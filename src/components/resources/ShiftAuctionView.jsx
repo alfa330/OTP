@@ -1018,9 +1018,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     return (
       <div
         title={title}
-        className={`max-w-[calc(100vw-1rem)] rounded-xl border text-xs shadow-lg backdrop-blur sm:max-w-[calc(100vw-1.5rem)] sm:text-sm ${showWorkload ? 'w-[min(360px,calc(100vw-1rem))] px-3 py-2' : 'inline-flex h-9 items-center px-2.5 sm:h-10 sm:px-3'} ${auctionStatusTone}`}
+        className={`rounded-lg border text-xs shadow-lg backdrop-blur ${showWorkload ? 'inline-block w-fit min-w-[214px] max-w-[min(292px,calc(100vw-1rem))] px-2.5 py-1.5 sm:min-w-[230px] sm:max-w-[292px]' : 'inline-flex h-8 max-w-[calc(100vw-1rem)] items-center px-2.5 sm:h-9 sm:max-w-[calc(100vw-1.5rem)] sm:px-3'} ${auctionStatusTone}`}
       >
-        <div className="flex min-w-0 items-center gap-1.5 sm:gap-2">
+        <div className="flex min-w-0 items-center gap-1.5">
           {runtimeStatus === 'open' ? <ShieldCheck size={15} className="shrink-0" /> : <Clock3 size={15} className="shrink-0" />}
           <span className="shrink-0 font-semibold sm:hidden">{auctionStatusShortLabel}</span>
           <span className="hidden shrink-0 font-semibold sm:inline">{auctionStatusLabel}</span>
@@ -1028,21 +1028,21 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           <span className="hidden min-w-0 truncate border-l border-current/20 pl-2 font-semibold tabular-nums sm:inline">{auctionStatusDetail}</span>
         </div>
         {showWorkload ? (
-          <div className="mt-2 border-t border-current/20 pt-2">
-            <div className="flex items-center justify-between gap-3">
+          <div className="mt-1.5 border-t border-current/20 pt-1.5">
+            <div className="flex items-center justify-between gap-2">
               <div className="min-w-0">
                 <div className="font-semibold text-slate-950">
                   {formatAuctionHours(myAuctionWorkload.claimedNetMinutes)} / {formatAuctionHours(myAuctionWorkload.normMinutes)} ч
                 </div>
-                <div className="truncate text-[11px] text-slate-600">
+                <div className="truncate text-[10px] text-slate-600 sm:text-[11px]">
                   {balanceLabel} · перерывы {formatAuctionHours(myAuctionWorkload.claimedBreakMinutes)} ч
                 </div>
               </div>
-              <div className={`shrink-0 rounded-md px-2 py-1 text-[11px] font-semibold ${myAuctionWorkload.overMinutes > 0 ? 'bg-rose-50 text-rose-700' : myAuctionWorkload.isComplete ? 'bg-emerald-50 text-emerald-700' : 'bg-white/70 text-slate-700'}`}>
+              <div className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold sm:text-[11px] ${myAuctionWorkload.overMinutes > 0 ? 'bg-rose-50 text-rose-700' : myAuctionWorkload.isComplete ? 'bg-emerald-50 text-emerald-700' : 'bg-white/70 text-slate-700'}`}>
                 {myAuctionWorkload.isComplete ? 'Норма' : formatAuctionHours(myAuctionWorkload.remainingMinutes)}
               </div>
             </div>
-            <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/60">
+            <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-white/60">
               <div className={`h-full rounded-full ${progressTone}`} style={{ width: `${progressWidth}%` }} />
             </div>
           </div>
