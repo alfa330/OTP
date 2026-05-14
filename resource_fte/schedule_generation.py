@@ -614,6 +614,36 @@ def _shift_preview_day_deficit(target: List[float], coverage: List[float], day_i
     return sum(max(0.0, float(target[index] or 0) - float(coverage[index] or 0)) for index in range(start, end))
 
 
+def _shift_preview_delta_target(base_target: List[float], adjusted_target: List[float]) -> List[float]:
+    base_values = base_target or []
+    adjusted_values = adjusted_target or []
+    total_hours = max(len(base_values), len(adjusted_values))
+    return [
+        round(
+            max(
+                0.0,
+                float(adjusted_values[index] if index < len(adjusted_values) else 0.0)
+                - float(base_values[index] if index < len(base_values) else 0.0),
+            ),
+            4,
+        )
+        for index in range(total_hours)
+    ]
+
+
+def _shift_preview_add_coverage(base_coverage: List[float], extra_coverage: List[float], total_hours: int) -> List[float]:
+    base_values = base_coverage or []
+    extra_values = extra_coverage or []
+    return [
+        round(
+            float(base_values[index] if index < len(base_values) else 0.0)
+            + float(extra_values[index] if index < len(extra_values) else 0.0),
+            4,
+        )
+        for index in range(max(0, int(total_hours or 0)))
+    ]
+
+
 def _shift_preview_totals(
     target: List[float],
     coverage: List[float],
@@ -1135,23 +1165,26 @@ def _build_schedule_preview_variant(
     has_incident_uplift = include_incident_uplift and any(float(item or 0) > 0.001 for item in (uplift_raw_target or []))
     incident_result = None
     if has_incident_uplift:
+        incident_target = _shift_preview_delta_target(target, effective_target)
         incident_result = _select_shift_preview_strategy(
-            effective_target,
+            incident_target,
             candidates,
             rate_capacity,
-            initial_coverage=base_coverage,
-            initial_selected=base_selected,
-            allow_cp_sat=False,
         )
+        incident_best = (incident_result.get("best") or {})
         incident_selected = [
             {
                 **item,
                 "source": "incident_uplift",
             }
-            for item in ((incident_result.get("best") or {}).get("selected") or [])
+            for item in (incident_best.get("selected") or [])
         ]
         selected = [*base_selected, *incident_selected]
-        coverage = (incident_result.get("best") or {}).get("coverage") or base_coverage
+        coverage = _shift_preview_add_coverage(
+            base_coverage,
+            incident_best.get("coverage") or [],
+            len(effective_target),
+        )
     else:
         incident_selected = []
         selected = base_selected
