@@ -3318,6 +3318,23 @@ class Database:
             "is_current_user_tester": current_id in set(selected_operator_ids) if current_id is not None else False
         }
 
+    def is_shift_auction_test_participant(self, operator_id):
+        try:
+            operator_id = int(operator_id)
+        except Exception:
+            return False
+        if operator_id <= 0:
+            return False
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT 1
+                FROM shift_auction_test_participants
+                WHERE operator_id = %s
+                LIMIT 1
+            """, (operator_id,))
+            return cursor.fetchone() is not None
+
     def update_shift_auction_test_access(self, enabled=False, operator_ids=None, launch_note='', updated_by=None, starts_at=None, ends_at=None):
         normalized_ids = []
         seen = set()

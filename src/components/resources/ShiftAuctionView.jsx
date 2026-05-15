@@ -506,7 +506,6 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         if (!response.ok || !response.body) throw new Error('SSE connection failed');
         setConnectionState('online');
         stopPolling();
-        fetchSnapshot({ silent: true });
         const reader = response.body.getReader();
         const decoder = new TextDecoder('utf-8');
         let buffer = '';
