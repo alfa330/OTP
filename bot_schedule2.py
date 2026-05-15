@@ -2955,7 +2955,6 @@ def api_shift_auction_test_events():
 
     response = Response(generate(), mimetype='text/event-stream')
     response.headers['Cache-Control'] = 'no-cache'
-    response.headers['Connection'] = 'keep-alive'
     response.headers['X-Accel-Buffering'] = 'no'
     return response
 
