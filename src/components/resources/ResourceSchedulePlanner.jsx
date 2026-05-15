@@ -1534,7 +1534,7 @@ const ResourceSchedulePlanner = ({
         setSavedScheduleSignature(currentScheduleSignature);
       }
       setSavedSchedule(schedule);
-      emit(`График сохранен: ${Number(response.data?.auction_count || 0)} смен доступно в аукционе`, 'success');
+      emit(`График сохранен: ${Number(response.data?.auction_count || 0)} смен в недельном плане`, 'success');
     } catch (error) {
       emit(error?.response?.data?.error || 'Не удалось сохранить график', 'error');
     } finally {
