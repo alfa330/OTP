@@ -30,7 +30,7 @@ import {
   Wifi,
   X
 } from 'lucide-react';
-import { isAdminLikeRole, normalizeRole } from '../../utils/roles';
+import { isAdminLikeRole, isSupervisorRole, normalizeRole } from '../../utils/roles';
 
 const normalizeOperatorId = (value) => {
   const id = Number(value);
@@ -1235,15 +1235,20 @@ const ADMIN_INSTRUCTION_STEPS = [
   }
 ];
 
-const ShiftAuctionInstructionsModal = ({ open, role, onClose }) => {
-  const isAdmin = role === 'admin';
-  const steps = isAdmin ? ADMIN_INSTRUCTION_STEPS : OPERATOR_INSTRUCTION_STEPS;
-  const totalSteps = steps.length;
+const ShiftAuctionInstructionsModal = ({ open, role, canSwitchRole = false, onClose }) => {
+  const [viewRole, setViewRole] = useState(role === 'admin' ? 'admin' : 'operator');
   const [currentStep, setCurrentStep] = useState(0);
 
   useEffect(() => {
-    if (open) setCurrentStep(0);
-  }, [open]);
+    if (open) {
+      setViewRole(role === 'admin' ? 'admin' : 'operator');
+      setCurrentStep(0);
+    }
+  }, [open, role]);
+
+  const isAdminView = viewRole === 'admin';
+  const steps = isAdminView ? ADMIN_INSTRUCTION_STEPS : OPERATOR_INSTRUCTION_STEPS;
+  const totalSteps = steps.length;
 
   useEffect(() => {
     if (!open) return undefined;
@@ -1269,41 +1274,49 @@ const ShiftAuctionInstructionsModal = ({ open, role, onClose }) => {
 
   if (!open) return null;
 
-  const step = steps[currentStep];
+  const safeStep = Math.min(currentStep, totalSteps - 1);
+  const step = steps[safeStep];
   if (!step) return null;
   const StepIcon = step.icon || Info;
-  const isFirst = currentStep === 0;
-  const isLast = currentStep === totalSteps - 1;
-  const progressWidth = `${((currentStep + 1) / totalSteps) * 100}%`;
+  const isFirst = safeStep === 0;
+  const isLast = safeStep === totalSteps - 1;
+  const progressWidth = `${((safeStep + 1) / totalSteps) * 100}%`;
 
-  const title = isAdmin ? 'Инструкция для администратора' : 'Инструкция для оператора';
-  const subtitle = isAdmin
+  const title = isAdminView ? 'Инструкция для администратора' : 'Инструкция для оператора';
+  const subtitle = isAdminView
     ? 'Как подготовить, запустить и контролировать тестовый аукцион смен.'
     : 'Как выбрать выходные, забрать и при необходимости вернуть смену.';
 
+  const switchRole = (next) => {
+    if (next === viewRole) return;
+    setViewRole(next);
+    setCurrentStep(0);
+  };
+
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 px-3 sm:px-6"
+      className="fixed inset-0 z-50 flex items-stretch justify-center bg-slate-900/60 sm:items-center sm:px-6 sm:py-6"
       role="dialog"
       aria-modal="true"
       aria-labelledby="shift-auction-instructions-title"
       onClick={onClose}
     >
       <div
-        className="flex max-h-[94vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"
+        className="flex h-[100dvh] min-h-0 w-full flex-col overflow-hidden bg-white shadow-2xl sm:h-auto sm:max-h-[90vh] sm:max-w-4xl sm:rounded-2xl sm:border sm:border-slate-200"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="border-b border-slate-200 bg-gradient-to-r from-blue-700 to-blue-900 px-5 py-4 text-white sm:px-7 sm:py-5">
-          <div className="flex items-start justify-between gap-4">
-            <div className="flex items-start gap-3">
-              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-white/15">
+        <div className="shrink-0 border-b border-slate-200 bg-gradient-to-r from-blue-700 to-blue-900 px-4 py-3 text-white sm:px-7 sm:py-5">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex min-w-0 items-start gap-2.5 sm:gap-3">
+              <div className="hidden h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-white/15 sm:flex">
                 <BookOpen size={22} />
               </div>
               <div className="min-w-0">
-                <h2 id="shift-auction-instructions-title" className="text-base font-semibold sm:text-lg">
-                  {title}
+                <h2 id="shift-auction-instructions-title" className="flex items-center gap-2 text-base font-semibold sm:text-lg">
+                  <BookOpen size={18} className="shrink-0 sm:hidden" />
+                  <span className="truncate">{title}</span>
                 </h2>
-                <p className="mt-0.5 text-xs leading-5 text-blue-100 sm:text-sm">{subtitle}</p>
+                <p className="mt-0.5 hidden text-xs leading-5 text-blue-100 sm:block sm:text-sm">{subtitle}</p>
               </div>
             </div>
             <button
@@ -1315,9 +1328,27 @@ const ShiftAuctionInstructionsModal = ({ open, role, onClose }) => {
               <X size={18} />
             </button>
           </div>
-          <div className="mt-4 flex items-center gap-3">
+          {canSwitchRole ? (
+            <div className="mt-3 inline-flex max-w-full rounded-lg bg-white/15 p-1 text-xs sm:text-sm">
+              <button
+                type="button"
+                onClick={() => switchRole('operator')}
+                className={`min-w-0 flex-1 truncate rounded-md px-3 py-1.5 font-semibold transition ${!isAdminView ? 'bg-white text-blue-800 shadow-sm' : 'text-white/85 hover:bg-white/10 hover:text-white'}`}
+              >
+                Оператор
+              </button>
+              <button
+                type="button"
+                onClick={() => switchRole('admin')}
+                className={`min-w-0 flex-1 truncate rounded-md px-3 py-1.5 font-semibold transition ${isAdminView ? 'bg-white text-blue-800 shadow-sm' : 'text-white/85 hover:bg-white/10 hover:text-white'}`}
+              >
+                Администратор
+              </button>
+            </div>
+          ) : null}
+          <div className="mt-3 flex items-center gap-3 sm:mt-4">
             <span className="text-[11px] font-semibold uppercase tracking-wider text-blue-100">
-              Шаг {currentStep + 1} из {totalSteps}
+              Шаг {safeStep + 1} из {totalSteps}
             </span>
             <div className="h-1 flex-1 overflow-hidden rounded-full bg-white/15">
               <div
@@ -1328,8 +1359,8 @@ const ShiftAuctionInstructionsModal = ({ open, role, onClose }) => {
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto bg-slate-50 px-4 py-5 sm:px-7 sm:py-7">
-          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-7">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-slate-50 px-3 py-4 sm:px-7 sm:py-7">
+          <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-7">
             <div className="flex items-start gap-4 sm:gap-5">
               <div className="hidden h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-blue-50 text-blue-700 sm:flex sm:h-16 sm:w-16">
                 <StepIcon size={28} />
@@ -1390,11 +1421,11 @@ const ShiftAuctionInstructionsModal = ({ open, role, onClose }) => {
           </div>
         </div>
 
-        <div className="flex flex-col gap-3 border-t border-slate-200 bg-white px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-7 sm:py-4">
-          <div className="flex flex-1 items-center justify-center gap-1.5 order-2 sm:order-1 sm:justify-start">
+        <div className="shrink-0 flex flex-col gap-2 border-t border-slate-200 bg-white px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between sm:gap-3 sm:px-7 sm:py-4">
+          <div className="order-2 flex flex-wrap items-center justify-center gap-1.5 sm:order-1 sm:flex-nowrap sm:justify-start">
             {steps.map((s, index) => {
-              const isActive = index === currentStep;
-              const isPassed = index < currentStep;
+              const isActive = index === safeStep;
+              const isPassed = index < safeStep;
               return (
                 <button
                   key={s.title}
@@ -1413,12 +1444,12 @@ const ShiftAuctionInstructionsModal = ({ open, role, onClose }) => {
               );
             })}
           </div>
-          <div className="flex items-center justify-between gap-2 order-1 sm:order-2 sm:justify-end">
+          <div className="order-1 flex items-center justify-between gap-2 sm:order-2 sm:justify-end">
             <button
               type="button"
               onClick={() => setCurrentStep((step) => Math.max(step - 1, 0))}
               disabled={isFirst}
-              className="inline-flex h-10 items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 sm:px-4"
+              className="inline-flex h-10 flex-1 items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 sm:flex-none sm:px-4"
             >
               <ChevronLeft size={16} />
               Назад
@@ -1427,7 +1458,7 @@ const ShiftAuctionInstructionsModal = ({ open, role, onClose }) => {
               <button
                 type="button"
                 onClick={onClose}
-                className="inline-flex h-10 items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700"
+                className="inline-flex h-10 flex-1 items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 sm:flex-none"
               >
                 <CheckCircle2 size={16} />
                 Готово
@@ -1436,7 +1467,7 @@ const ShiftAuctionInstructionsModal = ({ open, role, onClose }) => {
               <button
                 type="button"
                 onClick={() => setCurrentStep((step) => Math.min(step + 1, totalSteps - 1))}
-                className="inline-flex h-10 items-center justify-center gap-1.5 rounded-lg bg-blue-700 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-800"
+                className="inline-flex h-10 flex-1 items-center justify-center gap-1.5 rounded-lg bg-blue-700 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-800 sm:flex-none"
               >
                 Далее
                 <ChevronRight size={16} />
@@ -1507,6 +1538,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   }, [showToast]);
 
   const instructionsRole = canManage ? 'admin' : 'operator';
+  const canSwitchInstructionsRole = canManage || isSupervisorRole(role);
   const instructionsStorageKey = user?.id
     ? `shift_auction_instructions_seen_${SHIFT_AUCTION_INSTRUCTIONS_VERSION}_${instructionsRole}_${user.id}`
     : null;
@@ -2979,6 +3011,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       <ShiftAuctionInstructionsModal
         open={isInstructionsOpen}
         role={instructionsRole}
+        canSwitchRole={canSwitchInstructionsRole}
         onClose={closeInstructions}
       />
 
