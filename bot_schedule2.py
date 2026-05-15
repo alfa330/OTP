@@ -2739,6 +2739,8 @@ def _shift_auction_test_error_response(error):
         "OPERATOR_NOT_FOUND": ("Оператор не найден", 404),
         "LOT_NOT_FOUND": ("Смена не найдена", 404),
         "LOT_ALREADY_CLAIMED": ("Смену уже забрали", 409),
+        "LOT_NOT_CLAIMED": ("Эта смена сейчас не закреплена", 409),
+        "LOT_NOT_OWNED": ("Эта смена закреплена за другим оператором", 409),
         "RATE_TOO_LOW": ("Смена недоступна по вашей ставке", 403),
         "SHIFT_NORM_EXCEEDED": ("Эта смена превысит вашу норму часов на период", 409),
         "SHIFT_AUCTION_STATUS_PERIOD_BLOCKED": ("Этот день закрыт статусным периодом оператора", 409),
@@ -2854,7 +2856,7 @@ def api_shift_auction_test_restart():
         return jsonify({"error": "Internal server error"}), 500
 
 
-@app.route('/api/shift_auction/test_lots/<int:lot_id>/claim', methods=['POST', 'OPTIONS'])
+@app.route('/api/shift_auction/test_lots/<int:lot_id>/claim', methods=['POST', 'DELETE', 'OPTIONS'])
 @require_api_key
 def api_shift_auction_test_lot_claim(lot_id):
     if request.method == 'OPTIONS':
@@ -2867,7 +2869,10 @@ def api_shift_auction_test_lot_claim(lot_id):
             return jsonify({"error": message}), status_code
         if _normalize_user_role(requester[3]) != 'operator':
             return jsonify({"error": "Only operators can claim shifts"}), 403
-        result = db.claim_shift_auction_test_lot(requester_id, lot_id)
+        if request.method == 'DELETE':
+            result = db.release_shift_auction_test_lot(requester_id, lot_id)
+        else:
+            result = db.claim_shift_auction_test_lot(requester_id, lot_id)
         return jsonify({"status": "success", **result}), 200
     except ValueError as error:
         return _shift_auction_test_error_response(error)

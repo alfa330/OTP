@@ -841,6 +841,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [isSaving, setIsSaving] = useState(false);
   const [isRestarting, setIsRestarting] = useState(false);
   const [claimingLotId, setClaimingLotId] = useState(null);
+  const [releaseConfirmLot, setReleaseConfirmLot] = useState(null);
+  const [releasingLotId, setReleasingLotId] = useState(null);
   const [dayOffLoadingDate, setDayOffLoadingDate] = useState('');
   const [connectionState, setConnectionState] = useState('idle');
   const [statusVersion, setStatusVersion] = useState(0);
@@ -950,7 +952,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const handleRealtimeEvent = useCallback((event) => {
     const eventType = String(event?.event_type || '');
     const payload = event?.payload || {};
-    if (eventType === 'lot_claimed' && payload.lot?.id) {
+    if ((eventType === 'lot_claimed' || eventType === 'lot_released') && payload.lot?.id) {
       setLots((currentLots) => currentLots.map((lot) => (
         Number(lot.id) === Number(payload.lot.id)
           ? { ...lot, ...payload.lot }
@@ -1559,6 +1561,23 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     }
   }, [apiRoot, buildHeaders, canClaim, claimBlockReasonByLotId, fetchSnapshot, notify]);
 
+  const handleReleaseLot = useCallback(async () => {
+    const lot = releaseConfirmLot;
+    if (!canClaim || !apiRoot || !lot?.id) return;
+    setReleasingLotId(lot.id);
+    try {
+      await axios.delete(`${apiRoot}/api/shift_auction/test_lots/${lot.id}/claim`, { headers: buildHeaders() });
+      await fetchSnapshot({ silent: true });
+      notify('Смена возвращена в аукцион');
+      setReleaseConfirmLot(null);
+    } catch (error) {
+      await fetchSnapshot({ silent: true });
+      notify(error?.response?.data?.error || 'Не удалось вернуть смену', 'error');
+    } finally {
+      setReleasingLotId(null);
+    }
+  }, [apiRoot, buildHeaders, canClaim, fetchSnapshot, notify, releaseConfirmLot]);
+
   const toggleDayOff = useCallback(async (date) => {
     if (!canChoose || !apiRoot || !date) return;
     const blockedPeriod = myBlockedDateMap.get(date);
@@ -1888,15 +1907,24 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                 ? `${formatAuctionHours(getAuctionLotNetMinutes(item.myClaimedLot))} ч`
                                 : '';
                               const hoverTone = active ? 'hover:bg-blue-100' : 'hover:bg-slate-50';
+                              const canReleaseHere = !canManage && canClaim && item.state === 'shift' && item.myClaimedLot;
+                              const onCellClick = canReleaseHere
+                                ? () => setReleaseConfirmLot(item.myClaimedLot)
+                                : () => scrollToDay(item.date);
+                              const cellTitle = canReleaseHere
+                                ? `${formatDateLabel(item.date)} · нажмите, чтобы вернуть смену`
+                                : item.isBlocked
+                                  ? `${formatDateLabel(item.date)} · ${item.blockedLabel}`
+                                  : formatDateLabel(item.date);
                               return (
                                 <button
                                   key={item.date}
                                   type="button"
-                                  onClick={() => scrollToDay(item.date)}
+                                  onClick={onCellClick}
                                   data-auction-date-bar-cell
                                   aria-current={active ? 'true' : undefined}
                                   className={`h-12 min-w-0 border-r border-slate-200 px-1 py-1 text-center transition-colors last:border-r-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-inset sm:h-[56px] sm:px-2 sm:py-1.5 ${tone} ${hoverTone} ${active ? 'bg-blue-100 text-blue-900' : ''}`}
-                                  title={item.isBlocked ? `${formatDateLabel(item.date)} · ${item.blockedLabel}` : formatDateLabel(item.date)}
+                                  title={cellTitle}
                                 >
                                   <span className="block truncate text-[10px] font-semibold leading-4 sm:text-[11px]">{formatShortDateLabel(item.date)}</span>
                                   {!canManage && item.state === 'shift' ? (
@@ -2264,6 +2292,53 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         )}
       </div>
 
+      {releaseConfirmLot ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 px-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="release-confirm-title"
+          onClick={() => releasingLotId === null && setReleaseConfirmLot(null)}
+        >
+          <div
+            className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-5 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h3 id="release-confirm-title" className="text-base font-semibold text-slate-950">
+              Хотите ли вы вернуть эту смену?
+            </h3>
+            <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+              <div className="text-sm font-semibold text-slate-900">{formatDateLabel(releaseConfirmLot.shift_date)}</div>
+              <div className="mt-0.5 text-xs text-slate-600">
+                {releaseConfirmLot.start_time} - {releaseConfirmLot.end_time}
+                {' · '}
+                {formatAuctionHours(getAuctionLotNetMinutes(releaseConfirmLot))} ч
+              </div>
+            </div>
+            <p className="mt-3 text-xs leading-5 text-slate-600">
+              Смена снова станет доступной для других операторов. Это действие нельзя отменить.
+            </p>
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setReleaseConfirmLot(null)}
+                disabled={releasingLotId !== null}
+                className="inline-flex h-9 items-center justify-center rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 sm:text-sm"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={handleReleaseLot}
+                disabled={releasingLotId !== null}
+                className="inline-flex h-9 items-center justify-center rounded-lg bg-rose-600 px-3 text-xs font-semibold text-white transition hover:bg-rose-700 disabled:cursor-wait disabled:bg-rose-400 sm:text-sm"
+              >
+                {releasingLotId !== null ? 'Возвращаю...' : 'Вернуть смену'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 };
