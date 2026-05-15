@@ -1,0 +1,121 @@
+import ast
+import csv
+import re
+import unittest
+from datetime import datetime, timedelta
+from io import BytesIO, StringIO
+from pathlib import Path
+from zipfile import ZipFile
+import xml.etree.ElementTree as ET
+
+from openpyxl import Workbook
+
+
+BOT_PATH = Path(__file__).resolve().parents[1] / "bot_schedule2.py"
+
+
+def _status_import_namespace():
+    wanted_assignments = {
+        "CHAT2DESK_STATUS_EVENT_MAP",
+        "CHAT2DESK_ACTION_EVENT_MAP",
+    }
+    wanted_functions = {
+        "_status_import_normalize_key",
+        "_status_import_normalize_header",
+        "_status_import_normalize_operator_name",
+        "_status_import_parse_datetime",
+        "_status_import_resolve_break_note_label",
+        "_status_import_resolve_display_state",
+        "_status_import_split_segment_by_day",
+        "_xlsx_cell_ref_to_index",
+        "_status_import_xlsx_rows",
+        "_status_import_parse_csv",
+        "_status_import_parse_xlsx",
+    }
+
+    module = ast.parse(BOT_PATH.read_text(encoding="utf-8"))
+    selected_nodes = []
+    for node in module.body:
+        if isinstance(node, ast.Assign):
+            assigned_names = {
+                target.id for target in node.targets
+                if isinstance(target, ast.Name)
+            }
+            if assigned_names & wanted_assignments:
+                selected_nodes.append(node)
+        elif isinstance(node, ast.FunctionDef) and node.name in wanted_functions:
+            selected_nodes.append(node)
+
+    namespace = {
+        "BytesIO": BytesIO,
+        "ET": ET,
+        "ZipFile": ZipFile,
+        "StringIO": StringIO,
+        "csv": csv,
+        "datetime": datetime,
+        "timedelta": timedelta,
+        "re": re,
+        "STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT": 30,
+    }
+    exec(
+        compile(ast.Module(body=selected_nodes, type_ignores=[]), str(BOT_PATH), "exec"),
+        namespace,
+    )
+    return namespace
+
+
+class StatusImportChat2DeskTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.ns = _status_import_namespace()
+
+    def test_new_export_event_aliases_are_canonicalized(self):
+        resolve = self.ns["_status_import_resolve_display_state"]
+
+        self.assertEqual(resolve("online", None)["key"], "online")
+        self.assertEqual(resolve("offline", None)["key"], "logout")
+        self.assertEqual(resolve("tech_break", None)["key"], "тех причина")
+        self.assertEqual(resolve("take_chat", None)["key"], "take chat")
+        self.assertEqual(resolve("transfer_chat", None)["key"], "transfer chat")
+
+    def test_new_export_xlsx_headers_are_supported(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append([
+            "operator_id",
+            "operator_name",
+            "operator_role",
+            "operator_groups",
+            "event",
+            "dialog_id",
+            "created_at",
+            "status_duration",
+        ])
+        sheet.append(["100", "Jane Doe", "agent", "", "online", "", "2026-05-11 09:00:00", "1800"])
+        sheet.append(["100", "Jane Doe", "agent", "", "tech_break", "", "2026-05-11 09:30:00", "300"])
+        sheet.append(["100", "Jane Doe", "agent", "", "offline", "", "2026-05-11 09:35:00", ""])
+        sheet.append(["100", "Jane Doe", "agent", "", "take_chat", "42", "2026-05-11 09:36:00", ""])
+
+        raw_bytes = BytesIO()
+        workbook.save(raw_bytes)
+
+        parse_xlsx = self.ns["_status_import_parse_xlsx"]
+        normalize_name = self.ns["_status_import_normalize_operator_name"]
+        parsed = parse_xlsx(
+            raw_bytes.getvalue(),
+            {normalize_name("Jane Doe"): [{"id": 1, "name": "Jane Doe"}]},
+        )
+
+        self.assertEqual(parsed["source_rows"], 4)
+        self.assertEqual(parsed["valid_events"], 4)
+        self.assertEqual(parsed["matched_events"], 4)
+        self.assertEqual(parsed["invalid_rows_count"], 0)
+        self.assertEqual(
+            [event["status_key"] for event in parsed["events"]],
+            ["online", "тех причина", "logout", "take chat"],
+        )
+        self.assertEqual(parsed["action_events_count"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
