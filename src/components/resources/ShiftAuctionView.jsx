@@ -197,14 +197,45 @@ const getAuctionWindowMinutes = (startsAt, endsAt) => {
 
 const compareDateInputValues = (left, right) => String(left || '').localeCompare(String(right || ''));
 
+const getAuctionTimeDigits = (value) => String(value || '').replace(/\D/g, '').slice(0, 4);
+
+const formatAuctionTimeDigits = (value) => {
+  const digits = getAuctionTimeDigits(value);
+  if (digits.length <= 1) return digits;
+  if (digits.length === 2) return `${digits}:`;
+  return `${digits.slice(0, 2)}:${digits.slice(2)}`;
+};
+
+const getAuctionTimeDigitIndex = (value, caretPosition) => (
+  getAuctionTimeDigits(String(value || '').slice(0, caretPosition)).length
+);
+
+const getAuctionTimeCaretPosition = (digitsValue, digitIndex) => {
+  const digits = getAuctionTimeDigits(digitsValue);
+  const targetDigitIndex = Math.max(0, Math.min(Number(digitIndex) || 0, digits.length));
+  if (!targetDigitIndex) return 0;
+
+  const formatted = formatAuctionTimeDigits(digits);
+  let seenDigits = 0;
+  for (let index = 0; index < formatted.length; index += 1) {
+    if (!/\d/.test(formatted[index])) continue;
+    seenDigits += 1;
+    if (seenDigits === targetDigitIndex) {
+      return formatted[index + 1] === ':' ? index + 2 : index + 1;
+    }
+  }
+  return formatted.length;
+};
+
 const normalizeAuctionTimeInput = (value) => {
   const raw = String(value || '').trim();
   let hoursValue = '';
   let minutesValue = '';
 
-  const separatedMatch = raw.match(/^(\d{1,2}):(\d{1,2})$/);
+  const separatedMatch = raw.match(/^(\d{1,2}):(\d{0,2})$/);
   if (separatedMatch) {
     [, hoursValue, minutesValue] = separatedMatch;
+    minutesValue ||= '0';
   } else if (/^\d{1,4}$/.test(raw)) {
     if (raw.length <= 2) {
       hoursValue = raw;
@@ -582,21 +613,73 @@ const AuctionTimeField = ({
   const parts = splitDateTimeInputValue(value);
   const fallback = getAuctionDateTimeWithFallback(value || `${dateValue || getTodayDateInputValue()}T09:00`);
   const currentTime = parts.time || fallback.time;
-  const [draftTime, setDraftTime] = useState(currentTime);
+  const timeInputRef = useRef(null);
+  const [draftTimeDigits, setDraftTimeDigits] = useState(() => getAuctionTimeDigits(currentTime));
+  const draftTime = formatAuctionTimeDigits(draftTimeDigits);
   const normalizedDraftTime = normalizeAuctionTimeInput(draftTime);
-  const draftTimeInvalid = Boolean(draftTime && !normalizedDraftTime);
+  const draftTimeInvalid = Boolean(draftTimeDigits && !normalizedDraftTime);
 
   useEffect(() => {
-    setDraftTime(currentTime);
+    setDraftTimeDigits(getAuctionTimeDigits(currentTime));
   }, [currentTime]);
 
   const commitTime = () => {
     const normalized = normalizeAuctionTimeInput(draftTime);
     if (!normalized) {
-      setDraftTime(currentTime);
+      setDraftTimeDigits(getAuctionTimeDigits(currentTime));
       return;
     }
     onChange(mergeAuctionDateTimeValue(value || `${dateValue}T${normalized}`, { date: dateValue, time: normalized }));
+  };
+
+  const restoreCaret = (digits, digitIndex) => {
+    window.requestAnimationFrame(() => {
+      const input = timeInputRef.current;
+      if (!input || document.activeElement !== input) return;
+      const caretPosition = getAuctionTimeCaretPosition(digits, digitIndex);
+      input.setSelectionRange(caretPosition, caretPosition);
+    });
+  };
+
+  const handleTimeChange = (event) => {
+    const rawValue = event.target.value;
+    const rawCaretPosition = event.target.selectionStart ?? rawValue.length;
+    const nextDigits = getAuctionTimeDigits(rawValue);
+    const nextDigitIndex = Math.min(getAuctionTimeDigitIndex(rawValue, rawCaretPosition), nextDigits.length);
+    setDraftTimeDigits(nextDigits);
+    restoreCaret(nextDigits, nextDigitIndex);
+  };
+
+  const removeDraftDigitAt = (digitIndex, nextDigitIndex) => {
+    if (digitIndex < 0 || digitIndex >= draftTimeDigits.length) return;
+    const nextDigits = `${draftTimeDigits.slice(0, digitIndex)}${draftTimeDigits.slice(digitIndex + 1)}`;
+    setDraftTimeDigits(nextDigits);
+    restoreCaret(nextDigits, nextDigitIndex);
+  };
+
+  const handleTimeKeyDown = (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      commitTime();
+      return;
+    }
+
+    const selectionStart = event.currentTarget.selectionStart ?? 0;
+    const selectionEnd = event.currentTarget.selectionEnd ?? selectionStart;
+    if (selectionStart !== selectionEnd) return;
+
+    if (event.key === 'Backspace' && draftTime[selectionStart - 1] === ':') {
+      event.preventDefault();
+      const digitIndex = getAuctionTimeDigitIndex(draftTime, selectionStart) - 1;
+      removeDraftDigitAt(digitIndex, digitIndex);
+      return;
+    }
+
+    if (event.key === 'Delete' && draftTime[selectionStart] === ':') {
+      event.preventDefault();
+      const digitIndex = getAuctionTimeDigitIndex(draftTime, selectionStart);
+      removeDraftDigitAt(digitIndex, digitIndex);
+    }
   };
 
   const applyMinuteDelta = (minutes) => {
@@ -622,15 +705,11 @@ const AuctionTimeField = ({
             <Minus size={14} />
           </button>
           <input
+            ref={timeInputRef}
             value={draftTime}
-            onChange={(event) => setDraftTime(event.target.value.replace(/[^\d:]/g, '').slice(0, 5))}
+            onChange={handleTimeChange}
             onBlur={commitTime}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                event.preventDefault();
-                commitTime();
-              }
-            }}
+            onKeyDown={handleTimeKeyDown}
             disabled={disabled}
             inputMode="numeric"
             maxLength={5}
