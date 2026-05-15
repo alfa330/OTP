@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
+  AlertTriangle,
+  BookOpen,
   CalendarDays,
   CalendarClock,
   CheckCircle2,
@@ -8,15 +10,22 @@ import {
   ChevronRight,
   Clock3,
   Gavel,
+  Hand,
   History,
+  Info,
   ListChecks,
   Minus,
+  MousePointerClick,
+  PlayCircle,
   Plus,
   RefreshCw,
   RotateCcw,
   Save,
   Search,
+  Settings2,
   ShieldCheck,
+  Sparkles,
+  Undo2,
   Users,
   Wifi,
   X
@@ -800,6 +809,233 @@ const explainSteps = [
   }
 ];
 
+const SHIFT_AUCTION_INSTRUCTIONS_VERSION = 'v1';
+
+const OPERATOR_INSTRUCTION_STEPS = [
+  {
+    icon: Info,
+    title: 'Что такое аукцион смен',
+    body: 'Это окно, в котором утверждённые смены распределяются между операторами в реальном времени. Открывается на короткий период — успейте выбрать удобные смены до закрытия.'
+  },
+  {
+    icon: Clock3,
+    title: 'Шаг 1 · Дождитесь открытия',
+    body: 'Когда аукцион в статусе «Откроется» — в правом верхнем углу идёт обратный отсчёт. До старта можно зайти и выбрать выходные, но забирать смены ещё нельзя.',
+    example: 'Пример: «Откроется 05.06 09:00 · 00:14:32» — до старта осталось 14 минут.'
+  },
+  {
+    icon: ListChecks,
+    title: 'Шаг 2 · Выберите выходные (до 2 дней)',
+    body: 'В левой панели «Мои выходные» кликайте на дни, которые хотите оставить свободными. Можно выбрать максимум 2 дня на период. Эти дни выпадут из таблицы — смены на них вы выбирать не будете.',
+    nuances: [
+      'Если у вас уже стоит статусный период (отпуск, больничный, Б/С) на дни внутри аукциона — они занимают квоту автоматически.',
+      'Если статусные периоды покрыли 2 дня — выбрать дополнительные выходные нельзя.'
+    ]
+  },
+  {
+    icon: Hand,
+    title: 'Шаг 3 · Заберите смены',
+    body: 'В таблице кликните по нужному времени смены. Цвет смены показывает время старта (от голубого утром до тёмно-синего вечером). Ваша смена помечается зелёным, чужая — серым.',
+    nuances: [
+      'На один день — только одна смена.',
+      'Сумма часов не должна превышать вашу норму на период (норма видна в правом верхнем углу).',
+      'Если смена недоступна по правилам (превысит норму, на этот день уже есть смена и т. п.) — кнопка станет серой с подсказкой.'
+    ],
+    example: 'Например, при ставке 1.0 и периоде в 7 дней с 1 выходным норма ≈ 48 часов. Если вы уже забрали 40, останется 8 часов, чтобы добрать.'
+  },
+  {
+    icon: Undo2,
+    title: 'Шаг 4 · Передумали? Верните смену',
+    body: 'В нижней панели дней нажмите на день, где у вас уже стоит смена — появится карточка «Хотите ли вы вернуть эту смену?». После подтверждения смена снова станет доступной остальным операторам.',
+    nuances: [
+      'Вернуть можно только пока аукцион ещё открыт.',
+      'Если кто-то параллельно её уже забрал — система покажет ошибку, ничего страшного не произойдёт.'
+    ]
+  },
+  {
+    icon: Wifi,
+    title: 'Реалтайм без обновления страницы',
+    body: 'Когда другой оператор забирает или возвращает смену — у вас она моментально меняет статус. Не нужно нажимать F5. Индикатор «Realtime online» в шапке подтверждает связь.'
+  },
+  {
+    icon: AlertTriangle,
+    title: 'На что обратить внимание',
+    body: 'Несколько частых ситуаций, которые могут сбить с толку.',
+    nuances: [
+      'Аукцион выключен — раздел закрыт, кнопки не реагируют. Дождитесь анонса администратора.',
+      'Аукцион закрыт — выбор времени прошёл. Можете только смотреть итоги.',
+      'Норма уже набрана — забрать ещё одну смену в этот период не получится, даже если она доступна.',
+      'Закрытый день (отпуск/больничный) — смены на этот день не показываются и забирать их нельзя.'
+    ]
+  }
+];
+
+const ADMIN_INSTRUCTION_STEPS = [
+  {
+    icon: Info,
+    title: 'Что такое тестовый аукцион',
+    body: 'Полигон realtime-распределения смен между выбранной группой операторов. Используется для проверки сценария будущего «боевого» аукциона. Все настройки и смены — изолированы от основного графика.'
+  },
+  {
+    icon: CalendarClock,
+    title: 'Шаг 1 · Подготовьте смены через расчёт ресурсов',
+    body: 'Перед запуском аукциона смены нужно сгенерировать. Откройте «Расчёт ресурсов» (кнопка в шапке) и проведите штатную генерацию.',
+    nuances: [
+      'Без сгенерированных смен раздел будет пустым.'
+    ]
+  },
+  {
+    icon: Sparkles,
+    title: 'Шаг 2 · Создайте тестовые лоты',
+    body: 'Нажмите «Создать тестовые смены» в блоке «Тестовый запуск». Система сгенерирует набор смен на ближайшие 7 дней по шаблонам (1.0, 0.75, 0.5 ставки и ночные 20*08). При повторном клике существующие тестовые лоты пересоздаются.',
+    nuances: [
+      'Создание лотов сбрасывает выбранные операторами выходные на тестовом полигоне.',
+      'На «боевые» графики это не влияет.'
+    ]
+  },
+  {
+    icon: Settings2,
+    title: 'Шаг 3 · Настройте окно открытия',
+    body: 'Задайте «Старт аукциона» и «Завершение» в формате datetime-local. До старта операторы увидят таймер, после завершения — выбор закрывается. Поле «Текст для тестовой группы» — короткое сообщение, которое участники увидят в шапке.',
+    example: 'Пример: старт 05.06 09:00, завершение 05.06 09:30. Это даст 30-минутное окно «гонки» за смены.'
+  },
+  {
+    icon: Users,
+    title: 'Шаг 4 · Выберите участников',
+    body: 'В списке справа отметьте операторов, которые получат доступ. Поиск помогает быстро найти по имени, направлению или СВ. Только отмеченные операторы увидят раздел.',
+    nuances: [
+      'Если оператор уже уволен — он автоматически не попадёт в группу.',
+      'Можно менять состав группы и после старта — новые участники получат доступ сразу.'
+    ]
+  },
+  {
+    icon: PlayCircle,
+    title: 'Шаг 5 · Включите режим и сохраните',
+    body: 'Переключите «Включить тестовый режим» и нажмите «Сохранить». С этого момента выбранные операторы видят раздел и таймер до старта (либо сразу выбирают, если время старта уже прошло).',
+    nuances: [
+      'Выключение режима — мгновенное: операторы потеряют доступ к разделу до нового включения.',
+      'Изменения в окнах старта/завершения подхватываются всеми клиентами без перезагрузки.'
+    ]
+  },
+  {
+    icon: MousePointerClick,
+    title: 'Шаг 6 · Наблюдайте за процессом',
+    body: 'В режиме админа таблица показывает все смены и кто их забрал. Нижний бар дней — сводка по каждому дню (закрыто/всего). Realtime обновляет состояние моментально для всех подключённых клиентов.',
+    nuances: [
+      'Можно открыть раздел в режиме оператора через тестовый аккаунт, чтобы убедиться в корректности UX.',
+      'Индикатор «Realtime online» в шапке должен гореть зелёным.'
+    ]
+  },
+  {
+    icon: AlertTriangle,
+    title: 'Нюансы и ограничения',
+    body: 'Полезно держать в голове при подготовке запуска.',
+    nuances: [
+      'Все правки в тестовых лотах необратимы — пересоздание сбросит выбор операторов.',
+      'Аукцион работает на realtime через Server-Sent Events. Если перед сервисом стоит nginx/прокси — должен быть включён keepalive ≥ 60 сек.',
+      'Текст уведомления для группы лучше делать коротким — он отображается только в подсказке статус-бара.',
+      'Если статусный период оператора (отпуск, больничный) пересекается с днём аукциона — смены на этот день он не увидит.'
+    ]
+  }
+];
+
+const renderInstructionStep = (step, index) => {
+  const Icon = step.icon || Info;
+  return (
+    <div key={step.title} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="flex items-start gap-3">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-700">
+          <Icon size={18} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-[11px] font-semibold uppercase tracking-wider text-blue-700">
+            Шаг {index + 1}
+          </div>
+          <h3 className="mt-0.5 text-sm font-semibold text-slate-950 sm:text-base">{step.title}</h3>
+          <p className="mt-1.5 text-sm leading-6 text-slate-700">{step.body}</p>
+          {step.example ? (
+            <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
+              <span className="font-semibold">Пример. </span>
+              {step.example}
+            </div>
+          ) : null}
+          {Array.isArray(step.nuances) && step.nuances.length ? (
+            <ul className="mt-2.5 space-y-1.5">
+              {step.nuances.map((nuance) => (
+                <li key={nuance} className="flex items-start gap-2 text-xs leading-5 text-slate-600 sm:text-sm">
+                  <CheckCircle2 size={14} className="mt-0.5 shrink-0 text-emerald-600" />
+                  <span>{nuance}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const ShiftAuctionInstructionsModal = ({ open, role, onClose }) => {
+  if (!open) return null;
+  const isAdmin = role === 'admin';
+  const steps = isAdmin ? ADMIN_INSTRUCTION_STEPS : OPERATOR_INSTRUCTION_STEPS;
+  const title = isAdmin ? 'Инструкция для администратора' : 'Инструкция для оператора';
+  const subtitle = isAdmin
+    ? 'Как подготовить, запустить и контролировать тестовый аукцион смен.'
+    : 'Как выбрать выходные, забрать и при необходимости вернуть смену.';
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 px-3 sm:px-6"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="shift-auction-instructions-title"
+      onClick={onClose}
+    >
+      <div
+        className="flex max-h-[88vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-4 border-b border-slate-200 bg-gradient-to-r from-blue-700 to-blue-900 px-5 py-4 text-white sm:px-6 sm:py-5">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-white/15">
+              <BookOpen size={20} />
+            </div>
+            <div className="min-w-0">
+              <h2 id="shift-auction-instructions-title" className="text-base font-semibold sm:text-lg">
+                {title}
+              </h2>
+              <p className="mt-0.5 text-xs leading-5 text-blue-100 sm:text-sm">{subtitle}</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Закрыть инструкцию"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-white/80 transition hover:bg-white/15 hover:text-white"
+          >
+            <X size={18} />
+          </button>
+        </div>
+        <div className="space-y-3 overflow-y-auto bg-slate-50 p-4 sm:p-5">
+          {steps.map((step, index) => renderInstructionStep(step, index))}
+        </div>
+        <div className="flex items-center justify-between gap-3 border-t border-slate-200 bg-white px-5 py-3 sm:px-6 sm:py-4">
+          <span className="text-xs text-slate-500">
+            Кнопка «Инструкция» в шапке всегда вернёт это окно.
+          </span>
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex h-10 items-center justify-center rounded-lg bg-blue-700 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-800"
+          >
+            Понятно
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHeader, showToast, onOpenResourceGeneration }) => {
   const role = normalizeRole(user?.role);
   const canManage = isAdminLikeRole(role);
@@ -843,6 +1079,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [claimingLotId, setClaimingLotId] = useState(null);
   const [releaseConfirmLot, setReleaseConfirmLot] = useState(null);
   const [releasingLotId, setReleasingLotId] = useState(null);
+  const [isInstructionsOpen, setIsInstructionsOpen] = useState(false);
   const [dayOffLoadingDate, setDayOffLoadingDate] = useState('');
   const [connectionState, setConnectionState] = useState('idle');
   const [statusVersion, setStatusVersion] = useState(0);
@@ -855,6 +1092,31 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   useEffect(() => {
     showToastRef.current = showToast;
   }, [showToast]);
+
+  const instructionsRole = canManage ? 'admin' : 'operator';
+  const instructionsStorageKey = user?.id
+    ? `shift_auction_instructions_seen_${SHIFT_AUCTION_INSTRUCTIONS_VERSION}_${instructionsRole}_${user.id}`
+    : null;
+
+  useEffect(() => {
+    if (!instructionsStorageKey || typeof window === 'undefined') return;
+    try {
+      if (window.localStorage.getItem(instructionsStorageKey)) return;
+      setIsInstructionsOpen(true);
+    } catch (_error) {
+      setIsInstructionsOpen(true);
+    }
+  }, [instructionsStorageKey]);
+
+  const closeInstructions = useCallback(() => {
+    setIsInstructionsOpen(false);
+    if (!instructionsStorageKey || typeof window === 'undefined') return;
+    try {
+      window.localStorage.setItem(instructionsStorageKey, String(Date.now()));
+    } catch (_error) {
+      /* ignore quota / privacy mode errors */
+    }
+  }, [instructionsStorageKey]);
 
   useEffect(() => {
     if (!settings.enabled) return undefined;
@@ -1685,6 +1947,15 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                 Генерация графиков
               </button>
             ) : null}
+            <button
+              type="button"
+              onClick={() => setIsInstructionsOpen(true)}
+              className="inline-flex h-9 flex-1 items-center justify-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 text-xs font-semibold text-blue-800 shadow-sm transition hover:bg-blue-100 sm:h-10 sm:flex-none sm:px-4 sm:text-sm"
+              aria-label="Открыть инструкцию"
+            >
+              <BookOpen size={16} />
+              Инструкция
+            </button>
             <div className={`inline-flex h-9 flex-1 items-center justify-center gap-2 rounded-lg border px-2.5 text-xs sm:h-10 sm:flex-none sm:px-3 sm:text-sm ${connectionState === 'online' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-600'}`}>
               <Wifi size={15} />
               <span className="truncate">{connectionState === 'online' ? 'Realtime online' : connectionState === 'connecting' ? 'Подключение...' : connectionState === 'reconnecting' ? 'Переподключение...' : 'Realtime idle'}</span>
@@ -2291,6 +2562,12 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           </section>
         )}
       </div>
+
+      <ShiftAuctionInstructionsModal
+        open={isInstructionsOpen}
+        role={instructionsRole}
+        onClose={closeInstructions}
+      />
 
       {releaseConfirmLot ? (
         <div
