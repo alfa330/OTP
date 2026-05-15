@@ -307,6 +307,18 @@ const getAuctionRuntimeStatus = (settings, nowMs) => {
   return 'open';
 };
 
+const AuctionCountdownText = React.memo(({ target }) => {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!target) return undefined;
+    const timer = window.setInterval(() => setTick((value) => (value + 1) % 1_000_000), 1000);
+    return () => window.clearInterval(timer);
+  }, [target]);
+  if (!target) return null;
+  return <>{formatCountdown(target, Date.now())}</>;
+});
+AuctionCountdownText.displayName = 'AuctionCountdownText';
+
 const explainSteps = [
   {
     icon: CalendarClock,
@@ -338,6 +350,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const streamAbortRef = useRef(null);
   const snapshotRequestRef = useRef(false);
   const lastEventIdRef = useRef(0);
+  const snapshotEtagRef = useRef('');
   const auctionLayoutRef = useRef(null);
   const auctionTableScrollRef = useRef(null);
   const auctionDateBarScrollRef = useRef(null);
@@ -369,7 +382,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [claimingLotId, setClaimingLotId] = useState(null);
   const [dayOffLoadingDate, setDayOffLoadingDate] = useState('');
   const [connectionState, setConnectionState] = useState('idle');
-  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [statusVersion, setStatusVersion] = useState(0);
   const [activeDayDate, setActiveDayDate] = useState('');
   const [auctionDayColumnPx, setAuctionDayColumnPx] = useState(64);
 
@@ -378,9 +391,18 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   }, [showToast]);
 
   useEffect(() => {
-    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, []);
+    if (!settings.enabled) return undefined;
+    const startsAtMs = settings.starts_at ? new Date(settings.starts_at).getTime() : null;
+    const endsAtMs = settings.ends_at ? new Date(settings.ends_at).getTime() : null;
+    const now = Date.now();
+    let nextBoundary = null;
+    if (Number.isFinite(startsAtMs) && now < startsAtMs) nextBoundary = startsAtMs;
+    else if (Number.isFinite(endsAtMs) && now < endsAtMs) nextBoundary = endsAtMs;
+    if (nextBoundary === null) return undefined;
+    const delay = Math.max(500, nextBoundary - now + 50);
+    const timer = window.setTimeout(() => setStatusVersion((value) => value + 1), delay);
+    return () => window.clearTimeout(timer);
+  }, [settings.enabled, settings.starts_at, settings.ends_at, statusVersion]);
 
   const notify = useCallback((message, type = 'success') => {
     if (typeof showToastRef.current === 'function') showToastRef.current(message, type);
@@ -427,10 +449,16 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     snapshotRequestRef.current = true;
     if (!silent) setIsLoading(true);
     try {
+      const extraHeaders = snapshotEtagRef.current ? { 'If-None-Match': snapshotEtagRef.current } : {};
       const response = await axios.get(`${apiRoot}/api/shift_auction/test_snapshot`, {
-        headers: buildHeaders()
+        headers: buildHeaders(extraHeaders),
+        validateStatus: (status) => (status >= 200 && status < 300) || status === 304
       });
-      applySnapshot(response?.data?.snapshot || {});
+      const etag = response?.headers?.etag || response?.headers?.ETag;
+      if (etag) snapshotEtagRef.current = etag;
+      if (response?.status !== 304) {
+        applySnapshot(response?.data?.snapshot || {});
+      }
     } catch (error) {
       if (!silent) notify(error?.response?.data?.error || 'Не удалось загрузить аукцион смен', 'error');
     } finally {
@@ -448,13 +476,15 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           ? { ...lot, ...payload.lot }
           : lot
       )));
-      window.setTimeout(() => fetchSnapshot({ silent: true }), 150);
       return;
     }
 
     if ((eventType === 'day_off_selected' || eventType === 'day_off_removed') && Number(payload.operator_id) === Number(user?.id)) {
       setMyDayOffs(Array.isArray(payload.my_day_offs) ? payload.my_day_offs.filter(Boolean) : []);
-      window.setTimeout(() => fetchSnapshot({ silent: true }), 150);
+      return;
+    }
+
+    if (eventType === 'day_off_selected' || eventType === 'day_off_removed') {
       return;
     }
 
@@ -486,7 +516,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       stopPolling();
       pollTimer = window.setInterval(() => {
         if (!cancelled) fetchSnapshot({ silent: true });
-      }, 5000);
+      }, 15000);
     };
 
     const readStream = async () => {
@@ -721,13 +751,14 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     ));
   }, [dayNavigationItems]);
 
-  const runtimeStatus = getAuctionRuntimeStatus(settings, nowMs);
-  const countdown = runtimeStatus === 'scheduled'
-    ? formatCountdown(settings.starts_at, nowMs)
-    : '';
-  const closeCountdown = runtimeStatus === 'open' && settings.ends_at
-    ? formatCountdown(settings.ends_at, nowMs)
-    : '';
+  const runtimeStatus = useMemo(
+    () => getAuctionRuntimeStatus(settings, Date.now()),
+    // statusVersion forces re-evaluation when a scheduled/open boundary is crossed
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [settings.enabled, settings.starts_at, settings.ends_at, statusVersion]
+  );
+  const hasStartCountdown = runtimeStatus === 'scheduled' && Boolean(settings.starts_at);
+  const hasCloseCountdown = runtimeStatus === 'open' && Boolean(settings.ends_at);
   const auctionStatusLabel = runtimeStatus === 'scheduled'
     ? 'Откроется'
     : runtimeStatus === 'open'
@@ -742,16 +773,23 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       : runtimeStatus === 'closed'
         ? 'Закрыт'
         : 'Выкл.';
-  const auctionStatusDetail = runtimeStatus === 'scheduled'
-    ? (countdown || 'скоро')
+  const auctionStatusDetailText = runtimeStatus === 'scheduled'
+    ? 'скоро'
     : runtimeStatus === 'open'
-      ? (closeCountdown ? `до закрытия ${closeCountdown}` : 'идет выбор')
+      ? (hasCloseCountdown ? 'до закрытия' : 'идет выбор')
       : runtimeStatus === 'closed'
         ? 'выбор завершен'
         : `${settings.selected_operator_ids.length} тест.`;
-  const auctionStatusShortDetail = runtimeStatus === 'open' && closeCountdown
-    ? closeCountdown
-    : auctionStatusDetail;
+  const auctionStatusDetail = hasStartCountdown
+    ? <AuctionCountdownText target={settings.starts_at} />
+    : hasCloseCountdown
+      ? <>до закрытия <AuctionCountdownText target={settings.ends_at} /></>
+      : auctionStatusDetailText;
+  const auctionStatusShortDetail = hasCloseCountdown
+    ? <AuctionCountdownText target={settings.ends_at} />
+    : hasStartCountdown
+      ? <AuctionCountdownText target={settings.starts_at} />
+      : auctionStatusDetailText;
   const auctionStatusTone = runtimeStatus === 'open'
     ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
     : runtimeStatus === 'scheduled'
@@ -1013,7 +1051,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     const workloadTitle = showWorkload
       ? ` Набрано ${formatAuctionHours(myAuctionWorkload.claimedNetMinutes)} ч из ${formatAuctionHours(myAuctionWorkload.normMinutes)} ч. Перерывы: ${formatAuctionHours(myAuctionWorkload.claimedBreakMinutes)} ч.`
       : '';
-    const title = `${settings.launch_note || `${auctionStatusLabel}: ${auctionStatusDetail}`}${workloadTitle}`;
+    const title = `${settings.launch_note || `${auctionStatusLabel}: ${auctionStatusDetailText}`}${workloadTitle}`;
     return (
       <div
         title={title}
@@ -1181,7 +1219,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                 <h2 className="text-base font-semibold text-slate-950 sm:text-lg">Доступные смены</h2>
                 <p className="mt-1 text-xs text-slate-600 sm:text-sm">
                   {runtimeStatus === 'scheduled'
-                    ? `Аукцион откроется через ${countdown || 'несколько секунд'}.`
+                    ? <>Аукцион откроется через <AuctionCountdownText target={settings.starts_at} />.</>
                     : runtimeStatus === 'open'
                       ? 'Нажмите “Забрать”, чтобы закрепить смену. У остальных участников она сразу станет недоступной.'
                       : 'Сейчас аукцион закрыт.'}
