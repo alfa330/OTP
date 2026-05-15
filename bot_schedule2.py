@@ -2857,8 +2857,7 @@ def api_shift_auction_test_events():
         message, status_code = auth_error
         return jsonify({"error": message}), status_code
 
-    snapshot = db.get_shift_auction_test_access(current_user_id=requester_id)
-    if not (_is_admin_role(requester[3]) or snapshot.get('is_current_user_tester')):
+    if not _is_admin_role(requester[3]) and not db.is_shift_auction_test_participant(requester_id):
         return jsonify({"error": "Forbidden"}), 403
 
     try:
@@ -2873,6 +2872,7 @@ def api_shift_auction_test_events():
         nonlocal last_event_id
         last_signal_id = _get_shift_auction_event_signal_id()
         heartbeat_at = time.time()
+        yield f": connected {int(heartbeat_at)}\n\n"
         while True:
             events = db.get_shift_auction_test_events_after(last_event_id, limit=100)
             if events:
@@ -2895,6 +2895,7 @@ def api_shift_auction_test_events():
 
     response = Response(generate(), mimetype='text/event-stream')
     response.headers['Cache-Control'] = 'no-cache'
+    response.headers['Connection'] = 'keep-alive'
     response.headers['X-Accel-Buffering'] = 'no'
     return response
 
