@@ -3592,9 +3592,10 @@ class Database:
                     LEFT JOIN resource_saved_schedule_plans p
                       ON p.id = NULLIF(e.payload->'lot'->>'source_schedule_plan_id', '')::INTEGER
                     WHERE e.event_type = 'lot_claimed'
+                      AND NULLIF(e.payload->'lot'->>'source_schedule_plan_id', '')::INTEGER = %s
                     ORDER BY e.id DESC
                     LIMIT 200
-                """)
+                """, (settings_row[4],))
                 claim_journal_rows = cursor.fetchall() or []
 
         selected_operator_ids = [int(row[0]) for row in participant_rows if row and row[0] is not None]
@@ -3673,6 +3674,11 @@ class Database:
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = 1
             """, (int(period_row[0]), updated_by))
+            cursor.execute("""
+                DELETE FROM shift_auction_test_events
+                WHERE event_type = 'lot_claimed'
+                  AND NULLIF(payload->'lot'->>'source_schedule_plan_id', '')::INTEGER = %s
+            """, (int(period_row[0]),))
             cursor.execute("DELETE FROM shift_auction_test_day_offs")
             cursor.execute("DELETE FROM shift_auction_test_lots")
             execute_values(

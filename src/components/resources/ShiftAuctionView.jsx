@@ -2037,7 +2037,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                 <h2 className="text-base font-semibold text-slate-950 sm:text-lg">Журнал аукционов</h2>
               </div>
               <p className="mt-1 text-xs text-slate-600 sm:text-sm">
-                Кто и когда забрал смену. История сохраняется даже после перезапуска недели.
+                Кто и когда забрал смену в выбранном недельном периоде.
               </p>
             </div>
             <div className="overflow-x-auto">
