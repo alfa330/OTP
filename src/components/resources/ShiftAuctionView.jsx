@@ -809,24 +809,140 @@ const explainSteps = [
   }
 ];
 
-const SHIFT_AUCTION_INSTRUCTIONS_VERSION = 'v1';
+const SHIFT_AUCTION_INSTRUCTIONS_VERSION = 'v2';
+
+const StatusPillPreview = ({ tone, icon: Icon, label, detail }) => (
+  <span className={`inline-flex h-9 items-center gap-2 rounded-lg border px-3 text-xs font-semibold sm:text-sm ${tone}`}>
+    <Icon size={15} />
+    <span>{label}</span>
+    {detail ? <span className="border-l border-current/30 pl-2 tabular-nums">{detail}</span> : null}
+  </span>
+);
+
+const LotChipPreview = ({ tone = 'available', label }) => {
+  if (tone === 'mine') {
+    return (
+      <div className="flex h-8 w-20 items-center justify-center rounded border border-emerald-600 bg-emerald-600 px-2 text-xs font-semibold tabular-nums text-white shadow-sm">
+        {label}
+      </div>
+    );
+  }
+  if (tone === 'taken') {
+    return (
+      <div className="flex h-8 w-20 items-center justify-center rounded border border-slate-200 bg-slate-100 px-2 text-xs font-semibold tabular-nums text-slate-400 shadow-sm">
+        {label}
+      </div>
+    );
+  }
+  if (tone === 'blocked') {
+    return (
+      <div className="flex h-8 w-20 items-center justify-center rounded border border-slate-200 bg-slate-50 px-2 text-xs font-semibold tabular-nums text-slate-400 shadow-sm">
+        {label}
+      </div>
+    );
+  }
+  const style = tone === 'morning'
+    ? { backgroundColor: 'rgb(219, 234, 254)', borderColor: 'rgb(147, 197, 253)', color: '#1e3a8a' }
+    : tone === 'midday'
+      ? { backgroundColor: 'rgb(123, 175, 240)', borderColor: 'rgb(82, 137, 220)', color: '#0f1d4a' }
+      : { backgroundColor: 'rgb(46, 99, 199)', borderColor: 'rgb(30, 64, 175)', color: '#ffffff' };
+  return (
+    <div style={style} className="flex h-8 w-20 items-center justify-center rounded border px-2 text-xs font-semibold tabular-nums shadow-sm">
+      {label}
+    </div>
+  );
+};
+
+const DayBarCellPreview = ({ date, label, sublabel, active = false, tone = 'default' }) => {
+  const toneClass = tone === 'shift'
+    ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
+    : tone === 'off'
+      ? 'border-blue-300 bg-blue-50 text-blue-800'
+      : tone === 'blocked'
+        ? 'border-rose-300 bg-rose-50 text-rose-800'
+        : tone === 'admin-full'
+          ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
+          : tone === 'admin-some'
+            ? 'border-blue-300 bg-blue-50 text-blue-800'
+            : 'border-slate-200 bg-white text-slate-600';
+  return (
+    <div className={`flex h-[56px] w-[68px] shrink-0 flex-col items-center justify-center rounded border px-1 py-1.5 text-center ${toneClass} ${active ? 'ring-2 ring-blue-500 ring-offset-1' : ''}`}>
+      <span className="block truncate text-[11px] font-semibold leading-4">{date}</span>
+      <span className="mt-0.5 block truncate text-[11px] font-bold tabular-nums">{label}</span>
+      {sublabel ? <span className="block truncate text-[10px] font-semibold tabular-nums">{sublabel}</span> : null}
+    </div>
+  );
+};
+
+const ButtonPreview = ({ variant = 'primary', icon: Icon, children }) => {
+  const cls = variant === 'primary'
+    ? 'bg-blue-700 text-white shadow-sm hover:bg-blue-800'
+    : variant === 'dark'
+      ? 'bg-slate-900 text-white shadow-sm'
+      : variant === 'danger'
+        ? 'bg-rose-600 text-white shadow-sm'
+        : variant === 'success'
+          ? 'bg-emerald-600 text-white shadow-sm'
+          : 'border border-slate-200 bg-white text-slate-700 shadow-sm';
+  return (
+    <span className={`inline-flex h-10 items-center gap-2 rounded-lg px-4 text-sm font-semibold ${cls}`}>
+      {Icon ? <Icon size={16} /> : null}
+      {children}
+    </span>
+  );
+};
 
 const OPERATOR_INSTRUCTION_STEPS = [
   {
     icon: Info,
     title: 'Что такое аукцион смен',
-    body: 'Это окно, в котором утверждённые смены распределяются между операторами в реальном времени. Открывается на короткий период — успейте выбрать удобные смены до закрытия.'
+    body: 'Это окно, в котором утверждённые смены распределяются между операторами в реальном времени. Открывается на короткий период — успейте выбрать удобные смены до закрытия.',
+    visual: (
+      <div className="flex flex-wrap items-center gap-2">
+        <StatusPillPreview tone="border-emerald-200 bg-emerald-50 text-emerald-800" icon={ShieldCheck} label="Аукцион открыт" detail="до закрытия 00:12:45" />
+        <span className="text-xs text-slate-500">— так выглядит индикатор статуса в шапке.</span>
+      </div>
+    )
   },
   {
     icon: Clock3,
     title: 'Шаг 1 · Дождитесь открытия',
     body: 'Когда аукцион в статусе «Откроется» — в правом верхнем углу идёт обратный отсчёт. До старта можно зайти и выбрать выходные, но забирать смены ещё нельзя.',
-    example: 'Пример: «Откроется 05.06 09:00 · 00:14:32» — до старта осталось 14 минут.'
+    visual: (
+      <div className="flex flex-col items-start gap-2">
+        <StatusPillPreview tone="border-blue-200 bg-blue-50 text-blue-800" icon={Clock3} label="Откроется" detail="00:14:32" />
+        <span className="text-xs text-slate-500">Цифры обновляются каждую секунду. Когда отсчёт дойдёт до нуля — кнопки смен оживут.</span>
+      </div>
+    )
   },
   {
     icon: ListChecks,
     title: 'Шаг 2 · Выберите выходные (до 2 дней)',
     body: 'В левой панели «Мои выходные» кликайте на дни, которые хотите оставить свободными. Можно выбрать максимум 2 дня на период. Эти дни выпадут из таблицы — смены на них вы выбирать не будете.',
+    visual: (
+      <div className="space-y-2">
+        <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+          <ListChecks size={16} className="text-blue-700" /> Мои выходные
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          <span className="flex min-w-[120px] items-center justify-between gap-2 rounded-md border border-blue-300 bg-blue-50 px-2 py-2 text-sm font-medium text-blue-800">
+            <span>пн, 02 июн</span>
+            <CheckCircle2 size={16} />
+          </span>
+          <span className="flex min-w-[120px] items-center justify-between gap-2 rounded-md border border-rose-200 bg-rose-50 px-2 py-2 text-sm font-medium text-rose-700">
+            <span>вт, 03 июн</span>
+            <span className="text-[11px] font-semibold">Б/С</span>
+          </span>
+          <span className="flex min-w-[120px] items-center justify-between gap-2 rounded-md border border-slate-200 bg-white px-2 py-2 text-sm font-medium text-slate-700">
+            <span>ср, 04 июн</span>
+          </span>
+          <span className="flex min-w-[120px] items-center justify-between gap-2 rounded-md border border-slate-200 bg-slate-50 px-2 py-2 text-sm font-medium text-slate-400">
+            <span>чт, 05 июн</span>
+          </span>
+        </div>
+        <span className="block text-xs text-slate-500">Синий = выбран как выходной, розовый «Б/С» = занят статусным периодом, серый затемнённый = квота уже исчерпана.</span>
+      </div>
+    ),
     nuances: [
       'Если у вас уже стоит статусный период (отпуск, больничный, Б/С) на дни внутри аукциона — они занимают квоту автоматически.',
       'Если статусные периоды покрыли 2 дня — выбрать дополнительные выходные нельзя.'
@@ -836,6 +952,37 @@ const OPERATOR_INSTRUCTION_STEPS = [
     icon: Hand,
     title: 'Шаг 3 · Заберите смены',
     body: 'В таблице кликните по нужному времени смены. Цвет смены показывает время старта (от голубого утром до тёмно-синего вечером). Ваша смена помечается зелёным, чужая — серым.',
+    visual: (
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="space-y-1">
+            <LotChipPreview tone="morning" label="07-16" />
+            <span className="block text-center text-[10px] font-semibold uppercase tracking-wider text-slate-500">утро</span>
+          </div>
+          <div className="space-y-1">
+            <LotChipPreview tone="midday" label="13-22" />
+            <span className="block text-center text-[10px] font-semibold uppercase tracking-wider text-slate-500">день</span>
+          </div>
+          <div className="space-y-1">
+            <LotChipPreview tone="evening" label="17-02" />
+            <span className="block text-center text-[10px] font-semibold uppercase tracking-wider text-slate-500">вечер</span>
+          </div>
+          <div className="space-y-1">
+            <LotChipPreview tone="mine" label="10-19" />
+            <span className="block text-center text-[10px] font-semibold uppercase tracking-wider text-emerald-700">моя</span>
+          </div>
+          <div className="space-y-1">
+            <LotChipPreview tone="taken" label="09-18" />
+            <span className="block text-center text-[10px] font-semibold uppercase tracking-wider text-slate-500">чужая</span>
+          </div>
+          <div className="space-y-1">
+            <LotChipPreview tone="blocked" label="11-20" />
+            <span className="block text-center text-[10px] font-semibold uppercase tracking-wider text-slate-500">недост.</span>
+          </div>
+        </div>
+        <span className="block text-xs text-slate-500">Клик по доступной кнопке закрепляет смену за вами. Серая «недост.» означает превышение нормы или закрытый день.</span>
+      </div>
+    ),
     nuances: [
       'На один день — только одна смена.',
       'Сумма часов не должна превышать вашу норму на период (норма видна в правом верхнем углу).',
@@ -847,6 +994,35 @@ const OPERATOR_INSTRUCTION_STEPS = [
     icon: Undo2,
     title: 'Шаг 4 · Передумали? Верните смену',
     body: 'В нижней панели дней нажмите на день, где у вас уже стоит смена — появится карточка «Хотите ли вы вернуть эту смену?». После подтверждения смена снова станет доступной остальным операторам.',
+    visual: (
+      <div className="space-y-3">
+        <div>
+          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">Нижняя панель дней</div>
+          <div className="flex gap-1.5 overflow-hidden rounded-xl border border-slate-200 bg-white p-2 shadow-sm">
+            <DayBarCellPreview date="пн, 02" label="Пусто" />
+            <DayBarCellPreview date="вт, 03" label="10-19" sublabel="9 ч" tone="shift" active />
+            <DayBarCellPreview date="ср, 04" label="Б/С" tone="blocked" />
+            <DayBarCellPreview date="чт, 05" label="Смена" tone="off" />
+          </div>
+          <div className="mt-1 text-xs text-slate-500">Клик по зелёной ячейке с временем смены → откроется карточка подтверждения.</div>
+        </div>
+        <div>
+          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">Карточка подтверждения</div>
+          <div className="w-full max-w-xs rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="text-sm font-semibold text-slate-950">Хотите ли вы вернуть эту смену?</div>
+            <div className="mt-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+              <div className="text-sm font-semibold text-slate-900">вт, 03 июн</div>
+              <div className="text-xs text-slate-600">10:00 - 19:00 · 9 ч</div>
+            </div>
+            <p className="mt-2 text-[11px] leading-5 text-slate-600">Смена снова станет доступной для других операторов.</p>
+            <div className="mt-3 flex justify-end gap-2">
+              <ButtonPreview variant="outline">Отмена</ButtonPreview>
+              <ButtonPreview variant="danger">Вернуть смену</ButtonPreview>
+            </div>
+          </div>
+        </div>
+      </div>
+    ),
     nuances: [
       'Вернуть можно только пока аукцион ещё открыт.',
       'Если кто-то параллельно её уже забрал — система покажет ошибку, ничего страшного не произойдёт.'
@@ -855,12 +1031,27 @@ const OPERATOR_INSTRUCTION_STEPS = [
   {
     icon: Wifi,
     title: 'Реалтайм без обновления страницы',
-    body: 'Когда другой оператор забирает или возвращает смену — у вас она моментально меняет статус. Не нужно нажимать F5. Индикатор «Realtime online» в шапке подтверждает связь.'
+    body: 'Когда другой оператор забирает или возвращает смену — у вас она моментально меняет статус. Не нужно нажимать F5. Индикатор «Realtime online» в шапке подтверждает связь.',
+    visual: (
+      <div className="flex flex-wrap items-center gap-2">
+        <StatusPillPreview tone="border-emerald-200 bg-emerald-50 text-emerald-700" icon={Wifi} label="Realtime online" />
+        <StatusPillPreview tone="border-slate-200 bg-white text-slate-600" icon={Wifi} label="Переподключение..." />
+        <StatusPillPreview tone="border-slate-200 bg-white text-slate-600" icon={Wifi} label="Realtime idle" />
+      </div>
+    )
   },
   {
     icon: AlertTriangle,
     title: 'На что обратить внимание',
     body: 'Несколько частых ситуаций, которые могут сбить с толку.',
+    visual: (
+      <div className="flex flex-wrap gap-2">
+        <StatusPillPreview tone="border-blue-200 bg-blue-50 text-blue-800" icon={Clock3} label="Откроется" detail="00:05:21" />
+        <StatusPillPreview tone="border-emerald-200 bg-emerald-50 text-emerald-800" icon={ShieldCheck} label="Аукцион открыт" detail="до закрытия 00:14:32" />
+        <StatusPillPreview tone="border-slate-200 bg-slate-100 text-slate-600" icon={Clock3} label="Аукцион закрыт" detail="выбор завершен" />
+        <StatusPillPreview tone="border-amber-200 bg-amber-50 text-amber-800" icon={Clock3} label="Аукцион выключен" />
+      </div>
+    ),
     nuances: [
       'Аукцион выключен — раздел закрыт, кнопки не реагируют. Дождитесь анонса администратора.',
       'Аукцион закрыт — выбор времени прошёл. Можете только смотреть итоги.',
@@ -874,12 +1065,24 @@ const ADMIN_INSTRUCTION_STEPS = [
   {
     icon: Info,
     title: 'Что такое тестовый аукцион',
-    body: 'Полигон realtime-распределения смен между выбранной группой операторов. Используется для проверки сценария будущего «боевого» аукциона. Все настройки и смены — изолированы от основного графика.'
+    body: 'Полигон realtime-распределения смен между выбранной группой операторов. Используется для проверки сценария будущего «боевого» аукциона. Все настройки и смены — изолированы от основного графика.',
+    visual: (
+      <div className="flex flex-wrap items-center gap-2">
+        <StatusPillPreview tone="border-emerald-200 bg-emerald-50 text-emerald-800" icon={ShieldCheck} label="Аукцион открыт" detail="до закрытия 00:25:00" />
+        <StatusPillPreview tone="border-emerald-200 bg-emerald-50 text-emerald-700" icon={Wifi} label="Realtime online" />
+      </div>
+    )
   },
   {
     icon: CalendarClock,
     title: 'Шаг 1 · Подготовьте смены через расчёт ресурсов',
     body: 'Перед запуском аукциона смены нужно сгенерировать. Откройте «Расчёт ресурсов» (кнопка в шапке) и проведите штатную генерацию.',
+    visual: (
+      <div className="flex flex-col items-start gap-2">
+        <ButtonPreview variant="dark" icon={CalendarClock}>Генерация графиков</ButtonPreview>
+        <span className="text-xs text-slate-500">Кнопка в правом верхнем углу раздела — открывает расчёт ресурсов.</span>
+      </div>
+    ),
     nuances: [
       'Без сгенерированных смен раздел будет пустым.'
     ]
@@ -888,6 +1091,15 @@ const ADMIN_INSTRUCTION_STEPS = [
     icon: Sparkles,
     title: 'Шаг 2 · Создайте тестовые лоты',
     body: 'Нажмите «Создать тестовые смены» в блоке «Тестовый запуск». Система сгенерирует набор смен на ближайшие 7 дней по шаблонам (1.0, 0.75, 0.5 ставки и ночные 20*08). При повторном клике существующие тестовые лоты пересоздаются.',
+    visual: (
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <ButtonPreview variant="outline" icon={Sparkles}>Создать тестовые смены</ButtonPreview>
+          <ButtonPreview variant="primary" icon={Save}>Сохранить</ButtonPreview>
+        </div>
+        <span className="block text-xs text-slate-500">Кнопки в правом углу блока «Тестовый запуск».</span>
+      </div>
+    ),
     nuances: [
       'Создание лотов сбрасывает выбранные операторами выходные на тестовом полигоне.',
       'На «боевые» графики это не влияет.'
@@ -897,12 +1109,57 @@ const ADMIN_INSTRUCTION_STEPS = [
     icon: Settings2,
     title: 'Шаг 3 · Настройте окно открытия',
     body: 'Задайте «Старт аукциона» и «Завершение» в формате datetime-local. До старта операторы увидят таймер, после завершения — выбор закрывается. Поле «Текст для тестовой группы» — короткое сообщение, которое участники увидят в шапке.',
+    visual: (
+      <div className="space-y-2.5">
+        <div className="grid gap-2 sm:grid-cols-2">
+          <div>
+            <div className="text-xs font-semibold text-slate-800">Старт аукциона</div>
+            <div className="mt-1 flex h-10 items-center rounded-lg border border-slate-200 bg-white px-3 text-sm tabular-nums text-slate-700 shadow-sm">05.06.2026, 09:00</div>
+          </div>
+          <div>
+            <div className="text-xs font-semibold text-slate-800">Завершение</div>
+            <div className="mt-1 flex h-10 items-center rounded-lg border border-slate-200 bg-white px-3 text-sm tabular-nums text-slate-700 shadow-sm">05.06.2026, 09:30</div>
+          </div>
+        </div>
+        <div>
+          <div className="text-xs font-semibold text-slate-800">Текст для тестовой группы</div>
+          <div className="mt-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm">Тестовый запуск аукциона смен на июнь. Будьте онлайн в 09:00.</div>
+        </div>
+      </div>
+    ),
     example: 'Пример: старт 05.06 09:00, завершение 05.06 09:30. Это даст 30-минутное окно «гонки» за смены.'
   },
   {
     icon: Users,
     title: 'Шаг 4 · Выберите участников',
     body: 'В списке справа отметьте операторов, которые получат доступ. Поиск помогает быстро найти по имени, направлению или СВ. Только отмеченные операторы увидят раздел.',
+    visual: (
+      <div className="space-y-2">
+        <div className="relative max-w-sm">
+          <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <div className="flex h-10 items-center rounded-lg border border-slate-200 bg-white pl-9 pr-3 text-sm text-slate-400 shadow-sm">Поиск по оператору, направлению или СВ</div>
+        </div>
+        <div className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+          <div className="flex items-center gap-3 border-b border-slate-100 bg-blue-50 px-4 py-2.5">
+            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded border border-blue-700 bg-blue-700 text-white">
+              <CheckCircle2 size={12} />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-sm font-semibold text-slate-900">Иванов Иван Иванович</span>
+              <span className="block truncate text-xs text-slate-500">Контакт-центр · ставка 1.00 · Петров П. П.</span>
+            </span>
+          </div>
+          <div className="flex items-center gap-3 px-4 py-2.5">
+            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded border border-slate-300 bg-white"></span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-sm font-semibold text-slate-900">Сидоров Сидор Сидорович</span>
+              <span className="block truncate text-xs text-slate-500">Чат-менеджер · ставка 0.75 · Петров П. П.</span>
+            </span>
+          </div>
+        </div>
+        <span className="block text-xs text-slate-500">Синий чекбокс — оператор включён в тестовую группу.</span>
+      </div>
+    ),
     nuances: [
       'Если оператор уже уволен — он автоматически не попадёт в группу.',
       'Можно менять состав группы и после старта — новые участники получат доступ сразу.'
@@ -912,6 +1169,20 @@ const ADMIN_INSTRUCTION_STEPS = [
     icon: PlayCircle,
     title: 'Шаг 5 · Включите режим и сохраните',
     body: 'Переключите «Включить тестовый режим» и нажмите «Сохранить». С этого момента выбранные операторы видят раздел и таймер до старта (либо сразу выбирают, если время старта уже прошло).',
+    visual: (
+      <div className="space-y-3">
+        <label className="flex items-center justify-between gap-4 rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+          <span>
+            <span className="block text-sm font-semibold text-slate-900">Включить тестовый режим</span>
+            <span className="block text-xs text-slate-500">Выбранные операторы увидят realtime-полигон.</span>
+          </span>
+          <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded border border-blue-700 bg-blue-700">
+            <CheckCircle2 size={12} className="text-white" />
+          </span>
+        </label>
+        <ButtonPreview variant="primary" icon={Save}>Сохранить</ButtonPreview>
+      </div>
+    ),
     nuances: [
       'Выключение режима — мгновенное: операторы потеряют доступ к разделу до нового включения.',
       'Изменения в окнах старта/завершения подхватываются всеми клиентами без перезагрузки.'
@@ -921,6 +1192,24 @@ const ADMIN_INSTRUCTION_STEPS = [
     icon: MousePointerClick,
     title: 'Шаг 6 · Наблюдайте за процессом',
     body: 'В режиме админа таблица показывает все смены и кто их забрал. Нижний бар дней — сводка по каждому дню (закрыто/всего). Realtime обновляет состояние моментально для всех подключённых клиентов.',
+    visual: (
+      <div className="space-y-3">
+        <div>
+          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">Нижний бар (вид администратора)</div>
+          <div className="flex gap-1.5 overflow-hidden rounded-xl border border-slate-200 bg-white p-2 shadow-sm">
+            <DayBarCellPreview date="пн, 02" label="10/10" tone="admin-full" />
+            <DayBarCellPreview date="вт, 03" label="6/10" tone="admin-some" active />
+            <DayBarCellPreview date="ср, 04" label="3/10" tone="admin-some" />
+            <DayBarCellPreview date="чт, 05" label="0/10" />
+          </div>
+          <div className="mt-1 text-xs text-slate-500">Зелёная ячейка — все смены дня закрыты, синяя — частично, белая — никто ещё не выбрал.</div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <StatusPillPreview tone="border-emerald-200 bg-emerald-50 text-emerald-700" icon={Wifi} label="Realtime online" />
+          <span className="text-xs text-slate-500">Индикатор должен гореть зелёным.</span>
+        </div>
+      </div>
+    ),
     nuances: [
       'Можно открыть раздел в режиме оператора через тестовый аккаунт, чтобы убедиться в корректности UX.',
       'Индикатор «Realtime online» в шапке должен гореть зелёным.'
@@ -930,6 +1219,13 @@ const ADMIN_INSTRUCTION_STEPS = [
     icon: AlertTriangle,
     title: 'Нюансы и ограничения',
     body: 'Полезно держать в голове при подготовке запуска.',
+    visual: (
+      <div className="flex flex-wrap gap-2">
+        <StatusPillPreview tone="border-blue-200 bg-blue-50 text-blue-800" icon={Clock3} label="Откроется" detail="00:05:21" />
+        <StatusPillPreview tone="border-slate-200 bg-slate-100 text-slate-600" icon={Clock3} label="Аукцион закрыт" detail="выбор завершен" />
+        <StatusPillPreview tone="border-amber-200 bg-amber-50 text-amber-800" icon={Clock3} label="Аукцион выключен" />
+      </div>
+    ),
     nuances: [
       'Все правки в тестовых лотах необратимы — пересоздание сбросит выбор операторов.',
       'Аукцион работает на realtime через Server-Sent Events. Если перед сервисом стоит nginx/прокси — должен быть включён keepalive ≥ 60 сек.',
@@ -994,7 +1290,7 @@ const ShiftAuctionInstructionsModal = ({ open, role, onClose }) => {
       onClick={onClose}
     >
       <div
-        className="flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"
+        className="flex max-h-[94vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="border-b border-slate-200 bg-gradient-to-r from-blue-700 to-blue-900 px-5 py-4 text-white sm:px-7 sm:py-5">
@@ -1053,6 +1349,16 @@ const ShiftAuctionInstructionsModal = ({ open, role, onClose }) => {
                 <p className="mt-3 text-sm leading-7 text-slate-700 sm:text-base sm:leading-8">
                   {step.body}
                 </p>
+                {step.visual ? (
+                  <div className="mt-4 overflow-hidden rounded-xl border border-dashed border-slate-300 bg-gradient-to-br from-slate-50 to-white">
+                    <div className="flex items-center gap-1.5 border-b border-dashed border-slate-200 px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                      <MousePointerClick size={13} /> Как это выглядит
+                    </div>
+                    <div className="px-4 py-4 sm:px-5">
+                      {step.visual}
+                    </div>
+                  </div>
+                ) : null}
                 {step.example ? (
                   <div className="mt-4 flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
                     <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-amber-200/70 text-amber-900">
