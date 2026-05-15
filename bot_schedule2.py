@@ -234,6 +234,11 @@ def _build_postgres_connection_params():
         'password': os.getenv('POSTGRES_PASSWORD'),
         'host': os.getenv('POSTGRES_HOST'),
         'port': os.getenv('POSTGRES_PORT', 5432),
+        'keepalives': 1,
+        'keepalives_idle': 30,
+        'keepalives_interval': 10,
+        'keepalives_count': 3,
+        'connect_timeout': 5,
     }
 
 
@@ -2760,10 +2765,21 @@ def api_shift_auction_test_snapshot():
         requester_role = _normalize_user_role(requester[3])
         if not (_is_admin_role(requester_role) or snapshot.get('is_current_user_tester')):
             snapshot["lots"] = []
-            snapshot["day_offs"] = []
             snapshot["my_day_offs"] = []
             snapshot["my_blocked_dates"] = []
-        return jsonify({"status": "success", "snapshot": snapshot}), 200
+        snapshot_fingerprint = hashlib.sha1(
+            json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        ).hexdigest()
+        etag = f'W/"shift-auction-{requester_id}-{snapshot_fingerprint}"'
+        if request.headers.get('If-None-Match', '') == etag:
+            response = Response(status=304)
+            response.headers['ETag'] = etag
+            response.headers['Cache-Control'] = 'no-cache, private'
+            return response
+        response = jsonify({"status": "success", "snapshot": snapshot})
+        response.headers['ETag'] = etag
+        response.headers['Cache-Control'] = 'no-cache, private'
+        return response, 200
     except Exception as error:
         logging.error(f"Shift auction snapshot API error: {error}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
