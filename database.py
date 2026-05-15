@@ -3932,6 +3932,67 @@ class Database:
             event = self._insert_shift_auction_test_event(cursor, "lot_claimed", {"lot": lot_payload})
         return {"lot": lot_payload, "event": event}
 
+    def release_shift_auction_test_lot(self, operator_id, lot_id):
+        operator_id = int(operator_id)
+        lot_id = int(lot_id)
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    s.enabled,
+                    s.starts_at,
+                    s.ends_at,
+                    EXISTS(SELECT 1 FROM shift_auction_test_participants WHERE operator_id = %s) AS is_participant,
+                    l.id, l.shift_date, l.start_time, l.end_time, l.rate_min, l.status,
+                    l.claimed_by, l.claimed_at, l.breaks,
+                    l.source_schedule_plan_id, l.source_schedule_shift_id
+                FROM shift_auction_test_access s
+                LEFT JOIN shift_auction_test_lots l ON l.id = %s
+                WHERE s.id = 1
+                FOR UPDATE OF l
+            """, (operator_id, lot_id))
+            header = cursor.fetchone()
+            if not header or self._get_shift_auction_test_status(header[0], header[1], header[2]) != "open":
+                raise ValueError("AUCTION_NOT_OPEN")
+            if not header[3]:
+                raise ValueError("NOT_TEST_PARTICIPANT")
+            if header[4] is None:
+                raise ValueError("LOT_NOT_FOUND")
+            lot = header[4:]
+            if lot[5] != 'claimed':
+                raise ValueError("LOT_NOT_CLAIMED")
+            if lot[6] is None or int(lot[6]) != operator_id:
+                raise ValueError("LOT_NOT_OWNED")
+
+            cursor.execute("""
+                UPDATE shift_auction_test_lots
+                SET status = 'available',
+                    claimed_by = NULL,
+                    claimed_at = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                RETURNING id, shift_date, start_time, end_time, rate_min, status, claimed_by, claimed_at,
+                          breaks, source_schedule_plan_id, source_schedule_shift_id
+            """, (lot_id,))
+            updated = cursor.fetchone()
+            lot_payload = {
+                "id": updated[0],
+                "shift_date": updated[1].strftime('%Y-%m-%d') if updated[1] else None,
+                "start_time": updated[2].strftime('%H:%M') if updated[2] else None,
+                "end_time": updated[3].strftime('%H:%M') if updated[3] else None,
+                "rate_min": float(updated[4] or 0),
+                "status": updated[5],
+                "claimed_by": updated[6],
+                "claimed_at": updated[7].isoformat() if updated[7] else None,
+                "breaks": updated[8] if isinstance(updated[8], list) else [],
+                "source_schedule_plan_id": updated[9],
+                "source_schedule_shift_id": updated[10],
+            }
+            event = self._insert_shift_auction_test_event(cursor, "lot_released", {
+                "lot": lot_payload,
+                "operator_id": operator_id
+            })
+        return {"lot": lot_payload, "event": event}
+
     def set_shift_auction_test_day_off(self, operator_id, day_off_date, selected=True):
         operator_id = int(operator_id)
         if isinstance(day_off_date, str):
