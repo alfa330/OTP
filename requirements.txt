@@ -19,3 +19,4 @@ PyJWT==2.10.1
 Pillow==10.4.0
 xhtml2pdf==0.2.17
 weasyprint==62.3
+waitress==3.0.0

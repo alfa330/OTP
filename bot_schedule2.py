@@ -16215,7 +16215,18 @@ def import_chat_manager_metrics_csv():
 
 
 def run_flask():
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 8080)), debug=False, use_reloader=False)
+    threading.stack_size(2 * 1024 * 1024)
+    from waitress import serve
+    serve(
+        app,
+        host='0.0.0.0',
+        port=int(os.getenv('PORT', 8080)),
+        threads=int(os.getenv('WAITRESS_THREADS', '80')),
+        connection_limit=int(os.getenv('WAITRESS_CONN_LIMIT', '200')),
+        channel_timeout=0,
+        cleanup_interval=30,
+        ident='OTP-2'
+    )
 
 # === Классы =====================================================================================================
 class new_sv(StatesGroup):
