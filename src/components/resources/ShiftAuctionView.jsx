@@ -1524,6 +1524,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [releaseConfirmLot, setReleaseConfirmLot] = useState(null);
   const [releasingLotId, setReleasingLotId] = useState(null);
   const lotsRef = useRef([]);
+  const pendingClaimLotIdsRef = useRef(new Set());
   const lastClaimErrorRef = useRef({ message: '', shownAt: 0 });
   const [isInstructionsOpen, setIsInstructionsOpen] = useState(false);
   const [dayOffLoadingDate, setDayOffLoadingDate] = useState('');
@@ -2267,6 +2268,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     if (!canClaim || !apiRoot) return;
     const numericId = Number(lotId);
     if (!Number.isFinite(numericId)) return;
+    if (pendingClaimLotIdsRef.current.has(numericId)) return;
 
     const blockReason = claimBlockReasonByLotId.get(numericId);
     if (blockReason) {
@@ -2277,6 +2279,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     const prevLot = (lotsRef.current || []).find((l) => Number(l?.id) === numericId);
     if (!prevLot || prevLot.status !== 'available') return;
 
+    pendingClaimLotIdsRef.current.add(numericId);
     setClaimingLotIds((current) => {
       if (current.has(numericId)) return current;
       const next = new Set(current);
@@ -2320,11 +2323,14 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           : l
       )));
 
+      await fetchSnapshot({ silent: true });
+
       const silentCodes = new Set(['LOT_ALREADY_CLAIMED', 'AUCTION_NOT_OPEN']);
-      if (!silentCodes.has(code) && message) {
-        notifyClaimError(message);
+      if (!silentCodes.has(code)) {
+        notifyClaimError(message || 'Не удалось забрать смену');
       }
     } finally {
+      pendingClaimLotIdsRef.current.delete(numericId);
       setClaimingLotIds((current) => {
         if (!current.has(numericId)) return current;
         const next = new Set(current);
@@ -2332,7 +2338,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         return next;
       });
     }
-  }, [apiRoot, buildHeaders, canClaim, claimBlockReasonByLotId, notifyClaimError, user?.id]);
+  }, [apiRoot, buildHeaders, canClaim, claimBlockReasonByLotId, fetchSnapshot, notifyClaimError, user?.id]);
 
   const handleReleaseLot = useCallback(async () => {
     const lot = releaseConfirmLot;
@@ -2380,14 +2386,16 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           : l
       )));
 
+      await fetchSnapshot({ silent: true });
+
       const silentCodes = new Set(['LOT_NOT_CLAIMED', 'LOT_NOT_OWNED', 'AUCTION_NOT_OPEN']);
-      if (!silentCodes.has(code) && message) {
-        notifyClaimError(message);
+      if (!silentCodes.has(code)) {
+        notifyClaimError(message || 'Не удалось вернуть смену');
       }
     } finally {
       setReleasingLotId(null);
     }
-  }, [apiRoot, buildHeaders, canClaim, notifyClaimError, releaseConfirmLot]);
+  }, [apiRoot, buildHeaders, canClaim, fetchSnapshot, notifyClaimError, releaseConfirmLot]);
 
   const toggleDayOff = useCallback(async (date) => {
     if (!canChoose || !apiRoot || !date) return;

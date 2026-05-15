@@ -425,6 +425,7 @@ class Database:
     SCHEMA_INIT_LOCK_KEY = 915904137
     SCHEMA_INIT_LOCK_TIMEOUT_SEC = 120
     SCHEMA_INIT_RETRY_ATTEMPTS = 4
+    SHIFT_AUCTION_OPERATOR_LOCK_NAMESPACE = 915904138
 
     def __init__(self):
         self._init_db_with_retry()
@@ -3046,6 +3047,14 @@ class Database:
             "created_at": row[1].isoformat() if row and row[1] else None
         }
 
+    def _lock_shift_auction_operator_tx(self, cursor, operator_id):
+        # Serialize one operator's auction mutations so shared invariants are
+        # checked against a stable per-operator view inside this transaction.
+        cursor.execute(
+            "SELECT pg_advisory_xact_lock(%s, %s)",
+            (self.SHIFT_AUCTION_OPERATOR_LOCK_NAMESPACE, int(operator_id))
+        )
+
     def _shift_auction_break_minutes(self, breaks):
         total = 0
         for item in (breaks or []):
@@ -3805,6 +3814,7 @@ class Database:
         operator_id = int(operator_id)
         lot_id = int(lot_id)
         with self._get_cursor() as cursor:
+            self._lock_shift_auction_operator_tx(cursor, operator_id)
             cursor.execute("""
                 SELECT
                     s.enabled,
@@ -3936,6 +3946,7 @@ class Database:
         operator_id = int(operator_id)
         lot_id = int(lot_id)
         with self._get_cursor() as cursor:
+            self._lock_shift_auction_operator_tx(cursor, operator_id)
             cursor.execute("""
                 SELECT
                     s.enabled,
@@ -4001,6 +4012,7 @@ class Database:
             day_value = day_off_date
 
         with self._get_cursor() as cursor:
+            self._lock_shift_auction_operator_tx(cursor, operator_id)
             cursor.execute("""
                 SELECT enabled, starts_at, ends_at
                 FROM shift_auction_test_access
