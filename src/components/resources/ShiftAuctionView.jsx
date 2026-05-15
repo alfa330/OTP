@@ -4,10 +4,14 @@ import {
   CalendarDays,
   CalendarClock,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Clock3,
   Gavel,
   History,
   ListChecks,
+  Minus,
+  Plus,
   RefreshCw,
   RotateCcw,
   Save,
@@ -73,14 +77,6 @@ const splitDateTimeInputValue = (value) => {
   return { date, time };
 };
 
-const mergeDateTimeInputValue = (currentValue, patch) => {
-  const current = splitDateTimeInputValue(currentValue);
-  const nextDate = patch.date ?? current.date;
-  const nextTime = patch.time ?? current.time;
-  if (!nextDate && !nextTime) return '';
-  return `${nextDate || current.date || ''}T${nextTime || current.time || '00:00'}`;
-};
-
 const addMinutesToDateTimeInputValue = (value, minutes) => {
   const normalized = toDateTimeInputValue(value);
   if (!normalized) return '';
@@ -122,6 +118,89 @@ const AUCTION_DURATION_PRESETS = [
   { label: '2 часа', minutes: 120 },
   { label: '4 часа', minutes: 240 }
 ];
+
+const AUCTION_TIME_PRESETS = ['09:00', '12:00', '15:00', '18:00', '20:00'];
+const AUCTION_WEEKDAY_LABELS = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+
+const toDateInputValue = (value) => {
+  const normalized = toDateTimeInputValue(value);
+  return normalized ? normalized.slice(0, 10) : '';
+};
+
+const getTodayDateInputValue = () => toDateInputValue(new Date());
+
+const getDateFromInputValue = (value) => {
+  if (!value) return null;
+  const date = new Date(`${value}T00:00:00`);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const addDaysToDateInputValue = (value, days) => {
+  const date = getDateFromInputValue(value || getTodayDateInputValue());
+  if (!date) return getTodayDateInputValue();
+  date.setDate(date.getDate() + Number(days || 0));
+  return toDateInputValue(date);
+};
+
+const shiftCalendarMonth = (value, months) => {
+  const date = getDateFromInputValue(value || getTodayDateInputValue()) || new Date();
+  date.setDate(1);
+  date.setMonth(date.getMonth() + Number(months || 0));
+  return toDateInputValue(date);
+};
+
+const getCalendarMonthValue = (value) => {
+  const date = getDateFromInputValue(value || getTodayDateInputValue()) || new Date();
+  date.setDate(1);
+  return toDateInputValue(date);
+};
+
+const buildCalendarDays = (monthValue) => {
+  const monthDate = getDateFromInputValue(monthValue || getTodayDateInputValue()) || new Date();
+  monthDate.setDate(1);
+  const mondayOffset = (monthDate.getDay() + 6) % 7;
+  const cursor = new Date(monthDate);
+  cursor.setDate(cursor.getDate() - mondayOffset);
+  const today = getTodayDateInputValue();
+  return Array.from({ length: 42 }, (_, index) => {
+    const date = new Date(cursor);
+    date.setDate(cursor.getDate() + index);
+    const value = toDateInputValue(date);
+    return {
+      value,
+      day: date.getDate(),
+      isCurrentMonth: date.getMonth() === monthDate.getMonth(),
+      isToday: value === today
+    };
+  });
+};
+
+const formatCalendarMonthLabel = (value) => {
+  const date = getDateFromInputValue(value);
+  if (!date) return '';
+  return date.toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' });
+};
+
+const getAuctionDateTimeWithFallback = (value) => {
+  const parts = splitDateTimeInputValue(value);
+  return {
+    date: parts.date || getTodayDateInputValue(),
+    time: parts.time || '09:00'
+  };
+};
+
+const mergeAuctionDateTimeValue = (currentValue, patch) => {
+  const current = getAuctionDateTimeWithFallback(currentValue);
+  return `${patch.date ?? current.date}T${patch.time ?? current.time}`;
+};
+
+const getAuctionWindowMinutes = (startsAt, endsAt) => {
+  if (!startsAt || !endsAt) return null;
+  const start = new Date(startsAt).getTime();
+  const end = new Date(endsAt).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
+  return Math.round((end - start) / 60000);
+};
 
 const formatCountdown = (targetValue, nowMs) => {
   if (!targetValue) return '';
@@ -352,6 +431,156 @@ const AuctionLotCell = ({
     <div title={title} style={isLotClaimed ? undefined : startToneStyle} className={`flex h-6 w-full min-w-0 items-center justify-center overflow-hidden rounded border px-1 text-[10px] font-semibold tabular-nums sm:h-8 sm:px-2 sm:text-xs ${tone}`}>
       <span className="truncate sm:hidden">{compactLabel}</span>
       <span className="hidden truncate sm:inline">{label}</span>
+    </div>
+  );
+};
+
+const AuctionDateTimePicker = ({
+  label,
+  value,
+  onChange,
+  invalid = false
+}) => {
+  const rawParts = splitDateTimeInputValue(value);
+  const parts = getAuctionDateTimeWithFallback(value);
+  const [visibleMonth, setVisibleMonth] = useState(() => getCalendarMonthValue(parts.date));
+
+  useEffect(() => {
+    setVisibleMonth(getCalendarMonthValue(parts.date));
+  }, [parts.date]);
+
+  const calendarDays = useMemo(() => buildCalendarDays(visibleMonth), [visibleMonth]);
+  const selectedDate = rawParts.date || '';
+  const selectedTime = rawParts.time || parts.time;
+  const quickDates = [
+    { label: 'Сегодня', value: getTodayDateInputValue() },
+    { label: 'Завтра', value: addDaysToDateInputValue(getTodayDateInputValue(), 1) },
+    { label: '+2 дня', value: addDaysToDateInputValue(getTodayDateInputValue(), 2) }
+  ];
+
+  return (
+    <div className={`min-w-0 rounded-lg border bg-white p-3 sm:p-4 ${invalid ? 'border-rose-300' : 'border-slate-200'}`}>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <span className="block text-sm font-semibold text-slate-900">{label}</span>
+          <span className="mt-0.5 block text-xs text-slate-500">
+            {value ? formatDateTimeLabel(`${parts.date}T${selectedTime}`) : 'Не задано'}
+          </span>
+        </div>
+        <Clock3 size={16} className="mt-0.5 shrink-0 text-blue-700" />
+      </div>
+
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        {quickDates.map((item) => {
+          const active = item.value === selectedDate;
+          return (
+            <button
+              key={item.label}
+              type="button"
+              onClick={() => onChange(mergeAuctionDateTimeValue(value, { date: item.value }))}
+              className={`rounded-md px-2.5 py-1 text-xs font-semibold transition ${
+                active
+                  ? 'bg-blue-700 text-white'
+                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+              }`}
+            >
+              {item.label}
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+        <div className="flex items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={() => setVisibleMonth((current) => shiftCalendarMonth(current, -1))}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-600 transition hover:bg-white hover:text-slate-950"
+            title="Предыдущий месяц"
+          >
+            <ChevronLeft size={16} />
+          </button>
+          <span className="text-sm font-semibold capitalize text-slate-800">{formatCalendarMonthLabel(visibleMonth)}</span>
+          <button
+            type="button"
+            onClick={() => setVisibleMonth((current) => shiftCalendarMonth(current, 1))}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-600 transition hover:bg-white hover:text-slate-950"
+            title="Следующий месяц"
+          >
+            <ChevronRight size={16} />
+          </button>
+        </div>
+        <div className="mt-2 grid grid-cols-7 gap-1">
+          {AUCTION_WEEKDAY_LABELS.map((day) => (
+            <span key={day} className="py-1 text-center text-[11px] font-semibold text-slate-500">{day}</span>
+          ))}
+          {calendarDays.map((day) => {
+            const active = day.value === selectedDate;
+            return (
+              <button
+                key={day.value}
+                type="button"
+                onClick={() => onChange(mergeAuctionDateTimeValue(value, { date: day.value }))}
+                className={`h-8 rounded-md text-xs font-semibold transition ${
+                  active
+                    ? 'bg-blue-700 text-white'
+                    : day.isToday
+                      ? 'bg-blue-50 text-blue-800 hover:bg-blue-100'
+                      : day.isCurrentMonth
+                        ? 'text-slate-800 hover:bg-white'
+                        : 'text-slate-400 hover:bg-white'
+                }`}
+              >
+                {day.day}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="mt-3">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Время</span>
+          <div className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 p-1">
+            <button
+              type="button"
+              onClick={() => onChange(addMinutesToDateTimeInputValue(`${parts.date}T${selectedTime}`, -15))}
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-600 transition hover:bg-white hover:text-slate-950"
+              title="Минус 15 минут"
+            >
+              <Minus size={14} />
+            </button>
+            <span className="min-w-[58px] text-center text-sm font-semibold tabular-nums text-slate-950">{selectedTime}</span>
+            <button
+              type="button"
+              onClick={() => onChange(addMinutesToDateTimeInputValue(`${parts.date}T${selectedTime}`, 15))}
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-600 transition hover:bg-white hover:text-slate-950"
+              title="Плюс 15 минут"
+            >
+              <Plus size={14} />
+            </button>
+          </div>
+        </div>
+        <div className="mt-2 grid grid-cols-5 gap-1.5">
+          {AUCTION_TIME_PRESETS.map((time) => {
+            const active = time === selectedTime;
+            return (
+              <button
+                key={time}
+                type="button"
+                onClick={() => onChange(mergeAuctionDateTimeValue(value, { time }))}
+                className={`h-8 rounded-md text-xs font-semibold tabular-nums transition ${
+                  active
+                    ? 'bg-blue-700 text-white'
+                    : 'border border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                {time}
+              </button>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 };
@@ -702,8 +931,6 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     [operatorOptions, selectedIds]
   );
 
-  const draftStartsAtParts = useMemo(() => splitDateTimeInputValue(draftStartsAt), [draftStartsAt]);
-  const draftEndsAtParts = useMemo(() => splitDateTimeInputValue(draftEndsAt), [draftEndsAt]);
   const selectedDraftPeriod = useMemo(
     () => availablePeriods.find((period) => Number(period?.id) === Number(draftSchedulePlanId)) || null,
     [availablePeriods, draftSchedulePlanId]
@@ -712,6 +939,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     draftStartsAt
     && draftEndsAt
     && new Date(draftEndsAt).getTime() <= new Date(draftStartsAt).getTime()
+  );
+  const draftAuctionWindowMinutes = useMemo(
+    () => getAuctionWindowMinutes(draftStartsAt, draftEndsAt),
+    [draftEndsAt, draftStartsAt]
   );
 
   const lotDates = useMemo(
@@ -1670,61 +1901,51 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                   </p>
                 </div>
 
-                <div className="grid gap-3 md:grid-cols-2">
-                  <div className="rounded-lg border border-slate-200 bg-white p-3">
-                    <span className="block text-sm font-semibold text-slate-800">Старт аукциона</span>
-                    <div className="mt-2 grid grid-cols-[minmax(0,1fr)_108px] gap-2">
-                      <input
-                        type="date"
-                        value={draftStartsAtParts.date}
-                        onChange={(event) => setDraftStartsAt((current) => mergeDateTimeInputValue(current, { date: event.target.value }))}
-                        className="h-10 min-w-0 rounded-lg border border-slate-200 px-3 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                      />
-                      <input
-                        type="time"
-                        value={draftStartsAtParts.time}
-                        onChange={(event) => setDraftStartsAt((current) => mergeDateTimeInputValue(current, { time: event.target.value }))}
-                        disabled={!draftStartsAtParts.date}
-                        className="h-10 min-w-0 rounded-lg border border-slate-200 px-3 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                      />
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 sm:p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold text-slate-900">Окно аукциона</div>
+                      <div className="mt-0.5 text-xs text-slate-500">
+                        {draftAuctionWindowMinutes
+                          ? `Длительность: ${formatAuctionHours(draftAuctionWindowMinutes)} ч`
+                          : 'Выберите старт и завершение'}
+                      </div>
                     </div>
+                    {draftRangeInvalid ? (
+                      <span className="rounded-md bg-rose-50 px-2.5 py-1 text-xs font-semibold text-rose-700">
+                        Завершение раньше старта
+                      </span>
+                    ) : null}
                   </div>
-                  <div className={`rounded-lg border bg-white p-3 ${draftRangeInvalid ? 'border-rose-300' : 'border-slate-200'}`}>
-                    <span className="block text-sm font-semibold text-slate-800">Завершение</span>
-                    <div className="mt-2 grid grid-cols-[minmax(0,1fr)_108px] gap-2">
-                      <input
-                        type="date"
-                        value={draftEndsAtParts.date}
-                        onChange={(event) => setDraftEndsAt((current) => mergeDateTimeInputValue(current, { date: event.target.value }))}
-                        className="h-10 min-w-0 rounded-lg border border-slate-200 px-3 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                      />
-                      <input
-                        type="time"
-                        value={draftEndsAtParts.time}
-                        onChange={(event) => setDraftEndsAt((current) => mergeDateTimeInputValue(current, { time: event.target.value }))}
-                        disabled={!draftEndsAtParts.date}
-                        className="h-10 min-w-0 rounded-lg border border-slate-200 px-3 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                      />
-                    </div>
-                  </div>
-                </div>
 
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-xs font-semibold text-slate-500">Быстрое завершение:</span>
-                  {AUCTION_DURATION_PRESETS.map((preset) => (
-                    <button
-                      key={preset.label}
-                      type="button"
-                      onClick={() => setDraftEndsAt(addMinutesToDateTimeInputValue(draftStartsAt, preset.minutes))}
-                      disabled={!draftStartsAt}
-                      className="rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      + {preset.label}
-                    </button>
-                  ))}
-                  {draftRangeInvalid ? (
-                    <span className="text-xs font-medium text-rose-600">Завершение должно быть позже старта.</span>
-                  ) : null}
+                  <div className="mt-3 grid gap-3 xl:grid-cols-2">
+                    <AuctionDateTimePicker
+                      label="Старт аукциона"
+                      value={draftStartsAt}
+                      onChange={setDraftStartsAt}
+                    />
+                    <AuctionDateTimePicker
+                      label="Завершение"
+                      value={draftEndsAt}
+                      onChange={setDraftEndsAt}
+                      invalid={draftRangeInvalid}
+                    />
+                  </div>
+
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Завершить через</span>
+                    {AUCTION_DURATION_PRESETS.map((preset) => (
+                      <button
+                        key={preset.label}
+                        type="button"
+                        onClick={() => setDraftEndsAt(addMinutesToDateTimeInputValue(draftStartsAt, preset.minutes))}
+                        disabled={!draftStartsAt}
+                        className="rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
                 <div>
