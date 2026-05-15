@@ -13290,6 +13290,15 @@ CHAT2DESK_STATUS_EVENT_MAP = {
     'status.study': ('study', 'Тренинг'),
     'status.training': ('study', 'Тренинг'),
     'status.offline': ('logout', 'Выход из системы'),
+    # Новый экспорт Chat2Desk отдает те же статусы без префикса `status.`.
+    'online': ('online', 'Online'),
+    'holiday': ('holiday', 'Закрытие чатов'),
+    'break': ('break', 'Обеденный перерыв'),
+    'busy': ('busy', 'Busy'),
+    'study': ('study', 'Тренинг'),
+    'training': ('study', 'Тренинг'),
+    'offline': ('logout', 'Выход из системы'),
+    'tech.break': ('тех причина', 'Тех причина'),
     'login': ('login', 'Вход в систему'),
     'logout': ('logout', 'Выход из системы'),
 }
