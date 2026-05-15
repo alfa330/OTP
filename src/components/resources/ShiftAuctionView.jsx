@@ -939,50 +939,52 @@ const ADMIN_INSTRUCTION_STEPS = [
   }
 ];
 
-const renderInstructionStep = (step, index) => {
-  const Icon = step.icon || Info;
-  return (
-    <div key={step.title} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-      <div className="flex items-start gap-3">
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-700">
-          <Icon size={18} />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="text-[11px] font-semibold uppercase tracking-wider text-blue-700">
-            Шаг {index + 1}
-          </div>
-          <h3 className="mt-0.5 text-sm font-semibold text-slate-950 sm:text-base">{step.title}</h3>
-          <p className="mt-1.5 text-sm leading-6 text-slate-700">{step.body}</p>
-          {step.example ? (
-            <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
-              <span className="font-semibold">Пример. </span>
-              {step.example}
-            </div>
-          ) : null}
-          {Array.isArray(step.nuances) && step.nuances.length ? (
-            <ul className="mt-2.5 space-y-1.5">
-              {step.nuances.map((nuance) => (
-                <li key={nuance} className="flex items-start gap-2 text-xs leading-5 text-slate-600 sm:text-sm">
-                  <CheckCircle2 size={14} className="mt-0.5 shrink-0 text-emerald-600" />
-                  <span>{nuance}</span>
-                </li>
-              ))}
-            </ul>
-          ) : null}
-        </div>
-      </div>
-    </div>
-  );
-};
-
 const ShiftAuctionInstructionsModal = ({ open, role, onClose }) => {
-  if (!open) return null;
   const isAdmin = role === 'admin';
   const steps = isAdmin ? ADMIN_INSTRUCTION_STEPS : OPERATOR_INSTRUCTION_STEPS;
+  const totalSteps = steps.length;
+  const [currentStep, setCurrentStep] = useState(0);
+
+  useEffect(() => {
+    if (open) setCurrentStep(0);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const handleKey = (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (event.key === 'ArrowRight') {
+        event.preventDefault();
+        setCurrentStep((step) => Math.min(step + 1, totalSteps - 1));
+        return;
+      }
+      if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        setCurrentStep((step) => Math.max(step - 1, 0));
+      }
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [open, onClose, totalSteps]);
+
+  if (!open) return null;
+
+  const step = steps[currentStep];
+  if (!step) return null;
+  const StepIcon = step.icon || Info;
+  const isFirst = currentStep === 0;
+  const isLast = currentStep === totalSteps - 1;
+  const progressWidth = `${((currentStep + 1) / totalSteps) * 100}%`;
+
   const title = isAdmin ? 'Инструкция для администратора' : 'Инструкция для оператора';
   const subtitle = isAdmin
     ? 'Как подготовить, запустить и контролировать тестовый аукцион смен.'
     : 'Как выбрать выходные, забрать и при необходимости вернуть смену.';
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 px-3 sm:px-6"
@@ -992,44 +994,149 @@ const ShiftAuctionInstructionsModal = ({ open, role, onClose }) => {
       onClick={onClose}
     >
       <div
-        className="flex max-h-[88vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"
+        className="flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="flex items-start justify-between gap-4 border-b border-slate-200 bg-gradient-to-r from-blue-700 to-blue-900 px-5 py-4 text-white sm:px-6 sm:py-5">
-          <div className="flex items-start gap-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-white/15">
-              <BookOpen size={20} />
+        <div className="border-b border-slate-200 bg-gradient-to-r from-blue-700 to-blue-900 px-5 py-4 text-white sm:px-7 sm:py-5">
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-white/15">
+                <BookOpen size={22} />
+              </div>
+              <div className="min-w-0">
+                <h2 id="shift-auction-instructions-title" className="text-base font-semibold sm:text-lg">
+                  {title}
+                </h2>
+                <p className="mt-0.5 text-xs leading-5 text-blue-100 sm:text-sm">{subtitle}</p>
+              </div>
             </div>
-            <div className="min-w-0">
-              <h2 id="shift-auction-instructions-title" className="text-base font-semibold sm:text-lg">
-                {title}
-              </h2>
-              <p className="mt-0.5 text-xs leading-5 text-blue-100 sm:text-sm">{subtitle}</p>
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Закрыть инструкцию"
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-white/80 transition hover:bg-white/15 hover:text-white"
+            >
+              <X size={18} />
+            </button>
+          </div>
+          <div className="mt-4 flex items-center gap-3">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-blue-100">
+              Шаг {currentStep + 1} из {totalSteps}
+            </span>
+            <div className="h-1 flex-1 overflow-hidden rounded-full bg-white/15">
+              <div
+                className="h-full rounded-full bg-white transition-all duration-300 ease-out"
+                style={{ width: progressWidth }}
+              />
             </div>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Закрыть инструкцию"
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-white/80 transition hover:bg-white/15 hover:text-white"
-          >
-            <X size={18} />
-          </button>
         </div>
-        <div className="space-y-3 overflow-y-auto bg-slate-50 p-4 sm:p-5">
-          {steps.map((step, index) => renderInstructionStep(step, index))}
+
+        <div className="flex-1 overflow-y-auto bg-slate-50 px-4 py-5 sm:px-7 sm:py-7">
+          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-7">
+            <div className="flex items-start gap-4 sm:gap-5">
+              <div className="hidden h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-blue-50 text-blue-700 sm:flex sm:h-16 sm:w-16">
+                <StepIcon size={28} />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-50 text-blue-700 sm:hidden">
+                    <StepIcon size={18} />
+                  </div>
+                  <span className="inline-flex items-center rounded-full bg-blue-100 px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wider text-blue-800">
+                    Шаг {currentStep + 1}
+                  </span>
+                </div>
+                <h3 className="mt-2 text-lg font-semibold leading-tight text-slate-950 sm:text-xl">
+                  {step.title}
+                </h3>
+                <p className="mt-3 text-sm leading-7 text-slate-700 sm:text-base sm:leading-8">
+                  {step.body}
+                </p>
+                {step.example ? (
+                  <div className="mt-4 flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+                    <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-amber-200/70 text-amber-900">
+                      <Sparkles size={15} />
+                    </div>
+                    <div className="min-w-0 text-sm leading-6 text-amber-900">
+                      <div className="text-[11px] font-semibold uppercase tracking-wider">Пример</div>
+                      <div className="mt-0.5">{step.example}</div>
+                    </div>
+                  </div>
+                ) : null}
+                {Array.isArray(step.nuances) && step.nuances.length ? (
+                  <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+                    <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-slate-600">
+                      <Info size={13} /> Важно
+                    </div>
+                    <ul className="mt-2 space-y-2">
+                      {step.nuances.map((nuance) => (
+                        <li key={nuance} className="flex items-start gap-2.5 text-sm leading-6 text-slate-700">
+                          <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-emerald-600" />
+                          <span>{nuance}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          </div>
         </div>
-        <div className="flex items-center justify-between gap-3 border-t border-slate-200 bg-white px-5 py-3 sm:px-6 sm:py-4">
-          <span className="text-xs text-slate-500">
-            Кнопка «Инструкция» в шапке всегда вернёт это окно.
-          </span>
-          <button
-            type="button"
-            onClick={onClose}
-            className="inline-flex h-10 items-center justify-center rounded-lg bg-blue-700 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-800"
-          >
-            Понятно
-          </button>
+
+        <div className="flex flex-col gap-3 border-t border-slate-200 bg-white px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-7 sm:py-4">
+          <div className="flex flex-1 items-center justify-center gap-1.5 order-2 sm:order-1 sm:justify-start">
+            {steps.map((s, index) => {
+              const isActive = index === currentStep;
+              const isPassed = index < currentStep;
+              return (
+                <button
+                  key={s.title}
+                  type="button"
+                  onClick={() => setCurrentStep(index)}
+                  aria-label={`Шаг ${index + 1}: ${s.title}`}
+                  aria-current={isActive ? 'true' : undefined}
+                  className={`h-2 rounded-full transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 ${
+                    isActive
+                      ? 'w-6 bg-blue-700'
+                      : isPassed
+                        ? 'w-2 bg-blue-300 hover:bg-blue-400'
+                        : 'w-2 bg-slate-300 hover:bg-slate-400'
+                  }`}
+                />
+              );
+            })}
+          </div>
+          <div className="flex items-center justify-between gap-2 order-1 sm:order-2 sm:justify-end">
+            <button
+              type="button"
+              onClick={() => setCurrentStep((step) => Math.max(step - 1, 0))}
+              disabled={isFirst}
+              className="inline-flex h-10 items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 sm:px-4"
+            >
+              <ChevronLeft size={16} />
+              Назад
+            </button>
+            {isLast ? (
+              <button
+                type="button"
+                onClick={onClose}
+                className="inline-flex h-10 items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700"
+              >
+                <CheckCircle2 size={16} />
+                Готово
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setCurrentStep((step) => Math.min(step + 1, totalSteps - 1))}
+                className="inline-flex h-10 items-center justify-center gap-1.5 rounded-lg bg-blue-700 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-800"
+              >
+                Далее
+                <ChevronRight size={16} />
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>
