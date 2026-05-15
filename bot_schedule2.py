@@ -2708,6 +2708,8 @@ def api_shift_auction_test_access():
             ends_at=_parse_shift_auction_test_datetime(payload.get('ends_at'))
         )
         return jsonify({"status": "success", "test_access": updated}), 200
+    except ValueError as error:
+        return _shift_auction_test_error_response(error)
     except Exception as error:
         logging.error(f"Shift auction test access API error: {error}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
@@ -2746,6 +2748,13 @@ def _shift_auction_test_error_response(error):
         "DAY_OFF_LIMIT": ("Лимит выходных уже занят статусными периодами или выбранными выходными", 409),
         "INVALID_AUCTION_DATETIME": ("Некорректная дата запуска аукциона", 400)
     }
+    mapping.update({
+        "AUCTION_END_BEFORE_START": ("Время завершения должно быть позже старта", 400),
+        "AUCTION_PERIOD_NOT_FOUND": ("Недельный план для аукциона не найден", 404),
+        "AUCTION_PERIOD_NOT_WEEK": ("Для аукциона можно выбрать только полную неделю", 409),
+        "AUCTION_PERIOD_EMPTY": ("В выбранном недельном плане нет смен", 409),
+        "AUCTION_PERIOD_PAST": ("Прошедшую неделю нельзя запустить заново", 409),
+    })
     message, status = mapping.get(code, ("Ошибка аукциона смен", 400))
     return jsonify({"error": message, "code": code}), status
 
@@ -2761,12 +2770,21 @@ def api_shift_auction_test_snapshot():
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
-        snapshot = db.get_shift_auction_test_snapshot(current_user_id=requester_id)
         requester_role = _normalize_user_role(requester[3])
-        if not (_is_admin_role(requester_role) or snapshot.get('is_current_user_tester')):
+        is_admin_requester = _is_admin_role(requester_role)
+        snapshot = db.get_shift_auction_test_snapshot(
+            current_user_id=requester_id,
+            include_admin_fields=is_admin_requester
+        )
+        if not (is_admin_requester or snapshot.get('is_current_user_tester')):
             snapshot["lots"] = []
             snapshot["my_day_offs"] = []
             snapshot["my_blocked_dates"] = []
+            snapshot["available_periods"] = []
+            snapshot["claim_journal"] = []
+        elif not is_admin_requester:
+            snapshot["available_periods"] = []
+            snapshot["claim_journal"] = []
         snapshot_fingerprint = hashlib.sha1(
             json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
         ).hexdigest()
@@ -2807,6 +2825,32 @@ def api_shift_auction_test_lots_seed():
         return _shift_auction_test_error_response(error)
     except Exception as error:
         logging.error(f"Shift auction seed API error: {error}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/shift_auction/test_restart', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_shift_auction_test_restart():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not _is_admin_role(requester[3]):
+            return jsonify({"error": "Only admins can restart shift auctions"}), 403
+        payload = request.get_json(silent=True) or {}
+        result = db.restart_shift_auction_test(
+            schedule_plan_id=payload.get('schedule_plan_id') or payload.get('plan_id'),
+            updated_by=requester_id,
+        )
+        return jsonify({"status": "success", **result}), 200
+    except ValueError as error:
+        return _shift_auction_test_error_response(error)
+    except Exception as error:
+        logging.error(f"Shift auction restart API error: {error}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 

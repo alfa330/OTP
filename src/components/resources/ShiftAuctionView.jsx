@@ -1,22 +1,30 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
+  CalendarDays,
   CalendarClock,
   CheckCircle2,
   Clock3,
   Gavel,
+  History,
   ListChecks,
   RefreshCw,
+  RotateCcw,
   Save,
   Search,
   ShieldCheck,
-  Sparkles,
   Users,
-  Wifi
+  Wifi,
+  X
 } from 'lucide-react';
 import { isAdminLikeRole, normalizeRole } from '../../utils/roles';
 
 const normalizeOperatorId = (value) => {
+  const id = Number(value);
+  return Number.isFinite(id) && id > 0 ? id : null;
+};
+
+const normalizeSchedulePlanId = (value) => {
   const id = Number(value);
   return Number.isFinite(id) && id > 0 ? id : null;
 };
@@ -58,12 +66,62 @@ const toDateTimeInputValue = (value) => {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 };
 
+const splitDateTimeInputValue = (value) => {
+  const normalized = toDateTimeInputValue(value);
+  if (!normalized) return { date: '', time: '' };
+  const [date = '', time = ''] = normalized.split('T');
+  return { date, time };
+};
+
+const mergeDateTimeInputValue = (currentValue, patch) => {
+  const current = splitDateTimeInputValue(currentValue);
+  const nextDate = patch.date ?? current.date;
+  const nextTime = patch.time ?? current.time;
+  if (!nextDate && !nextTime) return '';
+  return `${nextDate || current.date || ''}T${nextTime || current.time || '00:00'}`;
+};
+
+const addMinutesToDateTimeInputValue = (value, minutes) => {
+  const normalized = toDateTimeInputValue(value);
+  if (!normalized) return '';
+  const date = new Date(normalized);
+  if (Number.isNaN(date.getTime())) return '';
+  date.setMinutes(date.getMinutes() + Number(minutes || 0));
+  return toDateTimeInputValue(date);
+};
+
 const formatDateLabel = (value) => {
   if (!value) return 'Дата';
   const date = new Date(`${value}T00:00:00`);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleDateString('ru-RU', { weekday: 'short', day: '2-digit', month: 'short' });
 };
+
+const formatDateTimeLabel = (value) => {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString('ru-RU', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+};
+
+const formatAuctionPeriodLabel = (period) => (
+  period?.date_from && period?.date_to
+    ? `${formatDateLabel(period.date_from)} — ${formatDateLabel(period.date_to)}`
+    : 'Неделя не выбрана'
+);
+
+const AUCTION_DURATION_PRESETS = [
+  { label: '30 мин', minutes: 30 },
+  { label: '1 час', minutes: 60 },
+  { label: '2 часа', minutes: 120 },
+  { label: '4 часа', minutes: 240 }
+];
 
 const formatCountdown = (targetValue, nowMs) => {
   if (!targetValue) return '';
@@ -364,6 +422,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     status: 'disabled',
     selected_operator_ids: [],
     selected_operators: [],
+    selected_schedule_plan_id: null,
+    selected_period: null,
     is_current_user_tester: false
   });
   const [lots, setLots] = useState([]);
@@ -374,17 +434,21 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [draftNote, setDraftNote] = useState('');
   const [draftStartsAt, setDraftStartsAt] = useState('');
   const [draftEndsAt, setDraftEndsAt] = useState('');
+  const [draftSchedulePlanId, setDraftSchedulePlanId] = useState('');
   const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [query, setQuery] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
-  const [isSeeding, setIsSeeding] = useState(false);
+  const [isRestarting, setIsRestarting] = useState(false);
   const [claimingLotId, setClaimingLotId] = useState(null);
   const [dayOffLoadingDate, setDayOffLoadingDate] = useState('');
   const [connectionState, setConnectionState] = useState('idle');
   const [statusVersion, setStatusVersion] = useState(0);
   const [activeDayDate, setActiveDayDate] = useState('');
+  const [isAdminDayDetailsOpen, setIsAdminDayDetailsOpen] = useState(false);
   const [auctionDayColumnPx, setAuctionDayColumnPx] = useState(64);
+  const [availablePeriods, setAvailablePeriods] = useState([]);
+  const [claimJournal, setClaimJournal] = useState([]);
 
   useEffect(() => {
     showToastRef.current = showToast;
@@ -417,6 +481,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const applySnapshot = useCallback((snapshot) => {
     const safe = snapshot || {};
     const ids = (safe.selected_operator_ids || []).map(normalizeOperatorId).filter(Boolean);
+    const periods = Array.isArray(safe.available_periods) ? safe.available_periods : [];
+    const selectedSchedulePlanId = normalizeSchedulePlanId(
+      safe.selected_schedule_plan_id ?? safe.selected_period?.id
+    );
 
     setSettings({
       enabled: Boolean(safe.enabled),
@@ -426,6 +494,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       status: safe.status || 'disabled',
       selected_operator_ids: ids,
       selected_operators: Array.isArray(safe.selected_operators) ? safe.selected_operators : [],
+      selected_schedule_plan_id: selectedSchedulePlanId,
+      selected_period: safe.selected_period || null,
       is_current_user_tester: Boolean(safe.is_current_user_tester),
       updated_by_name: safe.updated_by_name || '',
       updated_at: safe.updated_at || null
@@ -441,6 +511,16 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     setDraftStartsAt(toDateTimeInputValue(safe.starts_at));
     setDraftEndsAt(toDateTimeInputValue(safe.ends_at));
     setSelectedIds(new Set(ids));
+    setAvailablePeriods(periods);
+    setClaimJournal(Array.isArray(safe.claim_journal) ? safe.claim_journal : []);
+    setDraftSchedulePlanId((current) => {
+      const periodIds = new Set(periods.map((period) => normalizeSchedulePlanId(period?.id)).filter(Boolean));
+      const currentId = normalizeSchedulePlanId(current);
+      if (currentId && periodIds.has(currentId)) return String(currentId);
+      if (selectedSchedulePlanId && periodIds.has(selectedSchedulePlanId)) return String(selectedSchedulePlanId);
+      const firstAvailableId = normalizeSchedulePlanId(periods[0]?.id);
+      return firstAvailableId ? String(firstAvailableId) : '';
+    });
   }, []);
 
   const fetchSnapshot = useCallback(async ({ silent = false } = {}) => {
@@ -476,6 +556,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           ? { ...lot, ...payload.lot }
           : lot
       )));
+      if (canManage) fetchSnapshot({ silent: true });
       return;
     }
 
@@ -489,7 +570,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     }
 
     fetchSnapshot({ silent: true });
-  }, [fetchSnapshot, user?.id]);
+  }, [canManage, fetchSnapshot, user?.id]);
 
   useEffect(() => {
     fetchSnapshot();
@@ -621,6 +702,18 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     [operatorOptions, selectedIds]
   );
 
+  const draftStartsAtParts = useMemo(() => splitDateTimeInputValue(draftStartsAt), [draftStartsAt]);
+  const draftEndsAtParts = useMemo(() => splitDateTimeInputValue(draftEndsAt), [draftEndsAt]);
+  const selectedDraftPeriod = useMemo(
+    () => availablePeriods.find((period) => Number(period?.id) === Number(draftSchedulePlanId)) || null,
+    [availablePeriods, draftSchedulePlanId]
+  );
+  const draftRangeInvalid = Boolean(
+    draftStartsAt
+    && draftEndsAt
+    && new Date(draftEndsAt).getTime() <= new Date(draftStartsAt).getTime()
+  );
+
   const lotDates = useMemo(
     () => Array.from(new Set((lots || []).map((lot) => lot.shift_date).filter(Boolean))).sort(),
     [lots]
@@ -728,6 +821,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         total: dayLots.length,
         claimed: claimedLots.length,
         myClaimed: myClaimed.length,
+        myClaimedLot: myClaimed[0] || null,
         available: availableCount,
         locked: lockedCount,
         isDayOff,
@@ -739,9 +833,37 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     });
   }, [lotDates, lots, myBlockedDateMap, myDayOffs, user?.id, visibleLots]);
 
+  const adminActiveDayClaimGroups = useMemo(() => {
+    if (!canManage || !activeDayDate) return [];
+
+    const claimedLotsByGroup = new Map(AUCTION_RATE_GROUPS.map((group) => [group.id, []]));
+    lots.forEach((lot) => {
+      if (lot?.shift_date !== activeDayDate || lot.status !== 'claimed') return;
+      const groupId = getAuctionRateGroupId(lot);
+      const groupLots = claimedLotsByGroup.get(groupId) || [];
+      groupLots.push(lot);
+      claimedLotsByGroup.set(groupId, groupLots);
+    });
+
+    return AUCTION_RATE_GROUPS.map((group) => ({
+      ...group,
+      lots: [...(claimedLotsByGroup.get(group.id) || [])].sort((a, b) => (
+        clockToMinutes(a.start_time) - clockToMinutes(b.start_time)
+        || clockToMinutes(a.end_time) - clockToMinutes(b.end_time)
+        || Number(a.id || 0) - Number(b.id || 0)
+      ))
+    }));
+  }, [activeDayDate, canManage, lots]);
+
+  const adminActiveDayClaimCount = useMemo(
+    () => adminActiveDayClaimGroups.reduce((sum, group) => sum + group.lots.length, 0),
+    [adminActiveDayClaimGroups]
+  );
+
   useEffect(() => {
     if (!dayNavigationItems.length) {
       setActiveDayDate('');
+      setIsAdminDayDetailsOpen(false);
       return;
     }
     setActiveDayDate((current) => (
@@ -918,6 +1040,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
   const scrollToDay = useCallback((date) => {
     setActiveDayDate(date);
+    if (canManage) setIsAdminDayDetailsOpen(true);
     const dateIndex = lotDates.indexOf(date);
     if (dateIndex < 0) return;
 
@@ -941,7 +1064,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
     scrollNodeToDay(table);
     scrollNodeToDay(bar);
-  }, [lotDates]);
+  }, [canManage, lotDates]);
 
   const toggleOperator = useCallback((operatorId) => {
     const id = normalizeOperatorId(operatorId);
@@ -956,9 +1079,13 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
   const handleSave = useCallback(async () => {
     if (!canManage || !apiRoot) return;
+    if (draftRangeInvalid) {
+      notify('Время завершения должно быть позже старта', 'error');
+      return;
+    }
     setIsSaving(true);
     try {
-      const response = await axios.put(
+      await axios.put(
         `${apiRoot}/api/shift_auction/test_access`,
         {
           enabled: draftEnabled,
@@ -969,7 +1096,6 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         },
         { headers: buildHeaders() }
       );
-      applySnapshot(response?.data?.test_access || {});
       await fetchSnapshot({ silent: true });
       notify('Настройки тестового аукциона сохранены');
     } catch (error) {
@@ -977,21 +1103,37 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     } finally {
       setIsSaving(false);
     }
-  }, [apiRoot, applySnapshot, buildHeaders, canManage, draftEnabled, draftEndsAt, draftNote, draftStartsAt, fetchSnapshot, notify, selectedIds]);
+  }, [apiRoot, buildHeaders, canManage, draftEnabled, draftEndsAt, draftNote, draftRangeInvalid, draftStartsAt, fetchSnapshot, notify, selectedIds]);
 
-  const handleSeedLots = useCallback(async () => {
+  const handleRestartAuction = useCallback(async () => {
     if (!canManage || !apiRoot) return;
-    setIsSeeding(true);
-    try {
-      const response = await axios.post(`${apiRoot}/api/shift_auction/test_lots/seed`, {}, { headers: buildHeaders() });
-      applySnapshot(response?.data?.snapshot || {});
-      notify(`Тестовые смены созданы: ${Number(response?.data?.count || 0)}`);
-    } catch (error) {
-      notify(error?.response?.data?.error || 'Не удалось создать тестовые смены', 'error');
-    } finally {
-      setIsSeeding(false);
+    if (!selectedDraftPeriod?.id) {
+      notify('Сначала выберите недельный план для аукциона', 'error');
+      return;
     }
-  }, [apiRoot, applySnapshot, buildHeaders, canManage, notify]);
+    if (!selectedDraftPeriod.can_restart) {
+      notify('Прошедшую неделю нельзя запустить заново', 'error');
+      return;
+    }
+    const confirmed = window.confirm(
+      `Начать аукцион заново для недели ${formatAuctionPeriodLabel(selectedDraftPeriod)}? Все выбранные смены и выходные будут очищены.`
+    );
+    if (!confirmed) return;
+    setIsRestarting(true);
+    try {
+      const response = await axios.post(
+        `${apiRoot}/api/shift_auction/test_restart`,
+        { schedule_plan_id: selectedDraftPeriod.id },
+        { headers: buildHeaders({ 'Content-Type': 'application/json' }) }
+      );
+      applySnapshot(response?.data?.snapshot || {});
+      notify(`Аукцион запущен заново: ${formatAuctionPeriodLabel(response?.data?.period || selectedDraftPeriod)}`);
+    } catch (error) {
+      notify(error?.response?.data?.error || 'Не удалось начать аукцион заново', 'error');
+    } finally {
+      setIsRestarting(false);
+    }
+  }, [apiRoot, applySnapshot, buildHeaders, canManage, notify, selectedDraftPeriod]);
 
   const handleClaimLot = useCallback(async (lotId) => {
     if (!canClaim || !apiRoot) return;
@@ -1154,8 +1296,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         )}
 
         {canUseAuction && (
-          <section className="grid min-w-0 gap-3 xl:grid-cols-[260px_minmax(0,1fr)] xl:gap-5">
-            <aside className="grid min-w-0 gap-2 sm:grid-cols-2 xl:block xl:space-y-3">
+          <section className={`grid min-w-0 gap-3 ${canManage ? '' : 'xl:grid-cols-[260px_minmax(0,1fr)] xl:gap-5'}`}>
+            {!canManage ? (
+              <aside className="grid min-w-0 gap-2 xl:block xl:space-y-3">
               <div className="min-w-0 max-w-full overflow-hidden rounded-lg border border-slate-200 bg-white p-3 shadow-sm sm:p-4">
                 <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
                   <ListChecks size={17} className="text-blue-700" />
@@ -1192,27 +1335,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                 </div>
               </div>
 
-              <div className="min-w-0 max-w-full overflow-hidden rounded-lg border border-slate-200 bg-white p-3 shadow-sm sm:p-4">
-                <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-                  <Sparkles size={17} className="text-blue-700" />
-                  Мои смены
-                </div>
-                <div className="mt-2 flex min-w-0 max-w-full gap-1.5 overflow-x-auto overscroll-x-contain pb-1 xl:block xl:space-y-2 xl:overflow-visible xl:pb-0">
-                  {myClaimedLots.length ? myClaimedLots.map((lot) => (
-                    <div key={lot.id} className="min-w-[88px] shrink-0 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1.5 text-[11px] sm:min-w-[118px] sm:px-3 sm:py-2 sm:text-sm xl:w-auto">
-                      <div className="font-semibold text-emerald-900 sm:hidden">{formatShortDateLabel(lot.shift_date)}</div>
-                      <div className="hidden font-semibold text-emerald-900 sm:block">{formatDateLabel(lot.shift_date)}</div>
-                      <div className="text-emerald-700 sm:hidden">{formatCompactAuctionShiftLabel(lot)}</div>
-                      <div className="hidden text-emerald-700 sm:block">{lot.start_time} - {lot.end_time}</div>
-                    </div>
-                  )) : (
-                    <p className="min-w-full rounded-md border border-dashed border-slate-300 bg-slate-50 px-3 py-4 text-sm text-slate-500">
-                      Вы еще не забрали смены.
-                    </p>
-                  )}
-                </div>
-              </div>
             </aside>
+            ) : null}
 
             <main className="min-w-0 sm:rounded-lg sm:border sm:border-slate-200 sm:bg-white sm:shadow-sm">
               <div className="hidden border-b border-slate-200 sm:block sm:px-5 sm:py-4">
@@ -1312,6 +1436,48 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                         </tbody>
                       </table>
                     </div>
+                    {canManage && isAdminDayDetailsOpen && activeDayDate ? (
+                      <div className="fixed bottom-[58px] left-3 right-3 z-30 max-h-[45vh] overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 p-3 shadow-2xl sm:static sm:mt-3 sm:max-h-none sm:overflow-visible sm:p-4 sm:shadow-none">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <div className="text-sm font-semibold text-slate-900">
+                              Взятые смены за {formatDateLabel(activeDayDate)}
+                            </div>
+                            <div className="mt-0.5 text-xs text-slate-500">
+                              Всего взято: {adminActiveDayClaimCount}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setIsAdminDayDetailsOpen(false)}
+                            className="inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-500 transition hover:bg-white hover:text-slate-800"
+                            title="Закрыть"
+                          >
+                            <X size={16} />
+                          </button>
+                        </div>
+                        <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                          {adminActiveDayClaimGroups.map((group) => (
+                            <div key={`admin-day-claims-${group.id}`} className="min-w-0">
+                              <div className="flex items-center justify-between gap-2 border-b border-slate-200 pb-1.5">
+                                <span className="text-xs font-semibold uppercase tracking-wide text-slate-600">{group.title}</span>
+                                <span className="rounded-md bg-white px-2 py-0.5 text-xs font-semibold text-slate-700">{group.lots.length}</span>
+                              </div>
+                              <div className="divide-y divide-slate-200">
+                                {group.lots.length ? group.lots.map((lot) => (
+                                  <div key={`admin-day-claim-${lot.id}`} className="grid grid-cols-[88px_minmax(0,1fr)] items-center gap-2 py-2 text-sm">
+                                    <span className="font-semibold tabular-nums text-slate-900">{formatAuctionShiftLabel(lot)}</span>
+                                    <span className="truncate text-slate-700">{lot.claimed_by_name || `#${lot.claimed_by || ''}`}</span>
+                                  </div>
+                                )) : (
+                                  <div className="py-2 text-sm text-slate-500">Нет взятых смен.</div>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
                     {dayNavigationItems.length ? (
                       <div className="fixed bottom-2 left-3 right-3 z-30 mt-2 overflow-hidden rounded-xl border border-slate-200 bg-white/95 shadow-2xl backdrop-blur sm:sticky sm:bottom-3 sm:left-auto sm:right-auto">
                         <div
@@ -1347,6 +1513,12 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                               const finalStatusText = !canManage && item.state === 'blocked'
                                 ? item.blockedLabel
                                 : !canManage && item.state === 'locked' ? 'Занято' : statusText;
+                              const myShiftLabel = !canManage && item.state === 'shift'
+                                ? formatCompactAuctionShiftLabel(item.myClaimedLot)
+                                : '';
+                              const myShiftDuration = !canManage && item.state === 'shift'
+                                ? `${formatAuctionHours(getAuctionLotNetMinutes(item.myClaimedLot))} ч`
+                                : '';
                               const hoverTone = active ? 'hover:bg-blue-100' : 'hover:bg-slate-50';
                               return (
                                 <button
@@ -1355,11 +1527,18 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                   onClick={() => scrollToDay(item.date)}
                                   data-auction-date-bar-cell
                                   aria-current={active ? 'true' : undefined}
-                                  className={`h-11 min-w-0 border-r border-slate-200 px-1 py-1 text-center transition-colors last:border-r-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-inset sm:h-[52px] sm:px-2 sm:py-1.5 ${tone} ${hoverTone} ${active ? 'bg-blue-100 text-blue-900' : ''}`}
+                                  className={`h-12 min-w-0 border-r border-slate-200 px-1 py-1 text-center transition-colors last:border-r-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-inset sm:h-[56px] sm:px-2 sm:py-1.5 ${tone} ${hoverTone} ${active ? 'bg-blue-100 text-blue-900' : ''}`}
                                   title={item.isBlocked ? `${formatDateLabel(item.date)} · ${item.blockedLabel}` : formatDateLabel(item.date)}
                                 >
                                   <span className="block truncate text-[10px] font-semibold leading-4 sm:text-[11px]">{formatShortDateLabel(item.date)}</span>
-                                  <span className="mt-0.5 block text-[11px] font-bold tabular-nums sm:text-xs">{finalStatusText}</span>
+                                  {!canManage && item.state === 'shift' ? (
+                                    <>
+                                      <span className="mt-0.5 block truncate text-[10px] font-bold tabular-nums sm:text-[11px]">{myShiftLabel}</span>
+                                      <span className="block truncate text-[10px] font-semibold tabular-nums sm:text-[11px]">{myShiftDuration}</span>
+                                    </>
+                                  ) : (
+                                    <span className="mt-0.5 block truncate text-[10px] font-bold tabular-nums sm:text-[11px]">{finalStatusText}</span>
+                                  )}
                                 </button>
                               );
                             })}
@@ -1373,7 +1552,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                     {lotDates.length
                       ? 'Для выбранных дней сейчас нет доступных смен.'
                       : canManage
-                        ? 'Создайте тестовые смены для проверки realtime.'
+                        ? 'Выберите недельный план и начните аукцион заново.'
                         : 'Пока нет доступных смен.'}
                   </div>
                 )}
@@ -1387,20 +1566,20 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
             <div className="border-b border-slate-200 px-3 py-3 sm:px-5 sm:py-4">
               <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                 <div>
-                  <h2 className="text-base font-semibold text-slate-950 sm:text-lg">Тестовый запуск</h2>
+                  <h2 className="text-base font-semibold text-slate-950 sm:text-lg">Запуск аукциона</h2>
                   <p className="mt-1 text-xs text-slate-600 sm:text-sm">
-                    Выберите операторов, задайте время открытия и создайте тестовые смены.
+                    Выберите неделю, задайте окно аукциона и управляйте составом участников.
                   </p>
                 </div>
                 <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
                   <button
                     type="button"
-                    onClick={handleSeedLots}
-                    disabled={isSeeding}
+                    onClick={handleRestartAuction}
+                    disabled={isRestarting || !selectedDraftPeriod}
                     className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60 sm:h-10 sm:px-4 sm:text-sm"
                   >
-                    <Sparkles size={16} />
-                    {isSeeding ? 'Создание...' : 'Создать тестовые смены'}
+                    <RotateCcw size={16} />
+                    {isRestarting ? 'Перезапуск...' : 'Начать заново'}
                   </button>
                   <button
                     type="button"
@@ -1430,25 +1609,110 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                   />
                 </label>
 
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 sm:p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                        <CalendarDays size={16} className="text-blue-700" />
+                        Неделя аукциона
+                      </div>
+                      <p className="mt-1 text-xs text-slate-500">
+                        Активная: {formatAuctionPeriodLabel(settings.selected_period)}
+                      </p>
+                    </div>
+                    {selectedDraftPeriod ? (
+                      <span className="rounded-md bg-white px-2 py-1 text-xs font-semibold text-slate-700">
+                        {Number(selectedDraftPeriod.shift_count || 0)} смен
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                    {availablePeriods.length ? availablePeriods.map((period) => {
+                      const active = Number(draftSchedulePlanId) === Number(period.id);
+                      const isCurrent = Number(settings.selected_schedule_plan_id) === Number(period.id);
+                      return (
+                        <button
+                          key={period.id}
+                          type="button"
+                          onClick={() => setDraftSchedulePlanId(String(period.id))}
+                          className={`rounded-lg border px-3 py-2 text-left transition ${
+                            active
+                              ? 'border-blue-500 bg-blue-50 text-blue-900'
+                              : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                          }`}
+                        >
+                          <span className="block text-sm font-semibold">{formatAuctionPeriodLabel(period)}</span>
+                          <span className="mt-0.5 block text-xs text-slate-500">
+                            {Number(period.shift_count || 0)} смен{isCurrent ? ' · активная' : ''}
+                          </span>
+                        </button>
+                      );
+                    }) : (
+                      <div className="rounded-lg border border-dashed border-slate-300 bg-white px-3 py-4 text-sm text-slate-500 sm:col-span-2">
+                        Нет доступных недельных планов на текущую или будущие недели.
+                      </div>
+                    )}
+                  </div>
+                  <p className="mt-3 text-xs text-slate-500">
+                    Перезапуск доступен только для полных недель, которые еще не закончились. При перезапуске очищаются все выбранные смены и выходные.
+                  </p>
+                </div>
+
                 <div className="grid gap-3 md:grid-cols-2">
-                  <label className="block">
-                    <span className="mb-2 block text-sm font-semibold text-slate-800">Старт аукциона</span>
-                    <input
-                      type="datetime-local"
-                      value={draftStartsAt}
-                      onChange={(event) => setDraftStartsAt(event.target.value)}
-                      className="h-10 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                    />
-                  </label>
-                  <label className="block">
-                    <span className="mb-2 block text-sm font-semibold text-slate-800">Завершение</span>
-                    <input
-                      type="datetime-local"
-                      value={draftEndsAt}
-                      onChange={(event) => setDraftEndsAt(event.target.value)}
-                      className="h-10 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                    />
-                  </label>
+                  <div className="rounded-lg border border-slate-200 bg-white p-3">
+                    <span className="block text-sm font-semibold text-slate-800">Старт аукциона</span>
+                    <div className="mt-2 grid grid-cols-[minmax(0,1fr)_108px] gap-2">
+                      <input
+                        type="date"
+                        value={draftStartsAtParts.date}
+                        onChange={(event) => setDraftStartsAt((current) => mergeDateTimeInputValue(current, { date: event.target.value }))}
+                        className="h-10 min-w-0 rounded-lg border border-slate-200 px-3 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                      />
+                      <input
+                        type="time"
+                        value={draftStartsAtParts.time}
+                        onChange={(event) => setDraftStartsAt((current) => mergeDateTimeInputValue(current, { time: event.target.value }))}
+                        disabled={!draftStartsAtParts.date}
+                        className="h-10 min-w-0 rounded-lg border border-slate-200 px-3 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                      />
+                    </div>
+                  </div>
+                  <div className={`rounded-lg border bg-white p-3 ${draftRangeInvalid ? 'border-rose-300' : 'border-slate-200'}`}>
+                    <span className="block text-sm font-semibold text-slate-800">Завершение</span>
+                    <div className="mt-2 grid grid-cols-[minmax(0,1fr)_108px] gap-2">
+                      <input
+                        type="date"
+                        value={draftEndsAtParts.date}
+                        onChange={(event) => setDraftEndsAt((current) => mergeDateTimeInputValue(current, { date: event.target.value }))}
+                        className="h-10 min-w-0 rounded-lg border border-slate-200 px-3 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                      />
+                      <input
+                        type="time"
+                        value={draftEndsAtParts.time}
+                        onChange={(event) => setDraftEndsAt((current) => mergeDateTimeInputValue(current, { time: event.target.value }))}
+                        disabled={!draftEndsAtParts.date}
+                        className="h-10 min-w-0 rounded-lg border border-slate-200 px-3 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-semibold text-slate-500">Быстрое завершение:</span>
+                  {AUCTION_DURATION_PRESETS.map((preset) => (
+                    <button
+                      key={preset.label}
+                      type="button"
+                      onClick={() => setDraftEndsAt(addMinutesToDateTimeInputValue(draftStartsAt, preset.minutes))}
+                      disabled={!draftStartsAt}
+                      className="rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      + {preset.label}
+                    </button>
+                  ))}
+                  {draftRangeInvalid ? (
+                    <span className="text-xs font-medium text-rose-600">Завершение должно быть позже старта.</span>
+                  ) : null}
                 </div>
 
                 <div>
@@ -1531,9 +1795,56 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
             </div>
           </section>
         )}
+
+        {canManage && (
+          <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
+            <div className="border-b border-slate-200 px-3 py-3 sm:px-5 sm:py-4">
+              <div className="flex items-center gap-2">
+                <History size={17} className="text-blue-700" />
+                <h2 className="text-base font-semibold text-slate-950 sm:text-lg">Журнал аукционов</h2>
+              </div>
+              <p className="mt-1 text-xs text-slate-600 sm:text-sm">
+                Кто и когда забрал смену. История сохраняется даже после перезапуска недели.
+              </p>
+            </div>
+            <div className="overflow-x-auto">
+              {claimJournal.length ? (
+                <table className="min-w-full border-separate border-spacing-0 text-sm">
+                  <thead>
+                    <tr className="bg-slate-50 text-left text-xs font-semibold text-slate-600">
+                      <th className="border-b border-slate-200 px-3 py-2 sm:px-5">Время</th>
+                      <th className="border-b border-slate-200 px-3 py-2">Оператор</th>
+                      <th className="border-b border-slate-200 px-3 py-2">Смена</th>
+                      <th className="border-b border-slate-200 px-3 py-2 sm:px-5">Период</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {claimJournal.map((entry) => (
+                      <tr key={entry.id} className="text-slate-700">
+                        <td className="border-b border-slate-100 px-3 py-2 tabular-nums sm:px-5">{formatDateTimeLabel(entry.claimed_at)}</td>
+                        <td className="border-b border-slate-100 px-3 py-2 font-medium text-slate-900">{entry.claimed_by_name || `#${entry.claimed_by || ''}`}</td>
+                        <td className="border-b border-slate-100 px-3 py-2">
+                          {entry.shift_date ? `${formatShortDateLabel(entry.shift_date)} · ${entry.start_time || ''}-${entry.end_time || ''}` : '—'}
+                        </td>
+                        <td className="border-b border-slate-100 px-3 py-2 sm:px-5">
+                          {entry.period_start && entry.period_end
+                            ? `${formatShortDateLabel(entry.period_start)} — ${formatShortDateLabel(entry.period_end)}`
+                            : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (
+                <div className="px-3 py-8 text-center text-sm text-slate-500 sm:px-5">
+                  Пока никто не забирал смены.
+                </div>
+              )}
+            </div>
+          </section>
+        )}
       </div>
 
-      {null}
     </div>
   );
 };

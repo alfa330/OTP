@@ -1536,6 +1536,7 @@ class Database:
                     launch_note TEXT NOT NULL DEFAULT '',
                     starts_at TIMESTAMP NULL,
                     ends_at TIMESTAMP NULL,
+                    selected_schedule_plan_id INTEGER NULL REFERENCES resource_saved_schedule_plans(id) ON DELETE SET NULL,
                     updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
                     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     CONSTRAINT shift_auction_test_access_singleton CHECK (id = 1)
@@ -1543,6 +1544,7 @@ class Database:
             """)
             cursor.execute("ALTER TABLE shift_auction_test_access ADD COLUMN IF NOT EXISTS starts_at TIMESTAMP NULL;")
             cursor.execute("ALTER TABLE shift_auction_test_access ADD COLUMN IF NOT EXISTS ends_at TIMESTAMP NULL;")
+            cursor.execute("ALTER TABLE shift_auction_test_access ADD COLUMN IF NOT EXISTS selected_schedule_plan_id INTEGER NULL;")
             cursor.execute("""
                 INSERT INTO shift_auction_test_access (id)
                 VALUES (1)
@@ -2976,8 +2978,6 @@ class Database:
                     ],
                 )
 
-            cursor.execute("DELETE FROM shift_auction_test_day_offs")
-            cursor.execute("DELETE FROM shift_auction_test_lots")
             cursor.execute("""
                 SELECT id, shift_date, start_time, end_time, rate_min, breaks
                 FROM resource_saved_schedule_shifts
@@ -2985,29 +2985,6 @@ class Database:
                 ORDER BY shift_date, start_minute, end_minute, id
             """, (plan_id,))
             saved_shift_rows = cursor.fetchall() or []
-            if saved_shift_rows:
-                execute_values(
-                    cursor,
-                    """
-                    INSERT INTO shift_auction_test_lots (
-                        shift_date, start_time, end_time, rate_min,
-                        breaks, source_schedule_plan_id, source_schedule_shift_id
-                    )
-                    VALUES %s
-                    """,
-                    [
-                        (
-                            row[1],
-                            row[2],
-                            row[3],
-                            row[4],
-                            Json(row[5] if isinstance(row[5], list) else []),
-                            plan_id,
-                            row[0],
-                        )
-                        for row in saved_shift_rows
-                    ],
-                )
             event = self._insert_shift_auction_test_event(cursor, "resource_schedule_saved", {
                 "plan_id": plan_id,
                 "count": len(saved_shift_rows),
@@ -3142,6 +3119,82 @@ class Database:
         """)
         return [row[0] for row in (cursor.fetchall() or []) if row and row[0]]
 
+    def _serialize_shift_auction_period_row(self, row):
+        if not row:
+            return None
+        date_from = row[1]
+        date_to = row[2]
+        shift_count = int(row[5] or 0) if len(row) > 5 else 0
+        can_restart = bool(row[6]) if len(row) > 6 else bool(date_to and date_to >= date.today())
+        return {
+            "id": int(row[0]),
+            "date_from": date_from.strftime('%Y-%m-%d') if date_from else None,
+            "date_to": date_to.strftime('%Y-%m-%d') if date_to else None,
+            "title": row[3] or "",
+            "updated_at": row[4].isoformat() if row[4] else None,
+            "shift_count": shift_count,
+            "can_restart": can_restart,
+        }
+
+    def _get_shift_auction_period_row_tx(self, cursor, plan_id):
+        try:
+            plan_id = int(plan_id or 0)
+        except Exception:
+            plan_id = 0
+        if plan_id <= 0:
+            return None
+        cursor.execute("""
+            SELECT
+                p.id,
+                p.date_from,
+                p.date_to,
+                p.title,
+                p.updated_at,
+                COUNT(s.id) AS shift_count,
+                p.date_to >= CURRENT_DATE AS can_restart
+            FROM resource_saved_schedule_plans p
+            LEFT JOIN resource_saved_schedule_shifts s ON s.plan_id = p.id
+            WHERE p.id = %s
+              AND p.archived_at IS NULL
+            GROUP BY p.id, p.date_from, p.date_to, p.title, p.updated_at
+        """, (plan_id,))
+        return cursor.fetchone()
+
+    def _get_shift_auction_available_periods_tx(self, cursor):
+        cursor.execute("""
+            SELECT
+                p.id,
+                p.date_from,
+                p.date_to,
+                p.title,
+                p.updated_at,
+                COUNT(s.id) AS shift_count,
+                p.date_to >= CURRENT_DATE AS can_restart
+            FROM resource_saved_schedule_plans p
+            LEFT JOIN resource_saved_schedule_shifts s ON s.plan_id = p.id
+            WHERE p.archived_at IS NULL
+              AND p.date_to = p.date_from + 6
+              AND p.date_to >= CURRENT_DATE
+            GROUP BY p.id, p.date_from, p.date_to, p.title, p.updated_at
+            HAVING COUNT(s.id) > 0
+            ORDER BY p.date_from, p.updated_at DESC, p.id DESC
+        """)
+        return [self._serialize_shift_auction_period_row(row) for row in (cursor.fetchall() or [])]
+
+    def _validate_shift_auction_period_tx(self, cursor, schedule_plan_id, require_restartable=False):
+        row = self._get_shift_auction_period_row_tx(cursor, schedule_plan_id)
+        if not row:
+            raise ValueError("AUCTION_PERIOD_NOT_FOUND")
+        date_from = row[1]
+        date_to = row[2]
+        if not date_from or not date_to or date_to != date_from + timedelta(days=6):
+            raise ValueError("AUCTION_PERIOD_NOT_WEEK")
+        if int(row[5] or 0) <= 0:
+            raise ValueError("AUCTION_PERIOD_EMPTY")
+        if require_restartable and not bool(row[6]):
+            raise ValueError("AUCTION_PERIOD_PAST")
+        return row
+
     def _get_shift_auction_operator_blocked_dates_tx(self, cursor, operator_id, lot_dates=None):
         try:
             operator_id = int(operator_id or 0)
@@ -3254,6 +3307,16 @@ class Database:
                     s.launch_note,
                     s.starts_at,
                     s.ends_at,
+                    COALESCE(
+                        s.selected_schedule_plan_id,
+                        (
+                            SELECT source_schedule_plan_id
+                            FROM shift_auction_test_lots
+                            WHERE source_schedule_plan_id IS NOT NULL
+                            ORDER BY id
+                            LIMIT 1
+                        )
+                    ) AS selected_schedule_plan_id,
                     s.updated_by,
                     u.name AS updated_by_name,
                     s.updated_at
@@ -3268,7 +3331,7 @@ class Database:
                     VALUES (1)
                     ON CONFLICT (id) DO NOTHING
                 """)
-                settings_row = (False, '', None, None, None, None, None)
+                settings_row = (False, '', None, None, None, None, None, None)
 
             cursor.execute("""
                 SELECT
@@ -3289,6 +3352,7 @@ class Database:
                 ORDER BY u.name
             """)
             participant_rows = cursor.fetchall() or []
+            selected_period_row = self._get_shift_auction_period_row_tx(cursor, settings_row[4])
 
         selected_operator_ids = [int(row[0]) for row in participant_rows if row and row[0] is not None]
         current_id = None
@@ -3302,14 +3366,16 @@ class Database:
             "launch_note": settings_row[1] or "",
             "starts_at": settings_row[2].isoformat() if settings_row and settings_row[2] else None,
             "ends_at": settings_row[3].isoformat() if settings_row and settings_row[3] else None,
+            "selected_schedule_plan_id": settings_row[4] if settings_row else None,
+            "selected_period": self._serialize_shift_auction_period_row(selected_period_row),
             "status": self._get_shift_auction_test_status(
                 bool(settings_row[0]) if settings_row else False,
                 settings_row[2] if settings_row else None,
                 settings_row[3] if settings_row else None
             ),
-            "updated_by": settings_row[4] if settings_row else None,
-            "updated_by_name": settings_row[5] or "",
-            "updated_at": settings_row[6].isoformat() if settings_row and settings_row[6] else None,
+            "updated_by": settings_row[5] if settings_row else None,
+            "updated_by_name": settings_row[6] or "",
+            "updated_at": settings_row[7].isoformat() if settings_row and settings_row[7] else None,
             "selected_operator_ids": selected_operator_ids,
             "selected_operators": [
                 {
@@ -3347,6 +3413,8 @@ class Database:
             return cursor.fetchone() is not None
 
     def update_shift_auction_test_access(self, enabled=False, operator_ids=None, launch_note='', updated_by=None, starts_at=None, ends_at=None):
+        if starts_at and ends_at and ends_at <= starts_at:
+            raise ValueError("AUCTION_END_BEFORE_START")
         normalized_ids = []
         seen = set()
         for raw_id in (operator_ids or []):
@@ -3402,7 +3470,7 @@ class Database:
 
         return self.get_shift_auction_test_access(current_user_id=updated_by)
 
-    def get_shift_auction_test_snapshot(self, current_user_id=None):
+    def get_shift_auction_test_snapshot(self, current_user_id=None, include_admin_fields=False):
         current_id = None
         try:
             current_id = int(current_user_id) if current_user_id is not None else None
@@ -3416,6 +3484,16 @@ class Database:
                     s.launch_note,
                     s.starts_at,
                     s.ends_at,
+                    COALESCE(
+                        s.selected_schedule_plan_id,
+                        (
+                            SELECT source_schedule_plan_id
+                            FROM shift_auction_test_lots
+                            WHERE source_schedule_plan_id IS NOT NULL
+                            ORDER BY id
+                            LIMIT 1
+                        )
+                    ) AS selected_schedule_plan_id,
                     s.updated_by,
                     u.name AS updated_by_name,
                     s.updated_at,
@@ -3431,7 +3509,7 @@ class Database:
                     VALUES (1)
                     ON CONFLICT (id) DO NOTHING
                 """)
-                settings_row = (False, '', None, None, None, None, None, 0)
+                settings_row = (False, '', None, None, None, None, None, None, 0)
 
             cursor.execute("""
                 SELECT
@@ -3491,6 +3569,33 @@ class Database:
                 self._get_shift_auction_operator_blocked_dates_tx(cursor, current_id)
                 if current_id else []
             )
+            selected_period_row = self._get_shift_auction_period_row_tx(cursor, settings_row[4])
+            available_periods = []
+            claim_journal_rows = []
+            if include_admin_fields:
+                available_periods = self._get_shift_auction_available_periods_tx(cursor)
+                cursor.execute("""
+                    SELECT
+                        e.id,
+                        e.created_at,
+                        NULLIF(e.payload->'lot'->>'shift_date', '') AS shift_date,
+                        NULLIF(e.payload->'lot'->>'start_time', '') AS start_time,
+                        NULLIF(e.payload->'lot'->>'end_time', '') AS end_time,
+                        NULLIF(e.payload->'lot'->>'claimed_by', '')::INTEGER AS claimed_by,
+                        COALESCE(u.name, '') AS claimed_by_name,
+                        NULLIF(e.payload->'lot'->>'source_schedule_plan_id', '')::INTEGER AS source_schedule_plan_id,
+                        p.date_from,
+                        p.date_to
+                    FROM shift_auction_test_events e
+                    LEFT JOIN users u
+                      ON u.id = NULLIF(e.payload->'lot'->>'claimed_by', '')::INTEGER
+                    LEFT JOIN resource_saved_schedule_plans p
+                      ON p.id = NULLIF(e.payload->'lot'->>'source_schedule_plan_id', '')::INTEGER
+                    WHERE e.event_type = 'lot_claimed'
+                    ORDER BY e.id DESC
+                    LIMIT 200
+                """)
+                claim_journal_rows = cursor.fetchall() or []
 
         selected_operator_ids = [int(row[0]) for row in participant_rows if row and row[0] is not None]
         return {
@@ -3498,14 +3603,16 @@ class Database:
             "launch_note": settings_row[1] or "",
             "starts_at": settings_row[2].isoformat() if settings_row and settings_row[2] else None,
             "ends_at": settings_row[3].isoformat() if settings_row and settings_row[3] else None,
+            "selected_schedule_plan_id": settings_row[4] if settings_row else None,
+            "selected_period": self._serialize_shift_auction_period_row(selected_period_row),
             "status": self._get_shift_auction_test_status(
                 bool(settings_row[0]) if settings_row else False,
                 settings_row[2] if settings_row else None,
                 settings_row[3] if settings_row else None
             ),
-            "updated_by": settings_row[4] if settings_row else None,
-            "updated_by_name": settings_row[5] or "",
-            "updated_at": settings_row[6].isoformat() if settings_row and settings_row[6] else None,
+            "updated_by": settings_row[5] if settings_row else None,
+            "updated_by_name": settings_row[6] or "",
+            "updated_at": settings_row[7].isoformat() if settings_row and settings_row[7] else None,
             "selected_operator_ids": selected_operator_ids,
             "selected_operators": [
                 {
@@ -3526,7 +3633,85 @@ class Database:
             "lots": lots,
             "my_day_offs": my_day_offs,
             "my_blocked_dates": my_blocked_dates,
-            "last_event_id": int(settings_row[7] or 0) if settings_row and len(settings_row) > 7 else 0
+            "available_periods": available_periods,
+            "claim_journal": [
+                {
+                    "id": row[0],
+                    "claimed_at": row[1].isoformat() if row[1] else None,
+                    "shift_date": row[2],
+                    "start_time": row[3],
+                    "end_time": row[4],
+                    "claimed_by": row[5],
+                    "claimed_by_name": row[6] or "",
+                    "source_schedule_plan_id": row[7],
+                    "period_start": row[8].strftime('%Y-%m-%d') if row[8] else None,
+                    "period_end": row[9].strftime('%Y-%m-%d') if row[9] else None,
+                }
+                for row in claim_journal_rows
+            ],
+            "last_event_id": int(settings_row[8] or 0) if settings_row and len(settings_row) > 8 else 0
+        }
+
+    def restart_shift_auction_test(self, schedule_plan_id, updated_by=None):
+        with self._get_cursor() as cursor:
+            period_row = self._validate_shift_auction_period_tx(
+                cursor,
+                schedule_plan_id,
+                require_restartable=True
+            )
+            cursor.execute("""
+                SELECT id, shift_date, start_time, end_time, rate_min, breaks
+                FROM resource_saved_schedule_shifts
+                WHERE plan_id = %s
+                ORDER BY shift_date, start_minute, end_minute, id
+            """, (int(period_row[0]),))
+            saved_shift_rows = cursor.fetchall() or []
+            cursor.execute("""
+                UPDATE shift_auction_test_access
+                SET selected_schedule_plan_id = %s,
+                    updated_by = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = 1
+            """, (int(period_row[0]), updated_by))
+            cursor.execute("DELETE FROM shift_auction_test_day_offs")
+            cursor.execute("DELETE FROM shift_auction_test_lots")
+            execute_values(
+                cursor,
+                """
+                INSERT INTO shift_auction_test_lots (
+                    shift_date, start_time, end_time, rate_min,
+                    breaks, source_schedule_plan_id, source_schedule_shift_id
+                )
+                VALUES %s
+                """,
+                [
+                    (
+                        row[1],
+                        row[2],
+                        row[3],
+                        row[4],
+                        Json(row[5] if isinstance(row[5], list) else []),
+                        int(period_row[0]),
+                        row[0],
+                    )
+                    for row in saved_shift_rows
+                ],
+            )
+            event = self._insert_shift_auction_test_event(cursor, "auction_restarted", {
+                "plan_id": int(period_row[0]),
+                "count": len(saved_shift_rows),
+                "date_from": period_row[1].strftime('%Y-%m-%d'),
+                "date_to": period_row[2].strftime('%Y-%m-%d'),
+                "updated_by": updated_by,
+            })
+        return {
+            "count": len(saved_shift_rows),
+            "period": self._serialize_shift_auction_period_row(period_row),
+            "event": event,
+            "snapshot": self.get_shift_auction_test_snapshot(
+                current_user_id=updated_by,
+                include_admin_fields=True
+            ),
         }
 
     def seed_shift_auction_test_lots(self, updated_by=None, start_date=None):
@@ -3577,7 +3762,14 @@ class Database:
                 "start_date": base_date.strftime('%Y-%m-%d'),
                 "updated_by": updated_by
             })
-        return {"count": len(rows), "event": event, "snapshot": self.get_shift_auction_test_snapshot(current_user_id=updated_by)}
+        return {
+            "count": len(rows),
+            "event": event,
+            "snapshot": self.get_shift_auction_test_snapshot(
+                current_user_id=updated_by,
+                include_admin_fields=True
+            )
+        }
 
     def get_shift_auction_test_events_after(self, after_id=0, limit=100):
         try:
