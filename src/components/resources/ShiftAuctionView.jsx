@@ -1611,6 +1611,20 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     return typeof withAccessTokenHeader === 'function' ? withAccessTokenHeader(headers) : headers;
   }, [user?.id, withAccessTokenHeader]);
 
+  const postClaimLot = useCallback(async (lotId) => {
+    const response = await fetch(`${apiRoot}/api/shift_auction/test_lots/${lotId}/claim`, {
+      method: 'POST',
+      credentials: 'include'
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(data?.error || 'Claim request failed');
+      error.response = { status: response.status, data };
+      throw error;
+    }
+    return { data };
+  }, [apiRoot]);
+
   const applySnapshot = useCallback((snapshot) => {
     const safe = snapshot || {};
     const ids = (safe.selected_operator_ids || []).map(normalizeOperatorId).filter(Boolean);
@@ -2308,11 +2322,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     )));
 
     try {
-      const response = await enqueueAuctionMutation(() => axios.post(
-        `${apiRoot}/api/shift_auction/test_lots/${numericId}/claim`,
-        {},
-        { headers: buildHeaders() }
-      ));
+      const response = await enqueueAuctionMutation(() => postClaimLot(numericId));
       const serverLot = response?.data?.lot;
       if (serverLot && serverLot.id) {
         setLots((currentLots) => currentLots.map((l) => (
@@ -2346,7 +2356,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         return next;
       });
     }
-  }, [apiRoot, buildHeaders, canClaim, claimBlockReasonByLotId, enqueueAuctionMutation, fetchSnapshot, notifyClaimError, user?.id]);
+  }, [apiRoot, canClaim, claimBlockReasonByLotId, enqueueAuctionMutation, fetchSnapshot, notifyClaimError, postClaimLot, user?.id]);
 
   const handleReleaseLot = useCallback(async () => {
     const lot = releaseConfirmLot;
