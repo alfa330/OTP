@@ -14565,6 +14565,7 @@ def get_my_work_schedules():
         include_imported_statuses = _ws_query_bool('include_imported_statuses', default=False)
         include_technical_issues = _ws_query_bool('include_technical_issues', default=True)
         include_offline_activities = _ws_query_bool('include_offline_activities', default=True)
+        schedule_started_at = time.perf_counter()
         operator_schedule = db.get_operator_with_shifts(
             requester_id,
             start_date,
@@ -14573,6 +14574,7 @@ def get_my_work_schedules():
             include_technical_issues=include_technical_issues,
             include_offline_activities=include_offline_activities
         )
+        _record_elapsed_server_timing("work-schedules-db", schedule_started_at)
         if not operator_schedule:
             return jsonify({"error": "Operator not found"}), 404
 
@@ -14608,6 +14610,7 @@ def get_direction_work_schedules():
         include_technical_issues = _ws_query_bool('include_technical_issues', default=True)
         include_offline_activities = _ws_query_bool('include_offline_activities', default=True)
 
+        schedule_started_at = time.perf_counter()
         operators = db.get_operators_with_shifts(
             start_date=start_date,
             end_date=end_date,
@@ -14616,6 +14619,7 @@ def get_direction_work_schedules():
             include_technical_issues=include_technical_issues,
             include_offline_activities=include_offline_activities
         )
+        _record_elapsed_server_timing("work-schedules-db", schedule_started_at)
         return jsonify({"operators": operators, "direction": direction_name}), 200
 
     except ValueError as e:
@@ -14900,6 +14904,7 @@ def get_operators_with_schedules():
         include_imported_statuses = _ws_query_bool('include_imported_statuses', default=False)
         include_technical_issues = _ws_query_bool('include_technical_issues', default=True)
         include_offline_activities = _ws_query_bool('include_offline_activities', default=True)
+        schedule_started_at = time.perf_counter()
         operators = db.get_operators_with_shifts(
             start_date,
             end_date,
@@ -14907,6 +14912,7 @@ def get_operators_with_schedules():
             include_technical_issues=include_technical_issues,
             include_offline_activities=include_offline_activities
         )
+        _record_elapsed_server_timing("work-schedules-db", schedule_started_at)
         operators = _filter_operators_for_requester_scope(user_data, user_id, operators)
         
         return jsonify({
