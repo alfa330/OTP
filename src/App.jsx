@@ -369,7 +369,7 @@ const resolveAuthTransportFromHeaders = (headers = {}) => {
 
 const withAccessTokenHeader = (headers = {}, options = {}) => {
     const {
-        includeRefreshToken = shouldUseLegacyMobileBearerStorage(),
+        includeRefreshToken = false,
         transportOverride = null
     } = options || {};
     const nextHeaders = stripLegacyAuthHeaders(headers);
