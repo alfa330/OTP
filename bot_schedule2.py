@@ -117,6 +117,26 @@ RECRUITING_RUNTIME_MAX_JOBS = 20
 # === Flask-сервер ================================================================================================
 app = Flask(__name__)
 
+
+def _append_server_timing(name, duration_ms):
+    metric_name = re.sub(r'[^A-Za-z0-9_-]+', '-', str(name or '').strip()).strip('-')
+    if not metric_name:
+        return
+    try:
+        duration = max(0.0, float(duration_ms or 0))
+    except Exception:
+        return
+    timings = getattr(g, 'server_timings', None)
+    if timings is None:
+        timings = []
+        g.server_timings = timings
+    timings.append((metric_name, duration))
+
+
+def _record_elapsed_server_timing(name, started_at):
+    _append_server_timing(name, (time.perf_counter() - started_at) * 1000)
+
+
 @app.after_request
 def debug_401_responses(response):
     if response.status_code == 401:
@@ -138,6 +158,7 @@ JWT_ALGORITHM = "HS256"
 JWT_ACCESS_TOKEN_MINUTES = int(os.getenv('JWT_ACCESS_TOKEN_MINUTES', '30'))
 JWT_REFRESH_TOKEN_DAYS = int(os.getenv('JWT_REFRESH_TOKEN_DAYS', '30'))
 JWT_REFRESH_PREVIOUS_TOKEN_GRACE_SECONDS = int(os.getenv('JWT_REFRESH_PREVIOUS_TOKEN_GRACE_SECONDS', '90'))
+JWT_SESSION_TOUCH_INTERVAL_SECONDS = max(0, int(os.getenv('JWT_SESSION_TOUCH_INTERVAL_SECONDS', '60')))
 JWT_ACCESS_COOKIE_NAME = os.getenv('JWT_ACCESS_COOKIE_NAME', 'otp_access_token')
 JWT_REFRESH_COOKIE_NAME = os.getenv('JWT_REFRESH_COOKIE_NAME', 'otp_refresh_token')
 JWT_REFRESH_HEADER_NAME = os.getenv('JWT_REFRESH_HEADER_NAME', 'X-Refresh-Token')
@@ -563,10 +584,30 @@ def _validate_user_session_principal(user_id, session_id=None):
     return user
 
 
-def _set_request_auth_context(user_id):
+def _set_request_auth_context(user_id, user=None):
     request.environ['HTTP_X_USER_ID'] = str(user_id)
     request.user_id = int(user_id)
     g.user_id = int(user_id)
+    if user is not None:
+        g.auth_user = user
+
+
+def _should_touch_user_session(session, ip_address=None, user_agent=None):
+    if not session:
+        return True
+    if JWT_SESSION_TOUCH_INTERVAL_SECONDS <= 0:
+        return True
+    if ip_address and ip_address != session.get("ip_address"):
+        return True
+    if user_agent and user_agent != session.get("user_agent"):
+        return True
+    last_seen_at = session.get("last_seen_at")
+    if not last_seen_at:
+        return True
+    try:
+        return (datetime.now() - last_seen_at).total_seconds() >= JWT_SESSION_TOUCH_INTERVAL_SECONDS
+    except Exception:
+        return True
 
 
 def _get_original_request_user_id_header():
@@ -798,6 +839,7 @@ def _get_refresh_token_values():
 
 
 def _authenticate_access_cookie(optional=True, touch_session=True):
+    auth_started_at = time.perf_counter()
     access_tokens = _get_access_token_values()
     if not access_tokens:
         if optional:
@@ -817,17 +859,22 @@ def _authenticate_access_cookie(optional=True, touch_session=True):
                 raise AuthError("SESSION_REVOKED", "Session revoked")
             if session["expires_at"] and session["expires_at"] < datetime.utcnow():
                 raise AuthError("SESSION_EXPIRED", "Session expired")
-            _validate_user_session_principal(user_id=user_id, session_id=session_id)
+            user = _validate_user_session_principal(user_id=user_id, session_id=session_id)
 
-            if touch_session:
+            ip_address = _client_ip()
+            user_agent = request.headers.get('User-Agent')
+            if touch_session and _should_touch_user_session(session, ip_address=ip_address, user_agent=user_agent):
+                touch_started_at = time.perf_counter()
                 db.touch_user_session(
                     session_id=session_id,
                     user_id=user_id,
-                    ip_address=_client_ip(),
-                    user_agent=request.headers.get('User-Agent')
+                    ip_address=ip_address,
+                    user_agent=user_agent
                 )
+                _record_elapsed_server_timing("auth-touch", touch_started_at)
 
-            _set_request_auth_context(user_id)
+            _set_request_auth_context(user_id, user=user)
+            _record_elapsed_server_timing("auth-access", auth_started_at)
             return payload
         except AuthError as auth_error:
             last_error = auth_error
@@ -837,6 +884,7 @@ def _authenticate_access_cookie(optional=True, touch_session=True):
 
 
 def _authenticate_refresh_cookie(optional=True, rotate_tokens=True, rotate_refresh_token=True):
+    auth_started_at = time.perf_counter()
     refresh_tokens = _get_refresh_token_values()
     if not refresh_tokens:
         if optional:
@@ -897,7 +945,8 @@ def _authenticate_refresh_cookie(optional=True, rotate_tokens=True, rotate_refre
                     user_agent=request.headers.get('User-Agent')
                 )
 
-            _set_request_auth_context(user_id)
+            _set_request_auth_context(user_id, user=user)
+            _record_elapsed_server_timing("auth-refresh", auth_started_at)
             return payload
         except AuthError as auth_error:
             last_error = auth_error
@@ -2162,7 +2211,16 @@ def _get_authenticated_requester():
         except Exception:
             return None, None, ("Invalid X-User-Id", 400)
 
-    requester = db.get_user(id=requester_id)
+    requester = getattr(g, 'auth_user', None)
+    if requester is not None:
+        try:
+            requester_matches = int(requester[0]) == requester_id
+        except Exception:
+            requester_matches = False
+        if not requester_matches:
+            requester = None
+    if requester is None:
+        requester = db.get_user(id=requester_id)
     if not requester:
         return None, None, ("Requester not found", 404)
     return requester_id, requester, None
@@ -2422,6 +2480,13 @@ def after_request(response):
     if request.path.startswith('/api/'):
         response.headers['Cache-Control'] = 'no-store'
         response.headers['Pragma'] = 'no-cache'
+
+    timings = getattr(g, 'server_timings', None)
+    if timings:
+        response.headers['Server-Timing'] = ', '.join(
+            f"{name};dur={duration:.2f}"
+            for name, duration in timings
+        )
 
     pending_tokens = getattr(g, 'pending_auth_tokens', None)
     if pending_tokens:
@@ -2863,16 +2928,24 @@ def api_shift_auction_test_lot_claim(lot_id):
         return _build_cors_preflight_response()
 
     try:
+        requester_started_at = time.perf_counter()
         requester_id, requester, auth_error = _get_authenticated_requester()
+        _record_elapsed_server_timing("auction-requester", requester_started_at)
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
         if _normalize_user_role(requester[3]) != 'operator':
             return jsonify({"error": "Only operators can claim shifts"}), 403
+        mutation_started_at = time.perf_counter()
         if request.method == 'DELETE':
             result = db.release_shift_auction_test_lot(requester_id, lot_id)
         else:
             result = db.claim_shift_auction_test_lot(requester_id, lot_id)
+        db_timings = result.pop("_timings", None) if isinstance(result, dict) else None
+        _record_elapsed_server_timing("auction-mutation", mutation_started_at)
+        if isinstance(db_timings, dict):
+            for name, duration_ms in db_timings.items():
+                _append_server_timing(f"auction-{name}", duration_ms)
         return jsonify({"status": "success", **result}), 200
     except ValueError as error:
         return _shift_auction_test_error_response(error)
@@ -3010,7 +3083,7 @@ def login():
                 user_agent=request.headers.get('User-Agent'),
                 ip_address=_client_ip()
             )
-            _set_request_auth_context(user[0])
+            _set_request_auth_context(user[0], user=user_profile)
             payload = _get_user_payload(user_profile)
             response_payload = _build_auth_response_payload(
                 payload,
@@ -3037,7 +3110,9 @@ def auth_me():
         user_id = getattr(g, 'user_id', None)
         if not user_id:
             return jsonify({"error": "Unauthorized"}), 401
-        user = db.get_user(id=user_id)
+        user = getattr(g, 'auth_user', None)
+        if user is None:
+            user = db.get_user(id=user_id)
         if not user:
             return jsonify({"error": "User not found"}), 404
         payload = _get_user_payload(user)
@@ -3059,7 +3134,9 @@ def refresh_auth():
         user_id = getattr(g, 'user_id', None)
         if not user_id:
             raise AuthError("UNAUTHORIZED", "Unauthorized")
-        user = db.get_user(id=user_id)
+        user = getattr(g, 'auth_user', None)
+        if user is None:
+            user = db.get_user(id=user_id)
         if not user:
             raise AuthError("USER_NOT_FOUND", "User not found")
 
