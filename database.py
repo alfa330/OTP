@@ -7137,6 +7137,69 @@ class Database:
                 "sensitive_data_unlocked_at": row[12]
             }
 
+    def get_user_session_with_user(self, session_id, user_id):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    us.session_id::text,
+                    us.user_id,
+                    us.refresh_token_hash,
+                    us.previous_refresh_token_hash,
+                    us.previous_refresh_valid_until,
+                    us.user_agent,
+                    us.ip_address,
+                    us.created_at,
+                    us.last_seen_at,
+                    us.expires_at,
+                    us.revoked_at,
+                    us.sensitive_data_unlocked,
+                    us.sensitive_data_unlocked_at,
+                    u.id,
+                    u.telegram_id,
+                    u.name,
+                    u.role,
+                    d.name,
+                    u.hire_date,
+                    u.supervisor_id,
+                    u.login,
+                    u.hours_table_url,
+                    u.scores_table_url,
+                    u.is_active,
+                    u.status,
+                    u.rate,
+                    u.gender,
+                    u.birth_date,
+                    u.avatar_bucket,
+                    u.avatar_blob_path,
+                    u.avatar_content_type,
+                    u.avatar_file_size,
+                    u.avatar_updated_at
+                FROM user_sessions us
+                JOIN users u ON u.id = us.user_id
+                LEFT JOIN directions d ON d.id = u.direction_id
+                WHERE us.session_id = %s
+                  AND us.user_id = %s
+            """, (session_id, user_id))
+            row = cursor.fetchone()
+            if not row:
+                return None, None
+            session = {
+                "session_id": row[0],
+                "user_id": row[1],
+                "refresh_token_hash": row[2],
+                "previous_refresh_token_hash": row[3],
+                "previous_refresh_valid_until": row[4],
+                "user_agent": row[5],
+                "ip_address": row[6],
+                "created_at": row[7],
+                "last_seen_at": row[8],
+                "expires_at": row[9],
+                "revoked_at": row[10],
+                "sensitive_data_unlocked": bool(row[11]),
+                "sensitive_data_unlocked_at": row[12],
+            }
+            return session, tuple(row[13:])
+
     def rotate_user_session_token(
         self,
         session_id,
