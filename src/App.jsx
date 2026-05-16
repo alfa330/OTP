@@ -8828,13 +8828,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (!user) return;
                 if (user?.role === 'operator') return;
                 const abortController = new AbortController();
-                fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, {
-                    signal: abortController.signal
-                }).catch(error => {
-                    if (error?.name === 'AbortError') return;
-                    console.error('Error loading schedules:', error);
-                });
-                return () => abortController.abort();
+                const loadTimer = setTimeout(() => {
+                    fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, {
+                        signal: abortController.signal
+                    }).catch(error => {
+                        if (error?.name === 'AbortError') return;
+                        console.error('Error loading schedules:', error);
+                    });
+                }, 140);
+                return () => {
+                    clearTimeout(loadTimer);
+                    abortController.abort();
+                };
             }, [user?.id, user?.role, plannerPreloadMonthKeysKey, fetchPlannerSchedulesByMonths]);
             useEffect(() => {
                 if (!user) return;
@@ -9274,14 +9279,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
 
                 const abortController = new AbortController();
-                fetchPlannerImportedStatusesForRange(rangeStart, rangeEnd, {
-                    signal: abortController.signal,
-                    force: true
-                }).catch(error => {
-                    if (error?.name === 'AbortError') return;
-                    console.error('Error loading imported statuses:', error);
-                });
-                return () => abortController.abort();
+                const loadTimer = setTimeout(() => {
+                    fetchPlannerImportedStatusesForRange(rangeStart, rangeEnd, {
+                        signal: abortController.signal,
+                        force: true
+                    }).catch(error => {
+                        if (error?.name === 'AbortError') return;
+                        console.error('Error loading imported statuses:', error);
+                    });
+                }, 140);
+                return () => {
+                    clearTimeout(loadTimer);
+                    abortController.abort();
+                };
             }, [
                 user?.id,
                 user?.role,
