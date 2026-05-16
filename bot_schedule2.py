@@ -658,7 +658,7 @@ def _decode_token(token, expected_type, verify_exp=True):
 
 
 def _build_access_token(user, session_id):
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     payload = {
         "sub": str(user[0]),
         "role": user[3],
@@ -672,7 +672,7 @@ def _build_access_token(user, session_id):
 
 
 def _build_refresh_token(user_id, session_id):
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     payload = {
         "sub": str(user_id),
         "sid": str(session_id),
@@ -1113,7 +1113,7 @@ def _decode_sensitive_qr_token(token):
     if not session_id:
         raise ValueError("Invalid QR token session")
 
-    now_ts = int(datetime.utcnow().timestamp())
+    now_ts = int(datetime.now(timezone.utc).timestamp())
     if exp_ts <= now_ts:
         raise ValueError("QR token expired")
 
@@ -2378,10 +2378,11 @@ def hydrate_user_context_from_jwt():
     except AuthError as auth_error:
         request.environ['JWT_AUTH_ERROR_CODE'] = auth_error.code
 
-    try:
-        _authenticate_refresh_cookie(optional=True, rotate_tokens=True, rotate_refresh_token=False)
-    except AuthError as refresh_auth_error:
-        request.environ['JWT_AUTH_ERROR_CODE'] = refresh_auth_error.code
+    if _requested_auth_transport() != 'bearer':
+        try:
+            _authenticate_refresh_cookie(optional=True, rotate_tokens=True, rotate_refresh_token=False)
+        except AuthError as refresh_auth_error:
+            request.environ['JWT_AUTH_ERROR_CODE'] = refresh_auth_error.code
     return None
 
 
@@ -2431,14 +2432,15 @@ def require_auth(f):
         except AuthError as auth_error:
             request.environ['JWT_AUTH_ERROR_CODE'] = auth_error.code
 
-        try:
-            if _authenticate_refresh_cookie(optional=True, rotate_tokens=True, rotate_refresh_token=False):
-                identity_error = _validate_authenticated_identity_header()
-                if identity_error is not None:
-                    return identity_error
-                return f(*args, **kwargs)
-        except AuthError as refresh_auth_error:
-            request.environ['JWT_AUTH_ERROR_CODE'] = refresh_auth_error.code
+        if _requested_auth_transport() != 'bearer':
+            try:
+                if _authenticate_refresh_cookie(optional=True, rotate_tokens=True, rotate_refresh_token=False):
+                    identity_error = _validate_authenticated_identity_header()
+                    if identity_error is not None:
+                        return identity_error
+                    return f(*args, **kwargs)
+            except AuthError as refresh_auth_error:
+                request.environ['JWT_AUTH_ERROR_CODE'] = refresh_auth_error.code
 
         auth_error_code = request.environ.get('JWT_AUTH_ERROR_CODE')
         if auth_error_code:
