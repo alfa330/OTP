@@ -38,7 +38,7 @@ time.tzset()
 
 # Global connection pool. Keep a warm floor so the first browser burst does not
 # pay for creating PostgreSQL connections one by one on the request path.
-MIN_CONN = max(1, int(os.getenv('POSTGRES_POOL_MIN_CONN', '8')))
+MIN_CONN = max(1, int(os.getenv('POSTGRES_POOL_MIN_CONN', '16')))
 MAX_CONN = max(MIN_CONN, int(os.getenv('POSTGRES_POOL_MAX_CONN', '20')))
 POOL = None
 STATUS_IMPORT_INSERT_PAGE_SIZE = max(200, int(os.getenv('STATUS_IMPORT_INSERT_PAGE_SIZE', '2000')))
