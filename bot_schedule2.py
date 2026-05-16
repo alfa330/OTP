@@ -105,6 +105,7 @@ dp = Dispatcher(bot=bot, storage=storage)
 report_lock = threading.Lock()
 recruiting_parse_lock = threading.Lock()
 executor_pool = ThreadPoolExecutor(max_workers=4)
+auth_maintenance_executor = ThreadPoolExecutor(max_workers=1)
 login_rate_limit_lock = threading.Lock()
 session_touch_gate_lock = threading.Lock()
 session_touch_next_due = {}
@@ -635,6 +636,28 @@ def _reserve_user_session_touch(session_id, session, ip_address=None, user_agent
         return True
 
 
+def _touch_user_session_background(session_id, user_id, ip_address, user_agent):
+    try:
+        db.touch_user_session(
+            session_id=session_id,
+            user_id=user_id,
+            ip_address=ip_address,
+            user_agent=user_agent
+        )
+    except Exception:
+        app.logger.exception("Failed to touch user session in background")
+
+
+def _schedule_user_session_touch(session_id, user_id, ip_address, user_agent):
+    auth_maintenance_executor.submit(
+        _touch_user_session_background,
+        session_id,
+        user_id,
+        ip_address,
+        user_agent
+    )
+
+
 def _get_original_request_user_id_header():
     raw_value = request.environ.get('ORIGINAL_X_USER_ID')
     if raw_value is None:
@@ -891,14 +914,12 @@ def _authenticate_access_cookie(optional=True, touch_session=True):
             ip_address = _client_ip()
             user_agent = request.headers.get('User-Agent')
             if touch_session and _reserve_user_session_touch(session_id, session, ip_address=ip_address, user_agent=user_agent):
-                touch_started_at = time.perf_counter()
-                db.touch_user_session(
+                _schedule_user_session_touch(
                     session_id=session_id,
                     user_id=user_id,
                     ip_address=ip_address,
                     user_agent=user_agent
                 )
-                _record_elapsed_server_timing("auth-touch", touch_started_at)
 
             _set_request_auth_context(user_id, user=user)
             _record_elapsed_server_timing("auth-access", auth_started_at)

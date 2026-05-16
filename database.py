@@ -36,9 +36,10 @@ logging.basicConfig(level=logging.INFO)
 os.environ['TZ'] = 'Asia/Almaty'
 time.tzset()
 
-# Global connection pool
-MIN_CONN = 1
-MAX_CONN = 20  # Adjust based on expected load
+# Global connection pool. Keep a warm floor so the first browser burst does not
+# pay for creating PostgreSQL connections one by one on the request path.
+MIN_CONN = max(1, int(os.getenv('POSTGRES_POOL_MIN_CONN', '8')))
+MAX_CONN = max(MIN_CONN, int(os.getenv('POSTGRES_POOL_MAX_CONN', '20')))
 POOL = None
 STATUS_IMPORT_INSERT_PAGE_SIZE = max(200, int(os.getenv('STATUS_IMPORT_INSERT_PAGE_SIZE', '2000')))
 SHIFT_AUCTION_TEST_EVENT_NOTIFY_CHANNEL = 'shift_auction_test_events'
@@ -418,6 +419,7 @@ def get_pool():
             'port': os.getenv('POSTGRES_PORT', 5432)
         }
         POOL = ThreadedConnectionPool(MIN_CONN, MAX_CONN, **conn_params)
+        logging.info("PostgreSQL pool initialized with min=%s max=%s", MIN_CONN, MAX_CONN)
     return POOL
 
 class Database:
