@@ -106,6 +106,8 @@ report_lock = threading.Lock()
 recruiting_parse_lock = threading.Lock()
 executor_pool = ThreadPoolExecutor(max_workers=4)
 login_rate_limit_lock = threading.Lock()
+session_touch_gate_lock = threading.Lock()
+session_touch_next_due = {}
 
 # Runtime status for manual recruiting parser runs (for live logs in UI).
 recruiting_runtime_lock = threading.Lock()
@@ -564,8 +566,8 @@ def _is_state_changing_api_request():
     return request.method != 'OPTIONS'
 
 
-def _validate_user_session_principal(user_id, session_id=None):
-    user = db.get_user(id=user_id)
+def _validate_user_session_principal(user_id, session_id=None, user=None):
+    user = user if user is not None else db.get_user(id=user_id)
     if not user:
         if session_id:
             db.revoke_user_session(session_id=session_id, user_id=user_id)
@@ -607,6 +609,29 @@ def _should_touch_user_session(session, ip_address=None, user_agent=None):
     try:
         return (datetime.now() - last_seen_at).total_seconds() >= JWT_SESSION_TOUCH_INTERVAL_SECONDS
     except Exception:
+        return True
+
+
+def _reserve_user_session_touch(session_id, session, ip_address=None, user_agent=None):
+    if not _should_touch_user_session(session, ip_address=ip_address, user_agent=user_agent):
+        return False
+    now = time.monotonic()
+    fingerprint = (str(ip_address or ''), str(user_agent or ''))
+    with session_touch_gate_lock:
+        gate = session_touch_next_due.get(str(session_id))
+        if gate:
+            next_due_at, previous_fingerprint = gate
+            if next_due_at > now and previous_fingerprint == fingerprint:
+                return False
+        interval_seconds = max(1, JWT_SESSION_TOUCH_INTERVAL_SECONDS or 1)
+        session_touch_next_due[str(session_id)] = (now + interval_seconds, fingerprint)
+        if len(session_touch_next_due) > 5000:
+            expired = [
+                key for key, (next_due_at, _fingerprint) in session_touch_next_due.items()
+                if next_due_at <= now
+            ]
+            for key in expired[:2500]:
+                session_touch_next_due.pop(key, None)
         return True
 
 
@@ -852,18 +877,20 @@ def _authenticate_access_cookie(optional=True, touch_session=True):
             payload = _decode_token(access_token, expected_type="access", verify_exp=True)
             user_id = int(payload["sub"])
             session_id = str(payload["sid"])
-            session = db.get_user_session(session_id=session_id, user_id=user_id)
+            session_started_at = time.perf_counter()
+            session, user = db.get_user_session_with_user(session_id=session_id, user_id=user_id)
+            _record_elapsed_server_timing("auth-session", session_started_at)
             if not session:
                 raise AuthError("SESSION_NOT_FOUND", "Session not found")
             if session["revoked_at"] is not None:
                 raise AuthError("SESSION_REVOKED", "Session revoked")
             if session["expires_at"] and session["expires_at"] < datetime.utcnow():
                 raise AuthError("SESSION_EXPIRED", "Session expired")
-            user = _validate_user_session_principal(user_id=user_id, session_id=session_id)
+            user = _validate_user_session_principal(user_id=user_id, session_id=session_id, user=user)
 
             ip_address = _client_ip()
             user_agent = request.headers.get('User-Agent')
-            if touch_session and _should_touch_user_session(session, ip_address=ip_address, user_agent=user_agent):
+            if touch_session and _reserve_user_session_touch(session_id, session, ip_address=ip_address, user_agent=user_agent):
                 touch_started_at = time.perf_counter()
                 db.touch_user_session(
                     session_id=session_id,
@@ -898,7 +925,9 @@ def _authenticate_refresh_cookie(optional=True, rotate_tokens=True, rotate_refre
             user_id = int(payload["sub"])
             session_id = str(payload["sid"])
 
-            session = db.get_user_session(session_id=session_id, user_id=user_id)
+            session_started_at = time.perf_counter()
+            session, user = db.get_user_session_with_user(session_id=session_id, user_id=user_id)
+            _record_elapsed_server_timing("auth-session", session_started_at)
             if not session:
                 raise AuthError("SESSION_NOT_FOUND", "Session not found")
             if session["revoked_at"] is not None:
@@ -909,7 +938,7 @@ def _authenticate_refresh_cookie(optional=True, rotate_tokens=True, rotate_refre
             if not _refresh_token_matches_session(session, refresh_token_hash):
                 raise AuthError("REFRESH_TOKEN_MISMATCH", "Refresh token mismatch")
 
-            user = _validate_user_session_principal(user_id=user_id, session_id=session_id)
+            user = _validate_user_session_principal(user_id=user_id, session_id=session_id, user=user)
 
             if rotate_tokens:
                 new_access_token = _build_access_token(user, session_id)
@@ -932,7 +961,7 @@ def _authenticate_refresh_cookie(optional=True, rotate_tokens=True, rotate_refre
                     new_refresh_token = refresh_token
                     ip_address = _client_ip()
                     user_agent = request.headers.get('User-Agent')
-                    if _should_touch_user_session(session, ip_address=ip_address, user_agent=user_agent):
+                    if _reserve_user_session_touch(session_id, session, ip_address=ip_address, user_agent=user_agent):
                         touch_started_at = time.perf_counter()
                         db.touch_user_session(
                             session_id=session_id,
@@ -945,7 +974,7 @@ def _authenticate_refresh_cookie(optional=True, rotate_tokens=True, rotate_refre
             else:
                 ip_address = _client_ip()
                 user_agent = request.headers.get('User-Agent')
-                if _should_touch_user_session(session, ip_address=ip_address, user_agent=user_agent):
+                if _reserve_user_session_touch(session_id, session, ip_address=ip_address, user_agent=user_agent):
                     touch_started_at = time.perf_counter()
                     db.touch_user_session(
                         session_id=session_id,
