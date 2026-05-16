@@ -32742,14 +32742,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 } else if (user.role === 'trainer') {
                     fetchUsers();
                     fetchDirections();
-                } else if (user.role === 'operator') {
-                    fetchProfileData();
-                    fetchDirections();
-                    fetchUsers();
                 }
 
-                fetchSensitiveAccessStatus();
-                fetchSurveysPendingBadgeCount();
+                if (user.role !== 'operator') {
+                    fetchSensitiveAccessStatus();
+                    fetchSurveysPendingBadgeCount();
+                }
             }, [user?.id, user?.role]);
 
             useEffect(() => {
@@ -32759,10 +32757,38 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             useEffect(() => {
                 if (!user || !user.id || user.role !== 'operator') return;
-                fetchHoursData();
-                fetchOperatorData();
-                fetchTrainings();
-            }, [user?.id, user?.role, selectedMonth]);
+
+                if (view === 'profile') {
+                    fetchProfileData();
+                    fetchHoursData();
+                    fetchOperatorData();
+                    fetchTrainings();
+                    return;
+                }
+
+                if (view === 'hours') {
+                    fetchHoursData();
+                    fetchTrainings();
+                    return;
+                }
+
+                if (view === 'evaluation') {
+                    fetchOperatorData();
+                    fetchSensitiveAccessStatus();
+                }
+            }, [user?.id, user?.role, selectedMonth, view]);
+
+            useEffect(() => {
+                if (!user || !user.id || user.role !== 'operator') return;
+                if (!['surveys', 'trainings', 'contests'].includes(view)) return;
+                fetchDirections();
+                fetchUsers();
+            }, [user?.id, user?.role, view]);
+
+            useEffect(() => {
+                if (!user || !user.id || user.role !== 'operator' || view === 'shift_auction') return;
+                fetchSurveysPendingBadgeCount();
+            }, [user?.id, user?.role, view]);
 
             useEffect(() => {
                 if (view !== 'surveys') return;
