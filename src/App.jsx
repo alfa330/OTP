@@ -9252,10 +9252,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 () => plannerStatusRangeKey(plannerStatusFetchRange?.start, plannerStatusFetchRange?.end),
                 [plannerStatusRangeKey, plannerStatusFetchRange?.start, plannerStatusFetchRange?.end]
             );
+            const shouldLoadPlannerVisibleImportedStatuses = viewMode === 'day';
             useEffect(() => {
                 if (!user?.id) return;
                 if (user?.role === 'operator') return;
                 if (plannerStatusAnomalyAnalysis) return;
+                if (!shouldLoadPlannerVisibleImportedStatuses) return;
                 const rangeStart = String(plannerStatusFetchRange?.start || '').trim();
                 const rangeEnd = String(plannerStatusFetchRange?.end || '').trim();
                 const rangeKey = String(plannerStatusFetchRangeKey || '').trim();
@@ -9284,9 +9286,36 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 user?.id,
                 user?.role,
                 plannerStatusAnomalyAnalysis,
+                shouldLoadPlannerVisibleImportedStatuses,
                 plannerStatusFetchRange?.start,
                 plannerStatusFetchRange?.end,
                 plannerStatusFetchRangeKey,
+                fetchPlannerImportedStatusesForRange
+            ]);
+            useEffect(() => {
+                if (!user?.id) return;
+                if (user?.role === 'operator') return;
+                if (plannerStatusAnomalyAnalysis) return;
+                if (!modalState?.open || !modalState?.date) return;
+                if (!showEditTimelineModal && !showEditStatusJournal) return;
+
+                const modalDateObj = parseDateStr(modalState.date);
+                if (!modalDateObj || Number.isNaN(modalDateObj.getTime())) return;
+                const rangeStart = todayDateStr(addDays(modalDateObj, -1));
+                const rangeEnd = todayDateStr(addDays(modalDateObj, 1));
+
+                fetchPlannerImportedStatusesForRange(rangeStart, rangeEnd).catch(error => {
+                    if (error?.name === 'AbortError') return;
+                    console.error('Error loading modal imported statuses:', error);
+                });
+            }, [
+                user?.id,
+                user?.role,
+                plannerStatusAnomalyAnalysis,
+                modalState?.open,
+                modalState?.date,
+                showEditTimelineModal,
+                showEditStatusJournal,
                 fetchPlannerImportedStatusesForRange
             ]);
             const minutesInDay = 24 * 60;
