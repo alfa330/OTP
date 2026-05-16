@@ -930,20 +930,30 @@ def _authenticate_refresh_cookie(optional=True, rotate_tokens=True, rotate_refre
                     )
                 else:
                     new_refresh_token = refresh_token
+                    ip_address = _client_ip()
+                    user_agent = request.headers.get('User-Agent')
+                    if _should_touch_user_session(session, ip_address=ip_address, user_agent=user_agent):
+                        touch_started_at = time.perf_counter()
+                        db.touch_user_session(
+                            session_id=session_id,
+                            user_id=user_id,
+                            ip_address=ip_address,
+                            user_agent=user_agent
+                        )
+                        _record_elapsed_server_timing("auth-touch", touch_started_at)
+                g.pending_auth_tokens = (new_access_token, new_refresh_token)
+            else:
+                ip_address = _client_ip()
+                user_agent = request.headers.get('User-Agent')
+                if _should_touch_user_session(session, ip_address=ip_address, user_agent=user_agent):
+                    touch_started_at = time.perf_counter()
                     db.touch_user_session(
                         session_id=session_id,
                         user_id=user_id,
-                        ip_address=_client_ip(),
-                        user_agent=request.headers.get('User-Agent')
+                        ip_address=ip_address,
+                        user_agent=user_agent
                     )
-                g.pending_auth_tokens = (new_access_token, new_refresh_token)
-            else:
-                db.touch_user_session(
-                    session_id=session_id,
-                    user_id=user_id,
-                    ip_address=_client_ip(),
-                    user_agent=request.headers.get('User-Agent')
-                )
+                    _record_elapsed_server_timing("auth-touch", touch_started_at)
 
             _set_request_auth_context(user_id, user=user)
             _record_elapsed_server_timing("auth-refresh", auth_started_at)
@@ -2369,7 +2379,7 @@ def hydrate_user_context_from_jwt():
         request.environ['JWT_AUTH_ERROR_CODE'] = auth_error.code
 
     try:
-        _authenticate_refresh_cookie(optional=True, rotate_tokens=False)
+        _authenticate_refresh_cookie(optional=True, rotate_tokens=True, rotate_refresh_token=False)
     except AuthError as refresh_auth_error:
         request.environ['JWT_AUTH_ERROR_CODE'] = refresh_auth_error.code
     return None
