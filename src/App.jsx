@@ -594,11 +594,38 @@ const persistRotatedBearerTokens = ({ accessToken, refreshToken, transportHint =
     });
 };
 
+const isRecoverableAuthResponse = (body = {}) => {
+    const code = body?.code;
+    const apiErrorText = body?.error;
+    return (
+        code === 'TOKEN_EXPIRED' ||
+        code === 'INVALID_TOKEN' ||
+        code === 'INVALID_TOKEN_TYPE' ||
+        code === 'MISSING_TOKEN' ||
+        code === 'REFRESH_TOKEN_MISMATCH' ||
+        code === 'SESSION_EXPIRED' ||
+        code === 'SESSION_NOT_FOUND' ||
+        code === 'SESSION_REVOKED' ||
+        apiErrorText === 'JWT authentication failed'
+    );
+};
+
+const readResponseJsonSafe = async (response) => {
+    try {
+        return await response.clone().json();
+    } catch (_error) {
+        return null;
+    }
+};
+
 if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
     if (!window.__otpFetchAuthInterceptorInstalled && typeof window.fetch === 'function') {
         window.__otpFetchAuthInterceptorInstalled = true;
         const nativeFetch = window.fetch.bind(window);
-        window.fetch = (...args) => nativeFetch(...args).then((response) => {
+        window.fetch = async (...args) => {
+            const originalInput = args[0];
+            const originalInit = args[1] || {};
+            const response = await nativeFetch(...args);
             try {
                 persistRotatedBearerTokens({
                     accessToken:
@@ -614,8 +641,90 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             } catch (error) {
                 // Ignore token sync failures and keep original response semantics.
             }
-            return response;
-        });
+
+            const requestUrl = typeof originalInput === 'string'
+                ? originalInput
+                : String(originalInput?.url || '');
+            const canRetryAuth =
+                response?.status === 401 &&
+                requestUrl &&
+                !requestUrl.includes('/api/login') &&
+                !requestUrl.includes('/api/auth/refresh') &&
+                !originalInit?.__otpAuthRetry;
+            if (!canRetryAuth) {
+                return response;
+            }
+
+            const body = await readResponseJsonSafe(response);
+            if (!isRecoverableAuthResponse(body)) {
+                return response;
+            }
+
+            try {
+                if (!window.__otpRefreshPromise) {
+                    const refreshTransport = getPreferredAuthTransport();
+                    const refreshToken = refreshTransport === 'bearer'
+                        ? getStoredAuthToken(REFRESH_TOKEN_STORAGE_KEY)
+                        : '';
+                    window.__otpRefreshPromise = nativeFetch(AUTH_REFRESH_URL, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: withAccessTokenHeader(
+                            { 'Content-Type': 'application/json' },
+                            {
+                                includeRefreshToken: true,
+                                transportOverride: refreshTransport
+                            }
+                        ),
+                        body: JSON.stringify(
+                            refreshTransport === 'bearer'
+                                ? {
+                                    auth_transport: 'bearer',
+                                    refresh_token: refreshToken || undefined
+                                }
+                                : {
+                                    auth_transport: 'cookie'
+                                }
+                        )
+                    }).then(async (refreshResponse) => {
+                        const refreshData = await readResponseJsonSafe(refreshResponse);
+                        if (refreshResponse.ok) {
+                            persistRotatedBearerTokens({
+                                accessToken:
+                                    refreshResponse?.headers?.get?.('x-new-access-token') ||
+                                    refreshResponse?.headers?.get?.('X-New-Access-Token') ||
+                                    refreshData?.access_token,
+                                refreshToken:
+                                    refreshResponse?.headers?.get?.('x-new-refresh-token') ||
+                                    refreshResponse?.headers?.get?.('X-New-Refresh-Token') ||
+                                    refreshData?.refresh_token,
+                                transportHint:
+                                    refreshResponse?.headers?.get?.('x-auth-transport') ||
+                                    refreshResponse?.headers?.get?.('X-Auth-Transport') ||
+                                    refreshData?.auth_transport
+                            });
+                        }
+                        return refreshResponse;
+                    }).finally(() => {
+                        window.__otpRefreshPromise = null;
+                    });
+                }
+
+                const refreshResponse = await window.__otpRefreshPromise;
+                if (!refreshResponse?.ok) {
+                    return response;
+                }
+
+                const retryInit = {
+                    ...originalInit,
+                    __otpAuthRetry: true,
+                    headers: withAccessTokenHeader(originalInit?.headers || {})
+                };
+                return nativeFetch(originalInput, retryInit);
+            } catch (_error) {
+                return response;
+            }
+        };
     }
 
     axios.defaults.withCredentials = true;
