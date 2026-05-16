@@ -60,6 +60,16 @@ class ShiftAuctionLockingTests(unittest.TestCase):
                     "_lock_shift_auction_operator_tx",
                 )
 
+    def test_release_lot_lock_avoids_nullable_outer_join(self):
+        source = ast.get_source_segment(
+            DATABASE_PATH.read_text(encoding="utf-8-sig"),
+            _method("release_shift_auction_test_lot"),
+        )
+
+        self.assertNotIn("LEFT JOIN shift_auction_test_lots", source)
+        self.assertIn("FROM shift_auction_test_lots", source)
+        self.assertIn("FOR UPDATE", source)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3967,23 +3967,26 @@ class Database:
                     s.enabled,
                     s.starts_at,
                     s.ends_at,
-                    EXISTS(SELECT 1 FROM shift_auction_test_participants WHERE operator_id = %s) AS is_participant,
-                    l.id, l.shift_date, l.start_time, l.end_time, l.rate_min, l.status,
-                    l.claimed_by, l.claimed_at, l.breaks,
-                    l.source_schedule_plan_id, l.source_schedule_shift_id
+                    EXISTS(SELECT 1 FROM shift_auction_test_participants WHERE operator_id = %s) AS is_participant
                 FROM shift_auction_test_access s
-                LEFT JOIN shift_auction_test_lots l ON l.id = %s
                 WHERE s.id = 1
-                FOR UPDATE OF l
-            """, (operator_id, lot_id))
+            """, (operator_id,))
             header = cursor.fetchone()
             if not header or self._get_shift_auction_test_status(header[0], header[1], header[2]) != "open":
                 raise ValueError("AUCTION_NOT_OPEN")
             if not header[3]:
                 raise ValueError("NOT_TEST_PARTICIPANT")
-            if header[4] is None:
+
+            cursor.execute("""
+                SELECT id, shift_date, start_time, end_time, rate_min, status,
+                       claimed_by, claimed_at, breaks, source_schedule_plan_id, source_schedule_shift_id
+                FROM shift_auction_test_lots
+                WHERE id = %s
+                FOR UPDATE
+            """, (lot_id,))
+            lot = cursor.fetchone()
+            if lot is None:
                 raise ValueError("LOT_NOT_FOUND")
-            lot = header[4:]
             if lot[5] != 'claimed':
                 raise ValueError("LOT_NOT_CLAIMED")
             if lot[6] is None or int(lot[6]) != operator_id:
