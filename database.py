@@ -3813,8 +3813,12 @@ class Database:
     def claim_shift_auction_test_lot(self, operator_id, lot_id):
         operator_id = int(operator_id)
         lot_id = int(lot_id)
+        timings = {}
+        lock_started_at = time.perf_counter()
         with self._get_cursor() as cursor:
             self._lock_shift_auction_operator_tx(cursor, operator_id)
+            timings["lock"] = (time.perf_counter() - lock_started_at) * 1000
+            started_at = time.perf_counter()
             cursor.execute("""
                 SELECT
                     s.enabled,
@@ -3832,6 +3836,7 @@ class Database:
                 WHERE s.id = 1
             """, (operator_id, operator_id))
             header = cursor.fetchone()
+            timings["header"] = (time.perf_counter() - started_at) * 1000
             if not header or self._get_shift_auction_test_status(header[0], header[1], header[2]) != "open":
                 raise ValueError("AUCTION_NOT_OPEN")
             if not header[3]:
@@ -3840,6 +3845,7 @@ class Database:
                 raise ValueError("OPERATOR_NOT_FOUND")
             operator_rate = float(header[4] or 1)
 
+            started_at = time.perf_counter()
             cursor.execute("""
                 SELECT id, shift_date, start_time, end_time, rate_min, status, claimed_by, claimed_at, breaks,
                        source_schedule_plan_id, source_schedule_shift_id
@@ -3848,12 +3854,14 @@ class Database:
                 FOR UPDATE
             """, (lot_id,))
             lot = cursor.fetchone()
+            timings["lot"] = (time.perf_counter() - started_at) * 1000
             if not lot:
                 raise ValueError("LOT_NOT_FOUND")
             if lot[5] != 'available':
                 raise ValueError("LOT_ALREADY_CLAIMED")
 
             lot_date = lot[1]
+            started_at = time.perf_counter()
             cursor.execute("""
                 SELECT
                     EXISTS(
@@ -3880,11 +3888,14 @@ class Database:
                     ), '[]'::json) AS claimed_rows
             """, (operator_id, lot_date, operator_id, lot_date, operator_id))
             checks = cursor.fetchone()
+            timings["checks"] = (time.perf_counter() - started_at) * 1000
             has_day_off, has_shift_on_date, lot_dates, claimed_rows_json = checks
 
+            started_at = time.perf_counter()
             blocked_dates = self._get_shift_auction_operator_blocked_dates_tx(
                 cursor, operator_id, lot_dates=list(lot_dates or [])
             )
+            timings["blocked"] = (time.perf_counter() - started_at) * 1000
             blocked_date_map = {item["date"]: item for item in blocked_dates if item.get("date")}
             lot_date_key = lot_date.strftime('%Y-%m-%d') if lot_date else ''
             if lot_date_key and lot_date_key in blocked_date_map:
@@ -3915,6 +3926,7 @@ class Database:
             ):
                 raise ValueError("SHIFT_NORM_EXCEEDED")
 
+            started_at = time.perf_counter()
             cursor.execute("""
                 UPDATE shift_auction_test_lots
                 SET status = 'claimed',
@@ -3940,7 +3952,8 @@ class Database:
                 "source_schedule_shift_id": updated[10],
             }
             event = self._insert_shift_auction_test_event(cursor, "lot_claimed", {"lot": lot_payload})
-        return {"lot": lot_payload, "event": event}
+            timings["write"] = (time.perf_counter() - started_at) * 1000
+        return {"lot": lot_payload, "event": event, "_timings": timings}
 
     def release_shift_auction_test_lot(self, operator_id, lot_id):
         operator_id = int(operator_id)

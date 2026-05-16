@@ -1493,6 +1493,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const auctionTableScrollRef = useRef(null);
   const auctionDateBarScrollRef = useRef(null);
   const auctionScrollSyncRef = useRef({ ignoredNode: null, ignoredLeft: 0 });
+  const auctionMutationQueueRef = useRef(Promise.resolve());
 
   const [settings, setSettings] = useState({
     enabled: false,
@@ -1595,6 +1596,13 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
   const notify = useCallback((message, type = 'success') => {
     if (typeof showToastRef.current === 'function') showToastRef.current(message, type);
+  }, []);
+
+  const enqueueAuctionMutation = useCallback((task) => {
+    const runTask = () => Promise.resolve().then(task);
+    const queuedTask = auctionMutationQueueRef.current.then(runTask, runTask);
+    auctionMutationQueueRef.current = queuedTask.catch(() => undefined);
+    return queuedTask;
   }, []);
 
   const buildHeaders = useCallback((extra = {}) => {
@@ -2300,11 +2308,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     )));
 
     try {
-      const response = await axios.post(
+      const response = await enqueueAuctionMutation(() => axios.post(
         `${apiRoot}/api/shift_auction/test_lots/${numericId}/claim`,
         {},
         { headers: buildHeaders() }
-      );
+      ));
       const serverLot = response?.data?.lot;
       if (serverLot && serverLot.id) {
         setLots((currentLots) => currentLots.map((l) => (
@@ -2338,7 +2346,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         return next;
       });
     }
-  }, [apiRoot, buildHeaders, canClaim, claimBlockReasonByLotId, fetchSnapshot, notifyClaimError, user?.id]);
+  }, [apiRoot, buildHeaders, canClaim, claimBlockReasonByLotId, enqueueAuctionMutation, fetchSnapshot, notifyClaimError, user?.id]);
 
   const handleReleaseLot = useCallback(async () => {
     const lot = releaseConfirmLot;
@@ -2364,10 +2372,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     setReleaseConfirmLot(null);
 
     try {
-      const response = await axios.delete(
+      const response = await enqueueAuctionMutation(() => axios.delete(
         `${apiRoot}/api/shift_auction/test_lots/${numericId}/claim`,
         { headers: buildHeaders() }
-      );
+      ));
       const serverLot = response?.data?.lot;
       if (serverLot && serverLot.id) {
         setLots((currentLots) => currentLots.map((l) => (
@@ -2395,7 +2403,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     } finally {
       setReleasingLotId(null);
     }
-  }, [apiRoot, buildHeaders, canClaim, fetchSnapshot, notifyClaimError, releaseConfirmLot]);
+  }, [apiRoot, buildHeaders, canClaim, enqueueAuctionMutation, fetchSnapshot, notifyClaimError, releaseConfirmLot]);
 
   const toggleDayOff = useCallback(async (date) => {
     if (!canChoose || !apiRoot || !date) return;
@@ -2413,9 +2421,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     try {
       const requestConfig = { headers: buildHeaders(), data: { date } };
       if (selected) {
-        await axios.delete(`${apiRoot}/api/shift_auction/test_day_off`, requestConfig);
+        await enqueueAuctionMutation(() => axios.delete(`${apiRoot}/api/shift_auction/test_day_off`, requestConfig));
       } else {
-        await axios.post(`${apiRoot}/api/shift_auction/test_day_off`, { date }, { headers: buildHeaders() });
+        await enqueueAuctionMutation(() => axios.post(`${apiRoot}/api/shift_auction/test_day_off`, { date }, { headers: buildHeaders() }));
       }
       await fetchSnapshot({ silent: true });
     } catch (error) {
@@ -2423,7 +2431,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     } finally {
       setDayOffLoadingDate('');
     }
-  }, [apiRoot, buildHeaders, canChoose, fetchSnapshot, manualDayOffLimit, myBlockedDateMap, myDayOffs, notify, selectedManualDayOffCount]);
+  }, [apiRoot, buildHeaders, canChoose, enqueueAuctionMutation, fetchSnapshot, manualDayOffLimit, myBlockedDateMap, myDayOffs, notify, selectedManualDayOffCount]);
 
   const renderStatusBar = () => {
     const showWorkload = !canManage && canUseAuction;
