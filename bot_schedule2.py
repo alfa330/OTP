@@ -2378,10 +2378,11 @@ def hydrate_user_context_from_jwt():
     except AuthError as auth_error:
         request.environ['JWT_AUTH_ERROR_CODE'] = auth_error.code
 
-    try:
-        _authenticate_refresh_cookie(optional=True, rotate_tokens=True, rotate_refresh_token=False)
-    except AuthError as refresh_auth_error:
-        request.environ['JWT_AUTH_ERROR_CODE'] = refresh_auth_error.code
+    if _requested_auth_transport() != 'bearer':
+        try:
+            _authenticate_refresh_cookie(optional=True, rotate_tokens=True, rotate_refresh_token=False)
+        except AuthError as refresh_auth_error:
+            request.environ['JWT_AUTH_ERROR_CODE'] = refresh_auth_error.code
     return None
 
 
@@ -2431,14 +2432,15 @@ def require_auth(f):
         except AuthError as auth_error:
             request.environ['JWT_AUTH_ERROR_CODE'] = auth_error.code
 
-        try:
-            if _authenticate_refresh_cookie(optional=True, rotate_tokens=True, rotate_refresh_token=False):
-                identity_error = _validate_authenticated_identity_header()
-                if identity_error is not None:
-                    return identity_error
-                return f(*args, **kwargs)
-        except AuthError as refresh_auth_error:
-            request.environ['JWT_AUTH_ERROR_CODE'] = refresh_auth_error.code
+        if _requested_auth_transport() != 'bearer':
+            try:
+                if _authenticate_refresh_cookie(optional=True, rotate_tokens=True, rotate_refresh_token=False):
+                    identity_error = _validate_authenticated_identity_header()
+                    if identity_error is not None:
+                        return identity_error
+                    return f(*args, **kwargs)
+            except AuthError as refresh_auth_error:
+                request.environ['JWT_AUTH_ERROR_CODE'] = refresh_auth_error.code
 
         auth_error_code = request.environ.get('JWT_AUTH_ERROR_CODE')
         if auth_error_code:
