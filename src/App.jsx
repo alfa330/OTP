@@ -18051,7 +18051,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 style={viewMode === 'day' ? { flex: 1 } : { minWidth: cellMinWidth, flex: '0 0 auto' }}
                                                 onClick={(e) => handleDayClick(e, op.id, d)}
                                             >
-                                                {/* "Ожидает" badge removed — pending shown via yellow dot */}
+                                                {(viewMode === 'week' || viewMode === 'month') && pendingFlagLabels.length > 0 && (
+                                                    <span
+                                                        className="absolute top-0.5 left-0.5 z-50 flex items-center gap-0.5"
+                                                        title={`Ожидает подтверждения: ${pendingFlagLabels.join(', ')}`}
+                                                    >
+                                                        <span className="px-1 py-[1px] rounded-md bg-amber-500 text-white text-[8px] font-bold uppercase tracking-wide shadow-sm shadow-amber-500/35 leading-none">
+                                                            Ожидает
+                                                        </span>
+                                                        <span className="px-0.5 py-[1px] rounded bg-amber-100 text-amber-800 text-[8px] font-semibold border border-amber-300 leading-none">
+                                                            {pendingFlagLabels.length}
+                                                        </span>
+                                                    </span>
+                                                )}
                                                 {showTopRightIndicators && (
                                                     <span className="absolute top-0.5 right-0.5 z-50 flex items-center gap-1" title={topRightIndicatorsTitle || 'Есть недочеты/переработка'}>
                                                         {showCarryDayOffBadge && (
