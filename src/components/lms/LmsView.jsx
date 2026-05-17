@@ -12090,7 +12090,10 @@ function AdminView({
       questionId: Number(item?.question_id || index + 1),
       text: item?.text || "Тест",
       failRate: Math.max(0, Math.min(100, Number(item?.fail_rate || 0))),
+      test: item?.test || "Тест",
       course: item?.course || "Курс",
+      answerCount: Math.max(0, Number(item?.answer_count || 0)),
+      incorrectCount: Math.max(0, Number(item?.incorrect_count || 0)),
     }));
 
     overallProgress = Math.max(0, Math.min(100, Number(safeAnalytics?.summary?.overall_progress || 0)));
@@ -12905,7 +12908,10 @@ function AdminView({
                     <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 text-xs font-bold ${s.failRate >= 60 ? "bg-red-100 text-red-700" : s.failRate >= 40 ? "bg-amber-100 text-amber-700" : "bg-slate-100 text-slate-600"}`}>{s.failRate}%</div>
                     <div className="flex-1 min-w-0">
                       <p className="text-xs font-medium text-slate-800 truncate">{s.text}</p>
-                      <p className="text-[10px] text-slate-400 mt-0.5">{s.course}</p>
+                      <p className="text-[10px] text-slate-400 mt-0.5 truncate">
+                        {s.test} · {s.course}
+                        {s.answerCount > 0 ? ` · ошибок ${s.incorrectCount}/${s.answerCount}` : ""}
+                      </p>
                     </div>
                     <div className="w-16 h-1.5 bg-slate-100 rounded-full overflow-hidden self-center"><div className={`h-full rounded-full ${s.failRate >= 60 ? "bg-red-500" : "bg-amber-500"}`} style={{ width: `${s.failRate}%` }} /></div>
                   </div>
