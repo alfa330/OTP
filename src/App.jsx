@@ -6,7 +6,7 @@ import Papa from 'papaparse';
 import jsQR from 'jsqr';
 import ToastContainer from './components/common/ToastContainer';
 import SalaryCalculationResult from './components/salary/SalaryCalculationResult';
-import TasksView from './components/tasks/TasksView';
+import TasksView, { PinnedTaskWidget } from './components/tasks/TasksView';
 import SurveysView from './components/surveys/SurveysView';
 import TechnicalIssuesView from './components/technical/TechnicalIssuesView';
 import RecruitingView from './components/recruiting/RecruitingView';
@@ -25299,6 +25299,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const currentUserRole = normalizeRole(user?.role);
             const isSuperAdmin = currentUserRole === 'super_admin';
             const isAdminLikeRole = isAdminLikeRoleFn(currentUserRole);
+            const canUsePinnedTasks = isAdminLikeRole || isSupervisorRole(currentUserRole) || currentUserRole === 'trainer';
             const canAccessLmsSection = canAccessLmsSectionForUser(user);
             const canAccessResourceFteSection = canAccessResourceFteSectionForUser(user);
             const canChangeAccountAvatar = isAdminLikeRole || isSupervisorRole(currentUserRole);
@@ -25322,6 +25323,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const initialViewFromUrl = readAppViewFromUrl();
                 return initialViewFromUrl || 'hours';
             });
+            const [pinnedTask, setPinnedTask] = useState(null);
+            const [pinnedTaskActionLoadingKey, setPinnedTaskActionLoadingKey] = useState('');
+            const [taskFocusRequest, setTaskFocusRequest] = useState(null);
+            const [taskRefreshToken, setTaskRefreshToken] = useState(0);
             const [resourceFteInitialView, setResourceFteInitialView] = useState('');
             const [pendingSurveysBadgeCount, setPendingSurveysBadgeCount] = useState(0);
             const [newSvName, setNewSvName] = useState('');
@@ -26594,6 +26599,69 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setView(nextView);
                 setMobileMenuOpen(false);
             }, []);
+
+            useEffect(() => {
+                setPinnedTask(null);
+                setPinnedTaskActionLoadingKey('');
+            }, [user?.id]);
+
+            const handlePinTask = useCallback((task) => {
+                if (!task?.id) return;
+                setPinnedTask(task);
+            }, []);
+
+            const handleUnpinTask = useCallback(() => {
+                setPinnedTask(null);
+                setPinnedTaskActionLoadingKey('');
+            }, []);
+
+            const handlePinnedTaskSync = useCallback((task) => {
+                if (!task?.id) return;
+                setPinnedTask((prev) => (
+                    Number(prev?.id || 0) === Number(task.id) ? task : prev
+                ));
+            }, []);
+
+            const openPinnedTaskDetails = useCallback((task) => {
+                const taskId = Number(task?.id || 0);
+                if (!taskId) return;
+                setTaskFocusRequest((prev) => ({
+                    taskId,
+                    requestId: Number(prev?.requestId || 0) + 1,
+                }));
+                navigateToView('tasks');
+            }, [navigateToView]);
+
+            const runPinnedTaskAction = useCallback(async (task, action) => {
+                const taskId = Number(task?.id || 0);
+                if (!taskId || !action || !user?.id) return;
+                const key = `${taskId}:${action}`;
+                setPinnedTaskActionLoadingKey(key);
+                try {
+                    const response = await axios.post(
+                        `${API_BASE_URL}/api/tasks/${taskId}/status`,
+                        { action },
+                        {
+                            headers: withAccessTokenHeader({
+                                'X-User-Id': String(user.id),
+                            }),
+                        }
+                    );
+                    showToast(response?.data?.message || 'Статус задачи обновлен', 'success');
+                    if (response?.data?.warning) showToast(response.data.warning, 'error');
+                    const nextTask = response?.data?.task;
+                    if (nextTask?.id) {
+                        setPinnedTask((prev) => (
+                            Number(prev?.id || 0) === taskId ? nextTask : prev
+                        ));
+                    }
+                    setTaskRefreshToken((prev) => prev + 1);
+                } catch (error) {
+                    showToast(error?.response?.data?.error || 'Не удалось обновить статус задачи', 'error');
+                } finally {
+                    setPinnedTaskActionLoadingKey('');
+                }
+            }, [user?.id, withAccessTokenHeader, showToast]);
 
             const openResourceScheduleGeneration = useCallback(() => {
                 setResourceFteInitialView('schedule_planner');
@@ -35230,7 +35298,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 ))}
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}
                                 {( view === "technical_issues" && (<TechnicalIssuesView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
-                                {( view === "tasks" && (<TasksView user={user} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
+                                {( view === "tasks" && (
+                                    <TasksView
+                                        user={user}
+                                        showToast={showToast}
+                                        apiBaseUrl={API_BASE_URL}
+                                        withAccessTokenHeader={withAccessTokenHeader}
+                                        pinnedTaskId={pinnedTask?.id || null}
+                                        onPinTask={handlePinTask}
+                                        onUnpinTask={handleUnpinTask}
+                                        onPinnedTaskSync={handlePinnedTaskSync}
+                                        focusTaskRequest={taskFocusRequest}
+                                        externalRefreshToken={taskRefreshToken}
+                                    />
+                                ))}
                                 {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
                                 {( view === "recruiting" && (
                                     <RecruitingView
@@ -36242,7 +36323,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}
                                 {( view === "contests" && (<ContestsApp user={user} operators={users} directions={directions} />))}
                                 {( view === "technical_issues" && (<TechnicalIssuesView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
-                                {( view === "tasks" && (<TasksView user={user} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
+                                {( view === "tasks" && (
+                                    <TasksView
+                                        user={user}
+                                        showToast={showToast}
+                                        apiBaseUrl={API_BASE_URL}
+                                        withAccessTokenHeader={withAccessTokenHeader}
+                                        pinnedTaskId={pinnedTask?.id || null}
+                                        onPinTask={handlePinTask}
+                                        onUnpinTask={handleUnpinTask}
+                                        onPinnedTaskSync={handlePinnedTaskSync}
+                                        focusTaskRequest={taskFocusRequest}
+                                        externalRefreshToken={taskRefreshToken}
+                                    />
+                                ))}
                                 {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "resource_fte" && canAccessResourceFteSection && (
@@ -38658,6 +38752,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </>
                         )}
                     </div>
+
+                    {canUsePinnedTasks && pinnedTask && (
+                        <PinnedTaskWidget
+                            task={pinnedTask}
+                            user={user}
+                            actionLoadingKey={pinnedTaskActionLoadingKey}
+                            onUnpin={handleUnpinTask}
+                            onOpenDetails={openPinnedTaskDetails}
+                            onRunAction={runPinnedTaskAction}
+                        />
+                    )}
 
                     {showSensitiveQrModal && (
                         <div

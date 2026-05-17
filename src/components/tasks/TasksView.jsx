@@ -1,6 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { RefreshCw } from 'lucide-react';
+import {
+  GripHorizontal,
+  LoaderCircle,
+  Maximize2,
+  Minimize2,
+  PanelRightOpen,
+  Pin,
+  PinOff,
+  RefreshCw,
+} from 'lucide-react';
 import { normalizeRole, isAdminLikeRole, isSupervisorRole } from '../../utils/roles';
 import FaIcon from '../common/FaIcon';
 
@@ -291,7 +300,7 @@ styleTag.textContent = `
   }
   .tv-task-row-meta {
     display: grid;
-    grid-template-columns: auto auto 196px 112px 12px;
+    grid-template-columns: auto auto 196px 112px 28px 12px;
     align-items: center;
     column-gap: 8px;
     flex-shrink: 0;
@@ -334,6 +343,25 @@ styleTag.textContent = `
     color: var(--ink-3);
     white-space: nowrap;
     text-align: left;
+  }
+  .tv-row-pin-btn {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--ink-3);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all .15s ease;
+  }
+  .tv-row-pin-btn:hover,
+  .tv-row-pin-btn.is-pinned {
+    color: var(--indigo);
+    background: #eef2ff;
+    border-color: #c7d2fe;
   }
   .tv-task-count {
     display: inline-flex; align-items: center; justify-content: center;
@@ -582,6 +610,11 @@ styleTag.textContent = `
     border-color: #fecdd3;
     color: #be123c;
   }
+  .tv-icon-btn.is-pinned {
+    color: var(--indigo);
+    border-color: #c7d2fe;
+    background: #eef2ff;
+  }
 
   .tv-drawer-body {
     flex: 1; overflow-y: auto; padding: 20px;
@@ -771,17 +804,204 @@ styleTag.textContent = `
     line-height: 1.5;
   }
 
+  /* ── Pinned task widget ── */
+  .tv-pin-widget {
+    --bg: #f4f3f0;
+    --surface: #ffffff;
+    --surface-2: #fafaf8;
+    --border: #e8e5df;
+    --border-strong: #ccc9c0;
+    --ink: #1a1916;
+    --ink-2: #5c5852;
+    --ink-3: #9e9a93;
+    --accent: #1a1916;
+    --accent-fg: #ffffff;
+    --amber: #d97706;
+    --indigo: #4338ca;
+    --emerald: #059669;
+    --rose: #e11d48;
+    --blue: #2563eb;
+    --shadow-lg: 0 20px 60px rgba(0,0,0,.16), 0 8px 24px rgba(0,0,0,.1);
+    position: fixed;
+    z-index: 75;
+    width: min(360px, calc(100vw - 24px));
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 12px;
+    box-shadow: var(--shadow-lg);
+    overflow: hidden;
+    color: var(--ink);
+    font-family: 'DM Sans', sans-serif;
+    user-select: none;
+  }
+  .tv-pin-widget.is-dragging {
+    box-shadow: 0 24px 72px rgba(0,0,0,.2), 0 10px 28px rgba(0,0,0,.14);
+  }
+  .tv-pin-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+  }
+  .tv-pin-drag-handle {
+    width: 24px;
+    min-height: 32px;
+    border: 0;
+    background: transparent;
+    color: var(--ink-3);
+    cursor: grab;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    touch-action: none;
+    flex-shrink: 0;
+  }
+  .tv-pin-drag-handle:active {
+    cursor: grabbing;
+  }
+  .tv-pin-heading {
+    flex: 1;
+    min-width: 0;
+  }
+  .tv-pin-kicker {
+    display: block;
+    margin-bottom: 2px;
+    color: var(--ink-3);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+  }
+  .tv-pin-title {
+    margin: 0;
+    font-family: 'Syne', sans-serif;
+    font-size: 14px;
+    line-height: 1.35;
+    font-weight: 700;
+    color: var(--ink);
+    word-break: break-word;
+  }
+  .tv-pin-header-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+  .tv-pin-header-btn {
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--ink-2);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all .15s ease;
+  }
+  .tv-pin-header-btn:hover:not(:disabled) {
+    background: var(--border-strong);
+    color: var(--ink);
+    border-color: var(--border-strong);
+  }
+  .tv-pin-header-btn:disabled {
+    opacity: .55;
+    cursor: not-allowed;
+  }
+  .tv-pin-body {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 12px;
+  }
+  .tv-pin-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+  .tv-pin-summary {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .tv-pin-description {
+    margin: 0;
+    color: var(--ink-2);
+    font-size: 12.5px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 150px;
+    overflow: auto;
+    user-select: text;
+  }
+  .tv-pin-meta {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .tv-pin-meta-item {
+    min-width: 0;
+    padding: 8px 9px;
+    border-radius: 8px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+  }
+  .tv-pin-meta-label {
+    display: block;
+    margin-bottom: 2px;
+    color: var(--ink-3);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+  }
+  .tv-pin-meta-value {
+    display: block;
+    color: var(--ink);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tv-pin-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+  }
+  .tv-pin-actions .tv-btn {
+    justify-content: center;
+    flex: 1 1 140px;
+    min-height: 34px;
+    white-space: normal;
+    line-height: 1.25;
+  }
+  .tv-pin-empty-actions {
+    color: var(--ink-3);
+    font-size: 12px;
+  }
+
   @media (max-width: 680px) {
     .tv-root { padding: 16px 12px; }
     .tv-stats-strip { grid-template-columns: repeat(2, 1fr); }
     .tv-drawer { width: 100vw; }
     .tv-info-grid { grid-template-columns: 1fr; }
-    .tv-task-row-meta { grid-template-columns: auto auto 12px; column-gap: 6px; padding-left: 6px; }
+    .tv-task-row-meta { grid-template-columns: auto auto 28px 12px; column-gap: 6px; padding-left: 6px; }
     .tv-task-row-assignee-chip, .tv-task-row-flow, .tv-task-row-date { display: none; }
     .tv-pagination { flex-wrap: wrap; justify-content: center; }
     .tv-person-row { flex-wrap: wrap; }
     .tv-person-stats { white-space: normal; gap: 8px; }
     .tv-participants { flex-direction: column; gap: 10px; }
+    .tv-pin-widget {
+      width: min(360px, calc(100vw - 16px));
+    }
+    .tv-pin-meta {
+      grid-template-columns: 1fr;
+    }
   }
   @media (max-width: 400px) {
     .tv-stats-strip { grid-template-columns: 1fr 1fr; gap: 8px; }
@@ -827,6 +1047,32 @@ const HISTORY_LABELS = {
 
 const ROLE_LABELS = { admin: 'Админ', sv: 'СВ' };
 const TASKS_PAGE_SIZE = 20;
+
+const buildTaskActionButtons = (task, currentUserId, currentUserRole) => {
+  const assigneeId = Number(task?.assignee?.id || 0);
+  const creatorId  = Number(task?.creator?.id  || 0);
+  const isAssignee = assigneeId === currentUserId;
+  const isCreator  = creatorId === currentUserId;
+  const isSuperAdmin = normalizeRole(currentUserRole) === 'super_admin';
+  const canReview  = !isAssignee && (isAdminLikeRole(currentUserRole) || creatorId === currentUserId || isSupervisorRole(currentUserRole));
+  const s = task?.status;
+  const btns = [];
+  if (isAssignee && (s === 'assigned' || s === 'returned'))
+    btns.push({ action: 'in_progress', label: 'Принять в работу', cls: 'tv-btn-amber' });
+  if (isAssignee && (s === 'in_progress' || s === 'returned'))
+    btns.push({ action: 'completed', label: 'Отметить выполненной', cls: 'tv-btn-indigo' });
+  if (canReview && s === 'completed') {
+    btns.push({ action: 'accepted', label: 'Принять', cls: 'tv-btn-emerald' });
+    btns.push({ action: 'returned', label: 'Вернуть', cls: 'tv-btn-rose' });
+  }
+  if (canReview && s === 'accepted')
+    btns.push({ action: 'reopened', label: 'Возобновить', cls: 'tv-btn-ghost' });
+  if (isCreator)
+    btns.push({ action: 'edit', label: 'Редактировать', cls: 'tv-btn-ghost' });
+  if (isSuperAdmin)
+    btns.push({ action: 'delete', label: 'Удалить', cls: 'tv-btn-rose' });
+  return btns;
+};
 
 const fmt = (v) => {
   if (!v) return '—';
@@ -988,7 +1234,7 @@ const AvatarCircle = ({ className, name, avatarUrl }) => (
 );
 
 /* ─── TaskRow — defined outside to avoid remount ─── */
-const TaskRow = React.memo(({ task, onClick }) => {
+const TaskRow = React.memo(({ task, onClick, onPin, isPinned }) => {
   const sm = STATUS_META[task.status] || { label: task.status, badge: 'tv-badge-gray', dot: '#ccc' };
   const tm = TAG_META[task.tag]       || { label: task.tag || '—', badge: 'tv-badge-gray' };
   const creatorName = task?.creator?.name || '—';
@@ -1012,6 +1258,20 @@ const TaskRow = React.memo(({ task, onClick }) => {
           <span className="tv-task-row-assignee-name">{assigneeName}</span>
         </span>
         <span className="tv-task-row-date">{fmt(task.created_at)}</span>
+        {typeof onPin === 'function' && (
+          <button
+            type="button"
+            className={`tv-row-pin-btn ${isPinned ? 'is-pinned' : ''}`}
+            title={isPinned ? 'Открепить задачу' : 'Закрепить задачу'}
+            aria-label={isPinned ? 'Открепить задачу' : 'Закрепить задачу'}
+            onClick={(event) => {
+              event.stopPropagation();
+              onPin(task);
+            }}
+          >
+            {isPinned ? <PinOff size={14} strokeWidth={2} /> : <Pin size={14} strokeWidth={2} />}
+          </button>
+        )}
         <ChevronRight />
       </span>
     </div>
@@ -1022,7 +1282,7 @@ const TaskRow = React.memo(({ task, onClick }) => {
 const TaskDrawer = React.memo(({
   task, onClose, actionLoadingKey,
   getActionButtons, openCompleteModal, openStatusModal, updateStatus, downloadAttachment,
-  onEditTask, onDeleteTask,
+  onEditTask, onDeleteTask, onTogglePinTask, isPinned,
 }) => {
   const sm = STATUS_META[task.status] || { label: task.status, badge: 'tv-badge-gray' };
   const tm = TAG_META[task.tag]       || { label: task.tag || '—', badge: 'tv-badge-gray' };
@@ -1069,6 +1329,18 @@ const TaskDrawer = React.memo(({
             </div>
           </div>
           <div className="tv-drawer-header-actions">
+            {typeof onTogglePinTask === 'function' && (
+              <button
+                type="button"
+                className={`tv-icon-btn ${isPinned ? 'is-pinned' : ''}`}
+                title={isPinned ? 'Открепить задачу' : 'Закрепить задачу'}
+                aria-label={isPinned ? 'Открепить задачу' : 'Закрепить задачу'}
+                disabled={!!actionLoadingKey}
+                onClick={() => onTogglePinTask(task)}
+              >
+                {isPinned ? <PinOff size={15} strokeWidth={2} /> : <Pin size={15} strokeWidth={2} />}
+              </button>
+            )}
             {editBtn && (
               <button
                 type="button"
@@ -1237,6 +1509,199 @@ const TaskDrawer = React.memo(({
   );
 });
 
+export const PinnedTaskWidget = React.memo(({
+  task,
+  user,
+  actionLoadingKey,
+  onUnpin,
+  onOpenDetails,
+  onRunAction,
+}) => {
+  const [expanded, setExpanded] = useState(false);
+  const [position, setPosition] = useState(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const widgetRef = useRef(null);
+  const dragStateRef = useRef(null);
+  const currentUserRole = normalizeRole(user?.role);
+  const currentUserId = Number(user?.id || 0);
+  const sm = STATUS_META[task?.status] || { label: task?.status || '—', badge: 'tv-badge-gray' };
+  const tm = TAG_META[task?.tag] || { label: task?.tag || '—', badge: 'tv-badge-gray' };
+  const actionButtons = useMemo(
+    () => buildTaskActionButtons(task, currentUserId, currentUserRole)
+      .filter((btn) => !['edit', 'delete'].includes(btn.action)),
+    [task, currentUserId, currentUserRole]
+  );
+
+  const clampPosition = useCallback((nextX, nextY) => {
+    const node = widgetRef.current;
+    const rect = node?.getBoundingClientRect();
+    const width = rect?.width || 360;
+    const height = rect?.height || 220;
+    const maxX = Math.max(8, window.innerWidth - width - 8);
+    const maxY = Math.max(8, window.innerHeight - height - 8);
+    return {
+      x: Math.min(Math.max(8, nextX), maxX),
+      y: Math.min(Math.max(8, nextY), maxY),
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!task?.id || typeof window === 'undefined') return;
+    const node = widgetRef.current;
+    if (!node) return;
+    const rect = node.getBoundingClientRect();
+    setPosition((prev) => {
+      if (prev) return clampPosition(prev.x, prev.y);
+      return clampPosition(
+        window.innerWidth - rect.width - 18,
+        window.innerHeight - rect.height - 18
+      );
+    });
+  }, [task?.id, expanded, clampPosition]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const handleResize = () => {
+      setPosition((prev) => prev ? clampPosition(prev.x, prev.y) : prev);
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, [clampPosition]);
+
+  const handlePointerDown = useCallback((event) => {
+    if (event.button !== 0 || !widgetRef.current) return;
+    const rect = widgetRef.current.getBoundingClientRect();
+    dragStateRef.current = {
+      pointerId: event.pointerId,
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+    };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    setIsDragging(true);
+  }, []);
+
+  const handlePointerMove = useCallback((event) => {
+    const drag = dragStateRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    setPosition(clampPosition(
+      event.clientX - drag.offsetX,
+      event.clientY - drag.offsetY
+    ));
+  }, [clampPosition]);
+
+  const handlePointerEnd = useCallback((event) => {
+    const drag = dragStateRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    dragStateRef.current = null;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    setIsDragging(false);
+  }, []);
+
+  if (!task?.id) return null;
+
+  return (
+    <section
+      ref={widgetRef}
+      className={`tv-pin-widget ${isDragging ? 'is-dragging' : ''}`}
+      style={position ? { left: position.x, top: position.y } : { right: 18, bottom: 18 }}
+      aria-label="Закрепленная задача"
+    >
+      <header className="tv-pin-header">
+        <button
+          type="button"
+          className="tv-pin-drag-handle"
+          aria-label="Перетащить закрепленную задачу"
+          title="Перетащить"
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerEnd}
+          onPointerCancel={handlePointerEnd}
+        >
+          <GripHorizontal size={16} strokeWidth={2} />
+        </button>
+        <div className="tv-pin-heading">
+          <span className="tv-pin-kicker">Закрепленная задача</span>
+          <h2 className="tv-pin-title">{task.subject || 'Без темы'}</h2>
+        </div>
+        <div className="tv-pin-header-actions">
+          <button
+            type="button"
+            className="tv-pin-header-btn"
+            title={expanded ? 'Свернуть' : 'Развернуть'}
+            aria-label={expanded ? 'Свернуть' : 'Развернуть'}
+            onClick={() => setExpanded((prev) => !prev)}
+          >
+            {expanded ? <Minimize2 size={15} strokeWidth={2} /> : <Maximize2 size={15} strokeWidth={2} />}
+          </button>
+          <button
+            type="button"
+            className="tv-pin-header-btn"
+            title="Открыть карточку задачи"
+            aria-label="Открыть карточку задачи"
+            onClick={() => onOpenDetails?.(task)}
+          >
+            <PanelRightOpen size={15} strokeWidth={2} />
+          </button>
+          <button
+            type="button"
+            className="tv-pin-header-btn"
+            title="Открепить задачу"
+            aria-label="Открепить задачу"
+            onClick={() => onUnpin?.()}
+          >
+            <PinOff size={15} strokeWidth={2} />
+          </button>
+        </div>
+      </header>
+
+      <div className="tv-pin-body">
+        <div className="tv-pin-badges">
+          <span className={`tv-badge ${sm.badge}`}>{sm.label}</span>
+          <span className={`tv-badge ${tm.badge}`}>{tm.label}</span>
+        </div>
+
+        {expanded && (
+          <div className="tv-pin-summary">
+            <p className="tv-pin-description">
+              {task.description || 'Описание не добавлено.'}
+            </p>
+            <div className="tv-pin-meta">
+              <div className="tv-pin-meta-item">
+                <span className="tv-pin-meta-label">Исполнитель</span>
+                <span className="tv-pin-meta-value">{task?.assignee?.name || '—'}</span>
+              </div>
+              <div className="tv-pin-meta-item">
+                <span className="tv-pin-meta-label">Постановщик</span>
+                <span className="tv-pin-meta-value">{task?.creator?.name || '—'}</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div className="tv-pin-actions">
+          {actionButtons.length > 0 ? actionButtons.map((btn) => {
+            const loading = actionLoadingKey === `${task.id}:${btn.action}`;
+            return (
+              <button
+                key={btn.action}
+                type="button"
+                className={`tv-btn ${btn.cls}`}
+                disabled={!!actionLoadingKey}
+                onClick={() => onRunAction?.(task, btn.action)}
+              >
+                {loading && <LoaderCircle size={14} strokeWidth={2} className="animate-spin" />}
+                {loading ? 'Сохраняю...' : btn.label}
+              </button>
+            );
+          }) : (
+            <span className="tv-pin-empty-actions">Для текущего статуса быстрых действий нет.</span>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+});
+
 /* ─── Skeleton loading ─── */
 const SkeletonList = ({ count = 4 }) => (
   <div className="tv-task-list">
@@ -1247,7 +1712,18 @@ const SkeletonList = ({ count = 4 }) => (
 );
 
 /* ─── Main Component ─── */
-const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
+const TasksView = ({
+  user,
+  showToast,
+  apiBaseUrl,
+  withAccessTokenHeader,
+  pinnedTaskId = null,
+  onPinTask,
+  onUnpinTask,
+  onPinnedTaskSync,
+  focusTaskRequest,
+  externalRefreshToken = 0,
+}) => {
   const currentUserRole = normalizeRole(user?.role);
   const canAccessTasks = isAdminLikeRole(currentUserRole) || isSupervisorRole(currentUserRole) || currentUserRole === 'trainer';
   const [tasks,               setTasks]               = useState([]);
@@ -1292,6 +1768,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
   const searchRef              = useRef(null);
   const pagedRequestIdRef      = useRef(0);
   const personTasksRequestIdRef = useRef(0);
+  const handledFocusRequestRef = useRef(0);
   const [form, setForm] = useState({ subject: '', description: '', tag: 'task', assignedTo: '' });
 
   const showToastRef = useRef(showToast);
@@ -1328,6 +1805,12 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
       notify(e?.response?.data?.error || 'Не удалось загрузить задачи', 'error');
     } finally { setIsTasksLoading(false); }
   }, [apiBaseUrl, buildHeaders, notify]);
+
+  useEffect(() => {
+    if (!pinnedTaskId || typeof onPinnedTaskSync !== 'function') return;
+    const latestPinnedTask = tasks.find((task) => Number(task?.id || 0) === Number(pinnedTaskId));
+    if (latestPinnedTask) onPinnedTaskSync(latestPinnedTask);
+  }, [tasks, pinnedTaskId, onPinnedTaskSync]);
 
   const fetchPagedTasks = useCallback(async () => {
     const requestId = ++pagedRequestIdRef.current;
@@ -1486,6 +1969,11 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     await Promise.all(jobs);
   }, [fetchTasks, fetchPagedTasks, fetchPersonTasks, isPersonDrilldown]);
 
+  useEffect(() => {
+    if (!externalRefreshToken || !user || !canAccessTasks) return;
+    refreshTasksData();
+  }, [externalRefreshToken, user, canAccessTasks, refreshTasksData]);
+
   const totalPages = useMemo(
     () => Math.max(1, Math.ceil(filteredTasksTotal / TASKS_PAGE_SIZE)),
     [filteredTasksTotal]
@@ -1511,6 +1999,17 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     if (!user || !canAccessTasks || !isPersonDrilldown) return;
     fetchPersonTasks();
   }, [user, canAccessTasks, isPersonDrilldown, fetchPersonTasks]);
+
+  useEffect(() => {
+    const requestId = Number(focusTaskRequest?.requestId || 0);
+    const taskId = Number(focusTaskRequest?.taskId || 0);
+    if (!requestId || !taskId || handledFocusRequestRef.current === requestId) return;
+    const nextTask = [...tasks, ...pagedTasks, ...personTasks]
+      .find((task) => Number(task?.id || 0) === taskId);
+    if (!nextTask) return;
+    handledFocusRequestRef.current = requestId;
+    setDrawerTask(nextTask);
+  }, [focusTaskRequest, tasks, pagedTasks, personTasks]);
 
   // Stats
   const stats = useMemo(() => ({
@@ -1647,13 +2146,14 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
       if (res?.data?.warning) notify(res.data.warning, 'error');
       closeDeleteModal();
       setDrawerTask(prev => (prev?.id === taskId ? null : prev));
+      if (Number(pinnedTaskId) === Number(taskId)) onUnpinTask?.();
       await refreshTasksData();
     } catch (e) {
       notify(e?.response?.data?.error || 'Не удалось удалить задачу', 'error');
     } finally {
       setActionLoadingKey('');
     }
-  }, [deleteModal.taskId, apiBaseUrl, buildHeaders, notify, closeDeleteModal, refreshTasksData]);
+  }, [deleteModal.taskId, apiBaseUrl, buildHeaders, notify, closeDeleteModal, refreshTasksData, pinnedTaskId, onUnpinTask]);
 
   /* ── Update status ── */
   const updateStatus = useCallback(async (taskId, action, options = {}) => {
@@ -1773,29 +2273,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
 
   /* ── Action buttons ── */
   const getActionButtons = useCallback((task) => {
-    const assigneeId = Number(task?.assignee?.id || 0);
-    const creatorId  = Number(task?.creator?.id  || 0);
-    const isAssignee = assigneeId === currentUserId;
-    const isCreator  = creatorId === currentUserId;
-    const isSuperAdmin = normalizeRole(currentUserRole) === 'super_admin';
-    const canReview  = !isAssignee && (isAdminLikeRole(currentUserRole) || creatorId === currentUserId || isSupervisorRole(currentUserRole));
-    const s = task?.status;
-    const btns = [];
-    if (isAssignee && (s === 'assigned' || s === 'returned'))
-      btns.push({ action: 'in_progress', label: 'Принять в работу', cls: 'tv-btn-amber' });
-    if (isAssignee && (s === 'in_progress' || s === 'returned'))
-      btns.push({ action: 'completed', label: 'Отметить выполненной', cls: 'tv-btn-indigo' });
-    if (canReview && s === 'completed') {
-      btns.push({ action: 'accepted', label: 'Принять', cls: 'tv-btn-emerald' });
-      btns.push({ action: 'returned', label: 'Вернуть', cls: 'tv-btn-rose' });
-    }
-    if (canReview && s === 'accepted')
-      btns.push({ action: 'reopened', label: 'Возобновить', cls: 'tv-btn-ghost' });
-    if (isCreator)
-      btns.push({ action: 'edit', label: 'Редактировать', cls: 'tv-btn-ghost' });
-    if (isSuperAdmin)
-      btns.push({ action: 'delete', label: 'Удалить', cls: 'tv-btn-rose' });
-    return btns;
+    return buildTaskActionButtons(task, currentUserId, currentUserRole);
   }, [currentUserId, currentUserRole]);
 
   const isReturnAction = statusModal.action === 'returned';
@@ -1827,7 +2305,21 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
               </div>
             );
           }
-          return <TaskRow key={row.key} task={row.task} onClick={setDrawerTask} />;
+          return (
+            <TaskRow
+              key={row.key}
+              task={row.task}
+              onClick={setDrawerTask}
+              onPin={(task) => {
+                if (Number(task?.id || 0) === Number(pinnedTaskId)) {
+                  onUnpinTask?.();
+                  return;
+                }
+                onPinTask?.(task);
+              }}
+              isPinned={Number(row.task?.id || 0) === Number(pinnedTaskId)}
+            />
+          );
         })}
       </div>
     );
@@ -2121,6 +2613,14 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
           downloadAttachment={downloadAttachment}
           onEditTask={openEditModal}
           onDeleteTask={openDeleteModal}
+          onTogglePinTask={(task) => {
+            if (Number(task?.id || 0) === Number(pinnedTaskId)) {
+              onUnpinTask?.();
+              return;
+            }
+            onPinTask?.(task);
+          }}
+          isPinned={Number(drawerTask?.id || 0) === Number(pinnedTaskId)}
         />
       )}
 
@@ -2465,6 +2965,9 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
 const areEqual = (prev, next) =>
   prev.user === next.user &&
   prev.apiBaseUrl === next.apiBaseUrl &&
-  prev.withAccessTokenHeader === next.withAccessTokenHeader;
+  prev.withAccessTokenHeader === next.withAccessTokenHeader &&
+  prev.pinnedTaskId === next.pinnedTaskId &&
+  prev.focusTaskRequest === next.focusTaskRequest &&
+  prev.externalRefreshToken === next.externalRefreshToken;
 
 export default React.memo(TasksView, areEqual);
