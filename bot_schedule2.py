@@ -1626,6 +1626,38 @@ def _build_task_deep_link(task_id, referer_url=None, origin_url=None):
     return ''
 
 
+def _build_current_task_deep_link(task_id):
+    return _build_task_deep_link(
+        task_id,
+        referer_url=request.headers.get('Referer'),
+        origin_url=request.headers.get('Origin')
+    )
+
+
+def _build_task_notification_reply_markup(task_link):
+    if not task_link:
+        return None
+    return {
+        "inline_keyboard": [[
+            {"text": "Открыть задачу", "url": task_link}
+        ]]
+    }
+
+
+def _build_task_subject_notification_html(task_ctx, task_link=None):
+    subject_safe = _escape_telegram_html(
+        task_ctx.get('subject') or f"Задача #{task_ctx.get('id')}",
+        220
+    )
+    if not task_link:
+        return subject_safe
+    return (
+        f'<a href="{_escape_telegram_html(task_link, 500)}">'
+        f'{subject_safe}'
+        '</a>'
+    )
+
+
 def _get_telegram_error_text(response):
     try:
         payload = response.json()
@@ -2011,11 +2043,12 @@ def _build_task_status_notification_html(
     recipient_kind,
     comment=None,
     completion_summary=None,
-    completion_files_count=0
+    completion_files_count=0,
+    task_link=None
 ):
     action_norm = (action or '').strip().lower()
     tag_label = TASK_TAG_LABELS.get((task_ctx.get('tag') or 'task').strip().lower(), 'Задача')
-    subject_safe = _escape_telegram_html(task_ctx.get('subject') or f"Задача #{task_ctx.get('id')}", 220)
+    subject_safe = _build_task_subject_notification_html(task_ctx, task_link)
     tag_safe = _escape_telegram_html(tag_label, 60)
     actor_safe = _escape_telegram_html(actor_name or 'Сотрудник', 80)
 
@@ -2064,10 +2097,10 @@ def _build_task_status_notification_html(
     return message
 
 
-def _build_task_event_notification_html(event, task_ctx, actor_name, changed_fields=None):
+def _build_task_event_notification_html(event, task_ctx, actor_name, changed_fields=None, task_link=None):
     event_norm = (event or '').strip().lower()
     tag_label = TASK_TAG_LABELS.get((task_ctx.get('tag') or 'task').strip().lower(), 'Задача')
-    subject_safe = _escape_telegram_html(task_ctx.get('subject') or f"Задача #{task_ctx.get('id')}", 220)
+    subject_safe = _build_task_subject_notification_html(task_ctx, task_link)
     tag_safe = _escape_telegram_html(tag_label, 60)
     actor_safe = _escape_telegram_html(actor_name or 'Сотрудник', 80)
 
@@ -2111,7 +2144,7 @@ def _collect_task_assignee_recipients(task_ctx, actor_user_id):
     return [item for item in recipients if (item.get('kind') or '').strip() == 'assignee']
 
 
-def _send_task_completion_attachments_to_telegram(chat_id, task_subject, attachments):
+def _send_task_completion_attachments_to_telegram(chat_id, task_subject, attachments, task_link=None):
     warnings = []
     if not chat_id or not attachments:
         return warnings
@@ -2157,9 +2190,16 @@ def _send_task_completion_attachments_to_telegram(chat_id, task_subject, attachm
                 'chat_id': int(chat_id)
             }
             if idx == 1:
+                task_subject_html = _escape_telegram_html(task_subject or 'Без названия', 180)
+                if task_link:
+                    task_subject_html = (
+                        f'<a href="{_escape_telegram_html(task_link, 500)}">'
+                        f'{task_subject_html}'
+                        '</a>'
+                    )
                 caption = (
                     "<b>📎 Файлы по задаче</b>\n"
-                    f"{_escape_telegram_html(task_subject or 'Без названия', 180)}"
+                    f"{task_subject_html}"
                 )
                 if len(caption) > TELEGRAM_MAX_CAPTION_CHARS:
                     caption = caption[:TELEGRAM_MAX_CAPTION_CHARS]
@@ -10025,11 +10065,7 @@ def handle_tasks():
             assignee = db.get_user(id=assigned_to)
             assignee_chat_id = assignee[1] if assignee else None
             if assignee_chat_id:
-                task_link = _build_task_deep_link(
-                    created.get("id"),
-                    referer_url=request.headers.get('Referer'),
-                    origin_url=request.headers.get('Origin')
-                )
+                task_link = _build_current_task_deep_link(created.get("id"))
                 tag_label = TASK_TAG_LABELS.get(tag, 'Задача')
                 requester_name = requester[2] if requester else 'Система'
                 task_subject_html = _escape_telegram_html(subject, 220)
@@ -10042,23 +10078,11 @@ def handle_tasks():
                 message = (
                     "<b>🆕 Новая задача</b>\n\n"
                     f"<b>Тип:</b> {_escape_telegram_html(tag_label, 60)}\n"
-                    f"<b>Тема:</b> {_escape_telegram_html(subject, 220)}\n"
+                    f"<b>Тема:</b> {task_subject_html}\n"
                     f"<b>От:</b> {_escape_telegram_html(requester_name, 80)}\n\n"
                     "<b>Откройте раздел «Задачи», чтобы посмотреть детали.</b>"
                 )
-                if task_link:
-                    message = message.replace(
-                        _escape_telegram_html(subject, 220),
-                        task_subject_html,
-                        1
-                    )
-                reply_markup = None
-                if task_link:
-                    reply_markup = {
-                        "inline_keyboard": [[
-                            {"text": "Открыть задачу", "url": task_link}
-                        ]]
-                    }
+                reply_markup = _build_task_notification_reply_markup(task_link)
                 tg_response = _send_telegram_text_message(
                     assignee_chat_id,
                     message,
@@ -10163,18 +10187,22 @@ def handle_single_task(task_id):
                     task_ctx = _fetch_task_notification_context(task_id)
                     if task_ctx:
                         actor_name = requester[2] if requester and len(requester) > 2 else 'Сотрудник'
+                        task_link = _build_current_task_deep_link(task_ctx.get('id'))
+                        reply_markup = _build_task_notification_reply_markup(task_link)
                         recipients = _collect_task_assignee_recipients(task_ctx, requester_id)
                         for recipient in recipients:
                             message_html = _build_task_event_notification_html(
                                 event='edited',
                                 task_ctx=task_ctx,
                                 actor_name=actor_name,
-                                changed_fields=result.get('changed_fields') or []
+                                changed_fields=result.get('changed_fields') or [],
+                                task_link=task_link
                             )
                             response = _send_telegram_text_message(
                                 recipient.get('chat_id'),
                                 message_html,
-                                parse_mode='HTML'
+                                parse_mode='HTML',
+                                reply_markup=reply_markup
                             )
                             if response.status_code != 200:
                                 recipient_name = recipient.get('name') or 'исполнитель'
@@ -10343,6 +10371,8 @@ def update_task_status(task_id):
                 if task_ctx:
                     actor_name = requester[2] if requester and len(requester) > 2 else 'Сотрудник'
                     task_subject = (task_ctx.get('subject') or f"Задача #{task_id}").strip()
+                    task_link = _build_current_task_deep_link(task_ctx.get('id'))
+                    reply_markup = _build_task_notification_reply_markup(task_link)
                     recipients = _collect_task_notification_recipients(task_ctx, requester_id)
 
                     for recipient in recipients:
@@ -10353,12 +10383,14 @@ def update_task_status(task_id):
                             recipient_kind=recipient.get('kind') or 'participant',
                             comment=comment,
                             completion_summary=completion_summary,
-                            completion_files_count=len(action_attachments)
+                            completion_files_count=len(action_attachments),
+                            task_link=task_link
                         )
                         response = _send_telegram_text_message(
                             recipient.get('chat_id'),
                             message_html,
-                            parse_mode='HTML'
+                            parse_mode='HTML',
+                            reply_markup=reply_markup
                         )
                         if response.status_code != 200:
                             recipient_name = recipient.get('name') or recipient.get('kind') or 'получатель'
@@ -10372,7 +10404,8 @@ def update_task_status(task_id):
                                 _send_task_completion_attachments_to_telegram(
                                     recipient.get('chat_id'),
                                     task_subject,
-                                    action_attachments
+                                    action_attachments,
+                                    task_link=task_link
                                 )
                             )
         except Exception as notify_error:
