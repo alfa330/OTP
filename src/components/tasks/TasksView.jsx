@@ -1009,10 +1009,13 @@ styleTag.textContent = `
   .tv-pin-widget.is-detached .tv-pin-people-rail {
     min-height: 0;
     overflow-y: auto;
+    gap: 10px;
+    padding-bottom: 4px;
   }
   .tv-pin-person-btn {
     width: 42px;
     height: 42px;
+    position: relative;
     border-radius: 10px;
     border: 1px solid var(--border);
     background: var(--surface);
@@ -1031,6 +1034,33 @@ styleTag.textContent = `
     width: 30px;
     height: 30px;
     font-size: 11px;
+  }
+  .tv-pin-person-count {
+    display: none;
+    position: absolute;
+    right: -4px;
+    bottom: -5px;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 999px;
+    border: 2px solid var(--surface);
+    font-size: 10px;
+    line-height: 14px;
+    font-weight: 700;
+    text-align: center;
+    color: #ffffff;
+  }
+  .tv-pin-widget.is-detached .tv-pin-person-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .tv-pin-person-count.is-alert {
+    background: #f59e0b;
+  }
+  .tv-pin-person-count.is-active {
+    background: #2563eb;
   }
   .tv-pin-menu-panel {
     min-width: 0;
@@ -2051,6 +2081,14 @@ export const PinnedTaskWidget = React.memo(({
                   onClick={() => setSelectedCreatorKey(group.key)}
                 >
                   <AvatarCircle className="tv-avatar-md" name={group.name} avatarUrl={group.avatarUrl} />
+                  {(group.active + group.notAccepted) > 0 && (
+                    <span
+                      className={`tv-pin-person-count ${group.notAccepted > 0 ? 'is-alert' : 'is-active'}`}
+                      aria-hidden="true"
+                    >
+                      {(group.active + group.notAccepted) > 9 ? '9+' : (group.active + group.notAccepted)}
+                    </span>
+                  )}
                 </button>
               ))}
             </div>
