@@ -2252,6 +2252,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
   const [markingAllNotificationsRead, setMarkingAllNotificationsRead] = useState(false);
   const [adminCourses, setAdminCourses] = useState([]);
   const [adminAnalytics, setAdminAnalytics] = useState(null);
+  const [adminCourseStats, setAdminCourseStats] = useState([]);
   const [adminProgressRows, setAdminProgressRows] = useState([]);
   const [adminAttempts, setAdminAttempts] = useState([]);
   const [learners, setLearners] = useState([]);
@@ -2509,6 +2510,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
           ]);
           const nextAnalytics = analyticsRes && typeof analyticsRes === "object" ? analyticsRes : null;
           setAdminAnalytics(nextAnalytics);
+          setAdminCourseStats(Array.isArray(nextAnalytics?.course_stats) ? nextAnalytics.course_stats : []);
           if (coursesRes) {
             setAdminCourses(Array.isArray(coursesRes?.courses) ? coursesRes.courses : []);
             cacheState.coursesLoaded = true;
@@ -2538,18 +2540,11 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
         }
 
         if (scope === "courses") {
-          const [coursesRes, analyticsRes] = await Promise.all([
-            lmsRequest("/api/lms/admin/courses").catch(() => null),
-            cacheState.tabMonthCache.has(`analytics:${month}`) ? Promise.resolve(null)
-              : lmsRequest(`/api/lms/admin/analytics${mq ? `?${mq}` : ""}`).catch(() => null),
-          ]);
+          const coursesRes = await lmsRequest(`/api/lms/admin/courses?include_stats=1${mq ? `&${mq}` : ""}`).catch(() => null);
           if (coursesRes) {
             setAdminCourses(Array.isArray(coursesRes?.courses) ? coursesRes.courses : []);
+            setAdminCourseStats(Array.isArray(coursesRes?.course_stats) ? coursesRes.course_stats : []);
             cacheState.coursesLoaded = true;
-          }
-          if (analyticsRes && typeof analyticsRes === "object") {
-            setAdminAnalytics(analyticsRes);
-            cacheState.tabMonthCache.add(`analytics:${month}`);
           }
           cacheState.tabMonthCache.add("courses");
           setApiMode(true);
@@ -2614,6 +2609,12 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       });
     adminLearningSessionsPromisesRef.current.set(cacheKey, loadPromise);
     return loadPromise;
+  }, [apiRoot, canUseManagerApi, lmsRequest]);
+
+  const loadAdminAttemptDetail = useCallback(async (attemptId) => {
+    const normalizedAttemptId = Number(attemptId || 0);
+    if (!apiRoot || !canUseManagerApi || normalizedAttemptId <= 0) return null;
+    return lmsRequest(`/api/lms/admin/attempts/${normalizedAttemptId}/detail`);
   }, [apiRoot, canUseManagerApi, lmsRequest]);
 
   const getCourseCacheKey = useCallback((courseId) => {
@@ -3798,6 +3799,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
             progressRows={adminProgressRows}
             attempts={adminAttempts}
             analytics={adminAnalytics}
+            courseStats={adminCourseStats}
             loading={loadingAdmin}
             selectedMonth={adminSelectedMonth}
             onMonthChange={handleAdminMonthChange}
@@ -3811,6 +3813,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
             busyCourseId={busyCourseId}
             isEditorMode={isEditorRole}
             loadLearningSessions={loadAdminLearningSessions}
+            loadAttemptDetail={loadAdminAttemptDetail}
           />
         )}
       </main>
@@ -11679,6 +11682,7 @@ function AdminView({
   progressRows = [],
   attempts = [],
   analytics = null,
+  courseStats = [],
   loading = false,
   selectedMonth = "",
   onMonthChange,
@@ -11692,6 +11696,7 @@ function AdminView({
   busyCourseId = null,
   isEditorMode = false,
   loadLearningSessions,
+  loadAttemptDetail,
 }) {
   const [deletingCourseId, setDeletingCourseId] = useState(null);
   const [archivingCourseId, setArchivingCourseId] = useState(null);
@@ -11713,6 +11718,9 @@ function AdminView({
   const [isAssignCourseModalOpen, setIsAssignCourseModalOpen] = useState(false);
   const [selectedEmployeeLearningSessions, setSelectedEmployeeLearningSessions] = useState([]);
   const [isLoadingSelectedEmployeeLearningSessions, setIsLoadingSelectedEmployeeLearningSessions] = useState(false);
+  const [expandedAttemptId, setExpandedAttemptId] = useState(null);
+  const [loadingAttemptId, setLoadingAttemptId] = useState(null);
+  const [attemptDetailById, setAttemptDetailById] = useState({});
 
   useEffect(() => {
     if (!isEditorMode) {
@@ -11729,8 +11737,14 @@ function AdminView({
   const safeProgressRows = Array.isArray(progressRows) ? progressRows : [];
   const safeAttempts = Array.isArray(attempts) ? attempts : [];
   const safeAdminCourses = Array.isArray(adminCourses) ? adminCourses : [];
+  const safeCourseStats = Array.isArray(courseStats) ? courseStats : [];
+  const safeAnalytics = analytics && typeof analytics === "object" ? analytics : null;
   const assignableAdminCourses = safeAdminCourses.filter(isAssignableLmsCourse);
-  const isAdminLoading = loading && safeAdminCourses.length === 0 && safeProgressRows.length === 0 && safeAttempts.length === 0;
+  const isAdminLoading = loading && (
+    (tab === "analytics" && !safeAnalytics) ||
+    (tab === "employees" && safeProgressRows.length === 0 && safeAttempts.length === 0) ||
+    (tab === "courses" && safeAdminCourses.length === 0)
+  );
   const extractCourseSkills = (courseLike) => {
     const directSkills = Array.isArray(courseLike?.skills)
       ? courseLike.skills.map((item) => String(item || "").trim()).filter(Boolean)
@@ -11989,9 +12003,10 @@ function AdminView({
     pct: Math.round((item.count / courseStatusTotal) * 100),
   }));
 
-  const safeAnalytics = analytics && typeof analytics === "object" ? analytics : null;
   const hasAnalyticsPayload = Boolean(
-    safeAnalytics &&
+    safeCourseStats.length > 0 ||
+    (
+      safeAnalytics &&
     (
       safeAnalytics.summary ||
       Array.isArray(safeAnalytics.employee_rows) ||
@@ -11999,12 +12014,13 @@ function AdminView({
       Array.isArray(safeAnalytics.course_status_rows) ||
       Array.isArray(safeAnalytics.fail_stats)
     )
+    )
   );
 
   if (hasAnalyticsPayload) {
     const analyticsEmployeeRows = Array.isArray(safeAnalytics?.employee_rows) ? safeAnalytics.employee_rows : [];
     const analyticsCourseStats = new Map(
-      (Array.isArray(safeAnalytics?.course_stats) ? safeAnalytics.course_stats : [])
+      (safeCourseStats.length > 0 ? safeCourseStats : (Array.isArray(safeAnalytics?.course_stats) ? safeAnalytics.course_stats : []))
         .map((item) => [Number(item?.course_id || 0), item])
         .filter(([courseId]) => courseId > 0)
     );
@@ -12243,16 +12259,24 @@ function AdminView({
           lastAtMs: 0,
           isFinal: false,
           passed: false,
+          latestAttemptId: null,
+          latestAttemptNo: null,
+          latestAttemptStartedAt: null,
+          latestAttemptPassed: null,
         };
         prev.attempts += 1;
         prev.isFinal = Boolean(prev.isFinal || explicitFinal || inferredFinal);
         if (Boolean(attempt?.passed)) prev.passed = true;
         if (hasScore) {
           prev.bestScore = prev.bestScore == null ? score : Math.max(prev.bestScore, score);
-          if (startedAtMs >= prev.lastAtMs) {
-            prev.lastAtMs = startedAtMs;
-            prev.lastScore = score;
-          }
+        }
+        if (startedAtMs >= prev.lastAtMs) {
+          prev.lastAtMs = startedAtMs;
+          prev.lastScore = hasScore ? score : null;
+          prev.latestAttemptId = Number(attempt?.attempt_id || 0) || null;
+          prev.latestAttemptNo = Number(attempt?.attempt_no || 0) || null;
+          prev.latestAttemptStartedAt = attempt?.started_at || null;
+          prev.latestAttemptPassed = attempt?.passed == null ? null : Boolean(attempt.passed);
         }
         testsById.set(testKey, prev);
       });
@@ -12320,10 +12344,13 @@ function AdminView({
 
   useEffect(() => {
     setSelectedEmployeeCourseKey(null);
+    setExpandedAttemptId(null);
+    setAttemptDetailById({});
   }, [selectedEmployee?.id]);
 
   useEffect(() => {
     setSelectedEmployeeCourseDetailTab("overview");
+    setExpandedAttemptId(null);
   }, [selectedEmployeeCourseKey]);
 
   useEffect(() => {
@@ -12583,6 +12610,31 @@ function AdminView({
       icon: HelpCircle,
     },
   ] : [];
+  const handleToggleAttemptDetail = async (attemptId) => {
+    const normalizedAttemptId = Number(attemptId || 0);
+    if (!normalizedAttemptId) return;
+    if (expandedAttemptId === normalizedAttemptId) {
+      setExpandedAttemptId(null);
+      return;
+    }
+    setExpandedAttemptId(normalizedAttemptId);
+    if (attemptDetailById[normalizedAttemptId] || typeof loadAttemptDetail !== "function") return;
+    setLoadingAttemptId(normalizedAttemptId);
+    try {
+      const payload = await loadAttemptDetail(normalizedAttemptId);
+      setAttemptDetailById((prev) => ({
+        ...prev,
+        [normalizedAttemptId]: payload && typeof payload === "object" ? payload : null,
+      }));
+    } catch (_) {
+      setAttemptDetailById((prev) => ({
+        ...prev,
+        [normalizedAttemptId]: null,
+      }));
+    } finally {
+      setLoadingAttemptId((prev) => (prev === normalizedAttemptId ? null : prev));
+    }
+  };
 
   const getEmployeeCourseDeadline = (courseId, assignmentRow) => {
     const employeeId = Number(selectedEmployee?.id || 0);
@@ -13282,37 +13334,115 @@ function AdminView({
                             </div>
                           ) : (
                             <div className="space-y-3">
-                              {[...selectedEmployeeCourseItem.tests].reverse().map((testItem) => (
-                                <div key={testItem.key} className="bg-white rounded-xl border border-slate-100 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm overflow-hidden relative">
-                                  {testItem.passed && <div className="absolute top-0 left-0 w-1 h-full bg-emerald-500"></div>}
-                                  {!testItem.passed && testItem.attempts > 0 && <div className="absolute top-0 left-0 w-1 h-full bg-amber-500"></div>}
+                              {[...selectedEmployeeCourseItem.tests].reverse().map((testItem) => {
+                                const attemptId = Number(testItem.latestAttemptId || 0) || null;
+                                const attemptDetail = attemptId ? attemptDetailById[attemptId] : null;
+                                const attemptAnswers = Array.isArray(attemptDetail?.answers) ? attemptDetail.answers : [];
+                                const isExpanded = attemptId != null && expandedAttemptId === attemptId;
+                                const isLoadingAttempt = attemptId != null && loadingAttemptId === attemptId;
+                                return (
+                                  <div key={testItem.key} className="space-y-2">
+                                    <div className="bg-white rounded-xl border border-slate-100 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm overflow-hidden relative">
+                                      {testItem.passed && <div className="absolute top-0 left-0 w-1 h-full bg-emerald-500"></div>}
+                                      {!testItem.passed && testItem.attempts > 0 && <div className="absolute top-0 left-0 w-1 h-full bg-amber-500"></div>}
 
-                                  <div className="flex-1 min-w-0 pl-1">
-                                    <div className="flex items-center gap-2 mb-1.5">
-                                      <p className="text-sm font-semibold text-slate-900 truncate">{testItem.title}</p>
-                                      {testItem.isFinal && <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-violet-100 text-violet-700 uppercase tracking-widest flex-shrink-0">Итоговый</span>}
+                                      <div className="flex-1 min-w-0 pl-1">
+                                        <div className="flex items-center gap-2 mb-1.5">
+                                          <p className="text-sm font-semibold text-slate-900 truncate">{testItem.title}</p>
+                                          {testItem.isFinal && <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-violet-100 text-violet-700 uppercase tracking-widest flex-shrink-0">Итоговый</span>}
+                                        </div>
+                                        <div className="flex flex-wrap items-center gap-3 text-xs">
+                                          <span className="text-slate-500">Попыток: <strong className="text-slate-700">{testItem.attempts}</strong></span>
+                                          <span className="text-slate-300">•</span>
+                                          <span className={testItem.passed ? "text-emerald-600 font-semibold" : "text-amber-600 font-semibold"}>
+                                            {testItem.passed ? "Пройден" : "Не пройден"}
+                                          </span>
+                                          {testItem.latestAttemptStartedAt && (
+                                            <>
+                                              <span className="text-slate-300">•</span>
+                                              <span className="text-slate-500">Последняя: {formatDateTimeLabel(testItem.latestAttemptStartedAt)}</span>
+                                            </>
+                                          )}
+                                        </div>
+                                      </div>
+                                      <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+                                        <div className="flex items-center gap-5 bg-slate-50 rounded-lg px-4 py-2.5 border border-slate-100">
+                                          <div>
+                                            <p className="text-[10px] text-slate-400 mb-0.5 uppercase tracking-wider">Последний</p>
+                                            <p className="text-sm font-semibold text-slate-800">{testItem.lastScore == null ? "—" : `${testItem.lastScore}%`}</p>
+                                          </div>
+                                          <div className="h-7 w-px bg-slate-200"></div>
+                                          <div>
+                                            <p className="text-[10px] text-slate-400 mb-0.5 uppercase tracking-wider">Лучший</p>
+                                            <p className="text-sm font-bold text-indigo-600">{testItem.bestScore == null ? "—" : `${testItem.bestScore}%`}</p>
+                                          </div>
+                                        </div>
+                                        {attemptId && (
+                                          <button
+                                            onClick={() => { void handleToggleAttemptDetail(attemptId); }}
+                                            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900"
+                                          >
+                                            <Eye size={14} />
+                                            Ответы
+                                            <ChevronDown size={14} className={`transition-transform ${isExpanded ? "rotate-180" : ""}`} />
+                                          </button>
+                                        )}
+                                      </div>
                                     </div>
-                                    <div className="flex items-center gap-3 text-xs">
-                                      <span className="text-slate-500">Попыток: <strong className="text-slate-700">{testItem.attempts}</strong></span>
-                                      <span className="text-slate-300">•</span>
-                                      <span className={testItem.passed ? "text-emerald-600 font-semibold" : "text-amber-600 font-semibold"}>
-                                        {testItem.passed ? "Пройден" : "Не пройден"}
-                                      </span>
-                                    </div>
+
+                                    {isExpanded && (
+                                      <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4">
+                                        {isLoadingAttempt ? (
+                                          <div className="text-sm text-slate-500">Загружаем ответы...</div>
+                                        ) : attemptAnswers.length === 0 ? (
+                                          <div className="text-sm text-slate-500">Ответы для последней попытки не найдены</div>
+                                        ) : (
+                                          <div className="space-y-3">
+                                            {attemptAnswers.map((answerItem, answerIndex) => {
+                                              const selectedOptions = Array.isArray(answerItem?.selected_options) ? answerItem.selected_options : [];
+                                              const correctOptions = Array.isArray(answerItem?.correct_options) ? answerItem.correct_options : [];
+                                              const selectedLabel = selectedOptions.length > 0
+                                                ? selectedOptions.map((optionItem) => optionItem?.text || `#${optionItem?.id || ""}`).join(", ")
+                                                : (String(answerItem?.answer_text || "").trim() || "—");
+                                              const correctLabel = correctOptions.length > 0
+                                                ? correctOptions.map((optionItem) => optionItem?.text || `#${optionItem?.id || ""}`).join(", ")
+                                                : "—";
+                                              return (
+                                                <div key={`${attemptId}:${answerItem?.question_id || answerIndex}`} className="rounded-lg border border-slate-200 bg-white p-3">
+                                                  <div className="flex flex-wrap items-start justify-between gap-2">
+                                                    <p className="text-sm font-semibold text-slate-900">
+                                                      {answerIndex + 1}. {answerItem?.prompt || "Вопрос"}
+                                                    </p>
+                                                    <span className={`rounded-md px-2 py-1 text-[10px] font-semibold uppercase tracking-wider ${
+                                                      answerItem?.is_correct === true
+                                                        ? "bg-emerald-50 text-emerald-700"
+                                                        : answerItem?.is_correct === false
+                                                          ? "bg-rose-50 text-rose-700"
+                                                          : "bg-slate-100 text-slate-500"
+                                                    }`}>
+                                                      {answerItem?.is_correct === true ? "Верно" : answerItem?.is_correct === false ? "Ошибка" : "Без оценки"}
+                                                    </span>
+                                                  </div>
+                                                  <div className="mt-3 grid gap-2 text-xs text-slate-600 sm:grid-cols-2">
+                                                    <div>
+                                                      <p className="mb-1 font-semibold text-slate-500">Выбрано учеником</p>
+                                                      <p className="text-slate-800">{selectedLabel}</p>
+                                                    </div>
+                                                    <div>
+                                                      <p className="mb-1 font-semibold text-slate-500">Верный ответ</p>
+                                                      <p className="text-slate-800">{correctLabel}</p>
+                                                    </div>
+                                                  </div>
+                                                </div>
+                                              );
+                                            })}
+                                          </div>
+                                        )}
+                                      </div>
+                                    )}
                                   </div>
-                                  <div className="flex items-center gap-5 bg-slate-50 rounded-lg px-4 py-2.5 border border-slate-100">
-                                    <div>
-                                      <p className="text-[10px] text-slate-400 mb-0.5 uppercase tracking-wider">Последний</p>
-                                      <p className="text-sm font-semibold text-slate-800">{testItem.lastScore == null ? "—" : `${testItem.lastScore}%`}</p>
-                                    </div>
-                                    <div className="h-7 w-px bg-slate-200"></div>
-                                    <div>
-                                      <p className="text-[10px] text-slate-400 mb-0.5 uppercase tracking-wider">Лучший</p>
-                                      <p className="text-sm font-bold text-indigo-600">{testItem.bestScore == null ? "—" : `${testItem.bestScore}%`}</p>
-                                    </div>
-                                  </div>
-                                </div>
-                              ))}
+                                );
+                              })}
                             </div>
                           )}
                         </div>

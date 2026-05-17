@@ -18834,6 +18834,52 @@ def _lms_admin_course_aggregate_status(stat):
     return 'not_started'
 
 
+def _lms_build_admin_course_stats(assignment_rows):
+    course_map = {}
+    for row in assignment_rows or []:
+        course_id = int(row.get("course_id") or 0)
+        if not course_id:
+            continue
+        progress_percent = float(row.get("progress_percent") or 0.0)
+        ui_status = _lms_assignment_status_to_ui(row.get("status"), row.get("deadline_status"))
+        stat = course_map.get(course_id) or {
+            "course_id": course_id,
+            "progress_sum": 0.0,
+            "total": 0,
+            "completed": 0,
+            "completed_late": 0,
+            "in_progress": 0,
+            "not_started": 0,
+            "overdue": 0,
+            "lessons": 0,
+        }
+        stat["progress_sum"] += progress_percent
+        stat["total"] += 1
+        if ui_status == "completed":
+            stat["completed"] += 1
+        elif ui_status == "completed_late":
+            stat["completed_late"] += 1
+        elif ui_status == "in_progress":
+            stat["in_progress"] += 1
+        elif ui_status == "overdue":
+            stat["overdue"] += 1
+        else:
+            stat["not_started"] += 1
+        stat["lessons"] = max(stat["lessons"], int(row.get("total_lessons") or 0))
+        course_map[course_id] = stat
+
+    result = []
+    for stat in course_map.values():
+        total = max(0, int(stat.get("total") or 0))
+        result.append({
+            "course_id": int(stat["course_id"]),
+            "progress": int(round(stat["progress_sum"] / total)) if total else 0,
+            "status": _lms_admin_course_aggregate_status(stat),
+            "lessons": int(stat.get("lessons") or 0),
+        })
+    return result
+
+
 def _lms_bucket_name():
     return (
         (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_LMS') or '').strip()
@@ -23522,25 +23568,28 @@ def lms_admin_courses():
     try:
         if request.method == 'GET':
             course_id = _lms_to_int(request.args.get('course_id'), default=0)
-            with db._get_cursor() as cursor:
-                if course_id > 0:
-                    cursor.execute("SELECT current_version_id FROM lms_courses WHERE id = %s LIMIT 1", (course_id,))
-                    base = cursor.fetchone()
-                    if not base:
-                        return jsonify({"error": "Course not found"}), 404
-                    version_id = int(base[0]) if base[0] is not None else None
-                    if not version_id:
-                        return jsonify({"error": "Course has no active version"}), 404
-                    detail = _lms_course_structure_tx(
-                        cursor,
-                        course_id,
-                        version_id,
-                        include_test_questions=True,
-                        include_correct_answers=True
-                    )
-                    return jsonify({"status": "success", "course": detail}), 200
+            include_stats = str(request.args.get('include_stats') or '').strip().lower() in {'1', 'true', 'yes'}
+            db_started_at = time.perf_counter()
+            try:
+                with db._get_cursor() as cursor:
+                    if course_id > 0:
+                        cursor.execute("SELECT current_version_id FROM lms_courses WHERE id = %s LIMIT 1", (course_id,))
+                        base = cursor.fetchone()
+                        if not base:
+                            return jsonify({"error": "Course not found"}), 404
+                        version_id = int(base[0]) if base[0] is not None else None
+                        if not version_id:
+                            return jsonify({"error": "Course has no active version"}), 404
+                        detail = _lms_course_structure_tx(
+                            cursor,
+                            course_id,
+                            version_id,
+                            include_test_questions=True,
+                            include_correct_answers=True
+                        )
+                        return jsonify({"status": "success", "course": detail}), 200
 
-                cursor.execute("""
+                    cursor.execute("""
                     SELECT
                         c.id, c.slug, c.title, c.description, c.category, c.status,
                         c.default_pass_threshold, c.default_attempt_limit,
@@ -23565,18 +23614,18 @@ def lms_admin_courses():
                         LIMIT 1
                     ) latest_cv ON TRUE
                     ORDER BY c.updated_at DESC, c.id DESC
-                """)
-                rows = cursor.fetchall()
-                courses = []
-                for row in rows:
-                    version_settings = _lms_parse_json(row[13], {})
-                    cover_payload = _lms_resolve_cover_payload(version_settings)
-                    latest_version_id = int(row[14]) if row[14] is not None else None
-                    latest_version_number = int(row[15]) if row[15] is not None else None
-                    latest_version_status = str(row[16] or '').strip().lower() or None
-                    latest_version_created_at = row[17].isoformat() if row[17] else None
-                    latest_is_draft = latest_version_status == 'draft' and latest_version_id is not None
-                    courses.append({
+                    """)
+                    rows = cursor.fetchall()
+                    courses = []
+                    for row in rows:
+                        version_settings = _lms_parse_json(row[13], {})
+                        cover_payload = _lms_resolve_cover_payload(version_settings)
+                        latest_version_id = int(row[14]) if row[14] is not None else None
+                        latest_version_number = int(row[15]) if row[15] is not None else None
+                        latest_version_status = str(row[16] or '').strip().lower() or None
+                        latest_version_created_at = row[17].isoformat() if row[17] else None
+                        latest_is_draft = latest_version_status == 'draft' and latest_version_id is not None
+                        courses.append({
                         "id": int(row[0]),
                         "slug": row[1],
                         "title": row[2],
@@ -23605,8 +23654,29 @@ def lms_admin_courses():
                         "latest_draft_version_id": latest_version_id if latest_is_draft else None,
                         "latest_draft_version_number": latest_version_number if latest_is_draft else None,
                         "latest_draft_created_at": latest_version_created_at if latest_is_draft else None
-                    })
-                return jsonify({"status": "success", "courses": courses}), 200
+                        })
+                    payload = {"status": "success", "courses": courses}
+                    if include_stats:
+                        stats_where = ["1=1"]
+                        stats_params = []
+                        visible_ids = None
+                        if requester_role in ('sv', 'trainer'):
+                            visible_ids = set(_lms_visible_learner_ids(requester_id, requester_role))
+                        if visible_ids is not None:
+                            if visible_ids:
+                                stats_where.append("a.user_id = ANY(%s)")
+                                stats_params.append(list(visible_ids))
+                            else:
+                                payload["course_stats"] = []
+                                return jsonify(payload), 200
+                        month_start, month_end = _lms_parse_month_range(request.args.get('month', ''))
+                        if month_start and month_end:
+                            _lms_append_assignment_activity_month_filter(stats_where, stats_params, month_start, month_end)
+                        assignment_rows = _lms_admin_assignment_stats_tx(cursor, stats_where, stats_params)
+                        payload["course_stats"] = _lms_build_admin_course_stats(assignment_rows)
+                    return jsonify(payload), 200
+            finally:
+                _record_elapsed_server_timing("lms-admin-courses-db", db_started_at)
 
         data = request.get_json(silent=True) or {}
         if request.method == 'POST':
@@ -24548,24 +24618,28 @@ def lms_admin_progress():
         if requester_role in ('sv', 'trainer'):
             visible_ids = set(_lms_visible_learner_ids(requester_id, requester_role))
 
-        with db._get_cursor() as cursor:
-            params = []
-            where = ["1=1"]
-            if course_id_filter > 0:
-                where.append("a.course_id = %s")
-                params.append(course_id_filter)
-            if user_id_filter > 0:
-                where.append("a.user_id = %s")
-                params.append(user_id_filter)
-            if visible_ids is not None:
-                if not visible_ids:
-                    return jsonify({"status": "success", "rows": []}), 200
-                where.append("a.user_id = ANY(%s)")
-                params.append(list(visible_ids))
-            month_start, month_end = _lms_parse_month_range(request.args.get('month', ''))
-            if month_start and month_end:
-                _lms_append_assignment_activity_month_filter(where, params, month_start, month_end)
-            payload = _lms_admin_assignment_stats_tx(cursor, where, params)
+        db_started_at = time.perf_counter()
+        try:
+            with db._get_cursor() as cursor:
+                params = []
+                where = ["1=1"]
+                if course_id_filter > 0:
+                    where.append("a.course_id = %s")
+                    params.append(course_id_filter)
+                if user_id_filter > 0:
+                    where.append("a.user_id = %s")
+                    params.append(user_id_filter)
+                if visible_ids is not None:
+                    if not visible_ids:
+                        return jsonify({"status": "success", "rows": []}), 200
+                    where.append("a.user_id = ANY(%s)")
+                    params.append(list(visible_ids))
+                month_start, month_end = _lms_parse_month_range(request.args.get('month', ''))
+                if month_start and month_end:
+                    _lms_append_assignment_activity_month_filter(where, params, month_start, month_end)
+                payload = _lms_admin_assignment_stats_tx(cursor, where, params)
+        finally:
+            _record_elapsed_server_timing("lms-admin-progress-db", db_started_at)
 
         return jsonify({"status": "success", "rows": payload}), 200
     except Exception as e:
@@ -24731,10 +24805,12 @@ def lms_admin_analytics():
             attempt_where.append("ta.started_at >= %s AND ta.started_at < %s")
             attempt_params.extend([month_start, month_end])
 
-        with db._get_cursor() as cursor:
-            assignment_rows = _lms_admin_assignment_stats_tx(cursor, assignment_where, assignment_params)
+        db_started_at = time.perf_counter()
+        try:
+            with db._get_cursor() as cursor:
+                assignment_rows = _lms_admin_assignment_stats_tx(cursor, assignment_where, assignment_params)
 
-            cursor.execute(f"""
+                cursor.execute(f"""
                 SELECT
                     ta.user_id,
                     COUNT(*) AS attempts,
@@ -24745,24 +24821,35 @@ def lms_admin_analytics():
                 JOIN lms_course_assignments a ON a.id = ta.assignment_id
                 WHERE {" AND ".join(attempt_where)}
                 GROUP BY ta.user_id
-            """, attempt_params)
-            attempt_rows = cursor.fetchall()
+                """, attempt_params)
+                attempt_rows = cursor.fetchall()
 
-            cursor.execute(f"""
+                cursor.execute(f"""
                 SELECT
-                    ta.score_percent,
+                    q.id,
+                    q.prompt,
                     t.title,
-                    c.title
-                FROM lms_test_attempts ta
+                    c.title,
+                    COUNT(*) AS answer_count,
+                    COUNT(*) FILTER (WHERE aa.is_correct IS FALSE) AS incorrect_count
+                FROM lms_test_attempt_answers aa
+                JOIN lms_test_attempts ta ON ta.id = aa.attempt_id
+                JOIN lms_questions q ON q.id = aa.question_id
                 JOIN lms_tests t ON t.id = ta.test_id
                 JOIN lms_course_assignments a ON a.id = ta.assignment_id
                 JOIN lms_courses c ON c.id = a.course_id
                 WHERE {" AND ".join(attempt_where)}
-                  AND ta.score_percent IS NOT NULL
-                ORDER BY ta.score_percent ASC, ta.started_at DESC, ta.id DESC
+                  AND aa.is_correct IS NOT NULL
+                GROUP BY q.id, q.prompt, t.title, c.title
+                ORDER BY
+                    (COUNT(*) FILTER (WHERE aa.is_correct IS FALSE))::NUMERIC / NULLIF(COUNT(*), 0) DESC,
+                    COUNT(*) DESC,
+                    q.id ASC
                 LIMIT 4
-            """, attempt_params)
-            fail_rows = cursor.fetchall()
+                """, attempt_params)
+                fail_rows = cursor.fetchall()
+        finally:
+            _record_elapsed_server_timing("lms-admin-analytics-db", db_started_at)
 
         attempt_agg_by_user = {}
         for row in attempt_rows:
@@ -24949,11 +25036,16 @@ def lms_admin_analytics():
 
         fail_stats = []
         for index, row in enumerate(fail_rows, start=1):
+            answer_count = max(0, int(row[4] or 0))
+            incorrect_count = max(0, int(row[5] or 0))
             fail_stats.append({
-                "question_id": index,
-                "text": row[1] or "Тест",
-                "fail_rate": max(0, 100 - int(round(float(row[0] or 0)))),
-                "course": row[2] or "Курс"
+                "question_id": int(row[0] or index),
+                "text": row[1] or "Вопрос",
+                "test": row[2] or "Тест",
+                "course": row[3] or "Курс",
+                "answer_count": answer_count,
+                "incorrect_count": incorrect_count,
+                "fail_rate": int(round((incorrect_count / answer_count) * 100)) if answer_count else 0
             })
 
         summary = {
@@ -24991,33 +25083,35 @@ def lms_admin_attempts():
         if requester_role in ('sv', 'trainer'):
             visible_ids = set(_lms_visible_learner_ids(requester_id, requester_role))
 
-        with db._get_cursor() as cursor:
-            params = []
-            where = ["1=1"]
+        db_started_at = time.perf_counter()
+        try:
+            with db._get_cursor() as cursor:
+                params = []
+                where = ["1=1"]
 
-            course_id_filter = _lms_to_int(request.args.get('course_id'), default=0)
-            if course_id_filter > 0:
-                where.append("a.course_id = %s")
-                params.append(course_id_filter)
+                course_id_filter = _lms_to_int(request.args.get('course_id'), default=0)
+                if course_id_filter > 0:
+                    where.append("a.course_id = %s")
+                    params.append(course_id_filter)
 
-            user_id_filter = _lms_to_int(request.args.get('user_id'), default=0)
-            if user_id_filter > 0:
-                where.append("ta.user_id = %s")
-                params.append(user_id_filter)
+                user_id_filter = _lms_to_int(request.args.get('user_id'), default=0)
+                if user_id_filter > 0:
+                    where.append("ta.user_id = %s")
+                    params.append(user_id_filter)
 
-            if visible_ids is not None:
-                if not visible_ids:
-                    return jsonify({"status": "success", "attempts": []}), 200
-                where.append("ta.user_id = ANY(%s)")
-                params.append(list(visible_ids))
+                if visible_ids is not None:
+                    if not visible_ids:
+                        return jsonify({"status": "success", "attempts": []}), 200
+                    where.append("ta.user_id = ANY(%s)")
+                    params.append(list(visible_ids))
 
-            month_start, month_end = _lms_parse_month_range(request.args.get('month', ''))
-            if month_start and month_end:
-                where.append("ta.started_at >= %s AND ta.started_at < %s")
-                params.extend([month_start, month_end])
+                month_start, month_end = _lms_parse_month_range(request.args.get('month', ''))
+                if month_start and month_end:
+                    where.append("ta.started_at >= %s AND ta.started_at < %s")
+                    params.extend([month_start, month_end])
 
-            params.append(limit)
-            cursor.execute(f"""
+                params.append(limit)
+                cursor.execute(f"""
                 SELECT
                     ta.id, ta.assignment_id, ta.test_id, ta.user_id, u.name, u.role,
                     ta.attempt_no, ta.status, ta.score_percent, ta.passed,
@@ -25031,12 +25125,12 @@ def lms_admin_attempts():
                 WHERE {" AND ".join(where)}
                 ORDER BY ta.started_at DESC, ta.id DESC
                 LIMIT %s
-            """, params)
-            rows = cursor.fetchall()
+                """, params)
+                rows = cursor.fetchall()
 
-            attempts = []
-            for row in rows:
-                attempts.append({
+                attempts = []
+                for row in rows:
+                    attempts.append({
                     "attempt_id": int(row[0]),
                     "assignment_id": int(row[1]),
                     "test_id": int(row[2]),
@@ -25054,11 +25148,152 @@ def lms_admin_attempts():
                     "is_final": bool(row[14]) if row[14] is not None else False,
                     "course_id": int(row[15]),
                     "course_title": row[16]
-                })
+                    })
+        finally:
+            _record_elapsed_server_timing("lms-admin-attempts-db", db_started_at)
 
         return jsonify({"status": "success", "attempts": attempts}), 200
     except Exception as e:
         logging.exception("Error in /api/lms/admin/attempts")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/lms/admin/attempts/<int:attempt_id>/detail', methods=['GET'])
+@require_api_key
+def lms_admin_attempt_detail(attempt_id):
+    requester_id, _, requester_role, error_response, status_code = _lms_resolve_request('manager')
+    if error_response:
+        return error_response, status_code
+
+    try:
+        visible_ids = None
+        if requester_role in ('sv', 'trainer'):
+            visible_ids = set(_lms_visible_learner_ids(requester_id, requester_role))
+
+        db_started_at = time.perf_counter()
+        try:
+            with db._get_cursor() as cursor:
+                cursor.execute("""
+                    SELECT
+                        ta.id, ta.assignment_id, ta.test_id, ta.user_id, u.name, u.role,
+                        ta.attempt_no, ta.status, ta.score_percent, ta.passed,
+                        ta.started_at, ta.finished_at, ta.duration_seconds, ta.question_ids,
+                        t.title, COALESCE(t.is_final, FALSE), a.course_id, c.title
+                    FROM lms_test_attempts ta
+                    JOIN users u ON u.id = ta.user_id
+                    JOIN lms_tests t ON t.id = ta.test_id
+                    JOIN lms_course_assignments a ON a.id = ta.assignment_id
+                    JOIN lms_courses c ON c.id = a.course_id
+                    WHERE ta.id = %s
+                    LIMIT 1
+                """, (attempt_id,))
+                attempt = cursor.fetchone()
+                if not attempt:
+                    return jsonify({"error": "Attempt not found"}), 404
+                if visible_ids is not None and int(attempt[3]) not in visible_ids:
+                    return jsonify({"error": "Attempt not found"}), 404
+
+                questions = _lms_fetch_test_questions_tx(cursor, int(attempt[2]), include_correct=True)
+                selected_question_ids = _lms_parse_question_ids(attempt[13])
+                if selected_question_ids:
+                    question_map = {int(item.get('id')): item for item in questions}
+                    selected_questions = [question_map[qid] for qid in selected_question_ids if qid in question_map]
+                    if selected_questions:
+                        questions = selected_questions
+
+                cursor.execute("""
+                    SELECT question_id, answer_payload, is_correct, points_awarded, answered_at
+                    FROM lms_test_attempt_answers
+                    WHERE attempt_id = %s
+                """, (attempt_id,))
+                answer_rows = cursor.fetchall()
+                answers_by_question_id = {
+                    int(row[0]): {
+                        "answer_payload": _lms_parse_json(row[1], {}),
+                        "is_correct": (bool(row[2]) if row[2] is not None else None),
+                        "points_awarded": (float(row[3]) if row[3] is not None else None),
+                        "answered_at": row[4].isoformat() if row[4] else None,
+                    }
+                    for row in answer_rows
+                }
+        finally:
+            _record_elapsed_server_timing("lms-admin-attempt-detail-db", db_started_at)
+
+        answers = []
+        for question in questions:
+            question_id = int(question.get("id") or 0)
+            answer = answers_by_question_id.get(question_id, {})
+            answer_payload = answer.get("answer_payload", {})
+            selected_option_ids = _lms_extract_selected_option_ids(answer_payload)
+            options = question.get("options") if isinstance(question.get("options"), list) else []
+            option_by_id = {int(option.get("id") or 0): option for option in options}
+            selected_options = [
+                {
+                    "id": int(option_id),
+                    "text": option_by_id.get(int(option_id), {}).get("text"),
+                }
+                for option_id in selected_option_ids
+                if int(option_id) > 0
+            ]
+            correct_options = [
+                {
+                    "id": int(option.get("id") or 0),
+                    "text": option.get("text"),
+                }
+                for option in options
+                if bool(option.get("is_correct"))
+            ]
+            answer_text = ""
+            if isinstance(answer_payload, dict):
+                answer_text = str(
+                    answer_payload.get("text")
+                    or answer_payload.get("value")
+                    or answer_payload.get("answer")
+                    or ""
+                )
+            elif answer_payload not in (None, ""):
+                answer_text = str(answer_payload)
+
+            answers.append({
+                "question_id": question_id,
+                "type": question.get("type"),
+                "prompt": question.get("prompt"),
+                "selected_option_ids": selected_option_ids,
+                "selected_options": selected_options,
+                "correct_options": correct_options,
+                "answer_text": answer_text,
+                "answer_payload": answer_payload,
+                "is_correct": answer.get("is_correct"),
+                "points_awarded": answer.get("points_awarded"),
+                "answered_at": answer.get("answered_at"),
+            })
+
+        return jsonify({
+            "status": "success",
+            "attempt": {
+                "attempt_id": int(attempt[0]),
+                "assignment_id": int(attempt[1]),
+                "test_id": int(attempt[2]),
+                "user_id": int(attempt[3]),
+                "user_name": attempt[4],
+                "user_role": attempt[5],
+                "attempt_no": int(attempt[6] or 1),
+                "status": attempt[7],
+                "score_percent": float(attempt[8]) if attempt[8] is not None else None,
+                "passed": bool(attempt[9]) if attempt[9] is not None else None,
+                "started_at": attempt[10].isoformat() if attempt[10] else None,
+                "finished_at": attempt[11].isoformat() if attempt[11] else None,
+                "duration_seconds": int(attempt[12] or 0) if attempt[12] is not None else None,
+                "question_ids": selected_question_ids,
+                "test_title": attempt[14],
+                "is_final": bool(attempt[15]) if attempt[15] is not None else False,
+                "course_id": int(attempt[16]),
+                "course_title": attempt[17],
+            },
+            "answers": answers,
+        }), 200
+    except Exception as e:
+        logging.exception("Error in /api/lms/admin/attempts/<attempt_id>/detail")
         return jsonify({"error": "Internal server error"}), 500
 
 
