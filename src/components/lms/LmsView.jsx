@@ -1720,6 +1720,18 @@ const mapHomeCourseToView = (course) => {
   };
 };
 
+const getAdminCourseIntrinsicMetrics = (courseLike, fallbackLessons = 0) => {
+  const intrinsicLessons = Math.max(0, Number(courseLike?.total_lessons || 0));
+  const lessons = intrinsicLessons > 0
+    ? intrinsicLessons
+    : Math.max(0, Number(fallbackLessons || 0));
+  const totalDurationSeconds = Math.max(0, Number(courseLike?.total_duration_seconds || 0));
+  return {
+    lessons,
+    duration: totalDurationSeconds > 0 ? formatDurationLabel(totalDurationSeconds) : "—",
+  };
+};
+
 const mapApiQuestionToPreview = (question, fallbackId = 0) => {
   const qType = mapApiQuestionTypeToView(question?.type);
   const apiOptions = Array.isArray(question?.options) ? question.options : [];
@@ -3266,19 +3278,34 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
     }
 
     try {
-      await lmsRequest(`/api/lms/admin/courses/${normalizedCourseId}/assignments`, {
+      const payload = await lmsRequest(`/api/lms/admin/courses/${normalizedCourseId}/assignments`, {
         method: "POST",
         body: {
           user_ids: [normalizedUserId],
           due_at: dueDate ? `${dueDate} 23:59:59` : null,
         },
       });
+      const assignedCount = Array.isArray(payload?.assigned) ? payload.assigned.length : 0;
+      const skippedItems = Array.isArray(payload?.skipped) ? payload.skipped : [];
+      if (assignedCount <= 0) {
+        const skippedReason = String(skippedItems[0]?.reason || "").trim();
+        const skippedReasonLabel = {
+          not_visible_for_manager: "сотрудник недоступен для этого менеджера",
+          user_not_found: "сотрудник не найден",
+          user_not_learner: "сотруднику нельзя назначить курс",
+        }[skippedReason] || "backend не создал назначение";
+        emitToast(`Курс не назначен: ${skippedReasonLabel}`, "error");
+        return false;
+      }
       invalidateAdminCache({ courseId: normalizedCourseId });
       invalidateCourseCache(normalizedCourseId);
       const employeeLabel = String(employeeName || `#${normalizedUserId}`).trim();
       const courseLabel = String(courseTitle || `#${normalizedCourseId}`).trim();
       emitToast(`Курс «${courseLabel}» назначен сотруднику ${employeeLabel}`, "success");
-      await loadAdminData({ scope: "dashboard", force: true });
+      await Promise.all([
+        loadAdminData({ scope: "courses", force: true }),
+        loadAdminData({ scope: "employees", force: true }),
+      ]);
       return true;
     } catch (error) {
       emitToast(`Не удалось назначить курс: ${String(error?.message || "ошибка")}`, "error");
@@ -9411,7 +9438,18 @@ function CourseBuilder({
         },
       });
       const assignedCount = Array.isArray(payload?.assigned) ? payload.assigned.length : 0;
-      const skippedCount = Array.isArray(payload?.skipped) ? payload.skipped.length : 0;
+      const skippedItems = Array.isArray(payload?.skipped) ? payload.skipped : [];
+      const skippedCount = skippedItems.length;
+      if (assignedCount <= 0) {
+        const skippedReason = String(skippedItems[0]?.reason || "").trim();
+        const skippedReasonLabel = {
+          not_visible_for_manager: "сотрудники недоступны для этого менеджера",
+          user_not_found: "сотрудники не найдены",
+          user_not_learner: "выбранным сотрудникам нельзя назначить курс",
+        }[skippedReason] || "backend не создал назначения";
+        emitToast?.(`Курс не назначен: ${skippedReasonLabel}`, "error");
+        return;
+      }
       emitToast?.(`Назначение выполнено: ${assignedCount} назначено, ${skippedCount} пропущено`, "success");
       setSelectedLearnerIds([]);
       if (typeof onAfterSave === "function") {
@@ -11934,8 +11972,7 @@ function AdminView({
     const publishStatus = String(item?.status || "").trim().toLowerCase();
     const latestVersionStatus = String(item?.latest_version_status || "").trim().toLowerCase();
     const isDraftOfPublished = publishStatus === "published" && latestVersionStatus === "draft";
-    // Длительность автоматически из количества уроков
-    const adminDuration = stat.lessons > 0 ? `${stat.lessons} уроков` : "—";
+    const intrinsicMetrics = getAdminCourseIntrinsicMetrics(item, stat.lessons);
     return {
       id: Number(item?.id || index + 1),
       title: item?.title || `Курс #${item?.id || index + 1}`,
@@ -11944,8 +11981,8 @@ function AdminView({
       cover: visual.cover,
       color: visual.color,
       mandatory: false,
-      duration: adminDuration,
-      lessons: stat.lessons || 0,
+      duration: intrinsicMetrics.duration,
+      lessons: intrinsicMetrics.lessons,
       maxAttempts: Number(item?.default_attempt_limit || 3),
       attemptsUsed: 0,
       rating: 0,
@@ -12061,7 +12098,7 @@ function AdminView({
       const visual = pickCourseVisual(item?.id || index, item?.category || "");
       const stat = analyticsCourseStats.get(Number(item?.id || 0)) || {};
       const runtimeStat = courseStatMap.get(Number(item?.id || 0)) || {};
-      const lessons = Math.max(0, Number(stat?.lessons || 0));
+      const intrinsicMetrics = getAdminCourseIntrinsicMetrics(item, stat?.lessons);
       const publishStatus = String(item?.status || "").trim().toLowerCase();
       const latestVersionStatus = String(item?.latest_version_status || "").trim().toLowerCase();
       const isDraftOfPublished = publishStatus === "published" && latestVersionStatus === "draft";
@@ -12073,8 +12110,8 @@ function AdminView({
         cover: visual.cover,
         color: visual.color,
         mandatory: false,
-        duration: lessons > 0 ? `${lessons} уроков` : "—",
-        lessons,
+        duration: intrinsicMetrics.duration,
+        lessons: intrinsicMetrics.lessons,
         maxAttempts: Number(item?.default_attempt_limit || 3),
         attemptsUsed: 0,
         rating: 0,
