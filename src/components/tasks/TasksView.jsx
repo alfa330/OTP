@@ -925,13 +925,11 @@ styleTag.textContent = `
     border-color: var(--border-strong);
   }
   .tv-pin-header-btn-danger {
-    border-color: #fecdd3;
-    background: #fff1f2;
     color: #e11d48;
   }
   .tv-pin-header-btn-danger:hover:not(:disabled) {
-    border-color: #fda4af;
-    background: #ffe4e6;
+    background: #fff1f2;
+    border-color: var(--border);
     color: #be123c;
   }
   .tv-pin-header-btn:disabled {
@@ -1994,7 +1992,7 @@ export const PinnedTaskWidget = React.memo(({
           )}
           <button
             type="button"
-            className="tv-pin-header-btn tv-pin-header-btn-danger"
+            className="tv-pin-header-btn"
             title={expanded ? 'Свернуть' : 'Развернуть'}
             aria-label={expanded ? 'Свернуть' : 'Развернуть'}
             onClick={toggleExpanded}
@@ -2012,7 +2010,7 @@ export const PinnedTaskWidget = React.memo(({
           </button>
           <button
             type="button"
-            className="tv-pin-header-btn"
+            className="tv-pin-header-btn tv-pin-header-btn-danger"
             title="Открепить задачу"
             aria-label="Открепить задачу"
             onClick={() => onUnpin?.()}
