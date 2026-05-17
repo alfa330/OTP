@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
+  ChevronLeft as LucideChevronLeft,
+  ChevronRight as LucideChevronRight,
   GripHorizontal,
   LoaderCircle,
   Maximize2,
@@ -928,6 +930,50 @@ styleTag.textContent = `
     flex-direction: column;
     gap: 8px;
   }
+  .tv-pin-switcher {
+    display: grid;
+    grid-template-columns: 30px minmax(0, 1fr) 30px;
+    align-items: center;
+    gap: 6px;
+  }
+  .tv-pin-switcher-btn {
+    width: 30px;
+    height: 32px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--ink-2);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all .15s ease;
+  }
+  .tv-pin-switcher-btn:hover:not(:disabled) {
+    background: var(--border-strong);
+    color: var(--ink);
+    border-color: var(--border-strong);
+  }
+  .tv-pin-switcher-btn:disabled {
+    opacity: .45;
+    cursor: not-allowed;
+  }
+  .tv-pin-select {
+    width: 100%;
+    min-width: 0;
+    height: 32px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0 10px;
+    color: var(--ink);
+    background: var(--surface);
+    font-size: 12px;
+    outline: none;
+  }
+  .tv-pin-select:focus {
+    border-color: var(--ink-3);
+    box-shadow: 0 0 0 3px rgba(26,25,22,.06);
+  }
   .tv-pin-description {
     margin: 0;
     color: var(--ink-2);
@@ -1512,16 +1558,27 @@ const TaskDrawer = React.memo(({
 export const PinnedTaskWidget = React.memo(({
   task,
   user,
+  availableTasks = [],
+  isTasksLoading = false,
+  initialExpanded = false,
+  initialPosition = null,
   actionLoadingKey,
   onUnpin,
   onOpenDetails,
   onRunAction,
+  onSelectTask,
+  onStateChange,
 }) => {
-  const [expanded, setExpanded] = useState(false);
-  const [position, setPosition] = useState(null);
+  const [expanded, setExpanded] = useState(Boolean(initialExpanded));
+  const [position, setPosition] = useState(() => {
+    const x = Number(initialPosition?.x);
+    const y = Number(initialPosition?.y);
+    return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
+  });
   const [isDragging, setIsDragging] = useState(false);
   const widgetRef = useRef(null);
   const dragStateRef = useRef(null);
+  const latestPositionRef = useRef(position);
   const currentUserRole = normalizeRole(user?.role);
   const currentUserId = Number(user?.id || 0);
   const sm = STATUS_META[task?.status] || { label: task?.status || '—', badge: 'tv-badge-gray' };
@@ -1531,6 +1588,20 @@ export const PinnedTaskWidget = React.memo(({
       .filter((btn) => !['edit', 'delete'].includes(btn.action)),
     [task, currentUserId, currentUserRole]
   );
+  const taskOptions = useMemo(() => {
+    const unique = new Map();
+    [...availableTasks, task].filter(Boolean).forEach((item) => {
+      const id = Number(item?.id || 0);
+      if (!id || unique.has(id)) return;
+      unique.set(id, item);
+    });
+    return Array.from(unique.values()).sort((a, b) => {
+      const aTs = new Date(a?.created_at || 0).getTime() || 0;
+      const bTs = new Date(b?.created_at || 0).getTime() || 0;
+      return bTs - aTs;
+    });
+  }, [availableTasks, task]);
+  const currentTaskIndex = taskOptions.findIndex((item) => Number(item?.id || 0) === Number(task?.id || 0));
 
   const clampPosition = useCallback((nextX, nextY) => {
     const node = widgetRef.current;
@@ -1551,22 +1622,32 @@ export const PinnedTaskWidget = React.memo(({
     if (!node) return;
     const rect = node.getBoundingClientRect();
     setPosition((prev) => {
-      if (prev) return clampPosition(prev.x, prev.y);
-      return clampPosition(
-        window.innerWidth - rect.width - 18,
-        window.innerHeight - rect.height - 18
-      );
+      const next = prev
+        ? clampPosition(prev.x, prev.y)
+        : clampPosition(
+            window.innerWidth - rect.width - 18,
+            window.innerHeight - rect.height - 18
+          );
+      latestPositionRef.current = next;
+      onStateChange?.({ expanded, position: next });
+      return next;
     });
-  }, [task?.id, expanded, clampPosition]);
+  }, [task?.id, expanded, clampPosition, onStateChange]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;
     const handleResize = () => {
-      setPosition((prev) => prev ? clampPosition(prev.x, prev.y) : prev);
+      setPosition((prev) => {
+        if (!prev) return prev;
+        const next = clampPosition(prev.x, prev.y);
+        latestPositionRef.current = next;
+        onStateChange?.({ expanded, position: next });
+        return next;
+      });
     };
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
-  }, [clampPosition]);
+  }, [clampPosition, expanded, onStateChange]);
 
   const handlePointerDown = useCallback((event) => {
     if (event.button !== 0 || !widgetRef.current) return;
@@ -1583,10 +1664,12 @@ export const PinnedTaskWidget = React.memo(({
   const handlePointerMove = useCallback((event) => {
     const drag = dragStateRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
-    setPosition(clampPosition(
+    const next = clampPosition(
       event.clientX - drag.offsetX,
       event.clientY - drag.offsetY
-    ));
+    );
+    latestPositionRef.current = next;
+    setPosition(next);
   }, [clampPosition]);
 
   const handlePointerEnd = useCallback((event) => {
@@ -1595,7 +1678,33 @@ export const PinnedTaskWidget = React.memo(({
     dragStateRef.current = null;
     event.currentTarget.releasePointerCapture?.(event.pointerId);
     setIsDragging(false);
-  }, []);
+    onStateChange?.({
+      expanded,
+      position: latestPositionRef.current,
+    });
+  }, [expanded, onStateChange]);
+
+  const toggleExpanded = useCallback(() => {
+    setExpanded((prev) => {
+      const next = !prev;
+      onStateChange?.({
+        expanded: next,
+        position: latestPositionRef.current,
+      });
+      return next;
+    });
+  }, [onStateChange]);
+
+  const selectTaskByOffset = useCallback((offset) => {
+    if (taskOptions.length <= 1 || currentTaskIndex < 0) return;
+    const nextIndex = (currentTaskIndex + offset + taskOptions.length) % taskOptions.length;
+    const nextTask = taskOptions[nextIndex];
+    if (nextTask?.id) onSelectTask?.(nextTask);
+  }, [currentTaskIndex, onSelectTask, taskOptions]);
+
+  useEffect(() => {
+    latestPositionRef.current = position;
+  }, [position]);
 
   if (!task?.id) return null;
 
@@ -1629,7 +1738,7 @@ export const PinnedTaskWidget = React.memo(({
             className="tv-pin-header-btn"
             title={expanded ? 'Свернуть' : 'Развернуть'}
             aria-label={expanded ? 'Свернуть' : 'Развернуть'}
-            onClick={() => setExpanded((prev) => !prev)}
+            onClick={toggleExpanded}
           >
             {expanded ? <Minimize2 size={15} strokeWidth={2} /> : <Maximize2 size={15} strokeWidth={2} />}
           </button>
@@ -1658,6 +1767,44 @@ export const PinnedTaskWidget = React.memo(({
         <div className="tv-pin-badges">
           <span className={`tv-badge ${sm.badge}`}>{sm.label}</span>
           <span className={`tv-badge ${tm.badge}`}>{tm.label}</span>
+        </div>
+
+        <div className="tv-pin-switcher">
+          <button
+            type="button"
+            className="tv-pin-switcher-btn"
+            title="Предыдущая задача"
+            aria-label="Предыдущая задача"
+            disabled={taskOptions.length <= 1}
+            onClick={() => selectTaskByOffset(-1)}
+          >
+            <LucideChevronLeft size={15} strokeWidth={2} />
+          </button>
+          <select
+            className="tv-pin-select"
+            value={String(task.id)}
+            disabled={isTasksLoading || taskOptions.length <= 1}
+            onChange={(event) => {
+              const nextTask = taskOptions.find((item) => String(item?.id) === event.target.value);
+              if (nextTask?.id) onSelectTask?.(nextTask);
+            }}
+          >
+            {taskOptions.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.subject || `Задача #${item.id}`}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="tv-pin-switcher-btn"
+            title="Следующая задача"
+            aria-label="Следующая задача"
+            disabled={taskOptions.length <= 1}
+            onClick={() => selectTaskByOffset(1)}
+          >
+            <LucideChevronRight size={15} strokeWidth={2} />
+          </button>
         </div>
 
         {expanded && (
