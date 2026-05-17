@@ -924,6 +924,16 @@ styleTag.textContent = `
     color: var(--ink);
     border-color: var(--border-strong);
   }
+  .tv-pin-header-btn-danger {
+    border-color: #fecdd3;
+    background: #fff1f2;
+    color: #e11d48;
+  }
+  .tv-pin-header-btn-danger:hover:not(:disabled) {
+    border-color: #fda4af;
+    background: #ffe4e6;
+    color: #be123c;
+  }
   .tv-pin-header-btn:disabled {
     opacity: .55;
     cursor: not-allowed;
@@ -1984,7 +1994,7 @@ export const PinnedTaskWidget = React.memo(({
           )}
           <button
             type="button"
-            className="tv-pin-header-btn"
+            className="tv-pin-header-btn tv-pin-header-btn-danger"
             title={expanded ? 'Свернуть' : 'Развернуть'}
             aria-label={expanded ? 'Свернуть' : 'Развернуть'}
             onClick={toggleExpanded}
