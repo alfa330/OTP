@@ -1546,6 +1546,7 @@ TASK_ALLOWED_ACTIONS = {'in_progress', 'completed', 'accepted', 'returned', 'reo
 TASK_MAX_FILES = 10
 TASK_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
 TASK_ATTACHMENTS_UPLOAD_FOLDER = (os.getenv('TASK_ATTACHMENTS_UPLOAD_FOLDER') or 'TaskAttachments/').strip()
+TASK_WEB_APP_BASE_URL = (os.getenv('TASK_WEB_APP_BASE_URL') or '').strip()
 TELEGRAM_MAX_MESSAGE_CHARS = 4096
 TELEGRAM_MAX_CAPTION_CHARS = 1024
 TASK_TELEGRAM_TIMEOUT_SECONDS = 20
@@ -1593,6 +1594,36 @@ def _escape_telegram_html(text, max_chars=None):
     if max_chars is not None:
         value = _truncate_for_telegram(value, max_chars)
     return html.escape(value)
+
+
+def _build_task_deep_link(task_id, referer_url=None, origin_url=None):
+    try:
+        normalized_task_id = int(task_id)
+    except Exception:
+        return ''
+    if normalized_task_id <= 0:
+        return ''
+
+    candidates = [
+        (referer_url, False),
+        (TASK_WEB_APP_BASE_URL, True),
+        (origin_url, False),
+    ]
+    for raw_url, is_configured_url in candidates:
+        candidate = str(raw_url or '').strip()
+        if not candidate:
+            continue
+        parsed = urlparse(candidate)
+        if parsed.scheme not in {'http', 'https'} or not parsed.netloc:
+            continue
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        if not is_configured_url and not _is_allowed_origin(origin):
+            continue
+        path = parsed.path or '/'
+        if not path.startswith('/'):
+            path = f"/{path}"
+        return f"{origin}{path}?view=tasks&task_id={normalized_task_id}"
+    return ''
 
 
 def _get_telegram_error_text(response):
@@ -9994,8 +10025,20 @@ def handle_tasks():
             assignee = db.get_user(id=assigned_to)
             assignee_chat_id = assignee[1] if assignee else None
             if assignee_chat_id:
+                task_link = _build_task_deep_link(
+                    created.get("id"),
+                    referer_url=request.headers.get('Referer'),
+                    origin_url=request.headers.get('Origin')
+                )
                 tag_label = TASK_TAG_LABELS.get(tag, 'Задача')
                 requester_name = requester[2] if requester else 'Система'
+                task_subject_html = _escape_telegram_html(subject, 220)
+                if task_link:
+                    task_subject_html = (
+                        f'<a href="{_escape_telegram_html(task_link, 500)}">'
+                        f'{task_subject_html}'
+                        '</a>'
+                    )
                 message = (
                     "<b>🆕 Новая задача</b>\n\n"
                     f"<b>Тип:</b> {_escape_telegram_html(tag_label, 60)}\n"
@@ -10003,7 +10046,25 @@ def handle_tasks():
                     f"<b>От:</b> {_escape_telegram_html(requester_name, 80)}\n\n"
                     "<b>Откройте раздел «Задачи», чтобы посмотреть детали.</b>"
                 )
-                tg_response = _send_telegram_text_message(assignee_chat_id, message, parse_mode='HTML')
+                if task_link:
+                    message = message.replace(
+                        _escape_telegram_html(subject, 220),
+                        task_subject_html,
+                        1
+                    )
+                reply_markup = None
+                if task_link:
+                    reply_markup = {
+                        "inline_keyboard": [[
+                            {"text": "Открыть задачу", "url": task_link}
+                        ]]
+                    }
+                tg_response = _send_telegram_text_message(
+                    assignee_chat_id,
+                    message,
+                    parse_mode='HTML',
+                    reply_markup=reply_markup
+                )
                 if tg_response.status_code != 200:
                     error_detail = _get_telegram_error_text(tg_response)
                     telegram_warning = f"Task created, but Telegram notification failed: {error_detail}"
