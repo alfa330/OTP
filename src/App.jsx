@@ -26823,6 +26823,36 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             }, [user?.id, withAccessTokenHeader, showToast]);
 
+            const downloadPinnedTaskAttachment = useCallback(async (attachment) => {
+                const attachmentId = Number(attachment?.id || 0);
+                if (!attachmentId || !user?.id) return;
+                try {
+                    const response = await axios.get(
+                        `${API_BASE_URL}/api/tasks/attachments/${attachmentId}/download`,
+                        {
+                            headers: withAccessTokenHeader({
+                                'X-User-Id': String(user.id),
+                            }),
+                            responseType: 'blob',
+                        }
+                    );
+                    const blob = new Blob(
+                        [response.data],
+                        { type: attachment?.content_type || 'application/octet-stream' }
+                    );
+                    const url = URL.createObjectURL(blob);
+                    const link = document.createElement('a');
+                    link.href = url;
+                    link.download = attachment?.file_name || `attachment-${attachmentId}`;
+                    document.body.appendChild(link);
+                    link.click();
+                    link.remove();
+                    URL.revokeObjectURL(url);
+                } catch (error) {
+                    showToast(error?.response?.data?.error || 'Не удалось скачать файл', 'error');
+                }
+            }, [user?.id, withAccessTokenHeader, showToast]);
+
             const openResourceScheduleGeneration = useCallback(() => {
                 setResourceFteInitialView('schedule_planner');
                 navigateToView('resource_fte');
@@ -38933,6 +38963,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             onUnpin={handleUnpinTask}
                             onOpenDetails={openPinnedTaskDetails}
                             onRunAction={runPinnedTaskAction}
+                            onDownloadAttachment={downloadPinnedTaskAttachment}
                             onSelectTask={handlePinTask}
                             onStateChange={setPinnedTaskWidgetState}
                         />

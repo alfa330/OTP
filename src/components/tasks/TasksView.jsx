@@ -950,6 +950,9 @@ styleTag.textContent = `
     min-height: 0;
     overflow: hidden;
   }
+  .tv-pin-widget.is-detached .tv-pin-body:not(.is-menu-open) {
+    overflow-y: auto;
+  }
   .tv-pin-badges {
     display: flex;
     flex-wrap: wrap;
@@ -959,6 +962,19 @@ styleTag.textContent = `
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+  .tv-pin-files {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .tv-pin-file-section .tv-block-label {
+    margin: 0 0 6px;
+  }
+  .tv-pin-file-section-result .tv-file-btn {
+    background: #e0e7ff;
+    border-color: #c7d2fe;
+    color: #3730a3;
   }
   .tv-pin-menu-trigger {
     width: 30px;
@@ -1778,6 +1794,7 @@ export const PinnedTaskWidget = React.memo(({
   onUnpin,
   onOpenDetails,
   onRunAction,
+  onDownloadAttachment,
   onSelectTask,
   onStateChange,
 }) => {
@@ -1799,6 +1816,8 @@ export const PinnedTaskWidget = React.memo(({
   const currentUserId = Number(user?.id || 0);
   const sm = STATUS_META[task?.status] || { label: task?.status || '—', badge: 'tv-badge-gray' };
   const tm = TAG_META[task?.tag] || { label: task?.tag || '—', badge: 'tv-badge-gray' };
+  const attachments = Array.isArray(task?.attachments) ? task.attachments : [];
+  const compAttachments = Array.isArray(task?.completion_attachments) ? task.completion_attachments : [];
   const actionButtons = useMemo(
     () => buildTaskActionButtons(task, currentUserId, currentUserRole)
       .filter((btn) => !['edit', 'delete'].includes(btn.action)),
@@ -2050,7 +2069,7 @@ export const PinnedTaskWidget = React.memo(({
         </div>
       </header>
 
-      <div className="tv-pin-body">
+      <div className={`tv-pin-body ${taskMenuOpen ? 'is-menu-open' : ''}`}>
         <div className="tv-pin-menu-head">
           <button
             type="button"
@@ -2158,6 +2177,46 @@ export const PinnedTaskWidget = React.memo(({
                     <span className="tv-pin-meta-value">{task?.creator?.name || '—'}</span>
                   </div>
                 </div>
+                {(attachments.length > 0 || compAttachments.length > 0) && (
+                  <div className="tv-pin-files">
+                    {attachments.length > 0 && (
+                      <div className="tv-pin-file-section">
+                        <p className="tv-block-label">Файлы задачи</p>
+                        <div className="tv-file-list">
+                          {attachments.map((att) => (
+                            <button
+                              key={att.id}
+                              type="button"
+                              className="tv-file-btn"
+                              onClick={() => onDownloadAttachment?.(att)}
+                            >
+                              <FileIcon />
+                              {att.file_name}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {compAttachments.length > 0 && (
+                      <div className="tv-pin-file-section tv-pin-file-section-result">
+                        <p className="tv-block-label">Файлы выполнения</p>
+                        <div className="tv-file-list">
+                          {compAttachments.map((att) => (
+                            <button
+                              key={att.id}
+                              type="button"
+                              className="tv-file-btn"
+                              onClick={() => onDownloadAttachment?.(att)}
+                            >
+                              <FileIcon />
+                              {att.file_name}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
