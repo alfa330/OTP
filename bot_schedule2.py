@@ -1604,25 +1604,52 @@ def _build_task_deep_link(task_id, referer_url=None, origin_url=None):
     if normalized_task_id <= 0:
         return ''
 
-    candidates = [
-        (referer_url, False),
-        (TASK_WEB_APP_BASE_URL, True),
-        (origin_url, False),
-    ]
-    for raw_url, is_configured_url in candidates:
+    def _parse_candidate(raw_url, is_configured_url=False):
         candidate = str(raw_url or '').strip()
         if not candidate:
-            continue
+            return None
         parsed = urlparse(candidate)
         if parsed.scheme not in {'http', 'https'} or not parsed.netloc:
-            continue
+            return None
         origin = f"{parsed.scheme}://{parsed.netloc}"
         if not is_configured_url and not _is_allowed_origin(origin):
-            continue
+            return None
         path = parsed.path or '/'
         if not path.startswith('/'):
             path = f"/{path}"
-        return f"{origin}{path}?view=tasks&task_id={normalized_task_id}"
+        return {
+            "origin": origin,
+            "path": path,
+        }
+
+    configured_candidate = _parse_candidate(TASK_WEB_APP_BASE_URL, True)
+    request_candidates = [
+        _parse_candidate(referer_url, False),
+        _parse_candidate(origin_url, False),
+    ]
+
+    # When the request comes from the same public origin as the configured app,
+    # keep the configured app path (e.g. GitHub Pages /OTP) instead of a bare
+    # origin-only Referer/Origin that would incorrectly collapse to "/".
+    if configured_candidate and any(
+        candidate and candidate["origin"] == configured_candidate["origin"]
+        for candidate in request_candidates
+    ):
+        return (
+            f"{configured_candidate['origin']}{configured_candidate['path']}"
+            f"?view=tasks&task_id={normalized_task_id}"
+        )
+
+    for candidate in request_candidates:
+        if not candidate:
+            continue
+        return f"{candidate['origin']}{candidate['path']}?view=tasks&task_id={normalized_task_id}"
+
+    if configured_candidate:
+        return (
+            f"{configured_candidate['origin']}{configured_candidate['path']}"
+            f"?view=tasks&task_id={normalized_task_id}"
+        )
     return ''
 
 
