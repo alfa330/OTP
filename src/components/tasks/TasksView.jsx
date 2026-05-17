@@ -1,13 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import axios from 'axios';
 import {
   ChevronLeft as LucideChevronLeft,
-  ChevronRight as LucideChevronRight,
   GripHorizontal,
   LoaderCircle,
   Maximize2,
   Minimize2,
   PanelRightOpen,
+  PictureInPicture2,
   Pin,
   PinOff,
   RefreshCw,
@@ -836,6 +837,15 @@ styleTag.textContent = `
     font-family: 'DM Sans', sans-serif;
     user-select: none;
   }
+  .tv-pin-widget.is-detached {
+    position: relative;
+    inset: auto;
+    width: 100%;
+    min-height: 100vh;
+    border-radius: 0;
+    border: 0;
+    box-shadow: none;
+  }
   .tv-pin-widget.is-dragging {
     box-shadow: 0 24px 72px rgba(0,0,0,.2), 0 10px 28px rgba(0,0,0,.14);
   }
@@ -930,13 +940,7 @@ styleTag.textContent = `
     flex-direction: column;
     gap: 8px;
   }
-  .tv-pin-switcher {
-    display: grid;
-    grid-template-columns: 30px minmax(0, 1fr) 30px;
-    align-items: center;
-    gap: 6px;
-  }
-  .tv-pin-switcher-btn {
+  .tv-pin-menu-trigger {
     width: 30px;
     height: 32px;
     border-radius: 8px;
@@ -949,30 +953,127 @@ styleTag.textContent = `
     cursor: pointer;
     transition: all .15s ease;
   }
-  .tv-pin-switcher-btn:hover:not(:disabled) {
+  .tv-pin-menu-trigger:hover:not(:disabled) {
     background: var(--border-strong);
     color: var(--ink);
     border-color: var(--border-strong);
   }
-  .tv-pin-switcher-btn:disabled {
-    opacity: .45;
-    cursor: not-allowed;
+  .tv-pin-menu-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
   }
-  .tv-pin-select {
-    width: 100%;
-    min-width: 0;
-    height: 32px;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 0 10px;
-    color: var(--ink);
-    background: var(--surface);
+  .tv-pin-menu-title {
+    margin: 0;
+    color: var(--ink-2);
     font-size: 12px;
-    outline: none;
+    font-weight: 700;
   }
-  .tv-pin-select:focus {
-    border-color: var(--ink-3);
-    box-shadow: 0 0 0 3px rgba(26,25,22,.06);
+  .tv-pin-task-menu {
+    display: grid;
+    grid-template-columns: 48px minmax(0, 1fr);
+    gap: 10px;
+    min-height: 176px;
+  }
+  .tv-pin-people-rail {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    align-items: center;
+  }
+  .tv-pin-person-btn {
+    width: 42px;
+    height: 42px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all .15s ease;
+  }
+  .tv-pin-person-btn:hover,
+  .tv-pin-person-btn.is-active {
+    border-color: #c7d2fe;
+    background: #eef2ff;
+  }
+  .tv-pin-person-btn .tv-avatar-md {
+    width: 30px;
+    height: 30px;
+    font-size: 11px;
+  }
+  .tv-pin-menu-panel {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .tv-pin-person-summary {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .tv-pin-person-summary-name {
+    color: var(--ink);
+    font-size: 13px;
+    font-weight: 700;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tv-pin-person-summary-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    color: var(--ink-2);
+    font-size: 11px;
+  }
+  .tv-pin-person-summary-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .tv-pin-person-task-list {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    max-height: 180px;
+    overflow: auto;
+  }
+  .tv-pin-person-task {
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    background: var(--surface);
+    color: var(--ink);
+    padding: 8px 9px;
+    text-align: left;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .tv-pin-person-task:hover,
+  .tv-pin-person-task.is-active {
+    border-color: #c7d2fe;
+    background: #eef2ff;
+  }
+  .tv-pin-person-task-title {
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.35;
+  }
+  .tv-pin-person-task-meta {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex-wrap: wrap;
   }
   .tv-pin-description {
     margin: 0;
@@ -1575,6 +1676,10 @@ export const PinnedTaskWidget = React.memo(({
     const y = Number(initialPosition?.y);
     return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
   });
+  const [taskMenuOpen, setTaskMenuOpen] = useState(false);
+  const [selectedCreatorKey, setSelectedCreatorKey] = useState(null);
+  const [pipContainer, setPipContainer] = useState(null);
+  const [pipWindow, setPipWindow] = useState(null);
   const [isDragging, setIsDragging] = useState(false);
   const widgetRef = useRef(null);
   const dragStateRef = useRef(null);
@@ -1601,7 +1706,18 @@ export const PinnedTaskWidget = React.memo(({
       return bTs - aTs;
     });
   }, [availableTasks, task]);
-  const currentTaskIndex = taskOptions.findIndex((item) => Number(item?.id || 0) === Number(task?.id || 0));
+  const incomingTaskOptions = useMemo(
+    () => taskOptions.filter((item) => Number(item?.assignee?.id || 0) === currentUserId),
+    [currentUserId, taskOptions]
+  );
+  const creatorGroups = useMemo(
+    () => groupTasksByPerson(incomingTaskOptions, (item) => item?.creator),
+    [incomingTaskOptions]
+  );
+  const activeCreatorGroup = useMemo(
+    () => creatorGroups.find((group) => group.key === selectedCreatorKey) || creatorGroups[0] || null,
+    [creatorGroups, selectedCreatorKey]
+  );
 
   const clampPosition = useCallback((nextX, nextY) => {
     const node = widgetRef.current;
@@ -1695,44 +1811,104 @@ export const PinnedTaskWidget = React.memo(({
     });
   }, [onStateChange]);
 
-  const selectTaskByOffset = useCallback((offset) => {
-    if (taskOptions.length <= 1 || currentTaskIndex < 0) return;
-    const nextIndex = (currentTaskIndex + offset + taskOptions.length) % taskOptions.length;
-    const nextTask = taskOptions[nextIndex];
-    if (nextTask?.id) onSelectTask?.(nextTask);
-  }, [currentTaskIndex, onSelectTask, taskOptions]);
-
   useEffect(() => {
     latestPositionRef.current = position;
   }, [position]);
 
+  useEffect(() => {
+    if (!creatorGroups.length) {
+      setSelectedCreatorKey(null);
+      return;
+    }
+    setSelectedCreatorKey((prev) => {
+      if (prev && creatorGroups.some((group) => group.key === prev)) return prev;
+      const taskCreatorId = Number(task?.creator?.id || 0);
+      const matchingGroup = creatorGroups.find((group) => Number(group?.personId || 0) === taskCreatorId);
+      return matchingGroup?.key || creatorGroups[0].key;
+    });
+  }, [creatorGroups, task?.creator?.id]);
+
+  useEffect(() => {
+    if (!pipWindow) return undefined;
+    const handlePageHide = () => {
+      setPipWindow(null);
+      setPipContainer(null);
+    };
+    pipWindow.addEventListener('pagehide', handlePageHide);
+    return () => pipWindow.removeEventListener('pagehide', handlePageHide);
+  }, [pipWindow]);
+
+  useEffect(() => () => {
+    try {
+      pipWindow?.close?.();
+    } catch (error) {
+      // Ignore browser shutdown races while closing the widget.
+    }
+  }, [pipWindow]);
+
+  const openDocumentPictureInPicture = useCallback(async () => {
+    if (typeof window === 'undefined' || !window.documentPictureInPicture?.requestWindow || pipWindow) return;
+    try {
+      const nextPipWindow = await window.documentPictureInPicture.requestWindow({
+        width: 420,
+        height: 520,
+      });
+      nextPipWindow.document.title = 'Закрепленная задача';
+      Array.from(document.querySelectorAll('link[rel="stylesheet"], style')).forEach((node) => {
+        nextPipWindow.document.head.appendChild(node.cloneNode(true));
+      });
+      nextPipWindow.document.body.style.margin = '0';
+      nextPipWindow.document.body.style.background = '#f4f3f0';
+      nextPipWindow.document.body.style.minHeight = '100vh';
+      const root = nextPipWindow.document.createElement('div');
+      nextPipWindow.document.body.appendChild(root);
+      setPipWindow(nextPipWindow);
+      setPipContainer(root);
+    } catch (error) {
+      // The browser can reject PiP if it is unavailable or not user-triggered.
+    }
+  }, [pipWindow]);
+
   if (!task?.id) return null;
 
-  return (
+  const widgetMarkup = (
     <section
       ref={widgetRef}
-      className={`tv-pin-widget ${isDragging ? 'is-dragging' : ''}`}
-      style={position ? { left: position.x, top: position.y } : { right: 18, bottom: 18 }}
+      className={`tv-pin-widget ${isDragging ? 'is-dragging' : ''} ${pipWindow ? 'is-detached' : ''}`}
+      style={pipWindow ? undefined : (position ? { left: position.x, top: position.y } : { right: 18, bottom: 18 })}
       aria-label="Закрепленная задача"
     >
       <header className="tv-pin-header">
-        <button
-          type="button"
-          className="tv-pin-drag-handle"
-          aria-label="Перетащить закрепленную задачу"
-          title="Перетащить"
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerEnd}
-          onPointerCancel={handlePointerEnd}
-        >
-          <GripHorizontal size={16} strokeWidth={2} />
-        </button>
+        {!pipWindow && (
+          <button
+            type="button"
+            className="tv-pin-drag-handle"
+            aria-label="Перетащить закрепленную задачу"
+            title="Перетащить"
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerEnd}
+            onPointerCancel={handlePointerEnd}
+          >
+            <GripHorizontal size={16} strokeWidth={2} />
+          </button>
+        )}
         <div className="tv-pin-heading">
           <span className="tv-pin-kicker">Закрепленная задача</span>
           <h2 className="tv-pin-title">{task.subject || 'Без темы'}</h2>
         </div>
         <div className="tv-pin-header-actions">
+          {!pipWindow && typeof window !== 'undefined' && window.documentPictureInPicture?.requestWindow && (
+            <button
+              type="button"
+              className="tv-pin-header-btn"
+              title="Открыть поверх окон"
+              aria-label="Открыть поверх окон"
+              onClick={openDocumentPictureInPicture}
+            >
+              <PictureInPicture2 size={15} strokeWidth={2} />
+            </button>
+          )}
           <button
             type="button"
             className="tv-pin-header-btn"
@@ -1764,89 +1940,134 @@ export const PinnedTaskWidget = React.memo(({
       </header>
 
       <div className="tv-pin-body">
-        <div className="tv-pin-badges">
-          <span className={`tv-badge ${sm.badge}`}>{sm.label}</span>
-          <span className={`tv-badge ${tm.badge}`}>{tm.label}</span>
-        </div>
-
-        <div className="tv-pin-switcher">
+        <div className="tv-pin-menu-head">
           <button
             type="button"
-            className="tv-pin-switcher-btn"
-            title="Предыдущая задача"
-            aria-label="Предыдущая задача"
-            disabled={taskOptions.length <= 1}
-            onClick={() => selectTaskByOffset(-1)}
+            className="tv-pin-menu-trigger"
+            title={taskMenuOpen ? 'Вернуться к задаче' : 'Открыть меню задач'}
+            aria-label={taskMenuOpen ? 'Вернуться к задаче' : 'Открыть меню задач'}
+            onClick={() => setTaskMenuOpen((prev) => !prev)}
           >
             <LucideChevronLeft size={15} strokeWidth={2} />
           </button>
-          <select
-            className="tv-pin-select"
-            value={String(task.id)}
-            disabled={isTasksLoading || taskOptions.length <= 1}
-            onChange={(event) => {
-              const nextTask = taskOptions.find((item) => String(item?.id) === event.target.value);
-              if (nextTask?.id) onSelectTask?.(nextTask);
-            }}
-          >
-            {taskOptions.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.subject || `Задача #${item.id}`}
-              </option>
-            ))}
-          </select>
-          <button
-            type="button"
-            className="tv-pin-switcher-btn"
-            title="Следующая задача"
-            aria-label="Следующая задача"
-            disabled={taskOptions.length <= 1}
-            onClick={() => selectTaskByOffset(1)}
-          >
-            <LucideChevronRight size={15} strokeWidth={2} />
-          </button>
+          <p className="tv-pin-menu-title">{taskMenuOpen ? 'Меню задач' : 'Текущая задача'}</p>
+          <div className="tv-pin-badges">
+            <span className={`tv-badge ${sm.badge}`}>{sm.label}</span>
+            <span className={`tv-badge ${tm.badge}`}>{tm.label}</span>
+          </div>
         </div>
 
-        {expanded && (
-          <div className="tv-pin-summary">
-            <p className="tv-pin-description">
-              {task.description || 'Описание не добавлено.'}
-            </p>
-            <div className="tv-pin-meta">
-              <div className="tv-pin-meta-item">
-                <span className="tv-pin-meta-label">Исполнитель</span>
-                <span className="tv-pin-meta-value">{task?.assignee?.name || '—'}</span>
-              </div>
-              <div className="tv-pin-meta-item">
-                <span className="tv-pin-meta-label">Постановщик</span>
-                <span className="tv-pin-meta-value">{task?.creator?.name || '—'}</span>
-              </div>
+        {taskMenuOpen ? (
+          <div className="tv-pin-task-menu">
+            <div className="tv-pin-people-rail">
+              {creatorGroups.map((group) => (
+                <button
+                  key={group.key}
+                  type="button"
+                  className={`tv-pin-person-btn ${activeCreatorGroup?.key === group.key ? 'is-active' : ''}`}
+                  title={group.name}
+                  aria-label={group.name}
+                  onClick={() => setSelectedCreatorKey(group.key)}
+                >
+                  <AvatarCircle className="tv-avatar-md" name={group.name} avatarUrl={group.avatarUrl} />
+                </button>
+              ))}
+            </div>
+            <div className="tv-pin-menu-panel">
+              {activeCreatorGroup ? (
+                <>
+                  <div className="tv-pin-person-summary">
+                    <span className="tv-pin-person-summary-name">{activeCreatorGroup.name}</span>
+                    <span className="tv-pin-person-summary-stats">
+                      <span className="tv-pin-person-summary-chip">
+                        <span className="tv-task-count">{activeCreatorGroup.done}</span> выполнено
+                      </span>
+                      <span className="tv-pin-person-summary-chip">
+                        <span className="tv-task-count">{activeCreatorGroup.active}</span> в работе
+                      </span>
+                      <span className="tv-pin-person-summary-chip">
+                        <span className={`tv-task-count ${activeCreatorGroup.notAccepted > 0 ? 'is-alert' : ''}`}>
+                          {activeCreatorGroup.notAccepted}
+                        </span> ждут принятия
+                      </span>
+                    </span>
+                  </div>
+                  <div className="tv-pin-person-task-list">
+                    {activeCreatorGroup.tasks.map((item) => {
+                      const itemStatus = STATUS_META[item.status] || { label: item.status || '—', badge: 'tv-badge-gray' };
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          className={`tv-pin-person-task ${Number(item?.id || 0) === Number(task.id) ? 'is-active' : ''}`}
+                          onClick={() => {
+                            onSelectTask?.(item);
+                            setTaskMenuOpen(false);
+                          }}
+                        >
+                          <span className="tv-pin-person-task-title">{item.subject || `Задача #${item.id}`}</span>
+                          <span className="tv-pin-person-task-meta">
+                            <span className={`tv-badge ${itemStatus.badge}`}>{itemStatus.label}</span>
+                            <span className="tv-task-row-date">{fmt(item.created_at)}</span>
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </>
+              ) : (
+                <span className="tv-pin-empty-actions">
+                  {isTasksLoading ? 'Загружаю задачи...' : 'Входящих задач пока нет.'}
+                </span>
+              )}
             </div>
           </div>
-        )}
+        ) : (
+          <>
+            {expanded && (
+              <div className="tv-pin-summary">
+                <p className="tv-pin-description">
+                  {task.description || 'Описание не добавлено.'}
+                </p>
+                <div className="tv-pin-meta">
+                  <div className="tv-pin-meta-item">
+                    <span className="tv-pin-meta-label">Исполнитель</span>
+                    <span className="tv-pin-meta-value">{task?.assignee?.name || '—'}</span>
+                  </div>
+                  <div className="tv-pin-meta-item">
+                    <span className="tv-pin-meta-label">Постановщик</span>
+                    <span className="tv-pin-meta-value">{task?.creator?.name || '—'}</span>
+                  </div>
+                </div>
+              </div>
+            )}
 
-        <div className="tv-pin-actions">
-          {actionButtons.length > 0 ? actionButtons.map((btn) => {
-            const loading = actionLoadingKey === `${task.id}:${btn.action}`;
-            return (
-              <button
-                key={btn.action}
-                type="button"
-                className={`tv-btn ${btn.cls}`}
-                disabled={!!actionLoadingKey}
-                onClick={() => onRunAction?.(task, btn.action)}
-              >
-                {loading && <LoaderCircle size={14} strokeWidth={2} className="animate-spin" />}
-                {loading ? 'Сохраняю...' : btn.label}
-              </button>
-            );
-          }) : (
-            <span className="tv-pin-empty-actions">Для текущего статуса быстрых действий нет.</span>
-          )}
-        </div>
+            <div className="tv-pin-actions">
+              {actionButtons.length > 0 ? actionButtons.map((btn) => {
+                const loading = actionLoadingKey === `${task.id}:${btn.action}`;
+                return (
+                  <button
+                    key={btn.action}
+                    type="button"
+                    className={`tv-btn ${btn.cls}`}
+                    disabled={!!actionLoadingKey}
+                    onClick={() => onRunAction?.(task, btn.action)}
+                  >
+                    {loading && <LoaderCircle size={14} strokeWidth={2} className="animate-spin" />}
+                    {loading ? 'Сохраняю...' : btn.label}
+                  </button>
+                );
+              }) : (
+                <span className="tv-pin-empty-actions">Для текущего статуса быстрых действий нет.</span>
+              )}
+            </div>
+          </>
+        )}
       </div>
     </section>
   );
+
+  return pipContainer ? createPortal(widgetMarkup, pipContainer) : widgetMarkup;
 });
 
 /* ─── Skeleton loading ─── */
