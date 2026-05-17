@@ -2457,7 +2457,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
       if (scope === "course" && normalizedCourseId && cacheState.courseAnalytics.has(normalizedCourseId)) {
         return { progressRows: adminProgressRows, attempts: adminAttempts };
       }
-      const tabKey = (scope === "analytics" || scope === "employees") ? `${scope}:${month}` : scope;
+      const tabKey = (scope === "analytics" || scope === "employees" || scope === "courses") ? `${scope}:${month}` : scope;
       if (cacheState.tabMonthCache.has(tabKey)) {
         return { adminCourses, analytics: adminAnalytics, progressRows: adminProgressRows, attempts: adminAttempts };
       }
@@ -2465,7 +2465,7 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
 
     const loadKey = scope === "course" && normalizedCourseId
       ? `course:${normalizedCourseId}`
-      : (scope === "analytics" || scope === "employees") ? `${scope}:${month}` : scope;
+      : (scope === "analytics" || scope === "employees" || scope === "courses") ? `${scope}:${month}` : scope;
     const existingPromise = adminLoadPromisesRef.current.get(loadKey);
     if (existingPromise) return existingPromise;
 
@@ -2540,13 +2540,19 @@ export default function LmsView({ user, apiBaseUrl, withAccessTokenHeader, showT
         }
 
         if (scope === "courses") {
-          const coursesRes = await lmsRequest(`/api/lms/admin/courses?include_stats=1${mq ? `&${mq}` : ""}`).catch(() => null);
+          const hasAnalyticsForMonth = cacheState.tabMonthCache.has(`analytics:${month}`);
+          const coursesPath = hasAnalyticsForMonth
+            ? "/api/lms/admin/courses"
+            : `/api/lms/admin/courses?include_stats=1${mq ? `&${mq}` : ""}`;
+          const coursesRes = await lmsRequest(coursesPath).catch(() => null);
           if (coursesRes) {
             setAdminCourses(Array.isArray(coursesRes?.courses) ? coursesRes.courses : []);
-            setAdminCourseStats(Array.isArray(coursesRes?.course_stats) ? coursesRes.course_stats : []);
+            if (!hasAnalyticsForMonth) {
+              setAdminCourseStats(Array.isArray(coursesRes?.course_stats) ? coursesRes.course_stats : []);
+            }
             cacheState.coursesLoaded = true;
           }
-          cacheState.tabMonthCache.add("courses");
+          cacheState.tabMonthCache.add(`courses:${month}`);
           setApiMode(true);
           return { adminCourses };
         }
