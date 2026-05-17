@@ -23599,7 +23599,11 @@ def lms_admin_courses():
                         latest_cv.id,
                         latest_cv.version_number,
                         latest_cv.status,
-                        latest_cv.created_at
+                        latest_cv.created_at,
+                        COALESCE(lesson_stats.total_lessons, 0) AS total_lessons,
+                        COALESCE(lesson_stats.lessons_duration_seconds, 0) AS lessons_duration_seconds,
+                        COALESCE(test_stats.total_tests, 0) AS total_tests,
+                        COALESCE(test_stats.tests_duration_seconds, 0) AS tests_duration_seconds
                     FROM lms_courses c
                     LEFT JOIN lms_course_versions cv ON cv.id = c.current_version_id
                     LEFT JOIN LATERAL (
@@ -23613,6 +23617,29 @@ def lms_admin_courses():
                         ORDER BY cvl.version_number DESC, cvl.id DESC
                         LIMIT 1
                     ) latest_cv ON TRUE
+                    LEFT JOIN (
+                        SELECT
+                            m.course_version_id,
+                            COUNT(l.id) AS total_lessons,
+                            COALESCE(SUM(l.duration_seconds), 0) AS lessons_duration_seconds
+                        FROM lms_modules m
+                        JOIN lms_lessons l ON l.module_id = m.id
+                        GROUP BY m.course_version_id
+                    ) lesson_stats ON lesson_stats.course_version_id = c.current_version_id
+                    LEFT JOIN (
+                        SELECT
+                            t.course_version_id,
+                            COUNT(*) FILTER (WHERE t.status <> 'archived') AS total_tests,
+                            COALESCE(SUM(
+                                COALESCE(
+                                    NULLIF(to_jsonb(t) ->> 'time_limit_seconds', '')::INTEGER,
+                                    t.time_limit_minutes * 60,
+                                    0
+                                )
+                            ) FILTER (WHERE t.status <> 'archived'), 0) AS tests_duration_seconds
+                        FROM lms_tests t
+                        GROUP BY t.course_version_id
+                    ) test_stats ON test_stats.course_version_id = c.current_version_id
                     ORDER BY c.updated_at DESC, c.id DESC
                     """)
                     rows = cursor.fetchall()
@@ -23625,6 +23652,9 @@ def lms_admin_courses():
                         latest_version_status = str(row[16] or '').strip().lower() or None
                         latest_version_created_at = row[17].isoformat() if row[17] else None
                         latest_is_draft = latest_version_status == 'draft' and latest_version_id is not None
+                        total_lessons = int(row[18] or 0)
+                        total_tests = int(row[20] or 0)
+                        total_duration_seconds = int(row[19] or 0) + int(row[21] or 0)
                         courses.append({
                         "id": int(row[0]),
                         "slug": row[1],
@@ -23653,7 +23683,10 @@ def lms_admin_courses():
                         "has_draft_version": latest_is_draft,
                         "latest_draft_version_id": latest_version_id if latest_is_draft else None,
                         "latest_draft_version_number": latest_version_number if latest_is_draft else None,
-                        "latest_draft_created_at": latest_version_created_at if latest_is_draft else None
+                        "latest_draft_created_at": latest_version_created_at if latest_is_draft else None,
+                        "total_lessons": total_lessons,
+                        "total_tests": total_tests,
+                        "total_duration_seconds": total_duration_seconds
                         })
                     payload = {"status": "success", "courses": courses}
                     if include_stats:
