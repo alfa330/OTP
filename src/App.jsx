@@ -18,6 +18,36 @@ import OrazAitSplash from './components/common/OrazAitSplash';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole } from './utils/roles';
 
 const CHUNK_RELOAD_STORAGE_KEY = 'otp_chunk_reload_attempted';
+const PINNED_TASK_STORAGE_KEY_PREFIX = 'otp_pinned_task';
+
+const buildPinnedTaskStorageKey = (userId) =>
+    userId ? `${PINNED_TASK_STORAGE_KEY_PREFIX}:${userId}` : '';
+
+const compactPinnedTaskForStorage = (task) => {
+    if (!task?.id) return null;
+    return {
+        id: task.id,
+        subject: task.subject || '',
+        description: task.description || '',
+        status: task.status || '',
+        tag: task.tag || '',
+        created_at: task.created_at || '',
+        creator: task.creator ? {
+            id: task.creator.id,
+            name: task.creator.name || '',
+        } : null,
+        assignee: task.assignee ? {
+            id: task.assignee.id,
+            name: task.assignee.name || '',
+        } : null,
+    };
+};
+
+const normalizePinnedTaskPosition = (value) => {
+    const x = Number(value?.x);
+    const y = Number(value?.y);
+    return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
+};
 
 const lazyWithRetry = (importer) =>
     lazy(async () => {
@@ -25324,6 +25354,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return initialViewFromUrl || 'hours';
             });
             const [pinnedTask, setPinnedTask] = useState(null);
+            const [pinnedTaskPool, setPinnedTaskPool] = useState([]);
+            const [isPinnedTaskPoolLoading, setIsPinnedTaskPoolLoading] = useState(false);
+            const [pinnedTaskWidgetState, setPinnedTaskWidgetState] = useState({
+                expanded: false,
+                position: null,
+            });
             const [pinnedTaskActionLoadingKey, setPinnedTaskActionLoadingKey] = useState('');
             const [taskFocusRequest, setTaskFocusRequest] = useState(null);
             const [taskRefreshToken, setTaskRefreshToken] = useState(0);
@@ -26601,13 +26637,67 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, []);
 
             useEffect(() => {
-                setPinnedTask(null);
                 setPinnedTaskActionLoadingKey('');
+                setPinnedTaskPool([]);
+                setIsPinnedTaskPoolLoading(false);
+
+                const storageKey = buildPinnedTaskStorageKey(user?.id);
+                const storage = safeGetBrowserStorage('localStorage');
+                if (!storageKey) {
+                    setPinnedTask(null);
+                    setPinnedTaskWidgetState({ expanded: false, position: null });
+                    return;
+                }
+
+                const raw = safeStorageGetItem(storage, storageKey);
+                if (!raw) {
+                    setPinnedTask(null);
+                    setPinnedTaskWidgetState({ expanded: false, position: null });
+                    return;
+                }
+
+                try {
+                    const parsed = JSON.parse(raw);
+                    const restoredTask = parsed?.task?.id ? parsed.task : null;
+                    setPinnedTask(restoredTask);
+                    setPinnedTaskWidgetState({
+                        expanded: Boolean(parsed?.expanded),
+                        position: normalizePinnedTaskPosition(parsed?.position),
+                    });
+                } catch (error) {
+                    setPinnedTask(null);
+                    setPinnedTaskWidgetState({ expanded: false, position: null });
+                    safeStorageRemoveItem(storage, storageKey);
+                }
             }, [user?.id]);
+
+            useEffect(() => {
+                const storageKey = buildPinnedTaskStorageKey(user?.id);
+                const storage = safeGetBrowserStorage('localStorage');
+                if (!storageKey) return;
+
+                if (!pinnedTask?.id) {
+                    safeStorageRemoveItem(storage, storageKey);
+                    return;
+                }
+
+                safeStorageSetItem(storage, storageKey, JSON.stringify({
+                    task: compactPinnedTaskForStorage(pinnedTask),
+                    expanded: Boolean(pinnedTaskWidgetState?.expanded),
+                    position: normalizePinnedTaskPosition(pinnedTaskWidgetState?.position),
+                }));
+            }, [user?.id, pinnedTask, pinnedTaskWidgetState]);
 
             const handlePinTask = useCallback((task) => {
                 if (!task?.id) return;
                 setPinnedTask(task);
+                setPinnedTaskPool((prev) => {
+                    const next = Array.isArray(prev) ? [...prev] : [];
+                    const existingIndex = next.findIndex((item) => Number(item?.id || 0) === Number(task.id));
+                    if (existingIndex >= 0) next[existingIndex] = task;
+                    else next.unshift(task);
+                    return next;
+                });
             }, []);
 
             const handleUnpinTask = useCallback(() => {
@@ -26620,7 +26710,46 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setPinnedTask((prev) => (
                     Number(prev?.id || 0) === Number(task.id) ? task : prev
                 ));
+                setPinnedTaskPool((prev) => {
+                    const next = Array.isArray(prev) ? [...prev] : [];
+                    const existingIndex = next.findIndex((item) => Number(item?.id || 0) === Number(task.id));
+                    if (existingIndex >= 0) next[existingIndex] = task;
+                    else next.unshift(task);
+                    return next;
+                });
             }, []);
+
+            const refreshPinnedTaskPool = useCallback(async () => {
+                if (!user?.id || !canUsePinnedTasks) {
+                    setPinnedTaskPool([]);
+                    return [];
+                }
+
+                setIsPinnedTaskPoolLoading(true);
+                try {
+                    const response = await axios.get(`${API_BASE_URL}/api/tasks`, {
+                        headers: withAccessTokenHeader({
+                            'X-User-Id': String(user.id),
+                        }),
+                    });
+                    const list = Array.isArray(response?.data?.tasks) ? response.data.tasks : [];
+                    setPinnedTaskPool(list);
+                    setPinnedTask((prev) => {
+                        if (!prev?.id) return prev;
+                        return list.find((task) => Number(task?.id || 0) === Number(prev.id)) || null;
+                    });
+                    return list;
+                } catch (error) {
+                    return [];
+                } finally {
+                    setIsPinnedTaskPoolLoading(false);
+                }
+            }, [user?.id, canUsePinnedTasks, withAccessTokenHeader]);
+
+            useEffect(() => {
+                if (!user?.id || !canUsePinnedTasks) return;
+                refreshPinnedTaskPool();
+            }, [user?.id, canUsePinnedTasks, taskRefreshToken, refreshPinnedTaskPool]);
 
             const openPinnedTaskDetails = useCallback((task) => {
                 const taskId = Number(task?.id || 0);
@@ -26654,6 +26783,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         setPinnedTask((prev) => (
                             Number(prev?.id || 0) === taskId ? nextTask : prev
                         ));
+                        setPinnedTaskPool((prev) => {
+                            const next = Array.isArray(prev) ? [...prev] : [];
+                            const existingIndex = next.findIndex((item) => Number(item?.id || 0) === taskId);
+                            if (existingIndex >= 0) next[existingIndex] = nextTask;
+                            else next.unshift(nextTask);
+                            return next;
+                        });
                     }
                     setTaskRefreshToken((prev) => prev + 1);
                 } catch (error) {
@@ -38757,10 +38893,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         <PinnedTaskWidget
                             task={pinnedTask}
                             user={user}
+                            availableTasks={pinnedTaskPool}
+                            isTasksLoading={isPinnedTaskPoolLoading}
+                            initialExpanded={pinnedTaskWidgetState.expanded}
+                            initialPosition={pinnedTaskWidgetState.position}
                             actionLoadingKey={pinnedTaskActionLoadingKey}
                             onUnpin={handleUnpinTask}
                             onOpenDetails={openPinnedTaskDetails}
                             onRunAction={runPinnedTaskAction}
+                            onSelectTask={handlePinTask}
+                            onStateChange={setPinnedTaskWidgetState}
                         />
                     )}
 
