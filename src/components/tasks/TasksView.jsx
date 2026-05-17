@@ -4,6 +4,7 @@ import axios from 'axios';
 import {
   ChevronLeft as LucideChevronLeft,
   GripHorizontal,
+  Link2,
   LoaderCircle,
   Maximize2,
   Minimize2,
@@ -1158,6 +1159,39 @@ styleTag.textContent = `
 `;
 document.head.appendChild(styleTag);
 
+const TASK_VIEW_QUERY_PARAM = 'view';
+const TASK_ID_QUERY_PARAM = 'task_id';
+
+const buildTaskDeepLink = (taskId) => {
+  if (typeof window === 'undefined') return '';
+  const normalizedTaskId = Number(taskId || 0);
+  if (!Number.isInteger(normalizedTaskId) || normalizedTaskId <= 0) return '';
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.set(TASK_VIEW_QUERY_PARAM, 'tasks');
+    url.searchParams.set(TASK_ID_QUERY_PARAM, String(normalizedTaskId));
+    return url.toString();
+  } catch (error) {
+    return '';
+  }
+};
+
+const syncTaskDeepLink = (taskId) => {
+  if (typeof window === 'undefined') return;
+  try {
+    const url = new URL(window.location.href);
+    if (taskId) {
+      url.searchParams.set(TASK_VIEW_QUERY_PARAM, 'tasks');
+      url.searchParams.set(TASK_ID_QUERY_PARAM, String(taskId));
+    } else {
+      url.searchParams.delete(TASK_ID_QUERY_PARAM);
+    }
+    window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+  } catch (error) {
+    // Ignore URL-sync failures in constrained browser contexts.
+  }
+};
+
 /* ─── Constants ─── */
 const TAG_OPTIONS = [
   { value: 'task',       label: 'Задача' },
@@ -1429,7 +1463,7 @@ const TaskRow = React.memo(({ task, onClick, onPin, isPinned }) => {
 const TaskDrawer = React.memo(({
   task, onClose, actionLoadingKey,
   getActionButtons, openCompleteModal, openStatusModal, updateStatus, downloadAttachment,
-  onEditTask, onDeleteTask, onTogglePinTask, isPinned,
+  onEditTask, onDeleteTask, onTogglePinTask, onCopyTaskLink, isPinned,
 }) => {
   const sm = STATUS_META[task.status] || { label: task.status, badge: 'tv-badge-gray' };
   const tm = TAG_META[task.tag]       || { label: task.tag || '—', badge: 'tv-badge-gray' };
@@ -1476,6 +1510,17 @@ const TaskDrawer = React.memo(({
             </div>
           </div>
           <div className="tv-drawer-header-actions">
+            {typeof onCopyTaskLink === 'function' && (
+              <button
+                type="button"
+                className="tv-icon-btn"
+                title="Скопировать ссылку на задачу"
+                aria-label="Скопировать ссылку на задачу"
+                onClick={() => onCopyTaskLink(task)}
+              >
+                <Link2 size={15} strokeWidth={2} />
+              </button>
+            )}
             {typeof onTogglePinTask === 'function' && (
               <button
                 type="button"
@@ -2137,6 +2182,7 @@ const TasksView = ({
   const pagedRequestIdRef      = useRef(0);
   const personTasksRequestIdRef = useRef(0);
   const handledFocusRequestRef = useRef(0);
+  const hasSyncedDrawerUrlRef   = useRef(false);
   const [form, setForm] = useState({ subject: '', description: '', tag: 'task', assignedTo: '' });
 
   const showToastRef = useRef(showToast);
@@ -2145,6 +2191,20 @@ const TasksView = ({
   const notify = useCallback((msg, type = 'success') => {
     if (typeof showToastRef.current === 'function') showToastRef.current(msg, type);
   }, []);
+
+  const copyTaskLink = useCallback(async (task) => {
+    const taskLink = buildTaskDeepLink(task?.id);
+    if (!taskLink) {
+      notify('Не удалось собрать ссылку на задачу', 'error');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(taskLink);
+      notify('Ссылка на задачу скопирована');
+    } catch (error) {
+      notify('Не удалось скопировать ссылку на задачу', 'error');
+    }
+  }, [notify]);
 
   const buildHeaders = useCallback(() => {
     const h = {};
@@ -2179,6 +2239,21 @@ const TasksView = ({
     const latestPinnedTask = tasks.find((task) => Number(task?.id || 0) === Number(pinnedTaskId));
     if (latestPinnedTask) onPinnedTaskSync(latestPinnedTask);
   }, [tasks, pinnedTaskId, onPinnedTaskSync]);
+
+  useEffect(() => {
+    if (!hasSyncedDrawerUrlRef.current) {
+      hasSyncedDrawerUrlRef.current = true;
+      if (!drawerTask?.id && typeof window !== 'undefined') {
+        try {
+          const currentTaskId = Number(new URL(window.location.href).searchParams.get(TASK_ID_QUERY_PARAM) || 0);
+          if (currentTaskId > 0) return;
+        } catch (error) {
+          // Fall through to the regular sync path.
+        }
+      }
+    }
+    syncTaskDeepLink(drawerTask?.id || null);
+  }, [drawerTask?.id]);
 
   const fetchPagedTasks = useCallback(async () => {
     const requestId = ++pagedRequestIdRef.current;
@@ -2981,6 +3056,7 @@ const TasksView = ({
           downloadAttachment={downloadAttachment}
           onEditTask={openEditModal}
           onDeleteTask={openDeleteModal}
+          onCopyTaskLink={copyTaskLink}
           onTogglePinTask={(task) => {
             if (Number(task?.id || 0) === Number(pinnedTaskId)) {
               onUnpinTask?.();

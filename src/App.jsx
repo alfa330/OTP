@@ -102,6 +102,7 @@ const CALL_EVALUATION_EMBED_STATE_KEY = 'call_evaluation_embed_state';
 const SUPERVISOR_OPERATORS_SV_FILTER_KEY = 'supervisor_operators_sv_filter';
 const SUPERVISOR_OPERATORS_DIRECTION_FILTER_KEY = 'supervisor_operators_direction_filter';
 const APP_VIEW_QUERY_PARAM = 'view';
+const TASK_ID_QUERY_PARAM = 'task_id';
 const AUTH_TRANSPORT_STORAGE_KEY = 'otp_auth_transport';
 const ACCESS_TOKEN_STORAGE_KEY = 'otp_access_token';
 const REFRESH_TOKEN_STORAGE_KEY = 'otp_refresh_token';
@@ -541,6 +542,19 @@ const readAppViewFromUrl = (locationLike = null) => {
     }
 };
 
+const readTaskIdFromUrl = (locationLike = null) => {
+    if (typeof window === 'undefined' && !locationLike) return 0;
+    try {
+        const search = locationLike?.search ?? window.location.search;
+        const searchParams = new URLSearchParams(search || '');
+        const taskId = Number(searchParams.get(TASK_ID_QUERY_PARAM) || 0);
+        return Number.isInteger(taskId) && taskId > 0 ? taskId : 0;
+    } catch (error) {
+        console.warn('Failed to read task id from URL', error);
+        return 0;
+    }
+};
+
 const buildAppViewUrl = (nextView) => {
     if (typeof window === 'undefined') return APP_BASE_URL;
     try {
@@ -555,6 +569,9 @@ const buildAppViewUrl = (nextView) => {
             url.searchParams.set(APP_VIEW_QUERY_PARAM, nextView);
         } else {
             url.searchParams.delete(APP_VIEW_QUERY_PARAM);
+        }
+        if (nextView !== 'tasks') {
+            url.searchParams.delete(TASK_ID_QUERY_PARAM);
         }
         return url.toString();
     } catch (error) {
@@ -581,6 +598,9 @@ const syncAppViewWithUrl = (nextView) => {
             url.searchParams.set(APP_VIEW_QUERY_PARAM, nextView);
         } else {
             url.searchParams.delete(APP_VIEW_QUERY_PARAM);
+        }
+        if (nextView !== 'tasks') {
+            url.searchParams.delete(TASK_ID_QUERY_PARAM);
         }
         const nextUrl = `${url.pathname}${url.search}${url.hash}`;
         window.history.replaceState(window.history.state, '', nextUrl);
@@ -25289,6 +25309,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 () => readAppViewFromUrl(location),
                 [location.pathname, location.search]
             );
+            const requestedTaskIdFromLocation = useMemo(
+                () => readTaskIdFromUrl(location),
+                [location.search]
+            );
             const currentMonth = new Date().toISOString().slice(0, 7);
             const getStoredValue = (key, fallback) => {
                 try {
@@ -28339,6 +28363,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 else if (isSupervisorRole(user?.role)) setView('operators');
                 else setView('hours');
             }, [user?.id, user?.role, canAccessLmsSection, canAccessResourceFteSection, requestedViewFromLocation]);
+
+            useEffect(() => {
+                if (!user?.id || requestedViewFromLocation !== 'tasks' || !requestedTaskIdFromLocation) return;
+                setTaskFocusRequest((prev) => ({
+                    taskId: requestedTaskIdFromLocation,
+                    requestId: Number(prev?.requestId || 0) + 1,
+                }));
+            }, [user?.id, requestedViewFromLocation, requestedTaskIdFromLocation]);
 
             useEffect(() => {
                 // Do not touch view while authentication is still initializing
