@@ -842,7 +842,10 @@ styleTag.textContent = `
     position: relative;
     inset: auto;
     width: 100%;
+    height: 100vh;
     min-height: 100vh;
+    display: flex;
+    flex-direction: column;
     border-radius: 0;
     border: 0;
     box-shadow: none;
@@ -931,6 +934,14 @@ styleTag.textContent = `
     gap: 12px;
     padding: 12px;
   }
+  .tv-pin-widget.is-detached .tv-pin-header {
+    flex-shrink: 0;
+  }
+  .tv-pin-widget.is-detached .tv-pin-body {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
   .tv-pin-badges {
     display: flex;
     flex-wrap: wrap;
@@ -977,11 +988,19 @@ styleTag.textContent = `
     gap: 10px;
     min-height: 176px;
   }
+  .tv-pin-widget.is-detached .tv-pin-task-menu {
+    flex: 1;
+    min-height: 0;
+  }
   .tv-pin-people-rail {
     display: flex;
     flex-direction: column;
     gap: 6px;
     align-items: center;
+  }
+  .tv-pin-widget.is-detached .tv-pin-people-rail {
+    min-height: 0;
+    overflow-y: auto;
   }
   .tv-pin-person-btn {
     width: 42px;
@@ -1010,6 +1029,9 @@ styleTag.textContent = `
     display: flex;
     flex-direction: column;
     gap: 10px;
+  }
+  .tv-pin-widget.is-detached .tv-pin-menu-panel {
+    min-height: 0;
   }
   .tv-pin-person-summary {
     display: flex;
@@ -1046,6 +1068,12 @@ styleTag.textContent = `
     gap: 5px;
     max-height: 180px;
     overflow: auto;
+  }
+  .tv-pin-widget.is-detached .tv-pin-person-task-list {
+    flex: 1;
+    min-height: 0;
+    max-height: none;
+    overflow-y: auto;
   }
   .tv-pin-person-task {
     width: 100%;
