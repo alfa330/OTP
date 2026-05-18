@@ -2,6 +2,8 @@ import unittest
 
 from resource_fte.schedule_generation import (
     _generate_schedule_preview_from_forecast,
+    _select_best_shift_preview_result,
+    _select_default_schedule_preview_variant,
     get_resource_shift_templates,
 )
 
@@ -62,6 +64,55 @@ def _tiny_operator_capacity():
 
 
 class ResourceScheduleGenerationTests(unittest.TestCase):
+    def test_strategy_selection_prefers_lower_overcoverage_inside_default_coverage_band(self):
+        target = [1.0 for _ in range(200)]
+        exact = {
+            "totals": {"deficitFteHours": 0.0, "overFteHours": 40.0},
+            "selected": [{} for _ in range(20)],
+        }
+        lower_over = {
+            "totals": {"deficitFteHours": 2.0, "overFteHours": 10.0},
+            "selected": [{} for _ in range(18)],
+        }
+
+        self.assertIs(
+            _select_best_shift_preview_result([exact, lower_over], target),
+            lower_over,
+        )
+
+    def test_strategy_selection_rejects_lower_overcoverage_below_default_coverage_band(self):
+        target = [1.0 for _ in range(200)]
+        exact = {
+            "totals": {"deficitFteHours": 0.0, "overFteHours": 40.0},
+            "selected": [{} for _ in range(20)],
+        }
+        too_sparse = {
+            "totals": {"deficitFteHours": 3.0, "overFteHours": 0.0},
+            "selected": [{} for _ in range(17)],
+        }
+
+        self.assertIs(
+            _select_best_shift_preview_result([exact, too_sparse], target),
+            exact,
+        )
+
+    def test_default_variant_prefers_lower_overcoverage_inside_default_coverage_band(self):
+        template_variant = {
+            "key": "templates",
+            "summary": {"neededFteHours": 200.0, "deficitFteHours": 0.0, "overFteHours": 40.0},
+            "generation": {"qualityScore": 118.0},
+        }
+        freeform_variant = {
+            "key": "freeform",
+            "summary": {"neededFteHours": 200.0, "deficitFteHours": 2.0, "overFteHours": 10.0},
+            "generation": {"qualityScore": 230.0},
+        }
+
+        self.assertIs(
+            _select_default_schedule_preview_variant([template_variant, freeform_variant]),
+            freeform_variant,
+        )
+
     def test_default_preview_plans_from_forecast_need_instead_of_staff_cap(self):
         preview = _generate_schedule_preview_from_forecast(
             _forecast_payload(),
