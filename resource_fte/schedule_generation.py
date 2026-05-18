@@ -93,11 +93,23 @@ SHIFT_PREVIEW_CP_SAT_DEFICIT_WEIGHT = 100
 SHIFT_PREVIEW_CP_SAT_OVER_WEIGHT = 5
 SHIFT_PREVIEW_CP_SAT_SHIFT_WEIGHT = 2
 SHIFT_PREVIEW_CP_SAT_PREFERENCE_WEIGHT = 10
+SHIFT_PREVIEW_CP_SAT_RATE_MIX_WEIGHT = 1
 SHIFT_PREVIEW_LOCAL_ADD_MAX_ITERATIONS = 8
 SHIFT_PREVIEW_LOCAL_SWAP_MAX_ITERATIONS = 4
 SHIFT_PREVIEW_LOCAL_IMPROVEMENT_EPSILON = 0.001
-SHIFT_PREVIEW_DEFAULT_MIN_COVERAGE_PERCENT = 99.0
+SHIFT_PREVIEW_DEFAULT_MIN_COVERAGE_PERCENT = 99.8
+SHIFT_PREVIEW_GREEDY_RATE_MIX_WEIGHT = 0.35
 SHIFT_PREVIEW_GREEDY_STRATEGIES = (
+    {
+        "name": "precision",
+        "need_weight": 10.0,
+        "over_weight": 2.0,
+        "active_weight": 0.015,
+        "day_deficit_weight": 0.12,
+        "min_score": 0.0,
+        "min_covered_need": 0.05,
+        "prune_mode": "strict",
+    },
     {
         "name": "balanced",
         "need_weight": 10.0,
@@ -331,6 +343,7 @@ def _normalize_schedule_rate_capacity(operator_capacity: Optional[Dict[str, Any]
         _resource_rate_key(rate): {
             "rate": float(rate),
             "count": 0,
+            "mix_count": 0,
             "daily_shift_capacity": 0,
             "weekly_shift_capacity": 0,
         }
@@ -344,13 +357,18 @@ def _normalize_schedule_rate_capacity(operator_capacity: Optional[Dict[str, Any]
         by_rate[rate_key] = {
             "rate": _resource_rate_value(item.get("rate")),
             "count": count,
+            "mix_count": count,
             "daily_shift_capacity": daily_capacity,
             "weekly_shift_capacity": weekly_capacity,
         }
     return by_rate
 
 
-def _forecast_driven_rate_capacity(target: List[float], day_count: int) -> Dict[str, Dict[str, Any]]:
+def _forecast_driven_rate_capacity(
+    target: List[float],
+    day_count: int,
+    actual_rate_capacity: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Dict[str, Any]]:
     total_needed = sum(max(0.0, float(item or 0)) for item in target or [])
     # Keep forecast planning effectively unconstrained by current headcount while
     # retaining a finite cap for the greedy selector and CP-SAT model.
@@ -359,11 +377,70 @@ def _forecast_driven_rate_capacity(target: List[float], day_count: int) -> Dict[
         _resource_rate_key(rate): {
             "rate": float(rate),
             "count": 0,
+            "mix_count": max(0, _to_int((actual_rate_capacity or {}).get(_resource_rate_key(rate), {}).get("count"))),
             "daily_shift_capacity": shift_capacity,
             "weekly_shift_capacity": shift_capacity,
         }
         for rate in RESOURCE_RATE_VALUES
     }
+
+
+def _shift_preview_rate_mix_counts(rate_capacity: Dict[str, Dict[str, Any]]) -> Dict[str, int]:
+    return {
+        _resource_rate_key(rate): max(
+            0,
+            _to_int((rate_capacity.get(_resource_rate_key(rate)) or {}).get("mix_count")),
+        )
+        for rate in RESOURCE_RATE_VALUES
+    }
+
+
+def _shift_preview_rate_mix_deviation(
+    weekly_usage: Dict[str, int],
+    rate_capacity: Dict[str, Dict[str, Any]],
+) -> float:
+    mix_counts = _shift_preview_rate_mix_counts(rate_capacity)
+    total_mix_count = sum(mix_counts.values())
+    total_selected = sum(max(0, int(value or 0)) for value in weekly_usage.values())
+    if total_mix_count <= 0 or total_selected <= 0:
+        return 0.0
+    return round(
+        sum(
+            abs(
+                max(0, int(weekly_usage.get(rate_key) or 0)) * total_mix_count
+                - total_selected * mix_count
+            )
+            for rate_key, mix_count in mix_counts.items()
+        )
+        / total_mix_count,
+        4,
+    )
+
+
+def _shift_preview_candidate_upper_bound(
+    candidate: Dict[str, Any],
+    rate_capacity: Dict[str, Dict[str, Any]],
+    target: List[float],
+) -> int:
+    rate_key = candidate["rateKey"]
+    capacity = rate_capacity.get(rate_key) or {}
+    positive_amounts = [
+        float(amount or 0)
+        for amount in (candidate.get("vector") or [])
+        if float(amount or 0) > 0
+    ]
+    if not positive_amounts:
+        return 0
+    max_target = max([float(item or 0) for item in (target or [])] or [0.0])
+    need_based_cap = max(1, int(math.ceil((max_target + 2.0) / min(positive_amounts))))
+    return max(
+        0,
+        min(
+            max(0, _to_int(capacity.get("daily_shift_capacity"))),
+            max(0, _to_int(capacity.get("weekly_shift_capacity"))),
+            need_based_cap,
+        ),
+    )
 
 
 def _shift_preview_usage_by_rate(selected: List[Dict[str, Any]], day_count: int = 7) -> Dict[str, Dict[str, Any]]:
@@ -1090,12 +1167,42 @@ def _run_shift_preview_greedy_strategy(
     min_covered_need = float(strategy.get("min_covered_need", 0.05))
     min_score = float(strategy.get("min_score", 0.0))
     day_deficit_weight = float(strategy.get("day_deficit_weight", 0.12))
+    candidates_by_rate = defaultdict(list)
+    for candidate in candidates:
+        candidates_by_rate[candidate["rateKey"]].append(candidate)
+    mix_counts = _shift_preview_rate_mix_counts(rate_capacity)
+    enforce_rate_mix = sum(mix_counts.values()) > 0
 
     for _ in range(max_shifts):
         best = None
         best_score = None
         best_rank = None
-        for candidate in candidates:
+        allowed_rate_keys = list(candidates_by_rate.keys())
+        next_mix_deviation_by_rate = {}
+        if enforce_rate_mix:
+            for rate_key in allowed_rate_keys:
+                capacity = rate_capacity.get(rate_key) or {}
+                if weekly_usage[rate_key] >= int(capacity.get("weekly_shift_capacity") or 0):
+                    continue
+                next_weekly_usage = dict(weekly_usage)
+                next_weekly_usage[rate_key] = int(next_weekly_usage.get(rate_key) or 0) + 1
+                next_mix_deviation_by_rate[rate_key] = _shift_preview_rate_mix_deviation(
+                    next_weekly_usage,
+                    rate_capacity,
+                )
+            if next_mix_deviation_by_rate:
+                min_mix_deviation = min(next_mix_deviation_by_rate.values())
+                allowed_rate_keys = [
+                    rate_key
+                    for rate_key, value in next_mix_deviation_by_rate.items()
+                    if abs(float(value or 0) - float(min_mix_deviation or 0)) <= 0.0001
+                ]
+        candidate_pool = [
+            candidate
+            for rate_key in allowed_rate_keys
+            for candidate in candidates_by_rate.get(rate_key, [])
+        ]
+        for candidate in candidate_pool:
             rate_key = candidate["rateKey"]
             day_index = int(candidate["dayIndex"])
             capacity = rate_capacity.get(rate_key) or {}
@@ -1123,15 +1230,29 @@ def _run_shift_preview_greedy_strategy(
                 continue
             day_deficit = _shift_preview_day_deficit(target, coverage, day_index)
             preference_score = float(candidate.get("preferenceScore") or 0)
+            current_mix_deviation = _shift_preview_rate_mix_deviation(weekly_usage, rate_capacity)
+            next_mix_deviation = next_mix_deviation_by_rate.get(rate_key)
+            if next_mix_deviation is None:
+                next_weekly_usage = dict(weekly_usage)
+                next_weekly_usage[rate_key] = int(next_weekly_usage.get(rate_key) or 0) + 1
+                next_mix_deviation = _shift_preview_rate_mix_deviation(next_weekly_usage, rate_capacity)
+            mix_delta = max(-20.0, min(20.0, current_mix_deviation - next_mix_deviation))
             stats = {
                 **stats,
                 "day_deficit": round(day_deficit, 4),
                 "preference_score": round(preference_score, 4),
-                "score": stats["score"] + min(day_deficit, 120.0) * day_deficit_weight + preference_score,
+                "mix_delta": round(mix_delta, 4),
+                "score": (
+                    stats["score"]
+                    + min(day_deficit, 120.0) * day_deficit_weight
+                    + preference_score
+                    + mix_delta * SHIFT_PREVIEW_GREEDY_RATE_MIX_WEIGHT
+                ),
             }
             if stats["score"] <= min_score:
                 continue
             rank = (
+                -round(float(next_mix_deviation or 0), 6),
                 round(float(stats["score"] or 0), 6),
                 round(float(stats["covered_need"] or 0), 6),
                 round(preference_score, 6),
@@ -1199,14 +1320,19 @@ def _run_shift_preview_cp_sat_strategy(
     target: List[float],
     candidates: List[Dict[str, Any]],
     rate_capacity: Dict[str, Dict[str, Any]],
+    initial_coverage: Optional[List[float]] = None,
 ) -> Optional[Dict[str, Any]]:
     if cp_model is None or not candidates or len(candidates) > SHIFT_PREVIEW_CP_SAT_MIN_OVER_MAX_CANDIDATES:
         return None
 
     total_hours = len(target)
     model = cp_model.CpModel()
+    candidate_upper_bounds = [
+        _shift_preview_candidate_upper_bound(candidate, rate_capacity, target)
+        for candidate in candidates
+    ]
     selected_vars = [
-        model.NewBoolVar(f"shift_{index}")
+        model.NewIntVar(0, candidate_upper_bounds[index], f"shift_{index}")
         for index in range(len(candidates))
     ]
     objective_terms = []
@@ -1254,6 +1380,16 @@ def _run_shift_preview_cp_sat_strategy(
 
     for hour_index in range(total_hours):
         target_minutes = int(round(float(target[hour_index] or 0) * 60))
+        initial_coverage_minutes = int(
+            round(
+                float(
+                    (initial_coverage or [])[hour_index]
+                    if initial_coverage and hour_index < len(initial_coverage)
+                    else 0.0
+                )
+                * 60
+            )
+        )
         coverage_terms = [
             selected_vars[index] * vector_minutes_by_candidate[index][hour_index]
             for index in range(len(candidates))
@@ -1271,13 +1407,33 @@ def _run_shift_preview_cp_sat_strategy(
             max(max_coverage_minutes, target_minutes, 0),
             f"over_{hour_index}",
         )
-        model.Add(sum(coverage_terms) + deficit - over == target_minutes)
+        model.Add(sum(coverage_terms) + initial_coverage_minutes + deficit - over == target_minutes)
 
         deficit_weight = SHIFT_PREVIEW_CP_SAT_DEFICIT_WEIGHT
         if _shift_preview_need_weight(hour_index) > 1.0:
             deficit_weight = int(round(deficit_weight * _shift_preview_need_weight(hour_index)))
         objective_terms.append(deficit * deficit_weight)
         objective_terms.append(over * SHIFT_PREVIEW_CP_SAT_OVER_WEIGHT)
+
+    mix_counts = _shift_preview_rate_mix_counts(rate_capacity)
+    total_mix_count = sum(mix_counts.values())
+    if total_mix_count > 0:
+        max_total_shifts = max(0, sum(candidate_upper_bounds))
+        total_selected = model.NewIntVar(0, max_total_shifts, "total_selected")
+        model.Add(total_selected == sum(selected_vars))
+        for rate_key, mix_count in mix_counts.items():
+            indexes = by_rate.get(rate_key) or []
+            selected_for_rate = sum(selected_vars[index] for index in indexes) if indexes else 0
+            deviation = model.NewIntVar(
+                0,
+                max_total_shifts * total_mix_count,
+                f"rate_mix_deviation_{rate_key}",
+            )
+            model.AddAbsEquality(
+                deviation,
+                selected_for_rate * total_mix_count - total_selected * mix_count,
+            )
+            objective_terms.append(deviation * SHIFT_PREVIEW_CP_SAT_RATE_MIX_WEIGHT)
 
     model.Minimize(sum(objective_terms))
 
@@ -1288,27 +1444,42 @@ def _run_shift_preview_cp_sat_strategy(
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return None
 
-    coverage = [0.0 for _ in range(total_hours)]
+    coverage = [
+        round(
+            float(
+                (initial_coverage or [])[index]
+                if initial_coverage and index < len(initial_coverage)
+                else 0.0
+            ),
+            4,
+        )
+        for index in range(total_hours)
+    ]
     selected = []
     status_name = _shift_preview_status_name(status)
     for index, candidate in enumerate(candidates):
-        if not solver.BooleanValue(selected_vars[index]):
+        selected_count = int(solver.Value(selected_vars[index]) or 0)
+        if selected_count <= 0:
             continue
         for hour_index, amount in enumerate(candidate["vector"]):
-            coverage[hour_index] = round(float(coverage[hour_index] or 0) + float(amount or 0), 4)
-        selected.append({
-            "dayIndex": candidate["dayIndex"],
-            "template": candidate["template"],
-            "vector": list(candidate["vector"]),
-            "presenceVector": list(candidate.get("presenceVector") or []),
-            "source": candidate.get("source"),
-            "score": {
-                "method": "cp_sat",
-                "status": status_name,
-                "objective": round(float(solver.ObjectiveValue()), 4),
-                "preference_score": round(float(candidate.get("preferenceScore") or 0), 4),
-            },
-        })
+            coverage[hour_index] = round(
+                float(coverage[hour_index] or 0) + float(amount or 0) * selected_count,
+                4,
+            )
+        for _ in range(selected_count):
+            selected.append({
+                "dayIndex": candidate["dayIndex"],
+                "template": candidate["template"],
+                "vector": list(candidate["vector"]),
+                "presenceVector": list(candidate.get("presenceVector") or []),
+                "source": candidate.get("source"),
+                "score": {
+                    "method": "cp_sat",
+                    "status": status_name,
+                    "objective": round(float(solver.ObjectiveValue()), 4),
+                    "preference_score": round(float(candidate.get("preferenceScore") or 0), 4),
+                },
+            })
 
     pruned = _shift_preview_prune_selected(target, coverage, selected, prune_mode="objective")
     totals = pruned["totals"]
@@ -1471,8 +1642,13 @@ def _select_shift_preview_strategy(
     allow_cp_sat: bool = True,
 ) -> Dict[str, Any]:
     cp_sat_result = None
-    if allow_cp_sat and not initial_coverage and not initial_selected:
-        cp_sat_result = _run_shift_preview_cp_sat_strategy(target, candidates, rate_capacity)
+    if allow_cp_sat and not initial_selected:
+        cp_sat_result = _run_shift_preview_cp_sat_strategy(
+            target,
+            candidates,
+            rate_capacity,
+            initial_coverage=initial_coverage,
+        )
     strategy_results = []
     if cp_sat_result is not None:
         strategy_results.append(cp_sat_result)
@@ -1851,7 +2027,7 @@ def _generate_schedule_preview_from_forecast(
     rate_capacity = (
         actual_rate_capacity
         if respect_operator_capacity
-        else _forecast_driven_rate_capacity(target, day_count)
+        else _forecast_driven_rate_capacity(target, day_count, actual_rate_capacity)
     )
 
     template_candidates = _build_shift_preview_candidates(days, enabled_templates, rate_capacity, "template", total_hours)
