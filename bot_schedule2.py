@@ -2960,6 +2960,13 @@ def _shift_auction_test_error_response(error):
     mapping = {
         "AUCTION_NOT_OPEN": ("Аукцион еще не открыт", 409),
         "AUCTION_NOT_AVAILABLE": ("Аукцион недоступен", 409),
+        "AUCTION_NOT_CLOSED": ("Сохранить итоговые графики можно только после завершения аукциона", 409),
+        "AUCTION_CANNOT_PAUSE": ("Приостановить можно только открытый аукцион", 409),
+        "AUCTION_NOT_PAUSED": ("Аукцион сейчас не приостановлен", 409),
+        "AUCTION_ALREADY_CLOSED": ("Аукцион уже завершен", 409),
+        "AUCTION_NO_LOTS": ("В аукционе нет смен для публикации", 409),
+        "AUCTION_NO_PARTICIPANTS": ("В аукционе нет участников для публикации", 409),
+        "INVALID_AUCTION_CONTROL_ACTION": ("Неизвестное действие управления аукционом", 400),
         "NOT_TEST_PARTICIPANT": ("Вы не включены в тестовую группу аукциона", 403),
         "OPERATOR_NOT_FOUND": ("Оператор не найден", 404),
         "LOT_NOT_FOUND": ("Смена не найдена", 404),
@@ -3078,6 +3085,54 @@ def api_shift_auction_test_restart():
         return _shift_auction_test_error_response(error)
     except Exception as error:
         logging.error(f"Shift auction restart API error: {error}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/shift_auction/test_control', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_shift_auction_test_control():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not _is_admin_role(requester[3]):
+            return jsonify({"error": "Only admins can control shift auctions"}), 403
+        payload = request.get_json(silent=True) or {}
+        result = db.control_shift_auction_test(
+            action=payload.get('action'),
+            updated_by=requester_id,
+        )
+        return jsonify({"status": "success", **result}), 200
+    except ValueError as error:
+        return _shift_auction_test_error_response(error)
+    except Exception as error:
+        logging.error(f"Shift auction control API error: {error}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/shift_auction/test_publish', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_shift_auction_test_publish():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not _is_admin_role(requester[3]):
+            return jsonify({"error": "Only admins can publish shift auctions"}), 403
+        result = db.publish_shift_auction_test_to_work_schedules(updated_by=requester_id)
+        return jsonify({"status": "success", **result}), 200
+    except ValueError as error:
+        return _shift_auction_test_error_response(error)
+    except Exception as error:
+        logging.error(f"Shift auction publish API error: {error}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 
