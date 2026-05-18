@@ -87,6 +87,31 @@ class ResourceScheduleGenerationTests(unittest.TestCase):
         self.assertEqual(preview["capacity"]["constraintMode"], "operator_capacity")
         self.assertGreater(preview["summary"]["deficitFteHours"], 0)
 
+    def test_preview_uses_work_schedule_overnight_carry_in_for_first_day(self):
+        forecast = _forecast_payload()
+        for row in forecast["days"][0]["hourly_forecast"]:
+            row["forecast_fte"] = 1.0 if row["hour"] < 8 else 0.0
+
+        preview = _generate_schedule_preview_from_forecast(
+            forecast,
+            get_resource_shift_templates()["templates"],
+            _tiny_operator_capacity(),
+            carry_in_shifts=[
+                {
+                    "startMinute": 20 * 60,
+                    "endMinute": 28 * 60,
+                    "overnight": True,
+                }
+            ],
+        )
+
+        self.assertEqual(preview["carryIn"]["shiftCount"], 1)
+        self.assertEqual(preview["carryIn"]["coveredFteHours"], 4.0)
+        self.assertEqual(preview["days"][0]["coverage"][0]["covered"], 1.0)
+        self.assertEqual(preview["days"][0]["coverage"][3]["covered"], 1.0)
+        self.assertTrue(preview["days"][0]["shifts"][0]["isLocked"])
+        self.assertTrue(preview["days"][0]["shifts"][0]["excludeFromAuction"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2985,6 +2985,7 @@ class Database:
                 SELECT id, shift_date, start_time, end_time, rate_min, breaks
                 FROM resource_saved_schedule_shifts
                 WHERE plan_id = %s
+                  AND COALESCE(meta->>'excludeFromAuction', 'false') <> 'true'
                 ORDER BY shift_date, start_minute, end_minute, id
             """, (plan_id,))
             saved_shift_rows = cursor.fetchall() or []
@@ -2999,7 +3000,7 @@ class Database:
 
         return {
             "schedule": self.get_resource_saved_schedule(plan_id=plan_id),
-            "auction_count": len(shift_rows),
+            "auction_count": sum(1 for row in shift_rows if not bool((row.get("meta") or {}).get("excludeFromAuction"))),
             "event": event,
         }
 
@@ -3164,7 +3165,9 @@ class Database:
                 COUNT(s.id) AS shift_count,
                 p.date_to >= CURRENT_DATE AS can_restart
             FROM resource_saved_schedule_plans p
-            LEFT JOIN resource_saved_schedule_shifts s ON s.plan_id = p.id
+            LEFT JOIN resource_saved_schedule_shifts s
+              ON s.plan_id = p.id
+             AND COALESCE(s.meta->>'excludeFromAuction', 'false') <> 'true'
             WHERE p.id = %s
               AND p.archived_at IS NULL
             GROUP BY p.id, p.date_from, p.date_to, p.title, p.updated_at
@@ -3182,7 +3185,9 @@ class Database:
                 COUNT(s.id) AS shift_count,
                 p.date_to >= CURRENT_DATE AS can_restart
             FROM resource_saved_schedule_plans p
-            LEFT JOIN resource_saved_schedule_shifts s ON s.plan_id = p.id
+            LEFT JOIN resource_saved_schedule_shifts s
+              ON s.plan_id = p.id
+             AND COALESCE(s.meta->>'excludeFromAuction', 'false') <> 'true'
             WHERE p.archived_at IS NULL
               AND p.date_to = p.date_from + 6
               AND p.date_to >= CURRENT_DATE
@@ -3675,6 +3680,7 @@ class Database:
                 SELECT id, shift_date, start_time, end_time, rate_min, breaks
                 FROM resource_saved_schedule_shifts
                 WHERE plan_id = %s
+                  AND COALESCE(meta->>'excludeFromAuction', 'false') <> 'true'
                 ORDER BY shift_date, start_minute, end_minute, id
             """, (int(period_row[0]),))
             saved_shift_rows = cursor.fetchall() or []
