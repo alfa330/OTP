@@ -663,6 +663,69 @@ def _shift_preview_add_coverage(base_coverage: List[float], extra_coverage: List
     ]
 
 
+def _shift_preview_initial_coverage_from_carry_in(
+    carry_in_shifts: Optional[List[Dict[str, Any]]],
+    total_hours: int,
+) -> List[float]:
+    coverage = [0.0 for _ in range(max(0, int(total_hours or 0)))]
+    if not coverage:
+        return coverage
+    for shift in carry_in_shifts or []:
+        try:
+            start_minute = int(shift.get("startMinute") or shift.get("start_minute") or 0)
+            end_minute = int(shift.get("endMinute") or shift.get("end_minute") or 0)
+        except Exception:
+            continue
+        if end_minute <= 24 * 60 or end_minute <= start_minute:
+            continue
+        carry_end_minute = min(end_minute - (24 * 60), len(coverage) * 60)
+        if carry_end_minute <= 0:
+            continue
+        for hour_index in range(len(coverage)):
+            hour_start = hour_index * 60
+            if hour_start >= carry_end_minute:
+                break
+            hour_end = hour_start + 60
+            overlap = max(0, min(carry_end_minute, hour_end) - hour_start)
+            if overlap > 0:
+                coverage[hour_index] = round(float(coverage[hour_index] or 0) + (overlap / 60), 4)
+    return coverage
+
+
+def _shift_preview_carry_in_display_shifts(
+    carry_in_shifts: Optional[List[Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    display_shifts = []
+    for index, shift in enumerate(carry_in_shifts or [], start=1):
+        try:
+            end_minute = int(shift.get("endMinute") or shift.get("end_minute") or 0)
+        except Exception:
+            continue
+        carry_end_minute = max(0, min(24 * 60, end_minute - (24 * 60)))
+        if carry_end_minute <= 0:
+            continue
+        operator_name = str(shift.get("operatorName") or "").strip()
+        display_shifts.append({
+            **shift,
+            "id": f"carry-in-{shift.get('sourceWorkShiftId') or index}",
+            "templateId": "",
+            "label": shift.get("label") or "Реальная смена из графика работы",
+            "start": "00:00",
+            "end": _format_minutes_hhmm(carry_end_minute),
+            "startMinute": 0,
+            "endMinute": carry_end_minute,
+            "durationMinutes": carry_end_minute,
+            "overnight": False,
+            "source": "work_schedule_carry_in",
+            "tone": "slate",
+            "isLocked": True,
+            "excludeFromAuction": True,
+            "isCarryIn": True,
+            "displayLabel": operator_name or "Ночь из графика работы",
+        })
+    return display_shifts
+
+
 def _shift_preview_totals(
     target: List[float],
     coverage: List[float],
@@ -1321,8 +1384,11 @@ def _shift_preview_days(
     base_target: Optional[List[float]] = None,
     base_raw_target: Optional[List[float]] = None,
     uplift_raw_target: Optional[List[float]] = None,
+    carry_in_display_shifts: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     shifts_by_day = defaultdict(list)
+    if carry_in_display_shifts:
+        shifts_by_day[0].extend(carry_in_display_shifts)
     for index, selected_item in enumerate(selected, start=1):
         template = selected_item["template"]
         day_index = int(selected_item["dayIndex"])
@@ -1403,8 +1469,15 @@ def _build_schedule_preview_variant(
     base_variant_key: Optional[str] = None,
     selected_result: Optional[Dict[str, Any]] = None,
     capacity_summary_rate_capacity: Optional[Dict[str, Dict[str, Any]]] = None,
+    initial_coverage: Optional[List[float]] = None,
+    carry_in_display_shifts: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    selected_result = selected_result or _select_shift_preview_strategy(target, candidates, rate_capacity)
+    selected_result = selected_result or _select_shift_preview_strategy(
+        target,
+        candidates,
+        rate_capacity,
+        initial_coverage=initial_coverage,
+    )
     best_result = selected_result["best"]
     base_selected = best_result["selected"]
     base_coverage = best_result["coverage"]
@@ -1451,6 +1524,7 @@ def _build_schedule_preview_variant(
             base_target=target,
             base_raw_target=raw_target,
             uplift_raw_target=uplift_raw_target if has_incident_uplift else None,
+            carry_in_display_shifts=carry_in_display_shifts,
         ),
         "summary": _shift_preview_totals(effective_target, coverage, effective_raw_target, raw_target),
         "capacityRates": _shift_preview_capacity_summary(
@@ -1544,6 +1618,7 @@ def _generate_schedule_preview_from_forecast(
     templates: List[Dict[str, Any]],
     operator_capacity: Optional[Dict[str, Any]] = None,
     respect_operator_capacity: bool = False,
+    carry_in_shifts: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     days = forecast_payload.get("days") or []
     day_count = max(1, len(days))
@@ -1580,8 +1655,20 @@ def _generate_schedule_preview_from_forecast(
     template_candidates = _build_shift_preview_candidates(days, enabled_templates, rate_capacity, "template", total_hours)
     freeform_templates = _build_freeform_shift_templates(rate_capacity)
     freeform_candidates = _build_shift_preview_candidates(days, freeform_templates, rate_capacity, "freeform", total_hours)
-    template_selected_result = _select_shift_preview_strategy(target, template_candidates, rate_capacity)
-    freeform_selected_result = _select_shift_preview_strategy(target, freeform_candidates, rate_capacity)
+    initial_coverage = _shift_preview_initial_coverage_from_carry_in(carry_in_shifts, total_hours)
+    carry_in_display_shifts = _shift_preview_carry_in_display_shifts(carry_in_shifts)
+    template_selected_result = _select_shift_preview_strategy(
+        target,
+        template_candidates,
+        rate_capacity,
+        initial_coverage=initial_coverage,
+    )
+    freeform_selected_result = _select_shift_preview_strategy(
+        target,
+        freeform_candidates,
+        rate_capacity,
+        initial_coverage=initial_coverage,
+    )
     template_variant = _build_schedule_preview_variant(
         "templates",
         "По шаблонам",
@@ -1592,6 +1679,8 @@ def _generate_schedule_preview_from_forecast(
         rate_capacity,
         selected_result=template_selected_result,
         capacity_summary_rate_capacity=actual_rate_capacity,
+        initial_coverage=initial_coverage,
+        carry_in_display_shifts=carry_in_display_shifts,
     )
     freeform_variant = _build_schedule_preview_variant(
         "freeform",
@@ -1603,6 +1692,8 @@ def _generate_schedule_preview_from_forecast(
         rate_capacity,
         selected_result=freeform_selected_result,
         capacity_summary_rate_capacity=actual_rate_capacity,
+        initial_coverage=initial_coverage,
+        carry_in_display_shifts=carry_in_display_shifts,
     )
 
     base_variants = [template_variant, freeform_variant]
@@ -1625,6 +1716,8 @@ def _generate_schedule_preview_from_forecast(
                 base_variant_key="templates",
                 selected_result=template_selected_result,
                 capacity_summary_rate_capacity=actual_rate_capacity,
+                initial_coverage=initial_coverage,
+                carry_in_display_shifts=carry_in_display_shifts,
             ),
             _build_schedule_preview_variant(
                 "freeform_incident_uplift",
@@ -1641,6 +1734,8 @@ def _generate_schedule_preview_from_forecast(
                 base_variant_key="freeform",
                 selected_result=freeform_selected_result,
                 capacity_summary_rate_capacity=actual_rate_capacity,
+                initial_coverage=initial_coverage,
+                carry_in_display_shifts=carry_in_display_shifts,
             ),
         ])
     default_variant = min(base_variants, key=_schedule_preview_variant_rank)
@@ -1662,6 +1757,11 @@ def _generate_schedule_preview_from_forecast(
             "activeOperatorCount": _to_int((operator_capacity or {}).get("active_operator_count")),
             "currentOperatorFte": _to_float((operator_capacity or {}).get("current_operator_fte")),
             "selectedDirectionIds": (operator_capacity or {}).get("selected_direction_ids") or [],
+        },
+        "carryIn": {
+            "shiftCount": len(carry_in_shifts or []),
+            "coveredFteHours": round(sum(float(item or 0) for item in initial_coverage), 4),
+            "shifts": carry_in_shifts or [],
         },
         "days": default_variant["days"],
         "summary": default_variant["summary"],

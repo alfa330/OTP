@@ -4,6 +4,7 @@ import {
   ArrowDownUp,
   Gavel,
   GripVertical,
+  LockKeyhole,
   Plus,
   Redo2,
   RefreshCw,
@@ -271,6 +272,13 @@ const getCoverageVisualState = (row) => {
   if (needed > 0) return 'covered';
   return 'empty';
 };
+
+const isLockedPlannerShift = (shift) => Boolean(
+  shift?.isLocked
+  || shift?.locked
+  || shift?.excludeFromAuction
+  || shift?.source === 'work_schedule_carry_in'
+);
 
 const clonePlannerDays = (days) =>
   (days || []).map((day) => ({
@@ -956,14 +964,17 @@ const PlannerDayRow = ({
                     ? clamp(((carryoverBoundaryAbs - visibleStart) / visibleDuration) * 100, 0, 100)
                     : 100;
                   const isActive = activeDragId === shift.id;
+                  const isLocked = isLockedPlannerShift(shift);
                   const isIncidentUplift = shift.isIncidentUplift || shift.source === 'incident_uplift' || shift.tone === 'emerald';
-                  const inactiveShiftClass = isIncidentUplift
-                    ? 'z-20 border-emerald-300 bg-emerald-100 text-emerald-800 hover:bg-emerald-200'
-                    : 'z-20 border-blue-300 bg-blue-100 text-blue-800 hover:bg-blue-200';
+                  const inactiveShiftClass = isLocked
+                    ? 'z-20 cursor-default border-slate-300 bg-slate-200 text-slate-700'
+                    : isIncidentUplift
+                    ? 'z-20 cursor-grab border-emerald-300 bg-emerald-100 text-emerald-800 hover:bg-emerald-200'
+                    : 'z-20 cursor-grab border-blue-300 bg-blue-100 text-blue-800 hover:bg-blue-200';
                   return (
                     <div
                       key={`${sourceDayIndex}-${shift.id}`}
-                      className={`absolute flex h-7 cursor-grab items-center overflow-hidden rounded-md border px-1.5 text-xs font-semibold shadow-sm transition ${
+                      className={`absolute flex h-7 items-center overflow-hidden rounded-md border px-1.5 text-xs font-semibold shadow-sm transition ${
                         isActive
                           ? 'z-30 border-slate-900 bg-slate-900 text-white'
                           : inactiveShiftClass
@@ -974,11 +985,12 @@ const PlannerDayRow = ({
                         width: `${width}%`,
                       }}
                       onPointerDown={(event) => {
+                        if (isLocked) return;
                         if (event.button === 1) return;
                         onShiftPointerDown(event, sourceDayIndex, shift.id, 'move');
                       }}
                       onContextMenu={(event) => event.preventDefault()}
-                      title={`${formatTime(start)}-${formatTime(end)} · ${formatDurationHours(duration)} · ${shift.label}${isIncidentUplift ? ' · доп. смена под прирост' : ''}`}
+                      title={`${formatTime(start)}-${formatTime(end)} · ${formatDurationHours(duration)} · ${shift.label}${isIncidentUplift ? ' · доп. смена под прирост' : ''}${isLocked ? ' · реальная смена из графика работы' : ''}`}
                     >
                       {hasCarryover ? (
                         <div
@@ -986,41 +998,47 @@ const PlannerDayRow = ({
                           style={{ left: `${carryoverLeft}%` }}
                         />
                       ) : null}
-                      <button
-                        type="button"
-                        onPointerDown={(event) => {
-                          if (event.button === 1) return;
-                          onShiftPointerDown(event, sourceDayIndex, shift.id, 'resize-left');
-                        }}
-                        className="relative z-10 mr-1 h-5 w-2 cursor-ew-resize rounded bg-white/70"
-                        aria-label="resize-left"
-                      />
-                      <GripVertical size={13} className="relative z-10 mr-1 shrink-0" />
+                      {!isLocked ? (
+                        <button
+                          type="button"
+                          onPointerDown={(event) => {
+                            if (event.button === 1) return;
+                            onShiftPointerDown(event, sourceDayIndex, shift.id, 'resize-left');
+                          }}
+                          className="relative z-10 mr-1 h-5 w-2 cursor-ew-resize rounded bg-white/70"
+                          aria-label="resize-left"
+                        />
+                      ) : null}
+                      {isLocked ? <LockKeyhole size={13} className="relative z-10 mr-1 shrink-0" /> : <GripVertical size={13} className="relative z-10 mr-1 shrink-0" />}
                       <span className="relative z-10 min-w-0 flex-1 truncate">
                         {formatTime(start)}-{formatTime(end)} · {shift.rate}
                       </span>
                       {end > 1440 ? <span className={`relative z-10 ml-1 shrink-0 rounded bg-white/70 px-1 text-[10px] ${isIncidentUplift ? 'text-emerald-800' : 'text-blue-800'}`}>+1</span> : null}
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onDeleteShift(sourceDayIndex, shift.id);
-                        }}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        className="relative z-10 ml-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-current hover:bg-white/60"
-                        aria-label="delete-shift"
-                      >
-                        <Trash2 size={12} />
-                      </button>
-                      <button
-                        type="button"
-                        onPointerDown={(event) => {
-                          if (event.button === 1) return;
-                          onShiftPointerDown(event, sourceDayIndex, shift.id, 'resize-right');
-                        }}
-                        className="relative z-10 ml-1 h-5 w-2 cursor-ew-resize rounded bg-white/70"
-                        aria-label="resize-right"
-                      />
+                      {!isLocked ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              onDeleteShift(sourceDayIndex, shift.id);
+                            }}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            className="relative z-10 ml-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-current hover:bg-white/60"
+                            aria-label="delete-shift"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                          <button
+                            type="button"
+                            onPointerDown={(event) => {
+                              if (event.button === 1) return;
+                              onShiftPointerDown(event, sourceDayIndex, shift.id, 'resize-right');
+                            }}
+                            className="relative z-10 ml-1 h-5 w-2 cursor-ew-resize rounded bg-white/70"
+                            aria-label="resize-right"
+                          />
+                        </>
+                      ) : null}
                     </div>
                   );
                 })}
@@ -1612,6 +1630,7 @@ const ResourceSchedulePlanner = ({
           ...day,
           shifts: (day.shifts || []).map((shift) => {
             if (shift.id !== shiftId) return shift;
+            if (isLockedPlannerShift(shift)) return shift;
             const next = updater(shift);
             return normalizeShiftTiming({ ...shift, ...next });
           }),
@@ -1635,7 +1654,7 @@ const ResourceSchedulePlanner = ({
       const currentDayIndex = current.findIndex((day) => (day.shifts || []).some((shift) => shift.id === shiftId));
       if (currentDayIndex < 0) return current;
       const movingShift = current[currentDayIndex]?.shifts?.find((shift) => shift.id === shiftId);
-      if (!movingShift) return current;
+      if (!movingShift || isLockedPlannerShift(movingShift)) return current;
       const nextShift = normalizeShiftTiming({
         ...movingShift,
         startMinute,
@@ -1666,7 +1685,7 @@ const ResourceSchedulePlanner = ({
       event.stopPropagation();
       const timelineNode = timelineRefs.current.get(dayIndex);
       const sourceShift = plannerDays[dayIndex]?.shifts?.find((shift) => shift.id === shiftId);
-      if (!timelineNode || !sourceShift) return;
+      if (!timelineNode || !sourceShift || isLockedPlannerShift(sourceShift)) return;
       const rect = timelineNode.getBoundingClientRect();
       const width = Math.max(1, rect.width);
       const originalStart = Number(sourceShift.startMinute || 0);
@@ -1798,7 +1817,7 @@ const ResourceSchedulePlanner = ({
       const sourceDayIndex = dayIndex - 1;
       const timelineNode = timelineRefs.current.get(dayIndex);
       const sourceShift = plannerDays[sourceDayIndex]?.shifts?.find((shift) => shift.id === shiftId);
-      if (sourceDayIndex < 0 || !timelineNode || !sourceShift) return;
+      if (sourceDayIndex < 0 || !timelineNode || !sourceShift || isLockedPlannerShift(sourceShift)) return;
 
       const rect = timelineNode.getBoundingClientRect();
       const width = Math.max(1, rect.width);
@@ -1844,6 +1863,8 @@ const ResourceSchedulePlanner = ({
   );
 
   const deleteShift = useCallback((dayIndex, shiftId) => {
+    const sourceShift = plannerDaysRef.current[dayIndex]?.shifts?.find((shift) => shift.id === shiftId);
+    if (isLockedPlannerShift(sourceShift)) return;
     pushHistorySnapshot();
     applyPlannerDaysUpdate((current) =>
       current.map((day, index) => (

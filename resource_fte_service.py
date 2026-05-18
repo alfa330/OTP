@@ -1018,6 +1018,72 @@ def _refresh_all_historical_forecasts_tx(cursor, settings: Dict[str, Any]) -> No
         _refresh_historical_forecast_for_day_tx(cursor, report_date, settings)
 
 
+def _resource_schedule_direction_ids_from_settings(settings: Optional[Dict[str, Any]]) -> List[int]:
+    return _coerce_int_list((settings or {}).get("selected_direction_ids"))
+
+
+def _resource_work_shift_carry_in_tx(cursor, period_start, settings: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    selected_direction_ids = _resource_schedule_direction_ids_from_settings(settings)
+    previous_date = period_start - timedelta(days=1)
+    direction_filter = "AND u.direction_id = ANY(%s)" if selected_direction_ids else ""
+    params = [previous_date]
+    if selected_direction_ids:
+        params.append(selected_direction_ids)
+    cursor.execute(
+        f"""
+        SELECT
+            ws.id,
+            ws.operator_id,
+            u.name,
+            ws.shift_date,
+            ws.start_time,
+            ws.end_time,
+            COALESCE(u.rate, 1.0),
+            ws.shift_type
+        FROM work_shifts ws
+        JOIN users u ON u.id = ws.operator_id
+        WHERE ws.shift_date = %s
+          AND u.role = 'operator'
+          {direction_filter}
+          AND ws.end_time <= ws.start_time
+        ORDER BY ws.start_time, ws.end_time, ws.id
+        """,
+        params,
+    )
+    shifts = []
+    for row in cursor.fetchall() or []:
+        start_time = row[4]
+        end_time = row[5]
+        start_minute = start_time.hour * 60 + start_time.minute
+        end_minute = end_time.hour * 60 + end_time.minute
+        if end_minute <= start_minute:
+            end_minute += 24 * 60
+        shifts.append({
+            "id": f"work-shift-{row[0]}",
+            "sourceWorkShiftId": int(row[0]),
+            "operatorId": int(row[1]),
+            "operatorName": row[2] or "",
+            "sourceDate": row[3].isoformat() if row[3] else None,
+            "templateId": "",
+            "rate": float(row[6]) if row[6] is not None else 1.0,
+            "label": "Реальная смена из графика работы",
+            "start": start_time.strftime("%H:%M") if start_time else None,
+            "end": end_time.strftime("%H:%M") if end_time else None,
+            "startMinute": start_minute,
+            "endMinute": end_minute,
+            "durationMinutes": max(0, end_minute - start_minute),
+            "overnight": True,
+            "source": "work_schedule_carry_in",
+            "shiftType": row[7] or "regular",
+            "tone": "slate",
+            "isLocked": True,
+            "excludeFromAuction": True,
+            "isCarryIn": True,
+            "breaks": [],
+        })
+    return shifts
+
+
 def build_resource_schedule_preview(db, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     payload = payload or {}
     period_start_value = (
@@ -1058,6 +1124,7 @@ def build_resource_schedule_preview(db, payload: Optional[Dict[str, Any]] = None
         operator_capacity = _current_operator_fte_tx(cursor, settings)
         current_fte = operator_capacity.get("current_operator_fte", 0.0)
         incident_uplift_profile = _compute_recent_incident_uplift_profile_tx(cursor, incident_anchor_date, settings)
+        carry_in_shifts = _resource_work_shift_carry_in_tx(cursor, period_start, settings)
         forecast_payload = _build_forecast_payload(
             period_start,
             period_end,
@@ -1071,6 +1138,7 @@ def build_resource_schedule_preview(db, payload: Optional[Dict[str, Any]] = None
         templates,
         operator_capacity,
         respect_operator_capacity=respect_operator_capacity,
+        carry_in_shifts=carry_in_shifts,
     )
 
 
