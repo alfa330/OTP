@@ -1,0 +1,92 @@
+import unittest
+
+from resource_fte.schedule_generation import (
+    _generate_schedule_preview_from_forecast,
+    get_resource_shift_templates,
+)
+
+
+def _forecast_payload():
+    hourly = []
+    for hour in range(24):
+        hourly.append(
+            {
+                "hour": hour,
+                "forecast_fte": 1.0 if 7 <= hour < 22 else 0.0,
+                "incident_uplift_fte": 0.0,
+            }
+        )
+    return {
+        "week_start": "2026-05-25",
+        "week_end": "2026-05-25",
+        "period_start": "2026-05-25",
+        "period_end": "2026-05-25",
+        "days": [
+            {
+                "forecast_date": "2026-05-25",
+                "weekday": 0,
+                "short": "Mon",
+                "label": "Monday",
+                "hourly_forecast": hourly,
+            }
+        ],
+    }
+
+
+def _tiny_operator_capacity():
+    return {
+        "active_operator_count": 1,
+        "current_operator_fte": 1.0,
+        "selected_direction_ids": [70],
+        "rate_capacity": [
+            {
+                "rate": 1.0,
+                "count": 1,
+                "daily_shift_capacity": 1,
+                "weekly_shift_capacity": 1,
+            },
+            {
+                "rate": 0.75,
+                "count": 0,
+                "daily_shift_capacity": 0,
+                "weekly_shift_capacity": 0,
+            },
+            {
+                "rate": 0.5,
+                "count": 0,
+                "daily_shift_capacity": 0,
+                "weekly_shift_capacity": 0,
+            },
+        ],
+    }
+
+
+class ResourceScheduleGenerationTests(unittest.TestCase):
+    def test_default_preview_plans_from_forecast_need_instead_of_staff_cap(self):
+        preview = _generate_schedule_preview_from_forecast(
+            _forecast_payload(),
+            get_resource_shift_templates()["templates"],
+            _tiny_operator_capacity(),
+        )
+
+        self.assertEqual(preview["capacity"]["constraintMode"], "forecast_demand")
+        self.assertEqual(preview["summary"]["deficitFteHours"], 0)
+        self.assertGreater(
+            sum(item["weeklyShiftsUsed"] for item in preview["capacity"]["rates"]),
+            sum(item["weeklyShiftCapacity"] for item in preview["capacity"]["rates"]),
+        )
+
+    def test_preview_can_still_opt_into_operator_capacity_constraint(self):
+        preview = _generate_schedule_preview_from_forecast(
+            _forecast_payload(),
+            get_resource_shift_templates()["templates"],
+            _tiny_operator_capacity(),
+            respect_operator_capacity=True,
+        )
+
+        self.assertEqual(preview["capacity"]["constraintMode"], "operator_capacity")
+        self.assertGreater(preview["summary"]["deficitFteHours"], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

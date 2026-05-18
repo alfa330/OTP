@@ -1033,6 +1033,10 @@ def build_resource_schedule_preview(db, payload: Optional[Dict[str, Any]] = None
         or payload.get("periodEnd")
     )
     week_start_value = payload.get("week_start") or payload.get("weekStart")
+    respect_operator_capacity = bool(
+        payload.get("respect_operator_capacity")
+        or payload.get("respectOperatorCapacity")
+    )
     if period_start_value:
         period_start = _parse_report_date(period_start_value)
         period_end = _parse_report_date(period_end_value) if period_end_value else period_start
@@ -1062,7 +1066,12 @@ def build_resource_schedule_preview(db, payload: Optional[Dict[str, Any]] = None
             current_operator_fte=current_fte,
             incident_uplift_profile=incident_uplift_profile,
         )
-    return _generate_schedule_preview_from_forecast(forecast_payload, templates, operator_capacity)
+    return _generate_schedule_preview_from_forecast(
+        forecast_payload,
+        templates,
+        operator_capacity,
+        respect_operator_capacity=respect_operator_capacity,
+    )
 
 
 def import_resource_csv(db, content: bytes, filename: str, user_id: Optional[int]) -> Dict[str, Any]:
