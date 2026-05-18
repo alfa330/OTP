@@ -16,6 +16,7 @@ import {
   ListChecks,
   Minus,
   MousePointerClick,
+  PauseCircle,
   PlayCircle,
   Plus,
   RefreshCw,
@@ -25,6 +26,7 @@ import {
   Settings2,
   ShieldCheck,
   Sparkles,
+  Square,
   Undo2,
   Users,
   Wifi,
@@ -767,6 +769,8 @@ const AuctionTimeField = ({
 
 const getAuctionRuntimeStatus = (settings, nowMs) => {
   if (!settings?.enabled) return 'disabled';
+  if (settings.finished_at) return 'closed';
+  if (settings.paused_at) return 'paused';
   const startsAtMs = settings.starts_at ? new Date(settings.starts_at).getTime() : null;
   const endsAtMs = settings.ends_at ? new Date(settings.ends_at).getTime() : null;
   if (Number.isFinite(startsAtMs) && nowMs < startsAtMs) return 'scheduled';
@@ -1500,12 +1504,16 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     launch_note: '',
     starts_at: null,
     ends_at: null,
+    paused_at: null,
+    finished_at: null,
     status: 'disabled',
     selected_operator_ids: [],
     selected_operators: [],
     selected_schedule_plan_id: null,
     selected_period: null,
-    is_current_user_tester: false
+    is_current_user_tester: false,
+    published_to_work_schedules_at: null,
+    published_to_work_schedules_by_name: ''
   });
   const [lots, setLots] = useState([]);
   const [myDayOffs, setMyDayOffs] = useState([]);
@@ -1521,6 +1529,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isRestarting, setIsRestarting] = useState(false);
+  const [isControllingAuction, setIsControllingAuction] = useState(false);
+  const [isPublishingAuction, setIsPublishingAuction] = useState(false);
   const [claimingLotIds, setClaimingLotIds] = useState(() => new Set());
   const [releaseConfirmLot, setReleaseConfirmLot] = useState(null);
   const [releasingLotId, setReleasingLotId] = useState(null);
@@ -1582,6 +1592,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
   useEffect(() => {
     if (!settings.enabled) return undefined;
+    if (settings.paused_at || settings.finished_at) return undefined;
     const startsAtMs = settings.starts_at ? new Date(settings.starts_at).getTime() : null;
     const endsAtMs = settings.ends_at ? new Date(settings.ends_at).getTime() : null;
     const now = Date.now();
@@ -1592,7 +1603,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     const delay = Math.max(500, nextBoundary - now + 50);
     const timer = window.setTimeout(() => setStatusVersion((value) => value + 1), delay);
     return () => window.clearTimeout(timer);
-  }, [settings.enabled, settings.starts_at, settings.ends_at, statusVersion]);
+  }, [settings.enabled, settings.ends_at, settings.finished_at, settings.paused_at, settings.starts_at, statusVersion]);
 
   const notify = useCallback((message, type = 'success') => {
     if (typeof showToastRef.current === 'function') showToastRef.current(message, type);
@@ -1638,6 +1649,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       launch_note: safe.launch_note || '',
       starts_at: safe.starts_at || null,
       ends_at: safe.ends_at || null,
+      paused_at: safe.paused_at || null,
+      finished_at: safe.finished_at || null,
       status: safe.status || 'disabled',
       selected_operator_ids: ids,
       selected_operators: Array.isArray(safe.selected_operators) ? safe.selected_operators : [],
@@ -1645,7 +1658,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       selected_period: safe.selected_period || null,
       is_current_user_tester: Boolean(safe.is_current_user_tester),
       updated_by_name: safe.updated_by_name || '',
-      updated_at: safe.updated_at || null
+      updated_at: safe.updated_at || null,
+      published_to_work_schedules_at: safe.published_to_work_schedules_at || null,
+      published_to_work_schedules_by_name: safe.published_to_work_schedules_by_name || ''
     });
     setLots(Array.isArray(safe.lots) ? safe.lots : []);
     setMyDayOffs(Array.isArray(safe.my_day_offs) ? safe.my_day_offs.filter(Boolean) : []);
@@ -2028,7 +2043,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     () => getAuctionRuntimeStatus(settings, Date.now()),
     // statusVersion forces re-evaluation when a scheduled/open boundary is crossed
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [settings.enabled, settings.starts_at, settings.ends_at, statusVersion]
+    [settings.enabled, settings.ends_at, settings.finished_at, settings.paused_at, settings.starts_at, statusVersion]
   );
   const hasStartCountdown = runtimeStatus === 'scheduled' && Boolean(settings.starts_at);
   const hasCloseCountdown = runtimeStatus === 'open' && Boolean(settings.ends_at);
@@ -2036,6 +2051,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     ? 'Откроется'
     : runtimeStatus === 'open'
       ? 'Аукцион открыт'
+      : runtimeStatus === 'paused'
+        ? 'Аукцион на паузе'
       : runtimeStatus === 'closed'
         ? 'Аукцион закрыт'
         : 'Аукцион выключен';
@@ -2043,6 +2060,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     ? 'Старт'
     : runtimeStatus === 'open'
       ? 'Открыт'
+      : runtimeStatus === 'paused'
+        ? 'Пауза'
       : runtimeStatus === 'closed'
         ? 'Закрыт'
         : 'Выкл.';
@@ -2050,6 +2069,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     ? 'скоро'
     : runtimeStatus === 'open'
       ? (hasCloseCountdown ? 'до закрытия' : 'идет выбор')
+      : runtimeStatus === 'paused'
+        ? 'выбор временно остановлен'
       : runtimeStatus === 'closed'
         ? 'выбор завершен'
         : `${settings.selected_operator_ids.length} тест.`;
@@ -2067,6 +2088,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
     : runtimeStatus === 'scheduled'
       ? 'border-blue-200 bg-blue-50 text-blue-800'
+      : runtimeStatus === 'paused'
+        ? 'border-amber-200 bg-amber-50 text-amber-800'
       : runtimeStatus === 'closed'
         ? 'border-slate-200 bg-slate-100 text-slate-600'
         : 'border-amber-200 bg-amber-50 text-amber-800';
@@ -2285,6 +2308,56 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       setIsRestarting(false);
     }
   }, [apiRoot, applySnapshot, buildHeaders, canManage, notify, selectedDraftPeriod]);
+
+  const handleAuctionControl = useCallback(async (action) => {
+    if (!canManage || !apiRoot || isControllingAuction) return;
+    const actionMessages = {
+      pause: 'Аукцион приостановлен',
+      resume: 'Аукцион возобновлен',
+      finish: 'Аукцион завершен'
+    };
+    if (action === 'finish') {
+      const confirmed = window.confirm('Завершить аукцион сейчас? После этого операторы больше не смогут менять выбор.');
+      if (!confirmed) return;
+    }
+    setIsControllingAuction(true);
+    try {
+      const response = await axios.post(
+        `${apiRoot}/api/shift_auction/test_control`,
+        { action },
+        { headers: buildHeaders({ 'Content-Type': 'application/json' }) }
+      );
+      applySnapshot(response?.data?.snapshot || {});
+      notify(actionMessages[action] || 'Состояние аукциона обновлено');
+    } catch (error) {
+      notify(error?.response?.data?.error || 'Не удалось изменить состояние аукциона', 'error');
+    } finally {
+      setIsControllingAuction(false);
+    }
+  }, [apiRoot, applySnapshot, buildHeaders, canManage, isControllingAuction, notify]);
+
+  const handlePublishAuction = useCallback(async () => {
+    if (!canManage || !apiRoot || isPublishingAuction) return;
+    const confirmed = window.confirm(
+      'Сохранить итоговые смены и выходные в раздел «Графики работы»? Данные за неделю аукциона у участников будут заменены.'
+    );
+    if (!confirmed) return;
+    setIsPublishingAuction(true);
+    try {
+      const response = await axios.post(
+        `${apiRoot}/api/shift_auction/test_publish`,
+        {},
+        { headers: buildHeaders({ 'Content-Type': 'application/json' }) }
+      );
+      applySnapshot(response?.data?.snapshot || {});
+      const summary = response?.data?.summary || {};
+      notify(`Графики сохранены: ${Number(summary.shifts_saved || 0)} смен, ${Number(summary.days_off_saved || 0)} выходных`);
+    } catch (error) {
+      notify(error?.response?.data?.error || 'Не удалось сохранить итоговые графики', 'error');
+    } finally {
+      setIsPublishingAuction(false);
+    }
+  }, [apiRoot, applySnapshot, buildHeaders, canManage, isPublishingAuction, notify]);
 
   const handleClaimLot = useCallback(async (lotId) => {
     if (!canClaim || !apiRoot) return;
@@ -2621,6 +2694,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                     ? <>Аукцион откроется через <AuctionCountdownText target={settings.starts_at} />.</>
                     : runtimeStatus === 'open'
                       ? 'Нажмите “Забрать”, чтобы закрепить смену. У остальных участников она сразу станет недоступной.'
+                      : runtimeStatus === 'paused'
+                        ? 'Аукцион временно приостановлен администратором.'
                       : 'Сейчас аукцион закрыт.'}
                 </p>
               </div>
@@ -2862,6 +2937,50 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                   </p>
                 </div>
                 <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+                  {runtimeStatus === 'open' ? (
+                    <button
+                      type="button"
+                      onClick={() => handleAuctionControl('pause')}
+                      disabled={isControllingAuction}
+                      className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 text-xs font-semibold text-amber-800 transition hover:bg-amber-100 disabled:cursor-wait disabled:opacity-60 sm:h-10 sm:px-4 sm:text-sm"
+                    >
+                      <PauseCircle size={16} />
+                      Приостановить
+                    </button>
+                  ) : null}
+                  {runtimeStatus === 'paused' ? (
+                    <button
+                      type="button"
+                      onClick={() => handleAuctionControl('resume')}
+                      disabled={isControllingAuction}
+                      className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 text-xs font-semibold text-emerald-800 transition hover:bg-emerald-100 disabled:cursor-wait disabled:opacity-60 sm:h-10 sm:px-4 sm:text-sm"
+                    >
+                      <PlayCircle size={16} />
+                      Возобновить
+                    </button>
+                  ) : null}
+                  {['scheduled', 'open', 'paused'].includes(runtimeStatus) ? (
+                    <button
+                      type="button"
+                      onClick={() => handleAuctionControl('finish')}
+                      disabled={isControllingAuction}
+                      className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 text-xs font-semibold text-rose-800 transition hover:bg-rose-100 disabled:cursor-wait disabled:opacity-60 sm:h-10 sm:px-4 sm:text-sm"
+                    >
+                      <Square size={15} />
+                      Завершить
+                    </button>
+                  ) : null}
+                  {runtimeStatus === 'closed' ? (
+                    <button
+                      type="button"
+                      onClick={handlePublishAuction}
+                      disabled={isPublishingAuction}
+                      className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 text-xs font-semibold text-emerald-800 transition hover:bg-emerald-100 disabled:cursor-wait disabled:opacity-60 sm:h-10 sm:px-4 sm:text-sm"
+                    >
+                      <Save size={16} />
+                      {isPublishingAuction ? 'Сохранение...' : 'Сохранить в графики'}
+                    </button>
+                  ) : null}
                   <button
                     type="button"
                     onClick={handleRestartAuction}
@@ -2882,6 +3001,12 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                   </button>
                 </div>
               </div>
+              {settings.published_to_work_schedules_at ? (
+                <p className="mt-3 text-xs text-emerald-700">
+                  Итоги сохранены в графики работы {formatDateTimeLabel(settings.published_to_work_schedules_at)}
+                  {settings.published_to_work_schedules_by_name ? ` · ${settings.published_to_work_schedules_by_name}` : ''}.
+                </p>
+              ) : null}
             </div>
 
             <div className="grid gap-4 p-3 sm:p-5 xl:grid-cols-[minmax(0,1fr)_360px]">

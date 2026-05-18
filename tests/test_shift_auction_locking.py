@@ -70,6 +70,23 @@ class ShiftAuctionLockingTests(unittest.TestCase):
         self.assertIn("FROM shift_auction_test_lots", source)
         self.assertIn("FOR UPDATE", source)
 
+    def test_publish_uses_auto_break_generation(self):
+        method = _method("publish_shift_auction_test_to_work_schedules")
+        save_shift_calls = [
+            node for node in ast.walk(method)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_save_shift_tx"
+        ]
+
+        self.assertEqual(len(save_shift_calls), 1)
+        breaks_keyword = next(
+            keyword for keyword in save_shift_calls[0].keywords
+            if keyword.arg == "breaks"
+        )
+        self.assertIsInstance(breaks_keyword.value, ast.Constant)
+        self.assertIsNone(breaks_keyword.value.value)
+
 
 if __name__ == "__main__":
     unittest.main()
