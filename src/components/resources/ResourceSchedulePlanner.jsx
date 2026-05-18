@@ -2076,7 +2076,10 @@ const ResourceSchedulePlanner = ({
         ) : null}
         {capacityInfo?.rates?.length ? (
           <div className="mt-2 text-xs text-slate-500">
-            Ресурс ставок: {(capacityInfo.rates || []).map((item) => `${formatFte(item.rate)}: ${Number(item.weeklyShiftsUsed || 0)}/${Number(item.weeklyShiftCapacity || 0)} смен (${Number(item.count || 0)} чел.)`).join(' · ')} · период {Number(capacityInfo.periodDayCount || computedDays.length || 0)} дн., до {Number(capacityInfo.workDaysPerOperatorPeriod || capacityInfo.workDaysPerOperatorWeek || 0)} смен на сотрудника
+            Ресурс ставок: {(capacityInfo.rates || []).map((item) => {
+              const overCapacity = Number(item.weeklyShiftsOverCapacity || 0);
+              return `${formatFte(item.rate)}: ${Number(item.weeklyShiftsUsed || 0)}/${Number(item.weeklyShiftCapacity || 0)} смен (${Number(item.count || 0)} чел.${overCapacity > 0 ? `, +${overCapacity} сверх ресурса` : ''})`;
+            }).join(' · ')} · период {Number(capacityInfo.periodDayCount || computedDays.length || 0)} дн., до {Number(capacityInfo.workDaysPerOperatorPeriod || capacityInfo.workDaysPerOperatorWeek || 0)} смен на сотрудника
           </div>
         ) : null}
       </section>

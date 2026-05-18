@@ -347,6 +347,22 @@ def _normalize_schedule_rate_capacity(operator_capacity: Optional[Dict[str, Any]
     return by_rate
 
 
+def _forecast_driven_rate_capacity(target: List[float], day_count: int) -> Dict[str, Dict[str, Any]]:
+    total_needed = sum(max(0.0, float(item or 0)) for item in target or [])
+    # Keep forecast planning effectively unconstrained by current headcount while
+    # retaining a finite cap for the greedy selector and CP-SAT model.
+    shift_capacity = max(1, min(800, int(total_needed / 3) + 80))
+    return {
+        _resource_rate_key(rate): {
+            "rate": float(rate),
+            "count": 0,
+            "daily_shift_capacity": shift_capacity,
+            "weekly_shift_capacity": shift_capacity,
+        }
+        for rate in RESOURCE_RATE_VALUES
+    }
+
+
 def _shift_preview_usage_by_rate(selected: List[Dict[str, Any]], day_count: int = 7) -> Dict[str, Dict[str, Any]]:
     day_count = max(1, int(day_count or 1))
     usage = {
@@ -1290,6 +1306,7 @@ def _shift_preview_capacity_summary(
             "weeklyShiftCapacity": weekly_capacity,
             "weeklyShiftsUsed": int(usage.get("weekly_shifts") or 0),
             "weeklyShiftsRemaining": max(0, weekly_capacity - int(usage.get("weekly_shifts") or 0)),
+            "weeklyShiftsOverCapacity": max(0, int(usage.get("weekly_shifts") or 0) - weekly_capacity),
             "dailyShiftsUsed": usage.get("daily_shifts") or [0 for _ in range(day_count)],
         })
     return capacity_summary
@@ -1385,6 +1402,7 @@ def _build_schedule_preview_variant(
     include_incident_uplift: bool = False,
     base_variant_key: Optional[str] = None,
     selected_result: Optional[Dict[str, Any]] = None,
+    capacity_summary_rate_capacity: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     selected_result = selected_result or _select_shift_preview_strategy(target, candidates, rate_capacity)
     best_result = selected_result["best"]
@@ -1435,7 +1453,11 @@ def _build_schedule_preview_variant(
             uplift_raw_target=uplift_raw_target if has_incident_uplift else None,
         ),
         "summary": _shift_preview_totals(effective_target, coverage, effective_raw_target, raw_target),
-        "capacityRates": _shift_preview_capacity_summary(rate_capacity, selected, len(days)),
+        "capacityRates": _shift_preview_capacity_summary(
+            capacity_summary_rate_capacity or rate_capacity,
+            selected,
+            len(days),
+        ),
         "generation": {
             "variant": key,
             "baseVariant": base_variant_key or key,
@@ -1521,6 +1543,7 @@ def _generate_schedule_preview_from_forecast(
     forecast_payload: Dict[str, Any],
     templates: List[Dict[str, Any]],
     operator_capacity: Optional[Dict[str, Any]] = None,
+    respect_operator_capacity: bool = False,
 ) -> Dict[str, Any]:
     days = forecast_payload.get("days") or []
     day_count = max(1, len(days))
@@ -1547,7 +1570,12 @@ def _generate_schedule_preview_from_forecast(
 
     enabled_templates = [item for item in templates if item.get("enabled", True)]
     operator_capacity = _operator_capacity_for_period(operator_capacity, day_count)
-    rate_capacity = _normalize_schedule_rate_capacity(operator_capacity)
+    actual_rate_capacity = _normalize_schedule_rate_capacity(operator_capacity)
+    rate_capacity = (
+        actual_rate_capacity
+        if respect_operator_capacity
+        else _forecast_driven_rate_capacity(target, day_count)
+    )
 
     template_candidates = _build_shift_preview_candidates(days, enabled_templates, rate_capacity, "template", total_hours)
     freeform_templates = _build_freeform_shift_templates(rate_capacity)
@@ -1563,6 +1591,7 @@ def _generate_schedule_preview_from_forecast(
         template_candidates,
         rate_capacity,
         selected_result=template_selected_result,
+        capacity_summary_rate_capacity=actual_rate_capacity,
     )
     freeform_variant = _build_schedule_preview_variant(
         "freeform",
@@ -1573,6 +1602,7 @@ def _generate_schedule_preview_from_forecast(
         freeform_candidates,
         rate_capacity,
         selected_result=freeform_selected_result,
+        capacity_summary_rate_capacity=actual_rate_capacity,
     )
 
     base_variants = [template_variant, freeform_variant]
@@ -1594,6 +1624,7 @@ def _generate_schedule_preview_from_forecast(
                 include_incident_uplift=True,
                 base_variant_key="templates",
                 selected_result=template_selected_result,
+                capacity_summary_rate_capacity=actual_rate_capacity,
             ),
             _build_schedule_preview_variant(
                 "freeform_incident_uplift",
@@ -1609,6 +1640,7 @@ def _generate_schedule_preview_from_forecast(
                 include_incident_uplift=True,
                 base_variant_key="freeform",
                 selected_result=freeform_selected_result,
+                capacity_summary_rate_capacity=actual_rate_capacity,
             ),
         ])
     default_variant = min(base_variants, key=_schedule_preview_variant_rank)
@@ -1622,6 +1654,7 @@ def _generate_schedule_preview_from_forecast(
         "rounding_step": FTE_ROUNDING_STEP,
         "templates": templates,
         "capacity": {
+            "constraintMode": "operator_capacity" if respect_operator_capacity else "forecast_demand",
             "workDaysPerOperatorWeek": WORK_DAYS_PER_OPERATOR_WEEK,
             "workDaysPerOperatorPeriod": _to_int((operator_capacity or {}).get("period_work_days_per_operator"), _work_days_per_operator_for_period(day_count)),
             "periodDayCount": day_count,
