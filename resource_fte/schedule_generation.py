@@ -1,6 +1,6 @@
 import math
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional
 
 from .common import _resource_rate_key, _resource_rate_value, _round_fte_to_half, _to_float, _to_int
@@ -85,35 +85,28 @@ FREEFORM_DEEP_NIGHT_END_MINUTE = 7 * 60
 FREEFORM_REGULAR_OVERNIGHT_MAX_END_MINUTE = 26 * 60
 FREEFORM_REGULAR_OVERNIGHT_END_CLOCK_HOURS = {0, 1, 2}
 SHIFT_PREVIEW_DEEP_NIGHT_NEED_WEIGHT = 3.5
-SHIFT_PREVIEW_CP_SAT_TIME_LIMIT_SECONDS = 2.0
-SHIFT_PREVIEW_CP_SAT_MIN_OVER_TIME_LIMIT_SECONDS = 4.0
+SHIFT_PREVIEW_CP_SAT_TIME_LIMIT_SECONDS = 4.0
+SHIFT_PREVIEW_CP_SAT_MIN_OVER_TIME_LIMIT_SECONDS = 20.0
 SHIFT_PREVIEW_CP_SAT_SEARCH_WORKERS = 8
 SHIFT_PREVIEW_CP_SAT_MIN_OVER_MAX_CANDIDATES = 1200
+SHIFT_PREVIEW_CP_SAT_SCALE = 240
+SHIFT_PREVIEW_CP_SAT_FIXED_MIX_REFINE_TIME_LIMIT_SECONDS = 6.0
 SHIFT_PREVIEW_CP_SAT_DEFICIT_WEIGHT = 100
 SHIFT_PREVIEW_CP_SAT_OVER_WEIGHT = 5
 SHIFT_PREVIEW_CP_SAT_SHIFT_WEIGHT = 2
 SHIFT_PREVIEW_CP_SAT_PREFERENCE_WEIGHT = 10
 SHIFT_PREVIEW_CP_SAT_RATE_MIX_WEIGHT = 1
-SHIFT_PREVIEW_LOCAL_ADD_MAX_ITERATIONS = 8
-SHIFT_PREVIEW_LOCAL_SWAP_MAX_ITERATIONS = 4
+SHIFT_PREVIEW_LOCAL_ADD_MAX_ITERATIONS = 50
+SHIFT_PREVIEW_LOCAL_SWAP_MAX_ITERATIONS = 12
 SHIFT_PREVIEW_LOCAL_IMPROVEMENT_EPSILON = 0.001
 SHIFT_PREVIEW_DEFAULT_MIN_COVERAGE_PERCENT = 99.8
 SHIFT_PREVIEW_GREEDY_RATE_MIX_WEIGHT = 0.35
+SHIFT_PREVIEW_RATE_MIX_MAX_DEVIATION = 5.0
 SHIFT_PREVIEW_GREEDY_STRATEGIES = (
     {
         "name": "precision",
         "need_weight": 10.0,
         "over_weight": 2.0,
-        "active_weight": 0.015,
-        "day_deficit_weight": 0.12,
-        "min_score": 0.0,
-        "min_covered_need": 0.05,
-        "prune_mode": "strict",
-    },
-    {
-        "name": "balanced",
-        "need_weight": 10.0,
-        "over_weight": 3.2,
         "active_weight": 0.015,
         "day_deficit_weight": 0.12,
         "min_score": 0.0,
@@ -139,26 +132,6 @@ SHIFT_PREVIEW_GREEDY_STRATEGIES = (
         "min_score": 0.0,
         "min_covered_need": 0.05,
         "prune_mode": "strict",
-    },
-    {
-        "name": "day_focus",
-        "need_weight": 10.5,
-        "over_weight": 2.6,
-        "active_weight": 0.015,
-        "day_deficit_weight": 0.35,
-        "min_score": -0.1,
-        "min_covered_need": 0.05,
-        "prune_mode": "strict",
-    },
-    {
-        "name": "compact",
-        "need_weight": 10.0,
-        "over_weight": 3.2,
-        "active_weight": 0.04,
-        "day_deficit_weight": 0.12,
-        "min_score": 0.0,
-        "min_covered_need": 0.05,
-        "prune_mode": "objective",
     },
 )
 
@@ -415,6 +388,65 @@ def _shift_preview_rate_mix_deviation(
         / total_mix_count,
         4,
     )
+
+
+def _shift_preview_selected_rate_mix_deviation(
+    selected: List[Dict[str, Any]],
+    rate_capacity: Dict[str, Dict[str, Any]],
+) -> float:
+    usage = _shift_preview_usage_by_rate(selected, 7)
+    weekly_usage = {
+        rate_key: int((usage.get(rate_key) or {}).get("weekly_shifts") or 0)
+        for rate_key in usage
+    }
+    return _shift_preview_rate_mix_deviation(weekly_usage, rate_capacity)
+
+
+def _shift_preview_rate_mix_target_counts(
+    total_shifts: int,
+    rate_capacity: Dict[str, Dict[str, Any]],
+) -> Dict[str, int]:
+    total_shifts = max(0, int(total_shifts or 0))
+    mix_counts = _shift_preview_rate_mix_counts(rate_capacity)
+    total_mix = sum(mix_counts.values())
+    if total_mix <= 0:
+        return {rate_key: 0 for rate_key in mix_counts}
+
+    raw_targets = {
+        rate_key: (total_shifts * mix_count / total_mix)
+        for rate_key, mix_count in mix_counts.items()
+    }
+    result = {
+        rate_key: int(math.floor(value))
+        for rate_key, value in raw_targets.items()
+    }
+    remainder = total_shifts - sum(result.values())
+    ranked_rate_keys = sorted(
+        raw_targets,
+        key=lambda rate_key: (
+            raw_targets[rate_key] - result[rate_key],
+            mix_counts[rate_key],
+        ),
+        reverse=True,
+    )
+    for index in range(max(0, remainder)):
+        result[ranked_rate_keys[index % len(ranked_rate_keys)]] += 1
+    return result
+
+
+def _shift_preview_proportional_results(
+    results: List[Dict[str, Any]],
+    rate_capacity: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    if sum(_shift_preview_rate_mix_counts(rate_capacity).values()) <= 0:
+        return list(results)
+    proportional = [
+        item
+        for item in results
+        if _shift_preview_selected_rate_mix_deviation(item.get("selected") or [], rate_capacity)
+        <= SHIFT_PREVIEW_RATE_MIX_MAX_DEVIATION
+    ]
+    return proportional or list(results)
 
 
 def _shift_preview_candidate_upper_bound(
@@ -887,6 +919,108 @@ def _shift_preview_quality_for_coverage(
     )
 
 
+def _shift_preview_quality_components(
+    target: List[float], coverage: List[float]
+) -> Dict[str, float]:
+    """Return the per-hour quality terms so subsequent moves can update by delta."""
+    total_needed = 0.0
+    real_covered_need = 0.0
+    deficit = 0.0
+    over = 0.0
+    for index in range(len(target)):
+        needed = float(target[index] or 0)
+        real_covered = float(coverage[index] if index < len(coverage) else 0) or 0
+        covered = _round_fte_to_half(real_covered)
+        total_needed += needed
+        real_covered_need += min(real_covered, needed)
+        deficit += max(0.0, needed - covered)
+        over += max(0.0, covered - needed)
+    return {
+        "total_needed": total_needed,
+        "real_covered_need": real_covered_need,
+        "deficit": deficit,
+        "over": over,
+    }
+
+
+def _shift_preview_quality_from_components(
+    components: Dict[str, float], selected_count: int
+) -> float:
+    total_needed = float(components.get("total_needed") or 0.0)
+    real_covered_need = float(components.get("real_covered_need") or 0.0)
+    deficit = float(components.get("deficit") or 0.0)
+    over = float(components.get("over") or 0.0)
+    real_coverage = (real_covered_need / total_needed * 100) if total_needed > 0 else 0.0
+    return (
+        deficit * 100.0
+        + over * 3.0
+        + max(0, int(selected_count or 0)) * 0.025
+        - real_coverage * 0.02
+    )
+
+
+def _shift_preview_local_move_delta(
+    target: List[float],
+    coverage: List[float],
+    add_items: Optional[List[tuple]],
+    remove_items: Optional[List[tuple]],
+) -> Dict[str, float]:
+    """Compute deficit / over / real-covered deltas for an add/remove/swap touching only the
+    candidate's active hours. Returns deltas, not the new totals."""
+    deltas_by_index: Dict[int, float] = {}
+    for index, amount in add_items or []:
+        if not amount:
+            continue
+        deltas_by_index[index] = deltas_by_index.get(index, 0.0) + float(amount)
+    for index, amount in remove_items or []:
+        if not amount:
+            continue
+        deltas_by_index[index] = deltas_by_index.get(index, 0.0) - float(amount)
+    deficit_delta = 0.0
+    over_delta = 0.0
+    real_covered_delta = 0.0
+    for index, change in deltas_by_index.items():
+        if not change:
+            continue
+        needed = float(target[index] or 0)
+        old_real = float(coverage[index] if index < len(coverage) else 0) or 0
+        new_real = old_real + change
+        if new_real < 0:
+            new_real = 0.0
+        old_rounded = _round_fte_to_half(old_real)
+        new_rounded = _round_fte_to_half(new_real)
+        deficit_delta += (
+            max(0.0, needed - new_rounded) - max(0.0, needed - old_rounded)
+        )
+        over_delta += (
+            max(0.0, new_rounded - needed) - max(0.0, old_rounded - needed)
+        )
+        real_covered_delta += min(new_real, needed) - min(old_real, needed)
+    return {
+        "deficit": deficit_delta,
+        "over": over_delta,
+        "real_covered": real_covered_delta,
+    }
+
+
+def _shift_preview_apply_active_delta(
+    coverage: List[float],
+    add_items: Optional[List[tuple]],
+    remove_items: Optional[List[tuple]],
+) -> None:
+    """Mutate `coverage` in place using only the active indices of the changed shifts."""
+    for index, amount in add_items or []:
+        if not amount:
+            continue
+        coverage[index] = round(float(coverage[index] or 0) + float(amount), 4)
+    for index, amount in remove_items or []:
+        if not amount:
+            continue
+        coverage[index] = round(float(coverage[index] or 0) - float(amount), 4)
+        if coverage[index] < 0 and coverage[index] > -0.0001:
+            coverage[index] = 0.0
+
+
 def _shift_preview_default_deficit_limit(target: List[float], best_deficit: float = 0.0) -> float:
     total_needed = sum(max(0.0, float(item or 0)) for item in (target or []))
     allowed_ratio = max(0.0, 100.0 - float(SHIFT_PREVIEW_DEFAULT_MIN_COVERAGE_PERCENT or 0.0)) / 100.0
@@ -922,9 +1056,11 @@ def _shift_preview_prune_selected(
     coverage: List[float],
     selected: List[Dict[str, Any]],
     prune_mode: str = "strict",
+    deficit_limit: Optional[float] = None,
 ) -> Dict[str, Any]:
     selected = list(selected)
     coverage = list(coverage)
+    limit = float(deficit_limit) if deficit_limit is not None else None
     while True:
         current_totals = _shift_preview_totals(target, coverage)
         current_quality = _shift_preview_quality_score(current_totals, len(selected))
@@ -939,6 +1075,21 @@ def _shift_preview_prune_selected(
             if prune_mode == "objective":
                 next_quality = _shift_preview_quality_score(next_totals, len(selected) - 1)
                 should_remove = next_quality + 0.001 < current_quality
+            elif prune_mode == "rank" and limit is not None:
+                # Within the deficit budget we trade a little extra deficit for a lower over.
+                current_within = current_totals["deficitFteHours"] <= limit + 0.001
+                next_within = next_totals["deficitFteHours"] <= limit + 0.001
+                if current_within and next_within:
+                    should_remove = (
+                        next_totals["overFteHours"] + 0.001 < current_totals["overFteHours"]
+                    )
+                else:
+                    should_remove = (
+                        next_totals["deficitFteHours"] + 0.001 < current_totals["deficitFteHours"]
+                        or (
+                            next_within and not current_within
+                        )
+                    )
             else:
                 should_remove = (
                     next_totals["deficitFteHours"] <= current_totals["deficitFteHours"] + 0.001
@@ -1033,10 +1184,18 @@ def _shift_preview_can_add_candidate(
     active_capacity = int(capacity.get("daily_shift_capacity") or 0)
     if active_capacity <= 0:
         return False
-    removed_presence = (
-        _shift_preview_selected_presence_by_hour(removed_item)
-        if removed_matches_rate else {}
-    )
+    if removed_matches_rate:
+        # Hot path: callers in improve_selected precompute this once per removed_item.
+        # Falling back to a full scan keeps the function safe for ad-hoc callers.
+        removed_presence = (
+            removed_item.get("_presenceByHour")
+            if isinstance(removed_item, dict)
+            else None
+        )
+        if removed_presence is None:
+            removed_presence = _shift_preview_selected_presence_by_hour(removed_item)
+    else:
+        removed_presence = {}
     for index, amount in candidate.get("activePresenceVector") or []:
         if index >= total_hours:
             return False
@@ -1047,65 +1206,144 @@ def _shift_preview_can_add_candidate(
     return True
 
 
+def _shift_preview_selected_active_items(selected_item: Dict[str, Any]) -> List[tuple]:
+    cached = selected_item.get("_activeVector")
+    if cached is not None:
+        return cached
+    items = _shift_preview_active_items(selected_item.get("vector") or [])
+    selected_item["_activeVector"] = items
+    return items
+
+
 def _shift_preview_improve_selected(
     target: List[float],
     coverage: List[float],
     selected: List[Dict[str, Any]],
     candidates: List[Dict[str, Any]],
     rate_capacity: Dict[str, Dict[str, Any]],
+    deficit_limit: Optional[float] = None,
 ) -> Dict[str, Any]:
-    selected = list(selected or [])
+    selected = [dict(item) for item in (selected or [])]
     coverage = list(coverage or [])
     total_hours = len(target)
-    current_totals = _shift_preview_totals(target, coverage)
-    current_quality = _shift_preview_quality_for_coverage(target, coverage, len(selected))
+    components = _shift_preview_quality_components(target, coverage)
     epsilon = float(SHIFT_PREVIEW_LOCAL_IMPROVEMENT_EPSILON)
-    candidate_source = str((candidates[0] if candidates else {}).get("source") or "")
-    allow_swaps = candidate_source != "freeform"
+    # We optimize the same lexicographic objective as _shift_preview_result_rank:
+    # (over_limit_flag, over, deficit, selected_count). Falling back to the legacy
+    # quality function when no deficit_limit is provided keeps the behavior
+    # identical for any unrelated callers.
+    limit = float(deficit_limit) if deficit_limit is not None else None
+
+    def _make_rank(deficit: float, over: float, selected_count: int) -> tuple:
+        # Mirrors _shift_preview_result_rank so improve_selected and final result
+        # selection optimize the same objective.
+        # Within the deficit budget: minimize over, then deficit, then count.
+        # Above the budget: minimize deficit first (rejoin the budget), then over.
+        within = limit is None or deficit <= float(limit) + 0.0001
+        if within:
+            return (0, over, deficit, selected_count)
+        return (1, deficit, over, selected_count)
+
+    def _rank_now(selected_count: int) -> tuple:
+        return _make_rank(components["deficit"], components["over"], selected_count)
+
+    def _rank_with_delta(delta: Dict[str, float], selected_delta: int, selected_count_now: int) -> tuple:
+        next_deficit = components["deficit"] + delta["deficit"]
+        next_over = components["over"] + delta["over"]
+        return _make_rank(next_deficit, next_over, selected_count_now + selected_delta)
+
+    def _accept(new_rank: tuple, current_rank: tuple) -> bool:
+        # Tight lexicographic improvement; the epsilon prevents oscillation on
+        # rounding noise of equal-quality moves.
+        if new_rank[0] != current_rank[0]:
+            return new_rank[0] < current_rank[0]
+        if new_rank[1] + epsilon < current_rank[1]:
+            return True
+        if abs(new_rank[1] - current_rank[1]) <= epsilon and new_rank[2] + epsilon < current_rank[2]:
+            return True
+        if (
+            abs(new_rank[1] - current_rank[1]) <= epsilon
+            and abs(new_rank[2] - current_rank[2]) <= epsilon
+            and new_rank[3] < current_rank[3]
+        ):
+            return True
+        return False
+
     for _ in range(max(0, int(SHIFT_PREVIEW_LOCAL_ADD_MAX_ITERATIONS))):
         usage_state = _shift_preview_usage_state(selected, total_hours)
+        current_rank = _rank_now(len(selected))
         best_candidate = None
-        best_coverage = None
-        best_quality = current_quality
+        best_delta = None
+        best_rank = current_rank
         for candidate in candidates:
             if not _shift_preview_can_add_candidate(candidate, usage_state, rate_capacity, total_hours):
                 continue
-            next_coverage = _shift_preview_apply_vector_delta(coverage, add_vector=candidate["vector"])
-            next_quality = _shift_preview_quality_for_coverage(target, next_coverage, len(selected) + 1)
-            if next_quality + epsilon < best_quality:
+            add_items = candidate.get("activeVector") or _shift_preview_active_items(candidate["vector"])
+            delta = _shift_preview_local_move_delta(target, coverage, add_items, None)
+            new_rank = _rank_with_delta(delta, 1, len(selected))
+            if _accept(new_rank, best_rank):
                 best_candidate = candidate
-                best_coverage = next_coverage
-                best_quality = next_quality
+                best_delta = delta
+                best_rank = new_rank
         if best_candidate is None:
             break
-        selected.append(_shift_preview_candidate_to_selected(best_candidate))
-        coverage = best_coverage or coverage
-        current_totals = _shift_preview_totals(target, coverage)
-        current_quality = best_quality
-
-    if not allow_swaps:
-        return {
-            "selected": selected,
-            "coverage": coverage,
-            "totals": current_totals,
-            "quality": current_quality,
-        }
+        add_items = best_candidate.get("activeVector") or _shift_preview_active_items(best_candidate["vector"])
+        _shift_preview_apply_active_delta(coverage, add_items, None)
+        components["deficit"] += best_delta["deficit"]
+        components["over"] += best_delta["over"]
+        components["real_covered_need"] += best_delta["real_covered"]
+        chosen = _shift_preview_candidate_to_selected(best_candidate)
+        chosen["_activeVector"] = list(add_items)
+        selected.append(chosen)
 
     candidates_by_rate = defaultdict(list)
     for candidate in candidates:
         candidates_by_rate[candidate["rateKey"]].append(candidate)
 
+    mix_counts = _shift_preview_rate_mix_counts(rate_capacity)
+    enforce_rate_mix = sum(mix_counts.values()) > 0
+    candidates_by_day = defaultdict(list)
+    for candidate in candidates:
+        candidates_by_day[int(candidate.get("dayIndex") or 0)].append(candidate)
+
     for _ in range(max(0, int(SHIFT_PREVIEW_LOCAL_SWAP_MAX_ITERATIONS))):
         usage_state = _shift_preview_usage_state(selected, total_hours)
+        weekly_usage = usage_state["weekly_usage"]
+        current_mix_deviation = (
+            _shift_preview_rate_mix_deviation(weekly_usage, rate_capacity)
+            if enforce_rate_mix
+            else 0.0
+        )
+        current_rank = _rank_now(len(selected))
         best_move = None
-        best_coverage = None
-        best_quality = current_quality
+        best_delta = None
+        best_rank = current_rank
+        for selected_item in selected:
+            if "_presenceByHour" not in selected_item:
+                selected_item["_presenceByHour"] = _shift_preview_selected_presence_by_hour(selected_item)
         for remove_index, selected_item in enumerate(selected):
-            removed_vector = selected_item.get("vector") or []
+            removed_items = _shift_preview_selected_active_items(selected_item)
             selected_rate_key = _resource_rate_key((selected_item.get("template") or {}).get("rate"))
-            for candidate in candidates_by_rate.get(selected_rate_key, []):
+            selected_day = int(selected_item.get("dayIndex") or 0)
+            # Coverage is independent per day, so cross-day swaps are virtually never
+            # productive but blow up the inner loop ~7x for a week.
+            for candidate in candidates_by_day.get(selected_day, []):
                 if _shift_preview_is_same_candidate(selected_item, candidate):
                     continue
+                candidate_rate_key = candidate["rateKey"]
+                if enforce_rate_mix and candidate_rate_key != selected_rate_key:
+                    next_weekly_usage = dict(weekly_usage)
+                    next_weekly_usage[selected_rate_key] = max(
+                        0, int(next_weekly_usage.get(selected_rate_key) or 0) - 1
+                    )
+                    next_weekly_usage[candidate_rate_key] = (
+                        int(next_weekly_usage.get(candidate_rate_key) or 0) + 1
+                    )
+                    next_mix_deviation = _shift_preview_rate_mix_deviation(
+                        next_weekly_usage, rate_capacity
+                    )
+                    if next_mix_deviation > current_mix_deviation + 0.0001:
+                        continue
                 if not _shift_preview_can_add_candidate(
                     candidate,
                     usage_state,
@@ -1114,29 +1352,46 @@ def _shift_preview_improve_selected(
                     removed_item=selected_item,
                 ):
                     continue
-                next_coverage = _shift_preview_apply_vector_delta(
-                    coverage,
-                    add_vector=candidate["vector"],
-                    remove_vector=removed_vector,
-                )
-                next_quality = _shift_preview_quality_for_coverage(target, next_coverage, len(selected))
-                if next_quality + epsilon < best_quality:
-                    best_move = (remove_index, candidate)
-                    best_coverage = next_coverage
-                    best_quality = next_quality
+                add_items = candidate.get("activeVector") or _shift_preview_active_items(candidate["vector"])
+                delta = _shift_preview_local_move_delta(target, coverage, add_items, removed_items)
+                new_rank = _rank_with_delta(delta, 0, len(selected))
+                if _accept(new_rank, best_rank):
+                    best_move = (remove_index, candidate, add_items, removed_items)
+                    best_delta = delta
+                    best_rank = new_rank
         if best_move is None:
             break
-        remove_index, candidate = best_move
-        selected[remove_index] = _shift_preview_candidate_to_selected(candidate)
-        coverage = best_coverage or coverage
-        current_totals = _shift_preview_totals(target, coverage)
-        current_quality = best_quality
+        remove_index, candidate, add_items, removed_items = best_move
+        _shift_preview_apply_active_delta(coverage, add_items, removed_items)
+        components["deficit"] += best_delta["deficit"]
+        components["over"] += best_delta["over"]
+        components["real_covered_need"] += best_delta["real_covered"]
+        replaced = _shift_preview_candidate_to_selected(candidate)
+        replaced["_activeVector"] = list(add_items)
+        selected[remove_index] = replaced
 
+    for item in selected:
+        item.pop("_activeVector", None)
+        item.pop("_presenceByHour", None)
+    if limit is not None:
+        # Final rank-aware prune: trade a sliver of deficit (still inside the budget)
+        # for lower over. The swap loop above cannot do this on its own because it
+        # never decreases shift count.
+        pruned = _shift_preview_prune_selected(
+            target, coverage, selected, prune_mode="rank", deficit_limit=limit
+        )
+        selected = pruned["selected"]
+        coverage = pruned["coverage"]
+        final_totals = pruned["totals"]
+        components["deficit"] = float(final_totals.get("deficitFteHours") or 0)
+        components["over"] = float(final_totals.get("overFteHours") or 0)
+    else:
+        final_totals = _shift_preview_totals(target, coverage)
     return {
         "selected": selected,
         "coverage": coverage,
-        "totals": current_totals,
-        "quality": current_quality,
+        "totals": final_totals,
+        "quality": _shift_preview_quality_from_components(components, len(selected)),
     }
 
 
@@ -1396,8 +1651,8 @@ def _run_shift_preview_cp_sat_strategy(
             if hour_index < len(vector_minutes_by_candidate[index])
             and vector_minutes_by_candidate[index][hour_index] > 0
         ]
-        max_coverage_minutes = sum(
-            vector_minutes_by_candidate[index][hour_index]
+        max_coverage_minutes = initial_coverage_minutes + sum(
+            vector_minutes_by_candidate[index][hour_index] * candidate_upper_bounds[index]
             for index in range(len(candidates))
             if hour_index < len(vector_minutes_by_candidate[index])
         )
@@ -1501,13 +1756,17 @@ def _run_shift_preview_cp_sat_min_over_strategy(
     hint_selected: Optional[List[Dict[str, Any]]] = None,
     initial_coverage: Optional[List[float]] = None,
 ) -> Optional[Dict[str, Any]]:
-    if cp_model is None or not candidates:
+    if cp_model is None or not candidates or len(candidates) > SHIFT_PREVIEW_CP_SAT_MIN_OVER_MAX_CANDIDATES:
         return None
 
     total_hours = len(target)
     model = cp_model.CpModel()
+    candidate_upper_bounds = [
+        _shift_preview_candidate_upper_bound(candidate, rate_capacity, target)
+        for candidate in candidates
+    ]
     selected_vars = [
-        model.NewBoolVar(f"min_over_shift_{index}")
+        model.NewIntVar(0, candidate_upper_bounds[index], f"min_over_shift_{index}")
         for index in range(len(candidates))
     ]
 
@@ -1558,8 +1817,8 @@ def _run_shift_preview_cp_sat_min_over_strategy(
             if hour_index < len(vector_minutes_by_candidate[index])
             and vector_minutes_by_candidate[index][hour_index] > 0
         ]
-        max_coverage_minutes = sum(
-            vector_minutes_by_candidate[index][hour_index]
+        max_coverage_minutes = initial_coverage_minutes + sum(
+            vector_minutes_by_candidate[index][hour_index] * candidate_upper_bounds[index]
             for index in range(len(candidates))
             if hour_index < len(vector_minutes_by_candidate[index])
         )
@@ -1573,22 +1832,32 @@ def _run_shift_preview_cp_sat_min_over_strategy(
         deficit_vars.append(deficit)
         over_vars.append(over)
 
-    max_deficit_minutes = int(round(max(0.0, float(max_deficit_fte_hours or 0)) * 60))
+    # Soft deficit: the greedy reports deficit on _rounded_ coverage, but CP-SAT
+    # works in raw minutes, so a tight rounded budget like 4 FTE-h becomes
+    # infeasible (each hour can hide up to ~15 min of raw deficit inside the
+    # rounding). We therefore let CP-SAT take more raw deficit but penalize it
+    # heavily — matching the greedy quality formula (deficit*100 + over*3).
+    raw_deficit_headroom = sum(15 for value in target if float(value or 0) > 0)
+    max_deficit_minutes = (
+        int(round(max(0.0, float(max_deficit_fte_hours or 0)) * 60))
+        + raw_deficit_headroom
+    )
     model.Add(sum(deficit_vars) <= max_deficit_minutes)
-    model.Minimize(sum(over_vars) * 1000 + sum(selected_vars))
+    model.Minimize(sum(deficit_vars) * 100 + sum(over_vars) * 3 + sum(selected_vars))
 
-    hinted_keys = {
-        (
+    hint_counts: Dict[tuple, int] = {}
+    for item in hint_selected or []:
+        key = (
             int(item.get("dayIndex") or 0),
             str(((item.get("template") or {}).get("id")) or ""),
         )
-        for item in (hint_selected or [])
-    }
-    if hinted_keys:
+        hint_counts[key] = hint_counts.get(key, 0) + 1
+    if hint_counts:
         for index, candidate in enumerate(candidates):
             template = candidate.get("template") or {}
             key = (int(candidate.get("dayIndex") or 0), str(template.get("id") or ""))
-            model.AddHint(selected_vars[index], 1 if key in hinted_keys else 0)
+            hint_value = min(hint_counts.get(key, 0), candidate_upper_bounds[index])
+            model.AddHint(selected_vars[index], hint_value)
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = SHIFT_PREVIEW_CP_SAT_MIN_OVER_TIME_LIMIT_SECONDS
@@ -1604,23 +1873,28 @@ def _run_shift_preview_cp_sat_min_over_strategy(
     selected = []
     status_name = _shift_preview_status_name(status)
     for index, candidate in enumerate(candidates):
-        if not solver.BooleanValue(selected_vars[index]):
+        selected_count = int(solver.Value(selected_vars[index]) or 0)
+        if selected_count <= 0:
             continue
         for hour_index, amount in enumerate(candidate["vector"]):
-            coverage[hour_index] = round(float(coverage[hour_index] or 0) + float(amount or 0), 4)
-        selected.append({
-            "dayIndex": candidate["dayIndex"],
-            "template": candidate["template"],
-            "vector": list(candidate["vector"]),
-            "presenceVector": list(candidate.get("presenceVector") or []),
-            "source": candidate.get("source"),
-            "score": {
-                "method": "cp_sat_min_over",
-                "status": status_name,
-                "objective": round(float(solver.ObjectiveValue()), 4),
-                "preference_score": round(float(candidate.get("preferenceScore") or 0), 4),
-            },
-        })
+            coverage[hour_index] = round(
+                float(coverage[hour_index] or 0) + float(amount or 0) * selected_count,
+                4,
+            )
+        for _ in range(selected_count):
+            selected.append({
+                "dayIndex": candidate["dayIndex"],
+                "template": candidate["template"],
+                "vector": list(candidate["vector"]),
+                "presenceVector": list(candidate.get("presenceVector") or []),
+                "source": candidate.get("source"),
+                "score": {
+                    "method": "cp_sat_min_over",
+                    "status": status_name,
+                    "objective": round(float(solver.ObjectiveValue()), 4),
+                    "preference_score": round(float(candidate.get("preferenceScore") or 0), 4),
+                },
+            })
 
     pruned = _shift_preview_prune_selected(target, coverage, selected, prune_mode="strict")
     totals = pruned["totals"]
@@ -1630,6 +1904,196 @@ def _run_shift_preview_cp_sat_min_over_strategy(
         "coverage": pruned["coverage"],
         "totals": totals,
         "quality": _shift_preview_quality_score(totals, len(pruned["selected"])),
+    }
+
+
+def _run_shift_preview_cp_sat_fixed_mix_refine_strategy(
+    target: List[float],
+    candidates: List[Dict[str, Any]],
+    rate_capacity: Dict[str, Dict[str, Any]],
+    seed_result: Dict[str, Any],
+    initial_coverage: Optional[List[float]] = None,
+    target_rate_counts: Optional[Dict[str, int]] = None,
+    max_raw_deficit_fte_hours: Optional[float] = None,
+) -> Optional[Dict[str, Any]]:
+    if cp_model is None or not candidates or len(candidates) > SHIFT_PREVIEW_CP_SAT_MIN_OVER_MAX_CANDIDATES:
+        return None
+
+    seed_selected = seed_result.get("selected") or []
+    if not seed_selected:
+        return None
+
+    total_hours = len(target)
+    scale = int(SHIFT_PREVIEW_CP_SAT_SCALE)
+    model = cp_model.CpModel()
+    candidate_upper_bounds = [
+        _shift_preview_candidate_upper_bound(candidate, rate_capacity, target)
+        for candidate in candidates
+    ]
+    selected_vars = [
+        model.NewIntVar(0, candidate_upper_bounds[index], f"fixed_mix_shift_{index}")
+        for index in range(len(candidates))
+    ]
+
+    by_rate = defaultdict(list)
+    by_day_rate = defaultdict(list)
+    by_hour_rate = defaultdict(list)
+    vector_units_by_candidate = []
+
+    for index, candidate in enumerate(candidates):
+        rate_key = candidate["rateKey"]
+        day_index = int(candidate.get("dayIndex") or 0)
+        by_rate[rate_key].append(index)
+        by_day_rate[(day_index, rate_key)].append(index)
+        vector_units = [
+            int(round(float(amount or 0) * scale))
+            for amount in (candidate.get("vector") or [])
+        ]
+        presence_units = [
+            int(round(float(amount or 0) * scale))
+            for amount in (candidate.get("presenceVector") or [])
+        ]
+        vector_units_by_candidate.append(vector_units)
+        for hour_index, amount in enumerate(presence_units):
+            if amount > 0:
+                by_hour_rate[(hour_index, rate_key)].append((index, amount))
+
+    seed_rate_counts = Counter(
+        _resource_rate_key((item.get("template") or {}).get("rate"))
+        for item in seed_selected
+    )
+    effective_rate_counts = {
+        rate_key: max(0, int((target_rate_counts or seed_rate_counts).get(rate_key) or 0))
+        for rate_key in by_rate
+    }
+    for rate_key, indexes in by_rate.items():
+        model.Add(sum(selected_vars[index] for index in indexes) == effective_rate_counts.get(rate_key, 0))
+
+    for (_day_index, rate_key), indexes in by_day_rate.items():
+        capacity = int((rate_capacity.get(rate_key) or {}).get("daily_shift_capacity") or 0)
+        model.Add(sum(selected_vars[index] for index in indexes) <= capacity)
+
+    for (_hour_index, rate_key), items in by_hour_rate.items():
+        capacity = int((rate_capacity.get(rate_key) or {}).get("daily_shift_capacity") or 0)
+        active_units = sum(selected_vars[index] * amount for index, amount in items)
+        model.Add(active_units <= capacity * scale)
+
+    deficit_vars = []
+    over_vars = []
+    for hour_index in range(total_hours):
+        target_units = int(round(float(target[hour_index] or 0) * scale))
+        initial_coverage_units = int(
+            round(
+                float(
+                    (initial_coverage or [])[hour_index]
+                    if initial_coverage and hour_index < len(initial_coverage)
+                    else 0.0
+                )
+                * scale
+            )
+        )
+        coverage_terms = [
+            selected_vars[index] * vector_units_by_candidate[index][hour_index]
+            for index in range(len(candidates))
+            if hour_index < len(vector_units_by_candidate[index])
+            and vector_units_by_candidate[index][hour_index] > 0
+        ]
+        max_coverage_units = initial_coverage_units + sum(
+            vector_units_by_candidate[index][hour_index] * candidate_upper_bounds[index]
+            for index in range(len(candidates))
+            if hour_index < len(vector_units_by_candidate[index])
+        )
+        deficit = model.NewIntVar(0, max(target_units, 0), f"fixed_mix_deficit_{hour_index}")
+        over = model.NewIntVar(
+            0,
+            max(max_coverage_units, target_units, 0),
+            f"fixed_mix_over_{hour_index}",
+        )
+        model.Add(sum(coverage_terms) + initial_coverage_units + deficit - over == target_units)
+        deficit_vars.append(deficit)
+        over_vars.append(over)
+
+    if max_raw_deficit_fte_hours is None:
+        seed_coverage = seed_result.get("coverage") or []
+        max_raw_deficit_fte_hours = sum(
+            max(
+                0.0,
+                float(target[index] or 0)
+                - float(seed_coverage[index] if index < len(seed_coverage) else 0.0),
+            )
+            for index in range(total_hours)
+        )
+    model.Add(sum(deficit_vars) <= int(round(float(max_raw_deficit_fte_hours or 0) * scale)))
+    model.Minimize(sum(over_vars) * 1000 + sum(deficit_vars))
+
+    if effective_rate_counts == {
+        rate_key: int(seed_rate_counts.get(rate_key) or 0)
+        for rate_key in effective_rate_counts
+    }:
+        hint_counts = Counter(
+            (
+                int(item.get("dayIndex") or 0),
+                str(((item.get("template") or {}).get("id")) or ""),
+            )
+            for item in seed_selected
+        )
+        for index, candidate in enumerate(candidates):
+            template = candidate.get("template") or {}
+            key = (int(candidate.get("dayIndex") or 0), str(template.get("id") or ""))
+            model.AddHint(selected_vars[index], min(hint_counts.get(key, 0), candidate_upper_bounds[index]))
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = SHIFT_PREVIEW_CP_SAT_FIXED_MIX_REFINE_TIME_LIMIT_SECONDS
+    solver.parameters.num_search_workers = SHIFT_PREVIEW_CP_SAT_SEARCH_WORKERS
+    solver.parameters.random_seed = 23
+    status = solver.Solve(model)
+    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        return None
+
+    coverage = [
+        round(
+            float(
+                (initial_coverage or [])[index]
+                if initial_coverage and index < len(initial_coverage)
+                else 0.0
+            ),
+            4,
+        )
+        for index in range(total_hours)
+    ]
+    selected = []
+    status_name = _shift_preview_status_name(status)
+    for index, candidate in enumerate(candidates):
+        selected_count = int(solver.Value(selected_vars[index]) or 0)
+        if selected_count <= 0:
+            continue
+        for hour_index, amount in enumerate(candidate["vector"]):
+            coverage[hour_index] = round(
+                float(coverage[hour_index] or 0) + float(amount or 0) * selected_count,
+                4,
+            )
+        for _ in range(selected_count):
+            selected.append({
+                "dayIndex": candidate["dayIndex"],
+                "template": candidate["template"],
+                "vector": list(candidate["vector"]),
+                "presenceVector": list(candidate.get("presenceVector") or []),
+                "source": candidate.get("source"),
+                "score": {
+                    "method": "cp_sat_fixed_mix_refine",
+                    "status": status_name,
+                    "objective": round(float(solver.ObjectiveValue()), 4),
+                    "preference_score": round(float(candidate.get("preferenceScore") or 0), 4),
+                },
+            })
+
+    totals = _shift_preview_totals(target, coverage)
+    return {
+        "method": f"cp_sat_fixed_mix_refine_{status_name}",
+        "selected": selected,
+        "coverage": coverage,
+        "totals": totals,
+        "quality": _shift_preview_quality_score(totals, len(selected)),
     }
 
 
@@ -1663,34 +2127,39 @@ def _select_shift_preview_strategy(
         )
         for strategy in SHIFT_PREVIEW_GREEDY_STRATEGIES
     ])
-    raw_best_result = _select_best_shift_preview_result(strategy_results, target)
+    proportional_strategy_results = _shift_preview_proportional_results(strategy_results, rate_capacity)
+    raw_best_result = _select_best_shift_preview_result(proportional_strategy_results, target)
     best_deficit = min(
         round(float((item.get("totals") or {}).get("deficitFteHours") or 0), 4)
-        for item in strategy_results
+        for item in proportional_strategy_results
     )
     deficit_limit = _shift_preview_default_deficit_limit(target, best_deficit)
-    min_over_result = _run_shift_preview_cp_sat_min_over_strategy(
-        target,
-        candidates,
-        rate_capacity,
-        max_deficit_fte_hours=deficit_limit,
-        hint_selected=raw_best_result.get("selected") or [],
-        initial_coverage=initial_coverage,
-    )
-    if min_over_result is not None:
-        strategy_results.append(min_over_result)
-        raw_best_result = _select_best_shift_preview_result(strategy_results, target)
-        best_deficit = min(
-            round(float((item.get("totals") or {}).get("deficitFteHours") or 0), 4)
-            for item in strategy_results
+    if sum(_shift_preview_rate_mix_counts(rate_capacity).values()) <= 0:
+        min_over_result = _run_shift_preview_cp_sat_min_over_strategy(
+            target,
+            candidates,
+            rate_capacity,
+            max_deficit_fte_hours=deficit_limit,
+            hint_selected=raw_best_result.get("selected") or [],
+            initial_coverage=initial_coverage,
         )
-        deficit_limit = _shift_preview_default_deficit_limit(target, best_deficit)
+        if min_over_result is not None:
+            strategy_results.append(min_over_result)
+            proportional_strategy_results = _shift_preview_proportional_results(strategy_results, rate_capacity)
+            raw_best_result = _select_best_shift_preview_result(proportional_strategy_results, target)
+            best_deficit = min(
+                round(float((item.get("totals") or {}).get("deficitFteHours") or 0), 4)
+                for item in proportional_strategy_results
+            )
+            deficit_limit = _shift_preview_default_deficit_limit(target, best_deficit)
+
     improved = _shift_preview_improve_selected(
         target,
         raw_best_result["coverage"],
         raw_best_result["selected"],
         candidates,
         rate_capacity,
+        deficit_limit=deficit_limit,
     )
     improved_result = {
         **raw_best_result,
@@ -1699,17 +2168,57 @@ def _select_shift_preview_strategy(
         "totals": improved["totals"],
         "quality": improved["quality"],
     }
+    combined_results = list(strategy_results) + [improved_result]
+    proportional_combined_results = _shift_preview_proportional_results(combined_results, rate_capacity)
     best_result = min(
-        [raw_best_result, improved_result],
+        proportional_combined_results,
         key=lambda item: _shift_preview_result_rank(item, deficit_limit),
     )
-    strategy_results = [
-        best_result if item is raw_best_result else item
-        for item in strategy_results
-    ]
+    best_raw_deficit = sum(
+        max(
+            0.0,
+            float(target[index] or 0)
+            - float((best_result.get("coverage") or [])[index] if index < len(best_result.get("coverage") or []) else 0.0),
+        )
+        for index in range(len(target))
+    )
+    proportional_combined_results = _shift_preview_proportional_results(combined_results, rate_capacity)
+    candidate_totals = {
+        len(best_result.get("selected") or []),
+        min(len(item.get("selected") or []) for item in proportional_combined_results),
+    }
+    min_total = min(candidate_totals)
+    if min_total > 8:
+        candidate_totals.add(min_total - 8)
+
+    fixed_mix_results = []
+    for total_shifts in sorted(candidate_totals):
+        seed_for_total = min(
+            proportional_combined_results,
+            key=lambda item: abs(len(item.get("selected") or []) - total_shifts),
+        )
+        fixed_mix_refined = _run_shift_preview_cp_sat_fixed_mix_refine_strategy(
+            target,
+            candidates,
+            rate_capacity,
+            seed_for_total,
+            initial_coverage=initial_coverage,
+            target_rate_counts=_shift_preview_rate_mix_target_counts(total_shifts, rate_capacity),
+            max_raw_deficit_fte_hours=best_raw_deficit,
+        )
+        if fixed_mix_refined is not None:
+            fixed_mix_results.append(fixed_mix_refined)
+
+    if fixed_mix_results:
+        combined_results.extend(fixed_mix_results)
+        proportional_combined_results = _shift_preview_proportional_results(combined_results, rate_capacity)
+        best_result = min(
+            proportional_combined_results,
+            key=lambda item: _shift_preview_result_rank(item, deficit_limit),
+        )
     return {
         "best": best_result,
-        "strategy_results": strategy_results,
+        "strategy_results": combined_results,
     }
 
 

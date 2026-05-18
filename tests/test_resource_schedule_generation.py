@@ -2,6 +2,7 @@ import unittest
 
 from resource_fte.schedule_generation import (
     _generate_schedule_preview_from_forecast,
+    _shift_preview_rate_mix_target_counts,
     _run_shift_preview_greedy_strategy,
     _select_best_shift_preview_result,
     _select_default_schedule_preview_variant,
@@ -171,6 +172,19 @@ class ResourceScheduleGenerationTests(unittest.TestCase):
             counts[item["template"]["rate"]] += 1
 
         self.assertEqual(counts, {1.0: 5, 0.75: 5, 0.5: 10})
+
+    def test_rate_mix_target_counts_preserve_department_percentages(self):
+        self.assertEqual(
+            _shift_preview_rate_mix_target_counts(
+                410,
+                {
+                    "1": {"mix_count": 2},
+                    "0.75": {"mix_count": 14},
+                    "0.5": {"mix_count": 33},
+                },
+            ),
+            {"1": 17, "0.75": 117, "0.5": 276},
+        )
 
     def test_default_preview_plans_from_forecast_need_instead_of_staff_cap(self):
         preview = _generate_schedule_preview_from_forecast(
