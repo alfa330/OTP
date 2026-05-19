@@ -3137,12 +3137,7 @@ def api_shift_auction_test_publish():
         return jsonify({"error": "Internal server error"}), 500
 
 
-@app.route('/api/shift_auction/test_lots/<int:lot_id>/claim', methods=['POST', 'DELETE', 'OPTIONS'])
-@require_api_key
-def api_shift_auction_test_lot_claim(lot_id):
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-
+def _shift_auction_test_lot_mutation_response(lot_id, action):
     try:
         requester_started_at = time.perf_counter()
         requester_id, requester, auth_error = _get_authenticated_requester()
@@ -3153,7 +3148,7 @@ def api_shift_auction_test_lot_claim(lot_id):
         if _normalize_user_role(requester[3]) != 'operator':
             return jsonify({"error": "Only operators can claim shifts"}), 403
         mutation_started_at = time.perf_counter()
-        if request.method == 'DELETE':
+        if action == 'release':
             result = db.release_shift_auction_test_lot(requester_id, lot_id)
         else:
             result = db.claim_shift_auction_test_lot(requester_id, lot_id)
@@ -3168,6 +3163,33 @@ def api_shift_auction_test_lot_claim(lot_id):
     except Exception as error:
         logging.error(f"Shift auction claim API error: {error}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/shift_auction/test_lots/claim', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_shift_auction_test_lot_claim_stable():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+
+    payload = request.get_json(silent=True) or {}
+    try:
+        lot_id = int(payload.get('lot_id') or payload.get('id'))
+    except Exception:
+        return jsonify({"error": "Lot id is required"}), 400
+    action = str(payload.get('action') or 'claim').strip().lower()
+    if action not in ('claim', 'release'):
+        return jsonify({"error": "Unsupported auction lot action"}), 400
+    return _shift_auction_test_lot_mutation_response(lot_id, action)
+
+
+@app.route('/api/shift_auction/test_lots/<int:lot_id>/claim', methods=['POST', 'DELETE', 'OPTIONS'])
+@require_api_key
+def api_shift_auction_test_lot_claim(lot_id):
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+
+    action = 'release' if request.method == 'DELETE' else 'claim'
+    return _shift_auction_test_lot_mutation_response(lot_id, action)
 
 
 @app.route('/api/shift_auction/test_day_off', methods=['POST', 'DELETE', 'OPTIONS'])
