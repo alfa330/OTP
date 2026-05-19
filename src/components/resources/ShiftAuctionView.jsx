@@ -1957,6 +1957,15 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     () => lots.filter((lot) => Number(lot.claimed_by) === Number(user?.id)),
     [lots, user?.id]
   );
+  const myClaimedDateSet = useMemo(
+    () => new Set(
+      myClaimedLots
+        .filter((lot) => lot.status === 'claimed')
+        .map((lot) => lot.shift_date)
+        .filter(Boolean)
+    ),
+    [myClaimedLots]
+  );
 
   const dayOffQuota = useMemo(() => Math.min(2, Math.max(0, lotDates.length)), [lotDates.length]);
   const manualDayOffLimit = useMemo(
@@ -2139,6 +2148,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         reasons.set(lotId, `День закрыт: ${getAuctionBlockedDateLabel(blockedPeriod)}`);
         return;
       }
+      if (lot.shift_date && myClaimedDateSet.has(lot.shift_date)) {
+        reasons.set(lotId, 'На этот день уже выбрана смена');
+        return;
+      }
       const netMinutes = getAuctionLotNetMinutes(lot);
       if (myAuctionWorkload.normMinutes > 0 && myAuctionWorkload.claimedNetMinutes >= myAuctionWorkload.normMinutes - 1) {
         reasons.set(lotId, 'Норма уже набрана');
@@ -2152,7 +2165,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       }
     });
     return reasons;
-  }, [canMonitor, isTester, lots, myAuctionWorkload, myBlockedDateMap]);
+  }, [canMonitor, isTester, lots, myAuctionWorkload, myBlockedDateMap, myClaimedDateSet]);
 
   useEffect(() => {
     if (!canUseAuction || !lotDates.length || typeof window === 'undefined') return undefined;
