@@ -1625,8 +1625,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
   const postClaimLot = useCallback(async (lotId) => {
     const response = await axios.post(
-      `${apiRoot}/api/shift_auction/test_lots/${lotId}/claim`,
-      null,
+      `${apiRoot}/api/shift_auction/test_lots/claim`,
+      { lot_id: lotId, action: 'claim' },
       { headers: buildHeaders() }
     );
     return { data: response?.data || {} };
@@ -2472,8 +2472,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     setReleaseConfirmLot(null);
 
     try {
-      const response = await enqueueAuctionMutation(() => axios.delete(
-        `${apiRoot}/api/shift_auction/test_lots/${numericId}/claim`,
+      const response = await enqueueAuctionMutation(() => axios.post(
+        `${apiRoot}/api/shift_auction/test_lots/claim`,
+        { lot_id: numericId, action: 'release' },
         { headers: buildHeaders() }
       ));
       const serverLot = response?.data?.lot;
