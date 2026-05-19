@@ -3204,7 +3204,11 @@ class Database:
         selected_period_row = self._get_shift_auction_period_row_tx(cursor, settings_row[6])
         available_periods = []
         claim_journal_rows = []
+        participant_workloads = []
         if include_admin_fields:
+            participant_workloads = self._get_shift_auction_participant_workloads_tx(
+                cursor, participant_rows, lots, lot_dates
+            )
             available_periods = self._get_shift_auction_available_periods_tx(cursor)
             cursor.execute("""
                 SELECT
@@ -3236,7 +3240,8 @@ class Database:
             "lot_dates": lot_dates,
             "selected_period_row": selected_period_row,
             "available_periods": available_periods,
-            "claim_journal_rows": claim_journal_rows
+            "claim_journal_rows": claim_journal_rows,
+            "participant_workloads": participant_workloads
         }
 
     def _get_shift_auction_snapshot_common_tx(self, cursor, settings_row, include_admin_fields=False):
@@ -3321,6 +3326,112 @@ class Database:
         except Exception:
             total = 0
         return min(2, max(0, total))
+
+    def _get_shift_auction_participant_workloads_tx(self, cursor, participant_rows, lots, lot_dates):
+        # Per-operator workload (norm vs claimed) computed in one pass.
+        # Only the day-off / blocked-period counters need the DB; lot stats are
+        # derived from the already-loaded `lots` list.
+        if not participant_rows:
+            return []
+        operator_ids = [int(row[0]) for row in participant_rows if row and row[0] is not None]
+        if not operator_ids:
+            return []
+        lot_dates_list = [d for d in (lot_dates or []) if d]
+        total_days = len(lot_dates_list)
+
+        day_offs_count = {op_id: 0 for op_id in operator_ids}
+        cursor.execute(
+            """
+            SELECT operator_id, COUNT(*)::int
+            FROM shift_auction_test_day_offs
+            WHERE operator_id = ANY(%s)
+            GROUP BY operator_id
+            """,
+            (operator_ids,)
+        )
+        for op_id, count_value in (cursor.fetchall() or []):
+            if op_id is None:
+                continue
+            day_offs_count[int(op_id)] = int(count_value or 0)
+
+        blocked_days_count = {op_id: 0 for op_id in operator_ids}
+        if lot_dates_list:
+            period_start = min(lot_dates_list)
+            period_end = max(lot_dates_list)
+            cursor.execute(
+                """
+                SELECT p.operator_id, COUNT(DISTINCT d.shift_date)::int
+                FROM operator_schedule_status_periods p
+                JOIN UNNEST(%s::date[]) AS d(shift_date)
+                  ON d.shift_date >= p.start_date
+                 AND d.shift_date <= COALESCE(p.end_date, %s::date)
+                WHERE p.operator_id = ANY(%s)
+                  AND p.start_date <= %s::date
+                  AND COALESCE(p.end_date, %s::date) >= %s::date
+                GROUP BY p.operator_id
+                """,
+                (lot_dates_list, period_end, operator_ids, period_end, period_end, period_start)
+            )
+            for op_id, count_value in (cursor.fetchall() or []):
+                if op_id is None:
+                    continue
+                blocked_days_count[int(op_id)] = int(count_value or 0)
+
+        claimed_by_operator = {op_id: [] for op_id in operator_ids}
+        for lot in (lots or []):
+            if not isinstance(lot, dict):
+                continue
+            if str(lot.get('status') or '') != 'claimed':
+                continue
+            owner = lot.get('claimed_by')
+            try:
+                owner_id = int(owner) if owner is not None else None
+            except Exception:
+                owner_id = None
+            if owner_id is None or owner_id not in claimed_by_operator:
+                continue
+            claimed_by_operator[owner_id].append(lot)
+
+        workloads = []
+        for row in participant_rows:
+            if not row or row[0] is None:
+                continue
+            op_id = int(row[0])
+            try:
+                rate = float(row[4]) if row[4] is not None else 1.0
+            except Exception:
+                rate = 1.0
+            if rate <= 0:
+                rate = 1.0
+            blocked = blocked_days_count.get(op_id, 0)
+            workday_count = self._shift_auction_norm_workday_count(total_days, blocked_days=blocked)
+            norm_minutes = int(round(workday_count * 8 * 60 * rate))
+            claimed_lots = claimed_by_operator.get(op_id, [])
+            claimed_net = 0
+            claimed_break = 0
+            for lot in claimed_lots:
+                minutes = self._shift_auction_lot_minutes(
+                    lot.get('start_time'),
+                    lot.get('end_time'),
+                    lot.get('breaks') if isinstance(lot.get('breaks'), list) else []
+                )
+                claimed_net += int(minutes.get('net_minutes') or 0)
+                claimed_break += int(minutes.get('break_minutes') or 0)
+            workloads.append({
+                "operator_id": op_id,
+                "rate": rate,
+                "norm_minutes": norm_minutes,
+                "workday_count": int(workday_count),
+                "claimed_net_minutes": int(claimed_net),
+                "claimed_break_minutes": int(claimed_break),
+                "remaining_minutes": max(0, norm_minutes - int(claimed_net)),
+                "over_minutes": max(0, int(claimed_net) - norm_minutes),
+                "blocked_days": int(blocked),
+                "selected_day_offs": int(day_offs_count.get(op_id, 0)),
+                "lots_claimed_count": len(claimed_lots),
+                "is_complete": bool(norm_minutes > 0 and claimed_net >= norm_minutes - 1),
+            })
+        return workloads
 
     def _shift_auction_norm_workday_count(self, total_days, blocked_days=0):
         try:
@@ -4002,6 +4113,7 @@ class Database:
             selected_period_row = common_snapshot["selected_period_row"]
             available_periods = common_snapshot["available_periods"]
             claim_journal_rows = common_snapshot["claim_journal_rows"]
+            participant_workloads = common_snapshot.get("participant_workloads") or []
 
             my_day_offs = []
             if current_id:
@@ -4066,6 +4178,7 @@ class Database:
             "my_day_offs": my_day_offs,
             "my_blocked_dates": my_blocked_dates,
             "available_periods": available_periods,
+            "participant_workloads": participant_workloads,
             "claim_journal": [
                 {
                     "id": row[0],

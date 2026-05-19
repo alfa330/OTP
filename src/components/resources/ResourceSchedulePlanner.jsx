@@ -1236,6 +1236,11 @@ const ResourceSchedulePlanner = ({
   const [splitPreview, setSplitPreview] = useState(null);
   const [selectedDayIndex, setSelectedDayIndex] = useState(0);
   const [coverageView, setCoverageView] = useState('cards');
+  const [coverageSource, setCoverageSource] = useState('planner');
+  const [auctionLots, setAuctionLots] = useState([]);
+  const [auctionLoading, setAuctionLoading] = useState(false);
+  const [auctionError, setAuctionError] = useState('');
+  const [auctionLoadedAt, setAuctionLoadedAt] = useState(null);
   const [historyPast, setHistoryPast] = useState([]);
   const [historyFuture, setHistoryFuture] = useState([]);
   const timelineRefs = useRef(new Map());
@@ -1486,7 +1491,82 @@ const ResourceSchedulePlanner = ({
     }
   }, [apiRoot, applyGeneratedVariant, buildHeaders, emit, normalizePreviewDays, selectedPeriodEnd, selectedWeekStart, templates]);
 
-  const computed = useMemo(() => buildCoverageFromDays(plannerDays), [plannerDays]);
+  const fetchAuctionLots = useCallback(async () => {
+    if (!apiRoot) return;
+    setAuctionLoading(true);
+    setAuctionError('');
+    try {
+      const response = await axios.get(`${apiRoot}/api/shift_auction/test_snapshot`, {
+        headers: typeof buildHeaders === 'function' ? buildHeaders() : {}
+      });
+      const snapshot = response?.data?.snapshot || {};
+      const lots = Array.isArray(snapshot.lots) ? snapshot.lots : [];
+      setAuctionLots(lots);
+      setAuctionLoadedAt(new Date());
+    } catch (error) {
+      const message = error?.response?.data?.error || 'Не удалось загрузить взятые смены аукциона';
+      setAuctionError(message);
+      emit(message, 'error');
+    } finally {
+      setAuctionLoading(false);
+    }
+  }, [apiRoot, buildHeaders, emit]);
+
+  useEffect(() => {
+    if (coverageSource !== 'auction') return;
+    if (auctionLoading) return;
+    if (auctionLoadedAt) return;
+    fetchAuctionLots();
+  }, [auctionLoadedAt, auctionLoading, coverageSource, fetchAuctionLots]);
+
+  const auctionShiftsByDate = useMemo(() => {
+    const map = new Map();
+    if (!Array.isArray(auctionLots) || !auctionLots.length) return map;
+    const parseHM = (value) => {
+      if (!value || typeof value !== 'string') return null;
+      const [h, m] = value.split(':').map((part) => Number(part));
+      if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+      return h * 60 + m;
+    };
+    auctionLots.forEach((lot, index) => {
+      if (!lot || String(lot.status || '') !== 'claimed') return;
+      const date = lot.shift_date;
+      if (!date) return;
+      const startMinute = parseHM(lot.start_time);
+      const endMinuteRaw = parseHM(lot.end_time);
+      if (startMinute === null || endMinuteRaw === null) return;
+      const endMinute = endMinuteRaw > startMinute ? endMinuteRaw : endMinuteRaw + 24 * 60;
+      const list = map.get(date) || [];
+      list.push({
+        id: `auction-${lot.id || index}`,
+        startMinute,
+        endMinute,
+        readOnly: true,
+        source: 'auction',
+        claimedBy: lot.claimed_by_name || ''
+      });
+      map.set(date, list);
+    });
+    return map;
+  }, [auctionLots]);
+
+  const auctionClaimedCount = useMemo(
+    () => Array.from(auctionShiftsByDate.values()).reduce((sum, list) => sum + list.length, 0),
+    [auctionShiftsByDate]
+  );
+
+  const plannerDaysForCoverage = useMemo(() => {
+    if (coverageSource !== 'auction') return plannerDays;
+    return plannerDays.map((day) => ({
+      ...day,
+      shifts: auctionShiftsByDate.get(day.date) || []
+    }));
+  }, [auctionShiftsByDate, coverageSource, plannerDays]);
+
+  const computed = useMemo(
+    () => buildCoverageFromDays(plannerDaysForCoverage),
+    [plannerDaysForCoverage]
+  );
   const computedDays = computed.days;
   const summary = computed.summary;
   const visibleScheduleVariants = useMemo(() => {
@@ -2126,9 +2206,59 @@ const ResourceSchedulePlanner = ({
                 <div className="text-sm font-semibold text-slate-950">
                   {computedDays[activeDayIndex]?.short || computedDays[activeDayIndex]?.label || 'День'} · {computedDays[activeDayIndex]?.date || ''}
                 </div>
-                <div className="text-xs text-slate-500">Действия применяются к выбранному полотну</div>
+                <div className="text-xs text-slate-500">
+                  {coverageSource === 'auction'
+                    ? (
+                        auctionError
+                          ? <span className="text-rose-600">{auctionError}</span>
+                          : auctionLoading && !auctionLoadedAt
+                            ? 'Загружаю взятые смены аукциона…'
+                            : auctionClaimedCount > 0
+                              ? `Покрытие по ${auctionClaimedCount} взятым сменам из аукциона`
+                              : 'В аукционе пока никто не взял смены'
+                      )
+                    : 'Действия применяются к выбранному полотну'
+                  }
+                </div>
               </div>
               <div className="flex flex-wrap gap-2">
+                <div className="inline-flex h-10 overflow-hidden rounded-lg border border-slate-200 bg-white p-1" title="Источник данных для покрытия FTE">
+                  {[
+                    ['planner', 'Расписание'],
+                    ['auction', 'Аукцион'],
+                  ].map(([key, label]) => (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => setCoverageSource(key)}
+                      className={`inline-flex items-center gap-1.5 rounded-md px-3 text-sm font-semibold transition ${
+                        coverageSource === key
+                          ? 'bg-blue-600 text-white'
+                          : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+                      }`}
+                    >
+                      {key === 'auction' ? <Gavel size={14} /> : null}
+                      <span>{label}</span>
+                      {key === 'auction' && auctionClaimedCount > 0 ? (
+                        <span className={`rounded px-1 text-[10px] font-bold tabular-nums ${
+                          coverageSource === key ? 'bg-blue-500 text-white' : 'bg-slate-100 text-slate-600'
+                        }`}>{auctionClaimedCount}</span>
+                      ) : null}
+                    </button>
+                  ))}
+                </div>
+                {coverageSource === 'auction' ? (
+                  <button
+                    type="button"
+                    onClick={fetchAuctionLots}
+                    disabled={auctionLoading}
+                    className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60"
+                    title="Обновить данные аукциона"
+                  >
+                    <RefreshCw size={16} className={auctionLoading ? 'animate-spin' : ''} />
+                    {auctionLoading ? 'Обновляю…' : 'Обновить'}
+                  </button>
+                ) : null}
                 <div className="inline-flex h-10 overflow-hidden rounded-lg border border-slate-200 bg-white p-1">
                   {[
                     ['cards', 'Карточки'],
