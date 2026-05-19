@@ -3277,9 +3277,29 @@ class Database:
                 "SELECT pg_notify(%s, %s)",
                 (SHIFT_AUCTION_TEST_EVENT_NOTIFY_CHANNEL, str(event_id))
             )
-            _invalidate_shift_auction_runtime_caches(
-                include_participants=str(event_type or '').strip() == "settings_updated"
-            )
+            # Only invalidate the global snapshot cache when structural fields
+            # change (auction settings, participant list, lot collection, etc.).
+            # `lot_claimed` / `lot_released` / `day_off_*` events ride on SSE for
+            # real-time UI updates, and the 1.5s TTL keeps fresh views close
+            # enough. Aggressive invalidation here caused a thundering-herd
+            # rebuild storm under load — every claim made all polling clients
+            # miss the cache at once and stampede the DB pool.
+            structural_events = {
+                "settings_updated",
+                "lots_seeded",
+                "auction_published",
+                "auction_paused",
+                "auction_resumed",
+                "auction_finished",
+                "auction_restarted",
+                "resource_schedule_saved",
+            }
+            participant_invalidating_events = {"settings_updated"}
+            normalized_event_type = str(event_type or '').strip()
+            if normalized_event_type in structural_events:
+                _invalidate_shift_auction_runtime_caches(
+                    include_participants=normalized_event_type in participant_invalidating_events
+                )
         return {
             "id": event_id,
             "event_type": event_type,
