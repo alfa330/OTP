@@ -15,6 +15,7 @@ import io
 import math
 from io import BytesIO
 import asyncio
+import threading
 from concurrent.futures import ThreadPoolExecutor
 import gc
 from psycopg2.pool import ThreadedConnectionPool  # Added for connection pooling
@@ -36,13 +37,54 @@ logging.basicConfig(level=logging.INFO)
 os.environ['TZ'] = 'Asia/Almaty'
 time.tzset()
 
+def _env_int(name, default, minimum=None):
+    try:
+        value = int(str(os.getenv(name, default)).strip())
+    except Exception:
+        value = int(default)
+    if minimum is not None:
+        value = max(int(minimum), value)
+    return value
+
+
+def _env_float(name, default, minimum=None):
+    try:
+        value = float(str(os.getenv(name, default)).strip())
+    except Exception:
+        value = float(default)
+    if minimum is not None:
+        value = max(float(minimum), value)
+    return value
+
+
 # Global connection pool. Keep a warm floor so the first browser burst does not
 # pay for creating PostgreSQL connections one by one on the request path.
-MIN_CONN = max(1, int(os.getenv('POSTGRES_POOL_MIN_CONN', '16')))
-MAX_CONN = max(MIN_CONN, int(os.getenv('POSTGRES_POOL_MAX_CONN', '20')))
+MIN_CONN = _env_int('POSTGRES_POOL_MIN_CONN', 16, minimum=1)
+MAX_CONN = max(MIN_CONN, _env_int('POSTGRES_POOL_MAX_CONN', 40, minimum=MIN_CONN))
+POOL_ACQUIRE_TIMEOUT_SECONDS = _env_float('POSTGRES_POOL_ACQUIRE_TIMEOUT_SECONDS', 30, minimum=1)
+POOL_WAIT_WARN_SECONDS = _env_float('POSTGRES_POOL_WAIT_WARN_SECONDS', 2, minimum=0)
 POOL = None
+POOL_LOCK = threading.Lock()
+POOL_SEMAPHORE = None
 STATUS_IMPORT_INSERT_PAGE_SIZE = max(200, int(os.getenv('STATUS_IMPORT_INSERT_PAGE_SIZE', '2000')))
 SHIFT_AUCTION_TEST_EVENT_NOTIFY_CHANNEL = 'shift_auction_test_events'
+SHIFT_AUCTION_SNAPSHOT_CACHE_TTL_SECONDS = _env_float('SHIFT_AUCTION_SNAPSHOT_CACHE_TTL_SECONDS', 1.5, minimum=0)
+SHIFT_AUCTION_PARTICIPANT_CACHE_TTL_SECONDS = _env_float('SHIFT_AUCTION_PARTICIPANT_CACHE_TTL_SECONDS', 2, minimum=0)
+SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE = {"key": None, "expires_at": 0.0, "value": None}
+SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE_LOCK = threading.Lock()
+SHIFT_AUCTION_PARTICIPANT_CACHE = {"expires_at": 0.0, "ids": frozenset()}
+SHIFT_AUCTION_PARTICIPANT_CACHE_LOCK = threading.Lock()
+
+
+def _invalidate_shift_auction_runtime_caches(include_participants=False):
+    with SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE_LOCK:
+        SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE["key"] = None
+        SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE["expires_at"] = 0.0
+        SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE["value"] = None
+    if include_participants:
+        with SHIFT_AUCTION_PARTICIPANT_CACHE_LOCK:
+            SHIFT_AUCTION_PARTICIPANT_CACHE["expires_at"] = 0.0
+            SHIFT_AUCTION_PARTICIPANT_CACHE["ids"] = frozenset()
 
 ROLE_ALIASES = {
     'supervisor': 'sv',
@@ -409,17 +451,25 @@ TECHNICAL_ISSUE_REASONS: List[str] = [
 TECHNICAL_ISSUE_REASONS_SET = set(TECHNICAL_ISSUE_REASONS)
 
 def get_pool():
-    global POOL
+    global POOL, POOL_SEMAPHORE
     if POOL is None:
-        conn_params = {
-            'dbname': os.getenv('POSTGRES_DB'),
-            'user': os.getenv('POSTGRES_USER'),
-            'password': os.getenv('POSTGRES_PASSWORD'),
-            'host': os.getenv('POSTGRES_HOST'),
-            'port': os.getenv('POSTGRES_PORT', 5432)
-        }
-        POOL = ThreadedConnectionPool(MIN_CONN, MAX_CONN, **conn_params)
-        logging.info("PostgreSQL pool initialized with min=%s max=%s", MIN_CONN, MAX_CONN)
+        with POOL_LOCK:
+            if POOL is None:
+                conn_params = {
+                    'dbname': os.getenv('POSTGRES_DB'),
+                    'user': os.getenv('POSTGRES_USER'),
+                    'password': os.getenv('POSTGRES_PASSWORD'),
+                    'host': os.getenv('POSTGRES_HOST'),
+                    'port': os.getenv('POSTGRES_PORT', 5432)
+                }
+                POOL = ThreadedConnectionPool(MIN_CONN, MAX_CONN, **conn_params)
+                POOL_SEMAPHORE = threading.BoundedSemaphore(MAX_CONN)
+                logging.info(
+                    "PostgreSQL pool initialized with min=%s max=%s acquire_timeout=%ss",
+                    MIN_CONN,
+                    MAX_CONN,
+                    POOL_ACQUIRE_TIMEOUT_SECONDS
+                )
     return POOL
 
 class Database:
@@ -435,11 +485,33 @@ class Database:
     @contextmanager
     def _get_connection(self):
         pool = get_pool()
-        conn = pool.getconn()
+        semaphore = POOL_SEMAPHORE
+        acquire_started_at = time.perf_counter()
+        acquired = True
+        if semaphore is not None:
+            acquired = semaphore.acquire(timeout=POOL_ACQUIRE_TIMEOUT_SECONDS)
+        if not acquired:
+            raise TimeoutError("POSTGRES_POOL_ACQUIRE_TIMEOUT")
+
+        waited_seconds = time.perf_counter() - acquire_started_at
+        if POOL_WAIT_WARN_SECONDS and waited_seconds >= POOL_WAIT_WARN_SECONDS:
+            logging.warning(
+                "Waited %.2fs for PostgreSQL pool slot (max=%s)",
+                waited_seconds,
+                MAX_CONN
+            )
+
+        conn = None
         try:
+            conn = pool.getconn()
             yield conn
+        except Exception:
+            raise
         finally:
-            pool.putconn(conn)
+            if conn is not None:
+                pool.putconn(conn)
+            if semaphore is not None:
+                semaphore.release()
 
     @contextmanager
     def _get_cursor(self):
@@ -3042,6 +3114,151 @@ class Database:
             "source_schedule_shift_id": row[11] if len(row) > 11 else None,
         }
 
+    def _cache_shift_auction_participant_ids(self, participant_rows):
+        if SHIFT_AUCTION_PARTICIPANT_CACHE_TTL_SECONDS <= 0:
+            return
+        ids = frozenset(
+            int(row[0])
+            for row in (participant_rows or [])
+            if row and row[0] is not None
+        )
+        with SHIFT_AUCTION_PARTICIPANT_CACHE_LOCK:
+            SHIFT_AUCTION_PARTICIPANT_CACHE["ids"] = ids
+            SHIFT_AUCTION_PARTICIPANT_CACHE["expires_at"] = time.time() + SHIFT_AUCTION_PARTICIPANT_CACHE_TTL_SECONDS
+
+    def _get_shift_auction_participant_ids_cached_tx(self, cursor):
+        now = time.time()
+        if SHIFT_AUCTION_PARTICIPANT_CACHE_TTL_SECONDS > 0:
+            with SHIFT_AUCTION_PARTICIPANT_CACHE_LOCK:
+                if SHIFT_AUCTION_PARTICIPANT_CACHE["expires_at"] > now:
+                    return set(SHIFT_AUCTION_PARTICIPANT_CACHE["ids"])
+
+        cursor.execute("""
+            SELECT operator_id
+            FROM shift_auction_test_participants
+        """)
+        participant_ids = {
+            int(row[0])
+            for row in (cursor.fetchall() or [])
+            if row and row[0] is not None
+        }
+        if SHIFT_AUCTION_PARTICIPANT_CACHE_TTL_SECONDS > 0:
+            with SHIFT_AUCTION_PARTICIPANT_CACHE_LOCK:
+                SHIFT_AUCTION_PARTICIPANT_CACHE["ids"] = frozenset(participant_ids)
+                SHIFT_AUCTION_PARTICIPANT_CACHE["expires_at"] = time.time() + SHIFT_AUCTION_PARTICIPANT_CACHE_TTL_SECONDS
+        return participant_ids
+
+    def _shift_auction_snapshot_common_cache_key(self, settings_row, include_admin_fields):
+        if not settings_row:
+            return None
+        return (
+            bool(include_admin_fields),
+            int(settings_row[13] or 0) if len(settings_row) > 13 else 0,
+            int(settings_row[6]) if settings_row[6] is not None else None
+        )
+
+    def _build_shift_auction_snapshot_common_tx(self, cursor, settings_row, include_admin_fields=False):
+        cursor.execute("""
+            SELECT
+                u.id,
+                u.name,
+                u.role,
+                u.status,
+                u.rate,
+                u.direction_id,
+                d.name AS direction_name,
+                u.supervisor_id,
+                s.name AS supervisor_name,
+                p.created_at
+            FROM shift_auction_test_participants p
+            JOIN users u ON u.id = p.operator_id
+            LEFT JOIN directions d ON d.id = u.direction_id
+            LEFT JOIN users s ON s.id = u.supervisor_id
+            ORDER BY u.name
+        """)
+        participant_rows = cursor.fetchall() or []
+        self._cache_shift_auction_participant_ids(participant_rows)
+
+        cursor.execute("""
+            SELECT
+                l.id,
+                l.shift_date,
+                l.start_time,
+                l.end_time,
+                l.rate_min,
+                l.status,
+                l.claimed_by,
+                u.name AS claimed_by_name,
+                l.claimed_at,
+                l.breaks,
+                l.source_schedule_plan_id,
+                l.source_schedule_shift_id
+            FROM shift_auction_test_lots l
+            LEFT JOIN users u ON u.id = l.claimed_by
+            ORDER BY l.shift_date, l.start_time, l.id
+        """)
+        lot_rows = cursor.fetchall() or []
+        lots = [self._serialize_shift_auction_lot_row(row) for row in lot_rows]
+        lot_dates = sorted({row[1] for row in lot_rows if row and row[1]})
+
+        selected_period_row = self._get_shift_auction_period_row_tx(cursor, settings_row[6])
+        available_periods = []
+        claim_journal_rows = []
+        if include_admin_fields:
+            available_periods = self._get_shift_auction_available_periods_tx(cursor)
+            cursor.execute("""
+                SELECT
+                    e.id,
+                    e.created_at,
+                    NULLIF(e.payload->'lot'->>'shift_date', '') AS shift_date,
+                    NULLIF(e.payload->'lot'->>'start_time', '') AS start_time,
+                    NULLIF(e.payload->'lot'->>'end_time', '') AS end_time,
+                    NULLIF(e.payload->'lot'->>'claimed_by', '')::INTEGER AS claimed_by,
+                    COALESCE(u.name, '') AS claimed_by_name,
+                    NULLIF(e.payload->'lot'->>'source_schedule_plan_id', '')::INTEGER AS source_schedule_plan_id,
+                    p.date_from,
+                    p.date_to
+                FROM shift_auction_test_events e
+                LEFT JOIN users u
+                  ON u.id = NULLIF(e.payload->'lot'->>'claimed_by', '')::INTEGER
+                LEFT JOIN resource_saved_schedule_plans p
+                  ON p.id = NULLIF(e.payload->'lot'->>'source_schedule_plan_id', '')::INTEGER
+                WHERE e.event_type = 'lot_claimed'
+                  AND NULLIF(e.payload->'lot'->>'source_schedule_plan_id', '')::INTEGER = %s
+                ORDER BY e.id DESC
+                LIMIT 200
+            """, (settings_row[6],))
+            claim_journal_rows = cursor.fetchall() or []
+
+        return {
+            "participant_rows": participant_rows,
+            "lots": lots,
+            "lot_dates": lot_dates,
+            "selected_period_row": selected_period_row,
+            "available_periods": available_periods,
+            "claim_journal_rows": claim_journal_rows
+        }
+
+    def _get_shift_auction_snapshot_common_tx(self, cursor, settings_row, include_admin_fields=False):
+        cache_key = self._shift_auction_snapshot_common_cache_key(settings_row, include_admin_fields)
+        if not cache_key or SHIFT_AUCTION_SNAPSHOT_CACHE_TTL_SECONDS <= 0:
+            return self._build_shift_auction_snapshot_common_tx(cursor, settings_row, include_admin_fields)
+
+        now = time.time()
+        with SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE_LOCK:
+            if (
+                SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE["key"] == cache_key
+                and SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE["expires_at"] > now
+                and SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE["value"] is not None
+            ):
+                return SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE["value"]
+
+            value = self._build_shift_auction_snapshot_common_tx(cursor, settings_row, include_admin_fields)
+            SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE["key"] = cache_key
+            SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE["value"] = value
+            SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE["expires_at"] = time.time() + SHIFT_AUCTION_SNAPSHOT_CACHE_TTL_SECONDS
+            return value
+
     def _insert_shift_auction_test_event(self, cursor, event_type, payload):
         cursor.execute("""
             INSERT INTO shift_auction_test_events (event_type, payload)
@@ -3054,6 +3271,9 @@ class Database:
             cursor.execute(
                 "SELECT pg_notify(%s, %s)",
                 (SHIFT_AUCTION_TEST_EVENT_NOTIFY_CHANNEL, str(event_id))
+            )
+            _invalidate_shift_auction_runtime_caches(
+                include_participants=str(event_type or '').strip() == "settings_updated"
             )
         return {
             "id": event_id,
@@ -3445,13 +3665,7 @@ class Database:
             return False
 
         with self._get_cursor() as cursor:
-            cursor.execute("""
-                SELECT 1
-                FROM shift_auction_test_participants
-                WHERE operator_id = %s
-                LIMIT 1
-            """, (operator_id,))
-            return cursor.fetchone() is not None
+            return operator_id in self._get_shift_auction_participant_ids_cached_tx(cursor)
 
     def update_shift_auction_test_access(self, enabled=False, operator_ids=None, launch_note='', updated_by=None, starts_at=None, ends_at=None):
         if starts_at and ends_at and ends_at <= starts_at:
@@ -3509,6 +3723,7 @@ class Database:
                 "selected_operator_ids": valid_ids
             })
 
+        _invalidate_shift_auction_runtime_caches(include_participants=True)
         return self.get_shift_auction_test_access(current_user_id=updated_by)
 
     def control_shift_auction_test(self, action, updated_by=None):
@@ -3776,45 +3991,17 @@ class Database:
                 """)
                 settings_row = (False, '', None, None, None, None, None, None, None, None, None, None, None, 0)
 
-            cursor.execute("""
-                SELECT
-                    u.id,
-                    u.name,
-                    u.role,
-                    u.status,
-                    u.rate,
-                    u.direction_id,
-                    d.name AS direction_name,
-                    u.supervisor_id,
-                    s.name AS supervisor_name,
-                    p.created_at
-                FROM shift_auction_test_participants p
-                JOIN users u ON u.id = p.operator_id
-                LEFT JOIN directions d ON d.id = u.direction_id
-                LEFT JOIN users s ON s.id = u.supervisor_id
-                ORDER BY u.name
-            """)
-            participant_rows = cursor.fetchall() or []
-
-            cursor.execute("""
-                SELECT
-                    l.id,
-                    l.shift_date,
-                    l.start_time,
-                    l.end_time,
-                    l.rate_min,
-                    l.status,
-                    l.claimed_by,
-                    u.name AS claimed_by_name,
-                    l.claimed_at,
-                    l.breaks,
-                    l.source_schedule_plan_id,
-                    l.source_schedule_shift_id
-                FROM shift_auction_test_lots l
-                LEFT JOIN users u ON u.id = l.claimed_by
-                ORDER BY l.shift_date, l.start_time, l.id
-            """)
-            lots = [self._serialize_shift_auction_lot_row(row) for row in (cursor.fetchall() or [])]
+            common_snapshot = self._get_shift_auction_snapshot_common_tx(
+                cursor,
+                settings_row,
+                include_admin_fields=include_admin_fields
+            )
+            participant_rows = common_snapshot["participant_rows"]
+            lots = common_snapshot["lots"]
+            lot_dates = common_snapshot["lot_dates"]
+            selected_period_row = common_snapshot["selected_period_row"]
+            available_periods = common_snapshot["available_periods"]
+            claim_journal_rows = common_snapshot["claim_journal_rows"]
 
             my_day_offs = []
             if current_id:
@@ -3831,37 +4018,9 @@ class Database:
                 ]
 
             my_blocked_dates = (
-                self._get_shift_auction_operator_blocked_dates_tx(cursor, current_id)
+                self._get_shift_auction_operator_blocked_dates_tx(cursor, current_id, lot_dates=lot_dates)
                 if current_id else []
             )
-            selected_period_row = self._get_shift_auction_period_row_tx(cursor, settings_row[6])
-            available_periods = []
-            claim_journal_rows = []
-            if include_admin_fields:
-                available_periods = self._get_shift_auction_available_periods_tx(cursor)
-                cursor.execute("""
-                    SELECT
-                        e.id,
-                        e.created_at,
-                        NULLIF(e.payload->'lot'->>'shift_date', '') AS shift_date,
-                        NULLIF(e.payload->'lot'->>'start_time', '') AS start_time,
-                        NULLIF(e.payload->'lot'->>'end_time', '') AS end_time,
-                        NULLIF(e.payload->'lot'->>'claimed_by', '')::INTEGER AS claimed_by,
-                        COALESCE(u.name, '') AS claimed_by_name,
-                        NULLIF(e.payload->'lot'->>'source_schedule_plan_id', '')::INTEGER AS source_schedule_plan_id,
-                        p.date_from,
-                        p.date_to
-                    FROM shift_auction_test_events e
-                    LEFT JOIN users u
-                      ON u.id = NULLIF(e.payload->'lot'->>'claimed_by', '')::INTEGER
-                    LEFT JOIN resource_saved_schedule_plans p
-                      ON p.id = NULLIF(e.payload->'lot'->>'source_schedule_plan_id', '')::INTEGER
-                    WHERE e.event_type = 'lot_claimed'
-                      AND NULLIF(e.payload->'lot'->>'source_schedule_plan_id', '')::INTEGER = %s
-                    ORDER BY e.id DESC
-                    LIMIT 200
-                """, (settings_row[6],))
-                claim_journal_rows = cursor.fetchall() or []
 
         selected_operator_ids = [int(row[0]) for row in participant_rows if row and row[0] is not None]
         return {

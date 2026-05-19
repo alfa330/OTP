@@ -16561,8 +16561,8 @@ def run_flask():
         app,
         host='0.0.0.0',
         port=int(os.getenv('PORT', 8080)),
-        threads=int(os.getenv('WAITRESS_THREADS', '80')),
-        connection_limit=int(os.getenv('WAITRESS_CONN_LIMIT', '200')),
+        threads=int(os.getenv('WAITRESS_THREADS', '120')),
+        connection_limit=int(os.getenv('WAITRESS_CONN_LIMIT', '300')),
         channel_timeout=0,
         cleanup_interval=30,
         ident='OTP-2'
