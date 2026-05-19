@@ -980,6 +980,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             );
         };
 
+        const formatRateValue = (value) => {
+            const rate = Number(value);
+            if (!Number.isFinite(rate)) return '-';
+            return rate.toFixed(2).replace(/\.?0+$/, '');
+        };
+
         // SemiCircle Progress Component
         const SemiCircleProgress = ({ percentage, label, width = 150, height = 80 }) => {
             const canvasRef = useRef(null);
@@ -36678,7 +36684,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         })()}
 
                                         {/* Info cards grid */}
-                                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
                                           {/* Hire Date */}
                                           <div className="bg-gray-50 p-4 rounded-xl shadow-sm hover:shadow-md transition flex items-center gap-3">
                                             <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-green-100 flex items-center justify-center shrink-0">
@@ -36698,6 +36704,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <div className="min-w-0">
                                               <p className="text-xs uppercase tracking-wide text-gray-500">Супервайзер</p>
                                               <p className="text-base sm:text-lg font-medium text-gray-900 truncate">{profileData.supervisor_name || '-'}</p>
+                                            </div>
+                                          </div>
+
+                                          {/* Rate */}
+                                          <div className="bg-gray-50 p-4 rounded-xl shadow-sm hover:shadow-md transition flex items-center gap-3">
+                                            <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-blue-100 flex items-center justify-center shrink-0">
+                                              <FaIcon className="fas fa-briefcase text-blue-600 text-lg"></FaIcon>
+                                            </div>
+                                            <div className="min-w-0">
+                                              <p className="text-xs uppercase tracking-wide text-gray-500">Ставка</p>
+                                              <p className="text-base sm:text-lg font-semibold text-gray-900 truncate">{formatRateValue(profileData.rate)}</p>
                                             </div>
                                           </div>
 
