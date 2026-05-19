@@ -3120,6 +3120,37 @@ def api_shift_auction_test_control():
         return jsonify({"error": "Internal server error"}), 500
 
 
+@app.route('/api/shift_auction/test_journal', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_shift_auction_test_journal():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        requester_role = _normalize_user_role(requester[3])
+        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role)):
+            return jsonify({"error": "Only admins and supervisors can view the auction journal"}), 403
+        try:
+            page = int(request.args.get('page') or 1)
+        except Exception:
+            page = 1
+        try:
+            per_page = int(request.args.get('per_page') or 50)
+        except Exception:
+            per_page = 50
+        result = db.get_shift_auction_test_journal(page=page, per_page=per_page)
+        return jsonify({"status": "success", **result}), 200
+    except ValueError as error:
+        return _shift_auction_test_error_response(error)
+    except Exception as error:
+        logging.error(f"Shift auction journal API error: {error}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/shift_auction/test_topup', methods=['POST', 'DELETE', 'OPTIONS'])
 @require_api_key
 def api_shift_auction_test_topup():

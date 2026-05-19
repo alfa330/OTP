@@ -1554,6 +1554,14 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [participantWorkloads, setParticipantWorkloads] = useState([]);
   const [operatorWorkloadFilter, setOperatorWorkloadFilter] = useState('all');
   const [operatorWorkloadQuery, setOperatorWorkloadQuery] = useState('');
+  const [monitorTab, setMonitorTab] = useState('monitoring');
+  const [drilldownOperatorId, setDrilldownOperatorId] = useState(null);
+  const [journalEntries, setJournalEntries] = useState([]);
+  const [journalPage, setJournalPage] = useState(1);
+  const [journalPerPage] = useState(50);
+  const [journalTotal, setJournalTotal] = useState(0);
+  const [journalLoading, setJournalLoading] = useState(false);
+  const [journalError, setJournalError] = useState('');
 
   useEffect(() => {
     showToastRef.current = showToast;
@@ -1691,6 +1699,27 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     });
   }, []);
 
+  const fetchJournalPage = useCallback(async (page = 1) => {
+    if (!apiRoot || !user?.id) return;
+    setJournalLoading(true);
+    setJournalError('');
+    try {
+      const response = await axios.get(`${apiRoot}/api/shift_auction/test_journal`, {
+        params: { page, per_page: journalPerPage },
+        headers: buildHeaders()
+      });
+      const data = response?.data || {};
+      setJournalEntries(Array.isArray(data.entries) ? data.entries : []);
+      setJournalTotal(Number(data.total || 0));
+      setJournalPage(Number(data.page || page));
+    } catch (error) {
+      const message = error?.response?.data?.error || 'Не удалось загрузить журнал аукциона';
+      setJournalError(message);
+    } finally {
+      setJournalLoading(false);
+    }
+  }, [apiRoot, buildHeaders, journalPerPage, user?.id]);
+
   const fetchSnapshot = useCallback(async ({ silent = false } = {}) => {
     if (!apiRoot || !user?.id) return;
     if (snapshotRequestRef.current) return;
@@ -1714,6 +1743,13 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       if (!silent) setIsLoading(false);
     }
   }, [apiRoot, applySnapshot, buildHeaders, notify, user?.id]);
+
+  useEffect(() => {
+    if (!canMonitor) return;
+    if (monitorTab !== 'journal') return;
+    fetchJournalPage(1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [monitorTab, canMonitor]);
 
   const handleRealtimeEvent = useCallback((event) => {
     const eventType = String(event?.event_type || '');
@@ -2203,6 +2239,26 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     });
     return stats;
   }, [operatorWorkloadRows]);
+
+  const drilldownData = useMemo(() => {
+    if (!drilldownOperatorId) return null;
+    const opIdNum = Number(drilldownOperatorId);
+    const operator = (settings.selected_operators || []).find((op) => Number(op?.id) === opIdNum) || null;
+    const workload = (participantWorkloads || []).find((w) => Number(w?.operator_id) === opIdNum) || null;
+    const claimedLots = (lots || [])
+      .filter((lot) => lot && lot.status === 'claimed' && Number(lot.claimed_by) === opIdNum)
+      .sort((a, b) => {
+        const dateCmp = String(a.shift_date || '').localeCompare(String(b.shift_date || ''));
+        if (dateCmp !== 0) return dateCmp;
+        return String(a.start_time || '').localeCompare(String(b.start_time || ''));
+      });
+    return {
+      operator_id: opIdNum,
+      operator,
+      workload,
+      claimed_lots: claimedLots
+    };
+  }, [drilldownOperatorId, lots, participantWorkloads, settings.selected_operators]);
 
   const filteredOperatorWorkloads = useMemo(() => {
     const normalizedQuery = operatorWorkloadQuery.trim().toLowerCase();
@@ -2859,7 +2915,40 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           </section>
         )}
 
-        {canUseAuction && (
+        {canMonitor && (
+          <nav className="inline-flex w-fit max-w-full overflow-x-auto rounded-lg border border-slate-200 bg-white p-1 shadow-sm">
+            {[
+              canManage ? { id: 'settings', label: 'Настройки', icon: Settings2 } : null,
+              { id: 'monitoring', label: 'Мониторинг смен', icon: MousePointerClick },
+              { id: 'journal', label: 'Журнал', icon: History, badge: journalTotal > 0 ? journalTotal : null }
+            ].filter(Boolean).map((tab) => {
+              const Icon = tab.icon;
+              const active = monitorTab === tab.id;
+              return (
+                <button
+                  type="button"
+                  key={`monitor-tab-${tab.id}`}
+                  onClick={() => setMonitorTab(tab.id)}
+                  className={`inline-flex h-9 items-center gap-2 whitespace-nowrap rounded-md px-3 text-sm font-semibold transition sm:h-10 sm:px-4 ${
+                    active
+                      ? 'bg-slate-900 text-white shadow-sm'
+                      : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+                  }`}
+                >
+                  <Icon size={16} />
+                  <span>{tab.label}</span>
+                  {tab.badge !== null && tab.badge !== undefined ? (
+                    <span className={`rounded px-1.5 text-[10px] font-bold tabular-nums ${
+                      active ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-600'
+                    }`}>{tab.badge}</span>
+                  ) : null}
+                </button>
+              );
+            })}
+          </nav>
+        )}
+
+        {canUseAuction && (!canMonitor || monitorTab === 'monitoring') && (
           <section className={`grid min-w-0 gap-3 ${
             canMonitor && isAdminDayDetailsOpen
               ? 'xl:grid-cols-[minmax(0,1fr)_320px] xl:items-start xl:gap-5'
@@ -3141,7 +3230,15 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                             {group.lots.map((lot) => (
                               <div key={`admin-day-claim-${lot.id}`} className="grid grid-cols-[82px_minmax(0,1fr)] items-center gap-2 border-b border-slate-100 px-3 py-2 text-sm last:border-b-0">
                                 <span className="font-semibold tabular-nums text-slate-950">{formatAuctionShiftLabel(lot)}</span>
-                                <span className="truncate text-slate-700">{lot.claimed_by_name || `#${lot.claimed_by || ''}`}</span>
+                                <button
+                                  type="button"
+                                  onClick={() => lot.claimed_by ? setDrilldownOperatorId(Number(lot.claimed_by)) : null}
+                                  disabled={!lot.claimed_by}
+                                  className="truncate text-left text-slate-700 transition hover:text-blue-700 disabled:cursor-default disabled:hover:text-slate-700"
+                                  title="Посмотреть взятые смены этого оператора"
+                                >
+                                  {lot.claimed_by_name || `#${lot.claimed_by || ''}`}
+                                </button>
                               </div>
                             ))}
                           </div>
@@ -3159,7 +3256,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           </section>
         )}
 
-        {canMonitor && operatorWorkloadRows.length > 0 && (
+        {canMonitor && monitorTab === 'monitoring' && operatorWorkloadRows.length > 0 && (
           <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
             <div className="border-b border-slate-200 px-3 py-3 sm:px-5 sm:py-4">
               <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -3247,7 +3344,13 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                       row.selected_day_offs ? `вых ${row.selected_day_offs}` : null
                     ].filter(Boolean).join(' · ');
                     return (
-                      <div key={`op-workload-${row.operator_id}`} className="rounded-md border border-slate-200 bg-white p-3 transition hover:border-slate-300 hover:shadow-sm">
+                      <button
+                        type="button"
+                        key={`op-workload-${row.operator_id}`}
+                        onClick={() => setDrilldownOperatorId(Number(row.operator_id))}
+                        className="w-full rounded-md border border-slate-200 bg-white p-3 text-left transition hover:border-blue-300 hover:shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-200"
+                        title="Посмотреть взятые смены оператора"
+                      >
                         <div className="flex items-start justify-between gap-2">
                           <div className="min-w-0">
                             <div className="truncate text-sm font-semibold text-slate-950">{row.name}</div>
@@ -3271,7 +3374,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                         {meta ? (
                           <div className="mt-2 truncate text-[11px] text-slate-500">{meta}</div>
                         ) : null}
-                      </div>
+                      </button>
                     );
                   })}
                 </div>
@@ -3280,7 +3383,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           </section>
         )}
 
-        {canManage && (
+        {canManage && monitorTab === 'settings' && (
           <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
             <div className="border-b border-slate-200 px-3 py-3 sm:px-5 sm:py-4">
               <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -3611,19 +3714,40 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           </section>
         )}
 
-        {canMonitor && (
+        {canMonitor && monitorTab === 'journal' && (
           <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
-            <div className="border-b border-slate-200 px-3 py-3 sm:px-5 sm:py-4">
-              <div className="flex items-center gap-2">
-                <History size={17} className="text-blue-700" />
-                <h2 className="text-base font-semibold text-slate-950 sm:text-lg">Журнал аукционов</h2>
+            <div className="flex flex-col gap-3 border-b border-slate-200 px-3 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5 sm:py-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  <History size={17} className="text-blue-700" />
+                  <h2 className="text-base font-semibold text-slate-950 sm:text-lg">Журнал аукциона</h2>
+                </div>
+                <p className="mt-1 text-xs text-slate-600 sm:text-sm">
+                  Кто и когда забрал смену в выбранном недельном периоде.
+                </p>
               </div>
-              <p className="mt-1 text-xs text-slate-600 sm:text-sm">
-                Кто и когда забрал смену в выбранном недельном периоде.
-              </p>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-slate-500 tabular-nums sm:text-sm">
+                  Всего: <b className="text-slate-900">{journalTotal}</b>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => fetchJournalPage(journalPage)}
+                  disabled={journalLoading}
+                  className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60 sm:h-9 sm:px-3"
+                  title="Обновить"
+                >
+                  <RefreshCw size={14} className={journalLoading ? 'animate-spin' : ''} />
+                  Обновить
+                </button>
+              </div>
             </div>
             <div className="overflow-x-auto">
-              {claimJournal.length ? (
+              {journalError ? (
+                <div className="px-3 py-6 text-center text-sm text-rose-600 sm:px-5">{journalError}</div>
+              ) : journalLoading && journalEntries.length === 0 ? (
+                <div className="px-3 py-8 text-center text-sm text-slate-500 sm:px-5">Загружаю журнал…</div>
+              ) : journalEntries.length ? (
                 <table className="min-w-full border-separate border-spacing-0 text-sm">
                   <thead>
                     <tr className="bg-slate-50 text-left text-xs font-semibold text-slate-600">
@@ -3634,10 +3758,19 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                     </tr>
                   </thead>
                   <tbody>
-                    {claimJournal.map((entry) => (
-                      <tr key={entry.id} className="text-slate-700">
+                    {journalEntries.map((entry) => (
+                      <tr key={entry.id} className="text-slate-700 hover:bg-slate-50/60">
                         <td className="border-b border-slate-100 px-3 py-2 tabular-nums sm:px-5">{formatDateTimeLabel(entry.claimed_at)}</td>
-                        <td className="border-b border-slate-100 px-3 py-2 font-medium text-slate-900">{entry.claimed_by_name || `#${entry.claimed_by || ''}`}</td>
+                        <td className="border-b border-slate-100 px-3 py-2 font-medium text-slate-900">
+                          <button
+                            type="button"
+                            onClick={() => entry.claimed_by ? setDrilldownOperatorId(Number(entry.claimed_by)) : null}
+                            disabled={!entry.claimed_by}
+                            className="text-left hover:text-blue-700 disabled:cursor-default disabled:hover:text-slate-900"
+                          >
+                            {entry.claimed_by_name || `#${entry.claimed_by || ''}`}
+                          </button>
+                        </td>
                         <td className="border-b border-slate-100 px-3 py-2">
                           {entry.shift_date ? `${formatShortDateLabel(entry.shift_date)} · ${entry.start_time || ''}-${entry.end_time || ''}` : '—'}
                         </td>
@@ -3656,9 +3789,139 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                 </div>
               )}
             </div>
+            {journalTotal > journalPerPage ? (
+              <div className="flex flex-col gap-2 border-t border-slate-200 px-3 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+                <div className="text-xs text-slate-500 tabular-nums sm:text-sm">
+                  Стр. {journalPage} из {Math.max(1, Math.ceil(journalTotal / journalPerPage))} · показано {journalEntries.length} из {journalTotal}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => fetchJournalPage(Math.max(1, journalPage - 1))}
+                    disabled={journalLoading || journalPage <= 1}
+                    className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 sm:h-9"
+                  >
+                    <ChevronLeft size={14} />
+                    Назад
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => fetchJournalPage(journalPage + 1)}
+                    disabled={journalLoading || (journalPage * journalPerPage) >= journalTotal}
+                    className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 sm:h-9"
+                  >
+                    Вперёд
+                    <ChevronRight size={14} />
+                  </button>
+                </div>
+              </div>
+            ) : null}
           </section>
         )}
       </div>
+
+      {drilldownData ? (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/50 px-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="operator-drilldown-title"
+          onClick={() => setDrilldownOperatorId(null)}
+        >
+          <div
+            className="max-h-[85vh] w-full max-w-lg overflow-hidden rounded-lg bg-white shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3 sm:px-5 sm:py-4">
+              <div className="min-w-0">
+                <h3 id="operator-drilldown-title" className="truncate text-base font-semibold text-slate-950 sm:text-lg">
+                  {drilldownData.operator?.name || `Оператор #${drilldownData.operator_id}`}
+                </h3>
+                <div className="mt-0.5 truncate text-xs text-slate-500 sm:text-sm">
+                  {[drilldownData.operator?.supervisor_name, drilldownData.operator?.direction].filter(Boolean).join(' · ') || 'Без направления'}
+                  {drilldownData.operator?.rate && Math.abs(Number(drilldownData.operator.rate) - 1) > 0.001
+                    ? ` · ставка ${formatRate(drilldownData.operator.rate)}`
+                    : ''}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDrilldownOperatorId(null)}
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 transition hover:bg-white hover:text-slate-800"
+                title="Закрыть"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            {drilldownData.workload ? (
+              <div className="border-b border-slate-200 px-4 py-3 sm:px-5">
+                <div className="flex items-center justify-between gap-2 text-xs tabular-nums sm:text-sm">
+                  <span className="font-semibold text-slate-900">
+                    {formatAuctionHours(drilldownData.workload.claimed_net_minutes || 0)} / {formatAuctionHours(drilldownData.workload.norm_minutes || 0)} ч
+                  </span>
+                  <span className="text-slate-500">
+                    {drilldownData.workload.lots_claimed_count || 0} смен
+                    {drilldownData.workload.over_minutes > 0 ? ` · перебор ${formatAuctionHours(drilldownData.workload.over_minutes)} ч` : ''}
+                    {drilldownData.workload.blocked_days ? ` · закрыто ${drilldownData.workload.blocked_days} дн` : ''}
+                    {drilldownData.workload.selected_day_offs ? ` · вых ${drilldownData.workload.selected_day_offs}` : ''}
+                  </span>
+                </div>
+                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100">
+                  <div
+                    className={`h-full rounded-full ${
+                      drilldownData.workload.over_minutes > 0
+                        ? 'bg-rose-500'
+                        : drilldownData.workload.is_complete
+                          ? 'bg-emerald-500'
+                          : (drilldownData.workload.claimed_net_minutes || 0) > 0
+                            ? 'bg-blue-600'
+                            : 'bg-slate-300'
+                    }`}
+                    style={{ width: `${clampNumber(
+                      drilldownData.workload.norm_minutes > 0
+                        ? (drilldownData.workload.claimed_net_minutes / drilldownData.workload.norm_minutes) * 100
+                        : (drilldownData.workload.claimed_net_minutes > 0 ? 100 : 0),
+                      0,
+                      100
+                    )}%` }}
+                  />
+                </div>
+              </div>
+            ) : null}
+            <div className="max-h-[60vh] overflow-y-auto px-4 py-3 sm:px-5">
+              {drilldownData.claimed_lots.length ? (
+                <ul className="space-y-1.5">
+                  {drilldownData.claimed_lots.map((lot) => {
+                    const minutes = getAuctionLotNetMinutes(lot);
+                    const breakMinutes = getAuctionLotBreakMinutes(lot);
+                    return (
+                      <li
+                        key={`drilldown-lot-${lot.id}`}
+                        className="grid grid-cols-[90px_minmax(0,1fr)_auto] items-center gap-2 rounded-md border border-emerald-100 bg-emerald-50 px-3 py-2 text-sm text-slate-800"
+                      >
+                        <span className="font-semibold tabular-nums text-slate-900">
+                          {lot.shift_date ? formatShortDateLabel(lot.shift_date) : '—'}
+                        </span>
+                        <span className="truncate font-medium">
+                          {lot.start_time || '—'}–{lot.end_time || '—'}
+                          {breakMinutes ? <span className="ml-1 text-xs font-normal text-slate-500">(перерыв {formatAuctionHours(breakMinutes)} ч)</span> : null}
+                        </span>
+                        <span className="text-xs tabular-nums text-emerald-700">
+                          {formatAuctionHours(minutes)} ч
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : (
+                <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 px-3 py-6 text-center text-sm text-slate-500">
+                  Оператор пока не забрал ни одной смены.
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <ShiftAuctionInstructionsModal
         open={isInstructionsOpen}
