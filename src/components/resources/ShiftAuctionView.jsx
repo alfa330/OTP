@@ -2958,11 +2958,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
         {canUseAuction && (!canMonitor || monitorTab === 'monitoring') && (
           <section className={`grid min-w-0 gap-3 ${
-            canMonitor && isAdminDayDetailsOpen
-              ? 'xl:grid-cols-[minmax(0,1fr)_320px] xl:items-start xl:gap-5'
-              : canMonitor
-                ? ''
-                : 'xl:grid-cols-[260px_minmax(0,1fr)] xl:gap-5'
+            canMonitor
+              ? ''
+              : 'xl:grid-cols-[260px_minmax(0,1fr)] xl:gap-5'
           }`}>
             {!canMonitor ? (
               <aside className="grid min-w-0 gap-2 xl:block xl:space-y-3">
@@ -3206,7 +3204,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
               </div>
             </main>
             {canMonitor && isAdminDayDetailsOpen && activeDayDate ? (
-              <aside className="fixed bottom-[66px] left-3 right-3 z-30 max-h-[55vh] overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl xl:sticky xl:top-24 xl:bottom-auto xl:left-auto xl:right-auto xl:max-h-[calc(100vh-7rem)] xl:shadow-sm">
+              <aside className="fixed bottom-[66px] left-3 right-3 z-40 max-h-[55vh] overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl xl:top-24 xl:bottom-auto xl:left-auto xl:right-3 xl:w-[320px] xl:max-h-[calc(100vh-7rem)] xl:shadow-xl">
                 <div className="flex items-start justify-between gap-3 border-b border-slate-200 bg-slate-50 px-3 py-3 sm:px-4">
                   <div className="min-w-0">
                     <div className="truncate text-sm font-semibold text-slate-950">
