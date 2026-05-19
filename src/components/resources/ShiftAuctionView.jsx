@@ -2361,7 +2361,14 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     if (!canUseAuction || !lotDates.length || typeof window === 'undefined') return undefined;
 
     const updateAuctionColumnWidth = () => {
-      const layoutWidth = auctionLayoutRef.current?.getBoundingClientRect?.().width || window.innerWidth || 0;
+      // Only recompute when the layout container is actually in the DOM —
+      // otherwise (e.g. when monitor is on a different tab) we'd fall back to
+      // the full window width and inflate the column size, leaving the grid
+      // overflowing once it comes back into view.
+      const layoutNode = auctionLayoutRef.current;
+      if (!layoutNode) return;
+      const layoutWidth = layoutNode.getBoundingClientRect?.().width || 0;
+      if (layoutWidth <= 0) return;
       const minColumnWidth = window.matchMedia?.('(min-width: 640px)')?.matches ? 112 : 64;
       const nextColumnWidth = Math.max(minColumnWidth, layoutWidth / Math.max(1, lotDates.length));
       setAuctionDayColumnPx((current) => (
@@ -2379,7 +2386,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       resizeObserver?.disconnect?.();
       window.removeEventListener('resize', updateAuctionColumnWidth);
     };
-  }, [canUseAuction, lotDates.length]);
+  }, [canUseAuction, lotDates.length, monitorTab]);
 
   const auctionDayColumnStyle = useMemo(() => {
     const width = `${auctionDayColumnPx}px`;
@@ -2920,6 +2927,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
             {[
               canManage ? { id: 'settings', label: 'Настройки', icon: Settings2 } : null,
               { id: 'monitoring', label: 'Мониторинг смен', icon: MousePointerClick },
+              { id: 'progress', label: 'Прогресс', icon: Users, badge: operatorWorkloadStats.total > 0 ? operatorWorkloadStats.total : null },
               { id: 'journal', label: 'Журнал', icon: History, badge: journalTotal > 0 ? journalTotal : null }
             ].filter(Boolean).map((tab) => {
               const Icon = tab.icon;
@@ -3256,7 +3264,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           </section>
         )}
 
-        {canMonitor && monitorTab === 'monitoring' && operatorWorkloadRows.length > 0 && (
+        {canMonitor && monitorTab === 'progress' && (
           <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
             <div className="border-b border-slate-200 px-3 py-3 sm:px-5 sm:py-4">
               <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
