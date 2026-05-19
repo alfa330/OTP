@@ -4280,7 +4280,6 @@ class Database:
                        source_schedule_plan_id, source_schedule_shift_id
                 FROM shift_auction_test_lots
                 WHERE id = %s
-                FOR UPDATE
             """, (lot_id,))
             lot = cursor.fetchone()
             timings["lot"] = (time.perf_counter() - started_at) * 1000
@@ -4355,18 +4354,22 @@ class Database:
             ):
                 raise ValueError("SHIFT_NORM_EXCEEDED")
 
-            started_at = time.perf_counter()
+            cas_started_at = time.perf_counter()
             cursor.execute("""
                 UPDATE shift_auction_test_lots
                 SET status = 'claimed',
                     claimed_by = %s,
                     claimed_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = %s
+                WHERE id = %s AND status = 'available'
                 RETURNING id, shift_date, start_time, end_time, rate_min, status, claimed_by, claimed_at,
                           breaks, source_schedule_plan_id, source_schedule_shift_id
             """, (operator_id, lot_id))
             updated = cursor.fetchone()
+            timings["cas_update"] = (time.perf_counter() - cas_started_at) * 1000
+            if not updated:
+                raise ValueError("LOT_ALREADY_CLAIMED")
+            event_started_at = time.perf_counter()
             lot_payload = {
                 "id": updated[0],
                 "shift_date": updated[1].strftime('%Y-%m-%d') if updated[1] else None,
@@ -4381,7 +4384,8 @@ class Database:
                 "source_schedule_shift_id": updated[10],
             }
             event = self._insert_shift_auction_test_event(cursor, "lot_claimed", {"lot": lot_payload})
-            timings["write"] = (time.perf_counter() - started_at) * 1000
+            timings["event"] = (time.perf_counter() - event_started_at) * 1000
+            timings["write"] = timings["cas_update"] + timings["event"]
         return {"lot": lot_payload, "event": event, "_timings": timings}
 
     def release_shift_auction_test_lot(self, operator_id, lot_id):
