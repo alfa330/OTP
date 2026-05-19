@@ -1514,8 +1514,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     selected_period: null,
     is_current_user_tester: false,
     published_to_work_schedules_at: null,
-    published_to_work_schedules_by_name: ''
+    published_to_work_schedules_by_name: '',
+    topup_started_at: null,
+    topup_started_by_name: ''
   });
+  const [isTogglingTopup, setIsTogglingTopup] = useState(false);
   const [lots, setLots] = useState([]);
   const [myDayOffs, setMyDayOffs] = useState([]);
   const [myBlockedDates, setMyBlockedDates] = useState([]);
@@ -1659,7 +1662,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       updated_by_name: safe.updated_by_name || '',
       updated_at: safe.updated_at || null,
       published_to_work_schedules_at: safe.published_to_work_schedules_at || null,
-      published_to_work_schedules_by_name: safe.published_to_work_schedules_by_name || ''
+      published_to_work_schedules_by_name: safe.published_to_work_schedules_by_name || '',
+      topup_started_at: safe.topup_started_at || null,
+      topup_started_by_name: safe.topup_started_by_name || ''
     });
     setLots(Array.isArray(safe.lots) ? safe.lots : []);
     setMyDayOffs(Array.isArray(safe.my_day_offs) ? safe.my_day_offs.filter(Boolean) : []);
@@ -2210,9 +2215,34 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       });
   }, [operatorWorkloadRows, operatorWorkloadFilter, operatorWorkloadQuery]);
 
+  const isTopupActive = Boolean(settings.topup_started_at) && runtimeStatus === 'open';
+
+  const myClaimedLotsByDate = useMemo(() => {
+    const map = new Map();
+    myClaimedLots.forEach((lot) => {
+      if (!lot || !lot.shift_date) return;
+      const list = map.get(lot.shift_date) || [];
+      list.push(lot);
+      map.set(lot.shift_date, list);
+    });
+    return map;
+  }, [myClaimedLots]);
+
   const claimBlockReasonByLotId = useMemo(() => {
     const reasons = new Map();
     if (canMonitor || !isTester) return reasons;
+    const parseHM = (value) => {
+      if (!value || typeof value !== 'string') return null;
+      const [h, m] = value.split(':').map(Number);
+      if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+      return h * 60 + m;
+    };
+    const normalizeRange = (startStr, endStr) => {
+      const s = parseHM(startStr);
+      const e = parseHM(endStr);
+      if (s === null || e === null) return null;
+      return [s, e > s ? e : e + 24 * 60];
+    };
     lots.forEach((lot) => {
       if (!lot || lot.status !== 'available') return;
       const lotId = Number(lot.id);
@@ -2220,6 +2250,26 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       const blockedPeriod = myBlockedDateMap.get(lot.shift_date);
       if (blockedPeriod) {
         reasons.set(lotId, `День закрыт: ${getAuctionBlockedDateLabel(blockedPeriod)}`);
+        return;
+      }
+      if (isTopupActive) {
+        // Top-up mode: allow extra shifts on the same date as long as they
+        // don't overlap with an existing claim. Skip norm checks entirely.
+        const sameDateClaims = myClaimedLotsByDate.get(lot.shift_date) || [];
+        if (sameDateClaims.length) {
+          const candidateRange = normalizeRange(lot.start_time, lot.end_time);
+          if (candidateRange) {
+            const conflict = sameDateClaims.find((existing) => {
+              const range = normalizeRange(existing.start_time, existing.end_time);
+              if (!range) return false;
+              return candidateRange[0] < range[1] && range[0] < candidateRange[1];
+            });
+            if (conflict) {
+              reasons.set(lotId, `Пересекается с ${conflict.start_time}–${conflict.end_time}`);
+              return;
+            }
+          }
+        }
         return;
       }
       if (lot.shift_date && myClaimedDateSet.has(lot.shift_date)) {
@@ -2239,7 +2289,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       }
     });
     return reasons;
-  }, [canMonitor, isTester, lots, myAuctionWorkload, myBlockedDateMap, myClaimedDateSet]);
+  }, [canMonitor, isTester, isTopupActive, lots, myAuctionWorkload, myBlockedDateMap, myClaimedDateSet, myClaimedLotsByDate]);
 
   useEffect(() => {
     if (!canUseAuction || !lotDates.length || typeof window === 'undefined') return undefined;
@@ -2439,6 +2489,33 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       setIsControllingAuction(false);
     }
   }, [apiRoot, applySnapshot, buildHeaders, canManage, isControllingAuction, notify]);
+
+  const handleToggleTopup = useCallback(async () => {
+    if (!canManage || !apiRoot || isTogglingTopup) return;
+    const enable = !settings.topup_started_at;
+    if (enable) {
+      const confirmed = window.confirm(
+        'Перевести аукцион в режим добора смен?\n\n'
+        + 'В режиме добора операторы смогут забирать дополнительные смены (даже сверх своей нормы), '
+        + 'если они не пересекаются по времени с уже взятыми. Этот момент будет зафиксирован в журнале аукциона.'
+      );
+      if (!confirmed) return;
+    }
+    setIsTogglingTopup(true);
+    try {
+      const response = await axios({
+        method: enable ? 'POST' : 'DELETE',
+        url: `${apiRoot}/api/shift_auction/test_topup`,
+        headers: buildHeaders({ 'Content-Type': 'application/json' })
+      });
+      applySnapshot(response?.data?.snapshot || {});
+      notify(enable ? 'Аукцион переведён в режим добора смен' : 'Режим добора отключён');
+    } catch (error) {
+      notify(error?.response?.data?.error || 'Не удалось изменить режим добора', 'error');
+    } finally {
+      setIsTogglingTopup(false);
+    }
+  }, [apiRoot, applySnapshot, buildHeaders, canManage, isTogglingTopup, notify, settings.topup_started_at]);
 
   const handlePublishAuction = useCallback(async () => {
     if (!canManage || !apiRoot || isPublishingAuction) return;
@@ -2683,9 +2760,20 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
               <Gavel size={20} className="sm:h-[22px] sm:w-[22px]" />
             </div>
             <div className="min-w-0">
-              <h1 className="text-xl font-semibold text-slate-950 sm:text-2xl">Аукцион смен</h1>
+              <h1 className="text-xl font-semibold text-slate-950 sm:text-2xl">
+                Аукцион смен
+                {isTopupActive ? (
+                  <span className="ml-2 inline-flex items-center gap-1 rounded-full border border-violet-300 bg-violet-100 px-2 py-0.5 align-middle text-[11px] font-semibold text-violet-800 sm:text-xs">
+                    <Plus size={12} />
+                    Режим добора
+                  </span>
+                ) : null}
+              </h1>
               <p className="mt-1 max-w-3xl text-xs leading-5 text-slate-600 sm:text-sm sm:leading-6">
-                Тестовый realtime-раздел для проверки будущего выбора утвержденных смен по направлению.
+                {isTopupActive
+                  ? <>Идёт <b className="text-violet-800">добор смен</b>{settings.topup_started_at ? <> с {formatDateTimeLabel(settings.topup_started_at)}</> : null}{settings.topup_started_by_name ? <> · включил {settings.topup_started_by_name}</> : null}. Можно брать дополнительные смены сверх нормы, если они не пересекаются по времени с уже выбранными.</>
+                  : 'Тестовый realtime-раздел для проверки будущего выбора утвержденных смен по направлению.'
+                }
               </p>
             </div>
           </div>
@@ -3193,6 +3281,24 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                     >
                       <PlayCircle size={16} />
                       Возобновить
+                    </button>
+                  ) : null}
+                  {runtimeStatus === 'open' ? (
+                    <button
+                      type="button"
+                      onClick={handleToggleTopup}
+                      disabled={isTogglingTopup}
+                      title={settings.topup_started_at
+                        ? `Режим добора включён ${formatDateTimeLabel(settings.topup_started_at)}${settings.topup_started_by_name ? ` (${settings.topup_started_by_name})` : ''}`
+                        : 'Перевести аукцион в режим добора смен — операторы смогут забирать смены сверх нормы, если они не пересекаются по времени с уже взятыми.'}
+                      className={`inline-flex h-9 items-center justify-center gap-2 rounded-lg border px-3 text-xs font-semibold transition disabled:cursor-wait disabled:opacity-60 sm:h-10 sm:px-4 sm:text-sm ${
+                        settings.topup_started_at
+                          ? 'border-violet-300 bg-violet-100 text-violet-900 hover:bg-violet-200'
+                          : 'border-violet-200 bg-violet-50 text-violet-800 hover:bg-violet-100'
+                      }`}
+                    >
+                      <Plus size={16} />
+                      {settings.topup_started_at ? 'Отключить добор' : 'Включить добор'}
                     </button>
                   ) : null}
                   {['scheduled', 'open', 'paused'].includes(runtimeStatus) ? (

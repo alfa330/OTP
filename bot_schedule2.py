@@ -2979,6 +2979,9 @@ def _shift_auction_test_error_response(error):
         "DAY_OFF_SELECTED": ("На этот день выбран выходной", 409),
         "DAY_ALREADY_HAS_SHIFT": ("На этот день уже выбрана смена", 409),
         "DAY_HAS_CLAIMED_SHIFT": ("На этот день уже выбрана смена", 409),
+        "SHIFT_OVERLAPS_EXISTING": ("Эта смена пересекается по времени с уже взятой", 409),
+        "TOPUP_NOT_ACTIVE": ("Режим добора ещё не включён", 409),
+        "TOPUP_ALREADY_ACTIVE": ("Режим добора уже включён", 409),
         "DAY_OFF_LIMIT": ("Лимит выходных уже занят статусными периодами или выбранными выходными", 409),
         "INVALID_AUCTION_DATETIME": ("Некорректная дата запуска аукциона", 400)
     }
@@ -3114,6 +3117,31 @@ def api_shift_auction_test_control():
         return _shift_auction_test_error_response(error)
     except Exception as error:
         logging.error(f"Shift auction control API error: {error}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/shift_auction/test_topup', methods=['POST', 'DELETE', 'OPTIONS'])
+@require_api_key
+def api_shift_auction_test_topup():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not _is_admin_role(requester[3]):
+            return jsonify({"error": "Only admins can toggle shift auction top-up mode"}), 403
+        result = db.set_shift_auction_test_topup(
+            enabled=(request.method == 'POST'),
+            updated_by=requester_id,
+        )
+        return jsonify({"status": "success", **result}), 200
+    except ValueError as error:
+        return _shift_auction_test_error_response(error)
+    except Exception as error:
+        logging.error(f"Shift auction top-up API error: {error}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 

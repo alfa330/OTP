@@ -1628,6 +1628,8 @@ class Database:
             cursor.execute("ALTER TABLE shift_auction_test_access ADD COLUMN IF NOT EXISTS selected_schedule_plan_id INTEGER NULL;")
             cursor.execute("ALTER TABLE shift_auction_test_access ADD COLUMN IF NOT EXISTS published_to_work_schedules_at TIMESTAMP NULL;")
             cursor.execute("ALTER TABLE shift_auction_test_access ADD COLUMN IF NOT EXISTS published_to_work_schedules_by INTEGER NULL;")
+            cursor.execute("ALTER TABLE shift_auction_test_access ADD COLUMN IF NOT EXISTS topup_started_at TIMESTAMP NULL;")
+            cursor.execute("ALTER TABLE shift_auction_test_access ADD COLUMN IF NOT EXISTS topup_started_by INTEGER NULL;")
             cursor.execute("""
                 INSERT INTO shift_auction_test_access (id)
                 VALUES (1)
@@ -3151,9 +3153,13 @@ class Database:
     def _shift_auction_snapshot_common_cache_key(self, settings_row, include_admin_fields):
         if not settings_row:
             return None
+        # settings_row tail layout: ... published_to_work_schedules_by_name,
+        # topup_started_at, topup_started_by, topup_started_by_name, last_event_id.
+        # Probe the last position since the same row shape feeds multiple callers.
+        last_event_id = settings_row[-1] if isinstance(settings_row, (list, tuple)) and len(settings_row) >= 14 else 0
         return (
             bool(include_admin_fields),
-            int(settings_row[13] or 0) if len(settings_row) > 13 else 0,
+            int(last_event_id or 0),
             int(settings_row[6]) if settings_row[6] is not None else None
         )
 
@@ -3292,6 +3298,8 @@ class Database:
                 "auction_resumed",
                 "auction_finished",
                 "auction_restarted",
+                "auction_topup_started",
+                "auction_topup_stopped",
                 "resource_schedule_saved",
             }
             participant_invalidating_events = {"settings_updated"}
@@ -3703,10 +3711,14 @@ class Database:
                     s.updated_at,
                     s.published_to_work_schedules_at,
                     s.published_to_work_schedules_by,
-                    publisher.name AS published_to_work_schedules_by_name
+                    publisher.name AS published_to_work_schedules_by_name,
+                    s.topup_started_at,
+                    s.topup_started_by,
+                    topup_user.name AS topup_started_by_name
                 FROM shift_auction_test_access s
                 LEFT JOIN users u ON u.id = s.updated_by
                 LEFT JOIN users publisher ON publisher.id = s.published_to_work_schedules_by
+                LEFT JOIN users topup_user ON topup_user.id = s.topup_started_by
                 WHERE s.id = 1
             """)
             settings_row = cursor.fetchone()
@@ -3716,7 +3728,7 @@ class Database:
                     VALUES (1)
                     ON CONFLICT (id) DO NOTHING
                 """)
-                settings_row = (False, '', None, None, None, None, None, None, None, None, None, None, None)
+                settings_row = (False, '', None, None, None, None, None, None, None, None, None, None, None, None, None, None)
 
             cursor.execute("""
                 SELECT
@@ -3768,6 +3780,9 @@ class Database:
             "published_to_work_schedules_at": settings_row[10].isoformat() if settings_row and settings_row[10] else None,
             "published_to_work_schedules_by": settings_row[11] if settings_row else None,
             "published_to_work_schedules_by_name": settings_row[12] or "",
+            "topup_started_at": settings_row[13].isoformat() if settings_row and len(settings_row) > 13 and settings_row[13] else None,
+            "topup_started_by": settings_row[14] if settings_row and len(settings_row) > 14 else None,
+            "topup_started_by_name": (settings_row[15] or "") if settings_row and len(settings_row) > 15 else "",
             "selected_operator_ids": selected_operator_ids,
             "selected_operators": [
                 {
@@ -3929,6 +3944,69 @@ class Database:
                 """, (now, updated_by))
                 event = self._insert_shift_auction_test_event(cursor, "auction_finished", {
                     "finished_at": now.isoformat(),
+                    "updated_by": updated_by,
+                })
+
+        return {
+            "event": event,
+            "snapshot": self.get_shift_auction_test_snapshot(
+                current_user_id=updated_by,
+                include_admin_fields=True
+            ),
+        }
+
+    def set_shift_auction_test_topup(self, enabled, updated_by=None):
+        # Toggle the "top-up" claim mode: when enabled, operators may claim
+        # additional shifts that do not time-overlap with their existing claims
+        # even if the total exceeds their norm. Only the admin can flip it.
+        enable = bool(enabled)
+        now = datetime.now()
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT enabled, starts_at, ends_at, paused_at, finished_at, topup_started_at
+                FROM shift_auction_test_access
+                WHERE id = 1
+                FOR UPDATE
+            """)
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("AUCTION_NOT_AVAILABLE")
+            current_status = self._get_shift_auction_test_status(row[0], row[1], row[2], row[3], row[4])
+            current_topup_started_at = row[5]
+
+            if enable:
+                if current_status != 'open':
+                    raise ValueError("AUCTION_NOT_OPEN")
+                if current_topup_started_at is not None:
+                    raise ValueError("TOPUP_ALREADY_ACTIVE")
+                cursor.execute("""
+                    UPDATE shift_auction_test_access
+                    SET topup_started_at = %s,
+                        topup_started_by = %s,
+                        updated_by = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = 1
+                    RETURNING topup_started_at
+                """, (now, updated_by, updated_by))
+                started_at_row = cursor.fetchone()
+                topup_started_at = started_at_row[0] if started_at_row else now
+                event = self._insert_shift_auction_test_event(cursor, "auction_topup_started", {
+                    "topup_started_at": topup_started_at.isoformat() if topup_started_at else None,
+                    "updated_by": updated_by,
+                })
+            else:
+                if current_topup_started_at is None:
+                    raise ValueError("TOPUP_NOT_ACTIVE")
+                cursor.execute("""
+                    UPDATE shift_auction_test_access
+                    SET topup_started_at = NULL,
+                        topup_started_by = NULL,
+                        updated_by = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = 1
+                """, (updated_by,))
+                event = self._insert_shift_auction_test_event(cursor, "auction_topup_stopped", {
+                    "stopped_at": now.isoformat(),
                     "updated_by": updated_by,
                 })
 
@@ -4107,10 +4185,14 @@ class Database:
                     s.published_to_work_schedules_at,
                     s.published_to_work_schedules_by,
                     publisher.name AS published_to_work_schedules_by_name,
+                    s.topup_started_at,
+                    s.topup_started_by,
+                    topup_user.name AS topup_started_by_name,
                     (SELECT COALESCE(MAX(id), 0) FROM shift_auction_test_events) AS last_event_id
                 FROM shift_auction_test_access s
                 LEFT JOIN users u ON u.id = s.updated_by
                 LEFT JOIN users publisher ON publisher.id = s.published_to_work_schedules_by
+                LEFT JOIN users topup_user ON topup_user.id = s.topup_started_by
                 WHERE s.id = 1
             """)
             settings_row = cursor.fetchone()
@@ -4120,7 +4202,7 @@ class Database:
                     VALUES (1)
                     ON CONFLICT (id) DO NOTHING
                 """)
-                settings_row = (False, '', None, None, None, None, None, None, None, None, None, None, None, 0)
+                settings_row = (False, '', None, None, None, None, None, None, None, None, None, None, None, None, None, None, 0)
 
             common_snapshot = self._get_shift_auction_snapshot_common_tx(
                 cursor,
@@ -4177,6 +4259,9 @@ class Database:
             "published_to_work_schedules_at": settings_row[10].isoformat() if settings_row and settings_row[10] else None,
             "published_to_work_schedules_by": settings_row[11] if settings_row else None,
             "published_to_work_schedules_by_name": settings_row[12] or "",
+            "topup_started_at": settings_row[13].isoformat() if settings_row and len(settings_row) > 13 and settings_row[13] else None,
+            "topup_started_by": settings_row[14] if settings_row and len(settings_row) > 14 else None,
+            "topup_started_by_name": (settings_row[15] or "") if settings_row and len(settings_row) > 15 else "",
             "selected_operator_ids": selected_operator_ids,
             "selected_operators": [
                 {
@@ -4214,7 +4299,7 @@ class Database:
                 }
                 for row in claim_journal_rows
             ],
-            "last_event_id": int(settings_row[13] or 0) if settings_row and len(settings_row) > 13 else 0
+            "last_event_id": int(settings_row[16] or 0) if settings_row and len(settings_row) > 16 else 0
         }
 
     def restart_shift_auction_test(self, schedule_plan_id, updated_by=None):
@@ -4393,7 +4478,8 @@ class Database:
                         WHERE id = %s
                           AND LOWER(COALESCE(role, '')) = 'operator'
                           AND COALESCE(status, '') NOT IN ('fired', 'dismissal')
-                    ) AS operator_rate
+                    ) AS operator_rate,
+                    s.topup_started_at
                 FROM shift_auction_test_access s
                 WHERE s.id = 1
             """, (operator_id, operator_id))
@@ -4406,6 +4492,7 @@ class Database:
             if header[6] is None:
                 raise ValueError("OPERATOR_NOT_FOUND")
             operator_rate = float(header[6] or 1)
+            is_topup_mode = bool(header[7]) and not header[4]  # topup_started_at set, auction not finished
 
             started_at = time.perf_counter()
             cursor.execute("""
@@ -4440,6 +4527,7 @@ class Database:
                     ), ARRAY[]::date[]) AS lot_dates,
                     COALESCE((
                         SELECT json_agg(json_build_object(
+                            'shift_date', to_char(shift_date, 'YYYY-MM-DD'),
                             'start_time', to_char(start_time, 'HH24:MI'),
                             'end_time', to_char(end_time, 'HH24:MI'),
                             'breaks', breaks
@@ -4463,8 +4551,32 @@ class Database:
                 raise ValueError("SHIFT_AUCTION_STATUS_PERIOD_BLOCKED")
             if has_day_off:
                 raise ValueError("DAY_OFF_SELECTED")
-            if has_shift_on_date:
-                raise ValueError("DAY_ALREADY_HAS_SHIFT")
+
+            if is_topup_mode:
+                # Top-up mode allows more than one shift per day as long as the
+                # candidate does not overlap with the operator's existing
+                # claims on the same date. The hard daily limit is replaced by
+                # a precise time-interval overlap check.
+                candidate_range = self._schedule_interval_minutes(lot[2], lot[3])
+                conflicts = False
+                for claimed in (claimed_rows_json or []):
+                    if str(claimed.get('shift_date') or '') != lot_date_key:
+                        continue
+                    other_range = self._schedule_interval_minutes(
+                        claimed.get('start_time'),
+                        claimed.get('end_time')
+                    )
+                    if (
+                        candidate_range[0] < other_range[1]
+                        and other_range[0] < candidate_range[1]
+                    ):
+                        conflicts = True
+                        break
+                if conflicts:
+                    raise ValueError("SHIFT_OVERLAPS_EXISTING")
+            else:
+                if has_shift_on_date:
+                    raise ValueError("DAY_ALREADY_HAS_SHIFT")
 
             claimed_rows = [
                 (row.get('start_time'), row.get('end_time'), row.get('breaks'))
@@ -4482,7 +4594,8 @@ class Database:
                 lot[8] if isinstance(lot[8], list) else []
             )
             if (
-                workload["norm_minutes"] > 0
+                not is_topup_mode
+                and workload["norm_minutes"] > 0
                 and workload["claimed_net_minutes"] + candidate_minutes["net_minutes"] > workload["norm_minutes"] + 1
             ):
                 raise ValueError("SHIFT_NORM_EXCEEDED")

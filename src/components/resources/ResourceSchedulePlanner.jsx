@@ -355,6 +355,12 @@ const buildCoverageFromDays = (days) => {
 
   days.forEach((day, dayIndex) => {
     (day.shifts || []).forEach((shift) => {
+      // Auction-mode shifts include both claimed and available lots so the
+      // timeline can visualise the full auction supply; coverage stats should
+      // only credit lots that are actually taken.
+      if (shift && shift.source === 'auction' && shift.auctionStatus !== 'claimed') {
+        return;
+      }
       const startAbs = dayIndex * 1440 + Number(shift.startMinute || 0);
       const endAbs = dayIndex * 1440 + Number(shift.endMinute || 0);
       for (let hourIndex = 0; hourIndex < covered.length; hourIndex += 1) {
@@ -964,9 +970,15 @@ const PlannerDayRow = ({
                     ? clamp(((carryoverBoundaryAbs - visibleStart) / visibleDuration) * 100, 0, 100)
                     : 100;
                   const isActive = activeDragId === shift.id;
-                  const isLocked = isLockedPlannerShift(shift);
+                  const isAuctionShift = shift.source === 'auction';
+                  const isLocked = isAuctionShift || isLockedPlannerShift(shift);
                   const isIncidentUplift = shift.isIncidentUplift || shift.source === 'incident_uplift' || shift.tone === 'emerald';
-                  const inactiveShiftClass = isLocked
+                  const isAuctionClaimed = isAuctionShift && shift.auctionStatus === 'claimed';
+                  const inactiveShiftClass = isAuctionShift
+                    ? (isAuctionClaimed
+                        ? 'z-20 cursor-default border-emerald-400 bg-emerald-100 text-emerald-900'
+                        : 'z-20 cursor-default border-blue-300 bg-blue-50 text-blue-700 border-dashed')
+                    : isLockedPlannerShift(shift)
                     ? 'z-20 cursor-default border-slate-300 bg-slate-200 text-slate-700'
                     : isIncidentUplift
                     ? 'z-20 cursor-grab border-emerald-300 bg-emerald-100 text-emerald-800 hover:bg-emerald-200'
@@ -990,7 +1002,15 @@ const PlannerDayRow = ({
                         onShiftPointerDown(event, sourceDayIndex, shift.id, 'move');
                       }}
                       onContextMenu={(event) => event.preventDefault()}
-                      title={`${formatTime(start)}-${formatTime(end)} · ${formatDurationHours(duration)} · ${shift.label}${isIncidentUplift ? ' · доп. смена под прирост' : ''}${isLocked ? ' · реальная смена из графика работы' : ''}`}
+                      title={
+                        isAuctionShift
+                          ? `${formatTime(start)}-${formatTime(end)} · ${formatDurationHours(duration)} · ${
+                              isAuctionClaimed
+                                ? `Взято: ${shift.claimedBy || '—'}`
+                                : 'Свободно (никто ещё не выбрал)'
+                            }`
+                          : `${formatTime(start)}-${formatTime(end)} · ${formatDurationHours(duration)} · ${shift.label}${isIncidentUplift ? ' · доп. смена под прирост' : ''}${isLocked ? ' · реальная смена из графика работы' : ''}`
+                      }
                     >
                       {hasCarryover ? (
                         <div
@@ -1009,9 +1029,17 @@ const PlannerDayRow = ({
                           aria-label="resize-left"
                         />
                       ) : null}
-                      {isLocked ? <LockKeyhole size={13} className="relative z-10 mr-1 shrink-0" /> : <GripVertical size={13} className="relative z-10 mr-1 shrink-0" />}
+                      {isAuctionShift
+                        ? <Gavel size={13} className="relative z-10 mr-1 shrink-0" />
+                        : isLocked
+                          ? <LockKeyhole size={13} className="relative z-10 mr-1 shrink-0" />
+                          : <GripVertical size={13} className="relative z-10 mr-1 shrink-0" />}
                       <span className="relative z-10 min-w-0 flex-1 truncate">
-                        {formatTime(start)}-{formatTime(end)} · {shift.rate}
+                        {formatTime(start)}-{formatTime(end)}
+                        {isAuctionShift
+                          ? <> · <span className={isAuctionClaimed ? 'font-bold' : 'italic'}>{shift.label}</span></>
+                          : <> · {shift.rate}</>
+                        }
                       </span>
                       {end > 1440 ? <span className={`relative z-10 ml-1 shrink-0 rounded bg-white/70 px-1 text-[10px] ${isIncidentUplift ? 'text-emerald-800' : 'text-blue-800'}`}>+1</span> : null}
                       {!isLocked ? (
@@ -1529,9 +1557,11 @@ const ResourceSchedulePlanner = ({
       return h * 60 + m;
     };
     auctionLots.forEach((lot, index) => {
-      if (!lot || String(lot.status || '') !== 'claimed') return;
+      if (!lot) return;
       const date = lot.shift_date;
       if (!date) return;
+      const status = String(lot.status || '');
+      if (status !== 'claimed' && status !== 'available') return;
       const startMinute = parseHM(lot.start_time);
       const endMinuteRaw = parseHM(lot.end_time);
       if (startMinute === null || endMinuteRaw === null) return;
@@ -1543,7 +1573,11 @@ const ResourceSchedulePlanner = ({
         endMinute,
         readOnly: true,
         source: 'auction',
-        claimedBy: lot.claimed_by_name || ''
+        auctionStatus: status,
+        claimedBy: lot.claimed_by_name || '',
+        label: status === 'claimed'
+          ? (lot.claimed_by_name || 'Занято')
+          : 'Свободно'
       });
       map.set(date, list);
     });
@@ -1551,7 +1585,14 @@ const ResourceSchedulePlanner = ({
   }, [auctionLots]);
 
   const auctionClaimedCount = useMemo(
-    () => Array.from(auctionShiftsByDate.values()).reduce((sum, list) => sum + list.length, 0),
+    () => Array.from(auctionShiftsByDate.values())
+      .reduce((sum, list) => sum + list.filter((s) => s.auctionStatus === 'claimed').length, 0),
+    [auctionShiftsByDate]
+  );
+
+  const auctionAvailableCount = useMemo(
+    () => Array.from(auctionShiftsByDate.values())
+      .reduce((sum, list) => sum + list.filter((s) => s.auctionStatus === 'available').length, 0),
     [auctionShiftsByDate]
   );
 
@@ -2212,10 +2253,13 @@ const ResourceSchedulePlanner = ({
                         auctionError
                           ? <span className="text-rose-600">{auctionError}</span>
                           : auctionLoading && !auctionLoadedAt
-                            ? 'Загружаю взятые смены аукциона…'
-                            : auctionClaimedCount > 0
-                              ? `Покрытие по ${auctionClaimedCount} взятым сменам из аукциона`
-                              : 'В аукционе пока никто не взял смены'
+                            ? 'Загружаю смены аукциона…'
+                            : (auctionClaimedCount + auctionAvailableCount) > 0
+                              ? <>
+                                  Покрытие учитывает <b>{auctionClaimedCount}</b> взятых смен
+                                  {auctionAvailableCount > 0 ? <> · <span className="text-blue-700">{auctionAvailableCount} ещё свободно</span> (показаны пунктиром)</> : null}
+                                </>
+                              : 'В аукционе пока нет лотов'
                       )
                     : 'Действия применяются к выбранному полотну'
                   }
@@ -2239,10 +2283,10 @@ const ResourceSchedulePlanner = ({
                     >
                       {key === 'auction' ? <Gavel size={14} /> : null}
                       <span>{label}</span>
-                      {key === 'auction' && auctionClaimedCount > 0 ? (
+                      {key === 'auction' && (auctionClaimedCount + auctionAvailableCount) > 0 ? (
                         <span className={`rounded px-1 text-[10px] font-bold tabular-nums ${
                           coverageSource === key ? 'bg-blue-500 text-white' : 'bg-slate-100 text-slate-600'
-                        }`}>{auctionClaimedCount}</span>
+                        }`}>{auctionClaimedCount}/{auctionClaimedCount + auctionAvailableCount}</span>
                       ) : null}
                     </button>
                   ))}
