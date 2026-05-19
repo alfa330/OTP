@@ -1487,6 +1487,7 @@ const ShiftAuctionInstructionsModal = ({ open, role, canSwitchRole = false, onCl
 const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHeader, showToast, onOpenResourceGeneration }) => {
   const role = normalizeRole(user?.role);
   const canManage = isAdminLikeRole(role);
+  const canMonitor = canManage || isSupervisorRole(role);
   const apiRoot = String(apiBaseUrl || '').replace(/\/+$/, '');
   const showToastRef = useRef(showToast);
   const streamAbortRef = useRef(null);
@@ -1564,8 +1565,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     if (typeof showToastRef.current === 'function') showToastRef.current(message, 'error');
   }, []);
 
-  const instructionsRole = canManage ? 'admin' : 'operator';
-  const canSwitchInstructionsRole = canManage || isSupervisorRole(role);
+  const instructionsRole = canMonitor ? 'admin' : 'operator';
+  const canSwitchInstructionsRole = canMonitor;
   const instructionsStorageKey = user?.id
     ? `shift_auction_instructions_seen_${SHIFT_AUCTION_INSTRUCTIONS_VERSION}_${instructionsRole}_${user.id}`
     : null;
@@ -1718,7 +1719,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           ? { ...lot, ...payload.lot, _optimistic: false }
           : lot
       )));
-      if (canManage) fetchSnapshot({ silent: true });
+      if (canMonitor) fetchSnapshot({ silent: true });
       return;
     }
 
@@ -1732,13 +1733,13 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     }
 
     fetchSnapshot({ silent: true });
-  }, [canManage, fetchSnapshot, user?.id]);
+  }, [canMonitor, fetchSnapshot, user?.id]);
 
   useEffect(() => {
     fetchSnapshot();
   }, [fetchSnapshot]);
 
-  const canOpenStream = Boolean(apiRoot && user?.id && (canManage || settings.is_current_user_tester));
+  const canOpenStream = Boolean(apiRoot && user?.id && (canMonitor || settings.is_current_user_tester));
 
   useEffect(() => {
     if (!canOpenStream) return undefined;
@@ -1863,6 +1864,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     () => operatorOptions.filter((operator) => selectedIds.has(operator.id)),
     [operatorOptions, selectedIds]
   );
+  const selectedFilteredOperatorCount = useMemo(
+    () => filteredOperators.reduce((count, operator) => count + (selectedIds.has(operator.id) ? 1 : 0), 0),
+    [filteredOperators, selectedIds]
+  );
+  const allFilteredOperatorsSelected = filteredOperators.length > 0 && selectedFilteredOperatorCount === filteredOperators.length;
 
   const draftStartsAtParts = useMemo(() => splitDateTimeInputValue(draftStartsAt), [draftStartsAt]);
   const draftEndsAtParts = useMemo(() => splitDateTimeInputValue(draftEndsAt), [draftEndsAt]);
@@ -1897,9 +1903,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   }, [myBlockedDates]);
 
   const visibleLots = useMemo(() => {
-    if (canManage) return lots;
+    if (canMonitor) return lots;
     return lots.filter((lot) => !myDayOffs.includes(lot.shift_date) && !myBlockedDateMap.has(lot.shift_date));
-  }, [canManage, lots, myBlockedDateMap, myDayOffs]);
+  }, [canMonitor, lots, myBlockedDateMap, myDayOffs]);
 
   const auctionTableGroups = useMemo(() => {
     const groupMap = new Map(AUCTION_RATE_GROUPS.map((group) => [
@@ -2000,7 +2006,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   }, [lotDates, lots, myBlockedDateMap, myDayOffs, user?.id, visibleLots]);
 
   const adminActiveDayClaimGroups = useMemo(() => {
-    if (!canManage || !activeDayDate) return [];
+    if (!canMonitor || !activeDayDate) return [];
 
     const claimedLotsByGroup = new Map(AUCTION_RATE_GROUPS.map((group) => [group.id, []]));
     lots.forEach((lot) => {
@@ -2019,7 +2025,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         || Number(a.id || 0) - Number(b.id || 0)
       ))
     }));
-  }, [activeDayDate, canManage, lots]);
+  }, [activeDayDate, canMonitor, lots]);
 
   const adminActiveDayClaimCount = useMemo(
     () => adminActiveDayClaimGroups.reduce((sum, group) => sum + group.lots.length, 0),
@@ -2095,7 +2101,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         : 'border-amber-200 bg-amber-50 text-amber-800';
 
   const isTester = Boolean(settings.enabled && settings.is_current_user_tester);
-  const canUseAuction = isTester || canManage;
+  const canUseAuction = isTester || canMonitor;
   const canChoose = isTester && (runtimeStatus === 'scheduled' || runtimeStatus === 'open');
   const canClaim = isTester && runtimeStatus === 'open';
   const userRate = useMemo(() => {
@@ -2128,7 +2134,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
   const claimBlockReasonByLotId = useMemo(() => {
     const reasons = new Map();
-    if (canManage || !isTester) return reasons;
+    if (canMonitor || !isTester) return reasons;
     lots.forEach((lot) => {
       if (!lot || lot.status !== 'available') return;
       const lotId = Number(lot.id);
@@ -2151,7 +2157,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       }
     });
     return reasons;
-  }, [canManage, isTester, lots, myAuctionWorkload, myBlockedDateMap]);
+  }, [canMonitor, isTester, lots, myAuctionWorkload, myBlockedDateMap]);
 
   useEffect(() => {
     if (!canUseAuction || !lotDates.length || typeof window === 'undefined') return undefined;
@@ -2214,7 +2220,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
   const scrollToDay = useCallback((date) => {
     setActiveDayDate(date);
-    if (canManage) setIsAdminDayDetailsOpen(true);
+    if (canMonitor) setIsAdminDayDetailsOpen(true);
     const dateIndex = lotDates.indexOf(date);
     if (dateIndex < 0) return;
 
@@ -2238,7 +2244,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
     scrollNodeToDay(table);
     scrollNodeToDay(bar);
-  }, [canManage, lotDates]);
+  }, [canMonitor, lotDates]);
 
   const toggleOperator = useCallback((operatorId) => {
     const id = normalizeOperatorId(operatorId);
@@ -2250,6 +2256,18 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       return next;
     });
   }, []);
+
+  const selectAllFilteredOperators = useCallback(() => {
+    if (!filteredOperators.length) return;
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      filteredOperators.forEach((operator) => {
+        const id = normalizeOperatorId(operator?.id);
+        if (id) next.add(id);
+      });
+      return next;
+    });
+  }, [filteredOperators]);
 
   const handleSave = useCallback(async () => {
     if (!canManage || !apiRoot) return;
@@ -2517,7 +2535,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   }, [apiRoot, buildHeaders, canChoose, enqueueAuctionMutation, fetchSnapshot, manualDayOffLimit, myBlockedDateMap, myDayOffs, notify, selectedManualDayOffCount]);
 
   const renderStatusBar = () => {
-    const showWorkload = !canManage && canUseAuction;
+    const showWorkload = !canMonitor && canUseAuction;
     const progressWidth = clampNumber(myAuctionWorkload.progress, 0, 100);
     const progressTone = myAuctionWorkload.overMinutes > 0 ? 'bg-rose-500' : myAuctionWorkload.isComplete ? 'bg-emerald-500' : 'bg-blue-600';
     const balanceLabel = myAuctionWorkload.overMinutes > 0
@@ -2639,13 +2657,13 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
         {canUseAuction && (
           <section className={`grid min-w-0 gap-3 ${
-            canManage && isAdminDayDetailsOpen
+            canMonitor && isAdminDayDetailsOpen
               ? 'xl:grid-cols-[minmax(0,1fr)_320px] xl:items-start xl:gap-5'
-              : canManage
+              : canMonitor
                 ? ''
                 : 'xl:grid-cols-[260px_minmax(0,1fr)] xl:gap-5'
           }`}>
-            {!canManage ? (
+            {!canMonitor ? (
               <aside className="grid min-w-0 gap-2 xl:block xl:space-y-3">
               <div className="min-w-0 max-w-full overflow-hidden rounded-lg border border-slate-200 bg-white p-3 shadow-sm sm:p-4">
                 <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
@@ -2688,15 +2706,23 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
             <main className="min-w-0 sm:rounded-lg sm:border sm:border-slate-200 sm:bg-white sm:shadow-sm">
               <div className="hidden border-b border-slate-200 sm:block sm:px-5 sm:py-4">
-                <h2 className="text-base font-semibold text-slate-950 sm:text-lg">Доступные смены</h2>
+                <h2 className="text-base font-semibold text-slate-950 sm:text-lg">{canMonitor ? 'Мониторинг смен' : 'Доступные смены'}</h2>
                 <p className="mt-1 text-xs text-slate-600 sm:text-sm">
-                  {runtimeStatus === 'scheduled'
-                    ? <>Аукцион откроется через <AuctionCountdownText target={settings.starts_at} />.</>
-                    : runtimeStatus === 'open'
-                      ? 'Нажмите “Забрать”, чтобы закрепить смену. У остальных участников она сразу станет недоступной.'
-                      : runtimeStatus === 'paused'
-                        ? 'Аукцион временно приостановлен администратором.'
-                      : 'Сейчас аукцион закрыт.'}
+                  {canMonitor
+                    ? (runtimeStatus === 'scheduled'
+                      ? <>Аукцион откроется через <AuctionCountdownText target={settings.starts_at} />.</>
+                      : runtimeStatus === 'open'
+                        ? 'Realtime-мониторинг показывает все смены и кто их забрал.'
+                        : runtimeStatus === 'paused'
+                          ? 'Аукцион временно приостановлен.'
+                          : 'Сейчас аукцион закрыт.')
+                    : (runtimeStatus === 'scheduled'
+                      ? <>Аукцион откроется через <AuctionCountdownText target={settings.starts_at} />.</>
+                      : runtimeStatus === 'open'
+                        ? 'Нажмите “Забрать”, чтобы закрепить смену. У остальных участников она сразу станет недоступной.'
+                        : runtimeStatus === 'paused'
+                          ? 'Аукцион временно приостановлен администратором.'
+                          : 'Сейчас аукцион закрыт.')}
                 </p>
               </div>
               <div className="min-w-0 sm:p-5">
@@ -2767,7 +2793,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                           <AuctionLotCell
                                             lot={lot}
                                             canClaim={canClaim}
-                                            canManage={canManage}
+                                            canManage={canMonitor}
                                             claimingLotIds={claimingLotIds}
                                             onClaimLot={handleClaimLot}
                                             userId={user?.id}
@@ -2802,7 +2828,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                           >
                             {dayNavigationItems.map((item) => {
                               const active = activeDayDate === item.date;
-                              const tone = canManage
+                              const tone = canMonitor
                                 ? (item.claimed >= item.total && item.total > 0 ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : item.claimed > 0 ? 'border-blue-300 bg-blue-50 text-blue-800' : 'border-slate-200 bg-white text-slate-600')
                                 : item.state === 'shift'
                                   ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
@@ -2811,24 +2837,24 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                     : item.state === 'off'
                                       ? 'border-blue-300 bg-blue-50 text-blue-800'
                                       : 'border-slate-200 bg-white text-slate-600';
-                              const statusText = canManage
+                              const statusText = canMonitor
                                 ? `${item.claimed}/${item.total}`
                                 : item.state === 'shift'
                                   ? 'Смена'
                                   : item.state === 'off'
                                     ? 'Вых.'
                                     : 'Пусто';
-                              const finalStatusText = !canManage && item.state === 'blocked'
+                              const finalStatusText = !canMonitor && item.state === 'blocked'
                                 ? item.blockedLabel
-                                : !canManage && item.state === 'locked' ? 'Занято' : statusText;
-                              const myShiftLabel = !canManage && item.state === 'shift'
+                                : !canMonitor && item.state === 'locked' ? 'Занято' : statusText;
+                              const myShiftLabel = !canMonitor && item.state === 'shift'
                                 ? formatCompactAuctionShiftLabel(item.myClaimedLot)
                                 : '';
-                              const myShiftDuration = !canManage && item.state === 'shift'
+                              const myShiftDuration = !canMonitor && item.state === 'shift'
                                 ? `${formatAuctionHours(getAuctionLotNetMinutes(item.myClaimedLot))} ч`
                                 : '';
                               const hoverTone = active ? 'hover:bg-blue-100' : 'hover:bg-slate-50';
-                              const canReleaseHere = !canManage && canClaim && item.state === 'shift' && item.myClaimedLot;
+                              const canReleaseHere = !canMonitor && canClaim && item.state === 'shift' && item.myClaimedLot;
                               const onCellClick = canReleaseHere
                                 ? () => setReleaseConfirmLot(item.myClaimedLot)
                                 : () => scrollToDay(item.date);
@@ -2848,7 +2874,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                   title={cellTitle}
                                 >
                                   <span className="block truncate text-[10px] font-semibold leading-4 sm:text-[11px]">{formatShortDateLabel(item.date)}</span>
-                                  {!canManage && item.state === 'shift' ? (
+                                  {!canMonitor && item.state === 'shift' ? (
                                     <>
                                       <span className="mt-0.5 block truncate text-[10px] font-bold tabular-nums sm:text-[11px]">{myShiftLabel}</span>
                                       <span className="block truncate text-[10px] font-semibold tabular-nums sm:text-[11px]">{myShiftDuration}</span>
@@ -2870,12 +2896,14 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                       ? 'Для выбранных дней сейчас нет доступных смен.'
                       : canManage
                         ? 'Выберите недельный план и начните аукцион заново.'
+                        : canMonitor
+                          ? 'Аукцион пока не запущен.'
                         : 'Пока нет доступных смен.'}
                   </div>
                 )}
               </div>
             </main>
-            {canManage && isAdminDayDetailsOpen && activeDayDate ? (
+            {canMonitor && isAdminDayDetailsOpen && activeDayDate ? (
               <aside className="fixed bottom-[66px] left-3 right-3 z-30 max-h-[55vh] overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl xl:sticky xl:top-24 xl:bottom-auto xl:left-auto xl:right-auto xl:max-h-[calc(100vh-7rem)] xl:shadow-sm">
                 <div className="flex items-start justify-between gap-3 border-b border-slate-200 bg-slate-50 px-3 py-3 sm:px-4">
                   <div className="min-w-0">
@@ -3155,8 +3183,19 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                       className="h-10 w-full rounded-lg border border-slate-200 pl-9 pr-3 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
                     />
                   </div>
-                  <div className="text-sm text-slate-500">
-                    Выбрано: <span className="font-semibold text-slate-900">{selectedIds.size}</span>
+                  <div className="flex flex-wrap items-center justify-between gap-2 sm:justify-end">
+                    <div className="text-sm text-slate-500">
+                      Выбрано: <span className="font-semibold text-slate-900">{selectedIds.size}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={selectAllFilteredOperators}
+                      disabled={!filteredOperators.length || allFilteredOperatorsSelected}
+                      className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 text-xs font-semibold text-blue-800 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-50 disabled:text-slate-400 sm:px-4 sm:text-sm"
+                    >
+                      <CheckCircle2 size={16} />
+                      {query.trim() ? 'Выбрать найденных' : 'Выбрать все'}
+                    </button>
                   </div>
                 </div>
 
@@ -3214,7 +3253,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           </section>
         )}
 
-        {canManage && (
+        {canMonitor && (
           <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
             <div className="border-b border-slate-200 px-3 py-3 sm:px-5 sm:py-4">
               <div className="flex items-center gap-2">

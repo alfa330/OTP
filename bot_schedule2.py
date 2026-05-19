@@ -3006,17 +3006,18 @@ def api_shift_auction_test_snapshot():
             return jsonify({"error": message}), status_code
         requester_role = _normalize_user_role(requester[3])
         is_admin_requester = _is_admin_role(requester_role)
+        can_monitor_auction = is_admin_requester or _is_supervisor_role(requester_role)
         snapshot = db.get_shift_auction_test_snapshot(
             current_user_id=requester_id,
-            include_admin_fields=is_admin_requester
+            include_admin_fields=can_monitor_auction
         )
-        if not (is_admin_requester or snapshot.get('is_current_user_tester')):
+        if not (can_monitor_auction or snapshot.get('is_current_user_tester')):
             snapshot["lots"] = []
             snapshot["my_day_offs"] = []
             snapshot["my_blocked_dates"] = []
             snapshot["available_periods"] = []
             snapshot["claim_journal"] = []
-        elif not is_admin_requester:
+        elif not can_monitor_auction:
             snapshot["available_periods"] = []
             snapshot["claim_journal"] = []
         snapshot_fingerprint = hashlib.sha1(
@@ -3210,7 +3211,12 @@ def api_shift_auction_test_events():
         message, status_code = auth_error
         return jsonify({"error": message}), status_code
 
-    if not _is_admin_role(requester[3]) and not db.is_shift_auction_test_participant(requester_id):
+    requester_role = _normalize_user_role(requester[3])
+    if not (
+        _is_admin_role(requester_role)
+        or _is_supervisor_role(requester_role)
+        or db.is_shift_auction_test_participant(requester_id)
+    ):
         return jsonify({"error": "Forbidden"}), 403
 
     try:
