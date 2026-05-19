@@ -1537,6 +1537,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [isPublishingAuction, setIsPublishingAuction] = useState(false);
   const [claimingLotIds, setClaimingLotIds] = useState(() => new Set());
   const [releaseConfirmLot, setReleaseConfirmLot] = useState(null);
+  const [releaseConfirmOptions, setReleaseConfirmOptions] = useState([]);
   const [releasingLotId, setReleasingLotId] = useState(null);
   const lotsRef = useRef([]);
   const pendingClaimLotIdsRef = useRef(new Set());
@@ -1963,7 +1964,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   }, [lotDates, visibleLots]);
 
   const myClaimedLots = useMemo(
-    () => lots.filter((lot) => Number(lot.claimed_by) === Number(user?.id)),
+    () => lots.filter((lot) => lot.status === 'claimed' && Number(lot.claimed_by) === Number(user?.id)),
     [lots, user?.id]
   );
   const myClaimedDateSet = useMemo(
@@ -1990,7 +1991,14 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     return lotDates.map((date) => {
       const dayLots = lots.filter((lot) => lot.shift_date === date);
       const claimedLots = dayLots.filter((lot) => lot.status === 'claimed');
-      const myClaimed = dayLots.filter((lot) => Number(lot.claimed_by) === Number(user?.id));
+      const myClaimed = dayLots
+        .filter((lot) => lot.status === 'claimed' && Number(lot.claimed_by) === Number(user?.id))
+        .sort((a, b) => (
+          clockToMinutes(a.start_time) - clockToMinutes(b.start_time)
+          || clockToMinutes(a.end_time) - clockToMinutes(b.end_time)
+          || Number(a.id || 0) - Number(b.id || 0)
+        ));
+      const myClaimedNetMinutes = myClaimed.reduce((sum, lot) => sum + getAuctionLotNetMinutes(lot), 0);
       const isDayOff = myDayOffs.includes(date);
       const blockedPeriod = myBlockedDateMap.get(date);
       const availableCount = visibleLots.filter((lot) => lot.shift_date === date && lot.status === 'available').length;
@@ -2006,7 +2014,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         total: dayLots.length,
         claimed: claimedLots.length,
         myClaimed: myClaimed.length,
+        myClaimedLots: myClaimed,
         myClaimedLot: myClaimed[0] || null,
+        myClaimedNetMinutes,
         available: availableCount,
         locked: lockedCount,
         isDayOff,
@@ -2612,6 +2622,19 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     }
   }, [apiRoot, canClaim, claimBlockReasonByLotId, enqueueAuctionMutation, fetchSnapshot, notifyClaimError, postClaimLot, user?.id]);
 
+  const openReleaseConfirm = useCallback((lotsToRelease) => {
+    const options = (Array.isArray(lotsToRelease) ? lotsToRelease : [lotsToRelease])
+      .filter((lot) => lot && lot.id);
+    if (!options.length) return;
+    setReleaseConfirmOptions(options);
+    setReleaseConfirmLot(options[0]);
+  }, []);
+
+  const closeReleaseConfirm = useCallback(() => {
+    setReleaseConfirmLot(null);
+    setReleaseConfirmOptions([]);
+  }, []);
+
   const handleReleaseLot = useCallback(async () => {
     const lot = releaseConfirmLot;
     if (!canClaim || !apiRoot || !lot?.id) return;
@@ -2634,6 +2657,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         : l
     )));
     setReleaseConfirmLot(null);
+    setReleaseConfirmOptions([]);
 
     try {
       const response = await enqueueAuctionMutation(() => axios.post(
@@ -2744,6 +2768,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       </div>
     );
   };
+
+  const releaseOptions = releaseConfirmOptions.length
+    ? releaseConfirmOptions
+    : (releaseConfirmLot ? [releaseConfirmLot] : []);
+  const hasMultipleReleaseOptions = releaseOptions.length > 1;
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -3022,19 +3051,20 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                               const finalStatusText = !canMonitor && item.state === 'blocked'
                                 ? item.blockedLabel
                                 : !canMonitor && item.state === 'locked' ? 'Занято' : statusText;
+                              const myShiftCount = Number(item.myClaimed || 0);
                               const myShiftLabel = !canMonitor && item.state === 'shift'
-                                ? formatCompactAuctionShiftLabel(item.myClaimedLot)
+                                ? (myShiftCount > 1 ? `Смен: ${myShiftCount}` : formatCompactAuctionShiftLabel(item.myClaimedLot))
                                 : '';
                               const myShiftDuration = !canMonitor && item.state === 'shift'
-                                ? `${formatAuctionHours(getAuctionLotNetMinutes(item.myClaimedLot))} ч`
+                                ? `${formatAuctionHours(item.myClaimedNetMinutes)} ч`
                                 : '';
                               const hoverTone = active ? 'hover:bg-blue-100' : 'hover:bg-slate-50';
-                              const canReleaseHere = !canMonitor && canClaim && item.state === 'shift' && item.myClaimedLot;
+                              const canReleaseHere = !canMonitor && canClaim && item.state === 'shift' && item.myClaimedLots?.length;
                               const onCellClick = canReleaseHere
-                                ? () => setReleaseConfirmLot(item.myClaimedLot)
+                                ? () => openReleaseConfirm(item.myClaimedLots)
                                 : () => scrollToDay(item.date);
                               const cellTitle = canReleaseHere
-                                ? `${formatDateLabel(item.date)} · нажмите, чтобы вернуть смену`
+                                ? `${formatDateLabel(item.date)} · ${myShiftCount > 1 ? 'выберите смену для возврата' : 'нажмите, чтобы вернуть смену'}`
                                 : item.isBlocked
                                   ? `${formatDateLabel(item.date)} · ${item.blockedLabel}`
                                   : formatDateLabel(item.date);
@@ -3643,30 +3673,52 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           role="dialog"
           aria-modal="true"
           aria-labelledby="release-confirm-title"
-          onClick={() => releasingLotId === null && setReleaseConfirmLot(null)}
+          onClick={() => releasingLotId === null && closeReleaseConfirm()}
         >
           <div
-            className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-5 shadow-2xl"
+            className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-2xl"
             onClick={(event) => event.stopPropagation()}
           >
             <h3 id="release-confirm-title" className="text-base font-semibold text-slate-950">
-              Хотите ли вы вернуть эту смену?
+              {hasMultipleReleaseOptions ? 'Какую смену вернуть?' : 'Хотите ли вы вернуть эту смену?'}
             </h3>
             <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
               <div className="text-sm font-semibold text-slate-900">{formatDateLabel(releaseConfirmLot.shift_date)}</div>
-              <div className="mt-0.5 text-xs text-slate-600">
-                {releaseConfirmLot.start_time} - {releaseConfirmLot.end_time}
-                {' · '}
-                {formatAuctionHours(getAuctionLotNetMinutes(releaseConfirmLot))} ч
-              </div>
+              {hasMultipleReleaseOptions ? (
+                <div className="mt-2 space-y-2">
+                  {releaseOptions.map((lot) => {
+                    const selected = Number(releaseConfirmLot?.id) === Number(lot.id);
+                    return (
+                      <button
+                        key={lot.id}
+                        type="button"
+                        onClick={() => setReleaseConfirmLot(lot)}
+                        disabled={releasingLotId !== null}
+                        className={`flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left text-xs transition disabled:cursor-wait disabled:opacity-60 ${selected ? 'border-rose-300 bg-rose-50 text-rose-800' : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50'}`}
+                      >
+                        <span className="font-semibold tabular-nums">{lot.start_time} - {lot.end_time}</span>
+                        <span className="shrink-0 font-semibold tabular-nums">{formatAuctionHours(getAuctionLotNetMinutes(lot))} ч</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="mt-0.5 text-xs text-slate-600">
+                  {releaseConfirmLot.start_time} - {releaseConfirmLot.end_time}
+                  {' · '}
+                  {formatAuctionHours(getAuctionLotNetMinutes(releaseConfirmLot))} ч
+                </div>
+              )}
             </div>
             <p className="mt-3 text-xs leading-5 text-slate-600">
-              Смена снова станет доступной для других операторов. Это действие нельзя отменить.
+              {hasMultipleReleaseOptions
+                ? 'Выбранная смена снова станет доступной для других операторов. Остальные смены в этот день останутся у вас.'
+                : 'Смена снова станет доступной для других операторов. Это действие нельзя отменить.'}
             </p>
             <div className="mt-4 flex items-center justify-end gap-2">
               <button
                 type="button"
-                onClick={() => setReleaseConfirmLot(null)}
+                onClick={closeReleaseConfirm}
                 disabled={releasingLotId !== null}
                 className="inline-flex h-9 items-center justify-center rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 sm:text-sm"
               >
@@ -3675,7 +3727,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
               <button
                 type="button"
                 onClick={handleReleaseLot}
-                disabled={releasingLotId !== null}
+                disabled={releasingLotId !== null || !releaseConfirmLot}
                 className="inline-flex h-9 items-center justify-center rounded-lg bg-rose-600 px-3 text-xs font-semibold text-white transition hover:bg-rose-700 disabled:cursor-wait disabled:bg-rose-400 sm:text-sm"
               >
                 {releasingLotId !== null ? 'Возвращаю...' : 'Вернуть смену'}
