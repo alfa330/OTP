@@ -2269,6 +2269,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     });
   }, [filteredOperators]);
 
+  const clearSelectedOperators = useCallback(() => {
+    setSelectedIds(new Set());
+  }, []);
+
   const handleSave = useCallback(async () => {
     if (!canManage || !apiRoot) return;
     if (draftRangeInvalid) {
@@ -3174,7 +3178,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                 </div>
 
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="relative w-full sm:max-w-md">
+                  <div className="relative w-full">
                     <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                     <input
                       value={query}
@@ -3183,23 +3187,37 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                       className="h-10 w-full rounded-lg border border-slate-200 pl-9 pr-3 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
                     />
                   </div>
-                  <div className="flex flex-wrap items-center justify-between gap-2 sm:justify-end">
-                    <div className="text-sm text-slate-500">
-                      Выбрано: <span className="font-semibold text-slate-900">{selectedIds.size}</span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={selectAllFilteredOperators}
-                      disabled={!filteredOperators.length || allFilteredOperatorsSelected}
-                      className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 text-xs font-semibold text-blue-800 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-50 disabled:text-slate-400 sm:px-4 sm:text-sm"
-                    >
-                      <CheckCircle2 size={16} />
-                      {query.trim() ? 'Выбрать найденных' : 'Выбрать все'}
-                    </button>
-                  </div>
                 </div>
 
                 <div className="max-h-[460px] overflow-auto rounded-lg border border-slate-200">
+                  <div className="sticky top-0 z-10 flex flex-col gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="text-sm text-slate-500">
+                      Выбрано: <span className="font-semibold text-slate-900">{selectedIds.size}</span>
+                      {query.trim() ? (
+                        <span className="ml-2 text-xs">Найдено: <span className="font-semibold text-slate-700">{filteredOperators.length}</span></span>
+                      ) : null}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={selectAllFilteredOperators}
+                        disabled={!filteredOperators.length || allFilteredOperatorsSelected}
+                        className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 text-xs font-semibold text-blue-800 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-50 disabled:text-slate-400"
+                      >
+                        <CheckCircle2 size={15} />
+                        {query.trim() ? 'Выбрать найденных' : 'Выбрать все'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={clearSelectedOperators}
+                        disabled={!selectedIds.size}
+                        className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400"
+                      >
+                        <X size={15} />
+                        Снять выбор
+                      </button>
+                    </div>
+                  </div>
                   {filteredOperators.length ? (
                     filteredOperators.map((operator) => {
                       const active = selectedIds.has(operator.id);
