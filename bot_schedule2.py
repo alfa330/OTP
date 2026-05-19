@@ -3017,9 +3017,11 @@ def api_shift_auction_test_snapshot():
             snapshot["my_blocked_dates"] = []
             snapshot["available_periods"] = []
             snapshot["claim_journal"] = []
+            snapshot["participant_workloads"] = []
         elif not can_monitor_auction:
             snapshot["available_periods"] = []
             snapshot["claim_journal"] = []
+            snapshot["participant_workloads"] = []
         snapshot_fingerprint = hashlib.sha1(
             json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
         ).hexdigest()

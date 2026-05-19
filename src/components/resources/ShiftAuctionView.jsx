@@ -1547,6 +1547,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [auctionDayColumnPx, setAuctionDayColumnPx] = useState(64);
   const [availablePeriods, setAvailablePeriods] = useState([]);
   const [claimJournal, setClaimJournal] = useState([]);
+  const [participantWorkloads, setParticipantWorkloads] = useState([]);
+  const [operatorWorkloadFilter, setOperatorWorkloadFilter] = useState('all');
+  const [operatorWorkloadQuery, setOperatorWorkloadQuery] = useState('');
 
   useEffect(() => {
     showToastRef.current = showToast;
@@ -1671,6 +1674,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     setSelectedIds(new Set(ids));
     setAvailablePeriods(periods);
     setClaimJournal(Array.isArray(safe.claim_journal) ? safe.claim_journal : []);
+    setParticipantWorkloads(Array.isArray(safe.participant_workloads) ? safe.participant_workloads : []);
     setDraftSchedulePlanId((current) => {
       const periodIds = new Set(periods.map((period) => normalizeSchedulePlanId(period?.id)).filter(Boolean));
       const currentId = normalizeSchedulePlanId(current);
@@ -2135,6 +2139,76 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       isComplete: normMinutes > 0 && claimedNetMinutes >= normMinutes - 1
     };
   }, [lotDates.length, myBlockedDateMap.size, myClaimedLots, userRate]);
+
+  const operatorWorkloadRows = useMemo(() => {
+    if (!canMonitor) return [];
+    const operatorsById = new Map(
+      (settings.selected_operators || [])
+        .filter((operator) => operator && operator.id != null)
+        .map((operator) => [Number(operator.id), operator])
+    );
+    return (participantWorkloads || [])
+      .map((workload) => {
+        if (!workload || workload.operator_id == null) return null;
+        const operator = operatorsById.get(Number(workload.operator_id)) || {};
+        const normMinutes = Number(workload.norm_minutes || 0);
+        const claimedNet = Number(workload.claimed_net_minutes || 0);
+        const overMinutes = Number(workload.over_minutes || 0);
+        const isComplete = Boolean(workload.is_complete);
+        const progress = normMinutes > 0
+          ? clampNumber((claimedNet / normMinutes) * 100, 0, 140)
+          : (claimedNet > 0 ? 100 : 0);
+        const status = overMinutes > 0
+          ? 'over'
+          : isComplete
+            ? 'complete'
+            : claimedNet > 0
+              ? 'partial'
+              : 'empty';
+        return {
+          ...workload,
+          name: operator.name || `Оператор #${workload.operator_id}`,
+          supervisor_name: operator.supervisor_name || '',
+          direction: operator.direction || '',
+          progress,
+          status
+        };
+      })
+      .filter(Boolean);
+  }, [canMonitor, participantWorkloads, settings.selected_operators]);
+
+  const operatorWorkloadStats = useMemo(() => {
+    const stats = { total: 0, lagging: 0, complete: 0, over: 0, empty: 0 };
+    operatorWorkloadRows.forEach((row) => {
+      stats.total += 1;
+      if (row.status === 'empty') stats.empty += 1;
+      else if (row.status === 'partial') stats.lagging += 1;
+      else if (row.status === 'complete') stats.complete += 1;
+      else if (row.status === 'over') stats.over += 1;
+    });
+    return stats;
+  }, [operatorWorkloadRows]);
+
+  const filteredOperatorWorkloads = useMemo(() => {
+    const normalizedQuery = operatorWorkloadQuery.trim().toLowerCase();
+    return operatorWorkloadRows
+      .filter((row) => {
+        if (operatorWorkloadFilter === 'lagging' && !(row.status === 'empty' || row.status === 'partial')) return false;
+        if (operatorWorkloadFilter === 'complete' && row.status !== 'complete') return false;
+        if (operatorWorkloadFilter === 'over' && row.status !== 'over') return false;
+        if (operatorWorkloadFilter === 'empty' && row.status !== 'empty') return false;
+        if (!normalizedQuery) return true;
+        const haystack = [row.name, row.supervisor_name, row.direction]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
+        return haystack.includes(normalizedQuery);
+      })
+      .sort((a, b) => {
+        if (a.progress !== b.progress) return a.progress - b.progress;
+        return String(a.name || '').localeCompare(String(b.name || ''), 'ru');
+      });
+  }, [operatorWorkloadRows, operatorWorkloadFilter, operatorWorkloadQuery]);
 
   const claimBlockReasonByLotId = useMemo(() => {
     const reasons = new Map();
@@ -2964,6 +3038,127 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                 </div>
               </aside>
             ) : null}
+          </section>
+        )}
+
+        {canMonitor && operatorWorkloadRows.length > 0 && (
+          <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
+            <div className="border-b border-slate-200 px-3 py-3 sm:px-5 sm:py-4">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div className="min-w-0">
+                  <h2 className="text-base font-semibold text-slate-950 sm:text-lg">Прогресс операторов</h2>
+                  <p className="mt-1 text-xs text-slate-600 sm:text-sm">
+                    Норма зависит от ставки оператора и статусных периодов. Отстающие — наверху.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {[
+                    { id: 'all', label: 'Все', count: operatorWorkloadStats.total },
+                    { id: 'lagging', label: 'Отстают', count: operatorWorkloadStats.empty + operatorWorkloadStats.lagging },
+                    { id: 'complete', label: 'Норма', count: operatorWorkloadStats.complete },
+                    { id: 'over', label: 'Перебор', count: operatorWorkloadStats.over },
+                    { id: 'empty', label: 'Пусто', count: operatorWorkloadStats.empty }
+                  ].map((chip) => {
+                    const active = operatorWorkloadFilter === chip.id;
+                    return (
+                      <button
+                        type="button"
+                        key={`op-wk-filter-${chip.id}`}
+                        onClick={() => setOperatorWorkloadFilter(chip.id)}
+                        className={`inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-xs font-semibold transition sm:h-8 sm:px-3 ${
+                          active
+                            ? 'border-blue-500 bg-blue-50 text-blue-700'
+                            : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:text-slate-800'
+                        }`}
+                      >
+                        <span>{chip.label}</span>
+                        <span className={`tabular-nums ${active ? 'text-blue-600' : 'text-slate-400'}`}>{chip.count}</span>
+                      </button>
+                    );
+                  })}
+                  <input
+                    type="search"
+                    value={operatorWorkloadQuery}
+                    onChange={(event) => setOperatorWorkloadQuery(event.target.value)}
+                    placeholder="Поиск оператора"
+                    className="h-7 w-40 rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-800 placeholder:text-slate-400 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100 sm:h-8 sm:w-56 sm:text-sm"
+                  />
+                </div>
+              </div>
+            </div>
+            <div className="px-3 py-3 sm:px-5 sm:py-4">
+              {filteredOperatorWorkloads.length === 0 ? (
+                <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 px-3 py-6 text-center text-sm text-slate-500">
+                  Под фильтр операторов не нашлось.
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
+                  {filteredOperatorWorkloads.map((row) => {
+                    const progressWidth = clampNumber(row.progress, 0, 100);
+                    const progressTone = row.status === 'over'
+                      ? 'bg-rose-500'
+                      : row.status === 'complete'
+                        ? 'bg-emerald-500'
+                        : row.status === 'partial'
+                          ? 'bg-blue-600'
+                          : 'bg-slate-300';
+                    const chipClass = row.status === 'over'
+                      ? 'bg-rose-50 text-rose-700'
+                      : row.status === 'complete'
+                        ? 'bg-emerald-50 text-emerald-700'
+                        : row.status === 'partial'
+                          ? 'bg-blue-50 text-blue-700'
+                          : 'bg-slate-100 text-slate-600';
+                    const chipText = row.status === 'over'
+                      ? `+${formatAuctionHours(row.over_minutes || 0)} ч`
+                      : row.status === 'complete'
+                        ? 'Норма'
+                        : row.status === 'partial'
+                          ? `-${formatAuctionHours(row.remaining_minutes || 0)} ч`
+                          : 'Пусто';
+                    const subtitleParts = [];
+                    if (row.supervisor_name) subtitleParts.push(row.supervisor_name);
+                    if (row.direction) subtitleParts.push(row.direction);
+                    const rateLabel = row.rate && Math.abs(Number(row.rate) - 1) > 0.001
+                      ? ` · ст. ${formatRate(row.rate)}`
+                      : '';
+                    const subtitle = `${subtitleParts.join(' · ')}${rateLabel}`;
+                    const meta = [
+                      `${row.lots_claimed_count || 0} смен`,
+                      row.blocked_days ? `закрыто ${row.blocked_days} дн` : null,
+                      row.selected_day_offs ? `вых ${row.selected_day_offs}` : null
+                    ].filter(Boolean).join(' · ');
+                    return (
+                      <div key={`op-workload-${row.operator_id}`} className="rounded-md border border-slate-200 bg-white p-3 transition hover:border-slate-300 hover:shadow-sm">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="truncate text-sm font-semibold text-slate-950">{row.name}</div>
+                            {subtitle ? (
+                              <div className="mt-0.5 truncate text-[11px] text-slate-500">{subtitle}</div>
+                            ) : null}
+                          </div>
+                          <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold sm:text-[11px] ${chipClass}`}>
+                            {chipText}
+                          </span>
+                        </div>
+                        <div className="mt-2 flex items-center justify-between gap-2 text-xs tabular-nums">
+                          <span className="font-semibold text-slate-900">
+                            {formatAuctionHours(row.claimed_net_minutes || 0)} / {formatAuctionHours(row.norm_minutes || 0)} ч
+                          </span>
+                          <span className="text-slate-500">{Math.round(row.progress)}%</span>
+                        </div>
+                        <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-slate-100">
+                          <div className={`h-full rounded-full ${progressTone}`} style={{ width: `${progressWidth}%` }} />
+                        </div>
+                        {meta ? (
+                          <div className="mt-2 truncate text-[11px] text-slate-500">{meta}</div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           </section>
         )}
 
