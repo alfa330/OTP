@@ -1624,18 +1624,13 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   }, [user?.id, withAccessTokenHeader]);
 
   const postClaimLot = useCallback(async (lotId) => {
-    const response = await fetch(`${apiRoot}/api/shift_auction/test_lots/${lotId}/claim`, {
-      method: 'POST',
-      credentials: 'include'
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const error = new Error(data?.error || 'Claim request failed');
-      error.response = { status: response.status, data };
-      throw error;
-    }
-    return { data };
-  }, [apiRoot]);
+    const response = await axios.post(
+      `${apiRoot}/api/shift_auction/test_lots/${lotId}/claim`,
+      null,
+      { headers: buildHeaders() }
+    );
+    return { data: response?.data || {} };
+  }, [apiRoot, buildHeaders]);
 
   const applySnapshot = useCallback((snapshot) => {
     const safe = snapshot || {};
