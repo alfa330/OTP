@@ -3236,7 +3236,7 @@ class Database:
                 WHERE e.event_type = 'lot_claimed'
                   AND NULLIF(e.payload->'lot'->>'source_schedule_plan_id', '')::INTEGER = %s
                 ORDER BY e.id DESC
-                LIMIT 200
+                LIMIT 50
             """, (settings_row[6],))
             claim_journal_rows = cursor.fetchall() or []
 
@@ -4429,6 +4429,83 @@ class Database:
                 current_user_id=updated_by,
                 include_admin_fields=True
             )
+        }
+
+    def get_shift_auction_test_journal(self, page=1, per_page=50):
+        # Paginated claim journal for the currently-selected auction period.
+        # Returns rows ordered newest-first plus a total count for UI paging.
+        try:
+            page = max(1, int(page or 1))
+        except Exception:
+            page = 1
+        try:
+            per_page = max(1, min(200, int(per_page or 50)))
+        except Exception:
+            per_page = 50
+        offset = (page - 1) * per_page
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT selected_schedule_plan_id FROM shift_auction_test_access WHERE id = 1
+            """)
+            settings_row = cursor.fetchone()
+            plan_id = settings_row[0] if settings_row else None
+            if plan_id is None:
+                return {"entries": [], "total": 0, "page": page, "per_page": per_page, "has_more": False}
+
+            cursor.execute("""
+                SELECT COUNT(*)::int
+                FROM shift_auction_test_events e
+                WHERE e.event_type = 'lot_claimed'
+                  AND NULLIF(e.payload->'lot'->>'source_schedule_plan_id', '')::INTEGER = %s
+            """, (plan_id,))
+            total_row = cursor.fetchone()
+            total = int(total_row[0] or 0) if total_row else 0
+
+            cursor.execute("""
+                SELECT
+                    e.id,
+                    e.created_at,
+                    NULLIF(e.payload->'lot'->>'shift_date', '') AS shift_date,
+                    NULLIF(e.payload->'lot'->>'start_time', '') AS start_time,
+                    NULLIF(e.payload->'lot'->>'end_time', '') AS end_time,
+                    NULLIF(e.payload->'lot'->>'claimed_by', '')::INTEGER AS claimed_by,
+                    COALESCE(u.name, '') AS claimed_by_name,
+                    NULLIF(e.payload->'lot'->>'source_schedule_plan_id', '')::INTEGER AS source_schedule_plan_id,
+                    p.date_from,
+                    p.date_to
+                FROM shift_auction_test_events e
+                LEFT JOIN users u
+                  ON u.id = NULLIF(e.payload->'lot'->>'claimed_by', '')::INTEGER
+                LEFT JOIN resource_saved_schedule_plans p
+                  ON p.id = NULLIF(e.payload->'lot'->>'source_schedule_plan_id', '')::INTEGER
+                WHERE e.event_type = 'lot_claimed'
+                  AND NULLIF(e.payload->'lot'->>'source_schedule_plan_id', '')::INTEGER = %s
+                ORDER BY e.id DESC
+                LIMIT %s OFFSET %s
+            """, (plan_id, per_page, offset))
+            rows = cursor.fetchall() or []
+
+        entries = [
+            {
+                "id": row[0],
+                "claimed_at": row[1].isoformat() if row[1] else None,
+                "shift_date": row[2],
+                "start_time": row[3],
+                "end_time": row[4],
+                "claimed_by": row[5],
+                "claimed_by_name": row[6] or "",
+                "source_schedule_plan_id": row[7],
+                "period_start": row[8].strftime('%Y-%m-%d') if row[8] else None,
+                "period_end": row[9].strftime('%Y-%m-%d') if row[9] else None,
+            }
+            for row in rows
+        ]
+        return {
+            "entries": entries,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "has_more": (page * per_page) < total,
         }
 
     def get_shift_auction_test_events_after(self, after_id=0, limit=100):
