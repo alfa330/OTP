@@ -793,9 +793,10 @@ const PlannerDayRow = ({
   onAddShift,
 }) => {
   const viewportRef = useRef(null);
+  const syncedHeaderRef = useRef(null);
+  const syncedCoverageRef = useRef(null);
   const focusFrameRef = useRef(0);
   const scrollSyncRef = useRef({ active: false, targetLeft: 0, startedAt: 0 });
-  const [timelineScrollLeft, setTimelineScrollLeft] = useState(0);
   const allDays = days.length ? days : [day].filter(Boolean);
   const totalDays = Math.max(1, allDays.length);
   const totalMinutes = totalDays * 1440;
@@ -809,11 +810,22 @@ const PlannerDayRow = ({
   const syncedTimelineContentStyle = useMemo(
     () => ({
       ...timelineContentStyle,
-      transform: `translateX(-${timelineScrollLeft}px)`,
+      transform: 'translate3d(0, 0, 0)',
       willChange: 'transform',
     }),
-    [timelineContentStyle, timelineScrollLeft],
+    [timelineContentStyle],
   );
+
+  const syncPinnedTimeline = useCallback((scrollLeft) => {
+    const left = Number(scrollLeft ?? viewportRef.current?.scrollLeft ?? 0);
+    const transform = `translate3d(${-left}px, 0, 0)`;
+    if (syncedHeaderRef.current && syncedHeaderRef.current.style.transform !== transform) {
+      syncedHeaderRef.current.style.transform = transform;
+    }
+    if (syncedCoverageRef.current && syncedCoverageRef.current.style.transform !== transform) {
+      syncedCoverageRef.current.style.transform = transform;
+    }
+  }, []);
 
   const timeline = useMemo(() => buildPlannerTimeline(allDays, dayIndex), [allDays, dayIndex]);
 
@@ -838,13 +850,14 @@ const PlannerDayRow = ({
   useEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport) return;
+    syncPinnedTimeline(viewport.scrollLeft);
     const targetIndex = clamp(Number(dayIndex || 0), 0, totalDays - 1);
     if (getMostVisibleTimelineDayIndex(viewport, totalDays) === targetIndex) return;
     const dayWidth = viewport.scrollWidth / totalDays;
     const nextLeft = targetIndex * dayWidth;
     scrollSyncRef.current = { active: true, targetLeft: nextLeft, startedAt: Date.now() };
     viewport.scrollTo({ left: nextLeft, behavior: 'smooth' });
-  }, [dayIndex, totalDays]);
+  }, [dayIndex, syncPinnedTimeline, totalDays]);
 
   const reportFocusedDay = useCallback(() => {
     if (typeof onFocusedDayChange !== 'function') return;
@@ -855,7 +868,7 @@ const PlannerDayRow = ({
 
   const handleTimelineScroll = useCallback(() => {
     const viewport = viewportRef.current;
-    if (viewport) setTimelineScrollLeft(viewport.scrollLeft);
+    if (viewport) syncPinnedTimeline(viewport.scrollLeft);
     if (typeof onFocusedDayChange !== 'function') return;
     const sync = scrollSyncRef.current;
     if (viewport && sync.active) {
@@ -869,7 +882,7 @@ const PlannerDayRow = ({
       focusFrameRef.current = 0;
       reportFocusedDay();
     });
-  }, [onFocusedDayChange, reportFocusedDay]);
+  }, [onFocusedDayChange, reportFocusedDay, syncPinnedTimeline]);
 
   useEffect(() => () => {
     if (focusFrameRef.current) window.cancelAnimationFrame(focusFrameRef.current);
@@ -888,7 +901,7 @@ const PlannerDayRow = ({
       moveEvent.preventDefault();
       const nextLeft = startScrollLeft - (moveEvent.clientX - startX);
       viewport.scrollLeft = nextLeft;
-      setTimelineScrollLeft(nextLeft);
+      syncPinnedTimeline(viewport.scrollLeft);
     };
     const onUp = () => {
       viewport.classList.remove('cursor-grabbing');
@@ -898,7 +911,7 @@ const PlannerDayRow = ({
 
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
-  }, []);
+  }, [syncPinnedTimeline]);
 
   const splitTimelineItem = splitPreview
     ? timeline.items.find((item) => item.sourceDayIndex === Number(splitPreview.dayIndex) && item.shift.id === splitPreview.shiftId)
@@ -938,7 +951,7 @@ const PlannerDayRow = ({
         <div className="relative rounded-lg border border-slate-200 bg-slate-50">
           <div className="sticky top-0 z-30 rounded-t-lg border-b border-slate-200 bg-white/95 shadow-sm backdrop-blur">
             <div className="overflow-hidden">
-              <div className="flex" style={syncedTimelineContentStyle}>
+              <div ref={syncedHeaderRef} className="flex" style={syncedTimelineContentStyle}>
                 {allDays.map((itemDay, index) => (
                   <div
                     key={`${itemDay.date || index}-header`}
@@ -1153,7 +1166,7 @@ const PlannerDayRow = ({
 
           <div className="sticky bottom-0 z-30 rounded-b-lg border-t border-slate-200 bg-white/95 p-3 shadow-[0_-10px_24px_rgba(15,23,42,0.08)] backdrop-blur">
             <div className="overflow-hidden">
-              <div style={syncedTimelineContentStyle}>
+              <div ref={syncedCoverageRef} style={syncedTimelineContentStyle}>
                 {coverageView === 'bars' ? (
                   <div className="rounded-lg border border-slate-200 bg-white p-3">
                     <div className="mb-3 flex flex-wrap gap-3 text-xs text-slate-600">
