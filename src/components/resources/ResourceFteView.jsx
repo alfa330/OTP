@@ -3225,55 +3225,129 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                         </div>
                       </div>
                     ) : null}
-                    <div className="mb-3 mt-5 text-sm font-semibold text-slate-900">Выберите день</div>
+                    <div className="mb-3 mt-5 flex items-center justify-between text-sm font-semibold text-slate-900">
+                      <span>Выберите день</span>
+                      <span className="text-[11px] font-medium text-slate-500 tabular-nums">{(nextWeekForecast.days || []).length} дн.</span>
+                    </div>
                     <div className="space-y-2">
-                      {(nextWeekForecast.days || []).map((profile) => {
-                        const isActiveProfile = selectedForecastDay?.forecast_date === profile.forecast_date;
-                        return (
-                        <button
-                          key={profile.forecast_date || profile.weekday}
-                          type="button"
-                          aria-pressed={isActiveProfile}
-                          aria-label={`${profile.short} ${formatDate(profile.forecast_date)}, ${profile.insufficient_history ? 'истории не хватает' : 'история полная'}`}
-                          onClick={() => setSelectedForecastDate(profile.forecast_date)}
-                          className={`w-full rounded-lg border p-3 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 ${
-                            isActiveProfile
-                              ? profile.insufficient_history
-                                ? 'border-amber-300 bg-amber-50'
-                                : 'border-emerald-300 bg-emerald-50'
-                              : profile.insufficient_history
-                                ? 'border-slate-200 bg-white hover:border-amber-200 hover:bg-amber-50'
-                                : 'border-emerald-100 bg-white hover:border-emerald-200 hover:bg-emerald-50'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="flex items-center gap-1.5">
-                              {profile.insufficient_history
-                                ? <AlertTriangle size={14} className="shrink-0 text-amber-600" aria-hidden="true" />
-                                : <CheckCircle2 size={14} className="shrink-0 text-emerald-600" aria-hidden="true" />}
-                              <div>
-                                <div className="font-semibold text-slate-950">{profile.short}</div>
-                                <div className="text-xs text-slate-500">{formatDate(profile.forecast_date)}</div>
+                      {(() => {
+                        const tomorrowValue = addDaysIso(todayValue, 1);
+                        const maxDailyCalls = Math.max(1, ...(nextWeekForecast.days || []).map((d) => Number(d.forecast_calls || 0)));
+                        return (nextWeekForecast.days || []).map((profile) => {
+                          const isActiveProfile = selectedForecastDay?.forecast_date === profile.forecast_date;
+                          const isPast = profile.forecast_date && profile.forecast_date < todayValue;
+                          const isToday = profile.forecast_date === todayValue;
+                          const isTomorrow = profile.forecast_date === tomorrowValue;
+                          const hasActual = profile.has_actual_report && profile.forecast_date <= todayValue;
+                          const forecastFte = Number(profile.forecast_daily_fte || 0);
+                          const actualFte = Number(profile.actual_report_fte || 0);
+                          const factDelta = hasActual ? actualFte - forecastFte : null;
+                          const hasUplift = Number(profile.incident_uplift_calls || 0) > 0.01;
+                          const callShare = Math.min(100, (Number(profile.forecast_calls || 0) / maxDailyCalls) * 100);
+                          const accentClass = profile.insufficient_history ? 'bg-amber-400' : 'bg-emerald-500';
+                          const ariaLabel = `${profile.short} ${formatDate(profile.forecast_date)}, прогноз ${formatNumber(forecastFte, 2)} FTE${profile.insufficient_history ? ', истории не хватает' : ''}${hasActual ? `, факт ${formatNumber(actualFte, 2)} FTE` : ''}`;
+                          return (
+                            <button
+                              key={profile.forecast_date || profile.weekday}
+                              type="button"
+                              aria-pressed={isActiveProfile}
+                              aria-label={ariaLabel}
+                              onClick={() => setSelectedForecastDate(profile.forecast_date)}
+                              className={`group relative w-full overflow-hidden rounded-lg border p-3 pl-4 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 ${
+                                isActiveProfile
+                                  ? 'border-blue-400 bg-blue-50/60 shadow-sm'
+                                  : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'
+                              }`}
+                            >
+                              <span className={`pointer-events-none absolute left-0 top-0 h-full w-1 ${accentClass}`} aria-hidden="true" />
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="min-w-0">
+                                  <div className="flex flex-wrap items-center gap-1.5">
+                                    <span className="font-semibold text-slate-950">{profile.short}</span>
+                                    {isToday ? (
+                                      <span className="rounded-md bg-blue-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-blue-800">Сегодня</span>
+                                    ) : isTomorrow ? (
+                                      <span className="rounded-md bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-sky-800">Завтра</span>
+                                    ) : isPast ? (
+                                      <span className="rounded-md bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-600">Прошёл</span>
+                                    ) : null}
+                                  </div>
+                                  <div className="text-xs text-slate-500 tabular-nums">{formatDate(profile.forecast_date)}</div>
+                                </div>
+                                <div className="text-right">
+                                  <div className="text-base font-semibold tabular-nums text-slate-950">{formatNumber(forecastFte, 2)}</div>
+                                  <div className="text-[10px] uppercase tracking-wide text-slate-500">FTE прогноз</div>
+                                </div>
                               </div>
-                            </div>
-                            <div className="text-right">
-                              <div className={`text-sm font-semibold tabular-nums ${profile.insufficient_history ? 'text-amber-700' : 'text-emerald-700'}`}>{formatNumber(profile.forecast_daily_fte, 2)}</div>
-                              <div className="text-[11px] text-slate-500">FTE</div>
-                            </div>
-                          </div>
-                          <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-500">
-                            <span>Звонки: <b className="text-slate-800 tabular-nums">{formatInt(profile.forecast_calls)}</b></span>
-                            <span>История: <b className={`tabular-nums ${profile.insufficient_history ? 'text-amber-700' : 'text-emerald-700'}`}>{profile.history_count}/2</b></span>
-                            {Number(profile.incident_uplift_calls || 0) > 0.01 ? (
-                              <span className="col-span-2 text-emerald-700">Возможный прирост: <b>+{formatInt(profile.incident_uplift_calls)} зв. · +{formatNumber(profile.incident_uplift_fte, 2)} FTE · вес {formatPercent(profile.incident_future_weight ?? 1, 0)}</b></span>
-                            ) : null}
-                            {profile.has_actual_report && profile.forecast_date <= todayValue ? (
-                              <span className="col-span-2 text-emerald-700">Факт отчета: <b>{formatNumber(profile.actual_report_fte, 2)} FTE</b></span>
-                            ) : null}
-                          </div>
-                        </button>
-                        );
-                      })}
+
+                              <div className="mt-2.5 flex items-center gap-2 text-xs">
+                                <span className="inline-flex min-w-0 items-center gap-1 text-slate-600">
+                                  <PhoneCall size={11} className="shrink-0 text-slate-400" aria-hidden="true" />
+                                  <b className="text-slate-900 tabular-nums">{formatInt(profile.forecast_calls)}</b>
+                                  <span className="text-slate-400">зв.</span>
+                                </span>
+                                <span
+                                  className={`ml-auto inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-semibold ${
+                                    profile.insufficient_history
+                                      ? 'bg-amber-50 text-amber-800 ring-1 ring-inset ring-amber-200'
+                                      : 'bg-emerald-50 text-emerald-800 ring-1 ring-inset ring-emerald-200'
+                                  }`}
+                                  title={profile.insufficient_history ? 'Для дня не хватает исторических точек' : 'Обе исторические точки в наличии'}
+                                >
+                                  {profile.insufficient_history
+                                    ? <AlertTriangle size={11} aria-hidden="true" />
+                                    : <CheckCircle2 size={11} aria-hidden="true" />}
+                                  <span className="tabular-nums">{profile.history_count}/2</span>
+                                </span>
+                              </div>
+
+                              <div className="mt-2 h-1 overflow-hidden rounded-full bg-slate-100" role="presentation" aria-hidden="true">
+                                <div
+                                  className="h-full rounded-full bg-blue-500/70 transition-[width] duration-300 motion-reduce:transition-none"
+                                  style={{ width: `${callShare}%` }}
+                                />
+                              </div>
+
+                              {hasUplift ? (
+                                <div className="mt-2 flex items-center justify-between gap-2 rounded-md bg-emerald-50 px-2 py-1 text-[11px] text-emerald-800 ring-1 ring-inset ring-emerald-100">
+                                  <span className="inline-flex items-center gap-1">
+                                    <TrendingUp size={11} aria-hidden="true" />
+                                    Возможный прирост
+                                  </span>
+                                  <span className="tabular-nums">
+                                    +{formatInt(profile.incident_uplift_calls)} зв. · +{formatNumber(profile.incident_uplift_fte, 2)} FTE
+                                  </span>
+                                </div>
+                              ) : null}
+
+                              {hasActual ? (
+                                <div className="mt-2 flex items-center justify-between gap-2 rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[11px]">
+                                  <span className="inline-flex items-center gap-1 text-slate-600">
+                                    <CheckCircle2 size={11} className="text-emerald-600" aria-hidden="true" />
+                                    Факт <b className="text-slate-900 tabular-nums">{formatNumber(actualFte, 2)}</b>
+                                  </span>
+                                  {factDelta !== null ? (
+                                    <span
+                                      className={`tabular-nums font-semibold ${
+                                        Math.abs(factDelta) < 0.005
+                                          ? 'text-slate-600'
+                                          : factDelta < 0 ? 'text-rose-700' : 'text-emerald-700'
+                                      }`}
+                                      title="Факт − прогноз"
+                                    >
+                                      {Math.abs(factDelta) < 0.005
+                                        ? '±0.00'
+                                        : factDelta > 0
+                                          ? `+${formatNumber(factDelta, 2)}`
+                                          : formatNumber(factDelta, 2)}
+                                    </span>
+                                  ) : null}
+                                </div>
+                              ) : null}
+                            </button>
+                          );
+                        });
+                      })()}
                     </div>
                   </aside>
 
