@@ -795,9 +795,25 @@ const PlannerDayRow = ({
   const viewportRef = useRef(null);
   const focusFrameRef = useRef(0);
   const scrollSyncRef = useRef({ active: false, targetLeft: 0, startedAt: 0 });
+  const [timelineScrollLeft, setTimelineScrollLeft] = useState(0);
   const allDays = days.length ? days : [day].filter(Boolean);
   const totalDays = Math.max(1, allDays.length);
   const totalMinutes = totalDays * 1440;
+  const timelineContentStyle = useMemo(
+    () => ({
+      width: `${totalDays * 100}%`,
+      minWidth: `${980 * totalDays}px`,
+    }),
+    [totalDays],
+  );
+  const syncedTimelineContentStyle = useMemo(
+    () => ({
+      ...timelineContentStyle,
+      transform: `translateX(-${timelineScrollLeft}px)`,
+      willChange: 'transform',
+    }),
+    [timelineContentStyle, timelineScrollLeft],
+  );
 
   const timeline = useMemo(() => buildPlannerTimeline(allDays, dayIndex), [allDays, dayIndex]);
 
@@ -808,7 +824,7 @@ const PlannerDayRow = ({
     [allDays],
   );
   const laneTopOffset = 18;
-  const coverageStickyReserve = coverageView === 'bars' ? 128 : 72;
+  const coverageStickyReserve = coverageView === 'bars' ? 116 : 64;
   const rowHeight = Math.max(76, timeline.laneCount * 34 + laneTopOffset + 10 + coverageStickyReserve);
   const hourColumnCount = Math.max(24, totalDays * 24);
   const maxCoverageValue = Math.max(
@@ -838,8 +854,9 @@ const PlannerDayRow = ({
   }, [onFocusedDayChange, totalDays]);
 
   const handleTimelineScroll = useCallback(() => {
-    if (typeof onFocusedDayChange !== 'function') return;
     const viewport = viewportRef.current;
+    if (viewport) setTimelineScrollLeft(viewport.scrollLeft);
+    if (typeof onFocusedDayChange !== 'function') return;
     const sync = scrollSyncRef.current;
     if (viewport && sync.active) {
       const arrived = Math.abs(viewport.scrollLeft - sync.targetLeft) <= 2;
@@ -869,7 +886,9 @@ const PlannerDayRow = ({
 
     const onMove = (moveEvent) => {
       moveEvent.preventDefault();
-      viewport.scrollLeft = startScrollLeft - (moveEvent.clientX - startX);
+      const nextLeft = startScrollLeft - (moveEvent.clientX - startX);
+      viewport.scrollLeft = nextLeft;
+      setTimelineScrollLeft(nextLeft);
     };
     const onUp = () => {
       viewport.classList.remove('cursor-grabbing');
@@ -915,8 +934,35 @@ const PlannerDayRow = ({
         </div>
       </div>
 
-      <div className="mt-4 overflow-x-auto">
-        <div className="min-w-[980px]">
+      <div className="mt-4">
+        <div className="relative rounded-lg border border-slate-200 bg-slate-50">
+          <div className="sticky top-0 z-30 rounded-t-lg border-b border-slate-200 bg-white/95 shadow-sm backdrop-blur">
+            <div className="overflow-hidden">
+              <div className="flex" style={syncedTimelineContentStyle}>
+                {allDays.map((itemDay, index) => (
+                  <div
+                    key={`${itemDay.date || index}-header`}
+                    className={`relative shrink-0 border-r border-slate-300 px-2 py-2 last:border-r-0 ${
+                      Number(index) === Number(dayIndex) ? 'bg-white' : 'bg-slate-50'
+                    }`}
+                    style={{ width: `${100 / totalDays}%` }}
+                  >
+                    <div className="mb-1 truncate text-[11px] font-semibold text-slate-700">
+                      {itemDay.short || itemDay.label} · {itemDay.date}
+                    </div>
+                    <div className="grid" style={{ gridTemplateColumns: 'repeat(24, minmax(0, 1fr))' }}>
+                      {Array.from({ length: 24 }, (_, hour) => (
+                        <div key={hour} className="text-center text-[10px] font-medium text-slate-500">
+                          {String(hour).padStart(2, '0')}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
           <div
             ref={viewportRef}
             data-resource-planner-timeline="true"
@@ -926,34 +972,9 @@ const PlannerDayRow = ({
             }}
             onPointerDown={handleMiddlePanPointerDown}
             onScroll={handleTimelineScroll}
-            className="max-h-[calc(100vh-9rem)] overflow-auto rounded-lg border border-slate-200 bg-slate-50"
+            className="overflow-x-auto"
           >
-            <div className="relative" style={{ width: `${totalDays * 100}%` }}>
-              <div className="sticky top-0 z-40 border-b border-slate-200 bg-white/95 shadow-sm backdrop-blur">
-                <div className="flex">
-                  {allDays.map((itemDay, index) => (
-                    <div
-                      key={`${itemDay.date || index}-header`}
-                      className={`relative shrink-0 border-r border-slate-300 px-2 py-2 last:border-r-0 ${
-                        Number(index) === Number(dayIndex) ? 'bg-white' : 'bg-slate-50'
-                      }`}
-                      style={{ width: `${100 / totalDays}%` }}
-                    >
-                      <div className="mb-1 truncate text-[11px] font-semibold text-slate-700">
-                        {itemDay.short || itemDay.label} · {itemDay.date}
-                      </div>
-                      <div className="grid" style={{ gridTemplateColumns: 'repeat(24, minmax(0, 1fr))' }}>
-                        {Array.from({ length: 24 }, (_, hour) => (
-                          <div key={hour} className="text-center text-[10px] font-medium text-slate-500">
-                            {String(hour).padStart(2, '0')}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
+            <div className="relative" style={timelineContentStyle}>
               <div className="relative overflow-hidden" style={{ height: rowHeight }}>
                 <div className="absolute inset-0 flex">
                   {allDays.map((itemDay, index) => (
@@ -1127,8 +1148,12 @@ const PlannerDayRow = ({
                   </>
                 ) : null}
               </div>
+            </div>
+          </div>
 
-              <div className="sticky bottom-0 z-40 border-t border-slate-200 bg-white/95 p-3 shadow-[0_-10px_24px_rgba(15,23,42,0.08)] backdrop-blur">
+          <div className="sticky bottom-0 z-30 rounded-b-lg border-t border-slate-200 bg-white/95 p-3 shadow-[0_-10px_24px_rgba(15,23,42,0.08)] backdrop-blur">
+            <div className="overflow-hidden">
+              <div style={syncedTimelineContentStyle}>
                 {coverageView === 'bars' ? (
                   <div className="rounded-lg border border-slate-200 bg-white p-3">
                     <div className="mb-3 flex flex-wrap gap-3 text-xs text-slate-600">
