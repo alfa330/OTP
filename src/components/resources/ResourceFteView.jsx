@@ -17,7 +17,6 @@ import {
   Gavel,
   LayoutDashboard,
   ListChecks,
-  Minus,
   RefreshCw,
   Save,
   Settings,
@@ -537,100 +536,70 @@ const OperatorSummaryCard = ({
 }) => {
   const requiredNumber = Number(requiredFte || 0);
   const requiredWithUpliftNumber = Number(requiredWithUplift ?? requiredFte ?? 0);
-  const availableNumber = Number(availableFte || 0);
   const hasUpliftRequirement = Math.abs(requiredWithUpliftNumber - requiredNumber) > 0.005;
-  const effectiveGap = hasUpliftRequirement
-    ? availableNumber - requiredWithUpliftNumber
-    : Number(gap ?? availableNumber - requiredNumber);
-  const isDeficit = effectiveGap < -0.005;
-  const isBalanced = Math.abs(effectiveGap) <= 0.005;
-  const effectiveRequired = hasUpliftRequirement ? requiredWithUpliftNumber : requiredNumber;
-  const coverage = effectiveRequired > 0
-    ? Math.min(150, (availableNumber / effectiveRequired) * 100)
-    : 100;
-  const coverageBarWidth = Math.min(100, coverage);
-  const statusLabel = isBalanced ? 'В балансе' : isDeficit ? 'Дефицит' : 'Профицит';
-  const statusTone = isBalanced
-    ? 'bg-slate-100 text-slate-700 ring-slate-200'
-    : isDeficit
-      ? 'bg-rose-50 text-rose-700 ring-rose-200'
-      : 'bg-emerald-50 text-emerald-700 ring-emerald-200';
-  const gapTextClass = isBalanced ? 'text-slate-600' : isDeficit ? 'text-rose-700' : 'text-emerald-700';
-  const gapDisplay = isBalanced
-    ? '±0.00'
-    : effectiveGap > 0 ? `+${formatNumber(effectiveGap, 2)}` : formatNumber(effectiveGap, 2);
-  const barTone = isBalanced ? 'bg-slate-400' : isDeficit ? 'bg-rose-500' : 'bg-emerald-500';
+  const upliftGap = Number(availableFte || 0) - requiredWithUpliftNumber;
+  const isDeficit = Number(hasUpliftRequirement ? upliftGap : gap || 0) < 0;
   return (
-    <div className={`relative overflow-hidden rounded-xl border bg-white p-4 shadow-sm xl:col-span-2 ${isDeficit ? 'border-rose-200' : isBalanced ? 'border-slate-200' : 'border-emerald-200'}`}>
-      <span className={`pointer-events-none absolute left-0 top-0 h-full w-1 ${barTone}`} aria-hidden="true" />
-      <div className="flex items-start justify-between gap-3 pl-1.5">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Операторы</p>
-            <span className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-semibold ring-1 ring-inset ${statusTone}`}>
-              {isDeficit ? <AlertTriangle size={11} aria-hidden="true" /> : isBalanced ? <Minus size={11} aria-hidden="true" /> : <CheckCircle2 size={11} aria-hidden="true" />}
-              {statusLabel}
-            </span>
+    <button
+      type="button"
+      onClick={onOpen}
+      className={`rounded-xl border bg-white p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-blue-100 xl:col-span-2 ${
+        isDeficit ? 'border-rose-200' : 'border-emerald-200'
+      }`}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Операторы</p>
+          <div className={`mt-2 grid gap-3 ${hasUpliftRequirement ? 'grid-cols-3' : 'grid-cols-2'}`}>
+            <div>
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Нужно</div>
+              <div className="text-xl font-semibold text-slate-950 sm:text-2xl tabular-nums">{formatNumber(requiredFte, 2)}</div>
+            </div>
+            {hasUpliftRequirement ? (
+              <div>
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-emerald-600">С приростом</div>
+                <div className="text-xl font-semibold text-emerald-700 sm:text-2xl tabular-nums">{formatNumber(requiredWithUpliftNumber, 2)}</div>
+              </div>
+            ) : null}
+            <div>
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Доступно</div>
+              <div className={`text-xl font-semibold sm:text-2xl tabular-nums ${isDeficit ? 'text-rose-700' : 'text-emerald-700'}`}>
+                {formatNumber(availableFte, 2)}
+              </div>
+            </div>
           </div>
-          <div className="mt-1.5 flex items-baseline gap-2">
-            <div className={`text-3xl font-semibold tabular-nums ${gapTextClass}`}>{gapDisplay}</div>
-            <div className="text-xs uppercase tracking-wide text-slate-500">FTE</div>
-          </div>
-          <p className="mt-1 text-xs text-slate-500 tabular-nums">
-            Доступно <b className="text-slate-900">{formatNumber(availableNumber, 2)}</b> / нужно <b className="text-slate-900">{formatNumber(effectiveRequired, 2)}</b>
-            {hasUpliftRequirement ? <span className="text-emerald-700"> с приростом</span> : null}
-          </p>
         </div>
-        <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ring-1 ${isDeficit ? 'bg-rose-50 text-rose-700 ring-rose-100' : isBalanced ? 'bg-slate-100 text-slate-700 ring-slate-200' : 'bg-emerald-50 text-emerald-700 ring-emerald-100'}`}>
+        <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ring-1 ${isDeficit ? 'bg-rose-50 text-rose-700 ring-rose-100' : 'bg-emerald-50 text-emerald-700 ring-emerald-100'}`}>
           <Users size={18} aria-hidden="true" />
         </div>
       </div>
-
-      <div className="mt-3 pl-1.5">
-        <div className="flex items-center justify-between text-[11px] text-slate-500">
-          <span className="tabular-nums">{formatPercent(coverage / 100, 0)} покрытия</span>
-          <span className="tabular-nums">{coverage > 100 ? `+${formatPercent((coverage - 100) / 100, 0)}` : ''}</span>
+      <div className={`mt-3 grid gap-2 text-xs text-slate-600 ${hasUpliftRequirement ? 'sm:grid-cols-3' : 'sm:grid-cols-2'}`}>
+        <div className="rounded-lg bg-slate-50 px-3 py-2">
+          <span className="block text-slate-500">Разница</span>
+          <b className={`tabular-nums ${Number(gap || 0) < 0 ? 'text-rose-700' : 'text-emerald-700'}`}>{formatSignedNumber(gap, 2)} FTE</b>
         </div>
-        <div
-          className="mt-1 h-2 overflow-hidden rounded-full bg-slate-100"
-          role="progressbar"
-          aria-valuenow={Math.round(coverageBarWidth)}
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-label="Покрытие потребности доступным FTE"
-        >
-          <div className={`h-full rounded-full transition-[width] duration-300 motion-reduce:transition-none ${barTone}`} style={{ width: `${coverageBarWidth}%` }} />
+        {hasUpliftRequirement ? (
+          <div className="rounded-lg bg-emerald-50 px-3 py-2">
+            <span className="block text-emerald-700">Разница с приростом</span>
+            <b className={`tabular-nums ${upliftGap < 0 ? 'text-rose-700' : 'text-emerald-700'}`}>{formatSignedNumber(upliftGap, 2)} FTE</b>
+          </div>
+        ) : null}
+        <div className="rounded-lg bg-slate-50 px-3 py-2">
+          <span className="block text-slate-500">Сотрудники</span>
+          <b className="text-slate-900 tabular-nums">{formatInt(availableCount)} / {formatInt(totalCount)}</b>
         </div>
       </div>
-
-      {hasUpliftRequirement ? (
-        <div className="mt-3 flex items-center justify-between gap-2 rounded-md bg-emerald-50 px-2 py-1.5 text-[11px] text-emerald-800 ring-1 ring-inset ring-emerald-100 ml-1.5">
-          <span className="inline-flex items-center gap-1">
-            <TrendingUp size={11} aria-hidden="true" />
-            Без прироста хватило бы <b className="tabular-nums">{formatNumber(requiredNumber, 2)}</b> FTE
-          </span>
-          <span className="tabular-nums">+{formatNumber(requiredWithUpliftNumber - requiredNumber, 2)} к потребности</span>
-        </div>
-      ) : null}
-
-      <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 pl-1.5 text-[11px] text-slate-500 tabular-nums">
-        <span><b className="text-slate-700">{formatInt(availableCount)}</b> / {formatInt(totalCount)} сотр.</span>
-        {Number(partialCount) > 0 ? <span>· <b className="text-slate-700">{formatInt(partialCount)}</b> частично</span> : null}
-        {Number(unavailableCount) > 0 ? <span>· <b className="text-slate-700">{formatInt(unavailableCount)}</b> не работает</span> : null}
-        <span className="text-slate-400">·</span>
-        <span>Текущий FTE <b className="text-slate-700">{formatNumber(currentFte, 2)}</b></span>
-        <span>· Без усушки <b className="text-slate-700">{formatNumber(baseFte, 2)}</b></span>
+      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 tabular-nums">
+        <span>Без усушки: {formatNumber(baseFte, 2)}</span>
+        <span>Текущий FTE: {formatNumber(currentFte, 2)}</span>
+        <span>Часть периода: {formatInt(partialCount)}</span>
+        <span>Не работают: {formatInt(unavailableCount)}</span>
       </div>
-
-      <button
-        type="button"
-        onClick={onOpen}
-        className="mt-3 inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-semibold text-blue-700 transition hover:bg-blue-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 ml-1.5"
-      >
+      <div className="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold text-blue-700">
         <Eye size={14} aria-hidden="true" />
-        Подробнее о расчёте
-      </button>
-    </div>
+        Детали расчета
+      </div>
+    </button>
   );
 };
 
