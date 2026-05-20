@@ -37,6 +37,25 @@ const formatFte = (value) => fteFormatter.format(Number(value || 0));
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 
+const parseIsoDate = (value) => {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ''));
+  if (!match) return null;
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  if (Number.isNaN(date.getTime())) return null;
+  return date;
+};
+
+const formatIsoDate = (date) => (
+  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+);
+
+const addIsoDays = (value, amount) => {
+  const date = parseIsoDate(value);
+  if (!date) return '';
+  date.setDate(date.getDate() + Number(amount || 0));
+  return formatIsoDate(date);
+};
+
 const snapMinutes = (value) => Math.round(Number(value || 0) / SNAP_MINUTES) * SNAP_MINUTES;
 
 const roundMathFte = (value) => Math.round((Math.max(0, Number(value || 0)) + Number.EPSILON) * 2) / 2;
@@ -286,6 +305,21 @@ const isCopyablePlannerShift = (shift) => Boolean(
   && shift.source !== 'auction'
   && !isLockedPlannerShift(shift)
 );
+
+const hasUsableCoverageTarget = (day) => (
+  Boolean(day)
+  && Array.isArray(day.coverage)
+  && day.coverage.some((row) => Number(row?.rawNeeded ?? row?.realNeeded ?? row?.needed ?? 0) > FTE_EPSILON)
+);
+
+const normalizeCoverageProjectionDay = (day, fallbackDate) => ({
+  ...(day || {}),
+  date: day?.date || fallbackDate,
+  shifts: [],
+  readOnly: true,
+  isCoverageProjection: true,
+  source: 'next_week_projection',
+});
 
 const clonePlannerDays = (days) =>
   (days || []).map((day) => ({
@@ -925,6 +959,7 @@ const PlannerDayRow = ({
   const splitTimelineItem = splitPreview
     ? timeline.items.find((item) => item.sourceDayIndex === Number(splitPreview.dayIndex) && item.shift.id === splitPreview.shiftId)
     : null;
+  const isReadOnlyDay = Boolean(day?.readOnly || day?.isCoverageProjection);
 
   return (
     <section
@@ -947,7 +982,7 @@ const PlannerDayRow = ({
           <button
             type="button"
             onClick={() => onAddShift(dayIndex, selectedTemplateId)}
-            disabled={!templates.length}
+            disabled={!templates.length || isReadOnlyDay}
             className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Plus size={15} />
@@ -1248,9 +1283,10 @@ const PlannerDayRow = ({
 };
 
 const PlannerDayCards = ({ days, selectedDayIndex, onSelect }) => (
-  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-7">
+  <div className={`grid gap-3 md:grid-cols-2 ${days.length > 7 ? 'xl:grid-cols-8' : 'xl:grid-cols-7'}`}>
     {days.map((day, dayIndex) => {
       const active = Number(selectedDayIndex) === Number(dayIndex);
+      const isProjection = Boolean(day.isCoverageProjection);
       const deficit = Number(day.stats?.deficitFteHours || 0);
       const coveragePercent = Number(day.stats?.coveragePercent || 0);
       const incidentUpliftHours = Number(day.stats?.incidentUpliftFteHours || 0);
@@ -1275,7 +1311,7 @@ const PlannerDayCards = ({ days, selectedDayIndex, onSelect }) => (
               <div className="text-xs text-slate-600">{day.date}</div>
             </div>
             <div className="rounded-md bg-white/70 px-2 py-1 text-xs font-semibold text-slate-700 shadow-sm">
-              {(day.shifts || []).length}
+              {isProjection ? 'расчет' : (day.shifts || []).length}
             </div>
           </div>
           {incidentUpliftHours > 0.01 || incidentShiftCount > 0 ? (
@@ -1330,6 +1366,7 @@ const ResourceSchedulePlanner = ({
   const [selectedVariantKey, setSelectedVariantKey] = useState('');
   const [includeIncidentUplift, setIncludeIncidentUplift] = useState(false);
   const [previewCapacityBase, setPreviewCapacityBase] = useState(null);
+  const [nextMondayCoverageDay, setNextMondayCoverageDay] = useState(null);
   const [isSavedScheduleLoading, setIsSavedScheduleLoading] = useState(false);
   const [isSavingSchedule, setIsSavingSchedule] = useState(false);
   const [isTemplatesLoading, setIsTemplatesLoading] = useState(false);
@@ -1456,6 +1493,16 @@ const ResourceSchedulePlanner = ({
       ...day,
       shifts: (day.shifts || []).map((shift) => ({ ...shift, breaks: shift.breaks || [] })),
     })), []);
+
+  const nextMondayProjectionDate = useMemo(() => {
+    if (!plannerDays.length) return '';
+    const lastDate = plannerDays[plannerDays.length - 1]?.date
+      || selectedPeriodEnd
+      || (selectedWeekStart ? addIsoDays(selectedWeekStart, 6) : '');
+    const parsed = parseIsoDate(lastDate);
+    if (!parsed || parsed.getDay() !== 0) return '';
+    return addIsoDays(lastDate, 1);
+  }, [plannerDays, selectedPeriodEnd, selectedWeekStart]);
 
   const loadSavedSchedule = useCallback(async ({ silent = true } = {}) => {
     if (!apiRoot || !selectedWeekStart) return;
@@ -1601,6 +1648,68 @@ const ResourceSchedulePlanner = ({
     }
   }, [apiRoot, applyGeneratedVariant, buildHeaders, emit, normalizePreviewDays, selectedPeriodEnd, selectedWeekStart, templates]);
 
+  useEffect(() => {
+    if (!apiRoot || !nextMondayProjectionDate || !plannerDays.length) {
+      setNextMondayCoverageDay(null);
+      return undefined;
+    }
+
+    let cancelled = false;
+    const loadProjection = async () => {
+      try {
+        const response = await axios.post(
+          `${apiRoot}/api/resource_fte/schedule_preview`,
+          {
+            date_from: nextMondayProjectionDate,
+            date_to: nextMondayProjectionDate,
+            templates,
+          },
+          {
+            headers: buildHeaders({ 'Content-Type': 'application/json' }),
+          },
+        );
+        const preview = response.data?.preview || {};
+        const variants = Array.isArray(preview.variants) ? preview.variants : [];
+        const preferredVariant = includeIncidentUplift
+          ? (
+              variants.find((variant) => variant.includesIncidentUplift)
+              || variants.find((variant) => variant.key === preview.selectedVariant)
+              || variants[0]
+            )
+          : (
+              variants.find((variant) => variant.key === preview.selectedVariant && !variant.includesIncidentUplift)
+              || variants.find((variant) => !variant.includesIncidentUplift)
+              || variants[0]
+            );
+        const projectionDay = (preferredVariant?.days || preview.days || [])[0];
+        if (cancelled) return;
+        if (!hasUsableCoverageTarget(projectionDay)) {
+          setNextMondayCoverageDay(null);
+          return;
+        }
+        const [normalizedDay] = normalizePreviewDays([
+          normalizeCoverageProjectionDay(projectionDay, nextMondayProjectionDate),
+        ]);
+        setNextMondayCoverageDay(normalizedDay || null);
+      } catch {
+        if (!cancelled) setNextMondayCoverageDay(null);
+      }
+    };
+
+    loadProjection();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    apiRoot,
+    buildHeaders,
+    includeIncidentUplift,
+    nextMondayProjectionDate,
+    normalizePreviewDays,
+    plannerDays.length,
+    templates,
+  ]);
+
   const fetchAuctionLots = useCallback(async () => {
     if (!apiRoot) return;
     setAuctionLoading(true);
@@ -1678,6 +1787,13 @@ const ResourceSchedulePlanner = ({
     [auctionShiftsByDate]
   );
 
+  const plannerDaysWithProjection = useMemo(() => {
+    if (!nextMondayCoverageDay || !plannerDays.length) return plannerDays;
+    const lastDate = plannerDays[plannerDays.length - 1]?.date || '';
+    if (addIsoDays(lastDate, 1) !== nextMondayCoverageDay.date) return plannerDays;
+    return [...plannerDays, nextMondayCoverageDay];
+  }, [nextMondayCoverageDay, plannerDays]);
+
   const plannerDaysForCoverage = useMemo(() => {
     if (coverageSource !== 'auction') return plannerDays;
     return plannerDays.map((day) => ({
@@ -1686,11 +1802,24 @@ const ResourceSchedulePlanner = ({
     }));
   }, [auctionShiftsByDate, coverageSource, plannerDays]);
 
+  const displayPlannerDaysForCoverage = useMemo(() => {
+    if (coverageSource !== 'auction') return plannerDaysWithProjection;
+    return plannerDaysWithProjection.map((day) => ({
+      ...day,
+      shifts: day.isCoverageProjection ? [] : (auctionShiftsByDate.get(day.date) || [])
+    }));
+  }, [auctionShiftsByDate, coverageSource, plannerDaysWithProjection]);
+
   const computed = useMemo(
     () => buildCoverageFromDays(plannerDaysForCoverage),
     [plannerDaysForCoverage]
   );
+  const displayComputed = useMemo(
+    () => buildCoverageFromDays(displayPlannerDaysForCoverage),
+    [displayPlannerDaysForCoverage]
+  );
   const computedDays = computed.days;
+  const displayDays = displayComputed.days;
   const summary = computed.summary;
   const visibleScheduleVariants = useMemo(() => {
     const filtered = scheduleVariants.filter((variant) => (
@@ -1838,6 +1967,10 @@ const ResourceSchedulePlanner = ({
         const currentDays = plannerDaysRef.current || [];
         if (!copiedShift || !currentDays.length) return;
         event.preventDefault();
+        if (Number(selectedDayIndex || 0) >= currentDays.length) {
+          emit('Расчетный день следующей недели доступен только для просмотра', 'error');
+          return;
+        }
         const targetDayIndex = clamp(Number(selectedDayIndex || 0), 0, currentDays.length - 1);
         const pastedShift = normalizeShiftTiming({
           ...copiedShift,
@@ -2171,24 +2304,27 @@ const ResourceSchedulePlanner = ({
     );
   }, [applyPlannerDaysUpdate, pushHistorySnapshot, selectedTemplate, templates]);
 
-  const activeDayIndex = computedDays.length ? clamp(Number(selectedDayIndex || 0), 0, computedDays.length - 1) : 0;
+  const activeDayIndex = displayDays.length ? clamp(Number(selectedDayIndex || 0), 0, displayDays.length - 1) : 0;
+  const activeDay = displayDays[activeDayIndex] || computedDays[0] || null;
+  const activeDayIsReadOnly = Boolean(activeDay?.readOnly || activeDay?.isCoverageProjection);
   const selectedShiftKey = selectedShift ? `${selectedShift.dayIndex}-${selectedShift.shiftId}` : '';
 
   const selectPlannerShift = useCallback((dayIndex, shiftId) => {
-    const nextDayIndex = computedDays.length
-      ? clamp(Number(dayIndex || 0), 0, computedDays.length - 1)
+    const nextDayIndex = displayDays.length
+      ? clamp(Number(dayIndex || 0), 0, displayDays.length - 1)
       : Number(dayIndex || 0);
     setSelectedDayIndex(nextDayIndex);
     setSelectedShift({ dayIndex: nextDayIndex, shiftId });
-  }, [computedDays.length]);
+  }, [displayDays.length]);
 
   const handleFocusedDayChange = useCallback((dayIndex) => {
-    if (!computedDays.length) return;
-    const nextDayIndex = clamp(Number(dayIndex || 0), 0, computedDays.length - 1);
+    if (!displayDays.length) return;
+    const nextDayIndex = clamp(Number(dayIndex || 0), 0, displayDays.length - 1);
     setSelectedDayIndex((current) => (Number(current) === nextDayIndex ? current : nextDayIndex));
-  }, [computedDays.length]);
+  }, [displayDays.length]);
 
   const sortSelectedDayShifts = useCallback(() => {
+    if (activeDayIsReadOnly || activeDayIndex >= plannerDaysRef.current.length) return;
     const sourceShifts = plannerDaysRef.current[activeDayIndex]?.shifts || [];
     if (sourceShifts.length < 2) return;
     const sortedShifts = [...sourceShifts].sort((a, b) => (
@@ -2208,7 +2344,7 @@ const ResourceSchedulePlanner = ({
           : day
       )),
     );
-  }, [activeDayIndex, applyPlannerDaysUpdate, pushHistorySnapshot]);
+  }, [activeDayIndex, activeDayIsReadOnly, applyPlannerDaysUpdate, pushHistorySnapshot]);
 
   const resetTemplates = useCallback(() => {
     if (typeof window !== 'undefined') window.localStorage.removeItem(TEMPLATE_STORAGE_KEY);
@@ -2395,14 +2531,14 @@ const ResourceSchedulePlanner = ({
         {computedDays.length ? (
           <>
             <PlannerDayCards
-              days={computedDays}
+              days={displayDays}
               selectedDayIndex={activeDayIndex}
               onSelect={setSelectedDayIndex}
             />
             <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-3 shadow-sm md:flex-row md:items-center md:justify-between">
               <div>
                 <div className="text-sm font-semibold text-slate-950">
-                  {computedDays[activeDayIndex]?.short || computedDays[activeDayIndex]?.label || 'День'} · {computedDays[activeDayIndex]?.date || ''}
+                  {activeDay?.short || activeDay?.label || 'День'} · {activeDay?.date || ''}
                 </div>
                 <div className="text-xs text-slate-500">
                   {coverageSource === 'auction'
@@ -2502,7 +2638,7 @@ const ResourceSchedulePlanner = ({
                 <button
                   type="button"
                   onClick={sortSelectedDayShifts}
-                  disabled={(computedDays[activeDayIndex]?.shifts || []).length < 2}
+                  disabled={activeDayIsReadOnly || (computedDays[activeDayIndex]?.shifts || []).length < 2}
                   className="inline-flex h-10 items-center gap-2 rounded-lg bg-slate-900 px-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
                 >
                   <ArrowDownUp size={16} />
@@ -2511,9 +2647,9 @@ const ResourceSchedulePlanner = ({
               </div>
             </div>
             <PlannerDayRow
-              key={(computedDays || []).map((item) => item.date).join('-')}
-              day={computedDays[activeDayIndex]}
-              days={computedDays}
+              key={(displayDays || []).map((item) => item.date).join('-')}
+              day={activeDay}
+              days={displayDays}
               dayIndex={activeDayIndex}
               templates={templates.filter((template) => template.enabled !== false)}
               selectedTemplateId={selectedTemplateId}
