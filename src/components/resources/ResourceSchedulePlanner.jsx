@@ -1175,7 +1175,7 @@ const PlannerDayRow = ({
             </div>
           </div>
 
-          <div className="sticky bottom-0 z-30 rounded-b-lg border-t border-slate-200 bg-white/95 p-3 shadow-[0_-10px_24px_rgba(15,23,42,0.08)] backdrop-blur">
+          <div className="sticky bottom-0 z-30 rounded-b-lg border-t border-slate-200 bg-white/95 py-3 shadow-[0_-10px_24px_rgba(15,23,42,0.08)] backdrop-blur">
             <div className="overflow-hidden">
               <div ref={syncedCoverageRef} style={syncedTimelineContentStyle}>
                 {coverageView === 'bars' ? (
@@ -1220,18 +1220,20 @@ const PlannerDayRow = ({
                     </div>
                   </div>
                 ) : (
-                  <div className="grid gap-1" style={{ gridTemplateColumns: `repeat(${hourColumnCount}, minmax(40px, 1fr))` }}>
+                  <div className="grid" style={{ gridTemplateColumns: `repeat(${hourColumnCount}, minmax(40px, 1fr))` }}>
                     {coverageRows.map((row) => (
                       <div
                         key={`${row.sourceDayIndex}-${row.hour}`}
-                        className={`rounded-md border px-1 py-1 text-center text-[10px] ${coverageTone(row)} ${
-                          Number(row.hour) === 0 ? 'border-l-2 border-l-slate-300' : ''
-                        }`}
-                        style={coverageCellStyle(row)}
-                        title={`${allDays[row.sourceDayIndex]?.short || ''} ${String(row.hour).padStart(2, '0')}:00 · округл. ${formatFte(row.coveredRounded ?? roundMathFte(row.covered || 0))}/${formatFte(row.needed || 0)} · без округления ${formatNumber(row.covered, 2)}/${formatNumber(row.rawNeeded, 2)}`}
+                        className={`px-0.5 ${Number(row.hour) === 0 ? 'border-l-2 border-l-slate-300' : ''}`}
                       >
-                        <div className="font-semibold">{formatFte(row.coveredRounded ?? roundMathFte(row.covered || 0))}</div>
-                        <div>{formatFte(row.needed || 0)}</div>
+                        <div
+                          className={`rounded-md border px-1 py-1 text-center text-[10px] ${coverageTone(row)}`}
+                          style={coverageCellStyle(row)}
+                          title={`${allDays[row.sourceDayIndex]?.short || ''} ${String(row.hour).padStart(2, '0')}:00 · округл. ${formatFte(row.coveredRounded ?? roundMathFte(row.covered || 0))}/${formatFte(row.needed || 0)} · без округления ${formatNumber(row.covered, 2)}/${formatNumber(row.rawNeeded, 2)}`}
+                        >
+                          <div className="font-semibold">{formatFte(row.coveredRounded ?? roundMathFte(row.covered || 0))}</div>
+                          <div>{formatFte(row.needed || 0)}</div>
+                        </div>
                       </div>
                     ))}
                   </div>
