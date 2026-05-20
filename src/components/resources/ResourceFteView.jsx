@@ -515,8 +515,8 @@ const OperatorSummaryCard = ({
           <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Операторы</p>
           <div className={`mt-2 grid gap-3 ${hasUpliftRequirement ? 'grid-cols-3' : 'grid-cols-2'}`}>
             <div>
-              <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Нужно</div>
-              <div className="text-xl font-semibold text-slate-950 sm:text-2xl">{formatNumber(requiredFte, 2)}</div>
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Нужно</div>
+              <div className="text-xl font-semibold text-slate-950 sm:text-2xl tabular-nums">{formatNumber(requiredFte, 2)}</div>
             </div>
             {hasUpliftRequirement ? (
               <div>
@@ -525,8 +525,8 @@ const OperatorSummaryCard = ({
               </div>
             ) : null}
             <div>
-              <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Доступно</div>
-              <div className={`text-xl font-semibold sm:text-2xl ${isDeficit ? 'text-rose-700' : 'text-emerald-700'}`}>
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Доступно</div>
+              <div className={`text-xl font-semibold sm:text-2xl tabular-nums ${isDeficit ? 'text-rose-700' : 'text-emerald-700'}`}>
                 {formatNumber(availableFte, 2)}
               </div>
             </div>
@@ -538,8 +538,8 @@ const OperatorSummaryCard = ({
       </div>
       <div className={`mt-3 grid gap-2 text-xs text-slate-600 ${hasUpliftRequirement ? 'sm:grid-cols-3' : 'sm:grid-cols-2'}`}>
         <div className="rounded-lg bg-slate-50 px-3 py-2">
-          <span className="block text-slate-400">Разница</span>
-          <b className={Number(gap || 0) < 0 ? 'text-rose-700' : 'text-emerald-700'}>{formatSignedNumber(gap, 2)} FTE</b>
+          <span className="block text-slate-500">Разница</span>
+          <b className={`tabular-nums ${Number(gap || 0) < 0 ? 'text-rose-700' : 'text-emerald-700'}`}>{formatSignedNumber(gap, 2)} FTE</b>
         </div>
         {hasUpliftRequirement ? (
           <div className="rounded-lg bg-emerald-50 px-3 py-2">
@@ -548,8 +548,8 @@ const OperatorSummaryCard = ({
           </div>
         ) : null}
         <div className="rounded-lg bg-slate-50 px-3 py-2">
-          <span className="block text-slate-400">Сотрудники</span>
-          <b className="text-slate-900">{formatInt(availableCount)} / {formatInt(totalCount)}</b>
+          <span className="block text-slate-500">Сотрудники</span>
+          <b className="text-slate-900 tabular-nums">{formatInt(availableCount)} / {formatInt(totalCount)}</b>
         </div>
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
@@ -792,13 +792,14 @@ const OperatorAvailabilityDetailsModal = ({ open, onClose, forecast, isLoading =
   );
 };
 
-const EmptyState = ({ title, text }) => (
+const EmptyState = ({ title, text, action }) => (
   <div className="flex min-h-[220px] flex-col items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center">
     <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-slate-100 text-slate-500">
-      <BarChart3 size={22} />
+      <BarChart3 size={22} aria-hidden="true" />
     </div>
     <h3 className="mt-4 text-base font-semibold text-slate-900">{title}</h3>
     <p className="mt-1 max-w-md text-sm text-slate-500">{text}</p>
+    {action ? <div className="mt-4">{action}</div> : null}
   </div>
 );
 
@@ -968,14 +969,18 @@ const ForecastDisplayPanel = ({
                   <div className="space-y-1.5">
                     {visibleItems.map(([key, label, requires]) => {
                       const disabled = key === 'forecastShowActualLoad' && !forecastActualLoadAvailable && !displayOptions[key];
+                      const checked = !!displayOptions[key];
                       return (
                         <button
                           key={key}
                           type="button"
-                          onClick={() => !disabled && toggleDisplayOption(key, !displayOptions[key])}
+                          role="switch"
+                          aria-checked={checked}
+                          aria-label={label}
+                          onClick={() => !disabled && toggleDisplayOption(key, !checked)}
                           disabled={disabled}
                           title={disabled ? 'Для выбранного периода нет прошедших дней с загруженным отчетом' : undefined}
-                          className={`flex w-full items-center justify-between gap-3 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-left text-xs transition ${
+                          className={`flex min-h-9 w-full items-center justify-between gap-3 rounded-md border border-slate-200 bg-white px-2.5 py-2 text-left text-xs transition focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 ${
                             disabled ? 'cursor-not-allowed opacity-50' : 'hover:bg-slate-50'
                           }`}
                         >
@@ -1367,8 +1372,18 @@ const WeekForecastPicker = ({
     const handlePointerDown = (event) => {
       if (anchorRef.current && !anchorRef.current.contains(event.target)) setOpen(false);
     };
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        setOpen(false);
+        setDraftStart('');
+      }
+    };
     document.addEventListener('mousedown', handlePointerDown);
-    return () => document.removeEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
   }, [open]);
 
   const moveMonth = (delta) => {
@@ -1452,7 +1467,7 @@ const WeekForecastPicker = ({
             </button>
           </div>
 
-          <div className="mt-3 grid grid-cols-7 gap-1 text-center text-[11px] font-semibold uppercase text-slate-400">
+          <div className="mt-3 grid grid-cols-7 gap-1 text-center text-[11px] font-semibold uppercase text-slate-500">
             {['ПН', 'ВТ', 'СР', 'ЧТ', 'ПТ', 'СБ', 'ВС'].map((day) => (
               <div key={day} className="py-1">{day}</div>
             ))}
@@ -1471,7 +1486,8 @@ const WeekForecastPicker = ({
                   type="button"
                   title={compact ? formatDate(iso) : `${formatDate(iso)}: ${dayComplete ? 'истории хватает' : 'истории не хватает'}`}
                   onClick={() => selectDay(iso)}
-                  className={`relative flex h-10 items-center justify-center rounded-lg border text-sm font-semibold transition ${
+                  aria-pressed={isSelected}
+                  className={`relative flex h-11 items-center justify-center rounded-lg border text-sm font-semibold transition tabular-nums ${
                     isSelected
                       ? 'border-blue-500 bg-white text-blue-800 ring-1 ring-blue-500'
                       : inRange
@@ -1479,7 +1495,7 @@ const WeekForecastPicker = ({
                       : dayComplete
                         ? 'border-emerald-100 bg-emerald-50 text-emerald-700 hover:border-emerald-300'
                         : isOutside
-                          ? 'border-transparent text-slate-300 hover:bg-slate-50'
+                          ? 'border-transparent text-slate-400 hover:bg-slate-50'
                           : 'border-transparent text-slate-700 hover:bg-slate-100'
                   }`}
                 >
@@ -3135,10 +3151,11 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                       type="button"
                       onClick={handleRecalculate}
                       disabled={isRecalculating}
-                      className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
+                      aria-busy={isRecalculating}
+                      className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-white focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
                     >
-                      <RefreshCw size={16} className={isRecalculating ? 'animate-spin' : ''} />
-                      Пересчитать
+                      <RefreshCw size={16} className={isRecalculating ? 'animate-spin motion-reduce:animate-none' : ''} aria-hidden="true" />
+                      {isRecalculating ? 'Пересчитываем…' : 'Пересчитать'}
                     </button>
                   </div>
                 </div>
@@ -3210,13 +3227,17 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                     ) : null}
                     <div className="mb-3 mt-5 text-sm font-semibold text-slate-900">Выберите день</div>
                     <div className="space-y-2">
-                      {(nextWeekForecast.days || []).map((profile) => (
+                      {(nextWeekForecast.days || []).map((profile) => {
+                        const isActiveProfile = selectedForecastDay?.forecast_date === profile.forecast_date;
+                        return (
                         <button
                           key={profile.forecast_date || profile.weekday}
                           type="button"
+                          aria-pressed={isActiveProfile}
+                          aria-label={`${profile.short} ${formatDate(profile.forecast_date)}, ${profile.insufficient_history ? 'истории не хватает' : 'история полная'}`}
                           onClick={() => setSelectedForecastDate(profile.forecast_date)}
-                          className={`w-full rounded-lg border p-3 text-left transition ${
-                            selectedForecastDay?.forecast_date === profile.forecast_date
+                          className={`w-full rounded-lg border p-3 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 ${
+                            isActiveProfile
                               ? profile.insufficient_history
                                 ? 'border-amber-300 bg-amber-50'
                                 : 'border-emerald-300 bg-emerald-50'
@@ -3226,18 +3247,23 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                           }`}
                         >
                           <div className="flex items-center justify-between gap-2">
-                            <div>
-                              <div className="font-semibold text-slate-950">{profile.short}</div>
-                              <div className="text-xs text-slate-500">{formatDate(profile.forecast_date)}</div>
+                            <div className="flex items-center gap-1.5">
+                              {profile.insufficient_history
+                                ? <AlertTriangle size={14} className="shrink-0 text-amber-600" aria-hidden="true" />
+                                : <CheckCircle2 size={14} className="shrink-0 text-emerald-600" aria-hidden="true" />}
+                              <div>
+                                <div className="font-semibold text-slate-950">{profile.short}</div>
+                                <div className="text-xs text-slate-500">{formatDate(profile.forecast_date)}</div>
+                              </div>
                             </div>
                             <div className="text-right">
-                              <div className={`text-sm font-semibold ${profile.insufficient_history ? 'text-amber-700' : 'text-emerald-700'}`}>{formatNumber(profile.forecast_daily_fte, 2)}</div>
+                              <div className={`text-sm font-semibold tabular-nums ${profile.insufficient_history ? 'text-amber-700' : 'text-emerald-700'}`}>{formatNumber(profile.forecast_daily_fte, 2)}</div>
                               <div className="text-[11px] text-slate-500">FTE</div>
                             </div>
                           </div>
                           <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-500">
-                            <span>Звонки: <b className="text-slate-800">{formatInt(profile.forecast_calls)}</b></span>
-                            <span>История: <b className={profile.insufficient_history ? 'text-amber-700' : 'text-emerald-700'}>{profile.history_count}/2</b></span>
+                            <span>Звонки: <b className="text-slate-800 tabular-nums">{formatInt(profile.forecast_calls)}</b></span>
+                            <span>История: <b className={`tabular-nums ${profile.insufficient_history ? 'text-amber-700' : 'text-emerald-700'}`}>{profile.history_count}/2</b></span>
                             {Number(profile.incident_uplift_calls || 0) > 0.01 ? (
                               <span className="col-span-2 text-emerald-700">Возможный прирост: <b>+{formatInt(profile.incident_uplift_calls)} зв. · +{formatNumber(profile.incident_uplift_fte, 2)} FTE · вес {formatPercent(profile.incident_future_weight ?? 1, 0)}</b></span>
                             ) : null}
@@ -3246,7 +3272,8 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                             ) : null}
                           </div>
                         </button>
-                      ))}
+                        );
+                      })}
                     </div>
                   </aside>
 
@@ -3328,8 +3355,17 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                               >
                                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                                 <XAxis dataKey="hour" tick={{ fontSize: 11 }} interval={2} />
-                                <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
-                                <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} />
+                                <YAxis
+                                  yAxisId="left"
+                                  tick={{ fontSize: 11 }}
+                                  label={{ value: 'звонки / мин', angle: -90, position: 'insideLeft', offset: 12, style: { fontSize: 11, fill: '#64748b' } }}
+                                />
+                                <YAxis
+                                  yAxisId="right"
+                                  orientation="right"
+                                  tick={{ fontSize: 11 }}
+                                  label={{ value: 'FTE', angle: 90, position: 'insideRight', offset: 8, style: { fontSize: 11, fill: '#64748b' } }}
+                                />
                                 <Tooltip content={<ForecastHourlyTooltip />} />
                                 {activeForecastHourLabel ? (
                                   <ReferenceLine yAxisId="left" x={activeForecastHourLabel} stroke={pinnedForecastHour !== null ? '#0f172a' : '#64748b'} strokeDasharray="4 4" />
@@ -3387,7 +3423,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
 
                         <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_300px]">
                           <div className="overflow-x-auto rounded-lg border border-slate-200">
-                            <table className="w-full divide-y divide-slate-200 text-sm">
+                            <table className="w-full divide-y divide-slate-200 text-sm tabular-nums">
                               <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
                                 <tr>
                                   <th className="px-3 py-3 text-left">Час</th>
@@ -3470,7 +3506,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                       }`}
                                     >
                                       <td className="px-3 py-2 font-medium text-slate-900">
-                                        <span className={rowIsPinned ? 'rounded-md bg-slate-900 px-2 py-1 text-white' : ''}>{String(row.hour).padStart(2, '0')}:00</span>
+                                        <span className={rowIsPinned ? 'inline-flex items-center rounded-md bg-blue-100 px-2 py-1 text-blue-900 ring-1 ring-blue-300' : ''}>{String(row.hour).padStart(2, '0')}:00</span>
                                       </td>
                                       <td className="px-3 py-2 text-right">
                                         <span
@@ -3560,78 +3596,88 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                           <div className="space-y-4">
                             <div className="rounded-lg border border-slate-200 bg-white p-4">
                               <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-                                <TrendingUp size={16} />
+                                <TrendingUp size={16} aria-hidden="true" />
                                 Пиковые часы прогноз
                               </div>
                               <div className="mt-4 space-y-3">
-                                {selectedForecastPeakHours.map((row) => {
-                                  const rowIsActive = activeForecastHour !== null && Number(row.hour) === Number(activeForecastHour);
-                                  const rowIsPinned = pinnedForecastHour !== null && Number(row.hour) === Number(pinnedForecastHour);
-                                  return (
-                                    <button
-                                      key={row.hour}
-                                      type="button"
-                                      onMouseEnter={() => setHoveredForecastHour(Number(row.hour))}
-                                      onMouseLeave={() => setHoveredForecastHour(null)}
-                                      onClick={() => togglePinnedForecastSlice(Number(row.hour))}
-                                      className={`w-full rounded-lg p-3 text-left transition ${
-                                        rowIsPinned
-                                          ? 'bg-slate-100 ring-1 ring-inset ring-slate-300'
-                                          : rowIsActive
-                                            ? 'bg-blue-50'
-                                            : 'bg-slate-50 hover:bg-blue-50'
-                                      }`}
-                                    >
-                                      <div className="flex items-center justify-between">
-                                        <span className="font-semibold text-slate-900">{String(row.hour).padStart(2, '0')}:00</span>
-                                        <span className="rounded-md bg-blue-100 px-2 py-1 text-xs font-semibold text-blue-700">{formatNumber(row.forecast_fte, 2)} FTE</span>
-                                      </div>
-                                      <div className="mt-2 text-xs text-slate-500">Звонки: {formatNumber(row.forecast_calls, 1)} · нагрузка: {formatNumber(row.forecast_workload_minutes, 1)} мин</div>
-                                      <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200">
-                                        <div className="h-full rounded-full bg-blue-500" style={{ width: `${Math.min(100, Number(row.forecast_fte || 0) * 25)}%` }} />
-                                      </div>
-                                    </button>
-                                  );
-                                })}
+                                {(() => {
+                                  const peakMaxForecast = Math.max(1e-6, ...selectedForecastPeakHours.map((r) => Number(r.forecast_fte || 0)));
+                                  return selectedForecastPeakHours.map((row) => {
+                                    const rowIsActive = activeForecastHour !== null && Number(row.hour) === Number(activeForecastHour);
+                                    const rowIsPinned = pinnedForecastHour !== null && Number(row.hour) === Number(pinnedForecastHour);
+                                    const barWidth = Math.min(100, Math.max(0, (Number(row.forecast_fte || 0) / peakMaxForecast) * 100));
+                                    return (
+                                      <button
+                                        key={row.hour}
+                                        type="button"
+                                        aria-pressed={rowIsPinned}
+                                        onMouseEnter={() => setHoveredForecastHour(Number(row.hour))}
+                                        onMouseLeave={() => setHoveredForecastHour(null)}
+                                        onClick={() => togglePinnedForecastSlice(Number(row.hour))}
+                                        className={`w-full rounded-lg p-3 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 ${
+                                          rowIsPinned
+                                            ? 'bg-blue-50 ring-1 ring-inset ring-blue-300'
+                                            : rowIsActive
+                                              ? 'bg-blue-50'
+                                              : 'bg-slate-50 hover:bg-blue-50'
+                                        }`}
+                                      >
+                                        <div className="flex items-center justify-between">
+                                          <span className="font-semibold text-slate-900 tabular-nums">{String(row.hour).padStart(2, '0')}:00</span>
+                                          <span className="rounded-md bg-blue-100 px-2 py-1 text-xs font-semibold text-blue-800 tabular-nums">{formatNumber(row.forecast_fte, 2)} FTE</span>
+                                        </div>
+                                        <div className="mt-2 text-xs text-slate-500 tabular-nums">Звонки: {formatNumber(row.forecast_calls, 1)} · нагрузка: {formatNumber(row.forecast_workload_minutes, 1)} мин</div>
+                                        <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200" role="progressbar" aria-valuenow={Math.round(barWidth)} aria-valuemin={0} aria-valuemax={100}>
+                                          <div className="h-full rounded-full bg-blue-600 transition-[width] duration-300 motion-reduce:transition-none" style={{ width: `${barWidth}%` }} />
+                                        </div>
+                                      </button>
+                                    );
+                                  });
+                                })()}
                               </div>
                             </div>
 
                             {showForecastActualLoad && selectedForecastHasActualLoad && displayOptions.forecastShowActualPeakHours ? (
                               <div className="rounded-lg border border-emerald-100 bg-white p-4">
                                 <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-                                  <TrendingUp size={16} className="text-emerald-600" />
+                                  <TrendingUp size={16} className="text-emerald-600" aria-hidden="true" />
                                   Пиковые часы факт
                                 </div>
                                 <div className="mt-4 space-y-3">
-                                  {selectedActualPeakHours.map((row) => {
-                                    const rowIsActive = activeForecastHour !== null && Number(row.hour) === Number(activeForecastHour);
-                                    const rowIsPinned = pinnedForecastHour !== null && Number(row.hour) === Number(pinnedForecastHour);
-                                    return (
-                                      <button
-                                        key={row.hour}
-                                        type="button"
-                                        onMouseEnter={() => setHoveredForecastHour(Number(row.hour))}
-                                        onMouseLeave={() => setHoveredForecastHour(null)}
-                                        onClick={() => togglePinnedForecastSlice(Number(row.hour))}
-                                        className={`w-full rounded-lg p-3 text-left transition ${
-                                          rowIsPinned
-                                            ? 'bg-slate-100 ring-1 ring-inset ring-slate-300'
-                                            : rowIsActive
-                                              ? 'bg-emerald-50'
-                                              : 'bg-slate-50 hover:bg-emerald-50'
-                                        }`}
-                                      >
-                                        <div className="flex items-center justify-between">
-                                          <span className="font-semibold text-slate-900">{String(row.hour).padStart(2, '0')}:00</span>
-                                          <span className="rounded-md bg-emerald-100 px-2 py-1 text-xs font-semibold text-emerald-700">{formatNumber(row.actual_report_fte, 2)} FTE</span>
-                                        </div>
-                                        <div className="mt-2 text-xs text-slate-500">Звонки: {formatInt(row.actual_received_calls)} · нагрузка: {formatNumber(row.actual_workload_minutes, 1)} мин</div>
-                                        <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200">
-                                          <div className="h-full rounded-full bg-emerald-500" style={{ width: `${Math.min(100, Number(row.actual_report_fte || 0) * 25)}%` }} />
-                                        </div>
-                                      </button>
-                                    );
-                                  })}
+                                  {(() => {
+                                    const peakMaxActual = Math.max(1e-6, ...selectedActualPeakHours.map((r) => Number(r.actual_report_fte || 0)));
+                                    return selectedActualPeakHours.map((row) => {
+                                      const rowIsActive = activeForecastHour !== null && Number(row.hour) === Number(activeForecastHour);
+                                      const rowIsPinned = pinnedForecastHour !== null && Number(row.hour) === Number(pinnedForecastHour);
+                                      const barWidth = Math.min(100, Math.max(0, (Number(row.actual_report_fte || 0) / peakMaxActual) * 100));
+                                      return (
+                                        <button
+                                          key={row.hour}
+                                          type="button"
+                                          aria-pressed={rowIsPinned}
+                                          onMouseEnter={() => setHoveredForecastHour(Number(row.hour))}
+                                          onMouseLeave={() => setHoveredForecastHour(null)}
+                                          onClick={() => togglePinnedForecastSlice(Number(row.hour))}
+                                          className={`w-full rounded-lg p-3 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400 ${
+                                            rowIsPinned
+                                              ? 'bg-emerald-50 ring-1 ring-inset ring-emerald-300'
+                                              : rowIsActive
+                                                ? 'bg-emerald-50'
+                                                : 'bg-slate-50 hover:bg-emerald-50'
+                                          }`}
+                                        >
+                                          <div className="flex items-center justify-between">
+                                            <span className="font-semibold text-slate-900 tabular-nums">{String(row.hour).padStart(2, '0')}:00</span>
+                                            <span className="rounded-md bg-emerald-100 px-2 py-1 text-xs font-semibold text-emerald-800 tabular-nums">{formatNumber(row.actual_report_fte, 2)} FTE</span>
+                                          </div>
+                                          <div className="mt-2 text-xs text-slate-500 tabular-nums">Звонки: {formatInt(row.actual_received_calls)} · нагрузка: {formatNumber(row.actual_workload_minutes, 1)} мин</div>
+                                          <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200" role="progressbar" aria-valuenow={Math.round(barWidth)} aria-valuemin={0} aria-valuemax={100}>
+                                            <div className="h-full rounded-full bg-emerald-600 transition-[width] duration-300 motion-reduce:transition-none" style={{ width: `${barWidth}%` }} />
+                                          </div>
+                                        </button>
+                                      );
+                                    });
+                                  })()}
                                 </div>
                               </div>
                             ) : null}
@@ -3639,7 +3685,20 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                         </div>
                       </>
                     ) : (
-                      <EmptyState title="Нет прогноза" text="Загрузите исторические отчеты, чтобы построить прогноз выбранного периода." />
+                      <EmptyState
+                        title="Нет прогноза"
+                        text="Загрузите исторические отчеты, чтобы построить прогноз выбранного периода."
+                        action={(
+                          <button
+                            type="button"
+                            onClick={() => setIsUploadModalOpen(true)}
+                            className="inline-flex h-10 items-center gap-2 rounded-lg bg-blue-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
+                          >
+                            <UploadCloud size={16} aria-hidden="true" />
+                            Загрузить отчёт
+                          </button>
+                        )}
+                      />
                     )}
                   </div>
                 </div>
