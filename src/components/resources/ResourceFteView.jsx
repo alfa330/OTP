@@ -7,9 +7,12 @@ import {
   CalendarDays,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
+  ChevronDown,
   CheckCircle2,
   Clock3,
   Eye,
+  EyeOff,
   FileUp,
   Gavel,
   LayoutDashboard,
@@ -290,6 +293,33 @@ const DEFAULT_DISPLAY_OPTIONS = {
   chartActual: true,
   chartLosses: true,
   chartLossRate: true,
+  // Прогнозы — карточки KPI периода (главные: FTE-часы + Операторы)
+  forecastKpiFteHours: true,
+  forecastKpiOperators: true,
+  forecastKpiAht: false,
+  forecastKpiAnswerRate: false,
+  forecastKpiOccUr: false,
+  forecastKpiShrinkage: false,
+  forecastKpiUplift: false,
+  // Прогнозы — серии графика
+  forecastChartCalls: true,
+  forecastChartUplift: true,
+  forecastChartWorkload: true,
+  forecastChartFte: true,
+  forecastChartAdjustedFte: true,
+  forecastChartActualWorkload: true,
+  forecastChartActualFte: true,
+  // Прогнозы — колонки часовой таблицы (главные: Час/Звонки/FTE)
+  forecastTableAht: false,
+  forecastTableWorkload: false,
+  forecastTableUplift: false,
+  forecastTableAdjustedFte: false,
+  forecastTableActualCalls: false,
+  forecastTableActualWorkload: false,
+  forecastTableActualFte: false,
+  // Прогнозы — побочные блоки
+  forecastShowActualLoad: false,
+  forecastShowActualPeakHours: false,
 };
 
 const DISPLAY_GROUPS = [
@@ -312,6 +342,49 @@ const DISPLAY_GROUPS = [
       ['chartActual', 'Сумма FTE в час - факт'],
       ['chartLosses', 'Потери'],
       ['chartLossRate', 'Доля потерь'],
+    ],
+  },
+  {
+    title: 'Прогнозы · KPI',
+    items: [
+      ['forecastKpiFteHours', 'FTE-часы периода'],
+      ['forecastKpiOperators', 'Операторы'],
+      ['forecastKpiUplift', 'Возможный прирост'],
+      ['forecastKpiAht', 'AHT периода'],
+      ['forecastKpiAnswerRate', 'Принято'],
+      ['forecastKpiOccUr', 'OCC / UR'],
+      ['forecastKpiShrinkage', 'Усушка'],
+    ],
+  },
+  {
+    title: 'Прогнозы · График',
+    items: [
+      ['forecastChartCalls', 'Звонки (бар)'],
+      ['forecastChartUplift', 'Прирост звонков'],
+      ['forecastChartWorkload', 'Минуты нагрузки'],
+      ['forecastChartFte', 'Прогноз FTE'],
+      ['forecastChartAdjustedFte', 'FTE с приростом'],
+      ['forecastChartActualWorkload', 'Факт нагрузки'],
+      ['forecastChartActualFte', 'Факт FTE'],
+    ],
+  },
+  {
+    title: 'Прогнозы · Таблица',
+    items: [
+      ['forecastTableAht', 'AHT дня'],
+      ['forecastTableWorkload', 'Минут нагрузки'],
+      ['forecastTableUplift', 'Прирост'],
+      ['forecastTableAdjustedFte', 'FTE с приростом'],
+      ['forecastTableActualCalls', 'Факт звонков'],
+      ['forecastTableActualWorkload', 'Факт нагрузки'],
+      ['forecastTableActualFte', 'Факт FTE'],
+    ],
+  },
+  {
+    title: 'Прогнозы · Доп.',
+    items: [
+      ['forecastShowActualLoad', 'Сравнивать с фактом'],
+      ['forecastShowActualPeakHours', 'Пиковые часы факт'],
     ],
   },
 ];
@@ -750,6 +823,200 @@ const ToggleSwitch = ({ checked, label, onChange }) => (
     </span>
   </button>
 );
+
+const FORECAST_CHART_LEGEND_ITEMS = [
+  { key: 'forecastChartCalls', label: 'Звонки', color: '#60a5fa', shape: 'bar' },
+  { key: 'forecastChartUplift', label: 'Прирост звонков', color: '#34d399', shape: 'bar', requires: 'uplift' },
+  { key: 'forecastChartWorkload', label: 'Минуты нагрузки', color: '#3b82f6', shape: 'line' },
+  { key: 'forecastChartFte', label: 'Прогноз FTE', color: '#2563eb', shape: 'line' },
+  { key: 'forecastChartAdjustedFte', label: 'FTE с приростом', color: '#059669', shape: 'dashed', requires: 'uplift' },
+  { key: 'forecastChartActualWorkload', label: 'Факт нагрузки', color: '#10b981', shape: 'line', requires: 'actual' },
+  { key: 'forecastChartActualFte', label: 'Факт FTE', color: '#059669', shape: 'dashed', requires: 'actual' },
+];
+
+const ForecastChartLegend = ({ displayOptions, toggleDisplayOption, incidentUpliftAvailable, showActualLoad }) => {
+  const items = FORECAST_CHART_LEGEND_ITEMS.filter((item) => {
+    if (item.requires === 'uplift') return incidentUpliftAvailable;
+    if (item.requires === 'actual') return showActualLoad;
+    return true;
+  });
+
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-1.5">
+      {items.map((item) => {
+        const active = Boolean(displayOptions[item.key]);
+        return (
+          <button
+            key={item.key}
+            type="button"
+            onClick={() => toggleDisplayOption(item.key, !active)}
+            title={active ? 'Скрыть серию на графике' : 'Показать серию на графике'}
+            className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium transition ${
+              active ? 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50' : 'border-slate-200 bg-slate-50 text-slate-400 line-through hover:bg-slate-100'
+            }`}
+          >
+            <span
+              className={`inline-block h-2.5 ${item.shape === 'bar' ? 'w-2.5 rounded-sm' : 'w-4 rounded-full'}`}
+              style={{
+                background: item.shape === 'dashed'
+                  ? `repeating-linear-gradient(90deg, ${item.color} 0 4px, transparent 4px 7px)`
+                  : item.shape === 'bar' ? item.color : 'transparent',
+                borderTop: item.shape === 'line' ? `2px solid ${item.color}` : undefined,
+                opacity: active ? 1 : 0.35,
+              }}
+            />
+            {item.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+};
+
+const FORECAST_PANEL_GROUPS = [
+  {
+    title: 'KPI периода',
+    items: [
+      ['forecastKpiFteHours', 'FTE-часы периода'],
+      ['forecastKpiOperators', 'Операторы'],
+      ['forecastKpiUplift', 'Возможный прирост'],
+      ['forecastKpiAht', 'AHT периода'],
+      ['forecastKpiAnswerRate', 'Принято'],
+      ['forecastKpiOccUr', 'OCC / UR'],
+      ['forecastKpiShrinkage', 'Усушка'],
+    ],
+  },
+  {
+    title: 'Серии графика',
+    items: [
+      ['forecastChartCalls', 'Звонки (бар)'],
+      ['forecastChartUplift', 'Прирост звонков', 'uplift'],
+      ['forecastChartWorkload', 'Минуты нагрузки'],
+      ['forecastChartFte', 'Прогноз FTE'],
+      ['forecastChartAdjustedFte', 'FTE с приростом', 'uplift'],
+      ['forecastChartActualWorkload', 'Факт нагрузки', 'actual'],
+      ['forecastChartActualFte', 'Факт FTE', 'actual'],
+    ],
+  },
+  {
+    title: 'Колонки таблицы',
+    items: [
+      ['forecastTableAht', 'AHT дня'],
+      ['forecastTableWorkload', 'Минут нагрузки'],
+      ['forecastTableUplift', 'Прирост', 'uplift'],
+      ['forecastTableAdjustedFte', 'FTE с приростом', 'uplift'],
+      ['forecastTableActualCalls', 'Факт звонков', 'actual'],
+      ['forecastTableActualWorkload', 'Факт нагрузки', 'actual'],
+      ['forecastTableActualFte', 'Факт FTE', 'actual'],
+    ],
+  },
+  {
+    title: 'Дополнительно',
+    items: [
+      ['forecastShowActualLoad', 'Сравнивать с фактом'],
+      ['forecastShowActualPeakHours', 'Пиковые часы факт', 'actual'],
+    ],
+  },
+];
+
+const ForecastDisplayPanel = ({
+  isOpen,
+  onToggleOpen,
+  displayOptions,
+  toggleDisplayOption,
+  incidentUpliftAvailable,
+  showActualLoad,
+  forecastActualLoadAvailable,
+}) => {
+  const hiddenCount = FORECAST_PANEL_GROUPS.reduce((acc, group) => (
+    acc + group.items.filter(([key, , requires]) => {
+      if (requires === 'uplift' && !incidentUpliftAvailable) return false;
+      if (requires === 'actual' && !showActualLoad) return false;
+      return !displayOptions[key];
+    }).length
+  ), 0);
+
+  return (
+    <div className="pointer-events-none fixed bottom-4 right-4 z-40 flex max-w-[calc(100vw-2rem)] flex-col items-end gap-2">
+      {isOpen ? (
+        <div className="pointer-events-auto w-[340px] max-w-full rounded-xl border border-slate-200 bg-white shadow-xl">
+          <div className="flex items-center justify-between gap-2 border-b border-slate-200 px-3 py-2">
+            <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+              <SlidersHorizontal size={16} />
+              Отображение прогнозов
+            </div>
+            <button
+              type="button"
+              onClick={onToggleOpen}
+              className="rounded-md p-1 text-slate-500 hover:bg-slate-100"
+              aria-label="Свернуть"
+            >
+              <ChevronDown size={16} />
+            </button>
+          </div>
+          <div className="max-h-[60vh] space-y-3 overflow-y-auto p-3">
+            {FORECAST_PANEL_GROUPS.map((group) => {
+              const visibleItems = group.items.filter(([, , requires]) => {
+                if (requires === 'uplift' && !incidentUpliftAvailable) return false;
+                if (requires === 'actual' && !showActualLoad) return false;
+                return true;
+              });
+              if (!visibleItems.length) return null;
+              return (
+                <div key={group.title}>
+                  <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">{group.title}</div>
+                  <div className="space-y-1.5">
+                    {visibleItems.map(([key, label, requires]) => {
+                      const disabled = key === 'forecastShowActualLoad' && !forecastActualLoadAvailable && !displayOptions[key];
+                      return (
+                        <button
+                          key={key}
+                          type="button"
+                          onClick={() => !disabled && toggleDisplayOption(key, !displayOptions[key])}
+                          disabled={disabled}
+                          title={disabled ? 'Для выбранного периода нет прошедших дней с загруженным отчетом' : undefined}
+                          className={`flex w-full items-center justify-between gap-3 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-left text-xs transition ${
+                            disabled ? 'cursor-not-allowed opacity-50' : 'hover:bg-slate-50'
+                          }`}
+                        >
+                          <span className="font-medium text-slate-700">{label}</span>
+                          <span
+                            className={`relative inline-flex h-4 w-7 shrink-0 rounded-full transition ${
+                              displayOptions[key] ? 'bg-blue-600' : 'bg-slate-300'
+                            }`}
+                            aria-hidden="true"
+                          >
+                            <span
+                              className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow-sm transition ${
+                                displayOptions[key] ? 'left-3.5' : 'left-0.5'
+                              }`}
+                            />
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+      <button
+        type="button"
+        onClick={onToggleOpen}
+        className="pointer-events-auto inline-flex h-10 items-center gap-2 rounded-full border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 shadow-lg transition hover:bg-slate-50"
+      >
+        <SlidersHorizontal size={16} />
+        Отображение
+        {hiddenCount > 0 ? (
+          <span className="inline-flex h-5 min-w-[20px] items-center justify-center rounded-full bg-slate-900 px-1.5 text-[11px] font-semibold text-white">{hiddenCount}</span>
+        ) : null}
+        {isOpen ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+      </button>
+    </div>
+  );
+};
 
 const OverviewTrendTooltip = ({ active, label, payload }) => {
   if (!active || !payload?.length) return null;
@@ -1255,7 +1522,8 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
   const [selectedForecastWeekStart, setSelectedForecastWeekStart] = useState(() => getNextWeekStartIso());
   const [selectedForecastPeriodEnd, setSelectedForecastPeriodEnd] = useState(() => addDaysIso(getNextWeekStartIso(), 6));
   const [selectedForecastDate, setSelectedForecastDate] = useState('');
-  const [showForecastActualLoad, setShowForecastActualLoad] = useState(false);
+  const [isForecastPanelOpen, setIsForecastPanelOpen] = useState(false);
+  const showForecastActualLoad = Boolean(displayOptions.forecastShowActualLoad);
   const [hoveredForecastHour, setHoveredForecastHour] = useState(null);
   const [pinnedForecastHour, setPinnedForecastHour] = useState(null);
   const [callsChartMode, setCallsChartMode] = useState('losses');
@@ -2865,31 +3133,6 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                   <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                     <button
                       type="button"
-                      onClick={() => setShowForecastActualLoad((current) => !current)}
-                      disabled={!forecastActualLoadAvailable && !showForecastActualLoad}
-                      className={`inline-flex h-10 items-center justify-center gap-2 rounded-lg border px-3 text-sm font-medium transition ${
-                        showForecastActualLoad
-                          ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-                          : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100'
-                      } ${!forecastActualLoadAvailable && !showForecastActualLoad ? 'cursor-not-allowed opacity-50' : ''}`}
-                      title={forecastActualLoadAvailable ? 'Показать факт нагрузки из загруженных отчетов' : 'Для выбранного периода нет прошедших дней с загруженным отчетом'}
-                    >
-                      <span
-                        className={`relative inline-flex h-5 w-9 shrink-0 rounded-full transition ${
-                          showForecastActualLoad ? 'bg-emerald-600' : 'bg-slate-300'
-                        }`}
-                        aria-hidden="true"
-                      >
-                        <span
-                          className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition ${
-                            showForecastActualLoad ? 'left-4' : 'left-0.5'
-                          }`}
-                        />
-                      </span>
-                      Показать факт нагрузки
-                    </button>
-                    <button
-                      type="button"
                       onClick={handleRecalculate}
                       disabled={isRecalculating}
                       className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
@@ -2900,32 +3143,60 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                   </div>
                 </div>
 
-                <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-6 2xl:grid-cols-7">
-                  <StatCard icon={Clock3} label="AHT периода" value={formatSeconds(nextWeekForecast.periodAhtSeconds ?? nextWeekForecast.weeklyAhtSeconds)} hint="Среднее по дневным AHT" tone="blue" />
-                  <StatCard icon={PhoneCall} label="Принято" value={formatPercent(nextWeekForecast.answerRate)} hint="Коэффициент периода" tone="slate" />
-                  <StatCard icon={Users} label="OCC / UR" value={`${formatPercent(nextWeekForecast.occ, 0)} / ${formatPercent(nextWeekForecast.ur, 0)}`} hint={`Эфф. мин/час: ${formatNumber(nextWeekForecast.effectiveMinutes, 1)}`} tone="emerald" />
-                  <StatCard icon={ShieldAlert} label="Усушка" value={formatPercent(nextWeekForecast.shrinkage, 0)} hint="Коэффициент периода" tone="amber" />
-                  <StatCard icon={TrendingUp} label="FTE-часы периода" value={formatNumber(nextWeekForecast.periodFteHours ?? nextWeekForecast.weeklyFteHours, 1)} hint={`${formatInt(nextWeekForecast.periodDays || (nextWeekForecast.days || []).length)} дн.`} tone="blue" />
-                  <StatCard
-                    icon={TrendingUp}
-                    label="Возможный прирост"
-                    value={`+${formatInt(nextWeekForecast.incidentUpliftCalls)} зв.`}
-                    hint={`+${formatNumber(nextWeekForecast.incidentUpliftFteHours, 1)} FTE-ч · ${Number(nextWeekForecast.incidentUplift?.source_day_count || 0)}/6 дн. · дни ${formatPercent(1, 0)}-${formatPercent(nextWeekForecast.incidentUplift?.future_min_weight ?? 0.55, 0)}`}
-                    tone="emerald"
-                  />
-                  <OperatorSummaryCard
-                    requiredFte={nextWeekForecast.operatorsWithShrinkage}
-                    requiredWithUplift={nextWeekForecast.incidentAdjustedOperatorsWithShrinkage}
-                    baseFte={nextWeekForecast.baseOperators}
-                    availableFte={periodAvailableOperatorFte}
-                    currentFte={nextWeekForecast.currentOperatorFte}
-                    gap={periodAvailableOperatorFteGap}
-                    availableCount={periodAvailableOperatorCount}
-                    totalCount={periodOperatorCount}
-                    partialCount={periodPartialOperatorCount}
-                    unavailableCount={periodUnavailableOperatorCount}
-                    onOpen={openOperatorDetails}
-                  />
+                <div className="mt-4 flex flex-wrap gap-3">
+                  {displayOptions.forecastKpiFteHours ? (
+                    <div className="min-w-[200px] flex-1">
+                      <StatCard icon={TrendingUp} label="FTE-часы периода" value={formatNumber(nextWeekForecast.periodFteHours ?? nextWeekForecast.weeklyFteHours, 1)} hint={`${formatInt(nextWeekForecast.periodDays || (nextWeekForecast.days || []).length)} дн.`} tone="blue" />
+                    </div>
+                  ) : null}
+                  {displayOptions.forecastKpiOperators ? (
+                    <div className="min-w-[260px] flex-1">
+                      <OperatorSummaryCard
+                        requiredFte={nextWeekForecast.operatorsWithShrinkage}
+                        requiredWithUplift={nextWeekForecast.incidentAdjustedOperatorsWithShrinkage}
+                        baseFte={nextWeekForecast.baseOperators}
+                        availableFte={periodAvailableOperatorFte}
+                        currentFte={nextWeekForecast.currentOperatorFte}
+                        gap={periodAvailableOperatorFteGap}
+                        availableCount={periodAvailableOperatorCount}
+                        totalCount={periodOperatorCount}
+                        partialCount={periodPartialOperatorCount}
+                        unavailableCount={periodUnavailableOperatorCount}
+                        onOpen={openOperatorDetails}
+                      />
+                    </div>
+                  ) : null}
+                  {displayOptions.forecastKpiUplift ? (
+                    <div className="min-w-[200px] flex-1">
+                      <StatCard
+                        icon={TrendingUp}
+                        label="Возможный прирост"
+                        value={`+${formatInt(nextWeekForecast.incidentUpliftCalls)} зв.`}
+                        hint={`+${formatNumber(nextWeekForecast.incidentUpliftFteHours, 1)} FTE-ч · ${Number(nextWeekForecast.incidentUplift?.source_day_count || 0)}/6 дн.`}
+                        tone="emerald"
+                      />
+                    </div>
+                  ) : null}
+                  {displayOptions.forecastKpiAht ? (
+                    <div className="min-w-[180px] flex-1">
+                      <StatCard icon={Clock3} label="AHT периода" value={formatSeconds(nextWeekForecast.periodAhtSeconds ?? nextWeekForecast.weeklyAhtSeconds)} hint="Среднее по дневным AHT" tone="blue" />
+                    </div>
+                  ) : null}
+                  {displayOptions.forecastKpiAnswerRate ? (
+                    <div className="min-w-[180px] flex-1">
+                      <StatCard icon={PhoneCall} label="Принято" value={formatPercent(nextWeekForecast.answerRate)} hint="Коэффициент периода" tone="slate" />
+                    </div>
+                  ) : null}
+                  {displayOptions.forecastKpiOccUr ? (
+                    <div className="min-w-[200px] flex-1">
+                      <StatCard icon={Users} label="OCC / UR" value={`${formatPercent(nextWeekForecast.occ, 0)} / ${formatPercent(nextWeekForecast.ur, 0)}`} hint={`Эфф. мин/час: ${formatNumber(nextWeekForecast.effectiveMinutes, 1)}`} tone="emerald" />
+                    </div>
+                  ) : null}
+                  {displayOptions.forecastKpiShrinkage ? (
+                    <div className="min-w-[180px] flex-1">
+                      <StatCard icon={ShieldAlert} label="Усушка" value={formatPercent(nextWeekForecast.shrinkage, 0)} hint="Коэффициент периода" tone="amber" />
+                    </div>
+                  ) : null}
                 </div>
 
                 <div className="mt-5 grid gap-5 xl:grid-cols-[300px_minmax(0,1fr)]">
@@ -3077,15 +3348,17 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                 {activeForecastHourLabel ? (
                                   <ReferenceLine yAxisId="left" x={activeForecastHourLabel} stroke={pinnedForecastHour !== null ? '#0f172a' : '#64748b'} strokeDasharray="4 4" />
                                 ) : null}
-                                <Bar yAxisId="left" dataKey="calls" stackId="calls" fill="#bfdbfe" radius={incidentUpliftAvailable ? [0, 0, 0, 0] : [4, 4, 0, 0]}>
-                                  {selectedForecastHourlyData.map((item) => (
-                                    <Cell
-                                      key={item.hour}
-                                      fill={activeForecastHour !== null && Number(item.hourNumber) === Number(activeForecastHour) ? '#60a5fa' : '#bfdbfe'}
-                                    />
-                                  ))}
-                                </Bar>
-                                {incidentUpliftAvailable ? (
+                                {displayOptions.forecastChartCalls ? (
+                                  <Bar yAxisId="left" dataKey="calls" stackId="calls" fill="#bfdbfe" radius={incidentUpliftAvailable && displayOptions.forecastChartUplift ? [0, 0, 0, 0] : [4, 4, 0, 0]}>
+                                    {selectedForecastHourlyData.map((item) => (
+                                      <Cell
+                                        key={item.hour}
+                                        fill={activeForecastHour !== null && Number(item.hourNumber) === Number(activeForecastHour) ? '#60a5fa' : '#bfdbfe'}
+                                      />
+                                    ))}
+                                  </Bar>
+                                ) : null}
+                                {incidentUpliftAvailable && displayOptions.forecastChartUplift ? (
                                   <Bar yAxisId="left" dataKey="upliftCalls" stackId="calls" fill="#bbf7d0" radius={[4, 4, 0, 0]}>
                                     {selectedForecastHourlyData.map((item) => (
                                       <Cell
@@ -3095,20 +3368,30 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                     ))}
                                   </Bar>
                                 ) : null}
-                                <Line yAxisId="left" type="monotone" dataKey="workload" stroke="#3b82f6" strokeWidth={2} dot={false} activeDot={{ r: 5 }} />
-                                <Line yAxisId="right" type="monotone" dataKey="fte" stroke="#2563eb" strokeWidth={2} dot={false} activeDot={{ r: 5 }} />
-                                {incidentUpliftAvailable ? (
+                                {displayOptions.forecastChartWorkload ? (
+                                  <Line yAxisId="left" type="monotone" dataKey="workload" stroke="#3b82f6" strokeWidth={2} dot={false} activeDot={{ r: 5 }} />
+                                ) : null}
+                                {displayOptions.forecastChartFte ? (
+                                  <Line yAxisId="right" type="monotone" dataKey="fte" stroke="#2563eb" strokeWidth={2} dot={false} activeDot={{ r: 5 }} />
+                                ) : null}
+                                {incidentUpliftAvailable && displayOptions.forecastChartAdjustedFte ? (
                                   <Line yAxisId="right" type="monotone" dataKey="adjustedFte" stroke="#059669" strokeWidth={2} strokeDasharray="4 3" dot={false} activeDot={{ r: 5 }} />
                                 ) : null}
-                                {showForecastActualLoad && selectedForecastHasActualLoad && (
-                                  <>
-                                    <Line yAxisId="left" type="monotone" dataKey="actualWorkload" stroke="#10b981" strokeWidth={2} dot={false} activeDot={{ r: 5 }} />
-                                    <Line yAxisId="right" type="monotone" dataKey="actualFte" stroke="#059669" strokeWidth={2} strokeDasharray="5 4" dot={false} activeDot={{ r: 5 }} />
-                                  </>
-                                )}
+                                {showForecastActualLoad && selectedForecastHasActualLoad && displayOptions.forecastChartActualWorkload ? (
+                                  <Line yAxisId="left" type="monotone" dataKey="actualWorkload" stroke="#10b981" strokeWidth={2} dot={false} activeDot={{ r: 5 }} />
+                                ) : null}
+                                {showForecastActualLoad && selectedForecastHasActualLoad && displayOptions.forecastChartActualFte ? (
+                                  <Line yAxisId="right" type="monotone" dataKey="actualFte" stroke="#059669" strokeWidth={2} strokeDasharray="5 4" dot={false} activeDot={{ r: 5 }} />
+                                ) : null}
                               </ComposedChart>
                             </ResponsiveContainer>
                           </div>
+                          <ForecastChartLegend
+                            displayOptions={displayOptions}
+                            toggleDisplayOption={toggleDisplayOption}
+                            incidentUpliftAvailable={incidentUpliftAvailable}
+                            showActualLoad={showForecastActualLoad && selectedForecastHasActualLoad}
+                          />
                           {showForecastActualLoad && !selectedForecastHasActualLoad ? (
                             <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
                               Для выбранного дня нет загруженного отчета или день еще не прошел, поэтому факт нагрузки не отображается.
@@ -3118,28 +3401,67 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
 
                         <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_300px]">
                           <div className="overflow-x-auto rounded-lg border border-slate-200">
-                            <table className={`${showForecastActualLoad && selectedForecastHasActualLoad ? (incidentUpliftAvailable ? 'min-w-[1240px]' : 'min-w-[1080px]') : (incidentUpliftAvailable ? 'min-w-[960px]' : 'min-w-[760px]')} w-full divide-y divide-slate-200 text-sm`}>
+                            <table className="w-full divide-y divide-slate-200 text-sm">
                               <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
                                 <tr>
                                   <th className="px-3 py-3 text-left">Час</th>
-                                  <th className="px-3 py-3 text-right">Звонки</th>
-                                  {incidentUpliftAvailable ? (
-                                    <th className="px-3 py-3 text-right">Прирост</th>
+                                  <th className="px-3 py-3 text-right">
+                                    <span className="inline-flex items-center justify-end gap-1.5">
+                                      <span className="inline-block h-2 w-2 rounded-full bg-blue-400" />
+                                      Звонки
+                                    </span>
+                                  </th>
+                                  {incidentUpliftAvailable && displayOptions.forecastTableUplift ? (
+                                    <th className="px-3 py-3 text-right">
+                                      <span className="inline-flex items-center justify-end gap-1.5">
+                                        <span className="inline-block h-2 w-2 rounded-full bg-emerald-400" />
+                                        Прирост
+                                      </span>
+                                    </th>
                                   ) : null}
-                                  {showForecastActualLoad && selectedForecastHasActualLoad ? (
-                                    <th className="px-3 py-3 text-right">Факт звонков</th>
+                                  {showForecastActualLoad && selectedForecastHasActualLoad && displayOptions.forecastTableActualCalls ? (
+                                    <th className="px-3 py-3 text-right">
+                                      <span className="inline-flex items-center justify-end gap-1.5">
+                                        <span className="inline-block h-2 w-2 rounded-full bg-emerald-500" />
+                                        Факт звонков
+                                      </span>
+                                    </th>
                                   ) : null}
-                                  <th className="px-3 py-3 text-right">AHT дня</th>
-                                  <th className="px-3 py-3 text-right">Минут нагрузки</th>
-                                  {showForecastActualLoad && selectedForecastHasActualLoad ? (
-                                    <th className="px-3 py-3 text-right">Факт нагрузки</th>
+                                  {displayOptions.forecastTableAht ? (
+                                    <th className="px-3 py-3 text-right">AHT дня</th>
                                   ) : null}
-                                  <th className="px-3 py-3 text-right">FTE</th>
-                                  {incidentUpliftAvailable ? (
-                                    <th className="px-3 py-3 text-right">FTE с приростом</th>
+                                  {displayOptions.forecastTableWorkload ? (
+                                    <th className="px-3 py-3 text-right">Минут нагрузки</th>
                                   ) : null}
-                                  {showForecastActualLoad && selectedForecastHasActualLoad ? (
-                                    <th className="px-3 py-3 text-right">Факт FTE</th>
+                                  {showForecastActualLoad && selectedForecastHasActualLoad && displayOptions.forecastTableActualWorkload ? (
+                                    <th className="px-3 py-3 text-right">
+                                      <span className="inline-flex items-center justify-end gap-1.5">
+                                        <span className="inline-block h-2 w-2 rounded-full bg-emerald-500" />
+                                        Факт нагрузки
+                                      </span>
+                                    </th>
+                                  ) : null}
+                                  <th className="px-3 py-3 text-right">
+                                    <span className="inline-flex items-center justify-end gap-1.5">
+                                      <span className="inline-block h-2 w-2 rounded-full bg-blue-600" />
+                                      FTE
+                                    </span>
+                                  </th>
+                                  {incidentUpliftAvailable && displayOptions.forecastTableAdjustedFte ? (
+                                    <th className="px-3 py-3 text-right">
+                                      <span className="inline-flex items-center justify-end gap-1.5">
+                                        <span className="inline-block h-2 w-2 rounded-full bg-emerald-600" />
+                                        FTE с приростом
+                                      </span>
+                                    </th>
+                                  ) : null}
+                                  {showForecastActualLoad && selectedForecastHasActualLoad && displayOptions.forecastTableActualFte ? (
+                                    <th className="px-3 py-3 text-right">
+                                      <span className="inline-flex items-center justify-end gap-1.5">
+                                        <span className="inline-block h-2 w-2 rounded-full bg-emerald-600" />
+                                        Факт FTE
+                                      </span>
+                                    </th>
                                   ) : null}
                                 </tr>
                               </thead>
@@ -3174,7 +3496,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                           {formatNumber(row.forecast_calls, 1)}
                                         </span>
                                       </td>
-                                      {incidentUpliftAvailable ? (
+                                      {incidentUpliftAvailable && displayOptions.forecastTableUplift ? (
                                         <td className="px-3 py-2 text-right">
                                           <span
                                             title={formatIncidentUpliftTooltip(row)}
@@ -3186,7 +3508,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                           </span>
                                         </td>
                                       ) : null}
-                                      {showForecastActualLoad && selectedForecastHasActualLoad ? (
+                                      {showForecastActualLoad && selectedForecastHasActualLoad && displayOptions.forecastTableActualCalls ? (
                                         <td className="px-3 py-2 text-right">
                                           <span
                                             className={`inline-flex items-center justify-end rounded-md border px-2 py-1 font-medium text-emerald-700 transition ${
@@ -3197,27 +3519,31 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                           </span>
                                         </td>
                                       ) : null}
-                                      <td className="px-3 py-2 text-right">
-                                        <span
-                                          title={formatAhtTooltip(row.forecast_aht_seconds)}
-                                          className={`inline-flex cursor-help items-center justify-end rounded-md border px-2 py-1 transition ${
-                                            rowIsActive ? 'border-blue-200 bg-blue-50 text-blue-700' : 'border-transparent hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700'
-                                          }`}
-                                        >
-                                          {formatSeconds(row.forecast_aht_seconds)}
-                                        </span>
-                                      </td>
-                                      <td className="px-3 py-2 text-right">
-                                        <span
-                                          title={formatWorkloadTooltip(row, nextWeekForecast.answerRate)}
-                                          className={`inline-flex cursor-help items-center justify-end rounded-md border px-2 py-1 transition ${
-                                            rowIsActive ? 'border-blue-200 bg-blue-50 text-blue-700' : 'border-transparent hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700'
-                                          }`}
-                                        >
-                                          {formatNumber(row.forecast_workload_minutes, 1)}
-                                        </span>
-                                      </td>
-                                      {showForecastActualLoad && selectedForecastHasActualLoad ? (
+                                      {displayOptions.forecastTableAht ? (
+                                        <td className="px-3 py-2 text-right">
+                                          <span
+                                            title={formatAhtTooltip(row.forecast_aht_seconds)}
+                                            className={`inline-flex cursor-help items-center justify-end rounded-md border px-2 py-1 transition ${
+                                              rowIsActive ? 'border-blue-200 bg-blue-50 text-blue-700' : 'border-transparent hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700'
+                                            }`}
+                                          >
+                                            {formatSeconds(row.forecast_aht_seconds)}
+                                          </span>
+                                        </td>
+                                      ) : null}
+                                      {displayOptions.forecastTableWorkload ? (
+                                        <td className="px-3 py-2 text-right">
+                                          <span
+                                            title={formatWorkloadTooltip(row, nextWeekForecast.answerRate)}
+                                            className={`inline-flex cursor-help items-center justify-end rounded-md border px-2 py-1 transition ${
+                                              rowIsActive ? 'border-blue-200 bg-blue-50 text-blue-700' : 'border-transparent hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700'
+                                            }`}
+                                          >
+                                            {formatNumber(row.forecast_workload_minutes, 1)}
+                                          </span>
+                                        </td>
+                                      ) : null}
+                                      {showForecastActualLoad && selectedForecastHasActualLoad && displayOptions.forecastTableActualWorkload ? (
                                         <td className="px-3 py-2 text-right">
                                           <span
                                             title={formatActualLoadTooltip(row, nextWeekForecast.effectiveMinutes)}
@@ -3230,10 +3556,10 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                         </td>
                                       ) : null}
                                       <td className="px-3 py-2 text-right font-semibold text-blue-700">{formatNumber(row.forecast_fte, 2)}</td>
-                                      {incidentUpliftAvailable ? (
+                                      {incidentUpliftAvailable && displayOptions.forecastTableAdjustedFte ? (
                                         <td className="px-3 py-2 text-right font-semibold text-emerald-700">{formatNumber(row.incident_adjusted_fte ?? row.forecast_fte, 2)}</td>
                                       ) : null}
-                                      {showForecastActualLoad && selectedForecastHasActualLoad ? (
+                                      {showForecastActualLoad && selectedForecastHasActualLoad && displayOptions.forecastTableActualFte ? (
                                         <td className="px-3 py-2 text-right font-semibold text-emerald-700">
                                           {row.has_actual_report ? formatNumber(row.actual_report_fte, 2) : '-'}
                                         </td>
@@ -3284,7 +3610,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                               </div>
                             </div>
 
-                            {showForecastActualLoad && selectedForecastHasActualLoad ? (
+                            {showForecastActualLoad && selectedForecastHasActualLoad && displayOptions.forecastShowActualPeakHours ? (
                               <div className="rounded-lg border border-emerald-100 bg-white p-4">
                                 <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
                                   <TrendingUp size={16} className="text-emerald-600" />
@@ -3333,6 +3659,18 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                 </div>
               </section>
             )}
+
+            {activeDashboardView === 'next_week' ? (
+              <ForecastDisplayPanel
+                isOpen={isForecastPanelOpen}
+                onToggleOpen={() => setIsForecastPanelOpen((current) => !current)}
+                displayOptions={displayOptions}
+                toggleDisplayOption={toggleDisplayOption}
+                incidentUpliftAvailable={incidentUpliftAvailable}
+                showActualLoad={showForecastActualLoad && selectedForecastHasActualLoad}
+                forecastActualLoadAvailable={forecastActualLoadAvailable}
+              />
+            ) : null}
 
           </main>
         </div>
