@@ -3143,59 +3143,45 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                   </div>
                 </div>
 
-                <div className="mt-4 flex flex-wrap gap-3">
+                <div className="mt-4 grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 [&>*]:min-w-0">
                   {displayOptions.forecastKpiFteHours ? (
-                    <div className="min-w-[200px] flex-1">
-                      <StatCard icon={TrendingUp} label="FTE-часы периода" value={formatNumber(nextWeekForecast.periodFteHours ?? nextWeekForecast.weeklyFteHours, 1)} hint={`${formatInt(nextWeekForecast.periodDays || (nextWeekForecast.days || []).length)} дн.`} tone="blue" />
-                    </div>
+                    <StatCard icon={TrendingUp} label="FTE-часы периода" value={formatNumber(nextWeekForecast.periodFteHours ?? nextWeekForecast.weeklyFteHours, 1)} hint={`${formatInt(nextWeekForecast.periodDays || (nextWeekForecast.days || []).length)} дн.`} tone="blue" />
                   ) : null}
                   {displayOptions.forecastKpiOperators ? (
-                    <div className="min-w-[260px] flex-1">
-                      <OperatorSummaryCard
-                        requiredFte={nextWeekForecast.operatorsWithShrinkage}
-                        requiredWithUplift={nextWeekForecast.incidentAdjustedOperatorsWithShrinkage}
-                        baseFte={nextWeekForecast.baseOperators}
-                        availableFte={periodAvailableOperatorFte}
-                        currentFte={nextWeekForecast.currentOperatorFte}
-                        gap={periodAvailableOperatorFteGap}
-                        availableCount={periodAvailableOperatorCount}
-                        totalCount={periodOperatorCount}
-                        partialCount={periodPartialOperatorCount}
-                        unavailableCount={periodUnavailableOperatorCount}
-                        onOpen={openOperatorDetails}
-                      />
-                    </div>
+                    <OperatorSummaryCard
+                      requiredFte={nextWeekForecast.operatorsWithShrinkage}
+                      requiredWithUplift={nextWeekForecast.incidentAdjustedOperatorsWithShrinkage}
+                      baseFte={nextWeekForecast.baseOperators}
+                      availableFte={periodAvailableOperatorFte}
+                      currentFte={nextWeekForecast.currentOperatorFte}
+                      gap={periodAvailableOperatorFteGap}
+                      availableCount={periodAvailableOperatorCount}
+                      totalCount={periodOperatorCount}
+                      partialCount={periodPartialOperatorCount}
+                      unavailableCount={periodUnavailableOperatorCount}
+                      onOpen={openOperatorDetails}
+                    />
                   ) : null}
                   {displayOptions.forecastKpiUplift ? (
-                    <div className="min-w-[200px] flex-1">
-                      <StatCard
-                        icon={TrendingUp}
-                        label="Возможный прирост"
-                        value={`+${formatInt(nextWeekForecast.incidentUpliftCalls)} зв.`}
-                        hint={`+${formatNumber(nextWeekForecast.incidentUpliftFteHours, 1)} FTE-ч · ${Number(nextWeekForecast.incidentUplift?.source_day_count || 0)}/6 дн.`}
-                        tone="emerald"
-                      />
-                    </div>
+                    <StatCard
+                      icon={TrendingUp}
+                      label="Возможный прирост"
+                      value={`+${formatInt(nextWeekForecast.incidentUpliftCalls)} зв.`}
+                      hint={`+${formatNumber(nextWeekForecast.incidentUpliftFteHours, 1)} FTE-ч · ${Number(nextWeekForecast.incidentUplift?.source_day_count || 0)}/6 дн.`}
+                      tone="emerald"
+                    />
                   ) : null}
                   {displayOptions.forecastKpiAht ? (
-                    <div className="min-w-[180px] flex-1">
-                      <StatCard icon={Clock3} label="AHT периода" value={formatSeconds(nextWeekForecast.periodAhtSeconds ?? nextWeekForecast.weeklyAhtSeconds)} hint="Среднее по дневным AHT" tone="blue" />
-                    </div>
+                    <StatCard icon={Clock3} label="AHT периода" value={formatSeconds(nextWeekForecast.periodAhtSeconds ?? nextWeekForecast.weeklyAhtSeconds)} hint="Среднее по дневным AHT" tone="blue" />
                   ) : null}
                   {displayOptions.forecastKpiAnswerRate ? (
-                    <div className="min-w-[180px] flex-1">
-                      <StatCard icon={PhoneCall} label="Принято" value={formatPercent(nextWeekForecast.answerRate)} hint="Коэффициент периода" tone="slate" />
-                    </div>
+                    <StatCard icon={PhoneCall} label="Принято" value={formatPercent(nextWeekForecast.answerRate)} hint="Коэффициент периода" tone="slate" />
                   ) : null}
                   {displayOptions.forecastKpiOccUr ? (
-                    <div className="min-w-[200px] flex-1">
-                      <StatCard icon={Users} label="OCC / UR" value={`${formatPercent(nextWeekForecast.occ, 0)} / ${formatPercent(nextWeekForecast.ur, 0)}`} hint={`Эфф. мин/час: ${formatNumber(nextWeekForecast.effectiveMinutes, 1)}`} tone="emerald" />
-                    </div>
+                    <StatCard icon={Users} label="OCC / UR" value={`${formatPercent(nextWeekForecast.occ, 0)} / ${formatPercent(nextWeekForecast.ur, 0)}`} hint={`Эфф. мин/час: ${formatNumber(nextWeekForecast.effectiveMinutes, 1)}`} tone="emerald" />
                   ) : null}
                   {displayOptions.forecastKpiShrinkage ? (
-                    <div className="min-w-[180px] flex-1">
-                      <StatCard icon={ShieldAlert} label="Усушка" value={formatPercent(nextWeekForecast.shrinkage, 0)} hint="Коэффициент периода" tone="amber" />
-                    </div>
+                    <StatCard icon={ShieldAlert} label="Усушка" value={formatPercent(nextWeekForecast.shrinkage, 0)} hint="Коэффициент периода" tone="amber" />
                   ) : null}
                 </div>
 
