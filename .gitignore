@@ -6,3 +6,4 @@ dist/
 src/_extracted_script.jsx
 tools_find_tdz.js
 tools_find_tdz.cjs
+.claude/settings.local.json
