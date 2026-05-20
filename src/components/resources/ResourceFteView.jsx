@@ -2293,7 +2293,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
 
   return (
     <div className="min-h-screen bg-slate-50">
-      <div className="sticky top-0 z-20 border-b border-slate-200 bg-white/95 px-4 py-4 backdrop-blur md:px-6">
+      <div className={`${activeDashboardView === 'schedule_planner' ? 'relative' : 'sticky top-0'} z-20 border-b border-slate-200 bg-white/95 px-4 py-4 backdrop-blur md:px-6`}>
         <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
           <div>
             <h1 className="text-2xl font-semibold text-slate-950">Расчет ресурсов / FTE</h1>
