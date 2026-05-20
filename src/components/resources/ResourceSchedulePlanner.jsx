@@ -280,6 +280,13 @@ const isLockedPlannerShift = (shift) => Boolean(
   || shift?.source === 'work_schedule_carry_in'
 );
 
+const isCopyablePlannerShift = (shift) => Boolean(
+  shift
+  && !shift.readOnly
+  && shift.source !== 'auction'
+  && !isLockedPlannerShift(shift)
+);
+
 const clonePlannerDays = (days) =>
   (days || []).map((day) => ({
     ...day,
@@ -784,10 +791,12 @@ const PlannerDayRow = ({
   templates,
   selectedTemplateId,
   activeDragId,
+  selectedShiftKey,
   splitPreview,
   coverageView,
   onTimelineRef,
   onFocusedDayChange,
+  onSelectShift,
   onShiftPointerDown,
   onDeleteShift,
   onAddShift,
@@ -1030,6 +1039,7 @@ const PlannerDayRow = ({
                   const isLocked = isAuctionShift || isLockedPlannerShift(shift);
                   const isIncidentUplift = shift.isIncidentUplift || shift.source === 'incident_uplift' || shift.tone === 'emerald';
                   const isAuctionClaimed = isAuctionShift && shift.auctionStatus === 'claimed';
+                  const isSelected = selectedShiftKey === `${sourceDayIndex}-${shift.id}`;
                   const inactiveShiftClass = isAuctionShift
                     ? (isAuctionClaimed
                         ? 'z-20 cursor-default border-emerald-400 bg-emerald-100 text-emerald-900'
@@ -1046,13 +1056,14 @@ const PlannerDayRow = ({
                         isActive
                           ? 'z-30 border-slate-900 bg-slate-900 text-white'
                           : inactiveShiftClass
-                      }`}
+                      } ${isSelected ? 'ring-2 ring-slate-900/40 ring-offset-1 ring-offset-white' : ''}`}
                       style={{
                         top: laneTopOffset + lane * 34,
                         left: `${left}%`,
                         width: `${width}%`,
                       }}
                       onPointerDown={(event) => {
+                        if (typeof onSelectShift === 'function') onSelectShift(sourceDayIndex, shift.id);
                         if (isLocked) return;
                         if (event.button === 1) return;
                         onShiftPointerDown(event, sourceDayIndex, shift.id, 'move');
@@ -1325,6 +1336,7 @@ const ResourceSchedulePlanner = ({
   const [activeDragId, setActiveDragId] = useState('');
   const [splitPreview, setSplitPreview] = useState(null);
   const [selectedDayIndex, setSelectedDayIndex] = useState(0);
+  const [selectedShift, setSelectedShift] = useState(null);
   const [coverageView, setCoverageView] = useState('cards');
   const [coverageSource, setCoverageSource] = useState('planner');
   const [auctionLots, setAuctionLots] = useState([]);
@@ -1336,6 +1348,7 @@ const ResourceSchedulePlanner = ({
   const timelineRefs = useRef(new Map());
   const plannerDaysRef = useRef(plannerDays);
   const dragStartSnapshotRef = useRef(null);
+  const copiedShiftRef = useRef(null);
   const suppressContextMenuUntilRef = useRef(0);
 
   const emit = useCallback(
@@ -1378,6 +1391,7 @@ const ResourceSchedulePlanner = ({
       const previousDays = clonePlannerDays(previous);
       plannerDaysRef.current = previousDays;
       setPlannerDays(previousDays);
+      setSelectedShift(null);
       return current.slice(0, -1);
     });
   }, []);
@@ -1390,6 +1404,7 @@ const ResourceSchedulePlanner = ({
       const nextDays = clonePlannerDays(next);
       plannerDaysRef.current = nextDays;
       setPlannerDays(nextDays);
+      setSelectedShift(null);
       return current.slice(1);
     });
   }, []);
@@ -1461,6 +1476,7 @@ const ResourceSchedulePlanner = ({
         setSavedSchedule(schedule);
         setSavedScheduleSignature(plannerDaysSignature(nextDays));
         setSelectedDayIndex(0);
+        setSelectedShift(null);
         setHistoryPast([]);
         setHistoryFuture([]);
         setScheduleVariants([]);
@@ -1486,6 +1502,7 @@ const ResourceSchedulePlanner = ({
         setPreviewCapacityBase(null);
         setSelectedVariantKey('');
         setSelectedDayIndex(0);
+        setSelectedShift(null);
         setHistoryPast([]);
         setHistoryFuture([]);
       }
@@ -1510,6 +1527,7 @@ const ResourceSchedulePlanner = ({
     setSelectedVariantKey(variant.key || '');
     setIncludeIncidentUplift(Boolean(variant.includesIncidentUplift));
     setSelectedDayIndex(0);
+    setSelectedShift(null);
     setHistoryPast([]);
     setHistoryFuture([]);
     setServerSummary(variant.summary || null);
@@ -1698,6 +1716,7 @@ const ResourceSchedulePlanner = ({
   const currentScheduleSignature = useMemo(() => plannerDaysSignature(computedDays), [computedDays]);
   const hasScheduleToSave = computedDays.length > 0;
   const hasUnsavedScheduleChanges = hasScheduleToSave && currentScheduleSignature !== savedScheduleSignature;
+  const canSaveSchedule = hasUnsavedScheduleChanges && !isSavingSchedule;
   const lastScheduleDate = computedDays[computedDays.length - 1]?.date || selectedPeriodEnd || selectedWeekStart;
 
   const saveCurrentSchedule = useCallback(async () => {
@@ -1763,6 +1782,7 @@ const ResourceSchedulePlanner = ({
   useEffect(() => {
     if (!computedDays.length) {
       setSelectedDayIndex(0);
+      setSelectedShift(null);
       return;
     }
     setSelectedDayIndex((current) => clamp(Number(current || 0), 0, computedDays.length - 1));
@@ -1782,16 +1802,62 @@ const ResourceSchedulePlanner = ({
       const key = String(event.key || '').toLowerCase();
       const isZ = code === 'KeyZ' || key === 'z';
       const isY = code === 'KeyY' || key === 'y';
+      const isC = code === 'KeyC' || key === 'c';
+      const isV = code === 'KeyV' || key === 'v';
       const isUndo = (event.ctrlKey || event.metaKey) && isZ && !event.shiftKey;
       const isRedo = (event.ctrlKey || event.metaKey) && (isY || (isZ && event.shiftKey));
-      if (!isUndo && !isRedo) return;
+      const isCopy = (event.ctrlKey || event.metaKey) && isC && !event.shiftKey && !event.altKey;
+      const isPaste = (event.ctrlKey || event.metaKey) && isV && !event.shiftKey && !event.altKey;
+      if (!isUndo && !isRedo && !isCopy && !isPaste) return;
+
+      if (isCopy) {
+        const sourceDayIndex = Number(selectedShift?.dayIndex);
+        const shift = plannerDaysRef.current[sourceDayIndex]?.shifts?.find((item) => String(item.id) === String(selectedShift?.shiftId));
+        if (!isCopyablePlannerShift(shift)) return;
+        event.preventDefault();
+        copiedShiftRef.current = {
+          ...shift,
+          breaks: (shift.breaks || []).map((breakItem) => ({ ...breakItem })),
+        };
+        emit(`Смена скопирована: ${formatTime(shift.startMinute)}-${formatTime(shift.endMinute)}`);
+        return;
+      }
+
+      if (isPaste) {
+        const copiedShift = copiedShiftRef.current;
+        const currentDays = plannerDaysRef.current || [];
+        if (!copiedShift || !currentDays.length) return;
+        event.preventDefault();
+        const targetDayIndex = clamp(Number(selectedDayIndex || 0), 0, currentDays.length - 1);
+        const pastedShift = normalizeShiftTiming({
+          ...copiedShift,
+          id: `copy-${Date.now()}-${Math.round(Math.random() * 10000)}`,
+          readOnly: false,
+          isLocked: false,
+          locked: false,
+          excludeFromAuction: false,
+          breaks: (copiedShift.breaks || []).map((breakItem) => ({ ...breakItem })),
+        });
+        pushHistorySnapshot();
+        applyPlannerDaysUpdate((current) =>
+          current.map((day, index) => (
+            index === targetDayIndex
+              ? { ...day, shifts: [...(day.shifts || []), pastedShift] }
+              : day
+          )),
+        );
+        setSelectedShift({ dayIndex: targetDayIndex, shiftId: pastedShift.id });
+        emit(`Смена вставлена: ${formatTime(pastedShift.startMinute)}-${formatTime(pastedShift.endMinute)}`);
+        return;
+      }
+
       event.preventDefault();
       if (isUndo) undoPlannerChange();
       else redoPlannerChange();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [redoPlannerChange, undoPlannerChange]);
+  }, [applyPlannerDaysUpdate, emit, pushHistorySnapshot, redoPlannerChange, selectedDayIndex, selectedShift, undoPlannerChange]);
 
   useEffect(() => {
     const onContextMenu = (event) => {
@@ -2056,6 +2122,9 @@ const ResourceSchedulePlanner = ({
           : day
       )),
     );
+    setSelectedShift((current) => (
+      Number(current?.dayIndex) === Number(dayIndex) && String(current?.shiftId) === String(shiftId) ? null : current
+    ));
   }, [applyPlannerDaysUpdate, pushHistorySnapshot]);
 
   const addShift = useCallback((dayIndex, templateId) => {
@@ -2086,6 +2155,15 @@ const ResourceSchedulePlanner = ({
   }, [applyPlannerDaysUpdate, pushHistorySnapshot, selectedTemplate, templates]);
 
   const activeDayIndex = computedDays.length ? clamp(Number(selectedDayIndex || 0), 0, computedDays.length - 1) : 0;
+  const selectedShiftKey = selectedShift ? `${selectedShift.dayIndex}-${selectedShift.shiftId}` : '';
+
+  const selectPlannerShift = useCallback((dayIndex, shiftId) => {
+    const nextDayIndex = computedDays.length
+      ? clamp(Number(dayIndex || 0), 0, computedDays.length - 1)
+      : Number(dayIndex || 0);
+    setSelectedDayIndex(nextDayIndex);
+    setSelectedShift({ dayIndex: nextDayIndex, shiftId });
+  }, [computedDays.length]);
 
   const handleFocusedDayChange = useCallback((dayIndex) => {
     if (!computedDays.length) return;
@@ -2423,10 +2501,12 @@ const ResourceSchedulePlanner = ({
               templates={templates.filter((template) => template.enabled !== false)}
               selectedTemplateId={selectedTemplateId}
               activeDragId={activeDragId}
+              selectedShiftKey={selectedShiftKey}
               splitPreview={splitPreview}
               coverageView={coverageView}
               onTimelineRef={setTimelineRef}
               onFocusedDayChange={handleFocusedDayChange}
+              onSelectShift={selectPlannerShift}
               onShiftPointerDown={handleShiftPointerDown}
               onDeleteShift={deleteShift}
               onAddShift={addShift}
@@ -2439,8 +2519,8 @@ const ResourceSchedulePlanner = ({
         )}
       </div>
       {hasScheduleToSave ? (
-        <div className="fixed bottom-4 right-4 z-40 flex max-w-[calc(100vw-2rem)] items-center gap-3 rounded-xl border border-slate-200 bg-white/95 px-3 py-2 shadow-2xl backdrop-blur">
-          <div className="hidden min-w-0 text-xs text-slate-600 sm:block">
+        <div className="group fixed bottom-4 right-4 z-40 flex max-w-[calc(100vw-2rem)] items-center gap-3 overflow-hidden rounded-xl border border-slate-200/30 bg-white/15 px-2 py-2 opacity-55 shadow-lg backdrop-blur-md transition-all duration-200 hover:border-slate-200 hover:bg-white/95 hover:opacity-100 hover:shadow-2xl">
+          <div className="hidden max-w-0 overflow-hidden whitespace-nowrap text-xs text-slate-600 opacity-0 transition-all duration-200 group-hover:max-w-[260px] group-hover:opacity-100 sm:block">
             <div className="font-semibold text-slate-900">
               {hasUnsavedScheduleChanges ? 'Есть несохраненные изменения' : 'График сохранен'}
             </div>
@@ -2452,11 +2532,17 @@ const ResourceSchedulePlanner = ({
           <button
             type="button"
             onClick={saveCurrentSchedule}
-            disabled={!hasUnsavedScheduleChanges || isSavingSchedule}
-            className="inline-flex h-10 items-center gap-2 rounded-lg bg-slate-900 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-500"
+            disabled={!canSaveSchedule}
+            className={`inline-flex h-10 w-10 items-center justify-center gap-2 overflow-hidden rounded-lg border px-0 text-sm font-semibold shadow-sm transition-all duration-200 group-hover:w-40 group-hover:px-4 ${
+              canSaveSchedule
+                ? 'border-slate-400/40 bg-slate-900/10 text-slate-800 group-hover:border-slate-900 group-hover:bg-slate-900 group-hover:text-white'
+                : 'cursor-not-allowed border-slate-200/60 bg-white/25 text-slate-400 group-hover:bg-white/80 group-hover:text-slate-500'
+            }`}
           >
-            <Save size={16} />
-            {isSavingSchedule ? 'Сохранение...' : 'Сохранить'}
+            <Save size={16} className="shrink-0" />
+            <span className="max-w-0 overflow-hidden whitespace-nowrap opacity-0 transition-all duration-200 group-hover:max-w-[120px] group-hover:opacity-100">
+              {isSavingSchedule ? 'Сохранение...' : 'Сохранить'}
+            </span>
           </button>
         </div>
       ) : null}
