@@ -1814,19 +1814,27 @@ const ResourceSchedulePlanner = ({
 
       if (isCopy) {
         const sourceDayIndex = Number(selectedShift?.dayIndex);
-        const shift = plannerDaysRef.current[sourceDayIndex]?.shifts?.find((item) => String(item.id) === String(selectedShift?.shiftId));
+        const sourceShifts = plannerDaysRef.current[sourceDayIndex]?.shifts || [];
+        const sourceShiftIndex = sourceShifts.findIndex((item) => String(item.id) === String(selectedShift?.shiftId));
+        const shift = sourceShiftIndex >= 0 ? sourceShifts[sourceShiftIndex] : null;
         if (!isCopyablePlannerShift(shift)) return;
         event.preventDefault();
         copiedShiftRef.current = {
-          ...shift,
-          breaks: (shift.breaks || []).map((breakItem) => ({ ...breakItem })),
+          shift: {
+            ...shift,
+            breaks: (shift.breaks || []).map((breakItem) => ({ ...breakItem })),
+          },
+          sourceDayIndex,
+          sourceShiftId: shift.id,
+          sourceShiftIndex,
         };
         emit(`Смена скопирована: ${formatTime(shift.startMinute)}-${formatTime(shift.endMinute)}`);
         return;
       }
 
       if (isPaste) {
-        const copiedShift = copiedShiftRef.current;
+        const copied = copiedShiftRef.current;
+        const copiedShift = copied?.shift;
         const currentDays = plannerDaysRef.current || [];
         if (!copiedShift || !currentDays.length) return;
         event.preventDefault();
@@ -1842,11 +1850,18 @@ const ResourceSchedulePlanner = ({
         });
         pushHistorySnapshot();
         applyPlannerDaysUpdate((current) =>
-          current.map((day, index) => (
-            index === targetDayIndex
-              ? { ...day, shifts: [...(day.shifts || []), pastedShift] }
-              : day
-          )),
+          current.map((day, index) => {
+            if (index !== targetDayIndex) return day;
+            const shifts = day.shifts || [];
+            const anchorShiftId = Number(selectedShift?.dayIndex) === targetDayIndex
+              ? selectedShift.shiftId
+              : (Number(copied.sourceDayIndex) === targetDayIndex ? copied.sourceShiftId : null);
+            const anchorIndex = shifts.findIndex((shift) => String(shift.id) === String(anchorShiftId));
+            const insertIndex = anchorIndex >= 0 ? anchorIndex + 1 : shifts.length;
+            const nextShifts = [...shifts];
+            nextShifts.splice(insertIndex, 0, pastedShift);
+            return { ...day, shifts: nextShifts };
+          }),
         );
         setSelectedShift({ dayIndex: targetDayIndex, shiftId: pastedShift.id });
         emit(`Смена вставлена: ${formatTime(pastedShift.startMinute)}-${formatTime(pastedShift.endMinute)}`);
