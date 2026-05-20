@@ -807,7 +807,9 @@ const PlannerDayRow = ({
     ),
     [allDays],
   );
-  const rowHeight = Math.max(104, timeline.laneCount * 34 + 54);
+  const laneTopOffset = 18;
+  const coverageStickyReserve = coverageView === 'bars' ? 128 : 72;
+  const rowHeight = Math.max(76, timeline.laneCount * 34 + laneTopOffset + 10 + coverageStickyReserve);
   const hourColumnCount = Math.max(24, totalDays * 24);
   const maxCoverageValue = Math.max(
     1,
@@ -924,9 +926,34 @@ const PlannerDayRow = ({
             }}
             onPointerDown={handleMiddlePanPointerDown}
             onScroll={handleTimelineScroll}
-            className="overflow-x-auto rounded-lg border border-slate-200 bg-slate-50"
+            className="max-h-[calc(100vh-9rem)] overflow-auto rounded-lg border border-slate-200 bg-slate-50"
           >
             <div className="relative" style={{ width: `${totalDays * 100}%` }}>
+              <div className="sticky top-0 z-40 border-b border-slate-200 bg-white/95 shadow-sm backdrop-blur">
+                <div className="flex">
+                  {allDays.map((itemDay, index) => (
+                    <div
+                      key={`${itemDay.date || index}-header`}
+                      className={`relative shrink-0 border-r border-slate-300 px-2 py-2 last:border-r-0 ${
+                        Number(index) === Number(dayIndex) ? 'bg-white' : 'bg-slate-50'
+                      }`}
+                      style={{ width: `${100 / totalDays}%` }}
+                    >
+                      <div className="mb-1 truncate text-[11px] font-semibold text-slate-700">
+                        {itemDay.short || itemDay.label} · {itemDay.date}
+                      </div>
+                      <div className="grid" style={{ gridTemplateColumns: 'repeat(24, minmax(0, 1fr))' }}>
+                        {Array.from({ length: 24 }, (_, hour) => (
+                          <div key={hour} className="text-center text-[10px] font-medium text-slate-500">
+                            {String(hour).padStart(2, '0')}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
               <div className="relative overflow-hidden" style={{ height: rowHeight }}>
                 <div className="absolute inset-0 flex">
                   {allDays.map((itemDay, index) => (
@@ -943,13 +970,8 @@ const PlannerDayRow = ({
                     >
                       <div className="absolute inset-0 grid" style={{ gridTemplateColumns: 'repeat(24, minmax(0, 1fr))' }}>
                         {Array.from({ length: 24 }, (_, hour) => (
-                          <div key={hour} className="border-r border-slate-200/80 last:border-r-0">
-                            <div className="px-1 pt-6 text-[10px] font-medium text-slate-400">{String(hour).padStart(2, '0')}</div>
-                          </div>
+                          <div key={hour} className="border-r border-slate-200/80 last:border-r-0" />
                         ))}
-                      </div>
-                      <div className="absolute left-2 top-1 z-[1] rounded bg-white/80 px-1.5 py-0.5 text-[11px] font-semibold text-slate-700 shadow-sm">
-                        {itemDay.short || itemDay.label} · {itemDay.date}
                       </div>
                     </div>
                   ))}
@@ -992,7 +1014,7 @@ const PlannerDayRow = ({
                           : inactiveShiftClass
                       }`}
                       style={{
-                        top: 42 + lane * 34,
+                        top: laneTopOffset + lane * 34,
                         left: `${left}%`,
                         width: `${width}%`,
                       }}
@@ -1038,7 +1060,7 @@ const PlannerDayRow = ({
                         {formatTime(start)}-{formatTime(end)}
                         {isAuctionShift
                           ? <> · <span className={isAuctionClaimed ? 'font-bold' : 'italic'}>{shift.label}</span></>
-                          : <> · {shift.rate}</>
+                          : <> · {formatDurationHours(duration)}</>
                         }
                       </span>
                       {end > 1440 ? <span className={`relative z-10 ml-1 shrink-0 rounded bg-white/70 px-1 text-[10px] ${isIncidentUplift ? 'text-emerald-800' : 'text-blue-800'}`}>+1</span> : null}
@@ -1082,7 +1104,7 @@ const PlannerDayRow = ({
                       const split = Number(splitPreview.minute || 0) + Number(splitPreview.dayIndex || 0) * 1440;
                       const startAbs = splitTimelineItem.startAbs;
                       const endAbs = splitTimelineItem.endAbs;
-                      const top = 42 + Math.max(0, splitTimelineItem.lane) * 34 - 24;
+                      const top = Math.max(2, laneTopOffset + Math.max(0, splitTimelineItem.lane) * 34 - 24);
                       const leftCenter = clamp((((startAbs + split) / 2) / totalMinutes) * 100, 0, 100);
                       const rightCenter = clamp((((split + endAbs) / 2) / totalMinutes) * 100, 0, 100);
                       return (
@@ -1106,64 +1128,66 @@ const PlannerDayRow = ({
                 ) : null}
               </div>
 
-              {coverageView === 'bars' ? (
-                <div className="mt-3 rounded-lg border border-slate-200 bg-white p-3">
-                  <div className="mb-3 flex flex-wrap gap-3 text-xs text-slate-600">
-                    <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-blue-500" />Нужно</span>
-                    <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-emerald-500" />Покрыто</span>
-                    <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-rose-500" />Дефицит</span>
-                    <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-blue-600" />Перепокрытие</span>
-                  </div>
-                  <div className="space-y-2">
-                    {[
-                      ['needed', 'Нужно'],
-                      ['covered', 'Покрыто'],
-                    ].map(([key, label]) => (
-                      <div key={key} className="grid grid-cols-[72px_minmax(0,1fr)] items-center gap-2">
-                        <div className="text-xs font-semibold text-slate-600">{label}</div>
-                        <div className="grid h-8 gap-1" style={{ gridTemplateColumns: `repeat(${hourColumnCount}, minmax(24px, 1fr))` }}>
-                          {coverageRows.map((row) => {
-                            const value = key === 'needed'
-                              ? Number(row.needed || 0)
-                              : Number(row.coveredRounded ?? roundMathFte(row.covered || 0));
-                            const heightPercent = clamp((value / maxCoverageValue) * 100, value > 0 ? 28 : 12, 100);
-                            return (
-                              <div
-                                key={`${key}-${row.sourceDayIndex}-${row.hour}`}
-                                className={`flex items-end rounded-md bg-slate-100 px-0.5 ${
-                                  Number(row.hour) === 0 ? 'border-l-2 border-slate-300' : ''
-                                }`}
-                                title={`${allDays[row.sourceDayIndex]?.short || ''} ${String(row.hour).padStart(2, '0')}:00 · нужно ${formatFte(row.needed || 0)} · покрыто ${formatFte(row.coveredRounded ?? roundMathFte(row.covered || 0))}`}
-                              >
+              <div className="sticky bottom-0 z-40 border-t border-slate-200 bg-white/95 p-3 shadow-[0_-10px_24px_rgba(15,23,42,0.08)] backdrop-blur">
+                {coverageView === 'bars' ? (
+                  <div className="rounded-lg border border-slate-200 bg-white p-3">
+                    <div className="mb-3 flex flex-wrap gap-3 text-xs text-slate-600">
+                      <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-blue-500" />Нужно</span>
+                      <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-emerald-500" />Покрыто</span>
+                      <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-rose-500" />Дефицит</span>
+                      <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-blue-600" />Перепокрытие</span>
+                    </div>
+                    <div className="space-y-2">
+                      {[
+                        ['needed', 'Нужно'],
+                        ['covered', 'Покрыто'],
+                      ].map(([key, label]) => (
+                        <div key={key} className="grid grid-cols-[72px_minmax(0,1fr)] items-center gap-2">
+                          <div className="text-xs font-semibold text-slate-600">{label}</div>
+                          <div className="grid h-8 gap-1" style={{ gridTemplateColumns: `repeat(${hourColumnCount}, minmax(24px, 1fr))` }}>
+                            {coverageRows.map((row) => {
+                              const value = key === 'needed'
+                                ? Number(row.needed || 0)
+                                : Number(row.coveredRounded ?? roundMathFte(row.covered || 0));
+                              const heightPercent = clamp((value / maxCoverageValue) * 100, value > 0 ? 28 : 12, 100);
+                              return (
                                 <div
-                                  className={`w-full rounded-sm ${coverageBarTone(row, key)}`}
-                                  style={{ height: `${heightPercent}%`, ...coverageBarStyle(row, key) }}
-                                />
-                              </div>
-                            );
-                          })}
+                                  key={`${key}-${row.sourceDayIndex}-${row.hour}`}
+                                  className={`flex items-end rounded-md bg-slate-100 px-0.5 ${
+                                    Number(row.hour) === 0 ? 'border-l-2 border-slate-300' : ''
+                                  }`}
+                                  title={`${allDays[row.sourceDayIndex]?.short || ''} ${String(row.hour).padStart(2, '0')}:00 · нужно ${formatFte(row.needed || 0)} · покрыто ${formatFte(row.coveredRounded ?? roundMathFte(row.covered || 0))}`}
+                                >
+                                  <div
+                                    className={`w-full rounded-sm ${coverageBarTone(row, key)}`}
+                                    style={{ height: `${heightPercent}%`, ...coverageBarStyle(row, key) }}
+                                  />
+                                </div>
+                              );
+                            })}
+                          </div>
                         </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="grid gap-1" style={{ gridTemplateColumns: `repeat(${hourColumnCount}, minmax(40px, 1fr))` }}>
+                    {coverageRows.map((row) => (
+                      <div
+                        key={`${row.sourceDayIndex}-${row.hour}`}
+                        className={`rounded-md border px-1 py-1 text-center text-[10px] ${coverageTone(row)} ${
+                          Number(row.hour) === 0 ? 'border-l-2 border-l-slate-300' : ''
+                        }`}
+                        style={coverageCellStyle(row)}
+                        title={`${allDays[row.sourceDayIndex]?.short || ''} ${String(row.hour).padStart(2, '0')}:00 · округл. ${formatFte(row.coveredRounded ?? roundMathFte(row.covered || 0))}/${formatFte(row.needed || 0)} · без округления ${formatNumber(row.covered, 2)}/${formatNumber(row.rawNeeded, 2)}`}
+                      >
+                        <div className="font-semibold">{formatFte(row.coveredRounded ?? roundMathFte(row.covered || 0))}</div>
+                        <div>{formatFte(row.needed || 0)}</div>
                       </div>
                     ))}
                   </div>
-                </div>
-              ) : (
-                <div className="mt-3 grid gap-1" style={{ gridTemplateColumns: `repeat(${hourColumnCount}, minmax(40px, 1fr))` }}>
-                  {coverageRows.map((row) => (
-                    <div
-                      key={`${row.sourceDayIndex}-${row.hour}`}
-                      className={`rounded-md border px-1 py-1 text-center text-[10px] ${coverageTone(row)} ${
-                        Number(row.hour) === 0 ? 'border-l-2 border-l-slate-300' : ''
-                      }`}
-                      style={coverageCellStyle(row)}
-                      title={`${allDays[row.sourceDayIndex]?.short || ''} ${String(row.hour).padStart(2, '0')}:00 · округл. ${formatFte(row.coveredRounded ?? roundMathFte(row.covered || 0))}/${formatFte(row.needed || 0)} · без округления ${formatNumber(row.covered, 2)}/${formatNumber(row.rawNeeded, 2)}`}
-                    >
-                      <div className="font-semibold">{formatFte(row.coveredRounded ?? roundMathFte(row.covered || 0))}</div>
-                      <div>{formatFte(row.needed || 0)}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
+                )}
+              </div>
             </div>
           </div>
         </div>
