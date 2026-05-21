@@ -2047,8 +2047,6 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         </div>
                         )}
 
-                        {userToEdit?.role !== "sv" && (
-                            <>
                             {canShowOperatorRateControls && (
                                 <div className="grid grid-cols-1 gap-4">
                                 {isAdminLikeRequester && isOperatorDraft(editedUser) && (
@@ -2175,8 +2173,6 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </div>
                     </>
                     )}
-                    </>
-                )}
                     </>
                 )}
 
