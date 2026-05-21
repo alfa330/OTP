@@ -2278,7 +2278,8 @@ class Database:
         front_office_training_value = None if front_office_training is None else bool(front_office_training)
         if not front_office_training_value:
             front_office_training_date = None
-        if role_norm != 'operator':
+        if role_norm == 'trainee':
+            has_proxy_value = False
             proxy_card_number = None
         if role_norm == 'trainer':
             direction_id = None
@@ -4153,6 +4154,385 @@ class Database:
                 include_admin_fields=True
             ),
         }
+
+    def get_shift_auction_test_export_data(self):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT enabled, starts_at, ends_at, paused_at, finished_at, selected_schedule_plan_id
+                FROM shift_auction_test_access
+                WHERE id = 1
+            """)
+            settings_row = cursor.fetchone()
+            if not settings_row:
+                raise ValueError("AUCTION_NOT_AVAILABLE")
+
+            selected_period_row = self._get_shift_auction_period_row_tx(cursor, settings_row[5])
+            selected_period = self._serialize_shift_auction_period_row(selected_period_row)
+
+            cursor.execute("""
+                SELECT
+                    l.id,
+                    l.shift_date,
+                    l.start_time,
+                    l.end_time,
+                    l.rate_min,
+                    l.status,
+                    l.claimed_by,
+                    u.name AS claimed_by_name,
+                    l.claimed_at,
+                    l.breaks,
+                    l.source_schedule_plan_id,
+                    l.source_schedule_shift_id
+                FROM shift_auction_test_lots l
+                LEFT JOIN users u ON u.id = l.claimed_by
+                ORDER BY l.shift_date, l.start_time, l.id
+            """)
+            lot_rows = cursor.fetchall() or []
+            if not lot_rows:
+                raise ValueError("AUCTION_NO_LOTS")
+
+            lots = [self._serialize_shift_auction_lot_row(row) for row in lot_rows]
+            lot_dates = sorted({row[1] for row in lot_rows if row and row[1]})
+
+            cursor.execute("""
+                WITH report_operators AS (
+                    SELECT operator_id AS id
+                    FROM shift_auction_test_participants
+                    UNION
+                    SELECT claimed_by AS id
+                    FROM shift_auction_test_lots
+                    WHERE claimed_by IS NOT NULL
+                )
+                SELECT
+                    u.id,
+                    u.name,
+                    u.rate,
+                    u.status,
+                    d.name AS direction_name,
+                    u.supervisor_id,
+                    s.name AS supervisor_name
+                FROM report_operators ro
+                JOIN users u ON u.id = ro.id
+                LEFT JOIN directions d ON d.id = u.direction_id
+                LEFT JOIN users s ON s.id = u.supervisor_id
+                ORDER BY LOWER(COALESCE(u.name, '')), u.id
+            """)
+            operator_rows = cursor.fetchall() or []
+            operators = [
+                {
+                    "id": int(row[0]),
+                    "name": row[1] or f"Operator #{row[0]}",
+                    "rate": float(row[2]) if row[2] is not None else None,
+                    "status": row[3] or "",
+                    "direction": row[4] or "",
+                    "supervisor_id": row[5],
+                    "supervisor_name": row[6] or "",
+                }
+                for row in operator_rows
+                if row and row[0] is not None
+            ]
+
+            cursor.execute("""
+                SELECT operator_id, day_off_date
+                FROM shift_auction_test_day_offs
+                ORDER BY operator_id, day_off_date
+            """)
+            day_offs = [
+                {
+                    "operator_id": int(row[0]),
+                    "date": row[1].strftime('%Y-%m-%d') if row[1] else None,
+                }
+                for row in (cursor.fetchall() or [])
+                if row and row[0] is not None and row[1] is not None
+            ]
+
+            return {
+                "settings": {
+                    "enabled": bool(settings_row[0]),
+                    "starts_at": settings_row[1].isoformat() if settings_row[1] else None,
+                    "ends_at": settings_row[2].isoformat() if settings_row[2] else None,
+                    "paused_at": settings_row[3].isoformat() if settings_row[3] else None,
+                    "finished_at": settings_row[4].isoformat() if settings_row[4] else None,
+                    "selected_schedule_plan_id": settings_row[5],
+                    "status": self._get_shift_auction_test_status(
+                        settings_row[0],
+                        settings_row[1],
+                        settings_row[2],
+                        settings_row[3],
+                        settings_row[4]
+                    ),
+                },
+                "selected_period": selected_period,
+                "lot_dates": [item.strftime('%Y-%m-%d') for item in lot_dates],
+                "operators": operators,
+                "lots": lots,
+                "day_offs": day_offs,
+            }
+
+    @staticmethod
+    def _parse_shift_auction_export_date(value):
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        text = str(value or '').strip()
+        if not text:
+            return None
+        try:
+            return datetime.strptime(text[:10], '%Y-%m-%d').date()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _format_shift_auction_excel_time(value):
+        if hasattr(value, 'strftime'):
+            text = value.strftime('%H:%M')
+        else:
+            text = str(value or '').strip()
+        try:
+            hh, mm = text.split(':', 1)
+            h = int(hh)
+            m = int(str(mm)[:2])
+        except Exception:
+            return text
+        if m == 0:
+            return str(h)
+        return f"{h}/{m:02d}"
+
+    def _format_shift_auction_report_shift(self, lot):
+        start = self._format_shift_auction_excel_time(lot.get('start_time') or lot.get('start'))
+        end = self._format_shift_auction_excel_time(lot.get('end_time') or lot.get('end'))
+        return f"{start}*{end}" if start or end else ""
+
+    @staticmethod
+    def _shift_auction_report_duration_label(lot):
+        try:
+            start_h, start_m = [int(part) for part in str(lot.get('start_time') or '').split(':')[:2]]
+            end_h, end_m = [int(part) for part in str(lot.get('end_time') or '').split(':')[:2]]
+        except Exception:
+            return ""
+        start_min = start_h * 60 + start_m
+        end_min = end_h * 60 + end_m
+        if end_min <= start_min:
+            end_min += 24 * 60
+        duration_min = max(0, end_min - start_min)
+        hours = duration_min / 60
+        if abs(hours - round(hours)) < 0.001:
+            return f"{int(round(hours))} ч"
+        return f"{hours:.2f}".rstrip('0').rstrip('.') + " ч"
+
+    def generate_shift_auction_test_excel_report(self):
+        report = self.get_shift_auction_test_export_data()
+        selected_period = report.get('selected_period') or {}
+        lot_dates = [
+            self._parse_shift_auction_export_date(value)
+            for value in (report.get('lot_dates') or [])
+        ]
+        lot_dates = sorted({value for value in lot_dates if value})
+        start_date_obj = self._parse_shift_auction_export_date(selected_period.get('date_from'))
+        end_date_obj = self._parse_shift_auction_export_date(selected_period.get('date_to'))
+        if not start_date_obj and lot_dates:
+            start_date_obj = min(lot_dates)
+        if not end_date_obj and lot_dates:
+            end_date_obj = max(lot_dates)
+        if not start_date_obj or not end_date_obj or end_date_obj < start_date_obj:
+            raise ValueError("AUCTION_NO_LOTS")
+
+        date_list = []
+        current_date = start_date_obj
+        while current_date <= end_date_obj:
+            date_list.append(current_date)
+            current_date += timedelta(days=1)
+
+        operators = report.get('operators') or []
+        lots = report.get('lots') or []
+        settings = report.get('settings') or {}
+
+        claimed_by_operator_date = {}
+        unclaimed_lots = []
+        for lot in lots:
+            status = str(lot.get('status') or '').strip().lower()
+            if status == 'claimed' and lot.get('claimed_by') is not None:
+                key = (int(lot.get('claimed_by')), str(lot.get('shift_date') or ''))
+                claimed_by_operator_date.setdefault(key, []).append(lot)
+            elif status != 'claimed':
+                unclaimed_lots.append(lot)
+
+        day_off_dates = {
+            (int(item.get('operator_id')), str(item.get('date') or ''))
+            for item in (report.get('day_offs') or [])
+            if item.get('operator_id') is not None and item.get('date')
+        }
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = 'Итоги аукциона'
+
+        total_columns = max(2 + len(date_list), 6)
+
+        thin_side = Side(style='thin', color='CBD5E1')
+        border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+        title_fill = PatternFill(fill_type='solid', fgColor='0F172A')
+        subtitle_fill = PatternFill(fill_type='solid', fgColor='E0F2FE')
+        matrix_header_fill = PatternFill(fill_type='solid', fgColor='1E3A8A')
+        unclaimed_header_fill = PatternFill(fill_type='solid', fgColor='92400E')
+        claimed_fill = PatternFill(fill_type='solid', fgColor='DCFCE7')
+        day_off_fill = PatternFill(fill_type='solid', fgColor='F1F5F9')
+        zebra_fill = PatternFill(fill_type='solid', fgColor='F8FAFC')
+        empty_fill = PatternFill(fill_type='solid', fgColor='FFFFFF')
+
+        title_font = Font(bold=True, color='FFFFFF', size=14)
+        subtitle_font = Font(color='0F172A', size=10)
+        header_font = Font(bold=True, color='FFFFFF')
+        section_font = Font(bold=True, color='FFFFFF', size=12)
+        base_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        left_alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
+
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=total_columns)
+        title_cell = ws.cell(row=1, column=1, value='Отчет по аукциону смен')
+        title_cell.fill = title_fill
+        title_cell.font = title_font
+        title_cell.alignment = left_alignment
+
+        period_label = f"{start_date_obj.strftime('%d.%m.%Y')} - {end_date_obj.strftime('%d.%m.%Y')}"
+        generated_label = datetime.now().strftime('%d.%m.%Y %H:%M')
+        status_label = {
+            'disabled': 'выключен',
+            'scheduled': 'запланирован',
+            'open': 'открыт',
+            'paused': 'приостановлен',
+            'closed': 'завершен',
+        }.get(str(settings.get('status') or '').lower(), str(settings.get('status') or ''))
+        ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=total_columns)
+        subtitle_cell = ws.cell(
+            row=2,
+            column=1,
+            value=f"Период: {period_label} | Статус: {status_label or '-'} | Сформировано: {generated_label}"
+        )
+        subtitle_cell.fill = subtitle_fill
+        subtitle_cell.font = subtitle_font
+        subtitle_cell.alignment = left_alignment
+
+        matrix_header_row = 4
+        ws.cell(row=matrix_header_row, column=1, value='ФИО')
+        ws.cell(row=matrix_header_row, column=2, value='Ставка')
+        for idx, day_obj in enumerate(date_list, start=3):
+            cell = ws.cell(row=matrix_header_row, column=idx, value=day_obj)
+            cell.number_format = 'DD.MM.YYYY'
+
+        for col_idx in range(1, total_columns + 1):
+            cell = ws.cell(row=matrix_header_row, column=col_idx)
+            cell.fill = matrix_header_fill
+            cell.font = header_font
+            cell.border = border
+            cell.alignment = base_alignment
+
+        matrix_first_data_row = matrix_header_row + 1
+        if operators:
+            for row_idx, operator in enumerate(operators, start=matrix_first_data_row):
+                operator_id = int(operator.get('id'))
+                ws.cell(row=row_idx, column=1, value=operator.get('name') or '')
+                rate_cell = ws.cell(row=row_idx, column=2, value=operator.get('rate') if operator.get('rate') is not None else '')
+                if isinstance(rate_cell.value, (int, float)):
+                    rate_cell.number_format = '0.00'
+
+                for col_idx, day_obj in enumerate(date_list, start=3):
+                    date_key = day_obj.strftime('%Y-%m-%d')
+                    shifts = claimed_by_operator_date.get((operator_id, date_key), [])
+                    cell = ws.cell(row=row_idx, column=col_idx)
+                    if shifts:
+                        cell.value = ', '.join(filter(None, (self._format_shift_auction_report_shift(lot) for lot in shifts)))
+                        cell.fill = claimed_fill
+                    elif (operator_id, date_key) in day_off_dates:
+                        cell.value = 'Выходной'
+                        cell.fill = day_off_fill
+                    else:
+                        cell.value = ''
+                        cell.fill = zebra_fill if ((row_idx - matrix_first_data_row) % 2) else empty_fill
+
+                for col_idx in range(1, total_columns + 1):
+                    cell = ws.cell(row=row_idx, column=col_idx)
+                    cell.border = border
+                    cell.alignment = left_alignment if col_idx == 1 else base_alignment
+                    if col_idx <= 2 and ((row_idx - matrix_first_data_row) % 2):
+                        cell.fill = zebra_fill
+            matrix_last_row = matrix_first_data_row + len(operators) - 1
+        else:
+            matrix_last_row = matrix_first_data_row
+            ws.merge_cells(start_row=matrix_first_data_row, start_column=1, end_row=matrix_first_data_row, end_column=total_columns)
+            cell = ws.cell(row=matrix_first_data_row, column=1, value='Нет выбранных операторов для отчета')
+            cell.alignment = left_alignment
+            cell.fill = zebra_fill
+            for col_idx in range(1, total_columns + 1):
+                ws.cell(row=matrix_first_data_row, column=col_idx).border = border
+
+        ws.freeze_panes = 'C5'
+        ws.auto_filter.ref = f"A{matrix_header_row}:{get_column_letter(2 + len(date_list))}{max(matrix_last_row, matrix_header_row)}"
+
+        unclaimed_title_row = matrix_last_row + 3
+        unclaimed_columns = ['Дата', 'Смена', 'Ставка от', 'Длительность', 'Статус', 'Лот']
+        ws.merge_cells(start_row=unclaimed_title_row, start_column=1, end_row=unclaimed_title_row, end_column=len(unclaimed_columns))
+        section_cell = ws.cell(row=unclaimed_title_row, column=1, value='Неразобранные смены')
+        section_cell.fill = unclaimed_header_fill
+        section_cell.font = section_font
+        section_cell.alignment = left_alignment
+
+        unclaimed_header_row = unclaimed_title_row + 1
+        for col_idx, label in enumerate(unclaimed_columns, start=1):
+            cell = ws.cell(row=unclaimed_header_row, column=col_idx, value=label)
+            cell.fill = unclaimed_header_fill
+            cell.font = header_font
+            cell.border = border
+            cell.alignment = base_alignment
+
+        if unclaimed_lots:
+            for row_idx, lot in enumerate(unclaimed_lots, start=unclaimed_header_row + 1):
+                status = str(lot.get('status') or '').strip().lower()
+                status_text = 'Отменена' if status == 'cancelled' else 'Свободна'
+                shift_date = self._parse_shift_auction_export_date(lot.get('shift_date'))
+                values = [
+                    shift_date,
+                    self._format_shift_auction_report_shift(lot),
+                    float(lot.get('rate_min') or 0),
+                    self._shift_auction_report_duration_label(lot),
+                    status_text,
+                    lot.get('id'),
+                ]
+                for col_idx, value in enumerate(values, start=1):
+                    cell = ws.cell(row=row_idx, column=col_idx, value=value)
+                    cell.border = border
+                    cell.alignment = base_alignment if col_idx != 2 else left_alignment
+                    if col_idx == 1 and shift_date:
+                        cell.number_format = 'DD.MM.YYYY'
+                    if col_idx == 3 and isinstance(value, (int, float)):
+                        cell.number_format = '0.00'
+                    if (row_idx - unclaimed_header_row) % 2 == 0:
+                        cell.fill = zebra_fill
+        else:
+            row_idx = unclaimed_header_row + 1
+            ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=len(unclaimed_columns))
+            cell = ws.cell(row=row_idx, column=1, value='Все смены разобраны')
+            cell.alignment = left_alignment
+            cell.fill = claimed_fill
+            for col_idx in range(1, len(unclaimed_columns) + 1):
+                ws.cell(row=row_idx, column=col_idx).border = border
+
+        ws.row_dimensions[1].height = 26
+        ws.row_dimensions[2].height = 22
+        ws.row_dimensions[matrix_header_row].height = 24
+        ws.column_dimensions['A'].width = 34
+        ws.column_dimensions['B'].width = 10
+        for idx in range(len(date_list)):
+            ws.column_dimensions[get_column_letter(3 + idx)].width = 15
+        ws.column_dimensions['C'].width = max(ws.column_dimensions['C'].width or 0, 13)
+        ws.column_dimensions['D'].width = max(ws.column_dimensions['D'].width or 0, 14)
+        ws.column_dimensions['E'].width = max(ws.column_dimensions['E'].width or 0, 12)
+        ws.column_dimensions['F'].width = max(ws.column_dimensions['F'].width or 0, 10)
+
+        output = BytesIO()
+        wb.save(output)
+        output.seek(0)
+        return output, start_date_obj, end_date_obj
 
     def get_shift_auction_test_snapshot(self, current_user_id=None, include_admin_fields=False):
         current_id = None
@@ -9391,6 +9771,8 @@ class Database:
             old_field_value = row[1]
             if current_role == 'trainer' and field in ('direction_id', 'supervisor_id'):
                 value = None
+            if current_role == 'trainee' and field in ('has_proxy', 'proxy_card_number'):
+                value = False if field == 'has_proxy' else None
             old_value = str(old_field_value) if old_field_value is not None else None
 
             # When an operator is manually returned from dismissal via "Employees",

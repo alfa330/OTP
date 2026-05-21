@@ -3176,6 +3176,35 @@ def api_shift_auction_test_topup():
         return jsonify({"error": "Internal server error"}), 500
 
 
+@app.route('/api/shift_auction/test_export_excel', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_shift_auction_test_export_excel():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not _is_admin_role(requester[3]):
+            return jsonify({"error": "Only admins can export shift auction reports"}), 403
+
+        output, start_date_obj, end_date_obj = db.generate_shift_auction_test_excel_report()
+        filename = f"shift_auction_report_{start_date_obj.strftime('%Y%m%d')}_{end_date_obj.strftime('%Y%m%d')}.xlsx"
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name=filename,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+    except ValueError as error:
+        return _shift_auction_test_error_response(error)
+    except Exception as error:
+        logging.error(f"Shift auction Excel export API error: {error}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/shift_auction/test_publish', methods=['POST', 'OPTIONS'])
 @require_api_key
 def api_shift_auction_test_publish():
@@ -4547,7 +4576,9 @@ def admin_update_user():
         ]:
             value = str(value).strip() if value is not None else ''
             value = value or None
-            if field in ['sip_number', 'proxy_card_number'] and target_role != 'operator':
+            if field == 'sip_number' and target_role != 'operator':
+                value = None
+            if field == 'proxy_card_number' and target_role == 'trainee':
                 value = None
             if field in ['phone', 'close_contact_1_phone', 'close_contact_2_phone'] and value and not _is_valid_kz_phone(value):
                 return jsonify({"error": f"Invalid {field} format. Use +7XXXXXXXXXX"}), 400
@@ -4575,6 +4606,8 @@ def admin_update_user():
                 value = False
             else:
                 return jsonify({"error": f"Invalid {field} value"}), 400
+            if field == 'has_proxy' and target_role == 'trainee':
+                value = False
         else:
             return jsonify({"error": "Invalid field"}), 400
 
@@ -5567,33 +5600,119 @@ def get_sv_list():
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
-        if not (_is_admin_role(requester[3]) or _is_supervisor_role(requester[3])):
+        requester_role = _normalize_user_role(requester[3])
+        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role)):
             return jsonify({"error": "Only admins or supervisors can access supervisors list"}), 403
 
+        include_full_profile = _is_admin_role(requester_role)
         with db._get_cursor() as cursor:
-            cursor.execute("""
-                SELECT id, name, hours_table_url, role, hire_date, status, gender, birth_date, avatar_bucket, avatar_blob_path
-                FROM users
-                WHERE LOWER(COALESCE(role, '')) IN ('sv', 'supervisor')
-                ORDER BY name
-            """)
-            supervisors = cursor.fetchall()
+            if include_full_profile:
+                cursor.execute("""
+                    SELECT
+                        id,
+                        name,
+                        hours_table_url,
+                        role,
+                        hire_date,
+                        status,
+                        gender,
+                        birth_date,
+                        avatar_bucket,
+                        avatar_blob_path,
+                        avatar_updated_at,
+                        phone,
+                        email,
+                        instagram,
+                        telegram_nick,
+                        company_name,
+                        employment_type,
+                        study_place,
+                        study_course,
+                        study_completed,
+                        study_completion_year,
+                        close_contact_1_relation,
+                        close_contact_1_full_name,
+                        close_contact_1_phone,
+                        close_contact_2_relation,
+                        close_contact_2_full_name,
+                        close_contact_2_phone,
+                        card_number,
+                        COALESCE(has_proxy, FALSE) as has_proxy,
+                        proxy_card_number,
+                        internship_in_company,
+                        front_office_training,
+                        front_office_training_date,
+                        taxipro_id,
+                        rate,
+                        direction_id,
+                        supervisor_id
+                    FROM users
+                    WHERE LOWER(COALESCE(role, '')) IN ('sv', 'supervisor')
+                    ORDER BY name
+                """)
+                supervisors = cursor.fetchall()
+                sv_data = []
+                for sv in supervisors:
+                    sv_data.append({
+                        "id": sv[0],
+                        "name": sv[1],
+                        "table": sv[2],
+                        "role": _normalize_user_role(sv[3]),
+                        "hire_date": sv[4].strftime('%d-%m-%Y') if sv[4] else None,
+                        "status": sv[5],
+                        "gender": sv[6],
+                        "birth_date": sv[7].strftime('%d-%m-%Y') if sv[7] else None,
+                        "avatar_url": _build_avatar_signed_url(sv[8], sv[9]),
+                        "avatar_updated_at": sv[10].isoformat() if sv[10] else None,
+                        "phone": sv[11] or "",
+                        "email": sv[12] or "",
+                        "instagram": sv[13] or "",
+                        "telegram_nick": sv[14] or "",
+                        "company_name": sv[15] or "",
+                        "employment_type": sv[16] or "",
+                        "study_place": sv[17] or "",
+                        "study_course": sv[18] or "",
+                        "study_completed": bool(sv[19]) if sv[19] is not None else False,
+                        "study_completion_year": int(sv[20]) if sv[20] is not None else None,
+                        "close_contact_1_relation": sv[21] or "",
+                        "close_contact_1_full_name": sv[22] or "",
+                        "close_contact_1_phone": sv[23] or "",
+                        "close_contact_2_relation": sv[24] or "",
+                        "close_contact_2_full_name": sv[25] or "",
+                        "close_contact_2_phone": sv[26] or "",
+                        "card_number": sv[27] or "",
+                        "has_proxy": bool(sv[28]) if sv[28] is not None else False,
+                        "proxy_card_number": sv[29] or "",
+                        "internship_in_company": bool(sv[30]) if sv[30] is not None else False,
+                        "front_office_training": bool(sv[31]) if sv[31] is not None else False,
+                        "front_office_training_date": sv[32].strftime('%Y-%m-%d') if sv[32] else None,
+                        "taxipro_id": sv[33] or "",
+                        "rate": float(sv[34]) if sv[34] is not None else 1.0,
+                        "direction_id": sv[35],
+                        "supervisor_id": sv[36]
+                    })
+            else:
+                cursor.execute("""
+                    SELECT id, name, hours_table_url, role, hire_date, status, avatar_bucket, avatar_blob_path
+                    FROM users
+                    WHERE LOWER(COALESCE(role, '')) IN ('sv', 'supervisor')
+                    ORDER BY name
+                """)
+                supervisors = cursor.fetchall()
+                sv_data = [
+                    {
+                        "id": sv[0],
+                        "name": sv[1],
+                        "table": sv[2],
+                        "role": _normalize_user_role(sv[3]),
+                        "hire_date": sv[4].strftime('%d-%m-%Y') if sv[4] else None,
+                        "status": sv[5],
+                        "avatar_url": _build_avatar_signed_url(sv[6], sv[7])
+                    }
+                    for sv in supervisors
+                ]
 
-        logging.info(f"Fetched {len(supervisors)} supervisors")
-        sv_data = [
-            {
-                "id": sv[0],
-                "name": sv[1],
-                "table": sv[2],
-                "role": sv[3],
-                "hire_date": sv[4].strftime('%d-%m-%Y') if sv[4] else None,
-                "status": sv[5],
-                "gender": sv[6],
-                "birth_date": sv[7].strftime('%d-%m-%Y') if sv[7] else None,
-                "avatar_url": _build_avatar_signed_url(sv[8], sv[9])
-            }
-            for sv in supervisors
-        ]
+        logging.info(f"Fetched {len(sv_data)} supervisors")
         return jsonify({"status": "success", "sv_list": sv_data})
     except Exception as e:
         logging.error(f"Error fetching SV list: {e}", exc_info=True)
@@ -8338,11 +8457,13 @@ def add_user():
         if not name:
             return jsonify({"error": "Name cannot be empty"}), 400
 
-        role = str(data.get('role') or 'operator').strip().lower()
-        if role not in ('operator', 'trainee', 'trainer', 'admin'):
-            return jsonify({"error": "Unsupported role. Allowed: operator, trainee, trainer, admin"}), 400
+        role = _normalize_user_role(data.get('role') or 'operator')
+        if role not in ('operator', 'trainee', 'trainer', 'sv', 'admin'):
+            return jsonify({"error": "Unsupported role. Allowed: operator, trainee, trainer, sv, admin"}), 400
         if role == 'admin' and requester_role != 'super_admin':
             return jsonify({"error": "Only super admins can create admins"}), 403
+        if role == 'sv' and not _is_admin_role(requester_role):
+            return jsonify({"error": "Only admins can create supervisors"}), 403
         if requester_role == 'sv' and role not in ('operator', 'trainee'):
             return jsonify({"error": "Supervisors can create only operators or trainees"}), 403
 
@@ -8383,8 +8504,8 @@ def add_user():
                     rate = float(data['rate']) if data.get('rate') else 1.0
                 except (TypeError, ValueError):
                     return jsonify({"error": "Invalid rate"}), 400
-        elif role == 'trainer':
-            # Trainers are never tied to a direction or supervisor.
+        elif role in ('trainer', 'sv'):
+            # Trainers and supervisors are never tied to a direction or supervisor.
             supervisor_id = None
             direction_id = None
             try:
@@ -8572,7 +8693,8 @@ def add_user():
             return jsonify({"error": "Invalid has_driver_license value"}), 400
 
         proxy_card_number = str(data.get('proxy_card_number') or '').strip() or None
-        if role != 'operator' or not has_proxy:
+        if role == 'trainee' or not has_proxy:
+            has_proxy = False if role == 'trainee' else has_proxy
             proxy_card_number = None
 
         sip_number = str(data.get('sip_number') or '').strip() or None
@@ -8581,6 +8703,8 @@ def add_user():
 
         if role == 'trainer':
             login_prefix = 'trainer'
+        elif role == 'sv':
+            login_prefix = 'sv'
         elif role == 'admin':
             login_prefix = 'admin'
         elif role == 'trainee':
@@ -8638,6 +8762,8 @@ def add_user():
             role_label = 'Тренер'
         elif role == 'admin':
             role_label = 'Админ'
+        elif role == 'sv':
+            role_label = 'Супервайзер'
         elif role == 'trainee':
             role_label = 'Стажер'
         else:
