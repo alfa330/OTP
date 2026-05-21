@@ -119,8 +119,12 @@ class ShiftAuctionLockingTests(unittest.TestCase):
             if isinstance(node, ast.For)
             and isinstance(node.target, ast.Name)
             and node.target.id == "claimed"
-            and isinstance(node.iter, ast.Name)
-            and node.iter.id == "claimed_shifts"
+            and isinstance(node.iter, ast.Call)
+            and isinstance(node.iter.func, ast.Attribute)
+            and node.iter.func.attr == "_merge_shift_auction_claimed_shifts_for_publish"
+            and node.iter.args
+            and isinstance(node.iter.args[0], ast.Name)
+            and node.iter.args[0].id == "claimed_shifts"
         ]
         self.assertEqual(len(publish_loops), 1)
 

@@ -34,6 +34,22 @@ class _BreakRuleDummy:
         return str(direction_name or "").strip().lower() in {"чат менеджер", "chat manager"}
 
 
+class _MergeDummy:
+    def _schedule_interval_minutes(self, start_time_value, end_time_value):
+        def to_minutes(value):
+            hh, mm = str(value).split(":", 1)
+            return int(hh) * 60 + int(mm)
+
+        start_min = to_minutes(start_time_value)
+        end_min = to_minutes(end_time_value)
+        if end_min <= start_min:
+            end_min += 24 * 60
+        return start_min, end_min
+
+    def _normalize_schedule_time(self, value, field_name):
+        return value
+
+
 class WorkScheduleBreakRuleTests(unittest.TestCase):
     def test_database_custom_direction_rules_disable_default_fallback_for_gaps(self):
         namespace = {}
@@ -64,6 +80,32 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
 
         self.assertEqual(pick(300, direction_value="Основа", break_rules_map=rules_map), [])
         self.assertEqual(pick(300, direction_value="Основа", break_rules_map={}), [15])
+
+    def test_auction_publish_merges_touching_claimed_shifts_before_saving(self):
+        namespace = {}
+        exec(_function_source(DATABASE_PATH, "_minutes_to_time"), namespace)
+        exec(
+            _function_source(
+                DATABASE_PATH,
+                "_merge_shift_auction_claimed_shifts_for_publish",
+                class_name="Database"
+            ),
+            namespace
+        )
+        merge = namespace["_merge_shift_auction_claimed_shifts_for_publish"]
+
+        result = merge(_MergeDummy(), [
+            {"start_time": "15:00", "end_time": "19:00"},
+            {"start_time": "19:00", "end_time": "23:00"},
+            {"start_time": "08:00", "end_time": "12:00"},
+            {"start_time": "13:00", "end_time": "14:00"},
+        ])
+
+        self.assertEqual(result, [
+            {"start_time": "08:00", "end_time": "12:00"},
+            {"start_time": "13:00", "end_time": "14:00"},
+            {"start_time": "15:00", "end_time": "23:00"},
+        ])
 
 
 if __name__ == "__main__":

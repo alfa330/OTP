@@ -4024,6 +4024,39 @@ class Database:
             ),
         }
 
+    def _merge_shift_auction_claimed_shifts_for_publish(self, shifts):
+        ranges = []
+        for shift in shifts or []:
+            if not isinstance(shift, dict):
+                continue
+            start_time_value = shift.get("start_time")
+            end_time_value = shift.get("end_time")
+            if start_time_value is None or end_time_value is None:
+                continue
+            start_min, end_min = self._schedule_interval_minutes(start_time_value, end_time_value)
+            if end_min <= start_min:
+                continue
+            ranges.append({"start": start_min, "end": end_min})
+
+        if not ranges:
+            return []
+
+        ranges.sort(key=lambda item: (item["start"], item["end"]))
+        merged = []
+        for item in ranges:
+            if not merged or item["start"] > merged[-1]["end"]:
+                merged.append(dict(item))
+                continue
+            merged[-1]["end"] = max(merged[-1]["end"], item["end"])
+
+        result = []
+        for item in merged:
+            result.append({
+                "start_time": self._normalize_schedule_time(_minutes_to_time(item["start"]), "start_time"),
+                "end_time": self._normalize_schedule_time(_minutes_to_time(item["end"]), "end_time"),
+            })
+        return result
+
     def publish_shift_auction_test_to_work_schedules(self, updated_by=None):
         with self._get_cursor() as cursor:
             cursor.execute("""
@@ -4112,7 +4145,7 @@ class Database:
                     claimed_shifts = claimed_by_operator_date.get((operator_id, lot_date), [])
                     if not claimed_shifts:
                         continue
-                    for claimed in claimed_shifts:
+                    for claimed in self._merge_shift_auction_claimed_shifts_for_publish(claimed_shifts):
                         self._save_shift_tx(
                             cursor=cursor,
                             operator_id=operator_id,
