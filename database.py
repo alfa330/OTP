@@ -4024,7 +4024,7 @@ class Database:
             ),
         }
 
-    def publish_shift_auction_test_to_work_schedules(self, updated_by=None):
+    def publish_shift_auction_test_to_work_schedules(self, updated_by=None, precomputed_breaks=None):
         with self._get_cursor() as cursor:
             cursor.execute("""
                 SELECT enabled, starts_at, ends_at, paused_at, finished_at
@@ -4113,17 +4113,21 @@ class Database:
                     claimed_shifts = claimed_by_operator_date.get((operator_id, lot_date), [])
                     if not claimed_shifts:
                         continue
+                    lot_date_str = lot_date.strftime('%Y-%m-%d')
                     for claimed in claimed_shifts:
+                        start_val = claimed["start_time"]
+                        end_val = claimed["end_time"]
+                        start_str = start_val.strftime('%H:%M') if hasattr(start_val, 'strftime') else str(start_val)[:5]
+                        end_str = end_val.strftime('%H:%M') if hasattr(end_val, 'strftime') else str(end_val)[:5]
+                        breaks_key = (operator_id, lot_date_str, start_str, end_str)
+                        shift_breaks = (precomputed_breaks or {}).get(breaks_key)
                         self._save_shift_tx(
                             cursor=cursor,
                             operator_id=operator_id,
                             shift_date=lot_date,
                             start_time=claimed["start_time"],
                             end_time=claimed["end_time"],
-                            # Publish uses the same auto-break path as schedule import.
-                            # Auction lot breaks are planning metadata, not the final
-                            # work-schedule breaks that should be persisted.
-                            breaks=None,
+                            breaks=shift_breaks,
                         )
                         summary["shifts_saved"] += 1
 
@@ -4159,6 +4163,61 @@ class Database:
                 include_admin_fields=True
             ),
         }
+
+    def get_shift_auction_entries_for_simulation(self):
+        """
+        Возвращает claimed лоты текущего аукциона в формате entries для Python-симуляции перерывов.
+        Включает direction оператора из users → directions.
+        Результат: [{operator_id, date (str 'YYYY-MM-DD'), direction (str|None),
+                     shifts: [{'start': 'HH:MM', 'end': 'HH:MM'}]}]
+        Отсортировано по operator_id, shift_date — детерминированный порядок,
+        совпадающий с порядком обработки в publish_shift_auction_test_to_work_schedules.
+        """
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT operator_id
+                FROM shift_auction_test_participants
+                ORDER BY operator_id
+            """)
+            operator_ids = [int(row[0]) for row in (cursor.fetchall() or []) if row and row[0] is not None]
+            if not operator_ids:
+                return []
+
+            cursor.execute("""
+                SELECT l.claimed_by,
+                       l.shift_date,
+                       l.start_time,
+                       l.end_time,
+                       d.name AS direction_name
+                FROM shift_auction_test_lots l
+                JOIN shift_auction_test_participants p ON p.operator_id = l.claimed_by
+                LEFT JOIN users u ON u.id = l.claimed_by
+                LEFT JOIN directions d ON d.id = u.direction_id
+                WHERE l.status = 'claimed'
+                  AND l.claimed_by = ANY(%s)
+                ORDER BY l.claimed_by, l.shift_date, l.claimed_at, l.id
+            """, (operator_ids,))
+
+            entry_map = {}
+            for claimed_by, shift_date_value, start_time_value, end_time_value, direction_name in (cursor.fetchall() or []):
+                if claimed_by is None or shift_date_value is None:
+                    continue
+                op_id = int(claimed_by)
+                date_str = shift_date_value.strftime('%Y-%m-%d')
+                key = (op_id, date_str)
+                if key not in entry_map:
+                    entry_map[key] = {
+                        'operator_id': op_id,
+                        'date': date_str,
+                        'direction': direction_name,
+                        'shifts': []
+                    }
+                entry_map[key]['shifts'].append({
+                    'start': start_time_value.strftime('%H:%M'),
+                    'end': end_time_value.strftime('%H:%M')
+                })
+
+            return [entry_map[k] for k in sorted(entry_map.keys())]
 
     def get_shift_auction_test_export_data(self):
         with self._get_cursor() as cursor:

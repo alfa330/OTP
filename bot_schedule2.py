@@ -3223,7 +3223,33 @@ def api_shift_auction_test_publish():
             return jsonify({"error": message}), status_code
         if not _is_admin_role(requester[3]):
             return jsonify({"error": "Only admins can publish shift auctions"}), 403
-        result = db.publish_shift_auction_test_to_work_schedules(updated_by=requester_id)
+
+        # Симуляция перерывов — та же логика что и при Excel импорте:
+        # централизованная Python-симуляция всех операторов сразу с антиколлизией.
+        sim_entries = db.get_shift_auction_entries_for_simulation()
+        precomputed_breaks = {}
+        if sim_entries:
+            all_dates = [e['date'] for e in sim_entries]
+            min_date_obj = datetime.strptime(min(all_dates), '%Y-%m-%d').date()
+            max_date_obj = datetime.strptime(max(all_dates), '%Y-%m-%d').date()
+            sim_start = (min_date_obj - timedelta(days=1)).strftime('%Y-%m-%d')
+            sim_end = (max_date_obj + timedelta(days=1)).strftime('%Y-%m-%d')
+            sim_source_operators = db.get_operators_with_shifts(sim_start, sim_end) or []
+            break_rules_map = db.get_work_schedule_break_rules_map() or {}
+            _ws_compute_breaks_for_entries(sim_entries, sim_source_operators, break_rules_map)
+            for entry in sim_entries:
+                op_id = int(entry['operator_id'])
+                date_str = str(entry['date'])
+                for shift in (entry.get('shifts') or []):
+                    start_s = str(shift.get('start') or '')
+                    end_s = str(shift.get('end') or '')
+                    if start_s and end_s:
+                        precomputed_breaks[(op_id, date_str, start_s, end_s)] = shift.get('breaks') or []
+
+        result = db.publish_shift_auction_test_to_work_schedules(
+            updated_by=requester_id,
+            precomputed_breaks=precomputed_breaks
+        )
         return jsonify({"status": "success", **result}), 200
     except ValueError as error:
         return _shift_auction_test_error_response(error)
@@ -15021,6 +15047,102 @@ def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_dire
         seg['breaks'] = new_breaks
 
 
+def _ws_compute_breaks_for_entries(entries, sim_source_operators, break_rules_map,
+                                    break_direction_groups=None):
+    """
+    Вычисляет перерывы для списка entries (оператор + дата + смены).
+    Мутирует entries in-place: каждый shift получает поле 'breaks'.
+    Повторяет алгоритм Excel-импорта: централизованная Python-симуляция
+    всех операторов одновременно с антиколлизией по направлению.
+
+    entries: [
+        {
+            operator_id: int,
+            date: str 'YYYY-MM-DD',
+            direction: str | None  (направление оператора),
+            shifts: [{'start': 'HH:MM', 'end': 'HH:MM'}, ...],
+            is_day_off: bool (опционально)
+        }
+    ]
+    sim_source_operators: результат db.get_operators_with_shifts() за нужный период
+    break_rules_map: результат db.get_work_schedule_break_rules_map()
+    """
+    sim_operators = _ws_clone_ops_for_break_simulation(sim_source_operators)
+    sim_op_by_id = {int(op.get('id')): op for op in sim_operators if op.get('id') is not None}
+    scope_resolver = _ws_make_direction_scope_resolver(break_direction_groups or [])
+
+    for entry in entries:
+        op_id = int(entry.get('operator_id'))
+        date_str = str(entry.get('date'))
+
+        sim_op = sim_op_by_id.get(op_id)
+        if not sim_op:
+            sim_op = {
+                'id': op_id,
+                'direction': entry.get('direction'),
+                'shifts': {},
+                'daysOff': []
+            }
+            sim_operators.append(sim_op)
+            sim_op_by_id[op_id] = sim_op
+
+        sim_op['daysOff'] = [d for d in (sim_op.get('daysOff') or []) if str(d) != date_str]
+        sim_op.setdefault('shifts', {})
+        sim_op['shifts'].pop(date_str, None)
+
+        if entry.get('is_day_off'):
+            if date_str not in sim_op['daysOff']:
+                sim_op['daysOff'].append(date_str)
+            entry['shifts'] = []
+            continue
+
+        prepared_shifts = []
+        for raw_shift in (entry.get('shifts') or []):
+            start_str = str(raw_shift.get('start') or raw_shift.get('start_time') or '').strip()
+            end_str = str(raw_shift.get('end') or raw_shift.get('end_time') or '').strip()
+            if not start_str or not end_str:
+                continue
+            smin = _ws_time_to_minutes(start_str)
+            emin = _ws_time_to_minutes(end_str)
+            if emin <= smin:
+                emin += 1440
+            prepared_shifts.append({
+                'start': _ws_minutes_to_time(smin),
+                'end': _ws_minutes_to_time(emin),
+                '__startMin': smin,
+                '__endMin': emin,
+                'breaks': _ws_compute_breaks_for_shift_minutes(
+                    smin, emin,
+                    sim_op.get('direction'),
+                    break_rules_map=break_rules_map
+                )
+            })
+
+        sim_op['shifts'][date_str] = prepared_shifts
+        if prepared_shifts:
+            _ws_adjust_breaks_for_operator_on_date(
+                sim_op,
+                date_str,
+                sim_operators,
+                scope_resolver,
+                break_rules_map=break_rules_map
+            )
+
+        # Записываем финальные перерывы (после антиколлизии) обратно в entry
+        final_shifts = []
+        for seg in (sim_op.get('shifts', {}).get(date_str) or []):
+            final_shifts.append({
+                'start': str(seg.get('start') or ''),
+                'end': str(seg.get('end') or ''),
+                'breaks': [
+                    {'start': int(b.get('start')), 'end': int(b.get('end'))}
+                    for b in (seg.get('breaks') or [])
+                    if b is not None and int(b.get('end', 0)) > int(b.get('start', 0))
+                ]
+            })
+        entry['shifts'] = final_shifts
+
+
 def _iter_schedule_excel_dates(start_date_obj, end_date_obj):
     cur = start_date_obj
     while cur <= end_date_obj:
@@ -16504,76 +16626,13 @@ def import_work_schedules_excel():
         sim_start = (import_start_obj - timedelta(days=1)).strftime('%Y-%m-%d')
         sim_end = (import_end_obj + timedelta(days=1)).strftime('%Y-%m-%d')
         sim_source_operators = db.get_operators_with_shifts(sim_start, sim_end) or []
-        sim_operators = _ws_clone_ops_for_break_simulation(sim_source_operators)
-        sim_op_by_id = {int(op.get('id')): op for op in sim_operators if op.get('id') is not None}
-        scope_resolver = _ws_make_direction_scope_resolver(break_direction_groups)
         break_rules_map = db.get_work_schedule_break_rules_map() or {}
-
-        for entry in parsed_entries:
-            op_id = int(entry.get('operator_id'))
-            date_str = str(entry.get('date'))
-            sim_op = sim_op_by_id.get(op_id)
-            if not sim_op:
-                sim_op = {'id': op_id, 'direction': None, 'shifts': {}, 'daysOff': []}
-                sim_operators.append(sim_op)
-                sim_op_by_id[op_id] = sim_op
-
-            sim_op['daysOff'] = [d for d in (sim_op.get('daysOff') or []) if str(d) != date_str]
-            sim_op.setdefault('shifts', {})
-            sim_op['shifts'].pop(date_str, None)
-
-            if entry.get('is_day_off'):
-                if date_str not in sim_op['daysOff']:
-                    sim_op['daysOff'].append(date_str)
-                entry['shifts'] = []
-                continue
-
-            prepared_shifts = []
-            for raw_shift in (entry.get('shifts') or []):
-                start_str = str(raw_shift.get('start') or raw_shift.get('start_time') or '').strip()
-                end_str = str(raw_shift.get('end') or raw_shift.get('end_time') or '').strip()
-                if not start_str or not end_str:
-                    continue
-                smin = _ws_time_to_minutes(start_str)
-                emin = _ws_time_to_minutes(end_str)
-                if emin <= smin:
-                    emin += 1440
-                prepared_shifts.append({
-                    'start': _ws_minutes_to_time(smin),
-                    'end': _ws_minutes_to_time(emin),
-                    '__startMin': smin,
-                    '__endMin': emin,
-                    'breaks': _ws_compute_breaks_for_shift_minutes(
-                        smin,
-                        emin,
-                        sim_op.get('direction'),
-                        break_rules_map=break_rules_map
-                    )
-                })
-
-            sim_op['shifts'][date_str] = prepared_shifts
-            if prepared_shifts:
-                _ws_adjust_breaks_for_operator_on_date(
-                    sim_op,
-                    date_str,
-                    sim_operators,
-                    scope_resolver,
-                    break_rules_map=break_rules_map
-                )
-
-            # Сохраняем в entry уже финальные перерывы после анти-пересечения
-            final_shifts = []
-            for seg in (sim_op.get('shifts', {}).get(date_str) or []):
-                final_shifts.append({
-                    'start': str(seg.get('start') or ''),
-                    'end': str(seg.get('end') or ''),
-                    'breaks': [
-                        {'start': int(b.get('start')), 'end': int(b.get('end'))}
-                        for b in (seg.get('breaks') or [])
-                        if b is not None and int(b.get('end', 0)) > int(b.get('start', 0))
-                    ]
-                })
-            entry['shifts'] = final_shifts
+        _ws_compute_breaks_for_entries(
+            parsed_entries,
+            sim_source_operators,
+            break_rules_map,
+            break_direction_groups=break_direction_groups
+        )
 
         result = db.import_work_schedule_excel_entries(parsed_entries)
         return jsonify({
