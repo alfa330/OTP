@@ -2991,6 +2991,11 @@ def _shift_auction_test_error_response(error):
         "AUCTION_PERIOD_NOT_WEEK": ("Для аукциона можно выбрать только полную неделю", 409),
         "AUCTION_PERIOD_EMPTY": ("В выбранном недельном плане нет смен", 409),
         "AUCTION_PERIOD_PAST": ("Прошедшую неделю нельзя запустить заново", 409),
+        "POST_AUCTION_NOT_ACTIVE": ("Дополнительные смены можно забирать только после сохранения итогов в графики", 409),
+        "LOT_NOT_OPEN_FOR_POST_CLAIM": ("Эту смену больше нельзя забрать", 409),
+        "SHIFT_ALREADY_STARTED": ("Эта смена уже началась или прошла", 409),
+        "LOT_INVALID": ("Смена недоступна", 409),
+        "POST_AUCTION_LOT_NOT_RELEASABLE": ("Эту смену нельзя вернуть — она уже сохранена в графики", 409),
     })
     message, status = mapping.get(code, ("Ошибка аукциона смен", 400))
     return jsonify({"error": message, "code": code}), status
@@ -3252,6 +3257,115 @@ def _shift_auction_test_lot_mutation_response(lot_id, action):
         return _shift_auction_test_error_response(error)
     except Exception as error:
         logging.error(f"Shift auction claim API error: {error}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+def _notify_admins_post_auction_claim(operator_name, lot_payload):
+    try:
+        recipients = db.get_admin_post_claim_notify_recipients()
+    except Exception as error:
+        logging.error(f"Failed to load post-auction notify recipients: {error}", exc_info=True)
+        return
+    if not recipients:
+        return
+
+    shift_date_raw = str(lot_payload.get('shift_date') or '').strip()
+    try:
+        shift_date_obj = datetime.strptime(shift_date_raw, '%Y-%m-%d').date() if shift_date_raw else None
+    except Exception:
+        shift_date_obj = None
+    date_label = shift_date_obj.strftime('%d.%m.%Y') if shift_date_obj else shift_date_raw or '—'
+    start_label = str(lot_payload.get('start_time') or '').strip() or '—'
+    end_label = str(lot_payload.get('end_time') or '').strip() or '—'
+    now_label = datetime.now().strftime('%d.%m.%Y %H:%M')
+    operator_label = str(operator_name or '').strip() or 'Оператор'
+
+    text = (
+        "📣 <b>Аукцион смен — дополнительная смена</b>\n\n"
+        f"Оператор <b>{operator_label}</b> взял дополнительную смену.\n"
+        f"📅 Дата: <b>{date_label}</b>\n"
+        f"🕒 Время: <b>{start_label}–{end_label}</b>\n"
+        f"⏱ Когда взял: {now_label}"
+    )
+    for recipient in recipients:
+        chat_id = recipient.get('telegram_id') if isinstance(recipient, dict) else None
+        if not chat_id:
+            continue
+        try:
+            _send_telegram_text_message(int(chat_id), text)
+        except Exception as error:
+            logging.error(
+                f"Failed to send post-auction claim notification to {chat_id}: {error}",
+                exc_info=True
+            )
+
+
+@app.route('/api/shift_auction/post_claim_lot', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_shift_auction_post_claim_lot():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if _normalize_user_role(requester[3]) != 'operator':
+            return jsonify({"error": "Only operators can claim shifts"}), 403
+
+        payload = request.get_json(silent=True) or {}
+        try:
+            lot_id = int(payload.get('lot_id') or payload.get('id'))
+        except Exception:
+            return jsonify({"error": "Lot id is required"}), 400
+
+        result = db.post_auction_claim_lot(requester_id, lot_id)
+        operator_info = result.get('operator') or {}
+        operator_name = operator_info.get('name') or requester[1]
+        lot_payload = result.get('lot') or {}
+        try:
+            _notify_admins_post_auction_claim(operator_name, lot_payload)
+        except Exception as error:
+            logging.error(f"Post-auction claim notification dispatch failed: {error}", exc_info=True)
+        return jsonify({"status": "success", **result}), 200
+    except ValueError as error:
+        return _shift_auction_test_error_response(error)
+    except Exception as error:
+        logging.error(f"Post-auction claim API error: {error}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/shift_auction/admin_notify_settings', methods=['GET', 'PUT', 'OPTIONS'])
+@require_api_key
+def api_shift_auction_admin_notify_settings():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not _is_admin_role(requester[3]):
+            return jsonify({"error": "Only admins can change auction notification settings"}), 403
+
+        if request.method == 'GET':
+            enabled = db.get_admin_post_claim_notify_setting(requester_id)
+            return jsonify({"status": "success", "auction_post_claim_notify_enabled": bool(enabled)}), 200
+
+        payload = request.get_json(silent=True) or {}
+        if 'auction_post_claim_notify_enabled' not in payload:
+            return jsonify({"error": "auction_post_claim_notify_enabled is required"}), 400
+        raw_value = payload.get('auction_post_claim_notify_enabled')
+        if isinstance(raw_value, str):
+            enabled_value = raw_value.strip().lower() in ('1', 'true', 'yes', 'on')
+        else:
+            enabled_value = bool(raw_value)
+        saved = db.set_admin_post_claim_notify_setting(requester_id, enabled_value)
+        return jsonify({"status": "success", "auction_post_claim_notify_enabled": bool(saved)}), 200
+    except Exception as error:
+        logging.error(f"Auction admin notify settings API error: {error}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 
