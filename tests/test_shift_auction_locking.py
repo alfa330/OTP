@@ -87,6 +87,43 @@ class ShiftAuctionLockingTests(unittest.TestCase):
         self.assertIsInstance(breaks_keyword.value, ast.Constant)
         self.assertIsNone(breaks_keyword.value.value)
 
+    def test_publish_collects_multiple_claimed_shifts_per_operator_day(self):
+        method = _method("publish_shift_auction_test_to_work_schedules")
+        direct_bucket_overwrites = [
+            node for node in ast.walk(method)
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Subscript)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "claimed_by_operator_date"
+                for target in node.targets
+            )
+        ]
+        self.assertEqual(direct_bucket_overwrites, [])
+
+        append_calls = [
+            node for node in ast.walk(method)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "append"
+            and isinstance(node.func.value, ast.Call)
+            and isinstance(node.func.value.func, ast.Attribute)
+            and node.func.value.func.attr == "setdefault"
+            and isinstance(node.func.value.func.value, ast.Name)
+            and node.func.value.func.value.id == "claimed_by_operator_date"
+        ]
+        self.assertEqual(len(append_calls), 1)
+
+        publish_loops = [
+            node for node in ast.walk(method)
+            if isinstance(node, ast.For)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "claimed"
+            and isinstance(node.iter, ast.Name)
+            and node.iter.id == "claimed_shifts"
+        ]
+        self.assertEqual(len(publish_loops), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

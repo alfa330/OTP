@@ -4056,11 +4056,11 @@ class Database:
             for claimed_by, shift_date_value, start_time_value, end_time_value, breaks in (cursor.fetchall() or []):
                 if claimed_by is None or shift_date_value is None:
                     continue
-                claimed_by_operator_date[(int(claimed_by), shift_date_value)] = {
+                claimed_by_operator_date.setdefault((int(claimed_by), shift_date_value), []).append({
                     "start_time": start_time_value,
                     "end_time": end_time_value,
                     "breaks": breaks if isinstance(breaks, list) else [],
-                }
+                })
 
             cursor.execute("""
                 SELECT operator_id, day_off_date
@@ -4104,21 +4104,22 @@ class Database:
                         summary["days_off_saved"] += 1
                         continue
 
-                    claimed = claimed_by_operator_date.get((operator_id, lot_date))
-                    if not claimed:
+                    claimed_shifts = claimed_by_operator_date.get((operator_id, lot_date), [])
+                    if not claimed_shifts:
                         continue
-                    self._save_shift_tx(
-                        cursor=cursor,
-                        operator_id=operator_id,
-                        shift_date=lot_date,
-                        start_time=claimed["start_time"],
-                        end_time=claimed["end_time"],
-                        # Publish uses the same auto-break path as schedule import.
-                        # Auction lot breaks are planning metadata, not the final
-                        # work-schedule breaks that should be persisted.
-                        breaks=None,
-                    )
-                    summary["shifts_saved"] += 1
+                    for claimed in claimed_shifts:
+                        self._save_shift_tx(
+                            cursor=cursor,
+                            operator_id=operator_id,
+                            shift_date=lot_date,
+                            start_time=claimed["start_time"],
+                            end_time=claimed["end_time"],
+                            # Publish uses the same auto-break path as schedule import.
+                            # Auction lot breaks are planning metadata, not the final
+                            # work-schedule breaks that should be persisted.
+                            breaks=None,
+                        )
+                        summary["shifts_saved"] += 1
 
                 self._recalculate_auto_daily_hours_tx(
                     cursor=cursor,
