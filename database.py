@@ -4057,6 +4057,38 @@ class Database:
             })
         return result
 
+    def _resolve_post_auction_merged_shift_range(self, existing_shifts, new_start_min, new_end_min):
+        merged_start_min = int(new_start_min)
+        merged_end_min = int(new_end_min)
+        merge_ids = []
+        remaining = []
+
+        for sh_id, ex_start, ex_end in existing_shifts or []:
+            ex_start_min, ex_end_min = self._schedule_interval_minutes(ex_start, ex_end)
+            remaining.append({
+                "id": int(sh_id),
+                "start": ex_start_min,
+                "end": ex_end_min,
+            })
+
+        changed = True
+        while changed:
+            changed = False
+            next_remaining = []
+            for item in remaining:
+                if merged_start_min < item["end"] and item["start"] < merged_end_min:
+                    raise ValueError("SHIFT_OVERLAPS_EXISTING")
+                if item["end"] == merged_start_min or merged_end_min == item["start"]:
+                    merge_ids.append(item["id"])
+                    merged_start_min = min(merged_start_min, item["start"])
+                    merged_end_min = max(merged_end_min, item["end"])
+                    changed = True
+                else:
+                    next_remaining.append(item)
+            remaining = next_remaining
+
+        return merged_start_min, merged_end_min, merge_ids
+
     def publish_shift_auction_test_to_work_schedules(self, updated_by=None):
         with self._get_cursor() as cursor:
             cursor.execute("""
@@ -5354,17 +5386,11 @@ class Database:
             """, (operator_id, shift_date))
             existing_shifts = cursor.fetchall() or []
 
-            merged_start_min = new_start_min
-            merged_end_min = new_end_min
-            merge_ids = []
-            for sh_id, ex_start, ex_end in existing_shifts:
-                ex_start_min, ex_end_min = self._schedule_interval_minutes(ex_start, ex_end)
-                if new_start_min < ex_end_min and ex_start_min < new_end_min:
-                    raise ValueError("SHIFT_OVERLAPS_EXISTING")
-                if ex_end_min == new_start_min or new_end_min == ex_start_min:
-                    merge_ids.append(int(sh_id))
-                    merged_start_min = min(merged_start_min, ex_start_min)
-                    merged_end_min = max(merged_end_min, ex_end_min)
+            merged_start_min, merged_end_min, merge_ids = self._resolve_post_auction_merged_shift_range(
+                existing_shifts,
+                new_start_min,
+                new_end_min
+            )
 
             cursor.execute("""
                 UPDATE shift_auction_test_lots

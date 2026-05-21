@@ -107,6 +107,42 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
             {"start_time": "15:00", "end_time": "23:00"},
         ])
 
+    def test_post_auction_claim_merges_full_touching_shift_chain(self):
+        namespace = {}
+        exec(
+            _function_source(
+                DATABASE_PATH,
+                "_resolve_post_auction_merged_shift_range",
+                class_name="Database"
+            ),
+            namespace
+        )
+        resolve = namespace["_resolve_post_auction_merged_shift_range"]
+
+        start_min, end_min, merge_ids = resolve(_MergeDummy(), [
+            (1, "11:00", "15:00"),
+            (2, "15:00", "19:00"),
+            (3, "23:30", "01:00"),
+        ], 19 * 60, 23 * 60)
+
+        self.assertEqual((start_min, end_min), (11 * 60, 23 * 60))
+        self.assertEqual(merge_ids, [2, 1])
+
+    def test_post_auction_claim_rejects_overlap_with_existing_shift(self):
+        namespace = {}
+        exec(
+            _function_source(
+                DATABASE_PATH,
+                "_resolve_post_auction_merged_shift_range",
+                class_name="Database"
+            ),
+            namespace
+        )
+        resolve = namespace["_resolve_post_auction_merged_shift_range"]
+
+        with self.assertRaisesRegex(ValueError, "SHIFT_OVERLAPS_EXISTING"):
+            resolve(_MergeDummy(), [(1, "18:30", "21:00")], 19 * 60, 23 * 60)
+
 
 if __name__ == "__main__":
     unittest.main()
