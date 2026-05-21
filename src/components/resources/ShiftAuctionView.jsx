@@ -501,13 +501,17 @@ const AuctionLotCell = ({
   const lotStartMs = getLotStartDateTimeMs(lot);
   const hasStarted = lotStartMs !== null && postAuctionNowMs > 0 && lotStartMs <= postAuctionNowMs;
 
-  const postAuctionTakeable = (
+  // A lot is a post-auction candidate when the phase is active, not yet claimed,
+  // hasn't started, and the operator is not a manager.
+  const isPostAuctionCandidate = (
     postAuctionActive
     && !canManage
     && (lot.status === 'available' || lot.status === 'cancelled')
     && !isPostClaimedLot
     && !hasStarted
   );
+  // Actually takeable only when there is no blocking reason (e.g. time overlap).
+  const postAuctionTakeable = isPostAuctionCandidate && !claimBlockReason;
 
   const title = `${label}${minRate ? ` · ставка ${formatRate(minRate)}` : ''} · в норму ${formatAuctionHours(netMinutes)} ч${breakMinutes ? ` · перерыв ${formatAuctionHours(breakMinutes)} ч` : ''}${breaksLabel ? ` (${breaksLabel})` : ''}${claimBlockReason ? ` · ${claimBlockReason}` : ''}${lot.claimed_by_name ? ` · ${lot.claimed_by_name}` : ''}${postAuctionTakeable ? ' · доступно после аукциона' : ''}`;
 
@@ -524,6 +528,20 @@ const AuctionLotCell = ({
         <span className="truncate sm:hidden">{isPostClaiming ? '...' : compactLabel}</span>
         <span className="hidden truncate sm:inline">{isPostClaiming ? '...' : label}</span>
       </button>
+    );
+  }
+
+  // Post-auction candidate that is blocked (e.g. time overlap with existing shift) —
+  // render as grey, same as a blocked regular-auction lot.
+  if (isPostAuctionCandidate && claimBlockReason) {
+    return (
+      <div
+        title={title}
+        className="flex h-6 w-full min-w-0 items-center justify-center overflow-hidden rounded border px-1 text-[10px] font-semibold tabular-nums sm:h-8 sm:px-2 sm:text-xs border-slate-200 bg-slate-50 text-slate-400"
+      >
+        <span className="truncate sm:hidden">{compactLabel}</span>
+        <span className="hidden truncate sm:inline">{label}</span>
+      </div>
     );
   }
 
@@ -549,14 +567,9 @@ const AuctionLotCell = ({
   }
 
   let tone;
-  if (isPostClaimedLot && isLotClaimed) {
-    tone = lotClaimedByCurrentUser
-      ? 'border-orange-700 bg-orange-600 text-white'
-      : 'border-orange-200 bg-orange-100 text-orange-900';
-  } else if (isLotClaimed) {
-    tone = lotClaimedByCurrentUser
-      ? 'border-emerald-600 bg-emerald-600 text-white'
-      : 'border-slate-200 bg-slate-100 text-slate-400';
+  if (isLotClaimed) {
+    // In post-auction mode all claimed lots become grey — the auction is over
+    tone = 'border-slate-200 bg-slate-100 text-slate-400';
   } else if (postAuctionActive && (lot.status === 'available' || lot.status === 'cancelled') && !hasStarted) {
     tone = 'text-orange-900 hover:brightness-95';
   } else {
@@ -2523,6 +2536,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const claimBlockReasonByLotId = useMemo(() => {
     const reasons = new Map();
     if (canMonitor || !isTester) return reasons;
+    const postAuctionActive = Boolean(settings.post_auction_active);
     const parseHM = (value) => {
       if (!value || typeof value !== 'string') return null;
       const [h, m] = value.split(':').map(Number);
@@ -2536,7 +2550,13 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       return [s, e > s ? e : e + 24 * 60];
     };
     lots.forEach((lot) => {
-      if (!lot || lot.status !== 'available') return;
+      if (!lot) return;
+      // In post-auction mode also process 'cancelled' lots (they can be claimed).
+      // Outside post-auction mode only 'available' lots are actionable.
+      const isPostAuctionCandidate = postAuctionActive
+        && (lot.status === 'available' || lot.status === 'cancelled')
+        && !Boolean(lot.post_auction_claimed);
+      if (!isPostAuctionCandidate && lot.status !== 'available') return;
       const lotId = Number(lot.id);
       if (!Number.isFinite(lotId)) return;
       const blockedPeriod = myBlockedDateMap.get(lot.shift_date);
@@ -2544,9 +2564,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         reasons.set(lotId, `День закрыт: ${getAuctionBlockedDateLabel(blockedPeriod)}`);
         return;
       }
-      if (isTopupActive) {
-        // Top-up mode: allow extra shifts on the same date as long as they
-        // don't overlap with an existing claim. Skip norm checks entirely.
+      if (isTopupActive || postAuctionActive) {
+        // Top-up and post-auction modes: allow extra shifts on the same date as long
+        // as they don't overlap with an already-claimed shift. Skip norm checks.
         const sameDateClaims = myClaimedLotsByDate.get(lot.shift_date) || [];
         if (sameDateClaims.length) {
           const candidateRange = normalizeRange(lot.start_time, lot.end_time);
@@ -2581,7 +2601,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       }
     });
     return reasons;
-  }, [canMonitor, isTester, isTopupActive, lots, myAuctionWorkload, myBlockedDateMap, myClaimedDateSet, myClaimedLotsByDate]);
+  }, [canMonitor, isTester, isTopupActive, lots, myAuctionWorkload, myBlockedDateMap, myClaimedDateSet, myClaimedLotsByDate, settings.post_auction_active]);
 
   useEffect(() => {
     if (!canUseAuction || !lotDates.length || typeof window === 'undefined') return undefined;
