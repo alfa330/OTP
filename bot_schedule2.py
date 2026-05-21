@@ -3224,32 +3224,7 @@ def api_shift_auction_test_publish():
         if not _is_admin_role(requester[3]):
             return jsonify({"error": "Only admins can publish shift auctions"}), 403
 
-        # Симуляция перерывов — та же логика что и при Excel импорте:
-        # централизованная Python-симуляция всех операторов сразу с антиколлизией.
-        sim_entries = db.get_shift_auction_entries_for_simulation()
-        precomputed_breaks = {}
-        if sim_entries:
-            all_dates = [e['date'] for e in sim_entries]
-            min_date_obj = datetime.strptime(min(all_dates), '%Y-%m-%d').date()
-            max_date_obj = datetime.strptime(max(all_dates), '%Y-%m-%d').date()
-            sim_start = (min_date_obj - timedelta(days=1)).strftime('%Y-%m-%d')
-            sim_end = (max_date_obj + timedelta(days=1)).strftime('%Y-%m-%d')
-            sim_source_operators = db.get_operators_with_shifts(sim_start, sim_end) or []
-            break_rules_map = db.get_work_schedule_break_rules_map() or {}
-            _ws_compute_breaks_for_entries(sim_entries, sim_source_operators, break_rules_map)
-            for entry in sim_entries:
-                op_id = int(entry['operator_id'])
-                date_str = str(entry['date'])
-                for shift in (entry.get('shifts') or []):
-                    start_s = str(shift.get('start') or '')
-                    end_s = str(shift.get('end') or '')
-                    if start_s and end_s:
-                        precomputed_breaks[(op_id, date_str, start_s, end_s)] = shift.get('breaks') or []
-
-        result = db.publish_shift_auction_test_to_work_schedules(
-            updated_by=requester_id,
-            precomputed_breaks=precomputed_breaks
-        )
+        result = db.publish_shift_auction_test_to_work_schedules(updated_by=requester_id)
         return jsonify({"status": "success", **result}), 200
     except ValueError as error:
         return _shift_auction_test_error_response(error)

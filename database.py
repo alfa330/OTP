@@ -4024,7 +4024,7 @@ class Database:
             ),
         }
 
-    def publish_shift_auction_test_to_work_schedules(self, updated_by=None, precomputed_breaks=None):
+    def publish_shift_auction_test_to_work_schedules(self, updated_by=None):
         with self._get_cursor() as cursor:
             cursor.execute("""
                 SELECT enabled, starts_at, ends_at, paused_at, finished_at
@@ -4052,20 +4052,19 @@ class Database:
                 raise ValueError("AUCTION_NO_PARTICIPANTS")
 
             cursor.execute("""
-                SELECT claimed_by, shift_date, start_time, end_time, breaks
+                SELECT claimed_by, shift_date, start_time, end_time
                 FROM shift_auction_test_lots
                 WHERE status = 'claimed'
                   AND claimed_by = ANY(%s)
                 ORDER BY claimed_by, shift_date, claimed_at, id
             """, (operator_ids,))
             claimed_by_operator_date = {}
-            for claimed_by, shift_date_value, start_time_value, end_time_value, breaks in (cursor.fetchall() or []):
+            for claimed_by, shift_date_value, start_time_value, end_time_value in (cursor.fetchall() or []):
                 if claimed_by is None or shift_date_value is None:
                     continue
                 claimed_by_operator_date.setdefault((int(claimed_by), shift_date_value), []).append({
                     "start_time": start_time_value,
                     "end_time": end_time_value,
-                    "breaks": breaks if isinstance(breaks, list) else [],
                 })
 
             cursor.execute("""
@@ -4113,21 +4112,14 @@ class Database:
                     claimed_shifts = claimed_by_operator_date.get((operator_id, lot_date), [])
                     if not claimed_shifts:
                         continue
-                    lot_date_str = lot_date.strftime('%Y-%m-%d')
                     for claimed in claimed_shifts:
-                        start_val = claimed["start_time"]
-                        end_val = claimed["end_time"]
-                        start_str = start_val.strftime('%H:%M') if hasattr(start_val, 'strftime') else str(start_val)[:5]
-                        end_str = end_val.strftime('%H:%M') if hasattr(end_val, 'strftime') else str(end_val)[:5]
-                        breaks_key = (operator_id, lot_date_str, start_str, end_str)
-                        shift_breaks = (precomputed_breaks or {}).get(breaks_key)
                         self._save_shift_tx(
                             cursor=cursor,
                             operator_id=operator_id,
                             shift_date=lot_date,
                             start_time=claimed["start_time"],
                             end_time=claimed["end_time"],
-                            breaks=shift_breaks,
+                            breaks=None,
                         )
                         summary["shifts_saved"] += 1
 
