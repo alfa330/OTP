@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios';
 import {
   AlertTriangle,
+  Bell,
   BookOpen,
   CalendarDays,
   CalendarClock,
@@ -10,6 +11,7 @@ import {
   ChevronRight,
   Clock3,
   Download,
+  Flame,
   Gavel,
   Hand,
   History,
@@ -327,6 +329,29 @@ const getAuctionLotStartTone = (lot) => {
   };
 };
 
+const getAuctionLotPostAuctionTone = (lot) => {
+  const startMinutes = clockToMinutes(lot?.start_time);
+  const visualStartMinutes = startMinutes < 7 * 60 ? startMinutes + 24 * 60 : startMinutes;
+  const ratio = clampNumber((visualStartMinutes - (7 * 60)) / (17 * 60), 0, 1);
+  const bg = mixChannels([255, 237, 213], [194, 65, 12], ratio);
+  const border = mixChannels([253, 186, 116], [154, 52, 18], ratio);
+  return {
+    backgroundColor: channelRgb(bg),
+    borderColor: channelRgb(border),
+    color: ratio > 0.38 ? '#ffffff' : '#7c2d12'
+  };
+};
+
+const getLotStartDateTimeMs = (lot) => {
+  if (!lot || !lot.shift_date || !lot.start_time) return null;
+  const parts = String(lot.shift_date).split('-');
+  if (parts.length !== 3) return null;
+  const [y, m, d] = parts.map((part) => Number(part));
+  const [hh, mm] = String(lot.start_time).split(':').map((part) => Number(part));
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d) || !Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+  return new Date(y, m - 1, d, hh, mm, 0, 0).getTime();
+};
+
 const formatRate = (value) => {
   const rate = Number(value);
   if (!Number.isFinite(rate)) return '0';
@@ -452,7 +477,11 @@ const AuctionLotCell = ({
   claimingLotIds,
   onClaimLot,
   userId,
-  claimBlockReason
+  claimBlockReason,
+  postAuctionActive = false,
+  postAuctionNowMs = 0,
+  postClaimingLotIds,
+  onRequestPostAuctionClaim
 }) => {
   if (!lot) return null;
 
@@ -460,13 +489,43 @@ const AuctionLotCell = ({
   const lotClaimedByCurrentUser = Number(lot.claimed_by) === Number(userId);
   const minRate = Number(lot.rate_min || 0);
   const isClaiming = claimingLotIds instanceof Set && claimingLotIds.has(Number(lot.id));
+  const isPostClaiming = postClaimingLotIds instanceof Set && postClaimingLotIds.has(Number(lot.id));
   const label = formatAuctionShiftLabel(lot);
   const compactLabel = formatCompactAuctionShiftLabel(lot);
   const breaksLabel = formatAuctionBreaksLabel(lot);
   const netMinutes = getAuctionLotNetMinutes(lot);
   const breakMinutes = getAuctionLotBreakMinutes(lot);
-  const title = `${label}${minRate ? ` · ставка ${formatRate(minRate)}` : ''} · в норму ${formatAuctionHours(netMinutes)} ч${breakMinutes ? ` · перерыв ${formatAuctionHours(breakMinutes)} ч` : ''}${breaksLabel ? ` (${breaksLabel})` : ''}${claimBlockReason ? ` · ${claimBlockReason}` : ''}${lot.claimed_by_name ? ` · ${lot.claimed_by_name}` : ''}`;
+  const isPostClaimedLot = Boolean(lot.post_auction_claimed);
   const startToneStyle = getAuctionLotStartTone(lot);
+  const postAuctionToneStyle = getAuctionLotPostAuctionTone(lot);
+  const lotStartMs = getLotStartDateTimeMs(lot);
+  const hasStarted = lotStartMs !== null && postAuctionNowMs > 0 && lotStartMs <= postAuctionNowMs;
+
+  const postAuctionTakeable = (
+    postAuctionActive
+    && !canManage
+    && (lot.status === 'available' || lot.status === 'cancelled')
+    && !isPostClaimedLot
+    && !hasStarted
+  );
+
+  const title = `${label}${minRate ? ` · ставка ${formatRate(minRate)}` : ''} · в норму ${formatAuctionHours(netMinutes)} ч${breakMinutes ? ` · перерыв ${formatAuctionHours(breakMinutes)} ч` : ''}${breaksLabel ? ` (${breaksLabel})` : ''}${claimBlockReason ? ` · ${claimBlockReason}` : ''}${lot.claimed_by_name ? ` · ${lot.claimed_by_name}` : ''}${postAuctionTakeable ? ' · доступно после аукциона' : ''}`;
+
+  if (postAuctionTakeable) {
+    return (
+      <button
+        type="button"
+        onClick={() => onRequestPostAuctionClaim && onRequestPostAuctionClaim(lot)}
+        disabled={isPostClaiming}
+        title={title}
+        style={postAuctionToneStyle}
+        className="flex h-6 w-full min-w-0 items-center justify-center overflow-hidden rounded border px-1 text-[10px] font-semibold tabular-nums transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-1 disabled:cursor-wait sm:h-8 sm:px-2 sm:text-xs hover:brightness-95"
+      >
+        <span className="truncate sm:hidden">{isPostClaiming ? '...' : compactLabel}</span>
+        <span className="hidden truncate sm:inline">{isPostClaiming ? '...' : label}</span>
+      </button>
+    );
+  }
 
   if (lot.status === 'available' && !canManage) {
     const blocked = Boolean(claimBlockReason);
@@ -489,12 +548,26 @@ const AuctionLotCell = ({
     );
   }
 
-  const tone = isLotClaimed
-    ? (lotClaimedByCurrentUser ? 'border-emerald-600 bg-emerald-600 text-white' : 'border-slate-200 bg-slate-100 text-slate-400')
-    : 'text-white hover:brightness-95';
+  let tone;
+  if (isPostClaimedLot && isLotClaimed) {
+    tone = lotClaimedByCurrentUser
+      ? 'border-orange-700 bg-orange-600 text-white'
+      : 'border-orange-200 bg-orange-100 text-orange-900';
+  } else if (isLotClaimed) {
+    tone = lotClaimedByCurrentUser
+      ? 'border-emerald-600 bg-emerald-600 text-white'
+      : 'border-slate-200 bg-slate-100 text-slate-400';
+  } else if (postAuctionActive && (lot.status === 'available' || lot.status === 'cancelled') && !hasStarted) {
+    tone = 'text-orange-900 hover:brightness-95';
+  } else {
+    tone = 'text-white hover:brightness-95';
+  }
+
+  const isOpenPostStyle = !isLotClaimed && postAuctionActive && (lot.status === 'available' || lot.status === 'cancelled') && !hasStarted;
+  const styleToUse = isLotClaimed ? undefined : (isOpenPostStyle ? postAuctionToneStyle : startToneStyle);
 
   return (
-    <div title={title} style={isLotClaimed ? undefined : startToneStyle} className={`flex h-6 w-full min-w-0 items-center justify-center overflow-hidden rounded border px-1 text-[10px] font-semibold tabular-nums sm:h-8 sm:px-2 sm:text-xs ${tone}`}>
+    <div title={title} style={styleToUse} className={`flex h-6 w-full min-w-0 items-center justify-center overflow-hidden rounded border px-1 text-[10px] font-semibold tabular-nums sm:h-8 sm:px-2 sm:text-xs ${tone}`}>
       <span className="truncate sm:hidden">{compactLabel}</span>
       <span className="hidden truncate sm:inline">{label}</span>
     </div>
@@ -814,7 +887,7 @@ const explainSteps = [
   }
 ];
 
-const SHIFT_AUCTION_INSTRUCTIONS_VERSION = 'v2';
+const SHIFT_AUCTION_INSTRUCTIONS_VERSION = 'v3';
 
 const StatusPillPreview = ({ tone, icon: Icon, label, detail }) => (
   <span className={`inline-flex h-9 items-center gap-2 rounded-lg border px-3 text-xs font-semibold sm:text-sm ${tone}`}>
@@ -1046,6 +1119,54 @@ const OPERATOR_INSTRUCTION_STEPS = [
     )
   },
   {
+    icon: Flame,
+    title: 'После аукциона: оранжевые смены',
+    body: 'Когда аукцион закрыт и админ нажал «Сохранить в графики», оставшиеся свободные смены окрашиваются в оранжевый. Их ещё можно забрать — поштучно и в любой момент, пока смена не началась. Берётся такая смена напрямую в ваши настоящие графики работы.',
+    visual: (
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="space-y-1">
+            <div style={{ backgroundColor: 'rgb(255, 237, 213)', borderColor: 'rgb(253, 186, 116)', color: '#7c2d12' }} className="flex h-8 w-20 items-center justify-center rounded border px-2 text-xs font-semibold tabular-nums shadow-sm">
+              07-16
+            </div>
+            <span className="block text-center text-[10px] font-semibold uppercase tracking-wider text-orange-700">свободна</span>
+          </div>
+          <div className="space-y-1">
+            <div style={{ backgroundColor: 'rgb(194, 65, 12)', borderColor: 'rgb(154, 52, 18)', color: '#ffffff' }} className="flex h-8 w-20 items-center justify-center rounded border px-2 text-xs font-semibold tabular-nums shadow-sm">
+              17-02
+            </div>
+            <span className="block text-center text-[10px] font-semibold uppercase tracking-wider text-orange-700">свободна</span>
+          </div>
+          <div className="space-y-1">
+            <div className="flex h-8 w-20 items-center justify-center rounded border border-orange-700 bg-orange-600 px-2 text-xs font-semibold tabular-nums text-white shadow-sm">
+              10-19
+            </div>
+            <span className="block text-center text-[10px] font-semibold uppercase tracking-wider text-orange-800">взяли вы</span>
+          </div>
+        </div>
+        <div className="w-full max-w-sm rounded-xl border border-orange-200 bg-white p-4 shadow-sm">
+          <div className="text-sm font-semibold text-slate-950">Забрать дополнительную смену?</div>
+          <div className="mt-2 rounded-lg border border-orange-200 bg-orange-50 px-3 py-2">
+            <div className="text-sm font-semibold text-slate-900">вт, 03 июн</div>
+            <div className="text-xs text-slate-700">10:00 - 19:00 · 9 ч</div>
+          </div>
+          <p className="mt-2 text-[11px] leading-5 text-orange-900">Если возьмёте — вернуть не получится. Смена сразу появится в ваших графиках. Стыкуется с соседней — они объединятся, перерывы пересчитаются.</p>
+          <div className="mt-3 flex justify-end gap-2">
+            <ButtonPreview variant="outline">Отмена</ButtonPreview>
+            <span className="inline-flex h-10 items-center gap-2 rounded-lg bg-orange-600 px-4 text-sm font-semibold text-white shadow-sm">Забрать</span>
+          </div>
+        </div>
+      </div>
+    ),
+    nuances: [
+      'Берётся только смена, которая ещё не началась.',
+      'Если смена пересекается по времени с уже стоящей у вас в графиках — система не даст её взять.',
+      'Если новая смена стыкуется встык (например 12:00-17:00 и уже есть 17:00-22:00) — они автоматически объединяются в одну, перерывы пересчитываются по правилам направления.',
+      'Если стыка нет — для смены посчитаются собственные перерывы по тем же правилам.',
+      'Вернуть такую смену нельзя — она уже в реальном графике работы.'
+    ]
+  },
+  {
     icon: AlertTriangle,
     title: 'На что обратить внимание',
     body: 'Несколько частых ситуаций, которые могут сбить с толку.',
@@ -1059,7 +1180,7 @@ const OPERATOR_INSTRUCTION_STEPS = [
     ),
     nuances: [
       'Аукцион выключен — раздел закрыт, кнопки не реагируют. Дождитесь анонса администратора.',
-      'Аукцион закрыт — выбор времени прошёл. Можете только смотреть итоги.',
+      'Аукцион закрыт — выбор времени прошёл. Можете только смотреть итоги. Если админ нажал «Сохранить в графики» — оставшиеся смены окрасятся в оранжевый и их ещё можно будет забирать.',
       'Норма уже набрана — забрать ещё одну смену в этот период не получится, даже если она доступна.',
       'Закрытый день (отпуск/больничный) — смены на этот день не показываются и забирать их нельзя.'
     ]
@@ -1221,6 +1342,92 @@ const ADMIN_INSTRUCTION_STEPS = [
     ]
   },
   {
+    icon: Save,
+    title: 'Шаг 7 · Завершите и сохраните в графики',
+    body: 'После завершения аукциона нажмите «Сохранить в графики» — все взятые смены попадут в настоящие графики работы операторов с автоматическими перерывами по правилам направления. После сохранения остальные свободные/отменённые смены становятся доступными как «оранжевые» для пост-аукционного добора.',
+    visual: (
+      <div className="flex flex-wrap items-center gap-2">
+        <ButtonPreview variant="danger" icon={Square}>Завершить</ButtonPreview>
+        <ButtonPreview variant="success" icon={Save}>Сохранить в графики</ButtonPreview>
+      </div>
+    ),
+    nuances: [
+      'Сохранять можно только закрытый аукцион (статус «Аукцион закрыт»).',
+      'Сохранение очищает день оператора перед записью смен — старые смены в этих днях замещаются итогами аукциона.',
+      'После сохранения раздел переходит в пост-аукционный режим: операторы могут добирать оставшиеся смены сами.'
+    ]
+  },
+  {
+    icon: Flame,
+    title: 'Шаг 8 · Пост-аукционный режим',
+    body: 'После «Сохранить в графики» свободные и отменённые смены окрашиваются в оранжевый. Операторы могут поштучно забирать их — смена сразу пишется в их настоящие графики работы.',
+    visual: (
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="space-y-1">
+            <div style={{ backgroundColor: 'rgb(255, 237, 213)', borderColor: 'rgb(253, 186, 116)', color: '#7c2d12' }} className="flex h-8 w-20 items-center justify-center rounded border px-2 text-xs font-semibold tabular-nums shadow-sm">
+              07-16
+            </div>
+            <span className="block text-center text-[10px] font-semibold uppercase tracking-wider text-orange-700">свободна</span>
+          </div>
+          <div className="space-y-1">
+            <div style={{ backgroundColor: 'rgb(194, 65, 12)', borderColor: 'rgb(154, 52, 18)', color: '#ffffff' }} className="flex h-8 w-20 items-center justify-center rounded border px-2 text-xs font-semibold tabular-nums shadow-sm">
+              17-02
+            </div>
+            <span className="block text-center text-[10px] font-semibold uppercase tracking-wider text-orange-700">свободна</span>
+          </div>
+          <div className="space-y-1">
+            <div className="flex h-8 w-20 items-center justify-center rounded border border-orange-700 bg-orange-600 px-2 text-xs font-semibold tabular-nums text-white shadow-sm">
+              10-19
+            </div>
+            <span className="block text-center text-[10px] font-semibold uppercase tracking-wider text-orange-800">взяли</span>
+          </div>
+        </div>
+        <span className="block text-xs text-slate-500">Чем темнее оранжевый — тем позже начинается смена. Тёмная карточка с белым шрифтом — смена закреплена за оператором в пост-аукционе.</span>
+      </div>
+    ),
+    nuances: [
+      'Брать можно только смены, которые ещё не начались.',
+      'Проверяется пересечение с реальными сменами оператора в work_shifts — не дадим взять пересекающуюся.',
+      'Если смена стыкуется со стоящей у оператора по краю (например 12:00-17:00 встык к 17:00-22:00) — они объединяются в одну, перерывы пересчитываются автоматически.',
+      'Вернуть пост-аукционную смену оператор не может — она уже в реальном графике.'
+    ]
+  },
+  {
+    icon: Bell,
+    title: 'Шаг 9 · Уведомления о пост-аукционных взятиях',
+    body: 'В табе «Мониторинг смен» включите тумблер «Получать уведомления о взятии смены» — и вам в Telegram будет приходить сообщение каждый раз, когда оператор забирает оранжевую смену.',
+    visual: (
+      <label className="flex items-center justify-between gap-4 rounded-lg border border-slate-200 bg-white px-3 py-3 shadow-sm">
+        <span>
+          <span className="block text-sm font-semibold text-slate-900">Получать уведомления о взятии смены</span>
+          <span className="block text-xs text-slate-500">Когда оператор берёт дополнительную смену после окончания аукциона, в Telegram придёт уведомление с данными.</span>
+        </span>
+        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded border border-orange-600 bg-orange-600">
+          <CheckCircle2 size={12} className="text-white" />
+        </span>
+      </label>
+    ),
+    nuances: [
+      'Тумблер персональный — каждый админ управляет своими уведомлениями.',
+      'Для доставки сообщения у админа должен быть привязан telegram_id.',
+      'В сообщении: ФИО оператора, дата смены, время начала–конца, отметка времени взятия.'
+    ]
+  },
+  {
+    icon: Download,
+    title: 'Отчёт Excel по аукциону',
+    body: 'Кнопка «Отчёт Excel» в шапке блока «Тестовый запуск» выгружает сводный отчёт за выбранный период: матрица ФИО × Даты с временем взятых смен, а ниже — матрица неразобранных смен по дням.',
+    visual: (
+      <ButtonPreview variant="outline" icon={Download}>Отчёт Excel</ButtonPreview>
+    ),
+    nuances: [
+      'Формат времени смен: ЧЧ*ЧЧ для целочасовых (например 07*13), ЧЧ/ММ*ЧЧ — если есть минуты (07/30*13).',
+      'Зелёная заливка — смена взята оператором, серая — выходной, жёлтая — свободная, красноватая — отменённая.',
+      'Файл называется shift_auction_report_<начало>_<конец>.xlsx.'
+    ]
+  },
+  {
     icon: AlertTriangle,
     title: 'Нюансы и ограничения',
     body: 'Полезно держать в голове при подготовке запуска.',
@@ -1235,7 +1442,8 @@ const ADMIN_INSTRUCTION_STEPS = [
       'Все правки в тестовых лотах необратимы — пересоздание сбросит выбор операторов.',
       'Аукцион работает на realtime через Server-Sent Events. Если перед сервисом стоит nginx/прокси — должен быть включён keepalive ≥ 60 сек.',
       'Текст уведомления для группы лучше делать коротким — он отображается только в подсказке статус-бара.',
-      'Если статусный период оператора (отпуск, больничный) пересекается с днём аукциона — смены на этот день он не увидит.'
+      'Если статусный период оператора (отпуск, больничный) пересекается с днём аукциона — смены на этот день он не увидит.',
+      'Пост-аукционный режим включается автоматически после «Сохранить в графики» и работает, пока админ не запустит новый аукцион через «Начать заново».'
     ]
   }
 ];
@@ -1564,6 +1772,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [journalTotal, setJournalTotal] = useState(0);
   const [journalLoading, setJournalLoading] = useState(false);
   const [journalError, setJournalError] = useState('');
+  const [postClaimConfirmLot, setPostClaimConfirmLot] = useState(null);
+  const [postClaimingLotIds, setPostClaimingLotIds] = useState(() => new Set());
+  const [notifyPostClaimEnabled, setNotifyPostClaimEnabled] = useState(false);
+  const [isSavingNotifyToggle, setIsSavingNotifyToggle] = useState(false);
+  const [postAuctionNowMs, setPostAuctionNowMs] = useState(() => Date.now());
 
   useEffect(() => {
     showToastRef.current = showToast;
@@ -1649,6 +1862,15 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     return { data: response?.data || {} };
   }, [apiRoot, buildHeaders]);
 
+  const postAuctionClaimLotApi = useCallback(async (lotId) => {
+    const response = await axios.post(
+      `${apiRoot}/api/shift_auction/post_claim_lot`,
+      { lot_id: lotId },
+      { headers: buildHeaders() }
+    );
+    return { data: response?.data || {} };
+  }, [apiRoot, buildHeaders]);
+
   const applySnapshot = useCallback((snapshot) => {
     const safe = snapshot || {};
     const ids = (safe.selected_operator_ids || []).map(normalizeOperatorId).filter(Boolean);
@@ -1675,8 +1897,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       published_to_work_schedules_at: safe.published_to_work_schedules_at || null,
       published_to_work_schedules_by_name: safe.published_to_work_schedules_by_name || '',
       topup_started_at: safe.topup_started_at || null,
-      topup_started_by_name: safe.topup_started_by_name || ''
+      topup_started_by_name: safe.topup_started_by_name || '',
+      post_auction_active: Boolean(safe.post_auction_active)
     });
+    setNotifyPostClaimEnabled(Boolean(safe.notify_post_claim_enabled));
     setLots(Array.isArray(safe.lots) ? safe.lots : []);
     setMyDayOffs(Array.isArray(safe.my_day_offs) ? safe.my_day_offs.filter(Boolean) : []);
     setMyBlockedDates(Array.isArray(safe.my_blocked_dates) ? safe.my_blocked_dates.filter((item) => (typeof item === 'string' ? item : item?.date)) : []);
@@ -2733,6 +2957,89 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     }
   }, [apiRoot, canClaim, claimBlockReasonByLotId, enqueueAuctionMutation, fetchSnapshot, notifyClaimError, postClaimLot, user?.id]);
 
+  const handleRequestPostAuctionClaim = useCallback((lot) => {
+    if (!lot || !lot.id) return;
+    setPostClaimConfirmLot(lot);
+  }, []);
+
+  const handleClosePostAuctionClaim = useCallback(() => {
+    setPostClaimConfirmLot(null);
+  }, []);
+
+  const handleConfirmPostAuctionClaim = useCallback(async () => {
+    const lot = postClaimConfirmLot;
+    if (!lot || !lot.id) return;
+    const numericId = Number(lot.id);
+    if (!Number.isFinite(numericId)) return;
+    if (postClaimingLotIds.has(numericId)) return;
+
+    setPostClaimingLotIds((current) => {
+      const next = new Set(current);
+      next.add(numericId);
+      return next;
+    });
+
+    try {
+      const response = await enqueueAuctionMutation(() => postAuctionClaimLotApi(numericId));
+      const serverLot = response?.data?.lot;
+      if (serverLot && serverLot.id) {
+        setLots((currentLots) => currentLots.map((l) => (
+          Number(l.id) === Number(serverLot.id) ? { ...l, ...serverLot } : l
+        )));
+      }
+      notify('Смена забрана и сохранена в графики');
+      setPostClaimConfirmLot(null);
+      fetchSnapshot({ silent: true });
+    } catch (error) {
+      const message = error?.response?.data?.error || 'Не удалось забрать смену';
+      notifyClaimError(message);
+      fetchSnapshot({ silent: true });
+    } finally {
+      setPostClaimingLotIds((current) => {
+        if (!current.has(numericId)) return current;
+        const next = new Set(current);
+        next.delete(numericId);
+        return next;
+      });
+    }
+  }, [
+    enqueueAuctionMutation,
+    fetchSnapshot,
+    notify,
+    notifyClaimError,
+    postAuctionClaimLotApi,
+    postClaimConfirmLot,
+    postClaimingLotIds
+  ]);
+
+  const handleToggleAdminNotify = useCallback(async (nextValue) => {
+    if (isSavingNotifyToggle) return;
+    setIsSavingNotifyToggle(true);
+    const previous = notifyPostClaimEnabled;
+    setNotifyPostClaimEnabled(nextValue);
+    try {
+      await axios.put(
+        `${apiRoot}/api/shift_auction/admin_notify_settings`,
+        { auction_post_claim_notify_enabled: nextValue },
+        { headers: buildHeaders() }
+      );
+      notify(nextValue ? 'Уведомления включены' : 'Уведомления выключены');
+    } catch (error) {
+      setNotifyPostClaimEnabled(previous);
+      const message = error?.response?.data?.error || 'Не удалось сохранить настройку';
+      notify(message, 'error');
+    } finally {
+      setIsSavingNotifyToggle(false);
+    }
+  }, [apiRoot, buildHeaders, isSavingNotifyToggle, notify, notifyPostClaimEnabled]);
+
+  useEffect(() => {
+    if (!settings.post_auction_active) return undefined;
+    setPostAuctionNowMs(Date.now());
+    const interval = window.setInterval(() => setPostAuctionNowMs(Date.now()), 30000);
+    return () => window.clearInterval(interval);
+  }, [settings.post_auction_active]);
+
   const openReleaseConfirm = useCallback((lotsToRelease) => {
     const options = (Array.isArray(lotsToRelease) ? lotsToRelease : [lotsToRelease])
       .filter((lot) => lot && lot.id);
@@ -3004,6 +3311,24 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           </nav>
         )}
 
+        {canManage && monitorTab === 'monitoring' && (
+          <label className="flex flex-col gap-2 rounded-lg border border-slate-200 bg-white px-3 py-3 shadow-sm sm:flex-row sm:items-center sm:justify-between sm:gap-4 sm:px-4">
+            <span className="min-w-0">
+              <span className="block text-sm font-semibold text-slate-900">Получать уведомления о взятии смены</span>
+              <span className="block text-xs text-slate-500 sm:text-sm">
+                Когда оператор берёт дополнительную смену после окончания аукциона, в Telegram придёт уведомление с данными.
+              </span>
+            </span>
+            <input
+              type="checkbox"
+              checked={notifyPostClaimEnabled}
+              onChange={(event) => handleToggleAdminNotify(event.target.checked)}
+              disabled={isSavingNotifyToggle}
+              className="h-5 w-5 shrink-0 rounded border-slate-300 text-orange-600 focus:ring-orange-500 disabled:opacity-60"
+            />
+          </label>
+        )}
+
         {canUseAuction && (!canMonitor || monitorTab === 'monitoring') && (
           <section className={`grid min-w-0 gap-3 ${
             canMonitor
@@ -3145,6 +3470,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                             onClaimLot={handleClaimLot}
                                             userId={user?.id}
                                             claimBlockReason={claimBlockReasonByLotId.get(Number(lot.id)) || ''}
+                                            postAuctionActive={Boolean(settings.post_auction_active)}
+                                            postAuctionNowMs={postAuctionNowMs}
+                                            postClaimingLotIds={postClaimingLotIds}
+                                            onRequestPostAuctionClaim={handleRequestPostAuctionClaim}
                                           />
                                         ) : (
                                           <div className={`h-6 rounded border border-dashed sm:h-8 ${isBlocked ? 'border-rose-100 bg-rose-50/70' : isDayOff ? 'border-blue-100 bg-blue-50/60' : 'border-transparent bg-slate-50/70'}`} />
@@ -4063,6 +4392,57 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           </div>
         </div>
       ) : null}
+
+      {postClaimConfirmLot ? (() => {
+        const lotInProgress = postClaimingLotIds.has(Number(postClaimConfirmLot.id));
+        return (
+          <div
+            className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/50 px-4"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="post-claim-confirm-title"
+            onClick={() => !lotInProgress && handleClosePostAuctionClaim()}
+          >
+            <div
+              className="w-full max-w-md rounded-xl border border-orange-200 bg-white p-5 shadow-2xl"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <h3 id="post-claim-confirm-title" className="text-base font-semibold text-slate-950">
+                Забрать дополнительную смену?
+              </h3>
+              <div className="mt-3 rounded-lg border border-orange-200 bg-orange-50 px-3 py-2">
+                <div className="text-sm font-semibold text-slate-900">{formatDateLabel(postClaimConfirmLot.shift_date)}</div>
+                <div className="mt-0.5 text-xs text-slate-700 tabular-nums">
+                  {postClaimConfirmLot.start_time} - {postClaimConfirmLot.end_time}
+                  {' · '}
+                  {formatAuctionHours(getAuctionLotNetMinutes(postClaimConfirmLot))} ч
+                </div>
+              </div>
+              <p className="mt-3 text-xs leading-5 text-orange-900">
+                Если возьмёте — вернуть смену уже не получится. Она сразу появится в ваших графиках работы. Если смена стыкуется с уже существующей — они объединятся, перерывы будут пересчитаны автоматически.
+              </p>
+              <div className="mt-4 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={handleClosePostAuctionClaim}
+                  disabled={lotInProgress}
+                  className="inline-flex h-9 items-center justify-center rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 sm:text-sm"
+                >
+                  Отмена
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmPostAuctionClaim}
+                  disabled={lotInProgress}
+                  className="inline-flex h-9 items-center justify-center rounded-lg bg-orange-600 px-3 text-xs font-semibold text-white transition hover:bg-orange-700 disabled:cursor-wait disabled:bg-orange-400 sm:text-sm"
+                >
+                  {lotInProgress ? 'Забираю...' : 'Забрать'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })() : null}
     </div>
   );
 };
