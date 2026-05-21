@@ -4296,30 +4296,13 @@ class Database:
         except Exception:
             return text
         if m == 0:
-            return str(h)
-        return f"{h}/{m:02d}"
+            return f"{h:02d}"
+        return f"{h:02d}/{m:02d}"
 
     def _format_shift_auction_report_shift(self, lot):
         start = self._format_shift_auction_excel_time(lot.get('start_time') or lot.get('start'))
         end = self._format_shift_auction_excel_time(lot.get('end_time') or lot.get('end'))
         return f"{start}*{end}" if start or end else ""
-
-    @staticmethod
-    def _shift_auction_report_duration_label(lot):
-        try:
-            start_h, start_m = [int(part) for part in str(lot.get('start_time') or '').split(':')[:2]]
-            end_h, end_m = [int(part) for part in str(lot.get('end_time') or '').split(':')[:2]]
-        except Exception:
-            return ""
-        start_min = start_h * 60 + start_m
-        end_min = end_h * 60 + end_m
-        if end_min <= start_min:
-            end_min += 24 * 60
-        duration_min = max(0, end_min - start_min)
-        hours = duration_min / 60
-        if abs(hours - round(hours)) < 0.001:
-            return f"{int(round(hours))} ч"
-        return f"{hours:.2f}".rstrip('0').rstrip('.') + " ч"
 
     def generate_shift_auction_test_excel_report(self):
         report = self.get_shift_auction_test_export_data()
@@ -4470,64 +4453,83 @@ class Database:
         ws.auto_filter.ref = f"A{matrix_header_row}:{get_column_letter(2 + len(date_list))}{max(matrix_last_row, matrix_header_row)}"
 
         unclaimed_title_row = matrix_last_row + 3
-        unclaimed_columns = ['Дата', 'Смена', 'Ставка от', 'Длительность', 'Статус', 'Лот']
-        ws.merge_cells(start_row=unclaimed_title_row, start_column=1, end_row=unclaimed_title_row, end_column=len(unclaimed_columns))
+        ws.merge_cells(start_row=unclaimed_title_row, start_column=1, end_row=unclaimed_title_row, end_column=total_columns)
         section_cell = ws.cell(row=unclaimed_title_row, column=1, value='Неразобранные смены')
         section_cell.fill = unclaimed_header_fill
         section_cell.font = section_font
         section_cell.alignment = left_alignment
 
+        def _unclaimed_start_key(lot):
+            text = str(lot.get('start_time') or '')
+            try:
+                hh, mm = text.split(':')[:2]
+                return (int(hh), int(mm))
+            except Exception:
+                return (24, 0)
+
+        unclaimed_by_date = {}
+        for lot in unclaimed_lots:
+            shift_date = self._parse_shift_auction_export_date(lot.get('shift_date'))
+            if not shift_date:
+                continue
+            unclaimed_by_date.setdefault(shift_date, []).append(lot)
+        for shifts in unclaimed_by_date.values():
+            shifts.sort(key=_unclaimed_start_key)
+
         unclaimed_header_row = unclaimed_title_row + 1
-        for col_idx, label in enumerate(unclaimed_columns, start=1):
-            cell = ws.cell(row=unclaimed_header_row, column=col_idx, value=label)
+        for col_idx in (1, 2):
+            cell = ws.cell(row=unclaimed_header_row, column=col_idx)
+            cell.fill = unclaimed_header_fill
+            cell.border = border
+        for idx, day_obj in enumerate(date_list, start=3):
+            cell = ws.cell(row=unclaimed_header_row, column=idx, value=day_obj)
+            cell.number_format = 'DD.MM.YYYY'
             cell.fill = unclaimed_header_fill
             cell.font = header_font
             cell.border = border
             cell.alignment = base_alignment
 
-        if unclaimed_lots:
-            for row_idx, lot in enumerate(unclaimed_lots, start=unclaimed_header_row + 1):
-                status = str(lot.get('status') or '').strip().lower()
-                status_text = 'Отменена' if status == 'cancelled' else 'Свободна'
-                shift_date = self._parse_shift_auction_export_date(lot.get('shift_date'))
-                values = [
-                    shift_date,
-                    self._format_shift_auction_report_shift(lot),
-                    float(lot.get('rate_min') or 0),
-                    self._shift_auction_report_duration_label(lot),
-                    status_text,
-                    lot.get('id'),
-                ]
-                for col_idx, value in enumerate(values, start=1):
-                    cell = ws.cell(row=row_idx, column=col_idx, value=value)
-                    cell.border = border
-                    cell.alignment = base_alignment if col_idx != 2 else left_alignment
-                    if col_idx == 1 and shift_date:
-                        cell.number_format = 'DD.MM.YYYY'
-                    if col_idx == 3 and isinstance(value, (int, float)):
-                        cell.number_format = '0.00'
-                    if (row_idx - unclaimed_header_row) % 2 == 0:
-                        cell.fill = zebra_fill
-        else:
-            row_idx = unclaimed_header_row + 1
-            ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=len(unclaimed_columns))
-            cell = ws.cell(row=row_idx, column=1, value='Все смены разобраны')
+        max_shifts_per_day = max((len(shifts) for shifts in unclaimed_by_date.values()), default=0)
+
+        if max_shifts_per_day == 0:
+            info_row = unclaimed_header_row + 1
+            ws.merge_cells(start_row=info_row, start_column=1, end_row=info_row, end_column=total_columns)
+            cell = ws.cell(row=info_row, column=1, value='Все смены разобраны')
             cell.alignment = left_alignment
             cell.fill = claimed_fill
-            for col_idx in range(1, len(unclaimed_columns) + 1):
-                ws.cell(row=row_idx, column=col_idx).border = border
+            for col_idx in range(1, total_columns + 1):
+                ws.cell(row=info_row, column=col_idx).border = border
+        else:
+            free_fill = PatternFill(fill_type='solid', fgColor='FEF3C7')
+            cancelled_fill = PatternFill(fill_type='solid', fgColor='FECACA')
+            for row_offset in range(max_shifts_per_day):
+                row_idx = unclaimed_header_row + 1 + row_offset
+                base_fill = zebra_fill if (row_offset % 2) else empty_fill
+                for col_idx in (1, 2):
+                    cell = ws.cell(row=row_idx, column=col_idx)
+                    cell.border = border
+                    cell.fill = base_fill
+                for col_idx, day_obj in enumerate(date_list, start=3):
+                    cell = ws.cell(row=row_idx, column=col_idx)
+                    cell.border = border
+                    cell.alignment = base_alignment
+                    day_shifts = unclaimed_by_date.get(day_obj, [])
+                    if row_offset < len(day_shifts):
+                        lot = day_shifts[row_offset]
+                        cell.value = self._format_shift_auction_report_shift(lot)
+                        status = str(lot.get('status') or '').strip().lower()
+                        cell.fill = cancelled_fill if status == 'cancelled' else free_fill
+                    else:
+                        cell.fill = base_fill
 
         ws.row_dimensions[1].height = 26
         ws.row_dimensions[2].height = 22
         ws.row_dimensions[matrix_header_row].height = 24
+        ws.row_dimensions[unclaimed_header_row].height = 24
         ws.column_dimensions['A'].width = 34
         ws.column_dimensions['B'].width = 10
         for idx in range(len(date_list)):
             ws.column_dimensions[get_column_letter(3 + idx)].width = 15
-        ws.column_dimensions['C'].width = max(ws.column_dimensions['C'].width or 0, 13)
-        ws.column_dimensions['D'].width = max(ws.column_dimensions['D'].width or 0, 14)
-        ws.column_dimensions['E'].width = max(ws.column_dimensions['E'].width or 0, 12)
-        ws.column_dimensions['F'].width = max(ws.column_dimensions['F'].width or 0, 10)
 
         output = BytesIO()
         wb.save(output)
