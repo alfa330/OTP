@@ -9,6 +9,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock3,
+  Download,
   Gavel,
   Hand,
   History,
@@ -1535,6 +1536,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [isRestarting, setIsRestarting] = useState(false);
   const [isControllingAuction, setIsControllingAuction] = useState(false);
   const [isPublishingAuction, setIsPublishingAuction] = useState(false);
+  const [isExportingAuctionReport, setIsExportingAuctionReport] = useState(false);
   const [claimingLotIds, setClaimingLotIds] = useState(() => new Set());
   const [releaseConfirmLot, setReleaseConfirmLot] = useState(null);
   const [releaseConfirmOptions, setReleaseConfirmOptions] = useState([]);
@@ -2613,6 +2615,52 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     }
   }, [apiRoot, applySnapshot, buildHeaders, canManage, isPublishingAuction, notify]);
 
+  const handleExportAuctionReport = useCallback(async () => {
+    if (!canManage || !apiRoot || isExportingAuctionReport) return;
+    setIsExportingAuctionReport(true);
+    try {
+      const response = await axios.get(
+        `${apiRoot}/api/shift_auction/test_export_excel`,
+        {
+          headers: buildHeaders(),
+          responseType: 'blob'
+        }
+      );
+      const contentType = response.headers?.['content-type'] || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+      const blob = new Blob([response.data], { type: contentType });
+      const disposition = response.headers?.['content-disposition'] || '';
+      const utfFilenameMatch = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+      const plainFilenameMatch = disposition.match(/filename="?([^";]+)"?/i);
+      const filename = utfFilenameMatch
+        ? decodeURIComponent(utfFilenameMatch[1])
+        : (plainFilenameMatch?.[1] || 'shift_auction_report.xlsx');
+
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+      notify('Отчет аукциона выгружен');
+    } catch (error) {
+      let message = error?.response?.data?.error || 'Не удалось выгрузить отчет аукциона';
+      if (error?.response?.data instanceof Blob) {
+        try {
+          const text = await error.response.data.text();
+          const payload = JSON.parse(text);
+          message = payload?.error || message;
+        } catch (_) {
+          // keep fallback message
+        }
+      }
+      notify(message, 'error');
+    } finally {
+      setIsExportingAuctionReport(false);
+    }
+  }, [apiRoot, buildHeaders, canManage, isExportingAuctionReport, notify]);
+
   const handleClaimLot = useCallback(async (lotId) => {
     if (!canClaim || !apiRoot) return;
     const numericId = Number(lotId);
@@ -3451,6 +3499,16 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                       Завершить
                     </button>
                   ) : null}
+                  <button
+                    type="button"
+                    onClick={handleExportAuctionReport}
+                    disabled={isExportingAuctionReport || !lots.length}
+                    title={lots.length ? 'Выгрузить Excel-отчет по выбранному периоду аукциона' : 'Нет смен для выгрузки'}
+                    className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 text-xs font-semibold text-blue-800 transition hover:bg-blue-100 disabled:cursor-wait disabled:opacity-60 sm:h-10 sm:px-4 sm:text-sm"
+                  >
+                    <Download size={16} />
+                    {isExportingAuctionReport ? 'Выгрузка...' : 'Отчет Excel'}
+                  </button>
                   {runtimeStatus === 'closed' ? (
                     <button
                       type="button"

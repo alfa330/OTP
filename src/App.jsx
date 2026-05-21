@@ -26555,6 +26555,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         sortField: 'hire_date',
                         render: (employee) => formatEmployeeTableDate(employee?.hire_date)
                     },
+                    {
+                        key: 'has_proxy',
+                        label: 'Прокси',
+                        headerClassName: 'text-center',
+                        cellClassName: 'text-center',
+                        render: (employee) => {
+                            const employeeRole = String(employee?.role || '').trim().toLowerCase();
+                            if (employeeRole === 'trainee') return '-';
+                            return renderEmployeeBoolIcon(
+                                employee?.has_proxy,
+                                'Есть',
+                                'Нет',
+                                employee?.proxy_card_number
+                            );
+                        }
+                    },
                     ...(isOperatorVariant ? [
                     {
                         key: 'rate',
@@ -26566,18 +26582,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <div className="inline-flex items-center justify-center">
                                 <RateCircle rate={employee?.rate || 1.0} />
                             </div>
-                        )
-                    },
-                    {
-                        key: 'has_proxy',
-                        label: 'Прокси',
-                        headerClassName: 'text-center',
-                        cellClassName: 'text-center',
-                        render: (employee) => renderEmployeeBoolIcon(
-                            employee?.has_proxy,
-                            'Есть',
-                            'Нет',
-                            employee?.proxy_card_number
                         )
                     },
                     {
@@ -30157,6 +30161,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const createdRole = String(editedUser?.role || 'operator').trim().toLowerCase();
                         const isCreatedTrainer = createdRole === 'trainer';
                         const isCreatedOperator = createdRole === 'operator';
+                        const isCreatedTrainee = createdRole === 'trainee';
                         const createdRoleLabel = createdRole === 'trainer'
                             ? 'Тренер'
                             : createdRole === 'admin'
@@ -30203,8 +30208,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 ? normalizeDateForApi(editedUser.front_office_training_date)
                                 : null,
                             taxipro_id: normalizeTextForApi(editedUser.taxipro_id),
-                            has_proxy: normalizeBoolForApi(editedUser.has_proxy),
-                            proxy_card_number: isCreatedOperator && normalizeBoolForApi(editedUser.has_proxy)
+                            has_proxy: isCreatedTrainee ? false : normalizeBoolForApi(editedUser.has_proxy),
+                            proxy_card_number: !isCreatedTrainee && normalizeBoolForApi(editedUser.has_proxy)
                                 ? normalizeTextForApi(editedUser.proxy_card_number)
                                 : null,
                             has_driver_license: normalizeBoolForApi(editedUser.has_driver_license),
@@ -30645,7 +30650,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             headers: { 'X-User-Id': user.id }
                         });
                     }
-                    const nextHasProxy = normalizeBoolForApi(editedUser?.has_proxy);
+                    const editedCanUseProxyCard = editedRole !== 'trainee';
+                    const nextHasProxy = editedCanUseProxyCard ? normalizeBoolForApi(editedUser?.has_proxy) : false;
                     const prevHasProxy = normalizeBoolForApi(userToEdit?.has_proxy);
                     if (nextHasProxy !== prevHasProxy) {
                         await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
@@ -30667,7 +30673,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             headers: { 'X-User-Id': user.id }
                         });
                     }
-                    const nextProxyCardNumber = editedRole === 'operator' && nextHasProxy
+                    const nextProxyCardNumber = editedCanUseProxyCard && nextHasProxy
                         ? normalizeTextForApi(editedUser?.proxy_card_number)
                         : null;
                     const prevProxyCardNumber = normalizeTextForApi(userToEdit?.proxy_card_number);

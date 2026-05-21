@@ -250,6 +250,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     };
     const isTrainerDraft = (draft) => getRoleValue(draft) === 'trainer';
     const isOperatorDraft = (draft) => getRoleValue(draft) === 'operator';
+    const isTraineeDraft = (draft) => getRoleValue(draft) === 'trainee';
+    const canUseProxyCard = (draft) => !isTraineeDraft(draft);
     const isAdminLikeRequester = isAdminLikeRoleFn(user?.role);
     const requesterRole = normalizeRole(user?.role);
     const isSupervisorRequester = requesterRole === 'sv';
@@ -343,6 +345,10 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             defaults.direction_id = "";
             defaults.supervisor_id = "";
         }
+        if (baseRole === 'trainee') {
+            defaults.has_proxy = false;
+            defaults.proxy_card_number = "";
+        }
         defaults.phone = String(defaults.phone ?? '').trim();
         defaults.email = String(defaults.email ?? '').trim();
         defaults.instagram = String(defaults.instagram ?? '').trim();
@@ -368,8 +374,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             ? String(defaults.front_office_training_date ?? '').trim()
             : "";
         defaults.taxipro_id = String(defaults.taxipro_id ?? '').trim();
-        defaults.has_proxy = !!defaults.has_proxy;
-        defaults.proxy_card_number = String(defaults.proxy_card_number ?? '').trim();
+        defaults.has_proxy = baseRole === 'trainee' ? false : !!defaults.has_proxy;
+        defaults.proxy_card_number = baseRole === 'trainee' ? "" : String(defaults.proxy_card_number ?? '').trim();
         defaults.has_driver_license = !!defaults.has_driver_license;
         defaults.sip_number = isOperatorBase ? String(defaults.sip_number ?? '').trim() : "";
         if (defaults.status === 'unpaid_leave' || defaults.status === 'dismissal') {
@@ -611,6 +617,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         const isCreateMode = !editedUser?.id;
         const isTrainerUser = isTrainerDraft(editedUser);
         const isOperatorUser = isOperatorDraft(editedUser);
+        const canSaveProxyCard = canUseProxyCard(editedUser);
 
         // Простая локальная валидация
         if (!editedUser || !editedUser.name || editedUser.name.trim().length === 0) {
@@ -742,13 +749,13 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                 ? String(editedUser?.front_office_training_date || '').trim()
                 : '',
             taxipro_id: String(editedUser?.taxipro_id || '').trim(),
-            has_proxy: !!editedUser?.has_proxy,
-            proxy_card_number: isOperatorUser && !!editedUser?.has_proxy ? String(editedUser?.proxy_card_number || '').trim() : '',
+            has_proxy: canSaveProxyCard ? !!editedUser?.has_proxy : false,
+            proxy_card_number: canSaveProxyCard && !!editedUser?.has_proxy ? String(editedUser?.proxy_card_number || '').trim() : '',
             has_driver_license: !!editedUser?.has_driver_license,
             sip_number: isOperatorUser ? String(editedUser?.sip_number || '').trim() : ''
         };
         const normalizedUser = isTrainerUser
-            ? { ...normalizedUserDraft, supervisor_id: null, direction_id: null, proxy_card_number: '', sip_number: '' }
+            ? { ...normalizedUserDraft, supervisor_id: null, direction_id: null, sip_number: '' }
             : normalizedUserDraft;
         const result = await onSave({
             ...normalizedUser,
@@ -1494,7 +1501,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </div>
                     )}
 
-                    {isOperatorDraft(editedUser) && (
+                    {canUseProxyCard(editedUser) && (
                     <>
                     <div>
                         <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
@@ -1506,18 +1513,6 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             disabled={isLoading || !!createdCredentials}
                         />
                         <span>Наличие прокси</span>
-                        </label>
-                    </div>
-                    <div>
-                        <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
-                        <input
-                            type="checkbox"
-                            checked={!!editedUser?.has_driver_license}
-                            onChange={(e) => setEditedUser({ ...editedUser, has_driver_license: e.target.checked })}
-                            className="rounded border-gray-300"
-                            disabled={isLoading || !!createdCredentials}
-                        />
-                        <span>Наличие водительских прав</span>
                         </label>
                     </div>
                     {editedUser?.has_proxy && (
@@ -1533,6 +1528,22 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         />
                     </div>
                     )}
+                    </>
+                    )}
+                    {isOperatorDraft(editedUser) && (
+                    <>
+                    <div>
+                        <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                        <input
+                            type="checkbox"
+                            checked={!!editedUser?.has_driver_license}
+                            onChange={(e) => setEditedUser({ ...editedUser, has_driver_license: e.target.checked })}
+                            className="rounded border-gray-300"
+                            disabled={isLoading || !!createdCredentials}
+                        />
+                        <span>Наличие водительских прав</span>
+                        </label>
+                    </div>
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">SIP номер</label>
                         <input
@@ -2109,7 +2120,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             </div>
                             )}
 
-                            {isOperatorDraft(editedUser) && (
+                            {canUseProxyCard(editedUser) && (
                             <>
                             <div>
                                 <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
@@ -2121,18 +2132,6 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     disabled={isLoading}
                                 />
                                 <span>Наличие прокси</span>
-                                </label>
-                            </div>
-                            <div>
-                                <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
-                                <input
-                                    type="checkbox"
-                                    checked={!!editedUser?.has_driver_license}
-                                    onChange={(e) => setEditedUser({ ...editedUser, has_driver_license: e.target.checked })}
-                                    className="rounded border-gray-300"
-                                    disabled={isLoading}
-                                />
-                                <span>Наличие водительских прав</span>
                                 </label>
                             </div>
                             {editedUser?.has_proxy && (
@@ -2148,6 +2147,22 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 />
                             </div>
                             )}
+                            </>
+                            )}
+                            {isOperatorDraft(editedUser) && (
+                            <>
+                            <div>
+                                <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                                <input
+                                    type="checkbox"
+                                    checked={!!editedUser?.has_driver_license}
+                                    onChange={(e) => setEditedUser({ ...editedUser, has_driver_license: e.target.checked })}
+                                    className="rounded border-gray-300"
+                                    disabled={isLoading}
+                                />
+                                <span>Наличие водительских прав</span>
+                                </label>
+                            </div>
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">SIP номер</label>
                                 <input
@@ -2157,13 +2172,13 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                                 disabled={isLoading}
                                 />
-                            </div>
-                            </>
-                            )}
-                            </>
-                        )}
-                        </>
+                    </div>
+                    </>
                     )}
+                    </>
+                )}
+                    </>
+                )}
 
                     {activeTab === "account" && (
                         <>
@@ -2192,7 +2207,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             disabled={isLoading}
                             />
                         </div>
-                        </>
+                    </>
                     )}
                     </>
                 )}

@@ -7,3 +7,11 @@ src/_extracted_script.jsx
 tools_find_tdz.js
 tools_find_tdz.cjs
 .claude/settings.local.json
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
