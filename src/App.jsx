@@ -6783,9 +6783,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const plannerPickBreakDurationsForShift = (durationMinutes, directionValue = null, breakRuleRanges = null) => {
                 const dur = Number(durationMinutes) || 0;
                 const rules = Array.isArray(breakRuleRanges) ? breakRuleRanges : [];
+                const customRules = rules.filter(rule => rule && typeof rule === 'object');
                 let selectedCustomRule = null;
-                rules.forEach(rule => {
-                    if (!rule || typeof rule !== 'object') return;
+                customRules.forEach(rule => {
                     const minMinutes = Number(rule.minMinutes);
                     const maxMinutes = Number(rule.maxMinutes);
                     if (!Number.isFinite(minMinutes) || !Number.isFinite(maxMinutes)) return;
@@ -6798,6 +6798,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 });
                 if (selectedCustomRule) {
                     return plannerNormalizeBreakDurations(selectedCustomRule.breakDurations);
+                }
+                if (customRules.length > 0) {
+                    return [];
                 }
 
                 if (isChatManagerDirection(directionValue)) {

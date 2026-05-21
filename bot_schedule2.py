@@ -14717,8 +14717,9 @@ def _ws_pick_break_durations_for_shift(duration_minutes, direction_value=None, b
     selected_custom = None
     direction_key = _ws_normalize_direction_key(direction_value)
     direction_rules = rules_map.get(direction_key) or []
+    custom_rules = [r for r in direction_rules if isinstance(r, dict)]
     for rule in sorted(
-        [r for r in direction_rules if isinstance(r, dict)],
+        custom_rules,
         key=lambda x: (int(x.get('minMinutes', 0)), int(x.get('maxMinutes', 0)))
     ):
         try:
@@ -14734,6 +14735,8 @@ def _ws_pick_break_durations_for_shift(duration_minutes, direction_value=None, b
 
     if selected_custom is not None:
         return _ws_normalize_break_durations(selected_custom.get('breakDurations'))
+    if custom_rules:
+        return []
 
     if _ws_is_chat_manager_direction(direction_value):
         if dur >= 6 * 60 and dur < 9 * 60:

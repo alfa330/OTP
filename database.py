@@ -13992,9 +13992,10 @@ class Database:
     def _pick_break_durations_for_shift(self, duration_minutes, direction_name=None, direction_rules=None):
         dur = int(duration_minutes)
         rules = direction_rules if isinstance(direction_rules, list) else []
+        custom_rules = [r for r in rules if isinstance(r, dict)]
         selected_custom = None
         for rule in sorted(
-            [r for r in rules if isinstance(r, dict)],
+            custom_rules,
             key=lambda x: (int(x.get('minMinutes', 0)), int(x.get('maxMinutes', 0)))
         ):
             try:
@@ -14012,6 +14013,8 @@ class Database:
 
         if selected_custom is not None:
             return self._normalize_break_durations_list(selected_custom.get('breakDurations'))
+        if custom_rules:
+            return []
 
         # Fallback: действующий базовый профиль + чат-менеджер по умолчанию.
         if self._is_chat_manager_direction(direction_name):
