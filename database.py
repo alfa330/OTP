@@ -12494,6 +12494,7 @@ class Database:
                         u.name,
                         u.login,
                         u.role,
+                        COALESCE(dep.name, 'N/A') as department_name,
                         COALESCE(d.name, 'N/A') as direction,
                         COALESCE(s.name, 'N/A') as supervisor,
                         u.status,
@@ -12532,6 +12533,7 @@ class Database:
                         dismissal_info.dismissal_is_blacklist,
                         status_history.changed_at as status_fired_changed_at
                     FROM users u
+                    LEFT JOIN departments dep ON u.department_id = dep.id
                     LEFT JOIN directions d ON u.direction_id = d.id
                     LEFT JOIN users s ON u.supervisor_id = s.id
                     LEFT JOIN LATERAL (
@@ -12629,6 +12631,7 @@ class Database:
                 "Пол",
                 "Логин",
                 "Роль",
+                "Отдел",
                 "Направление",
                 "Супервайзер",
                 "Статус",
@@ -12674,7 +12677,7 @@ class Database:
             summary_rows = []
             for row in all_operators:
                 (
-                    name, login, role, direction, supervisor, status, rate, hire_date,
+                    name, login, role, department_name, direction, supervisor, status, rate, hire_date,
                     phone, email, instagram, telegram_nick,
                     study_place, study_course, company_name, employment_type,
                     has_proxy, proxy_card_number, proxy_status, has_driver_license, sip_number,
@@ -12692,6 +12695,7 @@ class Database:
                     _format_gender(gender),
                     login or "",
                     role or "",
+                    department_name or "N/A",
                     direction or "N/A",
                     supervisor or "N/A",
                     _format_status(status),
