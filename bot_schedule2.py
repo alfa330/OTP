@@ -4,6 +4,8 @@ import threading
 import asyncio
 import requests
 import select
+import gc
+import ctypes
 import calendar
 import csv
 import hashlib
@@ -89,6 +91,118 @@ time.tzset()
 # === Логирование =====================================================================================================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+
+def _env_bool(name, default=False):
+    value = os.getenv(name)
+    if value is None:
+        return bool(default)
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _env_int(name, default, minimum=None, maximum=None):
+    try:
+        value = int(str(os.getenv(name, default)).strip())
+    except Exception:
+        value = int(default)
+    if minimum is not None:
+        value = max(int(minimum), value)
+    if maximum is not None:
+        value = min(int(maximum), value)
+    return value
+
+
+MEMORY_TRIM_ENABLED = _env_bool('MEMORY_TRIM_ENABLED', True)
+MEMORY_TRIM_INTERVAL_SECONDS = _env_int('MEMORY_TRIM_INTERVAL_SECONDS', 900, minimum=0)
+MEMORY_TRIM_RSS_THRESHOLD_MB = _env_int('MEMORY_TRIM_RSS_THRESHOLD_MB', 700, minimum=0)
+MEMORY_TRIM_LOG_DETAILS = _env_bool('MEMORY_TRIM_LOG_DETAILS', False)
+_memory_trim_lock = threading.Lock()
+_memory_trim_next_due = 0.0
+_malloc_trim = None
+_malloc_trim_loaded = False
+
+
+def _get_current_rss_bytes():
+    try:
+        if os.name == 'posix':
+            with open('/proc/self/statm', 'r', encoding='utf-8') as statm:
+                parts = statm.read().split()
+            if len(parts) >= 2:
+                return int(parts[1]) * os.sysconf('SC_PAGE_SIZE')
+    except Exception:
+        return None
+    return None
+
+
+def _get_malloc_trim():
+    global _malloc_trim_loaded, _malloc_trim
+    if _malloc_trim_loaded:
+        return _malloc_trim
+    _malloc_trim_loaded = True
+    if os.name != 'posix':
+        return None
+    try:
+        libc = ctypes.CDLL('libc.so.6')
+        trim = getattr(libc, 'malloc_trim', None)
+        if trim is not None:
+            trim.argtypes = [ctypes.c_size_t]
+            trim.restype = ctypes.c_int
+            _malloc_trim = trim
+    except Exception:
+        _malloc_trim = None
+    return _malloc_trim
+
+
+def _trim_process_memory(reason='manual', force=False):
+    if not MEMORY_TRIM_ENABLED:
+        return False
+    if not force:
+        rss_before = _get_current_rss_bytes()
+        threshold_bytes = MEMORY_TRIM_RSS_THRESHOLD_MB * 1024 * 1024
+        if threshold_bytes > 0 and rss_before is not None and rss_before < threshold_bytes:
+            return False
+    else:
+        rss_before = _get_current_rss_bytes()
+
+    try:
+        collected = gc.collect()
+    except Exception:
+        collected = None
+
+    trimmed = False
+    trim = _get_malloc_trim()
+    if trim is not None:
+        try:
+            trimmed = bool(trim(0))
+        except Exception:
+            trimmed = False
+
+    if MEMORY_TRIM_LOG_DETAILS:
+        rss_after = _get_current_rss_bytes()
+        logging.info(
+            "Memory trim after %s: gc=%s malloc_trim=%s rss_before_mb=%s rss_after_mb=%s",
+            reason,
+            collected,
+            trimmed,
+            round(rss_before / 1024 / 1024, 1) if rss_before is not None else None,
+            round(rss_after / 1024 / 1024, 1) if rss_after is not None else None
+        )
+    return True
+
+
+def _maybe_trim_process_memory(reason='periodic'):
+    global _memory_trim_next_due
+    if not MEMORY_TRIM_ENABLED or MEMORY_TRIM_INTERVAL_SECONDS <= 0:
+        return False
+    now = time.monotonic()
+    if now < _memory_trim_next_due:
+        return False
+    with _memory_trim_lock:
+        now = time.monotonic()
+        if now < _memory_trim_next_due:
+            return False
+        _memory_trim_next_due = now + MEMORY_TRIM_INTERVAL_SECONDS
+    return _trim_process_memory(reason=reason, force=False)
+
 # === Переменные окружения =========================================================================================
 API_TOKEN = os.getenv('BOT_TOKEN')
 super_admin_id = int(os.getenv('SUPER_ADMIN_ID', '0'))
@@ -158,6 +272,16 @@ def debug_401_responses(response):
             f"Cookies: {cookie_hdr}"
         )
     return response
+
+
+@app.after_request
+def periodic_memory_maintenance(response):
+    try:
+        _maybe_trim_process_memory('periodic_request')
+    except Exception:
+        logging.debug("Periodic memory maintenance failed", exc_info=True)
+    return response
+
 JWT_SECRET = (os.getenv('JWT_SECRET') or '').strip()
 JWT_ALGORITHM = "HS256"
 JWT_ACCESS_TOKEN_MINUTES = int(os.getenv('JWT_ACCESS_TOKEN_MINUTES', '30'))
@@ -16948,9 +17072,9 @@ def run_flask():
         app,
         host='0.0.0.0',
         port=int(os.getenv('PORT', 8080)),
-        threads=int(os.getenv('WAITRESS_THREADS', '120')),
-        connection_limit=int(os.getenv('WAITRESS_CONN_LIMIT', '300')),
-        channel_timeout=0,
+        threads=_env_int('WAITRESS_THREADS', 96, minimum=32, maximum=140),
+        connection_limit=_env_int('WAITRESS_CONN_LIMIT', 180, minimum=80, maximum=300),
+        channel_timeout=_env_int('WAITRESS_CHANNEL_TIMEOUT', 120, minimum=15, maximum=600),
         cleanup_interval=30,
         ident='OTP-2'
     )
@@ -26311,6 +26435,7 @@ def sync_generate_weekly_report():
         logging.error(f"Critical error in report generation: {e}")
         return False
     finally:
+        _trim_process_memory('weekly_report', force=True)
         try:
             report_lock.release()
         except:
@@ -26558,6 +26683,8 @@ def sync_send_weekly_call_feedback_report():
     except Exception:
         logging.exception("Critical error in weekly call feedback report job")
         return False
+    finally:
+        _trim_process_memory('weekly_call_feedback_report', force=True)
 
 async def generate_weekly_report():
     loop = asyncio.get_event_loop()
@@ -26681,6 +26808,7 @@ def sync_recruiting_resumes_job(
             logging.exception("Failed to persist recruiting parser failure into DB")
         return {"status": "failed", "error": str(e)}
     finally:
+        _trim_process_memory('recruiting_parser', force=True)
         try:
             recruiting_parse_lock.release()
         except Exception:
