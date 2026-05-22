@@ -679,22 +679,6 @@ const readResponseJsonSafe = async (response) => {
     }
 };
 
-const isAuthMeRequestUrl = (url) => {
-    const rawUrl = String(url || '');
-    if (!rawUrl) return false;
-
-    try {
-        const parsedUrl = new URL(rawUrl, typeof window !== 'undefined' ? window.location.origin : undefined);
-        return parsedUrl.pathname === '/api/auth/me';
-    } catch (_error) {
-        return rawUrl.includes('/api/auth/me');
-    }
-};
-
-const isExpiredAuthMeError = (url, code) => {
-    return isAuthMeRequestUrl(url) && (code === 'TOKEN_EXPIRED' || code === 'SESSION_EXPIRED');
-};
-
 const isFailedRefreshResponse = (response) => {
     if (!response) return true;
     if (typeof response.ok === 'boolean') return !response.ok;
@@ -702,11 +686,11 @@ const isFailedRefreshResponse = (response) => {
     return Number.isFinite(status) && (status < 200 || status >= 300);
 };
 
-const forceReloadAfterFailedAuthMeRefresh = () => {
+const forceReloadAfterFailedAuthRefresh = () => {
     if (typeof window === 'undefined') return Promise.reject(new Error('Window is unavailable'));
-    if (window.__otpAuthMeRefreshReloading) return new Promise(() => {});
+    if (window.__otpAuthRefreshReloading) return new Promise(() => {});
 
-    window.__otpAuthMeRefreshReloading = true;
+    window.__otpAuthRefreshReloading = true;
     clearAuthTokens();
     safeStorageRemoveItem(safeGetBrowserStorage('localStorage'), 'user');
 
@@ -763,7 +747,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return response;
             }
 
-            const shouldReloadAfterFailedRefresh = isExpiredAuthMeError(requestUrl, body?.code);
+            const shouldReloadAfterFailedRefresh = isRecoverableAuthResponse(body);
             try {
                 if (!window.__otpRefreshPromise) {
                     const refreshTransport = getPreferredAuthTransport();
@@ -817,7 +801,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const refreshResponse = await window.__otpRefreshPromise;
                 if (!refreshResponse?.ok) {
                     if (shouldReloadAfterFailedRefresh) {
-                        return forceReloadAfterFailedAuthMeRefresh();
+                        return forceReloadAfterFailedAuthRefresh();
                     }
                     return response;
                 }
@@ -830,14 +814,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const retryResponse = await nativeFetch(originalInput, retryInit);
                 if (shouldReloadAfterFailedRefresh && retryResponse?.status === 401) {
                     const retryBody = await readResponseJsonSafe(retryResponse);
-                    if (isExpiredAuthMeError(requestUrl, retryBody?.code || body?.code)) {
-                        return forceReloadAfterFailedAuthMeRefresh();
+                    if (isRecoverableAuthResponse(retryBody)) {
+                        return forceReloadAfterFailedAuthRefresh();
                     }
                 }
                 return retryResponse;
             } catch (_error) {
                 if (shouldReloadAfterFailedRefresh) {
-                    return forceReloadAfterFailedAuthMeRefresh();
+                    return forceReloadAfterFailedAuthRefresh();
                 }
                 return response;
             }
@@ -875,24 +859,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     },
                     async (error) => {
                         const status = error?.response?.status;
-                        const code = error?.response?.data?.code;
-                        const apiErrorText = error?.response?.data?.error;
                         const originalRequest = error?.config;
                         const url = originalRequest?.url || '';
                         const isRefreshCall = url.includes('/api/auth/refresh');
                         const isLoginCall = url.includes('/api/login');
-                        const shouldReloadAfterFailedRefresh = isExpiredAuthMeError(url, code);
-                        const isRecoverableAuthError = (
-                            code === 'TOKEN_EXPIRED' ||
-                            code === 'INVALID_TOKEN' ||
-                            code === 'INVALID_TOKEN_TYPE' ||
-                            code === 'MISSING_TOKEN' ||
-                            code === 'REFRESH_TOKEN_MISMATCH' ||
-                            code === 'SESSION_EXPIRED' ||
-                            code === 'SESSION_NOT_FOUND' ||
-                            code === 'SESSION_REVOKED' ||
-                            apiErrorText === 'JWT authentication failed'
-                        );
+                        const isRecoverableAuthError = isRecoverableAuthResponse(error?.response?.data);
+                        const shouldReloadAfterFailedRefresh = isRecoverableAuthError;
 
                         if (
                             status === 401 &&
@@ -901,7 +873,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             !isRefreshCall &&
                             !isLoginCall
                         ) {
-                            return forceReloadAfterFailedAuthMeRefresh();
+                            return forceReloadAfterFailedAuthRefresh();
                         }
 
                         if (
@@ -962,13 +934,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 refreshResponse = await window.__otpRefreshPromise;
                             } catch (refreshError) {
                                 if (shouldReloadAfterFailedRefresh) {
-                                    return forceReloadAfterFailedAuthMeRefresh();
+                                    return forceReloadAfterFailedAuthRefresh();
                                 }
                                 throw refreshError;
                             }
                             if (isFailedRefreshResponse(refreshResponse)) {
                                 if (shouldReloadAfterFailedRefresh) {
-                                    return forceReloadAfterFailedAuthMeRefresh();
+                                    return forceReloadAfterFailedAuthRefresh();
                                 }
                                 return Promise.reject(error);
                             }
