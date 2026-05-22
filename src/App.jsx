@@ -19,6 +19,17 @@ import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole }
 
 const CHUNK_RELOAD_STORAGE_KEY = 'otp_chunk_reload_attempted';
 const PINNED_TASK_STORAGE_KEY_PREFIX = 'otp_pinned_task';
+const PROXY_STATUS_LABELS = {
+    lost: 'Утерян',
+    returned_to_hr: 'Сдан в HR',
+    not_received: 'Не получал'
+};
+const PROXY_STATUS_VALUES = new Set(Object.keys(PROXY_STATUS_LABELS));
+const normalizeProxyStatusForApi = (value) => {
+    const normalized = String(value ?? '').trim();
+    return PROXY_STATUS_VALUES.has(normalized) ? normalized : null;
+};
+const formatProxyStatusLabel = (value) => PROXY_STATUS_LABELS[String(value || '').trim()] || '';
 
 const buildPinnedTaskStorageKey = (userId) =>
     userId ? `${PINNED_TASK_STORAGE_KEY_PREFIX}:${userId}` : '';
@@ -26261,6 +26272,30 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </span>
                 );
             };
+            const renderEmployeeProxyInfo = (employee) => {
+                const hasProxy = isEmployeeTruthy(employee?.has_proxy);
+                const cardNumber = String(employee?.proxy_card_number || '').trim();
+                const statusLabel = employee?.proxy_status_label || formatProxyStatusLabel(employee?.proxy_status);
+                const details = [
+                    hasProxy && cardNumber ? cardNumber : '',
+                    statusLabel
+                ].filter(Boolean);
+                const titleText = hasProxy
+                    ? (details.length ? `Есть: ${details.join(' · ')}` : 'Есть')
+                    : (statusLabel ? `Нет: ${statusLabel}` : 'Нет');
+                return (
+                    <span className="inline-flex flex-col items-center justify-center" title={titleText} aria-label={titleText}>
+                        <span className={`inline-flex items-center justify-center ${hasProxy ? 'text-emerald-600' : 'text-red-600'}`}>
+                            <FaIcon className={hasProxy ? 'fa-solid fa-check' : 'fa-solid fa-times'} />
+                        </span>
+                        {details.length ? (
+                            <span className="mt-1 max-w-[112px] text-center text-[10px] font-medium leading-tight text-slate-500 break-words">
+                                {details.join(' · ')}
+                            </span>
+                        ) : null}
+                    </span>
+                );
+            };
             const normalizeEmployeeStudyCompletionYear = (value) => {
                 if (value === null || typeof value === 'undefined') return null;
                 const normalized = String(value).trim();
@@ -26563,16 +26598,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         label: 'Прокси',
                         headerClassName: 'text-center',
                         cellClassName: 'text-center',
-                        render: (employee) => {
-                            const employeeRole = String(employee?.role || '').trim().toLowerCase();
-                            if (employeeRole === 'trainee') return '-';
-                            return renderEmployeeBoolIcon(
-                                employee?.has_proxy,
-                                'Есть',
-                                'Нет',
-                                employee?.proxy_card_number
-                            );
-                        }
+                        render: (employee) => renderEmployeeProxyInfo(employee)
                     },
                     ...(isOperatorVariant ? [
                     {
@@ -30215,6 +30241,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             proxy_card_number: !isCreatedTrainee && normalizeBoolForApi(editedUser.has_proxy)
                                 ? normalizeTextForApi(editedUser.proxy_card_number)
                                 : null,
+                            proxy_status: normalizeProxyStatusForApi(editedUser.proxy_status),
                             has_driver_license: normalizeBoolForApi(editedUser.has_driver_license),
                             sip_number: isCreatedOperator ? normalizeTextForApi(editedUser.sip_number) : null,
                             status: isPeriodStatusValue(editedUser?.status) ? "working" : (editedUser.status || "working"),
@@ -30685,6 +30712,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             user_id: editedUser.id,
                             field: 'proxy_card_number',
                             value: nextProxyCardNumber
+                        }, {
+                            headers: { 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextProxyStatus = normalizeProxyStatusForApi(editedUser?.proxy_status);
+                    const prevProxyStatus = normalizeProxyStatusForApi(userToEdit?.proxy_status);
+                    if (nextProxyStatus !== prevProxyStatus) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'proxy_status',
+                            value: nextProxyStatus
                         }, {
                             headers: { 'X-User-Id': user.id }
                         });

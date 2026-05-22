@@ -75,6 +75,37 @@ SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE_LOCK = threading.Lock()
 SHIFT_AUCTION_PARTICIPANT_CACHE = {"expires_at": 0.0, "ids": frozenset()}
 SHIFT_AUCTION_PARTICIPANT_CACHE_LOCK = threading.Lock()
 
+PROXY_STATUS_VALUES = ('lost', 'returned_to_hr', 'not_received')
+PROXY_STATUS_LABELS = {
+    'lost': 'Утерян',
+    'returned_to_hr': 'Сдан в HR',
+    'not_received': 'Не получал',
+}
+
+
+def normalize_proxy_status_value(value):
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return None
+    aliases = {
+        'утерян': 'lost',
+        'lost': 'lost',
+        'сдан в hr': 'returned_to_hr',
+        'сдан hr': 'returned_to_hr',
+        'returned_to_hr': 'returned_to_hr',
+        'returned': 'returned_to_hr',
+        'не получал': 'not_received',
+        'не получил': 'not_received',
+        'not_received': 'not_received',
+        'not received': 'not_received',
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in PROXY_STATUS_VALUES:
+        raise ValueError("Invalid proxy_status")
+    return normalized
+
 
 def _invalidate_shift_auction_runtime_caches(include_participants=False):
     with SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE_LOCK:
@@ -639,6 +670,7 @@ class Database:
                     employment_type VARCHAR(10) CHECK (employment_type IN ('gph', 'of') OR employment_type IS NULL),
                     has_proxy BOOLEAN NOT NULL DEFAULT FALSE,
                     proxy_card_number VARCHAR(64),
+                    proxy_status VARCHAR(20) CHECK (proxy_status IN ('lost', 'returned_to_hr', 'not_received') OR proxy_status IS NULL),
                     has_driver_license BOOLEAN NOT NULL DEFAULT FALSE,
                     sip_number VARCHAR(64),
                     study_place VARCHAR(255),
@@ -659,6 +691,11 @@ class Database:
                     feedback_telegram_report_enabled BOOLEAN NOT NULL DEFAULT FALSE,
                     CONSTRAINT unique_name_role UNIQUE (name, role)
                 );
+            """)
+            cursor.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS proxy_status VARCHAR(20)
+                CHECK (proxy_status IN ('lost', 'returned_to_hr', 'not_received') OR proxy_status IS NULL);
             """)
             # Calls table
             cursor.execute("""
@@ -2110,12 +2147,16 @@ class Database:
                     sip_number VARCHAR(64),
                     has_proxy BOOLEAN NOT NULL DEFAULT FALSE,
                     proxy_card_number VARCHAR(64),
+                    proxy_status VARCHAR(20) CHECK (proxy_status IN ('lost', 'returned_to_hr', 'not_received') OR proxy_status IS NULL),
                     has_driver_license BOOLEAN NOT NULL DEFAULT FALSE,
                     internship_in_company BOOLEAN NOT NULL DEFAULT FALSE,
                     front_office_training BOOLEAN NOT NULL DEFAULT FALSE,
                     front_office_training_date DATE,
                     taxipro_id VARCHAR(128)
                 );
+                ALTER TABLE operator_profiles
+                ADD COLUMN IF NOT EXISTS proxy_status VARCHAR(20)
+                CHECK (proxy_status IN ('lost', 'returned_to_hr', 'not_received') OR proxy_status IS NULL);
 
                 -- User HR profiles (кадровые данные)
                 CREATE TABLE IF NOT EXISTS user_hr_profiles (
@@ -2190,6 +2231,7 @@ class Database:
         employment_type=None,
         has_proxy=None,
         proxy_card_number=None,
+        proxy_status=None,
         has_driver_license=None,
         sip_number=None,
         study_place=None,
@@ -2231,6 +2273,7 @@ class Database:
         company_name = str(company_name).strip() if company_name is not None else ""
         employment_type = str(employment_type).strip().lower() if employment_type is not None else ""
         proxy_card_number = str(proxy_card_number).strip() if proxy_card_number is not None else ""
+        proxy_status = normalize_proxy_status_value(proxy_status)
         sip_number = str(sip_number).strip() if sip_number is not None else ""
         study_place = str(study_place).strip() if study_place is not None else ""
         study_course = str(study_course).strip() if study_course is not None else ""
@@ -2351,9 +2394,9 @@ class Database:
                     cursor.execute("""
                         INSERT INTO operator_profiles (
                             user_id, direction_id, supervisor_id, is_active, rate,
-                            sip_number, has_proxy, proxy_card_number, has_driver_license,
+                            sip_number, has_proxy, proxy_card_number, proxy_status, has_driver_license,
                             internship_in_company, front_office_training, front_office_training_date, taxipro_id
-                        ) VALUES (%s, %s, %s, FALSE, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ) VALUES (%s, %s, %s, FALSE, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (user_id) DO UPDATE SET
                             direction_id = COALESCE(EXCLUDED.direction_id, operator_profiles.direction_id),
                             supervisor_id = COALESCE(EXCLUDED.supervisor_id, operator_profiles.supervisor_id),
@@ -2361,6 +2404,7 @@ class Database:
                             sip_number = COALESCE(EXCLUDED.sip_number, operator_profiles.sip_number),
                             has_proxy = EXCLUDED.has_proxy,
                             proxy_card_number = COALESCE(EXCLUDED.proxy_card_number, operator_profiles.proxy_card_number),
+                            proxy_status = COALESCE(EXCLUDED.proxy_status, operator_profiles.proxy_status),
                             has_driver_license = EXCLUDED.has_driver_license,
                             internship_in_company = EXCLUDED.internship_in_company,
                             front_office_training = EXCLUDED.front_office_training,
@@ -2371,6 +2415,7 @@ class Database:
                         sip_number,
                         (has_proxy_value if has_proxy_value is not None else False),
                         proxy_card_number,
+                        proxy_status,
                         (has_driver_license_value if has_driver_license_value is not None else False),
                         (internship_in_company_value if internship_in_company_value is not None else False),
                         (front_office_training_value if front_office_training_value is not None else False),
@@ -2391,13 +2436,13 @@ class Database:
                     INSERT INTO users (
                         telegram_id, name, role, direction_id, rate, hire_date, supervisor_id,
                         login, password_hash, hours_table_url, gender, birth_date, phone, email,
-                        instagram, telegram_nick, company_name, employment_type, has_proxy, proxy_card_number, has_driver_license, sip_number,
+                        instagram, telegram_nick, company_name, employment_type, has_proxy, proxy_card_number, proxy_status, has_driver_license, sip_number,
                         study_place, study_course, study_completed, study_completion_year,
                         close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                         close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
                         card_number, internship_in_company, front_office_training, front_office_training_date, taxipro_id
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                 """, (
                     telegram_id, name, role, direction_id, rate, hire_date, supervisor_id,
@@ -2405,6 +2450,7 @@ class Database:
                     instagram, telegram_nick, company_name, employment_type,
                     (has_proxy_value if has_proxy_value is not None else False),
                     proxy_card_number,
+                    proxy_status,
                     (has_driver_license_value if has_driver_license_value is not None else False),
                     sip_number,
                     study_place, study_course,
@@ -2440,6 +2486,7 @@ class Database:
                             employment_type = COALESCE(%s, employment_type),
                             has_proxy = COALESCE(%s, has_proxy),
                             proxy_card_number = COALESCE(%s, proxy_card_number),
+                            proxy_status = COALESCE(%s, proxy_status),
                             has_driver_license = COALESCE(%s, has_driver_license),
                             sip_number = COALESCE(%s, sip_number),
                             study_place = COALESCE(%s, study_place),
@@ -2461,7 +2508,7 @@ class Database:
                         RETURNING id
                     """, (
                         direction_id, supervisor_id, hours_table_url, gender, birth_date,
-                        phone, email, instagram, telegram_nick, company_name, employment_type, has_proxy_value, proxy_card_number, has_driver_license_value, sip_number,
+                        phone, email, instagram, telegram_nick, company_name, employment_type, has_proxy_value, proxy_card_number, proxy_status, has_driver_license_value, sip_number,
                         study_place, study_course, study_completed_value, study_completion_year,
                         close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                         close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
@@ -2497,6 +2544,7 @@ class Database:
                             employment_type = COALESCE(%s, employment_type),
                             has_proxy = COALESCE(%s, has_proxy),
                             proxy_card_number = COALESCE(%s, proxy_card_number),
+                            proxy_status = COALESCE(%s, proxy_status),
                             has_driver_license = COALESCE(%s, has_driver_license),
                             sip_number = COALESCE(%s, sip_number),
                             study_place = COALESCE(%s, study_place),
@@ -2519,7 +2567,7 @@ class Database:
                     """, (
                         name, role, direction_id, hire_date, supervisor_id, login, password_hash, hours_table_url,
                         gender, birth_date, phone, email, instagram, telegram_nick, company_name, employment_type,
-                        has_proxy_value, proxy_card_number, has_driver_license_value, sip_number,
+                        has_proxy_value, proxy_card_number, proxy_status, has_driver_license_value, sip_number,
                         study_place, study_course, study_completed_value, study_completion_year,
                         close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                         close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
@@ -10070,7 +10118,7 @@ class Database:
 
     _OPERATOR_PROFILE_FIELDS = frozenset([
         'direction_id', 'supervisor_id', 'rate', 'sip_number',
-        'has_proxy', 'proxy_card_number', 'has_driver_license',
+        'has_proxy', 'proxy_card_number', 'proxy_status', 'has_driver_license',
         'internship_in_company', 'front_office_training', 'front_office_training_date', 'taxipro_id'
     ])
     _HR_PROFILE_FIELDS = frozenset([
@@ -10100,6 +10148,7 @@ class Database:
             'employment_type',
             'has_proxy',
             'proxy_card_number',
+            'proxy_status',
             'has_driver_license',
             'sip_number',
             'study_place',
@@ -10133,6 +10182,8 @@ class Database:
                 value = None
             if current_role == 'trainee' and field in ('has_proxy', 'proxy_card_number'):
                 value = False if field == 'has_proxy' else None
+            if field == 'proxy_status':
+                value = normalize_proxy_status_value(value)
             old_value = str(old_field_value) if old_field_value is not None else None
 
             # When an operator is manually returned from dismissal via "Employees",
@@ -12458,6 +12509,7 @@ class Database:
                         u.employment_type,
                         COALESCE(u.has_proxy, FALSE) as has_proxy,
                         u.proxy_card_number,
+                        u.proxy_status,
                         COALESCE(u.has_driver_license, FALSE) as has_driver_license,
                         u.sip_number,
                         u.close_contact_1_relation,
@@ -12555,6 +12607,9 @@ class Database:
             def _format_proxy(value):
                 return 'Да' if bool(value) else 'Нет'
 
+            def _format_proxy_status(value):
+                return PROXY_STATUS_LABELS.get(str(value or '').strip().lower(), '')
+
             def _format_status(value):
                 normalized = str(value or '').strip().lower()
                 if normalized == 'working':
@@ -12594,6 +12649,7 @@ class Database:
                 "ID таксипро",
                 "Наличие прокси",
                 "Номер прокси карты",
+                "Статус прокси",
                 "Наличие водительских прав",
                 "SIP номер",
                 "Близкий 1: Кем приходится",
@@ -12621,7 +12677,7 @@ class Database:
                     name, login, role, direction, supervisor, status, rate, hire_date,
                     phone, email, instagram, telegram_nick,
                     study_place, study_course, company_name, employment_type,
-                    has_proxy, proxy_card_number, has_driver_license, sip_number,
+                    has_proxy, proxy_card_number, proxy_status, has_driver_license, sip_number,
                     close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                     close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
                     card_number, internship_in_company, front_office_training, front_office_training_date, taxipro_id, sup_id, gender,
@@ -12656,6 +12712,7 @@ class Database:
                     taxipro_id or "",
                     _format_proxy(has_proxy),
                     (proxy_card_number or "") if bool(has_proxy) else "",
+                    _format_proxy_status(proxy_status),
                     _format_proxy(has_driver_license),
                     sip_number or "",
                     close_contact_1_relation or "",

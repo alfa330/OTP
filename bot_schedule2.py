@@ -36,6 +36,8 @@ from database import (
     db,
     TECHNICAL_ISSUE_REASONS,
     SHIFT_AUCTION_TEST_EVENT_NOTIFY_CHANNEL,
+    PROXY_STATUS_LABELS,
+    normalize_proxy_status_value,
     normalize_role_value,
     get_calculation_model_catalog,
 )
@@ -4497,6 +4499,7 @@ def get_admin_users():
                         u.employment_type,
                         COALESCE(u.has_proxy, FALSE) as has_proxy,
                         u.proxy_card_number,
+                        u.proxy_status,
                         COALESCE(u.has_driver_license, FALSE) as has_driver_license,
                         u.sip_number,
                         u.study_place,
@@ -4579,23 +4582,25 @@ def get_admin_users():
                         "employment_type": row[26] or "",
                         "has_proxy": bool(row[27]) if row[27] is not None else False,
                         "proxy_card_number": row[28] or "",
-                        "has_driver_license": bool(row[29]) if row[29] is not None else False,
-                        "sip_number": row[30] or "",
-                        "study_place": row[31] or "",
-                        "study_course": row[32] or "",
-                        "close_contact_1_relation": row[33] or "",
-                        "close_contact_1_full_name": row[34] or "",
-                        "close_contact_1_phone": row[35] or "",
-                        "close_contact_2_relation": row[36] or "",
-                        "close_contact_2_full_name": row[37] or "",
-                        "close_contact_2_phone": row[38] or "",
-                        "card_number": row[39] or "",
-                        "internship_in_company": bool(row[40]) if row[40] is not None else False,
-                        "front_office_training": bool(row[41]) if row[41] is not None else False,
-                        "front_office_training_date": row[42].strftime('%Y-%m-%d') if row[42] else None,
-                        "taxipro_id": row[43] or "",
-                        "study_completed": bool(row[44]) if row[44] is not None else False,
-                        "study_completion_year": int(row[45]) if row[45] is not None else None
+                        "proxy_status": row[29] or "",
+                        "proxy_status_label": PROXY_STATUS_LABELS.get(str(row[29] or '').strip().lower(), ""),
+                        "has_driver_license": bool(row[30]) if row[30] is not None else False,
+                        "sip_number": row[31] or "",
+                        "study_place": row[32] or "",
+                        "study_course": row[33] or "",
+                        "close_contact_1_relation": row[34] or "",
+                        "close_contact_1_full_name": row[35] or "",
+                        "close_contact_1_phone": row[36] or "",
+                        "close_contact_2_relation": row[37] or "",
+                        "close_contact_2_full_name": row[38] or "",
+                        "close_contact_2_phone": row[39] or "",
+                        "card_number": row[40] or "",
+                        "internship_in_company": bool(row[41]) if row[41] is not None else False,
+                        "front_office_training": bool(row[42]) if row[42] is not None else False,
+                        "front_office_training_date": row[43].strftime('%Y-%m-%d') if row[43] else None,
+                        "taxipro_id": row[44] or "",
+                        "study_completed": bool(row[45]) if row[45] is not None else False,
+                        "study_completion_year": int(row[46]) if row[46] is not None else None
                     })
         return jsonify({"status": "success", "users": users}), 200
     except Exception as e:
@@ -4699,6 +4704,11 @@ def admin_update_user():
                 return jsonify({"error": f"Invalid {field} format. Use +7XXXXXXXXXX"}), 400
             if field == 'email' and value and '@' not in value:
                 return jsonify({"error": "Invalid email value"}), 400
+        elif field == 'proxy_status':
+            try:
+                value = normalize_proxy_status_value(value)
+            except ValueError:
+                return jsonify({"error": "Invalid proxy_status value"}), 400
         elif field == 'employment_type':
             value = str(value).strip().lower() if value is not None else ''
             value = value or None
@@ -5754,6 +5764,7 @@ def get_sv_list():
                         card_number,
                         COALESCE(has_proxy, FALSE) as has_proxy,
                         proxy_card_number,
+                        proxy_status,
                         internship_in_company,
                         front_office_training,
                         front_office_training_date,
@@ -5798,13 +5809,15 @@ def get_sv_list():
                         "card_number": sv[27] or "",
                         "has_proxy": bool(sv[28]) if sv[28] is not None else False,
                         "proxy_card_number": sv[29] or "",
-                        "internship_in_company": bool(sv[30]) if sv[30] is not None else False,
-                        "front_office_training": bool(sv[31]) if sv[31] is not None else False,
-                        "front_office_training_date": sv[32].strftime('%Y-%m-%d') if sv[32] else None,
-                        "taxipro_id": sv[33] or "",
-                        "rate": float(sv[34]) if sv[34] is not None else 1.0,
-                        "direction_id": sv[35],
-                        "supervisor_id": sv[36]
+                        "proxy_status": sv[30] or "",
+                        "proxy_status_label": PROXY_STATUS_LABELS.get(str(sv[30] or '').strip().lower(), ""),
+                        "internship_in_company": bool(sv[31]) if sv[31] is not None else False,
+                        "front_office_training": bool(sv[32]) if sv[32] is not None else False,
+                        "front_office_training_date": sv[33].strftime('%Y-%m-%d') if sv[33] else None,
+                        "taxipro_id": sv[34] or "",
+                        "rate": float(sv[35]) if sv[35] is not None else 1.0,
+                        "direction_id": sv[36],
+                        "supervisor_id": sv[37]
                     })
             else:
                 cursor.execute("""
@@ -8808,6 +8821,10 @@ def add_user():
             return jsonify({"error": "Invalid has_driver_license value"}), 400
 
         proxy_card_number = str(data.get('proxy_card_number') or '').strip() or None
+        try:
+            proxy_status = normalize_proxy_status_value(data.get('proxy_status'))
+        except ValueError:
+            return jsonify({"error": "Invalid proxy_status value"}), 400
         if role == 'trainee' or not has_proxy:
             has_proxy = False if role == 'trainee' else has_proxy
             proxy_card_number = None
@@ -8849,6 +8866,7 @@ def add_user():
             employment_type=employment_type,
             has_proxy=has_proxy,
             proxy_card_number=proxy_card_number,
+            proxy_status=proxy_status,
             has_driver_license=has_driver_license,
             sip_number=sip_number,
             study_place=study_place,
