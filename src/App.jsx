@@ -33219,7 +33219,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                       <h1 className="text-5xl font-extrabold mb-6 flex items-center justify-center">
                         <span className="flex">
                           <span className="bg-indigo-700 text-white px-3 py-2 rounded-l-2xl shadow-lg text-4xl border border-indigo-700">
-                            OTP
+                            iCORE
                           </span>
                           <span className="bg-white text-indigo-700 px-2 py-2 rounded-r-2xl border-t border-b border-r border-indigo-700 text-4xl -ml-px">
                             <img
@@ -33440,7 +33440,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                               {/* Полный логотип */}
                               <span className="sidebar-logo-full flex">
                                 <span className="bg-white text-blue-800 px-3 py-1.5 rounded-l-2xl shadow-md text-3xl border border-white">
-                                  OTP
+                                  iCORE
                                 </span>
                                 <span className="bg-blue-800 text-indigo-700 px-2 py-1.5 rounded-r-2xl border-t border-b border-r border-white text-3xl -ml-px flex items-center">
                                   <img src="https://iili.io/Kfw7PQp.png" alt="Site Icon" className="w-10 h-10 object-contain"/>
