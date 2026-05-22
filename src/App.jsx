@@ -123,6 +123,52 @@ const DEFAULT_USERS_REPORT_OPTIONS = {
     includeFired: false,
     includeDismissalDetails: true
 };
+const SALARY_CALCULATOR_TYPES = new Set(['call', 'chat', 'converter']);
+const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
+    admin_sessions: 'Admin sessions',
+    ai_feedback: 'Dos AI',
+    call_division: 'Call division',
+    call_evaluation: 'Call evaluation',
+    contests: 'Contests',
+    departments: 'Departments',
+    employees: 'Employees',
+    evaluation: 'My evaluations',
+    hours: 'Hours',
+    lms: 'LMS',
+    manage_admins: 'Manage admins',
+    manage_operators: 'Manage operators',
+    manage_trainers: 'Manage trainers',
+    manage_users: 'Manage users',
+    monitoring_scale: 'Monitoring scale',
+    operators: 'Operators',
+    profile: 'Profile',
+    qr_access: 'QR access',
+    recruiting: 'Recruiting',
+    resource_fte: 'Resource FTE',
+    salary: 'Salary calculator',
+    shift_auction: 'Shift auction',
+    surveys: 'Surveys',
+    sv_hours: 'Supervisor hours',
+    sv_list: 'Supervisor list',
+    tasks: 'Tasks',
+    technical_issues: 'Technical issues',
+    trainings: 'Trainings',
+    work_schedules: 'Work schedules'
+});
+const APP_SUBVIEW_ANALYTICS_NAMES = Object.freeze({
+    call_evaluation_analytics: 'Call evaluation analytics',
+    call_evaluation_calibration: 'Call evaluation calibration',
+    call_evaluation_journal: 'Call evaluation journal',
+    call_evaluation_requests: 'Call evaluation requests',
+    lms_admin: 'LMS admin',
+    lms_catalog: 'LMS catalog',
+    lms_course: 'LMS course',
+    lms_home: 'LMS home',
+    lms_lesson: 'LMS lesson',
+    salary_call: 'Salary calculator - call line',
+    salary_chat: 'Salary calculator - chat',
+    salary_converter: 'Salary calculator - converter'
+});
 const USERS_REPORT_SHEET_OPTIONS = [
     {
         value: 'summary_and_supervisors',
@@ -154,6 +200,71 @@ const normalizeClientAuthTransport = (value) => {
         return normalized;
     }
     return null;
+};
+const normalizeSalaryCalculatorType = (value) => {
+    const normalized = String(value || '').trim().toLowerCase();
+    return SALARY_CALCULATOR_TYPES.has(normalized) ? normalized : 'call';
+};
+const normalizeAnalyticsToken = (value) =>
+    String(value || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9_/-]+/g, '_')
+        .replace(/_+/g, '_')
+        .replace(/^_+|_+$/g, '');
+const formatAnalyticsName = (value) => {
+    const normalized = normalizeAnalyticsToken(value).replace(/[\/_-]+/g, ' ').trim();
+    return normalized ? normalized.replace(/\b\w/g, (char) => char.toUpperCase()) : 'Unknown';
+};
+const getAppViewAnalyticsName = (viewId) =>
+    APP_VIEW_ANALYTICS_NAMES[viewId] || formatAnalyticsName(viewId);
+const getAppSubviewAnalyticsName = (subviewId) =>
+    APP_SUBVIEW_ANALYTICS_NAMES[subviewId] || formatAnalyticsName(subviewId);
+const resolveAppViewAnalyticsSubview = ({ view, calculatorType, callEvaluationTab, pathname }) => {
+    const viewId = normalizeAnalyticsToken(view);
+    if (viewId === 'salary') {
+        return `salary_${normalizeSalaryCalculatorType(calculatorType)}`;
+    }
+    if (viewId === 'call_evaluation') {
+        const tab = normalizeAnalyticsToken(callEvaluationTab) || 'journal';
+        return `call_evaluation_${tab}`;
+    }
+    if (viewId === 'lms') {
+        const path = String(pathname || '').toLowerCase();
+        if (/\/lms\/course\/[^/]+\/lesson\//.test(path)) return 'lms_lesson';
+        if (/\/lms\/course\//.test(path)) return 'lms_course';
+        if (/\/lms\/admin\b/.test(path)) return 'lms_admin';
+        if (/\/lms\/catalog\b/.test(path)) return 'lms_catalog';
+        return 'lms_home';
+    }
+    return '';
+};
+const trackAppViewAnalytics = ({ view, subview = '', role = '' } = {}) => {
+    if (typeof window === 'undefined' || typeof window.gtag !== 'function') return false;
+    const viewId = normalizeAnalyticsToken(view) || 'unknown';
+    const subviewId = normalizeAnalyticsToken(subview);
+    const normalizedRole = normalizeRole(role);
+    const params = {
+        app_view_id: viewId,
+        app_view_name: getAppViewAnalyticsName(viewId),
+        page_location: window.location.href,
+        page_path: `${window.location.pathname}${window.location.search}${window.location.hash}`,
+        page_title: document.title || getAppViewAnalyticsName(viewId)
+    };
+    if (subviewId) {
+        params.app_subview_id = subviewId;
+        params.app_subview_name = getAppSubviewAnalyticsName(subviewId);
+    }
+    if (normalizedRole) {
+        params.app_user_role = normalizedRole;
+    }
+    try {
+        window.gtag('event', 'app_view', params);
+        return true;
+    } catch (error) {
+        console.warn('Failed to send app view analytics event:', error);
+        return false;
+    }
 };
 const authRuntimeState = {
     transport: null,
@@ -25550,7 +25661,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [showUsersReportModal, setShowUsersReportModal] = useState(false);
             const [usersReportOptions, setUsersReportOptions] = useState(DEFAULT_USERS_REPORT_OPTIONS);
             const [svOperators, setSvOperators] = useState([]);
-            const [calculatorType, setCalculatorType] = useState('call');
+            const [calculatorType, setCalculatorType] = useState(() =>
+                normalizeSalaryCalculatorType(getStoredValue('calculatorType', 'call'))
+            );
+            const appViewAnalyticsKeyRef = useRef('');
             const [tableUrl, setTableUrl] = useState(''); // URL таблицы
             const [previewData, setPreviewData] = useState(null); // Данные предпросмотра (sheet_name, operators)
             const [selectedDirection, setSelectedDirection] = useState(''); // Выбранное направление
@@ -28546,7 +28660,48 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     syncAppViewWithUrl(view);
                 }
             }, [isAuthInitializing, view, user]);
-            
+
+            const appViewAnalyticsSubview = useMemo(
+                () => resolveAppViewAnalyticsSubview({
+                    view,
+                    calculatorType,
+                    callEvaluationTab: callEvalActiveTab,
+                    pathname: location.pathname
+                }),
+                [view, calculatorType, callEvalActiveTab, location.pathname]
+            );
+
+            useEffect(() => {
+                if (isAuthInitializing || !user || !view || view === 'operators') return;
+                const currentPath = typeof window !== 'undefined'
+                    ? `${window.location.pathname}${window.location.search}${window.location.hash}`
+                    : `${location.pathname}${location.search}${location.hash || ''}`;
+                const analyticsKey = [
+                    user?.id || 'anonymous',
+                    view,
+                    appViewAnalyticsSubview,
+                    currentPath
+                ].join('|');
+                if (appViewAnalyticsKeyRef.current === analyticsKey) return;
+
+                appViewAnalyticsKeyRef.current = analyticsKey;
+                trackAppViewAnalytics({
+                    view,
+                    subview: appViewAnalyticsSubview,
+                    role: user?.role
+                });
+            }, [
+                appViewAnalyticsSubview,
+                isAuthInitializing,
+                location.hash,
+                location.pathname,
+                location.search,
+                user,
+                user?.id,
+                user?.role,
+                view
+            ]);
+             
             useEffect(() => {
                 if (selectedMonth && user) {
                     localStorage.setItem('selectedMonth', selectedMonth);
@@ -28623,7 +28778,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // Persist and restore calculatorType (for salary view)
             useEffect(() => {
                 if (user) {
-                    const savedCalcType = localStorage.getItem('calculatorType');
+                    const savedCalcType = normalizeSalaryCalculatorType(localStorage.getItem('calculatorType'));
                     if (savedCalcType) {
                         setCalculatorType(savedCalcType);
                     }
@@ -28632,7 +28787,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             
             useEffect(() => {
                 if (calculatorType && user) {
-                    localStorage.setItem('calculatorType', calculatorType);
+                    localStorage.setItem('calculatorType', normalizeSalaryCalculatorType(calculatorType));
                 }
             }, [calculatorType]);
             

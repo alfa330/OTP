@@ -17,6 +17,55 @@ const authRuntimeState = {
     accessToken: '',
     refreshToken: ''
 };
+const CALL_EVALUATION_SECTION_NAMES = Object.freeze({
+    analytics: 'Call evaluation analytics',
+    calibration: 'Call evaluation calibration',
+    journal: 'Call evaluation journal',
+    requests: 'Call evaluation requests'
+});
+
+const normalizeAnalyticsToken = (value) =>
+    String(value || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9_/-]+/g, '_')
+        .replace(/_+/g, '_')
+        .replace(/^_+|_+$/g, '');
+
+const formatAnalyticsName = (value) => {
+    const normalized = normalizeAnalyticsToken(value).replace(/[\/_-]+/g, ' ').trim();
+    return normalized ? normalized.replace(/\b\w/g, (char) => char.toUpperCase()) : 'Unknown';
+};
+
+const trackCallEvaluationAppView = ({ section = 'journal', role = '' } = {}) => {
+    if (typeof window === 'undefined' || typeof window.gtag !== 'function') return false;
+    if (window.parent && window.parent !== window) return false;
+
+    const sectionId = normalizeAnalyticsToken(section) || 'journal';
+    const roleId = normalizeAnalyticsToken(role === 'supervisor' ? 'sv' : role);
+    const subviewId = `call_evaluation_${sectionId}`;
+    const params = {
+        app_view_id: 'call_evaluation',
+        app_view_name: 'Call evaluation',
+        app_subview_id: subviewId,
+        app_subview_name: CALL_EVALUATION_SECTION_NAMES[sectionId] || formatAnalyticsName(subviewId),
+        page_location: window.location.href,
+        page_path: `${window.location.pathname}${window.location.search}${window.location.hash}`,
+        page_title: document.title || 'Call evaluation'
+    };
+
+    if (roleId) {
+        params.app_user_role = roleId;
+    }
+
+    try {
+        window.gtag('event', 'app_view', params);
+        return true;
+    } catch (error) {
+        console.warn('Failed to send call evaluation analytics event:', error);
+        return false;
+    }
+};
 
 const readEmbedState = () => {
     try {
@@ -2186,6 +2235,7 @@ const App = ({ user, initialSelection }) => {
     const [toDate, setToDate] = useState(null);
     const [viewMode, setViewMode] = useState('normal');
     const [activeSection, setActiveSection] = useState(canUseAnalytics ? 'analytics' : 'journal');
+    const appViewAnalyticsKeyRef = useRef('');
     const [reevaluationRequests, setReevaluationRequests] = useState([]);
     const [reevaluationSearch, setReevaluationSearch] = useState('');
     const [isRequestsLoading, setIsRequestsLoading] = useState(false);
@@ -2445,6 +2495,19 @@ const App = ({ user, initialSelection }) => {
             emitCallEvaluationToast(`Ошибка сохранения настройки: ${e.message}`, 'error');
         }
     }, [isAdminRole, userId, feedbackReportSetting.enabled]);
+
+    useEffect(() => {
+        const sectionId = normalizeAnalyticsToken(activeSection) || 'journal';
+        const roleId = normalizeAnalyticsToken(canonicalRole);
+        const analyticsKey = `${sectionId}|${roleId}`;
+        if (appViewAnalyticsKeyRef.current === analyticsKey) return;
+
+        appViewAnalyticsKeyRef.current = analyticsKey;
+        trackCallEvaluationAppView({
+            section: sectionId,
+            role: roleId
+        });
+    }, [activeSection, canonicalRole]);
 
     // Supervisors
     useEffect(() => {
