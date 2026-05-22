@@ -4493,6 +4493,7 @@ def get_admin_users():
                         sp.comment as status_period_comment,
                         u.phone,
                         u.email,
+                        u.personal_email,
                         u.instagram,
                         u.telegram_nick,
                         u.company_name,
@@ -4576,31 +4577,32 @@ def get_admin_users():
                         "status_period_comment": row[20] or "",
                         "phone": row[21] or "",
                         "email": row[22] or "",
-                        "instagram": row[23] or "",
-                        "telegram_nick": row[24] or "",
-                        "company_name": row[25] or "",
-                        "employment_type": row[26] or "",
-                        "has_proxy": bool(row[27]) if row[27] is not None else False,
-                        "proxy_card_number": row[28] or "",
-                        "proxy_status": row[29] or "",
-                        "proxy_status_label": PROXY_STATUS_LABELS.get(str(row[29] or '').strip().lower(), ""),
-                        "has_driver_license": bool(row[30]) if row[30] is not None else False,
-                        "sip_number": row[31] or "",
-                        "study_place": row[32] or "",
-                        "study_course": row[33] or "",
-                        "close_contact_1_relation": row[34] or "",
-                        "close_contact_1_full_name": row[35] or "",
-                        "close_contact_1_phone": row[36] or "",
-                        "close_contact_2_relation": row[37] or "",
-                        "close_contact_2_full_name": row[38] or "",
-                        "close_contact_2_phone": row[39] or "",
-                        "card_number": row[40] or "",
-                        "internship_in_company": bool(row[41]) if row[41] is not None else False,
-                        "front_office_training": bool(row[42]) if row[42] is not None else False,
-                        "front_office_training_date": row[43].strftime('%Y-%m-%d') if row[43] else None,
-                        "taxipro_id": row[44] or "",
-                        "study_completed": bool(row[45]) if row[45] is not None else False,
-                        "study_completion_year": int(row[46]) if row[46] is not None else None
+                        "personal_email": row[23] or "",
+                        "instagram": row[24] or "",
+                        "telegram_nick": row[25] or "",
+                        "company_name": row[26] or "",
+                        "employment_type": row[27] or "",
+                        "has_proxy": bool(row[28]) if row[28] is not None else False,
+                        "proxy_card_number": row[29] or "",
+                        "proxy_status": row[30] or "",
+                        "proxy_status_label": PROXY_STATUS_LABELS.get(str(row[30] or '').strip().lower(), ""),
+                        "has_driver_license": bool(row[31]) if row[31] is not None else False,
+                        "sip_number": row[32] or "",
+                        "study_place": row[33] or "",
+                        "study_course": row[34] or "",
+                        "close_contact_1_relation": row[35] or "",
+                        "close_contact_1_full_name": row[36] or "",
+                        "close_contact_1_phone": row[37] or "",
+                        "close_contact_2_relation": row[38] or "",
+                        "close_contact_2_full_name": row[39] or "",
+                        "close_contact_2_phone": row[40] or "",
+                        "card_number": row[41] or "",
+                        "internship_in_company": bool(row[42]) if row[42] is not None else False,
+                        "front_office_training": bool(row[43]) if row[43] is not None else False,
+                        "front_office_training_date": row[44].strftime('%Y-%m-%d') if row[44] else None,
+                        "taxipro_id": row[45] or "",
+                        "study_completed": bool(row[46]) if row[46] is not None else False,
+                        "study_completion_year": int(row[47]) if row[47] is not None else None
                     })
         return jsonify({"status": "success", "users": users}), 200
     except Exception as e:
@@ -4678,6 +4680,7 @@ def admin_update_user():
         elif field in [
             'phone',
             'email',
+            'personal_email',
             'instagram',
             'telegram_nick',
             'company_name',
@@ -4702,7 +4705,7 @@ def admin_update_user():
                 value = None
             if field in ['phone', 'close_contact_1_phone', 'close_contact_2_phone'] and value and not _is_valid_kz_phone(value):
                 return jsonify({"error": f"Invalid {field} format. Use +7XXXXXXXXXX"}), 400
-            if field == 'email' and value and '@' not in value:
+            if field in ['email', 'personal_email'] and value and '@' not in value:
                 return jsonify({"error": "Invalid email value"}), 400
         elif field == 'proxy_status':
             try:
@@ -5747,6 +5750,7 @@ def get_sv_list():
                         avatar_updated_at,
                         phone,
                         email,
+                        personal_email,
                         instagram,
                         telegram_nick,
                         company_name,
@@ -5792,32 +5796,33 @@ def get_sv_list():
                         "avatar_updated_at": sv[10].isoformat() if sv[10] else None,
                         "phone": sv[11] or "",
                         "email": sv[12] or "",
-                        "instagram": sv[13] or "",
-                        "telegram_nick": sv[14] or "",
-                        "company_name": sv[15] or "",
-                        "employment_type": sv[16] or "",
-                        "study_place": sv[17] or "",
-                        "study_course": sv[18] or "",
-                        "study_completed": bool(sv[19]) if sv[19] is not None else False,
-                        "study_completion_year": int(sv[20]) if sv[20] is not None else None,
-                        "close_contact_1_relation": sv[21] or "",
-                        "close_contact_1_full_name": sv[22] or "",
-                        "close_contact_1_phone": sv[23] or "",
-                        "close_contact_2_relation": sv[24] or "",
-                        "close_contact_2_full_name": sv[25] or "",
-                        "close_contact_2_phone": sv[26] or "",
-                        "card_number": sv[27] or "",
-                        "has_proxy": bool(sv[28]) if sv[28] is not None else False,
-                        "proxy_card_number": sv[29] or "",
-                        "proxy_status": sv[30] or "",
-                        "proxy_status_label": PROXY_STATUS_LABELS.get(str(sv[30] or '').strip().lower(), ""),
-                        "internship_in_company": bool(sv[31]) if sv[31] is not None else False,
-                        "front_office_training": bool(sv[32]) if sv[32] is not None else False,
-                        "front_office_training_date": sv[33].strftime('%Y-%m-%d') if sv[33] else None,
-                        "taxipro_id": sv[34] or "",
-                        "rate": float(sv[35]) if sv[35] is not None else 1.0,
-                        "direction_id": sv[36],
-                        "supervisor_id": sv[37]
+                        "personal_email": sv[13] or "",
+                        "instagram": sv[14] or "",
+                        "telegram_nick": sv[15] or "",
+                        "company_name": sv[16] or "",
+                        "employment_type": sv[17] or "",
+                        "study_place": sv[18] or "",
+                        "study_course": sv[19] or "",
+                        "study_completed": bool(sv[20]) if sv[20] is not None else False,
+                        "study_completion_year": int(sv[21]) if sv[21] is not None else None,
+                        "close_contact_1_relation": sv[22] or "",
+                        "close_contact_1_full_name": sv[23] or "",
+                        "close_contact_1_phone": sv[24] or "",
+                        "close_contact_2_relation": sv[25] or "",
+                        "close_contact_2_full_name": sv[26] or "",
+                        "close_contact_2_phone": sv[27] or "",
+                        "card_number": sv[28] or "",
+                        "has_proxy": bool(sv[29]) if sv[29] is not None else False,
+                        "proxy_card_number": sv[30] or "",
+                        "proxy_status": sv[31] or "",
+                        "proxy_status_label": PROXY_STATUS_LABELS.get(str(sv[31] or '').strip().lower(), ""),
+                        "internship_in_company": bool(sv[32]) if sv[32] is not None else False,
+                        "front_office_training": bool(sv[33]) if sv[33] is not None else False,
+                        "front_office_training_date": sv[34].strftime('%Y-%m-%d') if sv[34] else None,
+                        "taxipro_id": sv[35] or "",
+                        "rate": float(sv[36]) if sv[36] is not None else 1.0,
+                        "direction_id": sv[37],
+                        "supervisor_id": sv[38]
                     })
             else:
                 cursor.execute("""
@@ -8684,6 +8689,9 @@ def add_user():
         email = str(data.get('email') or '').strip() or None
         if email and '@' not in email:
             return jsonify({"error": "Invalid email value"}), 400
+        personal_email = str(data.get('personal_email') or '').strip() or None
+        if personal_email and '@' not in personal_email:
+            return jsonify({"error": "Invalid personal_email value"}), 400
         instagram = str(data.get('instagram') or '').strip() or None
         telegram_nick = str(data.get('telegram_nick') or '').strip() or None
         company_name = str(data.get('company_name') or '').strip() or None
@@ -8860,6 +8868,7 @@ def add_user():
             birth_date=birth_date,
             phone=phone,
             email=email,
+            personal_email=personal_email,
             instagram=instagram,
             telegram_nick=telegram_nick,
             company_name=company_name,
