@@ -31,6 +31,17 @@ const AVATAR_MIN_ZOOM = 1;
 const AVATAR_MAX_ZOOM_CAP = 6;
 const KZ_PHONE_REGEX = /^\+7\d{10}$/;
 const KZ_PHONE_PLACEHOLDER = '+7XXXXXXXXXX';
+const PROXY_STATUS_OPTIONS = [
+    { value: 'lost', label: 'Утерян' },
+    { value: 'returned_to_hr', label: 'Сдан в HR' },
+    { value: 'not_received', label: 'Не получал' }
+];
+const PROXY_STATUS_VALUES = new Set(PROXY_STATUS_OPTIONS.map((option) => option.value));
+
+const normalizeProxyStatus = (value) => {
+    const normalized = String(value ?? '').trim();
+    return PROXY_STATUS_VALUES.has(normalized) ? normalized : '';
+};
 const getAlmatyDayOfMonth = (date = new Date()) => {
     try {
         const dayValue = new Intl.DateTimeFormat('en-US', {
@@ -335,6 +346,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         taxipro_id: base.taxipro_id ?? "",
         has_proxy: !!base.has_proxy,
         proxy_card_number: base.proxy_card_number ?? "",
+        proxy_status: normalizeProxyStatus(base.proxy_status),
         has_driver_license: !!base.has_driver_license,
         sip_number: base.sip_number ?? "",
         use_schedule_status_period: false,
@@ -376,6 +388,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         defaults.taxipro_id = String(defaults.taxipro_id ?? '').trim();
         defaults.has_proxy = baseRole === 'trainee' ? false : !!defaults.has_proxy;
         defaults.proxy_card_number = baseRole === 'trainee' ? "" : String(defaults.proxy_card_number ?? '').trim();
+        defaults.proxy_status = normalizeProxyStatus(defaults.proxy_status);
         defaults.has_driver_license = !!defaults.has_driver_license;
         defaults.sip_number = isOperatorBase ? String(defaults.sip_number ?? '').trim() : "";
         if (defaults.status === 'unpaid_leave' || defaults.status === 'dismissal') {
@@ -596,6 +609,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         taxipro_id: "",
         has_proxy: false,
         proxy_card_number: "",
+        proxy_status: "",
         has_driver_license: false,
         sip_number: "",
         use_schedule_status_period: false,
@@ -751,6 +765,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             taxipro_id: String(editedUser?.taxipro_id || '').trim(),
             has_proxy: canSaveProxyCard ? !!editedUser?.has_proxy : false,
             proxy_card_number: canSaveProxyCard && !!editedUser?.has_proxy ? String(editedUser?.proxy_card_number || '').trim() : '',
+            proxy_status: normalizeProxyStatus(editedUser?.proxy_status),
             has_driver_license: !!editedUser?.has_driver_license,
             sip_number: isOperatorUser ? String(editedUser?.sip_number || '').trim() : ''
         };
@@ -1530,6 +1545,20 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     )}
                     </>
                     )}
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Статус прокси</label>
+                        <select
+                        value={normalizeProxyStatus(editedUser?.proxy_status)}
+                        onChange={(e) => setEditedUser({ ...editedUser, proxy_status: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading || !!createdCredentials}
+                        >
+                        <option value="">Не указан</option>
+                        {PROXY_STATUS_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                        </select>
+                    </div>
                     {isOperatorDraft(editedUser) && (
                     <>
                     <div>
@@ -2147,6 +2176,20 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             )}
                             </>
                             )}
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Статус прокси</label>
+                                <select
+                                value={normalizeProxyStatus(editedUser?.proxy_status)}
+                                onChange={(e) => setEditedUser({ ...editedUser, proxy_status: e.target.value })}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                disabled={isLoading}
+                                >
+                                <option value="">Не указан</option>
+                                {PROXY_STATUS_OPTIONS.map((option) => (
+                                    <option key={option.value} value={option.value}>{option.label}</option>
+                                ))}
+                                </select>
+                            </div>
                             {isOperatorDraft(editedUser) && (
                             <>
                             <div>
