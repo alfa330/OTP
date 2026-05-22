@@ -325,6 +325,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         status_period_comment: "",
         phone: base.phone ?? "",
         email: base.email ?? "",
+        personal_email: base.personal_email ?? "",
         instagram: base.instagram ?? "",
         telegram_nick: base.telegram_nick ?? "",
         study_place: base.study_place ?? "",
@@ -363,6 +364,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         }
         defaults.phone = String(defaults.phone ?? '').trim();
         defaults.email = String(defaults.email ?? '').trim();
+        defaults.personal_email = String(defaults.personal_email ?? '').trim();
         defaults.instagram = String(defaults.instagram ?? '').trim();
         defaults.telegram_nick = String(defaults.telegram_nick ?? '').trim();
         defaults.study_place = String(defaults.study_place ?? '').trim();
@@ -588,6 +590,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         status_period_comment: "",
         phone: "",
         email: "",
+        personal_email: "",
         instagram: "",
         telegram_nick: "",
         study_place: "",
@@ -669,6 +672,11 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         setModalError("Введите корректную почту.");
         return;
         }
+        const normalizedPersonalEmail = String(editedUser?.personal_email || '').trim();
+        if (normalizedPersonalEmail && !normalizedPersonalEmail.includes('@')) {
+        setModalError("Введите корректный личный Email.");
+        return;
+        }
 
         const normalizedPhone = String(editedUser?.phone || '').trim();
         if (!isValidKzPhone(normalizedPhone)) {
@@ -740,6 +748,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             ...editedUser,
             phone: String(editedUser?.phone || '').trim(),
             email: normalizedEmail,
+            personal_email: normalizedPersonalEmail,
             instagram: String(editedUser?.instagram || '').trim(),
             telegram_nick: String(editedUser?.telegram_nick || '').trim(),
             study_place: String(editedUser?.study_place || '').trim(),
@@ -1120,6 +1129,17 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         type="email"
                         value={editedUser?.email || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, email: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading || !!createdCredentials}
+                        />
+                    </div>
+
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Личный Email</label>
+                        <input
+                        type="email"
+                        value={editedUser?.personal_email || ""}
+                        onChange={(e) => setEditedUser({ ...editedUser, personal_email: e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                         disabled={isLoading || !!createdCredentials}
                         />
@@ -1735,6 +1755,17 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             type="email"
                             value={editedUser?.email || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, email: e.target.value })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading}
+                            />
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Личный Email</label>
+                            <input
+                            type="email"
+                            value={editedUser?.personal_email || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, personal_email: e.target.value })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                             disabled={isLoading}
                             />

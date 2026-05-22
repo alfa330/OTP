@@ -664,6 +664,7 @@ class Database:
                     avatar_updated_at TIMESTAMP,
                     phone VARCHAR(50),
                     email VARCHAR(255),
+                    personal_email VARCHAR(255),
                     instagram VARCHAR(255),
                     telegram_nick VARCHAR(255),
                     company_name VARCHAR(255),
@@ -696,6 +697,10 @@ class Database:
                 ALTER TABLE users
                 ADD COLUMN IF NOT EXISTS proxy_status VARCHAR(20)
                 CHECK (proxy_status IN ('lost', 'returned_to_hr', 'not_received') OR proxy_status IS NULL);
+            """)
+            cursor.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS personal_email VARCHAR(255);
             """)
             # Calls table
             cursor.execute("""
@@ -2164,6 +2169,7 @@ class Database:
                     user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
                     phone VARCHAR(50),
                     email VARCHAR(255),
+                    personal_email VARCHAR(255),
                     instagram VARCHAR(255),
                     telegram_nick VARCHAR(255),
                     company_name VARCHAR(255),
@@ -2180,6 +2186,8 @@ class Database:
                     close_contact_2_phone VARCHAR(50),
                     card_number VARCHAR(64)
                 );
+                ALTER TABLE user_hr_profiles
+                ADD COLUMN IF NOT EXISTS personal_email VARCHAR(255);
 
                 -- Admin profiles
                 CREATE TABLE IF NOT EXISTS admin_profiles (
@@ -2225,6 +2233,7 @@ class Database:
         birth_date=None,
         phone=None,
         email=None,
+        personal_email=None,
         instagram=None,
         telegram_nick=None,
         company_name=None,
@@ -2268,6 +2277,7 @@ class Database:
         role_norm = str(role or '').strip().lower()
         phone = str(phone).strip() if phone is not None else ""
         email = str(email).strip() if email is not None else ""
+        personal_email = str(personal_email).strip() if personal_email is not None else ""
         instagram = str(instagram).strip() if instagram is not None else ""
         telegram_nick = str(telegram_nick).strip() if telegram_nick is not None else ""
         company_name = str(company_name).strip() if company_name is not None else ""
@@ -2289,6 +2299,7 @@ class Database:
 
         phone = phone or None
         email = email or None
+        personal_email = personal_email or None
         instagram = instagram or None
         telegram_nick = telegram_nick or None
         company_name = company_name or None
@@ -2353,16 +2364,17 @@ class Database:
                 # HR profile (all users)
                 cursor.execute("""
                     INSERT INTO user_hr_profiles (
-                        user_id, phone, email, instagram, telegram_nick,
+                        user_id, phone, email, personal_email, instagram, telegram_nick,
                         company_name, employment_type,
                         study_place, study_course, study_completed, study_completion_year,
                         close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                         close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
                         card_number
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (user_id) DO UPDATE SET
                         phone = COALESCE(EXCLUDED.phone, user_hr_profiles.phone),
                         email = COALESCE(EXCLUDED.email, user_hr_profiles.email),
+                        personal_email = COALESCE(EXCLUDED.personal_email, user_hr_profiles.personal_email),
                         instagram = COALESCE(EXCLUDED.instagram, user_hr_profiles.instagram),
                         telegram_nick = COALESCE(EXCLUDED.telegram_nick, user_hr_profiles.telegram_nick),
                         company_name = COALESCE(EXCLUDED.company_name, user_hr_profiles.company_name),
@@ -2379,7 +2391,7 @@ class Database:
                         close_contact_2_phone = COALESCE(EXCLUDED.close_contact_2_phone, user_hr_profiles.close_contact_2_phone),
                         card_number = COALESCE(EXCLUDED.card_number, user_hr_profiles.card_number)
                 """, (
-                    uid, phone, email, instagram, telegram_nick,
+                    uid, phone, email, personal_email, instagram, telegram_nick,
                     company_name, employment_type,
                     study_place, study_course,
                     (study_completed_value if study_completed_value is not None else False),
@@ -2435,18 +2447,18 @@ class Database:
                 cursor.execute("""
                     INSERT INTO users (
                         telegram_id, name, role, direction_id, rate, hire_date, supervisor_id,
-                        login, password_hash, hours_table_url, gender, birth_date, phone, email,
+                        login, password_hash, hours_table_url, gender, birth_date, phone, email, personal_email,
                         instagram, telegram_nick, company_name, employment_type, has_proxy, proxy_card_number, proxy_status, has_driver_license, sip_number,
                         study_place, study_course, study_completed, study_completion_year,
                         close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                         close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
                         card_number, internship_in_company, front_office_training, front_office_training_date, taxipro_id
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                 """, (
                     telegram_id, name, role, direction_id, rate, hire_date, supervisor_id,
-                    login, password_hash, hours_table_url, gender, birth_date, phone, email,
+                    login, password_hash, hours_table_url, gender, birth_date, phone, email, personal_email,
                     instagram, telegram_nick, company_name, employment_type,
                     (has_proxy_value if has_proxy_value is not None else False),
                     proxy_card_number,
@@ -2480,6 +2492,7 @@ class Database:
                             birth_date = COALESCE(%s, birth_date),
                             phone = COALESCE(%s, phone),
                             email = COALESCE(%s, email),
+                            personal_email = COALESCE(%s, personal_email),
                             instagram = COALESCE(%s, instagram),
                             telegram_nick = COALESCE(%s, telegram_nick),
                             company_name = COALESCE(%s, company_name),
@@ -2508,7 +2521,7 @@ class Database:
                         RETURNING id
                     """, (
                         direction_id, supervisor_id, hours_table_url, gender, birth_date,
-                        phone, email, instagram, telegram_nick, company_name, employment_type, has_proxy_value, proxy_card_number, proxy_status, has_driver_license_value, sip_number,
+                        phone, email, personal_email, instagram, telegram_nick, company_name, employment_type, has_proxy_value, proxy_card_number, proxy_status, has_driver_license_value, sip_number,
                         study_place, study_course, study_completed_value, study_completion_year,
                         close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                         close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
@@ -2538,6 +2551,7 @@ class Database:
                             birth_date = COALESCE(%s, birth_date),
                             phone = COALESCE(%s, phone),
                             email = COALESCE(%s, email),
+                            personal_email = COALESCE(%s, personal_email),
                             instagram = COALESCE(%s, instagram),
                             telegram_nick = COALESCE(%s, telegram_nick),
                             company_name = COALESCE(%s, company_name),
@@ -2566,7 +2580,7 @@ class Database:
                         RETURNING id
                     """, (
                         name, role, direction_id, hire_date, supervisor_id, login, password_hash, hours_table_url,
-                        gender, birth_date, phone, email, instagram, telegram_nick, company_name, employment_type,
+                        gender, birth_date, phone, email, personal_email, instagram, telegram_nick, company_name, employment_type,
                         has_proxy_value, proxy_card_number, proxy_status, has_driver_license_value, sip_number,
                         study_place, study_course, study_completed_value, study_completion_year,
                         close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
@@ -10122,7 +10136,7 @@ class Database:
         'internship_in_company', 'front_office_training', 'front_office_training_date', 'taxipro_id'
     ])
     _HR_PROFILE_FIELDS = frozenset([
-        'phone', 'email', 'instagram', 'telegram_nick',
+        'phone', 'email', 'personal_email', 'instagram', 'telegram_nick',
         'company_name', 'employment_type',
         'study_place', 'study_course', 'study_completed', 'study_completion_year',
         'close_contact_1_relation', 'close_contact_1_full_name', 'close_contact_1_phone',
@@ -10142,6 +10156,7 @@ class Database:
             'birth_date',
             'phone',
             'email',
+            'personal_email',
             'instagram',
             'telegram_nick',
             'company_name',
@@ -12502,6 +12517,7 @@ class Database:
                         u.hire_date,
                         u.phone,
                         u.email,
+                        u.personal_email,
                         u.instagram,
                         u.telegram_nick,
                         u.study_place,
@@ -12639,6 +12655,7 @@ class Database:
                 "Дата принятия",
                 "Номер телефона",
                 "Почта",
+                "Личный Email",
                 "Инстаграм",
                 "Ник Telegram",
                 "Место учебы",
@@ -12678,7 +12695,7 @@ class Database:
             for row in all_operators:
                 (
                     name, login, role, department_name, direction, supervisor, status, rate, hire_date,
-                    phone, email, instagram, telegram_nick,
+                    phone, email, personal_email, instagram, telegram_nick,
                     study_place, study_course, company_name, employment_type,
                     has_proxy, proxy_card_number, proxy_status, has_driver_license, sip_number,
                     close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
@@ -12703,6 +12720,7 @@ class Database:
                     _format_date(hire_date),
                     phone or "",
                     email or "",
+                    personal_email or "",
                     instagram or "",
                     telegram_nick or "",
                     study_place or "",

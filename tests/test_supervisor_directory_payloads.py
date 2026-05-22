@@ -22,10 +22,10 @@ class SupervisorDirectoryPayloadTests(unittest.TestCase):
 
         self.assertIn("include_full_profile = _is_admin_role(requester_role)", source)
         self.assertIn("taxipro_id,", source)
-        self.assertIn('"has_proxy": bool(sv[28]) if sv[28] is not None else False', source)
-        self.assertIn('"proxy_card_number": sv[29] or ""', source)
-        self.assertIn('"proxy_status": sv[30] or ""', source)
-        self.assertIn('"taxipro_id": sv[34] or ""', source)
+        self.assertIn('"has_proxy": bool(sv[29]) if sv[29] is not None else False', source)
+        self.assertIn('"proxy_card_number": sv[30] or ""', source)
+        self.assertIn('"proxy_status": sv[31] or ""', source)
+        self.assertIn('"taxipro_id": sv[35] or ""', source)
 
         limited_query = source.split(
             "SELECT id, name, hours_table_url, role, hire_date, status, avatar_bucket, avatar_blob_path",

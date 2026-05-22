@@ -26493,6 +26493,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             render: (employee) => employee?.email || '-'
                         },
                         {
+                            key: 'personal_email',
+                            label: 'Личный Email',
+                            render: (employee) => employee?.personal_email || '-'
+                        },
+                        {
                             key: 'instagram',
                             label: 'Инстаграм',
                             render: (employee) => employee?.instagram || '-'
@@ -30216,6 +30221,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             birth_date: normalizeDateForApi(editedUser.birth_date),
                             phone: normalizeTextForApi(editedUser.phone),
                             email: normalizeTextForApi(editedUser.email),
+                            personal_email: normalizeTextForApi(editedUser.personal_email),
                             instagram: normalizeTextForApi(editedUser.instagram),
                             telegram_nick: normalizeTextForApi(editedUser.telegram_nick),
                             study_place: normalizeTextForApi(editedUser.study_place),
@@ -30463,6 +30469,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             user_id: editedUser.id,
                             field: 'email',
                             value: nextEmail
+                        }, {
+                            headers: { 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextPersonalEmail = normalizeTextForApi(editedUser?.personal_email);
+                    const prevPersonalEmail = normalizeTextForApi(userToEdit?.personal_email);
+                    if (nextPersonalEmail !== prevPersonalEmail) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'personal_email',
+                            value: nextPersonalEmail
                         }, {
                             headers: { 'X-User-Id': user.id }
                         });
