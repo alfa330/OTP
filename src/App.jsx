@@ -33257,7 +33257,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return (
                   <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-100 to-purple-100">
                     <div className="bg-white p-10 rounded-xl shadow-2xl w-full max-w-md transition-all duration-300 text-center">
-                      <h1 className="text-4xl font-extrabold mb-6 text-indigo-700">OTP</h1>
+                      <h1 className="text-5xl font-extrabold mb-6 flex items-center justify-center">
+                        <span className="flex">
+                          <span className="bg-indigo-700 text-white px-3 py-2 rounded-l-2xl shadow-lg text-4xl border border-indigo-700">
+                            iCORE
+                          </span>
+                          <span className="bg-white text-indigo-700 px-2 py-2 rounded-r-2xl border-t border-b border-r border-indigo-700 text-4xl -ml-px">
+                            <img
+                              src="https://iili.io/KfNE2qv.png"
+                              alt="Site Icon"
+                              className="w-12 h-12 object-contain mr-0.5"
+                            />
+                          </span>
+                        </span>
+                      </h1>
                       <div className="flex items-center justify-center gap-3 text-gray-700">
                         <FaIcon className="fas fa-spinner fa-spin text-blue-600"></FaIcon>
                         <span>Проверка сессии...</span>
