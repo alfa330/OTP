@@ -679,6 +679,48 @@ const readResponseJsonSafe = async (response) => {
     }
 };
 
+const isAuthMeRequestUrl = (url) => {
+    const rawUrl = String(url || '');
+    if (!rawUrl) return false;
+
+    try {
+        const parsedUrl = new URL(rawUrl, typeof window !== 'undefined' ? window.location.origin : undefined);
+        return parsedUrl.pathname === '/api/auth/me';
+    } catch (_error) {
+        return rawUrl.includes('/api/auth/me');
+    }
+};
+
+const isExpiredAuthMeError = (url, code) => {
+    return isAuthMeRequestUrl(url) && (code === 'TOKEN_EXPIRED' || code === 'SESSION_EXPIRED');
+};
+
+const isFailedRefreshResponse = (response) => {
+    if (!response) return true;
+    if (typeof response.ok === 'boolean') return !response.ok;
+    const status = Number(response.status);
+    return Number.isFinite(status) && (status < 200 || status >= 300);
+};
+
+const forceReloadAfterFailedAuthMeRefresh = () => {
+    if (typeof window === 'undefined') return Promise.reject(new Error('Window is unavailable'));
+    if (window.__otpAuthMeRefreshReloading) return new Promise(() => {});
+
+    window.__otpAuthMeRefreshReloading = true;
+    clearAuthTokens();
+    safeStorageRemoveItem(safeGetBrowserStorage('localStorage'), 'user');
+
+    try {
+        const url = new URL(window.location.href);
+        url.searchParams.set('auth_reload', Date.now().toString());
+        window.location.replace(url.toString());
+    } catch (_error) {
+        window.location.reload();
+    }
+
+    return new Promise(() => {});
+};
+
 if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
     if (!window.__otpFetchAuthInterceptorInstalled && typeof window.fetch === 'function') {
         window.__otpFetchAuthInterceptorInstalled = true;
@@ -721,6 +763,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return response;
             }
 
+            const shouldReloadAfterFailedRefresh = isExpiredAuthMeError(requestUrl, body?.code);
             try {
                 if (!window.__otpRefreshPromise) {
                     const refreshTransport = getPreferredAuthTransport();
@@ -773,6 +816,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 const refreshResponse = await window.__otpRefreshPromise;
                 if (!refreshResponse?.ok) {
+                    if (shouldReloadAfterFailedRefresh) {
+                        return forceReloadAfterFailedAuthMeRefresh();
+                    }
                     return response;
                 }
 
@@ -781,8 +827,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     __otpAuthRetry: true,
                     headers: withAccessTokenHeader(originalInit?.headers || {})
                 };
-                return nativeFetch(originalInput, retryInit);
+                const retryResponse = await nativeFetch(originalInput, retryInit);
+                if (shouldReloadAfterFailedRefresh && retryResponse?.status === 401) {
+                    const retryBody = await readResponseJsonSafe(retryResponse);
+                    if (isExpiredAuthMeError(requestUrl, retryBody?.code || body?.code)) {
+                        return forceReloadAfterFailedAuthMeRefresh();
+                    }
+                }
+                return retryResponse;
             } catch (_error) {
+                if (shouldReloadAfterFailedRefresh) {
+                    return forceReloadAfterFailedAuthMeRefresh();
+                }
                 return response;
             }
         };
@@ -825,6 +881,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const url = originalRequest?.url || '';
                         const isRefreshCall = url.includes('/api/auth/refresh');
                         const isLoginCall = url.includes('/api/login');
+                        const shouldReloadAfterFailedRefresh = isExpiredAuthMeError(url, code);
                         const isRecoverableAuthError = (
                             code === 'TOKEN_EXPIRED' ||
                             code === 'INVALID_TOKEN' ||
@@ -836,6 +893,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             code === 'SESSION_REVOKED' ||
                             apiErrorText === 'JWT authentication failed'
                         );
+
+                        if (
+                            status === 401 &&
+                            shouldReloadAfterFailedRefresh &&
+                            originalRequest?.__isRetryRequest &&
+                            !isRefreshCall &&
+                            !isLoginCall
+                        ) {
+                            return forceReloadAfterFailedAuthMeRefresh();
+                        }
 
                         if (
                             status === 401 &&
@@ -890,7 +957,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 });
                             }
 
-                            await window.__otpRefreshPromise;
+                            let refreshResponse;
+                            try {
+                                refreshResponse = await window.__otpRefreshPromise;
+                            } catch (refreshError) {
+                                if (shouldReloadAfterFailedRefresh) {
+                                    return forceReloadAfterFailedAuthMeRefresh();
+                                }
+                                throw refreshError;
+                            }
+                            if (isFailedRefreshResponse(refreshResponse)) {
+                                if (shouldReloadAfterFailedRefresh) {
+                                    return forceReloadAfterFailedAuthMeRefresh();
+                                }
+                                return Promise.reject(error);
+                            }
                             // Strip stale auth headers so the request interceptor
                             // re-injects fresh tokens on retry.
                             if (originalRequest.headers) {
