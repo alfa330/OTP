@@ -37,6 +37,38 @@ const formatAnalyticsName = (value) => {
     return normalized ? normalized.replace(/\b\w/g, (char) => char.toUpperCase()) : 'Unknown';
 };
 
+const buildCallEvaluationAnalyticsPageParams = (sectionId) => {
+    const normalizedSection = normalizeAnalyticsToken(sectionId) || 'journal';
+    const subviewId = `call_evaluation_${normalizedSection}`;
+    const pagePath = `/app/call_evaluation/${encodeURIComponent(subviewId)}`;
+    const origin = typeof window !== 'undefined' ? window.location.origin : '';
+
+    return {
+        page_location: `${origin}${pagePath}`,
+        page_path: pagePath,
+        page_title: `Call evaluation - ${CALL_EVALUATION_SECTION_NAMES[normalizedSection] || formatAnalyticsName(subviewId)}`
+    };
+};
+
+const notifyEmbeddedCallEvaluationSectionView = ({ section = 'journal', role = '' } = {}) => {
+    if (typeof window === 'undefined') return false;
+    if (!window.parent || window.parent === window) return false;
+
+    const sectionId = normalizeAnalyticsToken(section) || 'journal';
+    const roleId = normalizeAnalyticsToken(role === 'supervisor' ? 'sv' : role);
+    try {
+        window.parent.postMessage({
+            type: 'CALL_EVALUATION_SECTION_VIEW',
+            section: sectionId,
+            role: roleId
+        }, window.location.origin);
+        return true;
+    } catch (error) {
+        console.warn('Failed to notify parent about call evaluation analytics event:', error);
+        return false;
+    }
+};
+
 const trackCallEvaluationAppView = ({ section = 'journal', role = '' } = {}) => {
     if (typeof window === 'undefined' || typeof window.gtag !== 'function') return false;
     if (window.parent && window.parent !== window) return false;
@@ -49,9 +81,7 @@ const trackCallEvaluationAppView = ({ section = 'journal', role = '' } = {}) => 
         app_view_name: 'Call evaluation',
         app_subview_id: subviewId,
         app_subview_name: CALL_EVALUATION_SECTION_NAMES[sectionId] || formatAnalyticsName(subviewId),
-        page_location: window.location.href,
-        page_path: `${window.location.pathname}${window.location.search}${window.location.hash}`,
-        page_title: document.title || 'Call evaluation'
+        ...buildCallEvaluationAnalyticsPageParams(sectionId)
     };
 
     if (roleId) {
@@ -60,6 +90,7 @@ const trackCallEvaluationAppView = ({ section = 'journal', role = '' } = {}) => 
 
     try {
         window.gtag('event', 'app_view', params);
+        window.gtag('event', 'page_view', params);
         return true;
     } catch (error) {
         console.warn('Failed to send call evaluation analytics event:', error);
@@ -2503,10 +2534,16 @@ const App = ({ user, initialSelection }) => {
         if (appViewAnalyticsKeyRef.current === analyticsKey) return;
 
         appViewAnalyticsKeyRef.current = analyticsKey;
-        trackCallEvaluationAppView({
+        const wasForwardedToParent = notifyEmbeddedCallEvaluationSectionView({
             section: sectionId,
             role: roleId
         });
+        if (!wasForwardedToParent) {
+            trackCallEvaluationAppView({
+                section: sectionId,
+                role: roleId
+            });
+        }
     }, [activeSection, canonicalRole]);
 
     // Supervisors
