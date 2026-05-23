@@ -220,6 +220,23 @@ const getAppViewAnalyticsName = (viewId) =>
     APP_VIEW_ANALYTICS_NAMES[viewId] || formatAnalyticsName(viewId);
 const getAppSubviewAnalyticsName = (subviewId) =>
     APP_SUBVIEW_ANALYTICS_NAMES[subviewId] || formatAnalyticsName(subviewId);
+const buildAppViewAnalyticsPageParams = ({ view, subview = '' } = {}) => {
+    const viewId = normalizeAnalyticsToken(view) || 'unknown';
+    const subviewId = normalizeAnalyticsToken(subview);
+    const pathParts = ['/app', encodeURIComponent(viewId)];
+    if (subviewId) pathParts.push(encodeURIComponent(subviewId));
+    const pagePath = pathParts.join('/');
+    const pageTitle = subviewId
+        ? `${getAppViewAnalyticsName(viewId)} - ${getAppSubviewAnalyticsName(subviewId)}`
+        : getAppViewAnalyticsName(viewId);
+    const origin = typeof window !== 'undefined' ? window.location.origin : '';
+
+    return {
+        page_location: `${origin}${pagePath}`,
+        page_path: pagePath,
+        page_title: pageTitle
+    };
+};
 const resolveAppViewAnalyticsSubview = ({ view, calculatorType, callEvaluationTab, pathname }) => {
     const viewId = normalizeAnalyticsToken(view);
     if (viewId === 'salary') {
@@ -244,12 +261,11 @@ const trackAppViewAnalytics = ({ view, subview = '', role = '' } = {}) => {
     const viewId = normalizeAnalyticsToken(view) || 'unknown';
     const subviewId = normalizeAnalyticsToken(subview);
     const normalizedRole = normalizeRole(role);
+    const pageParams = buildAppViewAnalyticsPageParams({ view: viewId, subview: subviewId });
     const params = {
         app_view_id: viewId,
         app_view_name: getAppViewAnalyticsName(viewId),
-        page_location: window.location.href,
-        page_path: `${window.location.pathname}${window.location.search}${window.location.hash}`,
-        page_title: document.title || getAppViewAnalyticsName(viewId)
+        ...pageParams
     };
     if (subviewId) {
         params.app_subview_id = subviewId;
@@ -260,6 +276,7 @@ const trackAppViewAnalytics = ({ view, subview = '', role = '' } = {}) => {
     }
     try {
         window.gtag('event', 'app_view', params);
+        window.gtag('event', 'page_view', params);
         return true;
     } catch (error) {
         console.warn('Failed to send app view analytics event:', error);
@@ -25628,7 +25645,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [selectedReportMonth, setSelectedReportMonth] = useState(() => getStoredValue('selectedReportMonth', currentMonth));
             const [callEvaluationContext, setCallEvaluationContext] = useState(null);
             const [callEvaluationFrameReady, setCallEvaluationFrameReady] = useState(false);
-            const [callEvalActiveTab, setCallEvalActiveTab] = useState('journal');
+            const [callEvalActiveTab, setCallEvalActiveTab] = useState('analytics');
             const [expandedEvaluation, setExpandedEvaluation] = useState(null);  
             const [audioUrl, setAudioUrl] = useState(null);
             const [loadingAudioId, setLoadingAudioId] = useState(null);
@@ -28761,6 +28778,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const frameWindow = callEvaluationFrameRef.current?.contentWindow;
                         if (!frameWindow) return;
                         frameWindow.postMessage(callEvaluationInitPayload, window.location.origin);
+                    } else if (event.data?.type === 'CALL_EVALUATION_SECTION_VIEW') {
+                        const sectionId = normalizeAnalyticsToken(event.data?.section) || 'journal';
+                        if (['analytics', 'journal', 'requests', 'calibration'].includes(sectionId)) {
+                            setCallEvalActiveTab(sectionId);
+                        }
                     }
                 };
 
