@@ -604,6 +604,28 @@ const canAccessResourceFteSectionForUser = (userLike) => {
     return role === 'super_admin' || role === 'admin' || isSupervisorRole(role);
 };
 
+const DEV_LETTER_ACCESS_OPERATOR_NAME = '\u041d\u0443\u0440\u0448\u043e\u0432\u0430 \u0410\u0439\u0448\u0430 \u041a\u0430\u043d\u0430\u0433\u0430\u0442\u043a\u044b\u0437\u044b';
+const normalizeDevLetterAccessName = (value) =>
+    String(value || '')
+        .normalize('NFC')
+        .toLocaleLowerCase('ru-RU')
+        .replace(/\u0451/g, '\u0435')
+        .replace(/\u049b/g, '\u043a')
+        .replace(/\u0493/g, '\u0433')
+        .replace(/\s+/g, ' ')
+        .trim();
+const DEV_LETTER_ACCESS_OPERATOR_NAME_NORMALIZED = normalizeDevLetterAccessName(DEV_LETTER_ACCESS_OPERATOR_NAME);
+const canAccessDevLetterForUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    return (
+        role === 'super_admin' ||
+        (
+            role === 'operator' &&
+            normalizeDevLetterAccessName(userLike?.name) === DEV_LETTER_ACCESS_OPERATOR_NAME_NORMALIZED
+        )
+    );
+};
+
 const isNewTabNavigationEvent = (event) => Boolean(event?.ctrlKey || event?.metaKey);
 
 const normalizeAppRelativePathname = (pathname = '') => {
@@ -25552,6 +25574,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canUsePinnedTasks = isAdminLikeRole || isSupervisorRole(currentUserRole) || currentUserRole === 'trainer';
             const canAccessLmsSection = canAccessLmsSectionForUser(user);
             const canAccessResourceFteSection = canAccessResourceFteSectionForUser(user);
+            const canAccessDevLetterSection = canAccessDevLetterForUser(user);
             const canChangeAccountAvatar = isAdminLikeRole || isSupervisorRole(currentUserRole);
             const [isAuthInitializing, setIsAuthInitializing] = useState(true);
             const [showAuthEntranceSplash, setShowAuthEntranceSplash] = useState(false);
@@ -25715,7 +25738,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const qrScanTimerRef = useRef(null);
             const callEvaluationFrameRef = useRef(null);
             const callEvaluationActivatedRef = useRef(false);
-            // Images and state for gallery modal
+            // Images and state for dev letter modal
             const devLetterImages = [
                 {
                     src: `${APP_BASE_URL}assets/1.jpg`,
@@ -25778,9 +25801,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     // ignore
                 }
             }, [devLetterIndex]);
-            // Global helper to open/close the gallery modal programmatically
+            // Global helper to open/close the dev letter modal programmatically
             useEffect(() => {
-                window.ShowDevLetterModal = () => { console.log('window.ShowDevLetterModal called'); showToast?.('Открываю галерею команды'); setShowDevLetterModal(true); };
+                window.ShowDevLetterModal = () => {
+                    if (!canAccessDevLetterSection) return false;
+                    console.log('window.ShowDevLetterModal called');
+                    showToast?.('\u041e\u0442\u043a\u0440\u044b\u0432\u0430\u044e \u043f\u0438\u0441\u044c\u043c\u043e \u043e\u0442 \u043c\u043e\u0434\u0435\u0440\u0430');
+                    setShowDevLetterModal(true);
+                    try { startConfetti(); } catch(e) {}
+                    setMobileMenuOpen(false);
+                    return true;
+                };
                 window.HideDevLetterModal = () => { console.log('window.HideDevLetterModal called'); setShowDevLetterModal(false); };
 
                 const onKeyDown = (e) => {
@@ -25793,7 +25824,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     try { delete window.ShowDevLetterModal; } catch(e) {}
                     try { delete window.HideDevLetterModal; } catch(e) {}
                 };
-            }, [showToast]);
+            }, [showToast, canAccessDevLetterSection]);
             const [openMenuId, setOpenMenuId] = useState(null);
             const [rowActionMenuPos, setRowActionMenuPos] = useState({ top: 0, left: 0, width: 208 });
             const [selectedManageUsersIds, setSelectedManageUsersIds] = useState(new Set());
@@ -34123,13 +34154,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </>
                                 )}
 
-                                {/*
-                                <li>
-                                        <button onClick={() => { console.log('DevLetter button clicked'); showToast?.('Открываю галерею команды'); setShowDevLetterModal(true); try { startConfetti(); } catch(e){}; setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3`}>
-                                        <FaIcon className="fas fa-images"></FaIcon> <span className="sidebar-text">Галерея команды</span>
-                                    </button>
-                                </li>
-                                */}
+                                {canAccessDevLetterSection && (
+                                    <li>
+                                        <button
+                                            onClick={() => {
+                                                console.log('DevLetter button clicked');
+                                                showToast?.('\u041e\u0442\u043a\u0440\u044b\u0432\u0430\u044e \u043f\u0438\u0441\u044c\u043c\u043e \u043e\u0442 \u043c\u043e\u0434\u0435\u0440\u0430');
+                                                setShowDevLetterModal(true);
+                                                try { startConfetti(); } catch(e) {}
+                                                setMobileMenuOpen(false);
+                                            }}
+                                            className="w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3"
+                                        >
+                                            <FaIcon className="fas fa-envelope-open-text"></FaIcon> <span className="sidebar-text">{'\u041f\u0438\u0441\u044c\u043c\u043e \u043e\u0442 \u043c\u043e\u0434\u0435\u0440\u0430'}</span>
+                                        </button>
+                                    </li>
+                                )}
                             </ul>
                             <ul className="sidebar-footer-menu mt-3 pt-3 border-t border-white/30 space-y-2">
                                 <li className="relative" ref={sidebarAccountRef}>
@@ -39355,7 +39395,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </div>
                     )}
 
-                    {showDevLetterModal && (
+                    {canAccessDevLetterSection && showDevLetterModal && (
                         <div className="fixed inset-0 flex items-center justify-center bg-black/50 backdrop-blur-md z-50 p-3 sm:p-4">
                             <div className="bg-blue-50 w-full max-w-full sm:max-w-3xl md:max-w-4xl lg:max-w-5xl rounded-xl sm:rounded-3xl shadow-[0_25px_80px_rgba(0,0,0,0.2)] relative border border-blue-100 max-h-[92vh] overflow-y-auto dev-letter-modal">
                             
@@ -39369,10 +39409,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <div className="p-4 sm:p-6 md:p-10">
                                     <div className="mb-6 sm:mb-8">
                                         <h2 className="text-2xl sm:text-3xl font-bold text-gray-900">
-                                            Галерея команды OTP
+                                            {'\u041f\u0438\u0441\u044c\u043c\u043e \u043e\u0442 \u043c\u043e\u0434\u0435\u0440\u0430'}
                                         </h2>
                                         <p className="mt-2 text-sm text-gray-500">
-                                            Кадры с рабочими моментами, общими победами и атмосферой команды.
+                                            {'\u041f\u043e\u0441\u043b\u0430\u043d\u0438\u0435 \u0438 \u043c\u0430\u0442\u0435\u0440\u0438\u0430\u043b\u044b \u043e\u0442 \u043c\u043e\u0434\u0435\u0440\u0430 \u0434\u043b\u044f \u043a\u043e\u043c\u0430\u043d\u0434\u044b OTP.'}
                                         </p>
                                     </div>
 
@@ -39419,7 +39459,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     {devLetterImages[devLetterIndex].caption}
                                                 </h3>
                                                 <p className="mt-3 text-sm leading-relaxed text-gray-600">
-                                                    {devLetterImages[devLetterIndex].description || 'Коллекция ярких рабочих моментов команды OTP.'}
+                                                    {devLetterImages[devLetterIndex].description || '\u041c\u0430\u0442\u0435\u0440\u0438\u0430\u043b\u044b \u043f\u0438\u0441\u044c\u043c\u0430 \u043e\u0442 \u043c\u043e\u0434\u0435\u0440\u0430 \u043a\u043e\u043c\u0430\u043d\u0434\u044b OTP.'}
                                                 </p>
                                                 <p className="mt-4 text-xs text-gray-500">
                                                     Выберите миниатюру ниже, чтобы открыть нужный кадр.
@@ -39446,7 +39486,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                     <div className="mt-5 sm:mt-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                                         <p className="text-sm text-gray-600">
-                                            Хотите добавить свой кадр? Пишите в Telegram:&nbsp;
+                                            {'\u041f\u043e \u0432\u043e\u043f\u0440\u043e\u0441\u0430\u043c \u043f\u0438\u0441\u044c\u043c\u0430 \u043f\u0438\u0448\u0438\u0442\u0435 \u0432 Telegram:'}&nbsp;
                                             <a href="https://t.me/Alfa33O" target="_blank" rel="noopener noreferrer" className="text-blue-600 font-semibold hover:underline">
                                                 <FaIcon className="fab fa-telegram-plane"></FaIcon>&nbsp;@Alfa33O
                                             </a>
@@ -39455,7 +39495,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             onClick={() => setShowDevLetterModal(false)}
                                             className="px-6 py-3 text-sm font-semibold text-white bg-blue-600 rounded-xl hover:bg-blue-700 transition-all shadow-lg hover:shadow-xl"
                                         >
-                                            Закрыть галерею
+                                            {'\u0417\u0430\u043a\u0440\u044b\u0442\u044c \u043f\u0438\u0441\u044c\u043c\u043e'}
                                         </button>
                                     </div>
                                 </div>
