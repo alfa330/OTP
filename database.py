@@ -15565,12 +15565,17 @@ class Database:
                         shift_interval,
                         shift_excused_status
                     )
-                    early_excused_boundary = self._schedule_auto_shift_end_excused_boundary(
-                        shift_interval,
-                        shift_excused_status
-                    )
                     late_seconds_total += max(0, first_work_start - int(late_excused_boundary))
-                    early_leave_seconds_total += max(0, int(early_excused_boundary) - last_work_end)
+                    # Ранний уход: та же логика что у рабочих статусов —
+                    # берём конец последнего excused-сегмента внутри смены.
+                    # Разрывы внутри excused-периода (например, "без телефона"
+                    # между двумя тренинг-блоками) не влияют на результат.
+                    last_excused_end = max(
+                        (int(seg['end']) for seg in (shift_excused_status or [])),
+                        default=0
+                    )
+                    last_active_end = max(last_work_end, min(last_excused_end, shift_interval['end']))
+                    early_leave_seconds_total += max(0, shift_interval['end'] - last_active_end)
 
             day_shift_intervals = self._merge_break_intervals(day_shift_intervals)
             work_inside_shift_day = self._schedule_auto_overlap_minutes(day_work_status, day_shift_intervals)
