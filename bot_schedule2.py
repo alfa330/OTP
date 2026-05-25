@@ -14050,6 +14050,25 @@ STATUS_IMPORT_LOCK = threading.Lock()
 CHAT_MANAGER_METRICS_IMPORT_LOCK = threading.Lock()
 
 
+def _status_import_secure_filename_and_ext(raw_filename, fallback_filename='statuses.csv'):
+    original_filename = str(raw_filename or '').strip()
+    fallback = str(fallback_filename or 'statuses.csv').strip() or 'statuses.csv'
+    original_ext = os.path.splitext(original_filename)[1].lower()
+
+    safe_name = secure_filename(original_filename or fallback)
+    safe_ext = os.path.splitext(str(safe_name or '').lower())[1]
+    if original_ext and not safe_ext:
+        fallback_root = os.path.splitext(fallback)[0].strip() or 'statuses'
+        safe_name = secure_filename(f"{fallback_root}{original_ext}") or f"statuses{original_ext}"
+        safe_ext = os.path.splitext(str(safe_name or '').lower())[1]
+
+    if not safe_name:
+        safe_name = secure_filename(fallback) or fallback
+        safe_ext = os.path.splitext(str(safe_name or '').lower())[1]
+
+    return safe_name, safe_ext
+
+
 def _status_import_normalize_key(value):
     return ' '.join(str(value or '').strip().lower().split())
 
@@ -16813,8 +16832,10 @@ def import_work_schedules_statuses_csv():
         if not file_storage:
             return jsonify({"error": "file is required"}), 400
 
-        file_name = secure_filename(file_storage.filename or 'statuses.csv')
-        file_ext = os.path.splitext(file_name.lower())[1]
+        file_name, file_ext = _status_import_secure_filename_and_ext(
+            file_storage.filename,
+            fallback_filename='statuses.csv'
+        )
         if file_ext not in ('.csv', '.xlsx', '.xlsm'):
             return jsonify({"error": "Only .csv, .xlsx and .xlsm files are supported"}), 400
         source_system = (

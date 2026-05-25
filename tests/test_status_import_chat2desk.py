@@ -1,6 +1,8 @@
 import ast
 import csv
+import os
 import re
+import unicodedata
 import unittest
 from datetime import datetime, timedelta
 from io import BytesIO, StringIO
@@ -26,6 +28,7 @@ def _status_import_namespace():
         "_status_import_parse_datetime",
         "_status_import_resolve_break_note_label",
         "_status_import_resolve_display_state",
+        "_status_import_secure_filename_and_ext",
         "_status_import_split_segment_by_day",
         "_xlsx_cell_ref_to_index",
         "_status_import_xlsx_rows",
@@ -54,7 +57,19 @@ def _status_import_namespace():
         "csv": csv,
         "datetime": datetime,
         "timedelta": timedelta,
+        "os": os,
         "re": re,
+        "secure_filename": lambda filename: re.sub(
+            r"\s+",
+            "_",
+            re.sub(
+                r"[^\w\s.-]",
+                "",
+                unicodedata.normalize("NFKD", str(filename or ""))
+                .encode("ascii", "ignore")
+                .decode("ascii"),
+            ).strip("._ "),
+        ),
         "STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT": 30,
     }
     exec(
@@ -77,6 +92,22 @@ class StatusImportChat2DeskTests(unittest.TestCase):
         self.assertEqual(resolve("tech_break", None)["key"], "тех причина")
         self.assertEqual(resolve("take_chat", None)["key"], "take chat")
         self.assertEqual(resolve("transfer_chat", None)["key"], "transfer chat")
+
+    def test_cyrillic_upload_filename_keeps_original_extension(self):
+        filename_and_ext = self.ns["_status_import_secure_filename_and_ext"]
+
+        self.assertEqual(
+            filename_and_ext("статусы операторов.csv"),
+            ("statuses.csv", ".csv"),
+        )
+        self.assertEqual(
+            filename_and_ext("отчет.xlsx"),
+            ("statuses.xlsx", ".xlsx"),
+        )
+        self.assertEqual(
+            filename_and_ext("22.05-25.05.csv"),
+            ("22.05-25.05.csv", ".csv"),
+        )
 
     def test_new_export_xlsx_headers_are_supported(self):
         workbook = Workbook()
