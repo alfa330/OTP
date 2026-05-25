@@ -1537,6 +1537,122 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         };
         }
 
+        const HoursCustomSelect = ({
+            value,
+            onChange,
+            options,
+            placeholder = 'Выберите',
+            disabled = false,
+            searchable = false,
+            leadIcon = null,
+            ariaLabel,
+            className = '',
+        }) => {
+            const [open, setOpen] = useState(false);
+            const [search, setSearch] = useState('');
+            const ref = useRef(null);
+            const searchRef = useRef(null);
+
+            useEffect(() => {
+                if (!open) return;
+                const handler = (e) => {
+                    if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+                };
+                document.addEventListener('mousedown', handler);
+                return () => document.removeEventListener('mousedown', handler);
+            }, [open]);
+
+            useEffect(() => {
+                if (open && searchable && searchRef.current) searchRef.current.focus();
+            }, [open, searchable]);
+
+            const selectedLabel = useMemo(() => {
+                const found = (options || []).find(o => String(o.value) === String(value));
+                return found ? found.label : '';
+            }, [options, value]);
+
+            const filtered = useMemo(() => {
+                if (!searchable || !search.trim()) return options || [];
+                const q = search.toLowerCase();
+                return (options || []).filter(o => String(o.label).toLowerCase().includes(q));
+            }, [options, search, searchable]);
+
+            return (
+                <div ref={ref} className={`relative ${className}`}>
+                    <button
+                        type="button"
+                        onClick={() => { if (!disabled) setOpen(o => !o); }}
+                        disabled={disabled}
+                        aria-label={ariaLabel}
+                        className={`flex w-full items-center gap-2 rounded-lg border px-3 py-2 text-sm shadow-sm transition-colors focus:outline-none focus:ring-2 focus:ring-blue-400 ${
+                            disabled
+                                ? 'border-gray-200 bg-gray-100 text-gray-400 cursor-not-allowed'
+                                : selectedLabel
+                                    ? 'border-blue-300 bg-white text-gray-800 hover:bg-blue-50/40'
+                                    : 'border-blue-200 bg-white text-gray-400 hover:bg-blue-50/40'
+                        }`}
+                    >
+                        {leadIcon && (
+                            <FaIcon
+                                className={`fas ${leadIcon} ${disabled ? 'text-gray-300' : 'text-blue-400'} shrink-0`}
+                                style={{ width: '0.9em', height: '0.9em' }}
+                            />
+                        )}
+                        <span className="flex-1 text-left truncate">{selectedLabel || placeholder}</span>
+                        <FaIcon
+                            className={`fas fa-chevron-down ${disabled ? 'text-gray-300' : 'text-gray-400'} shrink-0`}
+                            style={{ width: '0.8em', height: '0.8em', transform: open ? 'rotate(180deg)' : 'none', transition: 'transform .2s' }}
+                        />
+                    </button>
+
+                    {open && !disabled && (
+                        <div className="absolute top-full left-0 right-0 z-50 mt-1 min-w-[220px] rounded-xl border border-blue-100 bg-white shadow-2xl overflow-hidden">
+                            {searchable && (
+                                <div className="p-2 border-b border-blue-50">
+                                    <div className="flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50/60 px-2 py-1.5">
+                                        <FaIcon className="fas fa-search text-blue-300" style={{ width: '0.8em', height: '0.8em' }} />
+                                        <input
+                                            ref={searchRef}
+                                            type="text"
+                                            value={search}
+                                            onChange={(e) => setSearch(e.target.value)}
+                                            placeholder="Поиск..."
+                                            className="flex-1 bg-transparent text-sm text-gray-700 focus:outline-none"
+                                        />
+                                    </div>
+                                </div>
+                            )}
+                            <div className="max-h-64 overflow-y-auto py-1">
+                                {filtered.length === 0 ? (
+                                    <div className="px-3 py-3 text-sm text-gray-400 text-center">Ничего не найдено</div>
+                                ) : (
+                                    filtered.map((opt, i) => {
+                                        const selected = String(opt.value) === String(value);
+                                        return (
+                                            <div
+                                                key={`${opt.value}-${i}`}
+                                                onClick={() => { onChange(opt.value); setOpen(false); setSearch(''); }}
+                                                className={`flex items-center gap-2 px-3 py-2 text-sm cursor-pointer transition-colors ${
+                                                    selected ? 'bg-blue-100 text-blue-800 font-semibold' : 'text-gray-700 hover:bg-blue-50'
+                                                }`}
+                                            >
+                                                <span className="w-4 shrink-0 text-center">
+                                                    {selected && (
+                                                        <FaIcon className="fas fa-check text-blue-600" style={{ width: '0.75em', height: '0.75em' }} />
+                                                    )}
+                                                </span>
+                                                <span className="flex-1 truncate">{opt.label}</span>
+                                            </div>
+                                        );
+                                    })
+                                )}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
         const HoursAccountingView = ({ user, svList, onUploaded, showToast }) => {
         const [month, setMonth] = useState(() => {
             const d = new Date();
@@ -3446,112 +3562,136 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const isAdminWithoutSupervisorSelected = isAdminLikeRoleFn(user?.role) && !selectedSvId;
         return (
             <div className="bg-white p-5 rounded-xl shadow-md">
-            <div className="flex items-center justify-between mb-4 gap-4">
-                <div className="flex items-center gap-3">
-                <label className="text-sm font-medium text-gray-700">Месяц</label>
-                <input type="month" className="px-3 py-2 border rounded-md" value={month} onChange={e => setMonth(e.target.value)} />
+            <div className="mb-4 flex flex-wrap items-stretch justify-between gap-3">
+                {/* === Параметры: период + охват отчёта + супервайзер === */}
+                <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-slate-50/70 p-2">
+                    <span className="px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Параметры</span>
+
+                    <label className="flex items-center gap-2 rounded-lg border border-blue-200 bg-white px-3 py-2 shadow-sm text-sm">
+                        <FaIcon className="fas fa-calendar-alt text-blue-400" style={{ width: '0.9em', height: '0.9em' }} />
+                        <input
+                            type="month"
+                            className="bg-transparent text-sm text-gray-800 focus:outline-none"
+                            value={month}
+                            onChange={e => setMonth(e.target.value)}
+                            aria-label="Месяц"
+                        />
+                    </label>
+
+                    <HoursCustomSelect
+                        value={reportScope}
+                        onChange={(v) => setReportScope(v)}
+                        options={[
+                            { value: 'by_sv', label: 'По СВ' },
+                            { value: 'all', label: 'Общий' },
+                        ]}
+                        leadIcon="fa-filter"
+                        ariaLabel="Тип отчёта"
+                        className="min-w-[140px]"
+                    />
+
+                    <HoursCustomSelect
+                        value={selectedSvId || ''}
+                        onChange={(v) => setSelectedSvId(v)}
+                        options={(svList || [])
+                            .filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status)
+                            .map(sv => ({ value: String(sv.id), label: sv.name }))}
+                        placeholder="Выберите супервайзера"
+                        leadIcon="fa-user-tie"
+                        searchable
+                        disabled={reportScope === 'all'}
+                        ariaLabel="Супервайзер"
+                        className="min-w-[240px]"
+                    />
                 </div>
 
-                <div className="flex items-center gap-3">
-                <div className="flex items-center gap-2">
-                <select
-                    value={reportScope}
-                    onChange={e => setReportScope(e.target.value)}
-                    className="px-3 py-2 border rounded-md"
-                    title="Выберите тип отчёта"
-                >
-                    <option value="by_sv">По СВ</option>
-                    <option value="all">Общий</option>
-                </select>
-                <select
-                    value={selectedSvId || ''}
-                    onChange={e => setSelectedSvId(e.target.value)}
-                    className="px-3 py-2 border rounded-md"
-                    disabled={reportScope === 'all'}
-                    title="Выберите супервайзера"
-                >
-                    <option value="">Выберите супервайзера</option>
-                    {(() => {
-                        const all = svList || [];
-                        const active = all.filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status);
-                        const fired = all.filter(sv => sv.status === 'fired');
-                        return (
+                {/* === Действия: обновить + выгрузить === */}
+                <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-slate-50/70 p-2">
+                    <span className="px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Действия</span>
+
+                    <button
+                        onClick={fetchDailyHoursAndTrainings}
+                        className="inline-flex items-center gap-2 rounded-lg border border-blue-300 bg-white px-3 py-2 text-sm font-medium text-blue-700 shadow-sm transition hover:bg-blue-50"
+                    >
+                        <FaIcon className="fas fa-sync" /> Обновить
+                    </button>
+
+                    <button
+                        onClick={downloadMonthlyReport}
+                        disabled={isDownloadingReport}
+                        className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-white shadow-sm transition ${isDownloadingReport ? 'bg-green-400 cursor-wait' : 'bg-green-600 hover:bg-green-700'}`}
+                        title="Скачать месячный отчёт в XLSX"
+                    >
+                        {isDownloadingReport ? (
                             <>
-                                {active.map(sv => (
-                                <option key={sv.id} value={sv.id}>{sv.name}</option>
-                                ))}
+                                <FaIcon className="fas fa-spinner fa-spin" /> Формируется...
                             </>
-                        );
-                    })()}
-                </select>
-                </div>
-                <button
-                    onClick={fetchDailyHoursAndTrainings}
-                    className="px-3 py-2 bg-blue-600 text-white rounded-md shadow-sm hover:bg-blue-700"
-                >
-                    Обновить
-                </button>
-
-                <button
-                    onClick={downloadMonthlyReport}
-                    disabled={isDownloadingReport}
-                    className={`px-3 py-2 rounded-md text-white ${isDownloadingReport ? 'bg-green-400 cursor-wait' : 'bg-green-600 hover:bg-green-700'}`}
-                    title="Скачать месячный отчёт в XLSX"
-                >
-                    {isDownloadingReport ? (
-                    <>
-                        <FaIcon className="fas fa-spinner fa-spin mr-2" /> Формируется...
-                    </>
-                    ) : (
-                    <>
-                        <FaIcon className="fas fa-file-excel mr-2" /> Сформировать отчёт
-                    </>
-                    )}
-                </button>
+                        ) : (
+                            <>
+                                <FaIcon className="fas fa-file-excel" /> Сформировать отчёт
+                            </>
+                        )}
+                    </button>
                 </div>
             </div>
 
-            {/* NEW: Active / Fired filter with counters */}
-            <div className="mb-4 flex items-center gap-3">
-                <button
-                onClick={() => setOperatorsViewTab('active')}
-                className={`px-3 py-2 rounded-md text-sm font-medium transition ${operatorsViewTab === 'active' ? 'bg-green-600 text-white shadow' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
-                title="Показать активных операторов"
-                >
-                Активные <span className="ml-2 inline-block px-2 py-0.5 text-xs rounded bg-white text-gray-800">{activeCount}</span>
-                </button>
+            {/* Второй ряд: фильтры операторов и переключатель метрик */}
+            <div className="mb-4 flex flex-wrap items-stretch justify-between gap-3">
+                {/* === Операторы: статус + направления === */}
+                <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-slate-50/70 p-2">
+                    <span className="px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Операторы</span>
 
-                <button
-                onClick={() => setOperatorsViewTab('fired')}
-                className={`px-3 py-2 rounded-md text-sm font-medium transition ${operatorsViewTab === 'fired' ? 'bg-red-600 text-white shadow' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
-                title="Показать уволенных операторов"
-                >
-                Уволенные <span className="ml-2 inline-block px-2 py-0.5 text-xs rounded bg-white text-gray-800">{firedCount}</span>
-                </button>
-
-                {/* Directions filter (inline after tabs) */}
-                <div className="flex items-center gap-3">
-                <label className="text-sm font-medium text-gray-700">Направления</label>
-                <div className="mt-0 ml-2 flex gap-2 flex-wrap">
-                    <button onClick={()=>setSelectedDirections(['all'])} className={`px-2 py-1 text-xs rounded border ${selectedDirections.includes('all') ? 'bg-blue-600 text-white' : ''}`}>Все</button>
-                    {directionOptions.map(d => (
-                    <button key={d} onClick={()=>toggleDirectionSelection(d)} className={`px-2 py-1 text-xs rounded border ${selectedDirections.includes(String(d)) ? 'bg-blue-600 text-white' : ''}`}>{d}</button>
-                    ))}
-                </div>
-                </div>
-
-                {/* Tabs for metrics */}
-                <div className="ml-auto flex items-center gap-2">
-                {TABS.map(tab => (
                     <button
-                    key={tab.key}
-                    onClick={() => setSelectedTab(tab.key)}
-                    className={`px-3 py-2 rounded-md text-sm font-medium transition ${selectedTab === tab.key ? 'bg-blue-600 text-white shadow' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
-                    title={tab.unit ? `${tab.label} (${tab.unit})` : tab.label}
+                        onClick={() => setOperatorsViewTab('active')}
+                        className={`px-3 py-2 rounded-lg text-sm font-medium transition ${operatorsViewTab === 'active' ? 'bg-green-600 text-white shadow' : 'bg-white border border-slate-200 text-gray-700 hover:bg-gray-50'}`}
+                        title="Показать активных операторов"
                     >
-                    {tab.label}
+                        Активные <span className={`ml-2 inline-block px-2 py-0.5 text-xs rounded ${operatorsViewTab === 'active' ? 'bg-white text-gray-800' : 'bg-slate-100 text-gray-700'}`}>{activeCount}</span>
                     </button>
-                ))}
+
+                    <button
+                        onClick={() => setOperatorsViewTab('fired')}
+                        className={`px-3 py-2 rounded-lg text-sm font-medium transition ${operatorsViewTab === 'fired' ? 'bg-red-600 text-white shadow' : 'bg-white border border-slate-200 text-gray-700 hover:bg-gray-50'}`}
+                        title="Показать уволенных операторов"
+                    >
+                        Уволенные <span className={`ml-2 inline-block px-2 py-0.5 text-xs rounded ${operatorsViewTab === 'fired' ? 'bg-white text-gray-800' : 'bg-slate-100 text-gray-700'}`}>{firedCount}</span>
+                    </button>
+
+                    <span className="mx-1 h-6 w-px bg-slate-300" aria-hidden="true" />
+
+                    <span className="px-1 text-xs font-medium text-slate-500">Направления</span>
+                    <div className="flex items-center gap-1 flex-wrap">
+                        <button
+                            onClick={()=>setSelectedDirections(['all'])}
+                            className={`px-2 py-1 text-xs rounded-md border transition ${selectedDirections.includes('all') ? 'bg-blue-600 border-blue-600 text-white' : 'bg-white border-slate-200 text-gray-700 hover:bg-blue-50'}`}
+                        >
+                            Все
+                        </button>
+                        {directionOptions.map(d => (
+                            <button
+                                key={d}
+                                onClick={()=>toggleDirectionSelection(d)}
+                                className={`px-2 py-1 text-xs rounded-md border transition ${selectedDirections.includes(String(d)) ? 'bg-blue-600 border-blue-600 text-white' : 'bg-white border-slate-200 text-gray-700 hover:bg-blue-50'}`}
+                            >
+                                {d}
+                            </button>
+                        ))}
+                    </div>
+                </div>
+
+                {/* === Метрика === */}
+                <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-slate-50/70 p-2">
+                    <span className="px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Метрика</span>
+                    {TABS.map(tab => (
+                        <button
+                            key={tab.key}
+                            onClick={() => setSelectedTab(tab.key)}
+                            className={`px-3 py-2 rounded-lg text-sm font-medium transition ${selectedTab === tab.key ? 'bg-blue-600 text-white shadow' : 'bg-white border border-slate-200 text-gray-700 hover:bg-gray-50'}`}
+                            title={tab.unit ? `${tab.label} (${tab.unit})` : tab.label}
+                        >
+                            {tab.label}
+                        </button>
+                    ))}
                 </div>
             </div>
 
