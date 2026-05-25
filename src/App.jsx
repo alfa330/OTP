@@ -3000,6 +3000,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
         }, [filteredOperators, trainingsMap, technicalIssuesMap, offlineActivitiesMap]);
 
+        // Red → amber → green gradient by percentage (0..100)
+        function efficiencyGradient(pct) {
+            const p = Math.max(0, Math.min(100, Number.isFinite(pct) ? pct : 0)) / 100;
+            let r, g, b;
+            if (p < 0.5) {
+                const t = p * 2;
+                r = Math.round(239 + (217 - 239) * t);
+                g = Math.round(68 + (119 - 68) * t);
+                b = Math.round(68 + (6 - 68) * t);
+            } else {
+                const t = (p - 0.5) * 2;
+                r = Math.round(217 + (22 - 217) * t);
+                g = Math.round(119 + (163 - 119) * t);
+                b = Math.round(6 + (74 - 6) * t);
+            }
+            return `rgb(${r},${g},${b})`;
+        }
+
         // render cell with trainings marker and trainings-tab rendering
         function renderCellByMetricWithStyleAndMarker(op, day, metricKey) {
             const dayKey = String(day);
@@ -3250,6 +3268,34 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         >
                             {formatted}
                         </span>
+                    </div>
+                );
+            }
+
+            if (selectedTab === 'efficiency') {
+                const work = d ? Number(d.work_time || 0) : 0;
+                const eff = d ? Number(d.efficiency || 0) : 0;
+                const hasData = work > 0 || eff > 0;
+                if (!hasData) return <div className="text-sm text-gray-400">—</div>;
+                if (work <= 0) {
+                    return (
+                        <div
+                            className="relative w-full h-8 rounded-md flex items-center justify-center text-gray-700 bg-gray-100"
+                            title={`Эффективность: ${eff.toFixed(2)} ч • Рабочее время: 0 ч`}
+                        >
+                            <span className="text-xs font-medium">—</span>
+                        </div>
+                    );
+                }
+                const pct = Math.max(0, Math.min(100, (eff / work) * 100));
+                const bg = efficiencyGradient(pct);
+                return (
+                    <div
+                        className="relative w-full h-8 rounded-md flex items-center justify-center text-white shadow-sm"
+                        style={{ backgroundColor: bg }}
+                        title={`Эффективность: ${eff.toFixed(2)} ч / Рабочее время: ${work.toFixed(2)} ч`}
+                    >
+                        <span className="text-xs font-semibold">{pct.toFixed(0)}%</span>
                     </div>
                 );
             }
@@ -3613,7 +3659,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         onClick={fetchDailyHoursAndTrainings}
                         className="inline-flex items-center gap-2 rounded-lg border border-blue-300 bg-white px-3 py-2 text-sm font-medium text-blue-700 shadow-sm transition hover:bg-blue-50"
                     >
-                        <FaIcon className="fas fa-sync" /> Обновить
+                        <FaIcon className="fas fa-sync-alt" /> Обновить
                     </button>
 
                     <button
@@ -3950,7 +3996,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {selectedTab === 'efficiency' && (
                                 <>
                                     <div className="w-36 p-2 text-sm text-center border-l">{formatNumber(effTotal, 1)}</div>
-                                    <div className="w-32 p-2 text-sm text-center border-l">{regular > 0 ? `${((effTotal / regular) * 100).toFixed(1)}%` : '—'}</div>
+                                    <div className="w-32 p-2 text-sm text-center border-l">
+                                        {regular > 0 ? (() => {
+                                            const occPct = Math.max(0, Math.min(100, (effTotal / regular) * 100));
+                                            return (
+                                                <span
+                                                    className="inline-flex items-center justify-center px-2 py-1 rounded-md text-xs font-semibold text-white shadow-sm"
+                                                    style={{ backgroundColor: efficiencyGradient(occPct) }}
+                                                    title={`Эффективность: ${effTotal.toFixed(2)} ч / Работа: ${regular.toFixed(2)} ч`}
+                                                >
+                                                    {occPct.toFixed(1)}%
+                                                </span>
+                                            );
+                                        })() : '—'}
+                                    </div>
                                 </>
                                 )}
 
@@ -4026,7 +4085,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {selectedTab === 'efficiency' && (
                         <>
                             <div className="w-36 p-2 text-sm text-center border-l">{footerTotals.sumEff.toFixed(2)}</div>
-                            <div className="w-32 p-2 text-sm text-center border-l">{footerTotals.avgOcc != null ? `${footerTotals.avgOcc.toFixed(1)}%` : '—'}</div>
+                            <div className="w-32 p-2 text-sm text-center border-l">
+                                {footerTotals.avgOcc != null ? (() => {
+                                    const occPct = Math.max(0, Math.min(100, footerTotals.avgOcc));
+                                    return (
+                                        <span
+                                            className="inline-flex items-center justify-center px-2 py-1 rounded-md text-xs font-semibold text-white shadow-sm"
+                                            style={{ backgroundColor: efficiencyGradient(occPct) }}
+                                        >
+                                            {occPct.toFixed(1)}%
+                                        </span>
+                                    );
+                                })() : '—'}
+                            </div>
                         </>
                         )}
 
