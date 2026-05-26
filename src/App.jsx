@@ -7329,7 +7329,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
                 .join(' ');
             };
-            const plannerStatusNormalizeOperatorName = (v) => String(v ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+            const plannerStatusNormalizeOperatorName = (v) => String(v ?? '')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .toLowerCase()
+                .replace(/ё/g, 'е')
+                // «Асель»/«Асел», «Игорь»/«Игор» — срезаем хвостовой мягкий/твёрдый знак
+                // в каждом слове, чтобы такие имена считались одним оператором.
+                .replace(/[ьъ]+(?=\s|$)/g, '');
             const PLANNER_CHAT2DESK_STATUS_EVENT_MAP = {
             'status.online': { key: 'online', label: 'Online' },
             'status.holiday': { key: 'holiday', label: 'Закрытие чатов' },
@@ -7337,14 +7344,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             'status.busy': { key: 'busy', label: 'Busy' },
             'status.study': { key: 'study', label: 'Тренинг' },
             'status.training': { key: 'study', label: 'Тренинг' },
-            'status.offline': { key: 'logout', label: 'Выход из системы' },
             'online': { key: 'online', label: 'Online' },
             'holiday': { key: 'holiday', label: 'Закрытие чатов' },
             'break': { key: 'break', label: 'Обеденный перерыв' },
             'busy': { key: 'busy', label: 'Busy' },
             'study': { key: 'study', label: 'Тренинг' },
             'training': { key: 'study', label: 'Тренинг' },
-            'offline': { key: 'logout', label: 'Выход из системы' },
             'tech.break': { key: 'тех причина', label: 'Тех причина' },
             'status.tech.break': { key: 'тех причина', label: 'Тех причина' },
             'tech_break': { key: 'тех причина', label: 'Тех причина' },
@@ -7352,6 +7357,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             'login': { key: 'login', label: 'Вход в систему' },
             'logout': { key: 'logout', label: 'Выход из системы' }
             };
+            // События chat2desk, которые в учёте чат-менеджеров полностью игнорируем.
+            const PLANNER_CHAT2DESK_IGNORED_STATUS_EVENTS = new Set([
+            'offline',
+            'status.offline'
+            ]);
             const PLANNER_CHAT2DESK_ACTION_EVENT_MAP = {
             'transfer.chat': { key: 'transfer chat', label: 'Передача чата' },
             'take.chat': { key: 'take chat', label: 'Взятие чата' }
@@ -7371,6 +7381,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const baseName = String(stateNameRaw ?? '').trim();
             const baseKey = plannerStatusNormalizeKey(baseName);
             const eventKey = baseKey.replace(/[\s_]+/g, '.').replace(/\.+/g, '.').replace(/^\.+|\.+$/g, '');
+            if (PLANNER_CHAT2DESK_IGNORED_STATUS_EVENTS.has(baseKey) || PLANNER_CHAT2DESK_IGNORED_STATUS_EVENTS.has(eventKey)) {
+                return { label: baseName || '—', key: '', baseKey, baseName, kind: 'ignore' };
+            }
             const statusEvent = PLANNER_CHAT2DESK_STATUS_EVENT_MAP[baseKey]
                 || PLANNER_CHAT2DESK_STATUS_EVENT_MAP[eventKey];
             if (statusEvent) {
@@ -7574,28 +7587,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
             return coveredUntil;
             };
-            const plannerResolveShiftEndCoveredFrom = (startRaw, endRaw, intervals = []) => {
-            const shiftStart = Number(startRaw || 0);
-            const shiftEnd = Number(endRaw || shiftStart);
-            if (shiftEnd <= shiftStart) return shiftEnd;
-            let coveredFrom = shiftEnd;
-            const merged = mergeIntervals(
-                (intervals || [])
-                    .map(i => ({ start: Number(i?.start || 0), end: Number(i?.end || 0) }))
-                    .filter(i => i.end > i.start)
-            );
-            for (let i = merged.length - 1; i >= 0; i -= 1) {
-                const seg = merged[i];
-                const segStart = Math.max(shiftStart, Number(seg?.start || 0));
-                const segEnd = Math.min(shiftEnd, Number(seg?.end || 0));
-                if (segEnd <= segStart) continue;
-                // Нужна непрерывная "уважительная" зона до конца смены.
-                if (segEnd < coveredFrom) break;
-                coveredFrom = Math.max(shiftStart, Math.min(coveredFrom, segStart));
-                if (coveredFrom <= shiftStart) break;
-            }
-            return coveredFrom;
-            };
             const plannerComputeShiftStatusMatchMetrics = ({ shiftParts = [], breakParts = [], statusBars = [] } = {}) => {
             const shiftIntervals = mergeIntervals((shiftParts || []).map(p => ({ start: Number(p?.start || 0), end: Number(p?.end || 0) }))).filter(i => i.end > i.start);
             const breakIntervals = mergeIntervals((breakParts || []).map(b => ({ start: Number(b?.start || 0), end: Number(b?.end || 0) }))).filter(i => i.end > i.start);
@@ -7685,13 +7676,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         shiftInterval.end,
                         shiftLateExcusedIntervals
                     );
-                    const earlyLeaveBoundaryMin = plannerResolveShiftEndCoveredFrom(
-                        shiftInterval.start,
-                        shiftInterval.end,
-                        shiftLateExcusedIntervals
+                    // Ранний уход: та же логика, что и у операторов на бэке —
+                    // берём конец самого позднего excused-сегмента в смене
+                    // (без требования непрерывного покрытия до конца смены).
+                    // Разрывы между excused-блоками (например, "без телефона"
+                    // между двумя тренинг-блоками) не влияют на результат.
+                    const lastExcusedEnd = (shiftLateExcusedIntervals || []).reduce(
+                        (acc, seg) => Math.max(acc, Number(seg?.end || 0)),
+                        0
+                    );
+                    const lastActiveEnd = Math.max(
+                        lastWorkEnd,
+                        Math.min(lastExcusedEnd, shiftInterval.end)
                     );
                     lateMin = Math.max(0, firstWorkStart - lateStartMin);
-                    earlyLeaveMin = Math.max(0, earlyLeaveBoundaryMin - lastWorkEnd);
+                    earlyLeaveMin = Math.max(0, shiftInterval.end - lastActiveEnd);
                 }
                 return {
                     id: `${String(part?.sourceDate || '')}:${Number(part?.sourceIndex ?? idx)}`,
@@ -7873,6 +7872,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return;
                 }
                 const resolvedState = plannerStatusResolveDisplayState(sourceStateName, stateNote);
+                if (resolvedState.kind === 'ignore') {
+                    return;
+                }
                 events.push({
                 row: i + 2,
                 operatorName,
