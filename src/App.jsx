@@ -7279,11 +7279,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const plannerStatusPad2 = (n) => String(n).padStart(2, '0');
             const plannerStatusNormalizeKey = (v) => String(v ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
             const plannerStatusCompactKey = (v) => plannerStatusNormalizeKey(v).replace(/[\s._-]+/g, '');
-            const plannerStatusIsTechReasonKey = (v) => plannerStatusCompactKey(v) === 'техпричина';
+            const plannerStatusIsTechReasonKey = (v) => {
+            const compactKey = plannerStatusCompactKey(v);
+            return compactKey === 'техпричина' || compactKey === 'techbreak' || compactKey === 'statustechbreak';
+            };
+            const plannerStatusIsTrainingKey = (v) => {
+            const key = plannerStatusNormalizeKey(v);
+            return key === 'тренинг' || key === 'training' || key === 'study';
+            };
             const plannerStatusIsLateExcusedKey = (v) => {
             const key = plannerStatusNormalizeKey(v);
             if (!key) return false;
-            return key === 'тренинг' || key === 'training' || plannerStatusIsTechReasonKey(key);
+            return plannerStatusIsTrainingKey(key) || plannerStatusIsTechReasonKey(key);
             };
             const plannerStatusKeyLabelMap = {
             'готов': 'Готов',
@@ -7295,11 +7302,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             'вышел': 'Вышел',
             'тренинг': 'Тренинг',
             'training': 'Training',
+            'study': 'Тренинг',
             'без телефона': 'Без телефона',
             'нет статуса': 'Нет статуса',
             'отключен': 'Отключен',
             'отключена': 'Отключена',
-            'отключено': 'Отключено'
+            'отключено': 'Отключено',
+            'online': 'Online',
+            'holiday': 'Закрытие чатов',
+            'break': 'Обеденный перерыв',
+            'busy': 'Busy',
+            'login': 'Вход в систему',
+            'logout': 'Выход из системы',
+            'transfer chat': 'Передача чата',
+            'take chat': 'Взятие чата'
             };
             const plannerStatusLabelFromKey = (statusKeyRaw, fallback = 'Статус') => {
             const key = plannerStatusNormalizeKey(statusKeyRaw);
@@ -7314,6 +7330,30 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 .join(' ');
             };
             const plannerStatusNormalizeOperatorName = (v) => String(v ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+            const PLANNER_CHAT2DESK_STATUS_EVENT_MAP = {
+            'status.online': { key: 'online', label: 'Online' },
+            'status.holiday': { key: 'holiday', label: 'Закрытие чатов' },
+            'status.break': { key: 'break', label: 'Обеденный перерыв' },
+            'status.busy': { key: 'busy', label: 'Busy' },
+            'status.study': { key: 'study', label: 'Тренинг' },
+            'status.training': { key: 'study', label: 'Тренинг' },
+            'status.offline': { key: 'logout', label: 'Выход из системы' },
+            'online': { key: 'online', label: 'Online' },
+            'holiday': { key: 'holiday', label: 'Закрытие чатов' },
+            'break': { key: 'break', label: 'Обеденный перерыв' },
+            'busy': { key: 'busy', label: 'Busy' },
+            'study': { key: 'study', label: 'Тренинг' },
+            'training': { key: 'study', label: 'Тренинг' },
+            'offline': { key: 'logout', label: 'Выход из системы' },
+            'tech.break': { key: 'тех причина', label: 'Тех причина' },
+            'status.tech.break': { key: 'тех причина', label: 'Тех причина' },
+            'login': { key: 'login', label: 'Вход в систему' },
+            'logout': { key: 'logout', label: 'Выход из системы' }
+            };
+            const PLANNER_CHAT2DESK_ACTION_EVENT_MAP = {
+            'transfer.chat': { key: 'transfer chat', label: 'Передача чата' },
+            'take.chat': { key: 'take chat', label: 'Взятие чата' }
+            };
             const plannerStatusResolveBreakNoteLabel = (stateNoteRaw) => {
             const noteKey = plannerStatusNormalizeKey(stateNoteRaw);
             if (!noteKey) return 'Перерыв';
@@ -7328,11 +7368,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const plannerStatusResolveDisplayState = (stateNameRaw, stateNoteRaw) => {
             const baseName = String(stateNameRaw ?? '').trim();
             const baseKey = plannerStatusNormalizeKey(baseName);
+            const eventKey = baseKey.replace(/[\s_]+/g, '.').replace(/\.+/g, '.').replace(/^\.+|\.+$/g, '');
+            const statusEvent = PLANNER_CHAT2DESK_STATUS_EVENT_MAP[eventKey];
+            if (statusEvent) {
+                return { label: statusEvent.label, key: statusEvent.key, baseKey, baseName, kind: 'status' };
+            }
+            const actionEvent = PLANNER_CHAT2DESK_ACTION_EVENT_MAP[eventKey];
+            if (actionEvent) {
+                return { label: actionEvent.label, key: actionEvent.key, baseKey, baseName, kind: 'action' };
+            }
             if (baseKey === 'перерыв') {
                 const label = plannerStatusResolveBreakNoteLabel(stateNoteRaw);
-                return { label, key: plannerStatusNormalizeKey(label), baseKey, baseName };
+                return { label, key: plannerStatusNormalizeKey(label), baseKey, baseName, kind: 'status' };
             }
-            return { label: baseName || '—', key: baseKey, baseKey, baseName };
+            return { label: baseName || '—', key: baseKey, baseKey, baseName, kind: 'status' };
             };
             const getPlannerImportedStatusTone = (statusNameOrKey) => {
             const key = plannerStatusNormalizeKey(statusNameOrKey);
@@ -7436,9 +7485,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     });
             }
             };
-            const PLANNER_IMPORTED_WORK_STATUS_KEYS = new Set(['готов', 'занят', 'занята', 'перезвон']);
-            const PLANNER_IMPORTED_BREAK_STATUS_KEYS = new Set(['перерыв', 'авто']);
-            const PLANNER_IMPORTED_NOT_ON_SHIFT_STATUS_KEYS = new Set(['нет статуса', 'отключен', 'отключена', 'отключено']);
+            const PLANNER_IMPORTED_WORK_STATUS_KEYS = new Set([
+            'готов', 'занят', 'занята', 'перезвон',
+            'online', 'holiday', 'онлайн', 'закрытие чатов'
+            ]);
+            const PLANNER_IMPORTED_BREAK_STATUS_KEYS = new Set([
+            'перерыв', 'авто',
+            'break', 'обеденный перерыв'
+            ]);
+            const PLANNER_IMPORTED_LATE_START_STATUS_KEYS = new Set([
+            ...PLANNER_IMPORTED_WORK_STATUS_KEYS,
+            'login', 'вход', 'вход в систему', 'подключение'
+            ]);
+            const PLANNER_IMPORTED_NOT_ON_SHIFT_STATUS_KEYS = new Set([
+            'нет статуса', 'отключен', 'отключена', 'отключено',
+            'logout', 'выход', 'выход из системы', 'отключение'
+            ]);
             const plannerImportedStatusCountsAsOnShift = (statusKeyRaw) => {
             const key = plannerStatusNormalizeKey(statusKeyRaw);
             if (!key) return false;
@@ -7541,20 +7603,44 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     endMin: Number(seg?.endMin ?? seg?.end ?? 0),
                     statusKeyNorm: plannerStatusNormalizeKey(seg?.stateKey || seg?.statusKey || seg?.stateName || seg?.statusName || '')
                 }))
-                .filter(seg => seg.endMin > seg.startMin);
+                .filter(seg => seg.endMin > seg.startMin)
+                .map(seg => {
+                    const statusKeyNorm = plannerStatusNormalizeKey(seg.statusKeyNorm);
+                    return {
+                        ...seg,
+                        statusKeyNorm,
+                        isWorkStatus: typeof seg?.isWork === 'boolean'
+                            ? seg.isWork
+                            : PLANNER_IMPORTED_WORK_STATUS_KEYS.has(statusKeyNorm),
+                        isBreakStatus: typeof seg?.isBreak === 'boolean'
+                            ? seg.isBreak
+                            : PLANNER_IMPORTED_BREAK_STATUS_KEYS.has(statusKeyNorm),
+                        isLateStartStatus: typeof seg?.isLateStart === 'boolean'
+                            ? seg.isLateStart
+                            : PLANNER_IMPORTED_LATE_START_STATUS_KEYS.has(statusKeyNorm),
+                        isLateExcusedStatus: typeof seg?.isLateExcused === 'boolean'
+                            ? seg.isLateExcused
+                            : plannerStatusIsLateExcusedKey(statusKeyNorm)
+                    };
+                });
             const workStatusIntervals = mergeIntervals(
                 bars
-                    .filter(seg => PLANNER_IMPORTED_WORK_STATUS_KEYS.has(seg.statusKeyNorm))
+                    .filter(seg => seg.isWorkStatus)
                     .map(seg => ({ start: seg.startMin, end: seg.endMin }))
             );
             const breakStatusIntervals = mergeIntervals(
                 bars
-                    .filter(seg => PLANNER_IMPORTED_BREAK_STATUS_KEYS.has(seg.statusKeyNorm))
+                    .filter(seg => seg.isBreakStatus)
+                    .map(seg => ({ start: seg.startMin, end: seg.endMin }))
+            );
+            const lateStartStatusIntervals = mergeIntervals(
+                bars
+                    .filter(seg => seg.isLateStartStatus)
                     .map(seg => ({ start: seg.startMin, end: seg.endMin }))
             );
             const lateExcusedStatusIntervals = mergeIntervals(
                 bars
-                    .filter(seg => plannerStatusIsLateExcusedKey(seg.statusKeyNorm))
+                    .filter(seg => seg.isLateExcusedStatus)
                     .map(seg => ({ start: seg.startMin, end: seg.endMin }))
             );
 
@@ -7577,6 +7663,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const shiftWorkScheduleIntervals = plannerSubtractIntervals([shiftInterval], shiftBreakIntervals);
                 const shiftWorkStatusIntervals = plannerIntersectIntervalWithList(shiftInterval, workStatusIntervals);
                 const shiftBreakStatusIntervals = plannerIntersectIntervalWithList(shiftInterval, breakStatusIntervals);
+                const shiftLateStartStatusIntervals = plannerIntersectIntervalWithList(shiftInterval, lateStartStatusIntervals);
                 const shiftMatchedWorkMin = plannerOverlapMinutesBetweenIntervalSets(shiftWorkScheduleIntervals, shiftWorkStatusIntervals);
                 const shiftMatchedBreakMin = plannerOverlapMinutesBetweenIntervalSets(shiftBreakIntervals, shiftBreakStatusIntervals);
                 const shiftMatchedTotalMin = shiftMatchedWorkMin + shiftMatchedBreakMin;
@@ -7586,7 +7673,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 let lateStartMin = shiftInterval.start;
                 const hasWorkStatus = shiftWorkStatusIntervals.length > 0;
                 if (hasWorkStatus) {
-                    const firstWorkStart = shiftWorkStatusIntervals[0].start;
+                    const firstWorkStart = (shiftLateStartStatusIntervals[0] || shiftWorkStatusIntervals[0]).start;
                     const lastWorkEnd = shiftWorkStatusIntervals[shiftWorkStatusIntervals.length - 1].end;
                     const shiftLateExcusedIntervals = plannerIntersectIntervalWithList(shiftInterval, lateExcusedStatusIntervals);
                     lateStartMin = plannerResolveShiftStartCoveredUntil(
@@ -7788,6 +7875,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 stateName: resolvedState.label,
                 stateKey: resolvedState.key,
                 stateNote,
+                kind: resolvedState.kind || 'status',
                 ts,
                 tsMs: ts.getTime()
                 });
@@ -7840,7 +7928,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return dayObj.operators.get(name);
             };
             const addSegmentPartToStats = (operatorName, stateName, stateKey, stateNote, p) => {
-                const isNoPhone = plannerStatusNormalizeKey(stateKey) === PLANNER_STATUS_NO_PHONE_KEY;
+                const statusKeyNorm = plannerStatusNormalizeKey(stateKey);
+                const isWork = PLANNER_IMPORTED_WORK_STATUS_KEYS.has(statusKeyNorm);
+                const isBreak = PLANNER_IMPORTED_BREAK_STATUS_KEYS.has(statusKeyNorm);
+                const isTraining = plannerStatusIsTrainingKey(statusKeyNorm);
+                const isTechnicalReason = plannerStatusIsTechReasonKey(statusKeyNorm);
+                const isLateStart = PLANNER_IMPORTED_LATE_START_STATUS_KEYS.has(statusKeyNorm);
+                const isLateExcused = plannerStatusIsLateExcusedKey(statusKeyNorm);
+                const isNoPhone = statusKeyNorm === PLANNER_STATUS_NO_PHONE_KEY;
                 const isNoPhoneAnomaly = isNoPhone && p.durationSec > PLANNER_STATUS_NO_PHONE_ANOMALY_SECONDS;
                 const seg = {
                 operatorName,
@@ -7848,6 +7943,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 stateKey,
                 stateNote: stateNote || '',
                 ...p,
+                isWork,
+                isBreak,
+                isTraining,
+                isTechnicalReason,
+                isLateStart,
+                isLateExcused,
                 isNoPhone,
                 isNoPhoneAnomaly
                 };
@@ -7873,10 +7974,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const nowTsMs = Date.now();
             const recentWindowMs = 48 * 60 * 60 * 1000;
             for (const [operatorName, list] of byOperator.entries()) {
-                if (!list.length) continue;
-                for (let i = 0; i < list.length - 1; i++) {
-                const cur = list[i];
-                const next = list[i + 1];
+                const statusEvents = (list || []).filter(ev => String(ev?.kind || 'status') !== 'action');
+                if (!statusEvents.length) continue;
+                for (let i = 0; i < statusEvents.length - 1; i++) {
+                const cur = statusEvents[i];
+                const next = statusEvents[i + 1];
                 if (next.tsMs <= cur.tsMs) { zeroOrNegativeTransitions += 1; continue; }
                 const parts = plannerStatusSplitSegmentByDay(cur.ts, next.ts);
                 for (const p of parts) {
@@ -7889,7 +7991,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     );
                 }
                 }
-                const last = list[list.length - 1];
+                const last = statusEvents[statusEvents.length - 1];
                 const lastTsMs = Number(last?.tsMs || 0);
                 const tailAnchorTsMs = (lastTsMs > 0 && (nowTsMs - lastTsMs) <= recentWindowMs)
                     ? nowTsMs
@@ -7981,8 +8083,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         let durationSec = Math.round(Number(seg?.durationSec ?? seg?.duration_sec ?? 0));
                         if (!Number.isFinite(durationSec) || durationSec <= 0) durationSec = Math.max(0, Math.round((end - start) / 1000));
                         if (durationSec <= 0) return;
-                        const isWork = PLANNER_IMPORTED_WORK_STATUS_KEYS.has(statusKey);
-                        const isBreak = PLANNER_IMPORTED_BREAK_STATUS_KEYS.has(statusKey);
+                        const isWork = typeof seg?.isWork === 'boolean'
+                            ? seg.isWork
+                            : PLANNER_IMPORTED_WORK_STATUS_KEYS.has(statusKey);
+                        const isBreak = typeof seg?.isBreak === 'boolean'
+                            ? seg.isBreak
+                            : PLANNER_IMPORTED_BREAK_STATUS_KEYS.has(statusKey);
+                        const isTraining = typeof seg?.isTraining === 'boolean'
+                            ? seg.isTraining
+                            : plannerStatusIsTrainingKey(statusKey);
+                        const isTechnicalReason = typeof seg?.isTechnicalReason === 'boolean'
+                            ? seg.isTechnicalReason
+                            : plannerStatusIsTechReasonKey(statusKey);
+                        const isLateStart = typeof seg?.isLateStart === 'boolean'
+                            ? seg.isLateStart
+                            : PLANNER_IMPORTED_LATE_START_STATUS_KEYS.has(statusKey);
+                        const isLateExcused = typeof seg?.isLateExcused === 'boolean'
+                            ? seg.isLateExcused
+                            : plannerStatusIsLateExcusedKey(statusKey);
                         const isNoPhone = statusKey === PLANNER_STATUS_NO_PHONE_KEY;
                         const isNoPhoneAnomaly = isNoPhone && durationSec > PLANNER_STATUS_NO_PHONE_ANOMALY_SECONDS;
                         const preparedSeg = {
@@ -7996,6 +8114,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             durationSec,
                             isWork,
                             isBreak,
+                            isTraining,
+                            isTechnicalReason,
+                            isLateStart,
+                            isLateExcused,
                             isNoPhone,
                             isNoPhoneAnomaly
                         };
@@ -9898,6 +10020,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     : [];
                 snapshotOperators.forEach(op => {
                     addDirection(op?.direction || op?.direction_name || '');
+                });
+                const snapshotLots = Array.isArray(plannerStatusGroupingAuctionState?.snapshot?.lots)
+                    ? plannerStatusGroupingAuctionState.snapshot.lots
+                    : [];
+                snapshotLots.forEach(lot => {
+                    addDirection(lot?.claimed_by_direction || lot?.claimed_by_direction_name || lot?.direction || lot?.direction_name || '');
                 });
 
                 return Array.from(byKey.values())
@@ -13234,7 +13362,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const raw = (Array.isArray(modalImportedStatusTimeline) ? modalImportedStatusTimeline : [])
                     .map((seg) => {
                         const statusKey = plannerStatusNormalizeKey(seg?.stateKey || seg?.statusKey || seg?.stateName || seg?.statusName || '');
-                        if (!matchFn(statusKey)) return null;
+                        if (!matchFn(statusKey, seg)) return null;
                         const startRaw = Number(seg?.startMin ?? seg?.start ?? 0);
                         const endRaw = Number(seg?.endMin ?? seg?.end ?? 0);
                         if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw)) return null;
@@ -13280,14 +13408,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [modalImportedStatusTimeline]);
             const modalTrainingStatusSegments = useMemo(
                 () => buildModalStatusSegments(
-                    (statusKey) => statusKey === 'тренинг' || statusKey === 'training',
+                    (statusKey, seg) => !!seg?.isTraining || plannerStatusIsTrainingKey(statusKey),
                     'training'
                 ),
                 [buildModalStatusSegments]
             );
             const modalTechReasonStatusSegments = useMemo(
                 () => buildModalStatusSegments(
-                    (statusKey) => plannerStatusIsTechReasonKey(statusKey),
+                    (statusKey, seg) => !!seg?.isTechnicalReason || plannerStatusIsTechReasonKey(statusKey),
                     'tech-reason'
                 ),
                 [buildModalStatusSegments]
@@ -21810,13 +21938,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             if (!Number.isFinite(id) || id <= 0) return;
                             operatorsById.set(id, op);
                         });
-                        const getPlanOperatorMeta = (operatorIdRaw, fallbackName = '') => {
+                        const getPlanOperatorMeta = (operatorIdRaw, fallbackName = '', fallbackDirection = '') => {
                             const operatorId = Number(operatorIdRaw);
                             const auctionOperator = auctionOperatorsById.get(operatorId);
                             const scheduleOperator = operatorsById.get(operatorId);
                             const source = auctionOperator || scheduleOperator || {};
                             const operatorName = String(source?.name || fallbackName || `Оператор ${operatorId || ''}`).trim();
-                            const direction = String(source?.direction || source?.direction_name || scheduleOperator?.direction || scheduleOperator?.direction_name || 'Без направления').trim() || 'Без направления';
+                            const direction = String(
+                                source?.direction
+                                || source?.direction_name
+                                || scheduleOperator?.direction
+                                || scheduleOperator?.direction_name
+                                || fallbackDirection
+                                || 'Без направления'
+                            ).trim() || 'Без направления';
                             return {
                                 operatorId: Number.isFinite(operatorId) ? operatorId : 0,
                                 operatorName: operatorName || `Оператор ${operatorId || ''}`,
@@ -21827,27 +21962,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             const lotDate = String(lot?.shift_date || lot?.date || '').trim();
                             const targetDate = String(dateKey || '').trim();
                             if (!lotDate || !targetDate) return [];
-                            const targetDateObj = parseDateStr(targetDate);
-                            if (!targetDateObj || Number.isNaN(targetDateObj.getTime())) return [];
-                            const previousDate = todayDateStr(addDays(targetDateObj, -1));
                             const startText = String(lot?.start_time || lot?.start || '').trim();
                             const endText = String(lot?.end_time || lot?.end || '').trim();
                             if (!startText || !endText) return [];
-                            const start = timeToMinutes(startText);
-                            let end = timeToMinutes(endText);
-                            if (end <= start) end += 1440;
+                            const dateKeyToDayNumber = (value) => {
+                                const [year, month, day] = String(value || '').split('-').map(Number);
+                                if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null;
+                                return Math.floor(Date.UTC(year, month - 1, day) / 86400000);
+                            };
+                            const lotDayNumber = dateKeyToDayNumber(lotDate);
+                            const targetDayNumber = dateKeyToDayNumber(targetDate);
+                            if (!Number.isFinite(lotDayNumber) || !Number.isFinite(targetDayNumber)) return [];
+
+                            const sourceStart = Number(lot?.source_start_minute ?? lot?.start_minute);
+                            const sourceEnd = Number(lot?.source_end_minute ?? lot?.end_minute);
+                            const hasSourceMinutes = Number.isFinite(sourceStart) && Number.isFinite(sourceEnd) && sourceEnd > sourceStart;
+                            const start = hasSourceMinutes ? sourceStart : timeToMinutes(startText);
+                            let end = hasSourceMinutes ? sourceEnd : timeToMinutes(endText);
+                            if (!hasSourceMinutes && end <= start) end += 1440;
                             if (end <= start) return [];
 
-                            if (lotDate === targetDate) {
-                                const partStart = Math.max(0, start);
-                                const partEnd = Math.min(1440, end);
-                                return partEnd > partStart ? [{ start: partStart, end: partEnd, sourceDate: lotDate }] : [];
-                            }
-                            if (lotDate === previousDate && end > 1440) {
-                                const partEnd = Math.min(1440, end - 1440);
-                                return partEnd > 0 ? [{ start: 0, end: partEnd, sourceDate: lotDate }] : [];
-                            }
-                            return [];
+                            const dayOffset = lotDayNumber - targetDayNumber;
+                            const absoluteStart = (dayOffset * 1440) + start;
+                            const absoluteEnd = (dayOffset * 1440) + end;
+                            const partStart = Math.max(0, absoluteStart);
+                            const partEnd = Math.min(1440, absoluteEnd);
+                            return partEnd > partStart ? [{ start: partStart, end: partEnd, sourceDate: lotDate }] : [];
                         };
                         const formatGroupingShiftLabel = (startText, endText) => {
                             const start = String(startText || '').trim() || '—';
@@ -21861,7 +22001,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 if (String(lot?.status || '').trim().toLowerCase() !== 'claimed') return;
                                 const claimedBy = Number(lot?.claimed_by);
                                 if (!Number.isFinite(claimedBy) || claimedBy <= 0) return;
-                                const meta = getPlanOperatorMeta(claimedBy, lot?.claimed_by_name);
+                                const meta = getPlanOperatorMeta(
+                                    claimedBy,
+                                    lot?.claimed_by_name,
+                                    lot?.claimed_by_direction || lot?.claimed_by_direction_name || lot?.direction || lot?.direction_name
+                                );
                                 const directionKey = plannerNormalizeDirectionKey(meta.direction);
                                 if (!directionKey || !effectiveGroupingDirectionSet.has(directionKey)) return;
                                 const parts = auctionLotPartsForDate(lot, effectiveDayKey);
@@ -21945,11 +22089,108 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 }
                             });
                         }
+                        const computeMissedFactDetails = (operatorName, hour) => {
+                            const operatorNameKey = plannerStatusNormalizeOperatorName(operatorName);
+                            const statusBars = (operatorNameKey && effectiveDayKey)
+                                ? (importedStatusTimelineByOperatorDateKey.get(`${operatorNameKey}|${effectiveDayKey}`) || [])
+                                : [];
+                            const hStart = hour * 60;
+                            const hEnd = hStart + 60;
+                            const segments = (Array.isArray(statusBars) ? statusBars : [])
+                                .map(seg => {
+                                    const segStart = Number(seg?.startMin ?? seg?.start ?? 0);
+                                    const segEnd = Number(seg?.endMin ?? seg?.end ?? 0);
+                                    if (!Number.isFinite(segStart) || !Number.isFinite(segEnd) || segEnd <= segStart) return null;
+                                    const start = Math.max(hStart, segStart);
+                                    const end = Math.min(hEnd, segEnd);
+                                    if (end <= start) return null;
+                                    const statusKey = plannerStatusNormalizeKey(seg?.stateKey || seg?.statusKey || seg?.stateName || seg?.statusName || '');
+                                    const statusLabel = plannerStatusLabelFromKey(
+                                        statusKey,
+                                        String(seg?.stateName || seg?.statusName || seg?.stateKey || seg?.statusKey || 'Статус').trim() || 'Статус'
+                                    );
+                                    return { start, end, statusKey, statusLabel, isOnShift: plannerImportedStatusCountsAsOnShift(statusKey) };
+                                })
+                                .filter(Boolean)
+                                .sort((a, b) => a.start - b.start);
+
+                            if (segments.length === 0) {
+                                return {
+                                    reasonLabel: 'Не вышел на смену',
+                                    reasonNote: 'Нет данных о статусах в этом часе',
+                                    reasonStatusLabel: '',
+                                    reasonStatusKey: '',
+                                    workingMinutes: 0,
+                                    statusRangeLabel: '—',
+                                    hasAnyStatus: false
+                                };
+                            }
+
+                            const onShiftMinutes = plannerIntervalsTotalMinutes(
+                                mergeIntervals(segments.filter(s => s.isOnShift).map(s => ({ start: s.start, end: s.end })))
+                            );
+
+                            const statusDurationMap = new Map();
+                            segments.forEach(s => {
+                                const key = s.statusKey || '';
+                                const item = statusDurationMap.get(key) || { key, label: s.statusLabel, isOnShift: s.isOnShift, minutes: 0 };
+                                item.minutes += (s.end - s.start);
+                                statusDurationMap.set(key, item);
+                            });
+                            const sortedStatuses = Array.from(statusDurationMap.values()).sort((a, b) => b.minutes - a.minutes);
+                            const dominantOnShift = sortedStatuses.find(s => s.isOnShift);
+                            const dominantOffShift = sortedStatuses.find(s => !s.isOnShift);
+
+                            const statusRangeLabel = segments
+                                .map(s => `${minutesToTime(s.start)} - ${minutesToTime(s.end)} (${s.statusLabel})`)
+                                .slice(0, 3)
+                                .join('; ') || '—';
+
+                            let reasonLabel;
+                            let reasonNote = '';
+                            let reasonStatusLabel = '';
+                            let reasonStatusKey = '';
+                            if (onShiftMinutes > 0) {
+                                reasonLabel = 'Меньше 30 мин на линии';
+                                reasonNote = `${Math.round(onShiftMinutes)} мин на линии при нужных 30`;
+                                reasonStatusLabel = dominantOnShift?.label || '';
+                                reasonStatusKey = dominantOnShift?.key || '';
+                            } else {
+                                reasonLabel = 'Не на смене';
+                                reasonNote = dominantOffShift?.label
+                                    ? `Преимущественно: ${dominantOffShift.label}`
+                                    : '';
+                                reasonStatusLabel = dominantOffShift?.label || '';
+                                reasonStatusKey = dominantOffShift?.key || '';
+                            }
+
+                            return {
+                                reasonLabel,
+                                reasonNote,
+                                reasonStatusLabel,
+                                reasonStatusKey,
+                                workingMinutes: onShiftMinutes,
+                                statusRangeLabel,
+                                hasAnyStatus: true
+                            };
+                        };
                         const rows = (!showPlannerStatusGroupingModal || !hasAnalysis || !effectiveDayKey)
                             ? []
                             : Array.from({ length: 24 }).map((_, hour) => {
                                 const plannedOperators = Array.from(planByHour[hour].values()).sort(sortByDirectionAndName);
                                 const actualOperators = (factByHour[hour] || []).sort(sortByDirectionAndName);
+                                const actualOperatorIdSet = new Set();
+                                actualOperators.forEach(it => {
+                                    const id = Number(it?.operatorId);
+                                    if (Number.isFinite(id) && id > 0) actualOperatorIdSet.add(id);
+                                });
+                                const missedOperators = plannedOperators
+                                    .filter(po => {
+                                        const id = Number(po?.operatorId);
+                                        return !(Number.isFinite(id) && id > 0 && actualOperatorIdSet.has(id));
+                                    })
+                                    .map(po => ({ ...po, ...computeMissedFactDetails(po.operatorName, hour) }))
+                                    .sort(sortByDirectionAndName);
                                 const directionMap = new Map();
                                 const ensureDirection = (direction) => {
                                     const label = String(direction || 'Без направления').trim() || 'Без направления';
@@ -21975,9 +22216,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     forecastCalls: Number(forecastRow?.forecastCalls || 0),
                                     plannedCount: plannedOperators.length,
                                     actualCount: actualOperators.length,
+                                    missedCount: missedOperators.length,
                                     delta: actualOperators.length - plannedOperators.length,
                                     plannedOperators,
                                     actualOperators,
+                                    missedOperators,
                                     directionRows
                                 };
                             });
@@ -21990,6 +22233,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             : null;
                         const selectedList = selectedRow
                             ? (expandedScope === 'planned' ? selectedRow.plannedOperators : selectedRow.actualOperators)
+                            : [];
+                        const selectedMissed = (selectedRow && expandedScope === 'actual')
+                            ? (selectedRow.missedOperators || [])
                             : [];
                         const selectedDirectionLabels = groupingDirectionOptions
                             .filter(item => effectiveGroupingDirectionSet.has(item.key))
@@ -22059,6 +22305,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         cell(item?.statusRangeLabel || ''),
                                         cell(Number(item?.workingMinutes || 0), 'Number'),
                                         cell(item?.isActuallyOnShift ? 'Да' : 'Нет')
+                                    ]));
+                                });
+                                (r.missedOperators || []).forEach(item => {
+                                    const reasonParts = [item?.reasonLabel, item?.reasonNote, item?.reasonStatusLabel ? `Статус: ${item.reasonStatusLabel}` : '']
+                                        .map(part => String(part || '').trim())
+                                        .filter(Boolean);
+                                    detailsRowsXml.push(rowXml([
+                                        cell(effectiveDayLabel),
+                                        cell(r.hourLabel),
+                                        cell('Не вошел'),
+                                        cell(item?.operatorName || ''),
+                                        cell(item?.direction || ''),
+                                        cell(reasonParts.join(' | ') || 'Не на смене'),
+                                        cell(item?.statusRangeLabel || ''),
+                                        cell(Number(item?.workingMinutes || 0), 'Number'),
+                                        cell('Нет')
                                     ]));
                                 });
                             });
@@ -22300,10 +22562,45 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 </tbody>
                                                             </table>
                                                         </div>
+                                                        {expandedScope === 'actual' && selectedMissed.length > 0 && (
+                                                            <div className="space-y-2">
+                                                                <div className="text-sm font-semibold text-rose-700 flex items-center gap-2">
+                                                                    <FaIcon className="fas fa-exclamation-triangle text-rose-500"></FaIcon>
+                                                                    Не вошли в факт: {selectedMissed.length}
+                                                                </div>
+                                                                {selectedMissed.map((item, idx) => (
+                                                                    <div key={`group-missed-${idx}-${item?.operatorId || item?.operatorName}`} className="rounded-md border border-rose-200 bg-rose-50/60 px-2 py-1.5 text-xs">
+                                                                        <div className="flex items-start justify-between gap-2">
+                                                                            <div className="min-w-0">
+                                                                                <div className="font-semibold text-slate-900 truncate">{item?.operatorName || '—'}</div>
+                                                                                <div className="text-slate-500 truncate">{item?.direction || 'Без направления'}</div>
+                                                                            </div>
+                                                                            <span className="px-1.5 py-0.5 rounded border border-rose-200 bg-white text-rose-700 whitespace-nowrap font-medium">
+                                                                                {item?.reasonLabel || 'Не на смене'}
+                                                                            </span>
+                                                                        </div>
+                                                                        <div className="mt-1 text-slate-600 flex flex-wrap gap-x-2 gap-y-0.5">
+                                                                            <span className="tabular-nums">Смена: {(item?.shiftLabels || []).join('; ') || '—'}</span>
+                                                                            {item?.reasonStatusLabel && (
+                                                                                <span className="text-slate-500">Статус: {item.reasonStatusLabel}</span>
+                                                                            )}
+                                                                            {item?.reasonNote && (
+                                                                                <span className="text-slate-500">{item.reasonNote}</span>
+                                                                            )}
+                                                                        </div>
+                                                                        {item?.hasAnyStatus && (
+                                                                            <div className="mt-0.5 text-slate-500 text-[11px] tabular-nums">
+                                                                                Интервалы: {item?.statusRangeLabel || '—'}
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        )}
                                                         <div className="text-sm font-semibold text-slate-800">
                                                             {expandedScope === 'planned' ? 'Операторы по плану' : 'Операторы по факту'}: {selectedList.length}
                                                         </div>
-                                                        {selectedList.length === 0 && (
+                                                        {selectedList.length === 0 && selectedMissed.length === 0 && (
                                                             <div className="text-xs text-slate-500">Нет данных для выбранного значения.</div>
                                                         )}
                                                         {selectedList.map((item, idx) => {

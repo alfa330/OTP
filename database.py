@@ -3181,6 +3181,10 @@ class Database:
             "source_schedule_plan_id": row[10] if len(row) > 10 else None,
             "source_schedule_shift_id": row[11] if len(row) > 11 else None,
             "post_auction_claimed": bool(row[12]) if len(row) > 12 and row[12] is not None else False,
+            "claimed_by_direction_id": row[13] if len(row) > 13 else None,
+            "claimed_by_direction": (row[14] or "") if len(row) > 14 else "",
+            "source_start_minute": int(row[15]) if len(row) > 15 and row[15] is not None else None,
+            "source_end_minute": int(row[16]) if len(row) > 16 and row[16] is not None else None,
         }
 
     def _cache_shift_auction_participant_ids(self, participant_rows):
@@ -3266,9 +3270,15 @@ class Database:
                 l.breaks,
                 l.source_schedule_plan_id,
                 l.source_schedule_shift_id,
-                COALESCE(l.post_auction_claimed, FALSE) AS post_auction_claimed
+                COALESCE(l.post_auction_claimed, FALSE) AS post_auction_claimed,
+                u.direction_id AS claimed_by_direction_id,
+                claimed_dir.name AS claimed_by_direction,
+                source_shift.start_minute AS source_start_minute,
+                source_shift.end_minute AS source_end_minute
             FROM shift_auction_test_lots l
             LEFT JOIN users u ON u.id = l.claimed_by
+            LEFT JOIN directions claimed_dir ON claimed_dir.id = u.direction_id
+            LEFT JOIN resource_saved_schedule_shifts source_shift ON source_shift.id = l.source_schedule_shift_id
             ORDER BY l.shift_date, l.start_time, l.id
         """)
         lot_rows = cursor.fetchall() or []
@@ -4366,9 +4376,15 @@ class Database:
                     l.breaks,
                     l.source_schedule_plan_id,
                     l.source_schedule_shift_id,
-                    COALESCE(l.post_auction_claimed, FALSE) AS post_auction_claimed
+                    COALESCE(l.post_auction_claimed, FALSE) AS post_auction_claimed,
+                    u.direction_id AS claimed_by_direction_id,
+                    claimed_dir.name AS claimed_by_direction,
+                    source_shift.start_minute AS source_start_minute,
+                    source_shift.end_minute AS source_end_minute
                 FROM shift_auction_test_lots l
                 LEFT JOIN users u ON u.id = l.claimed_by
+                LEFT JOIN directions claimed_dir ON claimed_dir.id = u.direction_id
+                LEFT JOIN resource_saved_schedule_shifts source_shift ON source_shift.id = l.source_schedule_shift_id
                 ORDER BY l.shift_date, l.start_time, l.id
             """)
             lot_rows = cursor.fetchall() or []
@@ -14811,7 +14827,7 @@ class Database:
 
     def _schedule_auto_is_tech_reason_status_key(self, status_key_value):
         compact_key = self._schedule_auto_compact_status_key(status_key_value)
-        return compact_key == 'техпричина'
+        return compact_key in {'техпричина', 'techbreak', 'statustechbreak'}
 
     def _schedule_auto_is_late_excused_status_key(self, status_key_value):
         key = self._normalize_import_status_key(status_key_value)
@@ -16581,6 +16597,10 @@ class Database:
             state_label_value = self._status_label_from_key(status_key_norm)
             is_work = status_key_norm in set(status_profile.get('work') or set())
             is_break = status_key_norm in set(status_profile.get('break') or set())
+            is_training = status_key_norm in set(status_profile.get('training') or set())
+            is_late_start = status_key_norm in set(status_profile.get('late_start') or set())
+            is_technical_reason = self._schedule_auto_is_tech_reason_status_key(status_key_norm)
+            is_late_excused = self._schedule_auto_is_late_excused_status_key(status_key_norm)
             is_no_phone = status_key_norm == SCHEDULE_AUTO_NO_PHONE_STATUS_KEY
 
             target.setdefault(day_key, []).append({
@@ -16593,6 +16613,10 @@ class Database:
                 'stateNote': str(state_note or ''),
                 'isWork': bool(is_work),
                 'isBreak': bool(is_break),
+                'isTraining': bool(is_training),
+                'isLateStart': bool(is_late_start),
+                'isTechnicalReason': bool(is_technical_reason),
+                'isLateExcused': bool(is_late_excused),
                 'isNoPhone': bool(is_no_phone)
             })
 

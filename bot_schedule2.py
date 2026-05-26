@@ -14114,6 +14114,7 @@ CHAT2DESK_STATUS_EVENT_MAP = {
     'training': ('study', 'Тренинг'),
     'offline': ('logout', 'Выход из системы'),
     'tech.break': ('тех причина', 'Тех причина'),
+    'status.tech.break': ('тех причина', 'Тех причина'),
     'login': ('login', 'Вход в систему'),
     'logout': ('logout', 'Выход из системы'),
 }

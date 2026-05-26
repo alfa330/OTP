@@ -90,6 +90,7 @@ class StatusImportChat2DeskTests(unittest.TestCase):
         self.assertEqual(resolve("online", None)["key"], "online")
         self.assertEqual(resolve("offline", None)["key"], "logout")
         self.assertEqual(resolve("tech_break", None)["key"], "тех причина")
+        self.assertEqual(resolve("status.tech_break", None)["key"], "тех причина")
         self.assertEqual(resolve("take_chat", None)["key"], "take chat")
         self.assertEqual(resolve("transfer_chat", None)["key"], "transfer chat")
 
