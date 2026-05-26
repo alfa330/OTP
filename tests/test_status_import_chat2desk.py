@@ -20,11 +20,13 @@ def _status_import_namespace():
     wanted_assignments = {
         "CHAT2DESK_STATUS_EVENT_MAP",
         "CHAT2DESK_ACTION_EVENT_MAP",
+        "CHAT2DESK_IGNORED_STATUS_EVENTS",
     }
     wanted_functions = {
         "_status_import_normalize_key",
         "_status_import_normalize_header",
         "_status_import_normalize_operator_name",
+        "_status_import_operator_name_variants",
         "_status_import_parse_datetime",
         "_status_import_resolve_break_note_label",
         "_status_import_resolve_display_state",
@@ -88,11 +90,33 @@ class StatusImportChat2DeskTests(unittest.TestCase):
         resolve = self.ns["_status_import_resolve_display_state"]
 
         self.assertEqual(resolve("online", None)["key"], "online")
-        self.assertEqual(resolve("offline", None)["key"], "logout")
         self.assertEqual(resolve("tech_break", None)["key"], "тех причина")
         self.assertEqual(resolve("status.tech_break", None)["key"], "тех причина")
         self.assertEqual(resolve("take_chat", None)["key"], "take chat")
         self.assertEqual(resolve("transfer_chat", None)["key"], "transfer chat")
+
+    def test_operator_name_normalization_collapses_trailing_soft_sign(self):
+        normalize_name = self.ns["_status_import_normalize_operator_name"]
+        name_variants = self.ns["_status_import_operator_name_variants"]
+
+        self.assertEqual(normalize_name("Асель Серикбаева"), "асел серикбаева")
+        self.assertEqual(normalize_name("Асел Серикбаева"), "асел серикбаева")
+        self.assertEqual(normalize_name("Игорь"), "игор")
+        # Внутрисловный мягкий знак не трогаем.
+        self.assertEqual(normalize_name("Татьяна"), "татьяна")
+
+        db_variants = set(name_variants("Асель Серикбаева"))
+        chat2desk_key = normalize_name("Асел Серикбаева")
+        self.assertIn(chat2desk_key, db_variants)
+
+    def test_chat2desk_offline_events_are_ignored(self):
+        resolve = self.ns["_status_import_resolve_display_state"]
+
+        for event in ("offline", "status.offline", "Status.Offline", "OFFLINE"):
+            with self.subTest(event=event):
+                resolved = resolve(event, None)
+                self.assertEqual(resolved["kind"], "ignore")
+                self.assertEqual(resolved["key"], "")
 
     def test_cyrillic_upload_filename_keeps_original_extension(self):
         filename_and_ext = self.ns["_status_import_secure_filename_and_ext"]
@@ -140,11 +164,12 @@ class StatusImportChat2DeskTests(unittest.TestCase):
 
         self.assertEqual(parsed["source_rows"], 4)
         self.assertEqual(parsed["valid_events"], 4)
-        self.assertEqual(parsed["matched_events"], 4)
+        self.assertEqual(parsed["matched_events"], 3)
         self.assertEqual(parsed["invalid_rows_count"], 0)
+        self.assertEqual(parsed.get("ignored_events_count"), 1)
         self.assertEqual(
             [event["status_key"] for event in parsed["events"]],
-            ["online", "тех причина", "logout", "take chat"],
+            ["online", "тех причина", "take chat"],
         )
         self.assertEqual(parsed["action_events_count"], 1)
 

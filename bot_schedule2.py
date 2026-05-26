@@ -14078,7 +14078,11 @@ def _status_import_normalize_header(value):
 
 
 def _status_import_normalize_operator_name(value):
-    return re.sub(r'\s+', ' ', str(value or '').strip()).replace('ё', 'е').replace('Ё', 'Е').lower()
+    text = re.sub(r'\s+', ' ', str(value or '').strip()).replace('ё', 'е').replace('Ё', 'Е').lower()
+    # Имена в БД и Chat2Desk нередко расходятся на конечный мягкий/твёрдый знак
+    # («Асель»/«Асел», «Игорь»/«Игор»), поэтому срезаем «ь»/«ъ» в конце
+    # каждого слова — чтобы оба варианта матчились как один оператор.
+    return re.sub(r'[ьъ]+(?=\s|$)', '', text)
 
 
 def _status_import_operator_name_variants(value):
@@ -14104,7 +14108,6 @@ CHAT2DESK_STATUS_EVENT_MAP = {
     'status.busy': ('busy', 'Busy'),
     'status.study': ('study', 'Тренинг'),
     'status.training': ('study', 'Тренинг'),
-    'status.offline': ('logout', 'Выход из системы'),
     # Новый экспорт Chat2Desk отдает те же статусы без префикса `status.`.
     'online': ('online', 'Online'),
     'holiday': ('holiday', 'Закрытие чатов'),
@@ -14112,13 +14115,20 @@ CHAT2DESK_STATUS_EVENT_MAP = {
     'busy': ('busy', 'Busy'),
     'study': ('study', 'Тренинг'),
     'training': ('study', 'Тренинг'),
-    'offline': ('logout', 'Выход из системы'),
     'tech.break': ('тех причина', 'Тех причина'),
     'status.tech.break': ('тех причина', 'Тех причина'),
     'tech_break': ('тех причина', 'Тех причина'),
     'status.tech_break': ('тех причина', 'Тех причина'),
     'login': ('login', 'Вход в систему'),
     'logout': ('logout', 'Выход из системы'),
+}
+
+
+# События, которые приходят из Chat2Desk, но в учёте чат-менеджеров их нужно
+# полностью игнорировать (не превращать в logout и не сохранять сегмент).
+CHAT2DESK_IGNORED_STATUS_EVENTS = {
+    'offline',
+    'status.offline',
 }
 
 
@@ -14176,6 +14186,14 @@ def _status_import_resolve_display_state(state_name_raw, state_note_raw):
     base_key = _status_import_normalize_key(base_name)
     event_key = re.sub(r'[\s_]+', '.', base_key)
     event_key = re.sub(r'\.+', '.', event_key).strip('.')
+    if base_key in CHAT2DESK_IGNORED_STATUS_EVENTS or event_key in CHAT2DESK_IGNORED_STATUS_EVENTS:
+        return {
+            'label': base_name or '—',
+            'key': '',
+            'base_key': base_key,
+            'base_name': base_name,
+            'kind': 'ignore'
+        }
     matched_status = CHAT2DESK_STATUS_EVENT_MAP.get(base_key) or CHAT2DESK_STATUS_EVENT_MAP.get(event_key)
     if matched_status:
         status_key, label = matched_status
@@ -14334,6 +14352,7 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
     events_by_operator = {}
     source_order_stats = {}
     action_events_count = 0
+    ignored_events_count = 0
     chat_metrics_by_operator_day = {}
 
     def _push_invalid(row_num, reason, operator_name, source_state_name, state_note, time_change):
@@ -14411,9 +14430,12 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
             continue
 
         resolved = _status_import_resolve_display_state(source_state_name, state_note)
+        event_kind = str(resolved.get('kind') or 'status')
+        if event_kind == 'ignore':
+            ignored_events_count += 1
+            continue
         operator_info = operator_matches[0]
         operator_id = int(operator_info['id'])
-        event_kind = str(resolved.get('kind') or 'status')
         status_key = resolved.get('key') or _status_import_normalize_key(source_state_name)
         if event_kind == 'action':
             action_events_count += 1
@@ -14527,6 +14549,7 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
         'parse_errors_count': 0,
         'operators_count': len(events_by_operator),
         'action_events_count': int(action_events_count),
+        'ignored_events_count': int(ignored_events_count),
         'open_tail_events': int(open_tail_events),
         'zero_or_negative_transitions': int(zero_or_negative_transitions),
         'events': events_for_db,
