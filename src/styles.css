@@ -242,7 +242,66 @@
       --main-content-sidebar-offset: 80px;
       margin-left: 80px;
     }
-    
+
+    /* === Sidebar performance optimizations (no visual change) ===
+       Цель: максимальный FPS при наведении/сворачивании, без потери внешнего вида.
+       ВАЖНО: внутри .sidebar/.sidebar-menu-scroll живут `position: fixed`
+       дропдауны, поэтому в этих местах нельзя использовать `transform`,
+       `filter`, `contain: layout|paint|strict` или `will-change: transform` —
+       они создают containing block и ломают позиционирование fixed-потомков.
+       Используем только `contain: style` и `will-change: width`. */
+    .sidebar {
+      will-change: width;
+      contain: style;
+    }
+    .sidebar > div {
+      contain: style;
+    }
+    .main-content {
+      will-change: margin-left;
+      contain: style;
+    }
+
+    /* Заменяем дорогой `transition: all` на узкий набор реально анимируемых
+       свойств — браузеру не нужно переоценивать каждое CSS-свойство в кадре.
+       Селектор более специфичный, чем `.transition-all`, поэтому переопределяет
+       Tailwind-утилиту, сохраняя её `duration-*` и `ease-*` модификаторы. */
+    .sidebar button.transition-all,
+    .sidebar a.transition-all,
+    .sidebar-collapse-btn.transition-all {
+      transition-property: background-color, color, box-shadow;
+    }
+
+    /* Текстовые спаны внутри пунктов меню — декоративные, не должны участвовать
+       в hit-testing'е (hover ловит сам <button>). */
+    .sidebar .sidebar-text {
+      pointer-events: none;
+    }
+
+    /* Прокручиваемая область — изолируем стилевую инвалидацию и
+       чейнинг overscroll к body. `contain: paint/layout` НЕЛЬЗЯ
+       (фикс-дропдауны как потомки). */
+    .sidebar-menu-scroll {
+      contain: style;
+      overscroll-behavior: contain;
+      overflow-anchor: none;
+    }
+
+    /* Футер с аккаунтом — стабильная зона. Дропдаун аккаунта — `position: absolute`
+       и виден за пределами футера, так что paint/layout containment тоже нельзя. */
+    .sidebar-footer-menu {
+      contain: style;
+    }
+
+    /* Сами выпадающие панели — изолируем их полностью.
+       contain: paint клипнул бы box-shadow, поэтому только layout+style.
+       У них нет fixed/abs-потомков, так что safe. */
+    .sidebar .animate-dropdown,
+    .sidebar .animate-dropdown-reverse {
+      contain: layout style;
+      will-change: transform, opacity;
+    }
+
     /* Гамбургер кнопка */
     .hamburger-btn {
       display: none;
