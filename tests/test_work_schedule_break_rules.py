@@ -1,4 +1,5 @@
 import ast
+import re
 import textwrap
 import unittest
 from pathlib import Path
@@ -50,6 +51,10 @@ class _MergeDummy:
         return value
 
 
+class _TechReasonDummy:
+    pass
+
+
 class WorkScheduleBreakRuleTests(unittest.TestCase):
     def test_database_custom_direction_rules_disable_default_fallback_for_gaps(self):
         namespace = {}
@@ -61,6 +66,18 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
 
         self.assertEqual(pick(_BreakRuleDummy(), 300, direction_name="Основа", direction_rules=rules), [])
         self.assertEqual(pick(_BreakRuleDummy(), 300, direction_name="Основа", direction_rules=[]), [15])
+
+    def test_tech_reason_status_detection_accepts_chat2desk_aliases(self):
+        namespace = {"re": re}
+        exec(_function_source(DATABASE_PATH, "_schedule_auto_compact_status_key", class_name="Database"), namespace)
+        exec(_function_source(DATABASE_PATH, "_schedule_auto_is_tech_reason_status_key", class_name="Database"), namespace)
+        dummy = _TechReasonDummy()
+        dummy._schedule_auto_compact_status_key = namespace["_schedule_auto_compact_status_key"].__get__(dummy, _TechReasonDummy)
+        is_tech_reason = namespace["_schedule_auto_is_tech_reason_status_key"]
+
+        self.assertTrue(is_tech_reason(dummy, "тех причина"))
+        self.assertTrue(is_tech_reason(dummy, "tech_break"))
+        self.assertTrue(is_tech_reason(dummy, "status.tech_break"))
 
     def test_import_simulation_custom_direction_rules_disable_default_fallback_for_gaps(self):
         namespace = {}
