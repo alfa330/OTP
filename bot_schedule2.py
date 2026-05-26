@@ -14115,6 +14115,8 @@ CHAT2DESK_STATUS_EVENT_MAP = {
     'offline': ('logout', 'Выход из системы'),
     'tech.break': ('тех причина', 'Тех причина'),
     'status.tech.break': ('тех причина', 'Тех причина'),
+    'tech_break': ('тех причина', 'Тех причина'),
+    'status.tech_break': ('тех причина', 'Тех причина'),
     'login': ('login', 'Вход в систему'),
     'logout': ('logout', 'Выход из системы'),
 }
@@ -14174,8 +14176,9 @@ def _status_import_resolve_display_state(state_name_raw, state_note_raw):
     base_key = _status_import_normalize_key(base_name)
     event_key = re.sub(r'[\s_]+', '.', base_key)
     event_key = re.sub(r'\.+', '.', event_key).strip('.')
-    if event_key in CHAT2DESK_STATUS_EVENT_MAP:
-        status_key, label = CHAT2DESK_STATUS_EVENT_MAP[event_key]
+    matched_status = CHAT2DESK_STATUS_EVENT_MAP.get(base_key) or CHAT2DESK_STATUS_EVENT_MAP.get(event_key)
+    if matched_status:
+        status_key, label = matched_status
         return {
             'label': label,
             'key': status_key,
@@ -14183,8 +14186,9 @@ def _status_import_resolve_display_state(state_name_raw, state_note_raw):
             'base_name': base_name,
             'kind': 'status'
         }
-    if event_key in CHAT2DESK_ACTION_EVENT_MAP:
-        status_key, label = CHAT2DESK_ACTION_EVENT_MAP[event_key]
+    matched_action = CHAT2DESK_ACTION_EVENT_MAP.get(base_key) or CHAT2DESK_ACTION_EVENT_MAP.get(event_key)
+    if matched_action:
+        status_key, label = matched_action
         return {
             'label': label,
             'key': status_key,
