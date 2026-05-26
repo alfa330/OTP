@@ -8527,7 +8527,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [plannerStatusModalFocus, setPlannerStatusModalFocus] = useState(null);
             const [plannerStatusHourlyDayKey, setPlannerStatusHourlyDayKey] = useState('');
             const [plannerStatusHourlyExpandedKey, setPlannerStatusHourlyExpandedKey] = useState('');
-            const [plannerStatusGroupingDirectionKeys, setPlannerStatusGroupingDirectionKeys] = useState(['all']);
+            const [plannerStatusGroupingDirectionKeys, setPlannerStatusGroupingDirectionKeys] = useState([]);
+            const [plannerStatusGroupingForecastState, setPlannerStatusGroupingForecastState] = useState({
+                loading: false,
+                dateKey: '',
+                error: '',
+                hourly: [],
+                day: null
+            });
+            const [plannerStatusGroupingAuctionState, setPlannerStatusGroupingAuctionState] = useState({
+                loading: false,
+                error: '',
+                snapshot: null
+            });
             const [showBreakRulesSettingsModal, setShowBreakRulesSettingsModal] = useState(false);
             const [plannerBreakRulesLoading, setPlannerBreakRulesLoading] = useState(false);
             const [plannerBreakRulesSaving, setPlannerBreakRulesSaving] = useState(false);
@@ -9855,6 +9867,178 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 () => (plannerStatusAnomalyAnalysis || plannerStatusServerAnalysis || null),
                 [plannerStatusAnomalyAnalysis, plannerStatusServerAnalysis]
             );
+            const plannerStatusGroupingDayOptions = useMemo(() => (
+                (Array.isArray(plannerStatusEffectiveAnalysis?.days) ? plannerStatusEffectiveAnalysis.days : [])
+                    .map(day => String(day?.dateKey || ''))
+                    .filter(Boolean)
+                    .sort((a, b) => b.localeCompare(a))
+            ), [plannerStatusEffectiveAnalysis]);
+            const plannerStatusGroupingEffectiveDayKey = useMemo(() => {
+                const current = String(plannerStatusHourlyDayKey || '');
+                return plannerStatusGroupingDayOptions.includes(current)
+                    ? current
+                    : (plannerStatusGroupingDayOptions[0] || '');
+            }, [plannerStatusGroupingDayOptions, plannerStatusHourlyDayKey]);
+            const plannerStatusGroupingDirectionOptions = useMemo(() => {
+                const byKey = new Map();
+                const addDirection = (value) => {
+                    const label = String(value || '').trim();
+                    if (!label) return;
+                    const key = plannerNormalizeDirectionKey(label);
+                    if (!key || byKey.has(key)) return;
+                    byKey.set(key, { key, label });
+                };
+
+                (Array.isArray(plannerSystemDirections) ? plannerSystemDirections : []).forEach(addDirection);
+                (Array.isArray(operators) ? operators : []).forEach(op => {
+                    addDirection(op?.direction || op?.direction_name || '');
+                });
+                const snapshotOperators = Array.isArray(plannerStatusGroupingAuctionState?.snapshot?.selected_operators)
+                    ? plannerStatusGroupingAuctionState.snapshot.selected_operators
+                    : [];
+                snapshotOperators.forEach(op => {
+                    addDirection(op?.direction || op?.direction_name || '');
+                });
+
+                return Array.from(byKey.values())
+                    .sort((a, b) => String(a?.label || '').localeCompare(String(b?.label || ''), 'ru'));
+            }, [operators, plannerSystemDirections, plannerStatusGroupingAuctionState?.snapshot]);
+            useEffect(() => {
+                if (!showPlannerStatusGroupingModal) return;
+                if (!plannerStatusGroupingDirectionOptions.length) return;
+                const availableKeys = new Set(plannerStatusGroupingDirectionOptions.map(item => item.key));
+                setPlannerStatusGroupingDirectionKeys(prev => {
+                    const normalized = Array.from(new Set(
+                        (Array.isArray(prev) ? prev : [])
+                            .map(v => plannerNormalizeDirectionKey(v))
+                            .filter(key => key && availableKeys.has(key))
+                    ));
+                    const next = normalized.length > 0
+                        ? normalized
+                        : plannerStatusGroupingDirectionOptions.map(item => item.key);
+                    if (
+                        Array.isArray(prev)
+                        && prev.length === next.length
+                        && prev.every((value, idx) => plannerNormalizeDirectionKey(value) === next[idx])
+                    ) {
+                        return prev;
+                    }
+                    return next;
+                });
+            }, [showPlannerStatusGroupingModal, plannerStatusGroupingDirectionOptions]);
+            useEffect(() => {
+                if (!showPlannerStatusGroupingModal) return;
+                if (!plannerStatusGroupingEffectiveDayKey) return;
+                if (!user?.id || user?.role === 'operator') return;
+
+                const dateKey = String(plannerStatusGroupingEffectiveDayKey || '').trim();
+                if (!dateKey) return;
+
+                const abortController = new AbortController();
+                const buildGroupingHeaders = (extra = {}) => (
+                    typeof withAccessTokenHeader === 'function'
+                        ? withAccessTokenHeader({ ...extra, 'X-User-Id': String(user.id) })
+                        : { ...extra, 'X-User-Id': String(user.id) }
+                );
+
+                const loadForecast = async () => {
+                    setPlannerStatusGroupingForecastState(prev => ({
+                        ...prev,
+                        loading: true,
+                        dateKey,
+                        error: '',
+                        hourly: prev.dateKey === dateKey ? prev.hourly : [],
+                        day: prev.dateKey === dateKey ? prev.day : null
+                    }));
+                    try {
+                        const params = new URLSearchParams({
+                            forecast_date_from: dateKey,
+                            forecast_date_to: dateKey
+                        });
+                        const response = await fetch(`${API_BASE_URL}/api/resource_fte/overview?${params.toString()}`, {
+                            credentials: 'include',
+                            headers: buildGroupingHeaders(),
+                            signal: abortController.signal
+                        });
+                        const payload = await response.json().catch(() => ({}));
+                        if (!response.ok) {
+                            throw new Error(payload?.error || `HTTP ${response.status}`);
+                        }
+                        if (abortController.signal.aborted) return;
+                        const days = Array.isArray(payload?.next_week_forecast?.days)
+                            ? payload.next_week_forecast.days
+                            : [];
+                        const day = days.find(item => String(item?.forecast_date || '') === dateKey) || days[0] || null;
+                        const hourly = Array.from({ length: 24 }).map((_, hour) => {
+                            const source = (Array.isArray(day?.hourly_forecast) ? day.hourly_forecast : [])
+                                .find(item => Number(item?.hour) === hour);
+                            return {
+                                hour,
+                                forecastFte: Number(source?.forecast_fte || 0),
+                                forecastCalls: Number(source?.forecast_calls || 0),
+                                insufficientHistory: Boolean(day?.insufficient_history)
+                            };
+                        });
+                        setPlannerStatusGroupingForecastState({
+                            loading: false,
+                            dateKey,
+                            error: '',
+                            hourly,
+                            day
+                        });
+                    } catch (error) {
+                        if (abortController.signal.aborted) return;
+                        setPlannerStatusGroupingForecastState(prev => ({
+                            ...prev,
+                            loading: false,
+                            dateKey,
+                            error: error?.message || 'Не удалось загрузить прогноз'
+                        }));
+                    }
+                };
+
+                const loadAuction = async () => {
+                    setPlannerStatusGroupingAuctionState(prev => ({
+                        ...prev,
+                        loading: true,
+                        error: ''
+                    }));
+                    try {
+                        const response = await fetch(`${API_BASE_URL}/api/shift_auction/test_snapshot`, {
+                            credentials: 'include',
+                            headers: buildGroupingHeaders(),
+                            signal: abortController.signal
+                        });
+                        const payload = await response.json().catch(() => ({}));
+                        if (!response.ok) {
+                            throw new Error(payload?.error || `HTTP ${response.status}`);
+                        }
+                        if (abortController.signal.aborted) return;
+                        setPlannerStatusGroupingAuctionState({
+                            loading: false,
+                            error: '',
+                            snapshot: payload?.snapshot || null
+                        });
+                    } catch (error) {
+                        if (abortController.signal.aborted) return;
+                        setPlannerStatusGroupingAuctionState(prev => ({
+                            ...prev,
+                            loading: false,
+                            error: error?.message || 'Не удалось загрузить аукцион смен'
+                        }));
+                    }
+                };
+
+                loadForecast();
+                loadAuction();
+                return () => abortController.abort();
+            }, [
+                showPlannerStatusGroupingModal,
+                plannerStatusGroupingEffectiveDayKey,
+                user?.id,
+                user?.role,
+                withAccessTokenHeader
+            ]);
             const importedStatusTimelineByOperatorDateKey = useMemo(() => {
                 const sourceTimelineByDayOperator = new Map();
                 const days = Array.isArray(plannerStatusEffectiveAnalysis?.days) ? plannerStatusEffectiveAnalysis.days : [];
@@ -11253,7 +11437,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setPlannerStatusModalFocus(null);
                     setPlannerStatusHourlyDayKey('');
                     setPlannerStatusHourlyExpandedKey('');
-                    setPlannerStatusGroupingDirectionKeys(['all']);
+                    setPlannerStatusGroupingDirectionKeys([]);
                     setPlannerStatusSpecialViewEnabled(Boolean(analysis));
                     plannerLoadedStatusRangeKeysRef.current = new Set();
                     plannerLoadingStatusRangeKeysRef.current = new Set();
@@ -11274,7 +11458,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setPlannerStatusModalFocus(null);
                     setPlannerStatusHourlyDayKey('');
                     setPlannerStatusHourlyExpandedKey('');
-                    setPlannerStatusGroupingDirectionKeys(['all']);
+                    setPlannerStatusGroupingDirectionKeys([]);
                     setPlannerStatusSpecialViewEnabled(false);
                     setPlannerStatusAnomalyExpandedDays({});
                     setPlannerStatusAnomalyError(error?.message || 'Не удалось обработать файл');
@@ -18020,7 +18204,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         setShowPlannerStatusGroupingModal(false);
                                                         setPlannerStatusHourlyDayKey('');
                                                         setPlannerStatusHourlyExpandedKey('');
-                                                        setPlannerStatusGroupingDirectionKeys(['all']);
+                                                        setPlannerStatusGroupingDirectionKeys([]);
                                                         setPlannerStatusAnomalyExpandedDays({});
                                                     }}
                                                     className="w-full px-3 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-sm font-medium flex items-center gap-2"
@@ -21541,71 +21725,44 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     {(() => {
                         const analysis = plannerStatusEffectiveAnalysis;
                         const hasAnalysis = !!analysis;
-                        const dayOptions = hasAnalysis
-                            ? (Array.isArray(analysis?.days) ? analysis.days : [])
-                                .map(day => String(day?.dateKey || ''))
-                                .filter(Boolean)
-                                .sort((a, b) => b.localeCompare(a))
-                            : [];
-                        const effectiveDayKey = dayOptions.includes(String(plannerStatusHourlyDayKey || ''))
-                            ? String(plannerStatusHourlyDayKey || '')
-                            : (dayOptions[0] || '');
+                        const dayOptions = hasAnalysis ? plannerStatusGroupingDayOptions : [];
+                        const effectiveDayKey = hasAnalysis ? plannerStatusGroupingEffectiveDayKey : '';
                         const effectiveDayLabel = effectiveDayKey ? plannerStatusFormatDayLabel(effectiveDayKey) : '—';
-                        const groupingDirectionOptions = (() => {
-                            const byKey = new Map();
-                            (Array.isArray(filteredOperators) ? filteredOperators : []).forEach(op => {
-                                const directionLabel = String(op?.direction || op?.direction_name || 'Без направления').trim() || 'Без направления';
-                                const directionKey = plannerNormalizeDirectionKey(directionLabel);
-                                if (!directionKey || byKey.has(directionKey)) return;
-                                byKey.set(directionKey, directionLabel);
-                            });
-                            return Array.from(byKey.entries())
-                                .map(([key, label]) => ({ key, label }))
-                                .sort((a, b) => String(a?.label || '').localeCompare(String(b?.label || ''), 'ru'));
-                        })();
+                        const groupingDirectionOptions = plannerStatusGroupingDirectionOptions;
                         const availableGroupingDirectionKeys = new Set(groupingDirectionOptions.map(item => item.key));
                         const normalizedGroupingDirectionSelection = Array.from(new Set(
-                            (Array.isArray(plannerStatusGroupingDirectionKeys) ? plannerStatusGroupingDirectionKeys : ['all'])
+                            (Array.isArray(plannerStatusGroupingDirectionKeys) ? plannerStatusGroupingDirectionKeys : [])
                                 .map(v => plannerNormalizeDirectionKey(v))
-                                .filter(Boolean)
+                                .filter(key => key && availableGroupingDirectionKeys.has(key))
                         ));
-                        const effectiveGroupingDirectionKeys = normalizedGroupingDirectionSelection.includes('all')
-                            ? ['all']
-                            : (() => {
-                                const valid = normalizedGroupingDirectionSelection.filter(key => availableGroupingDirectionKeys.has(key));
-                                return valid.length > 0 ? valid : ['all'];
-                            })();
-                        const effectiveGroupingDirectionSet = effectiveGroupingDirectionKeys.includes('all')
-                            ? null
-                            : new Set(effectiveGroupingDirectionKeys);
-                        const operatorsForGrouping = (Array.isArray(filteredOperators) ? filteredOperators : []).filter(op => {
-                            if (!effectiveGroupingDirectionSet) return true;
+                        const effectiveGroupingDirectionKeys = normalizedGroupingDirectionSelection.length > 0
+                            ? normalizedGroupingDirectionSelection
+                            : groupingDirectionOptions.map(item => item.key);
+                        const effectiveGroupingDirectionSet = new Set(effectiveGroupingDirectionKeys);
+                        const operatorDirectionLabel = (op) => String(op?.direction || op?.direction_name || 'Без направления').trim() || 'Без направления';
+                        const operatorMatchesGroupingDirections = (op) => {
+                            if (effectiveGroupingDirectionSet.size === 0) return false;
                             const directionLabel = String(op?.direction || op?.direction_name || 'Без направления').trim() || 'Без направления';
                             const directionKey = plannerNormalizeDirectionKey(directionLabel);
                             return effectiveGroupingDirectionSet.has(directionKey);
-                        });
+                        };
+                        const operatorsForGrouping = (Array.isArray(operators) ? operators : []).filter(operatorMatchesGroupingDirections);
                         const toggleGroupingDirectionKey = (directionKeyRaw) => {
                             const directionKey = plannerNormalizeDirectionKey(directionKeyRaw);
-                            if (!directionKey || directionKey === 'all') {
-                                setPlannerStatusGroupingDirectionKeys(['all']);
-                                setPlannerStatusHourlyExpandedKey('');
-                                return;
-                            }
+                            if (!directionKey || !availableGroupingDirectionKeys.has(directionKey)) return;
                             setPlannerStatusGroupingDirectionKeys(prev => {
                                 const current = Array.from(new Set(
-                                    (Array.isArray(prev) ? prev : ['all'])
+                                    (Array.isArray(prev) ? prev : [])
                                         .map(v => plannerNormalizeDirectionKey(v))
-                                        .filter(Boolean)
+                                        .filter(key => key && availableGroupingDirectionKeys.has(key))
                                 ));
                                 let next = current;
-                                if (current.includes('all')) {
-                                    next = [directionKey];
-                                } else if (current.includes(directionKey)) {
+                                if (current.includes(directionKey)) {
                                     next = current.filter(key => key !== directionKey);
                                 } else {
                                     next = [...current, directionKey];
                                 }
-                                if (next.length === 0) next = ['all'];
+                                if (next.length === 0) next = [directionKey];
                                 return Array.from(new Set(next));
                             });
                             setPlannerStatusHourlyExpandedKey('');
@@ -21634,59 +21791,188 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             if (directionCmp !== 0) return directionCmp;
                             return String(a?.operatorName || '').localeCompare(String(b?.operatorName || ''), 'ru');
                         };
-                        const rows = (!showPlannerStatusGroupingModal || !hasAnalysis || !effectiveDayKey)
-                            ? []
-                            : Array.from({ length: 24 }).map((_, hour) => {
-                                const hourMoment = hour * 60;
-                                const plannedOperators = [];
-                                const actualOperators = [];
-                                const directionMap = new Map();
-                                operatorsForGrouping.forEach(op => {
-                                    const shiftParts = getShiftPartsForDate(op, effectiveDayKey);
-                                    if (!shiftParts.length) return;
-                                    const onShiftAtMoment = shiftParts.some(part => {
-                                        const partStart = Number(part?.start || 0);
-                                        const partEnd = Number(part?.end || 0);
-                                        return partStart <= hourMoment && partEnd > hourMoment;
-                                    });
-                                    if (!onShiftAtMoment) return;
-                                    const operatorName = String(op?.name || op?.login || `Оператор ${op?.id || ''}`).trim();
-                                    const operatorNameKey = plannerStatusNormalizeOperatorName(operatorName);
-                                    const direction = String(op?.direction || op?.direction_name || 'Без направления').trim() || 'Без направления';
-                                    const statusBars = importedStatusTimelineByOperatorDateKey.get(`${operatorNameKey}|${effectiveDayKey}`) || [];
-                                    const status = pickStatusAtMoment(statusBars, hourMoment);
-                                    const isActuallyOnShift = plannerImportedStatusCountsAsOnShift(status.key);
-                                    const statusRangeLabel = (status.segStart == null || status.segEnd == null)
-                                        ? '—'
-                                        : `${minutesToTime(status.segStart)} - ${minutesToTime(status.segEnd)}`;
-                                    const item = {
+                        const forecastByHour = new Map(
+                            (plannerStatusGroupingForecastState.dateKey === effectiveDayKey
+                                ? (plannerStatusGroupingForecastState.hourly || [])
+                                : []
+                            ).map(item => [Number(item?.hour), item])
+                        );
+                        const auctionSnapshot = plannerStatusGroupingAuctionState?.snapshot || {};
+                        const auctionOperatorsById = new Map();
+                        (Array.isArray(auctionSnapshot?.selected_operators) ? auctionSnapshot.selected_operators : []).forEach(op => {
+                            const id = Number(op?.id);
+                            if (!Number.isFinite(id) || id <= 0) return;
+                            auctionOperatorsById.set(id, op);
+                        });
+                        const operatorsById = new Map();
+                        (Array.isArray(operators) ? operators : []).forEach(op => {
+                            const id = Number(op?.id);
+                            if (!Number.isFinite(id) || id <= 0) return;
+                            operatorsById.set(id, op);
+                        });
+                        const getPlanOperatorMeta = (operatorIdRaw, fallbackName = '') => {
+                            const operatorId = Number(operatorIdRaw);
+                            const auctionOperator = auctionOperatorsById.get(operatorId);
+                            const scheduleOperator = operatorsById.get(operatorId);
+                            const source = auctionOperator || scheduleOperator || {};
+                            const operatorName = String(source?.name || fallbackName || `Оператор ${operatorId || ''}`).trim();
+                            const direction = String(source?.direction || source?.direction_name || scheduleOperator?.direction || scheduleOperator?.direction_name || 'Без направления').trim() || 'Без направления';
+                            return {
+                                operatorId: Number.isFinite(operatorId) ? operatorId : 0,
+                                operatorName: operatorName || `Оператор ${operatorId || ''}`,
+                                direction
+                            };
+                        };
+                        const auctionLotPartsForDate = (lot, dateKey) => {
+                            const lotDate = String(lot?.shift_date || lot?.date || '').trim();
+                            const targetDate = String(dateKey || '').trim();
+                            if (!lotDate || !targetDate) return [];
+                            const targetDateObj = parseDateStr(targetDate);
+                            if (!targetDateObj || Number.isNaN(targetDateObj.getTime())) return [];
+                            const previousDate = todayDateStr(addDays(targetDateObj, -1));
+                            const startText = String(lot?.start_time || lot?.start || '').trim();
+                            const endText = String(lot?.end_time || lot?.end || '').trim();
+                            if (!startText || !endText) return [];
+                            const start = timeToMinutes(startText);
+                            let end = timeToMinutes(endText);
+                            if (end <= start) end += 1440;
+                            if (end <= start) return [];
+
+                            if (lotDate === targetDate) {
+                                const partStart = Math.max(0, start);
+                                const partEnd = Math.min(1440, end);
+                                return partEnd > partStart ? [{ start: partStart, end: partEnd, sourceDate: lotDate }] : [];
+                            }
+                            if (lotDate === previousDate && end > 1440) {
+                                const partEnd = Math.min(1440, end - 1440);
+                                return partEnd > 0 ? [{ start: 0, end: partEnd, sourceDate: lotDate }] : [];
+                            }
+                            return [];
+                        };
+                        const formatGroupingShiftLabel = (startText, endText) => {
+                            const start = String(startText || '').trim() || '—';
+                            const end = String(endText || '').trim() || '—';
+                            const overnight = start !== '—' && end !== '—' && timeToMinutes(end) <= timeToMinutes(start) && end !== '00:00';
+                            return `${start} - ${end}${overnight ? ' (+1)' : ''}`;
+                        };
+                        const planByHour = Array.from({ length: 24 }, () => new Map());
+                        if (showPlannerStatusGroupingModal && hasAnalysis && effectiveDayKey && effectiveGroupingDirectionSet.size > 0) {
+                            (Array.isArray(auctionSnapshot?.lots) ? auctionSnapshot.lots : []).forEach(lot => {
+                                if (String(lot?.status || '').trim().toLowerCase() !== 'claimed') return;
+                                const claimedBy = Number(lot?.claimed_by);
+                                if (!Number.isFinite(claimedBy) || claimedBy <= 0) return;
+                                const meta = getPlanOperatorMeta(claimedBy, lot?.claimed_by_name);
+                                const directionKey = plannerNormalizeDirectionKey(meta.direction);
+                                if (!directionKey || !effectiveGroupingDirectionSet.has(directionKey)) return;
+                                const parts = auctionLotPartsForDate(lot, effectiveDayKey);
+                                if (!parts.length) return;
+                                const shiftLabel = formatGroupingShiftLabel(lot?.start_time, lot?.end_time);
+                                parts.forEach(part => {
+                                    for (let hour = 0; hour < 24; hour++) {
+                                        const hStart = hour * 60;
+                                        const hEnd = hStart + 60;
+                                        const overlap = Math.max(0, Math.min(Number(part.end || 0), hEnd) - Math.max(Number(part.start || 0), hStart));
+                                        if (overlap <= 0) continue;
+                                        const current = planByHour[hour].get(meta.operatorId) || {
+                                            operatorId: meta.operatorId,
+                                            operatorName: meta.operatorName,
+                                            direction: meta.direction,
+                                            plannedOverlapMinutes: 0,
+                                            shiftLabels: []
+                                        };
+                                        current.plannedOverlapMinutes += overlap;
+                                        if (shiftLabel && !current.shiftLabels.includes(shiftLabel)) {
+                                            current.shiftLabels.push(shiftLabel);
+                                        }
+                                        planByHour[hour].set(meta.operatorId, current);
+                                    }
+                                });
+                            });
+                        }
+                        const factByHour = Array.from({ length: 24 }, () => []);
+                        if (showPlannerStatusGroupingModal && hasAnalysis && effectiveDayKey && effectiveGroupingDirectionSet.size > 0) {
+                            operatorsForGrouping.forEach(op => {
+                                const operatorName = String(op?.name || op?.login || `Оператор ${op?.id || ''}`).trim();
+                                const operatorNameKey = plannerStatusNormalizeOperatorName(operatorName);
+                                if (!operatorNameKey) return;
+                                const direction = operatorDirectionLabel(op);
+                                const statusBars = importedStatusTimelineByOperatorDateKey.get(`${operatorNameKey}|${effectiveDayKey}`) || [];
+                                const countedStatusSegments = (Array.isArray(statusBars) ? statusBars : [])
+                                    .map(seg => {
+                                        const startMin = Number(seg?.startMin ?? seg?.start ?? 0);
+                                        const endMin = Number(seg?.endMin ?? seg?.end ?? 0);
+                                        if (!Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) return null;
+                                        const statusKey = plannerStatusNormalizeKey(seg?.stateKey || seg?.statusKey || seg?.stateName || seg?.statusName || '');
+                                        if (!plannerImportedStatusCountsAsOnShift(statusKey)) return null;
+                                        const statusLabel = plannerStatusLabelFromKey(
+                                            statusKey,
+                                            String(seg?.stateName || seg?.statusName || seg?.stateKey || seg?.statusKey || 'Статус').trim() || 'Статус'
+                                        );
+                                        return { start: startMin, end: endMin, statusKey, statusLabel };
+                                    })
+                                    .filter(Boolean);
+                                if (!countedStatusSegments.length) return;
+
+                                for (let hour = 0; hour < 24; hour++) {
+                                    const hStart = hour * 60;
+                                    const hEnd = hStart + 60;
+                                    const hourSegments = countedStatusSegments
+                                        .map(seg => {
+                                            const start = Math.max(hStart, Number(seg.start || 0));
+                                            const end = Math.min(hEnd, Number(seg.end || 0));
+                                            return end > start ? { ...seg, start, end } : null;
+                                        })
+                                        .filter(Boolean);
+                                    if (!hourSegments.length) continue;
+                                    const workingMinutes = plannerIntervalsTotalMinutes(
+                                        mergeIntervals(hourSegments.map(seg => ({ start: seg.start, end: seg.end })))
+                                    );
+                                    if (workingMinutes < 30) continue;
+                                    const statusLabels = Array.from(new Set(hourSegments.map(seg => seg.statusLabel).filter(Boolean)));
+                                    const statusRanges = hourSegments
+                                        .map(seg => `${minutesToTime(seg.start)} - ${minutesToTime(seg.end)}`)
+                                        .slice(0, 3);
+                                    factByHour[hour].push({
                                         operatorId: Number(op?.id || 0),
                                         operatorName: operatorName || `Оператор ${op?.id || ''}`,
                                         direction,
-                                        statusLabel: status.label || 'Нет статуса',
-                                        statusKey: status.key || 'нет статуса',
-                                        statusRangeLabel,
-                                        isActuallyOnShift
-                                    };
-                                    plannedOperators.push(item);
-                                    if (!directionMap.has(direction)) {
-                                        directionMap.set(direction, { direction, plannedCount: 0, actualCount: 0 });
+                                        statusLabel: statusLabels.join(', ') || 'Статус',
+                                        statusKey: hourSegments[0]?.statusKey || '',
+                                        statusRangeLabel: statusRanges.join('; ') || '—',
+                                        workingMinutes,
+                                        isActuallyOnShift: true
+                                    });
+                                }
+                            });
+                        }
+                        const rows = (!showPlannerStatusGroupingModal || !hasAnalysis || !effectiveDayKey)
+                            ? []
+                            : Array.from({ length: 24 }).map((_, hour) => {
+                                const plannedOperators = Array.from(planByHour[hour].values()).sort(sortByDirectionAndName);
+                                const actualOperators = (factByHour[hour] || []).sort(sortByDirectionAndName);
+                                const directionMap = new Map();
+                                const ensureDirection = (direction) => {
+                                    const label = String(direction || 'Без направления').trim() || 'Без направления';
+                                    if (!directionMap.has(label)) {
+                                        directionMap.set(label, { direction: label, plannedCount: 0, actualCount: 0 });
                                     }
-                                    const dirBucket = directionMap.get(direction);
-                                    dirBucket.plannedCount += 1;
-                                    if (isActuallyOnShift) {
-                                        actualOperators.push(item);
-                                        dirBucket.actualCount += 1;
-                                    }
+                                    return directionMap.get(label);
+                                };
+                                plannedOperators.forEach(item => {
+                                    ensureDirection(item.direction).plannedCount += 1;
                                 });
-                                plannedOperators.sort(sortByDirectionAndName);
-                                actualOperators.sort(sortByDirectionAndName);
+                                actualOperators.forEach(item => {
+                                    ensureDirection(item.direction).actualCount += 1;
+                                });
                                 const directionRows = Array.from(directionMap.values())
                                     .map(row => ({ ...row, delta: row.actualCount - row.plannedCount }))
                                     .sort((a, b) => String(a?.direction || '').localeCompare(String(b?.direction || ''), 'ru'));
+                                const forecastRow = forecastByHour.get(hour) || {};
                                 return {
                                     hour,
                                     hourLabel: `${plannerStatusPad2(hour)}:00`,
+                                    forecastFte: Number(forecastRow?.forecastFte || 0),
+                                    forecastCalls: Number(forecastRow?.forecastCalls || 0),
                                     plannedCount: plannedOperators.length,
                                     actualCount: actualOperators.length,
                                     delta: actualOperators.length - plannedOperators.length,
@@ -21705,11 +21991,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const selectedList = selectedRow
                             ? (expandedScope === 'planned' ? selectedRow.plannedOperators : selectedRow.actualOperators)
                             : [];
-                        const selectedDirectionLabels = !effectiveGroupingDirectionSet
-                            ? ['Все направления']
-                            : groupingDirectionOptions
-                                .filter(item => effectiveGroupingDirectionSet.has(item.key))
-                                .map(item => item.label);
+                        const selectedDirectionLabels = groupingDirectionOptions
+                            .filter(item => effectiveGroupingDirectionSet.has(item.key))
+                            .map(item => item.label);
                         const exportGroupingToExcel = () => {
                             if (!rows.length) {
                                 emitAppToast('Нет данных для экспорта', 'warning');
@@ -21725,12 +22009,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             const rowXml = (cells) => `<Row>${cells.join('')}</Row>`;
                             const summaryRowsXml = [];
                             summaryRowsXml.push(rowXml([cell('Дата отчета'), cell(effectiveDayLabel)]));
-                            summaryRowsXml.push(rowXml([cell('Направления'), cell(selectedDirectionLabels.join(', '))]));
+                            summaryRowsXml.push(rowXml([cell('Направления'), cell(selectedDirectionLabels.join(', ') || '—')]));
                             summaryRowsXml.push(rowXml([cell('')]));
-                            summaryRowsXml.push(rowXml([cell('Точка времени'), cell('План'), cell('Факт'), cell('Δ')]));
+                            summaryRowsXml.push(rowXml([cell('Точка времени'), cell('Прогноз'), cell('План'), cell('Факт'), cell('Δ')]));
                             rows.forEach(r => {
                                 summaryRowsXml.push(rowXml([
                                     cell(r.hourLabel),
+                                    cell(Number(r.forecastFte || 0), 'Number'),
                                     cell(Number(r.plannedCount || 0), 'Number'),
                                     cell(Number(r.actualCount || 0), 'Number'),
                                     cell(Number(r.delta || 0), 'Number')
@@ -21744,9 +22029,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 cell('Срез'),
                                 cell('Оператор'),
                                 cell('Направление'),
-                                cell('Статус на момент'),
-                                cell('Интервал статуса'),
-                                cell('На линии')
+                                cell('Статус/смена'),
+                                cell('Интервал/смена'),
+                                cell('Минут в час'),
+                                cell('Включен в сумму')
                             ]));
                             rows.forEach(r => {
                                 (r.plannedOperators || []).forEach(item => {
@@ -21756,9 +22042,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         cell('План'),
                                         cell(item?.operatorName || ''),
                                         cell(item?.direction || ''),
-                                        cell(item?.statusLabel || ''),
-                                        cell(item?.statusRangeLabel || ''),
-                                        cell(item?.isActuallyOnShift ? 'Да' : 'Нет')
+                                        cell('Аукцион смен'),
+                                        cell((item?.shiftLabels || []).join('; ')),
+                                        cell(Number(item?.plannedOverlapMinutes || 0), 'Number'),
+                                        cell('Да')
                                     ]));
                                 });
                                 (r.actualOperators || []).forEach(item => {
@@ -21770,6 +22057,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         cell(item?.direction || ''),
                                         cell(item?.statusLabel || ''),
                                         cell(item?.statusRangeLabel || ''),
+                                        cell(Number(item?.workingMinutes || 0), 'Number'),
                                         cell(item?.isActuallyOnShift ? 'Да' : 'Нет')
                                     ]));
                                 });
@@ -21812,10 +22100,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             Почасовая группировка смен
                                         </h3>
                                         <div className="text-xs text-slate-500 mt-1">
-                                            Расчет идет по моменту времени ровно в HH:00 (например 09:00, 10:00), а не по часовому интервалу.
+                                            Расчет идет по часовому интервалу HH:00-HH:59.
                                         </div>
                                         <div className="text-xs text-slate-500 mt-1">
-                                            «Нет статуса» и «Отключен/Отключена» не входят в факт. «Перерыв» и «Перезвон» учитываются как на смене.
+                                            Факт включает оператора, если рабочие статусы занимают не меньше 30 минут часа.
                                         </div>
                                     </div>
                                     <button
@@ -21869,18 +22157,30 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <span className="ml-3">Операторов: <strong className="text-slate-900">{operatorsForGrouping.length}</strong></span>
                                                 </div>
                                             </div>
+                                            {(plannerStatusGroupingForecastState.loading || plannerStatusGroupingAuctionState.loading || plannerStatusGroupingForecastState.error || plannerStatusGroupingAuctionState.error) && (
+                                                <div className="flex flex-wrap gap-2 text-xs">
+                                                    {plannerStatusGroupingForecastState.loading && (
+                                                        <span className="rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-blue-700">Прогноз загружается...</span>
+                                                    )}
+                                                    {plannerStatusGroupingAuctionState.loading && (
+                                                        <span className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-amber-800">План загружается...</span>
+                                                    )}
+                                                    {plannerStatusGroupingForecastState.error && (
+                                                        <span className="rounded-md border border-rose-200 bg-rose-50 px-2 py-1 text-rose-700">Прогноз: {plannerStatusGroupingForecastState.error}</span>
+                                                    )}
+                                                    {plannerStatusGroupingAuctionState.error && (
+                                                        <span className="rounded-md border border-rose-200 bg-rose-50 px-2 py-1 text-rose-700">План: {plannerStatusGroupingAuctionState.error}</span>
+                                                    )}
+                                                </div>
+                                            )}
                                             <div>
                                                 <div className="text-xs text-slate-600">Направления (мультивыбор)</div>
                                                 <div className="mt-1 flex flex-wrap gap-1.5">
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => toggleGroupingDirectionKey('all')}
-                                                        className={`px-2.5 py-1 rounded-lg border text-xs font-medium ${!effectiveGroupingDirectionSet ? 'border-blue-300 bg-blue-100 text-blue-800' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}`}
-                                                    >
-                                                        Все
-                                                    </button>
+                                                    {groupingDirectionOptions.length === 0 && (
+                                                        <span className="px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-xs text-slate-400">Нет направлений</span>
+                                                    )}
                                                     {groupingDirectionOptions.map(directionItem => {
-                                                        const isActive = !!effectiveGroupingDirectionSet && effectiveGroupingDirectionSet.has(directionItem.key);
+                                                        const isActive = effectiveGroupingDirectionSet.has(directionItem.key);
                                                         return (
                                                             <button
                                                                 key={`group-direction-${directionItem.key}`}
@@ -21902,6 +22202,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <thead className="bg-slate-50 border-b text-xs uppercase tracking-wide text-slate-500">
                                                         <tr>
                                                             <th className="text-left px-3 py-2">Час</th>
+                                                            <th className="text-right px-3 py-2">Прогноз</th>
                                                             <th className="text-right px-3 py-2">План</th>
                                                             <th className="text-right px-3 py-2">Факт</th>
                                                             <th className="text-right px-3 py-2">Δ</th>
@@ -21914,6 +22215,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             return (
                                                                 <tr key={`group-row-${row.hour}`} className="border-b last:border-b-0">
                                                                     <td className="px-3 py-2 font-medium text-slate-800 tabular-nums">{row.hourLabel}</td>
+                                                                    <td className="px-3 py-2 text-right tabular-nums text-blue-700 font-semibold" title={`Прогноз звонков: ${Number(row.forecastCalls || 0).toFixed(0)}`}>
+                                                                        {plannerStatusGroupingForecastState.loading && plannerStatusGroupingForecastState.dateKey === effectiveDayKey ? '...' : Number(row.forecastFte || 0).toFixed(2)}
+                                                                    </td>
                                                                     <td className="px-3 py-2 text-right">
                                                                         <button
                                                                             type="button"
@@ -21987,7 +22291,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             <div className="text-xs text-slate-500">Нет данных для выбранного значения.</div>
                                                         )}
                                                         {selectedList.map((item, idx) => {
-                                                            const tone = getPlannerImportedStatusTone(item?.statusLabel || item?.statusKey || '');
+                                                            const isPlannedScope = expandedScope === 'planned';
+                                                            const tone = isPlannedScope
+                                                                ? { pill: 'border-blue-200 bg-blue-50 text-blue-700' }
+                                                                : getPlannerImportedStatusTone(item?.statusLabel || item?.statusKey || '');
                                                             return (
                                                                 <div key={`group-op-${idx}-${item?.operatorId || item?.operatorName}`} className="rounded-md border border-slate-200 px-2 py-1.5 text-xs">
                                                                     <div className="flex items-start justify-between gap-2">
@@ -21995,11 +22302,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             <div className="font-semibold text-slate-900 truncate">{item?.operatorName || '—'}</div>
                                                                             <div className="text-slate-500 truncate">{item?.direction || 'Без направления'}</div>
                                                                         </div>
-                                                                        <span className={`px-1.5 py-0.5 rounded border whitespace-nowrap ${tone.pill}`}>{item?.statusLabel || 'Нет статуса'}</span>
+                                                                        <span className={`px-1.5 py-0.5 rounded border whitespace-nowrap ${tone.pill}`}>{isPlannedScope ? 'Аукцион' : (item?.statusLabel || 'Нет статуса')}</span>
                                                                     </div>
                                                                     <div className="mt-1 text-slate-600">
-                                                                        <span className="tabular-nums">Статус на момент: {item?.statusRangeLabel || '—'}</span>
-                                                                        {!item?.isActuallyOnShift && <span className="ml-2 text-rose-700 font-medium">Не на линии</span>}
+                                                                        {isPlannedScope ? (
+                                                                            <>
+                                                                                <span className="tabular-nums">Смена: {(item?.shiftLabels || []).join('; ') || '—'}</span>
+                                                                                <span className="ml-2 text-slate-500 tabular-nums">{Math.round(Number(item?.plannedOverlapMinutes || 0))} мин.</span>
+                                                                            </>
+                                                                        ) : (
+                                                                            <>
+                                                                                <span className="tabular-nums">Статусы: {item?.statusRangeLabel || '—'}</span>
+                                                                                <span className="ml-2 text-slate-500 tabular-nums">{Math.round(Number(item?.workingMinutes || 0))} мин.</span>
+                                                                                {!item?.isActuallyOnShift && <span className="ml-2 text-rose-700 font-medium">Не на линии</span>}
+                                                                            </>
+                                                                        )}
                                                                     </div>
                                                                 </div>
                                                             );
