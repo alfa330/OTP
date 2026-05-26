@@ -7347,6 +7347,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             'offline': { key: 'logout', label: 'Выход из системы' },
             'tech.break': { key: 'тех причина', label: 'Тех причина' },
             'status.tech.break': { key: 'тех причина', label: 'Тех причина' },
+            'tech_break': { key: 'тех причина', label: 'Тех причина' },
+            'status.tech_break': { key: 'тех причина', label: 'Тех причина' },
             'login': { key: 'login', label: 'Вход в систему' },
             'logout': { key: 'logout', label: 'Выход из системы' }
             };
@@ -7369,11 +7371,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const baseName = String(stateNameRaw ?? '').trim();
             const baseKey = plannerStatusNormalizeKey(baseName);
             const eventKey = baseKey.replace(/[\s_]+/g, '.').replace(/\.+/g, '.').replace(/^\.+|\.+$/g, '');
-            const statusEvent = PLANNER_CHAT2DESK_STATUS_EVENT_MAP[eventKey];
+            const statusEvent = PLANNER_CHAT2DESK_STATUS_EVENT_MAP[baseKey]
+                || PLANNER_CHAT2DESK_STATUS_EVENT_MAP[eventKey];
             if (statusEvent) {
                 return { label: statusEvent.label, key: statusEvent.key, baseKey, baseName, kind: 'status' };
             }
-            const actionEvent = PLANNER_CHAT2DESK_ACTION_EVENT_MAP[eventKey];
+            const actionEvent = PLANNER_CHAT2DESK_ACTION_EVENT_MAP[baseKey]
+                || PLANNER_CHAT2DESK_ACTION_EVENT_MAP[eventKey];
             if (actionEvent) {
                 return { label: actionEvent.label, key: actionEvent.key, baseKey, baseName, kind: 'action' };
             }
