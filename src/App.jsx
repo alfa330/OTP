@@ -8219,7 +8219,82 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 });
                 });
             });
-            return mergeIntervals(occupied);
+            return occupied.slice().sort((a, b) => (a.start - b.start) || (a.end - b.end));
+            }
+
+            function getBreakLayoutSpacing(segStart, segEnd, breakDurations) {
+            const duration = Math.max(0, Number(segEnd || 0) - Number(segStart || 0));
+            const count = Array.isArray(breakDurations) ? breakDurations.length : 0;
+            if (duration <= 0 || count <= 0) return { edgeMargin: 0, minGap: 0 };
+
+            let edgeMargin = duration >= 8 * 60 ? 90 : (duration >= 6 * 60 ? 60 : 45);
+            let minGap = count > 1 ? 45 : 0;
+            const totalBreakMinutes = (breakDurations || []).reduce((sum, item) => sum + Math.max(0, Number(item) || 0), 0);
+            const required = (edgeValue, gapValue) => totalBreakMinutes + (2 * edgeValue) + (gapValue * Math.max(0, count - 1));
+
+            while (edgeMargin > 30 && required(edgeMargin, minGap) > duration) edgeMargin -= 5;
+            while (minGap > 15 && required(edgeMargin, minGap) > duration) minGap -= 5;
+            while (edgeMargin > 0 && required(edgeMargin, minGap) > duration) edgeMargin -= 5;
+            while (minGap > 0 && required(edgeMargin, minGap) > duration) minGap -= 5;
+
+            return {
+                edgeMargin: Math.max(0, Math.round(edgeMargin)),
+                minGap: Math.max(0, Math.round(minGap))
+            };
+            }
+
+            function getBreakStartBoundsForIndex(segStart, segEnd, breakDurations, index, edgeMargin, minGap) {
+            const durations = (breakDurations || []).map(item => Math.max(0, Number(item) || 0));
+            const idx = Number(index);
+            if (!Number.isInteger(idx) || idx < 0 || idx >= durations.length) {
+                return { lower: Number(segStart || 0), upper: Number(segEnd || 0) };
+            }
+            const beforeMinutes = durations.slice(0, idx).reduce((sum, item) => sum + item, 0) + (Number(minGap || 0) * idx);
+            const afterMinutes = durations.slice(idx + 1).reduce((sum, item) => sum + item, 0) + (Number(minGap || 0) * Math.max(0, durations.length - idx - 1));
+            return {
+                lower: Number(segStart || 0) + Number(edgeMargin || 0) + beforeMinutes,
+                upper: Number(segEnd || 0) - Number(edgeMargin || 0) - durations[idx] - afterMinutes
+            };
+            }
+
+            function breakTotalOverlapMinutes(interval, occupiedIntervals) {
+            return (occupiedIntervals || []).reduce((sum, occ) => {
+                const overlap = Math.min(Number(interval.end), Number(occ.end)) - Math.max(Number(interval.start), Number(occ.start));
+                return sum + Math.max(0, Number.isFinite(overlap) ? overlap : 0);
+            }, 0);
+            }
+
+            function findBestBreakStart(desiredStart, length, lowerBound, upperBound, occupiedIntervals) {
+            const step = 5;
+            const len = Number(length || 0);
+            if (len <= 0) return null;
+            const lower = Math.ceil(Number(lowerBound || 0) / step) * step;
+            const upper = Math.floor(Number(upperBound || 0) / step) * step;
+            if (upper < lower) return null;
+
+            const desired = Math.round(Number(desiredStart || 0) / step) * step;
+            let bestStart = null;
+            let bestScore = null;
+            for (let start = lower; start <= upper; start += step) {
+                const candidate = { start, end: start + len };
+                const overlapMinutes = breakTotalOverlapMinutes(candidate, occupiedIntervals);
+                const overlapCount = (occupiedIntervals || []).reduce((sum, occ) => sum + (intervalsOverlap(candidate, occ) ? 1 : 0), 0);
+                const score = [
+                    overlapMinutes * 1000 + overlapCount * 100,
+                    Math.abs(start - desired),
+                    start
+                ];
+                if (
+                    !bestScore
+                    || score[0] < bestScore[0]
+                    || (score[0] === bestScore[0] && score[1] < bestScore[1])
+                    || (score[0] === bestScore[0] && score[1] === bestScore[1] && score[2] < bestScore[2])
+                ) {
+                    bestScore = score;
+                    bestStart = start;
+                }
+            }
+            return bestStart;
             }
 
             function findNonOverlappingStart(desiredStart, length, segStart, segEnd, occupiedIntervals) {
@@ -8261,22 +8336,47 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 );
                 const segStart = Math.max(0, rawSegStart);
                 const segEnd = Math.max(segStart, Math.min(2880, rawSegEnd));
+                const preparedBreaks = (seg.breaks || [])
+                    .map(b => ({
+                        start: Number(b?.start || 0),
+                        end: Number(b?.end || 0)
+                    }))
+                    .filter(b => Number.isFinite(b.start) && Number.isFinite(b.end) && b.end > b.start)
+                    .sort((a, b) => (a.start - b.start) || (a.end - b.end))
+                    .map(b => ({ ...b, length: b.end - b.start }));
+
+                if (preparedBreaks.length === 0) {
+                    seg.breaks = [];
+                    continue;
+                }
+
+                const breakDurations = preparedBreaks.map(b => b.length);
+                const { edgeMargin, minGap } = getBreakLayoutSpacing(segStart, segEnd, breakDurations);
                 const newBreaks = [];
-                for (const b of seg.breaks) {
-                const length = b.end - b.start;
-                if (length <= 0 || segEnd - segStart <= 0) continue;
-                let desiredStart = Math.max(segStart, Math.min(segEnd - length, b.start));
-                const found = findNonOverlappingStart(desiredStart, length, segStart, segEnd, occupied);
+                for (let idx = 0; idx < preparedBreaks.length; idx += 1) {
+                const b = preparedBreaks[idx];
+                const length = b.length;
+                let { lower, upper } = getBreakStartBoundsForIndex(segStart, segEnd, breakDurations, idx, edgeMargin, minGap);
+                if (newBreaks.length > 0 && minGap > 0) {
+                    lower = Math.max(lower, newBreaks[newBreaks.length - 1].end + minGap);
+                }
+                let desiredStart = upper >= lower ? Math.max(lower, Math.min(upper, b.start)) : b.start;
+                const found = findBestBreakStart(desiredStart, length, lower, upper, occupied);
                 if (found !== null) {
                     const nb = { start: found, end: found + length };
                     newBreaks.push(nb);
                     occupied.push(nb);
                 } else {
-                    const clamped = { start: Math.max(segStart, Math.min(segEnd - length, b.start)), end: Math.max(segStart, Math.min(segEnd, b.end)) };
+                    let clampedStart = Math.max(segStart, Math.min(segEnd - length, b.start));
+                    if (newBreaks.length > 0 && minGap > 0) {
+                        clampedStart = Math.max(clampedStart, newBreaks[newBreaks.length - 1].end + minGap);
+                    }
+                    clampedStart = Math.min(clampedStart, segEnd - length);
+                    const clamped = { start: clampedStart, end: clampedStart + length };
                     newBreaks.push(clamped);
                     occupied.push(clamped);
                 }
-                occupied = mergeIntervals(occupied);
+                occupied = occupied.slice().sort((a, b) => (a.start - b.start) || (a.end - b.end));
                 }
                 seg.breaks = newBreaks;
             }
@@ -8636,6 +8736,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [plannerFineActionLoading, setPlannerFineActionLoading] = useState(false);
             const [excelTransferState, setExcelTransferState] = useState({ importing: false, exporting: false });
             const [excelImportReport, setExcelImportReport] = useState(null);
+            const [breakRecalculateState, setBreakRecalculateState] = useState({ loading: false });
             const [showPlannerStatusAnomalyModal, setShowPlannerStatusAnomalyModal] = useState(false);
             const [showPlannerStatusGroupingModal, setShowPlannerStatusGroupingModal] = useState(false);
             const [plannerStatusAnomalyLoading, setPlannerStatusAnomalyLoading] = useState(false);
@@ -11194,6 +11295,69 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     await fetchPlannerImportedStatusesForRange(rangeStart, rangeEnd, { force: true });
                 }
                 return schedulesPayload;
+            };
+
+            const handlePlannerBreaksRecalculate = async () => {
+                if (user?.role === 'operator') return;
+                const sortedDates = (Array.isArray(visibleRange) ? [...visibleRange] : [])
+                    .map(date => String(date || '').trim())
+                    .filter(Boolean)
+                    .sort((a, b) => a.localeCompare(b));
+                if (sortedDates.length === 0) {
+                    emitAppToast('Нет дат для пересчета перерывов', 'warning');
+                    return;
+                }
+
+                const operatorIds = Array.from(new Set(
+                    (Array.isArray(filteredOperators) ? filteredOperators : [])
+                        .map(op => Number(op?.id))
+                        .filter(id => Number.isFinite(id) && id > 0)
+                        .map(id => Math.trunc(id))
+                ));
+                if (operatorIds.length === 0) {
+                    emitAppToast('По текущим фильтрам нет операторов для пересчета', 'warning');
+                    return;
+                }
+
+                const startDate = sortedDates[0];
+                const endDate = sortedDates[sortedDates.length - 1];
+                const rangeLabel = startDate === endDate ? startDate : `${startDate} - ${endDate}`;
+                const confirmed = window.confirm(
+                    `Пересчитать перерывы за ${rangeLabel} для ${operatorIds.length} операторов? Смены и выходные не изменятся, будут перезаписаны только перерывы.`
+                );
+                if (!confirmed) return;
+
+                setBreakRecalculateState({ loading: true });
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/recalculate_breaks`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: withAccessTokenHeader({
+                            'Content-Type': 'application/json'
+                        }),
+                        body: JSON.stringify({
+                            start_date: startDate,
+                            end_date: endDate,
+                            operator_ids: operatorIds
+                        })
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+
+                    await reloadPlannerSchedulesFromServer();
+                    const result = payload?.result || {};
+                    emitAppToast(
+                        `Перерывы пересчитаны: смен ${Number(result.shifts_processed || 0)}, перерывов ${Number(result.breaks_inserted || 0)}`,
+                        'success'
+                    );
+                } catch (error) {
+                    console.error('Error recalculating breaks:', error);
+                    emitAppToast(`Ошибка пересчета перерывов: ${error?.message || error}`, 'error');
+                } finally {
+                    setBreakRecalculateState({ loading: false });
+                }
             };
 
             const loadPlannerBreakRulesFromServer = async ({ silent = false } = {}) => {
@@ -18234,6 +18398,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             >
                                                 <FaIcon className="fas fa-sliders-h"></FaIcon>
                                                 Настройка перерывов
+                                            </button>
+
+                                            <button
+                                                onClick={() => {
+                                                    setShowPlannerTopActionsMenu(false);
+                                                    handlePlannerBreaksRecalculate();
+                                                }}
+                                                disabled={breakRecalculateState.loading || excelTransferState.importing || excelTransferState.exporting}
+                                                className="w-full px-3 py-2 rounded-xl border border-teal-200 bg-teal-50 hover:bg-teal-100 text-teal-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                                                title="Пересчитать перерывы в видимом диапазоне по текущим правилам направлений"
+                                            >
+                                                <FaIcon className={`fas ${breakRecalculateState.loading ? 'fa-spinner fa-spin' : 'fa-sync-alt'}`}></FaIcon>
+                                                {breakRecalculateState.loading ? 'Пересчет...' : 'Пересчитать перерывы'}
                                             </button>
 
                                             {plannerStatusEffectiveAnalysis && (

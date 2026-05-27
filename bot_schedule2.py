@@ -15144,7 +15144,7 @@ def _ws_build_occupied_intervals_for_date(all_operators, date_str, exclude_op_id
             for b in (seg.get('breaks') or []):
                 clamp_push(int(b.get('start', 0)) + 1440, int(b.get('end', 0)) + 1440)
 
-    return _ws_merge_intervals(occupied)
+    return sorted(occupied, key=lambda item: (int(item['start']), int(item['end'])))
 
 
 def _ws_find_non_overlapping_start(desired_start, length, seg_start, seg_end, occupied_intervals):
@@ -15170,6 +15170,95 @@ def _ws_find_non_overlapping_start(desired_start, length, seg_start, seg_end, oc
             continue
         return start
     return None
+
+
+def _ws_break_layout_spacing(seg_start, seg_end, break_durations):
+    duration = max(0, int(seg_end) - int(seg_start))
+    count = len(break_durations or [])
+    if duration <= 0 or count <= 0:
+        return 0, 0
+
+    if duration >= 8 * 60:
+        edge_margin = 90
+    elif duration >= 6 * 60:
+        edge_margin = 60
+    else:
+        edge_margin = 45
+    min_gap = 45 if count > 1 else 0
+    total_break_minutes = sum(max(0, int(x)) for x in (break_durations or []))
+
+    def required(edge_value, gap_value):
+        return total_break_minutes + (2 * edge_value) + (gap_value * max(0, count - 1))
+
+    while edge_margin > 30 and required(edge_margin, min_gap) > duration:
+        edge_margin -= 5
+    while min_gap > 15 and required(edge_margin, min_gap) > duration:
+        min_gap -= 5
+    while edge_margin > 0 and required(edge_margin, min_gap) > duration:
+        edge_margin -= 5
+    while min_gap > 0 and required(edge_margin, min_gap) > duration:
+        min_gap -= 5
+
+    return max(0, int(edge_margin)), max(0, int(min_gap))
+
+
+def _ws_break_start_bounds_for_index(seg_start, seg_end, break_durations, index, edge_margin, min_gap):
+    durations = [max(0, int(x)) for x in (break_durations or [])]
+    idx = int(index)
+    count = len(durations)
+    if idx < 0 or idx >= count:
+        return int(seg_start), int(seg_end)
+
+    before_minutes = sum(durations[:idx]) + (int(min_gap) * idx)
+    after_minutes = sum(durations[idx + 1:]) + (int(min_gap) * max(0, count - idx - 1))
+    lower = int(seg_start) + int(edge_margin) + before_minutes
+    upper = int(seg_end) - int(edge_margin) - durations[idx] - after_minutes
+    return int(lower), int(upper)
+
+
+def _ws_break_total_overlap_minutes(interval, occupied_intervals):
+    total = 0
+    for occ in (occupied_intervals or []):
+        try:
+            overlap = min(int(interval['end']), int(occ['end'])) - max(int(interval['start']), int(occ['start']))
+        except Exception:
+            continue
+        if overlap > 0:
+            total += overlap
+    return total
+
+
+def _ws_find_best_break_start(desired_start, length, lower_bound, upper_bound, occupied_intervals):
+    step = 5
+    length = int(length)
+    if length <= 0:
+        return None
+
+    lower = int(math.ceil(float(lower_bound) / step) * step)
+    upper = int(math.floor(float(upper_bound) / step) * step)
+    if upper < lower:
+        return None
+
+    desired = int(round(float(desired_start) / step) * step)
+    best = None
+    best_score = None
+    for start in range(lower, upper + 1, step):
+        test_iv = {'start': start, 'end': start + length}
+        overlap_minutes = _ws_break_total_overlap_minutes(test_iv, occupied_intervals)
+        overlap_count = sum(
+            1
+            for occ in (occupied_intervals or [])
+            if _ws_intervals_overlap(test_iv, occ)
+        )
+        score = (
+            overlap_minutes * 1000 + overlap_count * 100,
+            abs(start - desired),
+            start
+        )
+        if best_score is None or score < best_score:
+            best_score = score
+            best = start
+    return best
 
 
 def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_direction_scope_key, break_rules_map=None):
@@ -15200,26 +15289,50 @@ def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_dire
 
         seg_start = max(0, raw_seg_start)
         seg_end = max(seg_start, min(2880, raw_seg_end))
-        new_breaks = []
-        for b in (seg.get('breaks') or []):
+        prepared_breaks = []
+        for b in sorted((seg.get('breaks') or []), key=lambda x: (int(x.get('start', 0)), int(x.get('end', 0)))):
             b_start = int(b.get('start', 0))
             b_end = int(b.get('end', 0))
             length = b_end - b_start
-            if length <= 0 or (seg_end - seg_start) <= 0:
-                continue
-            desired_start = max(seg_start, min(seg_end - length, b_start))
-            found = _ws_find_non_overlapping_start(desired_start, length, seg_start, seg_end, occupied)
+            if length > 0:
+                prepared_breaks.append({'start': b_start, 'end': b_end, 'length': length})
+
+        if not prepared_breaks:
+            seg['breaks'] = []
+            continue
+
+        break_durations = [int(b['length']) for b in prepared_breaks]
+        edge_margin, min_gap = _ws_break_layout_spacing(seg_start, seg_end, break_durations)
+        new_breaks = []
+        for idx, b in enumerate(prepared_breaks):
+            length = int(b['length'])
+            lower, upper = _ws_break_start_bounds_for_index(
+                seg_start,
+                seg_end,
+                break_durations,
+                idx,
+                edge_margin,
+                min_gap
+            )
+            if new_breaks and min_gap > 0:
+                lower = max(lower, int(new_breaks[-1]['end']) + int(min_gap))
+
+            desired_start = max(lower, min(upper, int(b['start']))) if upper >= lower else int(b['start'])
+            found = _ws_find_best_break_start(desired_start, length, lower, upper, occupied)
             if found is not None:
                 nb = {'start': int(found), 'end': int(found) + int(length)}
             else:
-                clamped_start = max(seg_start, min(seg_end - length, b_start))
-                clamped_end = max(seg_start, min(seg_end, b_end))
+                clamped_start = max(seg_start, min(seg_end - length, int(b['start'])))
+                if new_breaks and min_gap > 0:
+                    clamped_start = max(clamped_start, int(new_breaks[-1]['end']) + int(min_gap))
+                clamped_start = min(clamped_start, seg_end - length)
+                clamped_end = clamped_start + length
                 if clamped_end <= clamped_start:
                     continue
                 nb = {'start': clamped_start, 'end': clamped_end}
             new_breaks.append(nb)
             occupied.append(nb)
-            occupied = _ws_merge_intervals(occupied)
+            occupied.sort(key=lambda item: (int(item['start']), int(item['end'])))
         seg['breaks'] = new_breaks
 
 
@@ -15247,7 +15360,48 @@ def _ws_compute_breaks_for_entries(entries, sim_source_operators, break_rules_ma
     sim_op_by_id = {int(op.get('id')): op for op in sim_operators if op.get('id') is not None}
     scope_resolver = _ws_make_direction_scope_resolver(break_direction_groups or [])
 
-    for entry in entries:
+    def _entry_sort_key(entry):
+        date_str = str(entry.get('date') or '')
+        direction_value = entry.get('direction')
+        scope_key = str(scope_resolver(direction_value))
+        try:
+            op_id_value = int(entry.get('operator_id'))
+        except Exception:
+            op_id_value = 0
+        if entry.get('is_day_off'):
+            return (date_str, scope_key, -1, 0, op_id_value)
+
+        best_flexibility = 10 ** 9
+        first_start = 10 ** 9
+        for raw_shift in (entry.get('shifts') or []):
+            try:
+                start_str = str(raw_shift.get('start') or raw_shift.get('start_time') or '').strip()
+                end_str = str(raw_shift.get('end') or raw_shift.get('end_time') or '').strip()
+                if not start_str or not end_str:
+                    continue
+                smin = _ws_time_to_minutes(start_str)
+                emin = _ws_time_to_minutes(end_str)
+                if emin <= smin:
+                    emin += 1440
+                durations = _ws_pick_break_durations_for_shift(
+                    duration_minutes=emin - smin,
+                    direction_value=direction_value,
+                    break_rules_map=break_rules_map
+                )
+                edge_margin, min_gap = _ws_break_layout_spacing(smin, emin, durations)
+                required_minutes = (
+                    sum(max(0, int(x)) for x in (durations or []))
+                    + (2 * int(edge_margin))
+                    + (int(min_gap) * max(0, len(durations or []) - 1))
+                )
+                flexibility = (emin - smin) - required_minutes
+                best_flexibility = min(best_flexibility, flexibility)
+                first_start = min(first_start, smin)
+            except Exception:
+                continue
+        return (date_str, scope_key, best_flexibility, first_start, op_id_value)
+
+    for entry in sorted(list(entries or []), key=_entry_sort_key):
         op_id = int(entry.get('operator_id'))
         date_str = str(entry.get('date'))
 
@@ -15800,6 +15954,77 @@ def save_work_schedule_break_rules():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error saving work schedule break rules: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/work_schedules/recalculate_breaks', methods=['POST'])
+@require_api_key
+def recalculate_work_schedule_breaks():
+    """
+    Rebuild shift_breaks for existing work_shifts using current direction break rules.
+    Shift rows, days off and status periods are not changed.
+    Body: {
+        "start_date": "YYYY-MM-DD",
+        "end_date": "YYYY-MM-DD",
+        "operator_ids": [1, 2, ...]  // recommended; required for supervisors
+    }
+    """
+    try:
+        requester_id, user_data, auth_error = _resolve_management_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        data = request.get_json(silent=True) or {}
+        start_date = data.get('start_date') or data.get('date_from') or data.get('from')
+        end_date = data.get('end_date') or data.get('date_to') or data.get('to') or start_date
+        if not start_date or not end_date:
+            return jsonify({"error": "start_date and end_date are required"}), 400
+
+        raw_operator_ids = (
+            data.get('operator_ids')
+            if 'operator_ids' in data else (
+                data.get('operatorIds')
+                if 'operatorIds' in data else None
+            )
+        )
+        operator_ids = None
+        if raw_operator_ids is not None:
+            if not isinstance(raw_operator_ids, list):
+                return jsonify({"error": "operator_ids must be a list"}), 400
+            operator_ids = []
+            seen_operator_ids = set()
+            for raw_operator_id in raw_operator_ids:
+                target_operator, scope_error = _resolve_scoped_operator_for_requester(
+                    user_data,
+                    requester_id,
+                    raw_operator_id
+                )
+                if scope_error:
+                    message, status_code = scope_error
+                    return jsonify({"error": message}), status_code
+                target_id = int(target_operator[0])
+                if target_id in seen_operator_ids:
+                    continue
+                seen_operator_ids.add(target_id)
+                operator_ids.append(target_id)
+        elif _is_supervisor_role(user_data[3]):
+            return jsonify({"error": "operator_ids are required for supervisor requests"}), 400
+
+        result = db.recalculate_work_schedule_breaks(
+            start_date=start_date,
+            end_date=end_date,
+            operator_ids=operator_ids
+        )
+        return jsonify({
+            "message": "Breaks recalculated successfully",
+            "result": result
+        }), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error recalculating work schedule breaks: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 

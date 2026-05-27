@@ -1,4 +1,5 @@
 import ast
+import math
 import re
 import textwrap
 import unittest
@@ -51,6 +52,14 @@ class _MergeDummy:
         return value
 
 
+class _BreakAdjustDummy(_MergeDummy):
+    def __init__(self, occupied=None):
+        self.occupied = occupied or []
+
+    def _load_occupied_break_intervals_for_operator_date_tx(self, cursor, operator_id, shift_date):
+        return list(self.occupied)
+
+
 class _TechReasonDummy:
     pass
 
@@ -97,6 +106,92 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
 
         self.assertEqual(pick(300, direction_value="Основа", break_rules_map=rules_map), [])
         self.assertEqual(pick(300, direction_value="Основа", break_rules_map={}), [15])
+
+    def test_database_break_adjustment_keeps_breaks_away_from_shift_edges_and_each_other(self):
+        namespace = {"math": math}
+        for function_name in (
+            "_break_intervals_overlap",
+            "_merge_break_intervals",
+            "_break_layout_spacing",
+            "_break_start_bounds_for_index",
+            "_break_total_overlap_minutes",
+            "_find_best_break_start",
+            "_adjust_shift_breaks_against_occupied_tx",
+        ):
+            exec(_function_source(DATABASE_PATH, function_name, class_name="Database"), namespace)
+
+        dummy = _BreakAdjustDummy()
+        for function_name in (
+            "_break_intervals_overlap",
+            "_merge_break_intervals",
+            "_break_layout_spacing",
+            "_break_start_bounds_for_index",
+            "_break_total_overlap_minutes",
+            "_find_best_break_start",
+            "_adjust_shift_breaks_against_occupied_tx",
+        ):
+            setattr(dummy, function_name, namespace[function_name].__get__(dummy, _BreakAdjustDummy))
+
+        result = dummy._adjust_shift_breaks_against_occupied_tx(
+            cursor=None,
+            operator_id=1,
+            shift_date="2026-05-21",
+            start_time="12:00",
+            end_time="21:00",
+            breaks=[
+                {"start": 12 * 60 + 10, "end": 12 * 60 + 25},
+                {"start": 12 * 60 + 25, "end": 12 * 60 + 40},
+                {"start": 16 * 60 + 15, "end": 16 * 60 + 45},
+            ],
+        )
+
+        self.assertEqual([item["end"] - item["start"] for item in result], [15, 15, 30])
+        self.assertGreaterEqual(result[0]["start"] - 12 * 60, 90)
+        self.assertGreaterEqual(21 * 60 - result[-1]["end"], 90)
+        self.assertTrue(all(b["start"] - a["end"] >= 45 for a, b in zip(result, result[1:])))
+
+    def test_database_break_adjustment_prefers_good_overlap_slot_over_edge_violation(self):
+        namespace = {"math": math}
+        for function_name in (
+            "_break_intervals_overlap",
+            "_merge_break_intervals",
+            "_break_layout_spacing",
+            "_break_start_bounds_for_index",
+            "_break_total_overlap_minutes",
+            "_find_best_break_start",
+            "_adjust_shift_breaks_against_occupied_tx",
+        ):
+            exec(_function_source(DATABASE_PATH, function_name, class_name="Database"), namespace)
+
+        dummy = _BreakAdjustDummy(occupied=[{"start": 16 * 60 + 15, "end": 16 * 60 + 45}])
+        for function_name in (
+            "_break_intervals_overlap",
+            "_merge_break_intervals",
+            "_break_layout_spacing",
+            "_break_start_bounds_for_index",
+            "_break_total_overlap_minutes",
+            "_find_best_break_start",
+            "_adjust_shift_breaks_against_occupied_tx",
+        ):
+            setattr(dummy, function_name, namespace[function_name].__get__(dummy, _BreakAdjustDummy))
+
+        result = dummy._adjust_shift_breaks_against_occupied_tx(
+            cursor=None,
+            operator_id=1,
+            shift_date="2026-05-21",
+            start_time="12:00",
+            end_time="21:00",
+            breaks=[
+                {"start": 14 * 60 + 10, "end": 14 * 60 + 25},
+                {"start": 16 * 60 + 15, "end": 16 * 60 + 45},
+                {"start": 18 * 60 + 40, "end": 18 * 60 + 55},
+            ],
+        )
+
+        lunch = result[1]
+        self.assertFalse(dummy._break_intervals_overlap(lunch, {"start": 16 * 60 + 15, "end": 16 * 60 + 45}))
+        self.assertGreaterEqual(lunch["start"] - result[0]["end"], 45)
+        self.assertGreaterEqual(result[2]["start"] - lunch["end"], 45)
 
     def test_auction_publish_merges_touching_claimed_shifts_before_saving(self):
         namespace = {}
