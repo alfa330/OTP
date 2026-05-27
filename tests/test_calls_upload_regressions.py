@@ -29,10 +29,11 @@ class CallsUploadRegressionTests(unittest.TestCase):
         self.assertNotIn("calls = EXCLUDED.calls", source)
         self.assertIn("imported call counts must survive", source)
 
-    def test_calls_preview_sends_selected_day_to_backend(self):
+    def test_calls_preview_does_not_restrict_upload_to_selected_day(self):
         source = APP_PATH.read_text(encoding="utf-8-sig")
 
-        self.assertIn("form.append('date', selectedDayUpload.dateStr);", source)
+        self.assertNotIn("form.append('date', selectedDayUpload.dateStr);", source)
+        self.assertNotIn("form.append('date', selectedDayUpload.dateStr)", source)
 
     def test_daily_fines_have_lookup_indexes_for_daily_hours_payloads(self):
         source = DATABASE_PATH.read_text(encoding="utf-8-sig")

@@ -2022,7 +2022,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             if (selectedSvId) {
                 form.append('sv_id', String(selectedSvId));
             }
-            form.append('date', selectedDayUpload.dateStr);
             const resp = await axios.post(`${API_BASE_URL}/api/sv/preview_calls_table`, form, {
                 headers: { 'X-User-Id': user.id, 'Content-Type': 'multipart/form-data' },
                 onUploadProgress: (p) => {
