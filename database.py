@@ -2695,7 +2695,7 @@ class Database:
                     "isActive": row[4],
                     "calculationModelCode": normalize_calculation_model_code(row[5], row[1]),
                     "calculation_model_code": normalize_calculation_model_code(row[5], row[1])
-                } for row in cursor.fetchall()
+                } for row in cursor.fetchall()  
             ]
 
     def _parse_resource_schedule_date_value(self, value, field_name="date"):
@@ -4227,6 +4227,57 @@ class Database:
 
             first_date = min(lot_dates)
             last_date = max(lot_dates)
+            cursor.execute(
+                """
+                SELECT u.id, d.name
+                FROM users u
+                LEFT JOIN directions d ON d.id = u.direction_id
+                WHERE u.id = ANY(%s)
+                """,
+                (operator_ids,)
+            )
+            operator_direction_map = {
+                int(op_id): direction_name
+                for op_id, direction_name in (cursor.fetchall() or [])
+                if op_id is not None
+            }
+            direction_rules_cache = {}
+
+            def _direction_rules_for_sort(direction_name):
+                direction_key = self._normalize_direction_key(direction_name)
+                if direction_key not in direction_rules_cache:
+                    direction_rules_cache[direction_key] = self._get_work_schedule_break_rules_for_direction_tx(
+                        cursor,
+                        direction_name
+                    )
+                return direction_rules_cache[direction_key]
+
+            def _publish_shift_sort_key(item):
+                start_min, end_min = self._schedule_interval_minutes(item["start_time"], item["end_time"])
+                duration = max(0, end_min - start_min)
+                direction_name = item.get("direction")
+                break_durations = self._pick_break_durations_for_shift(
+                    duration,
+                    direction_name=direction_name,
+                    direction_rules=_direction_rules_for_sort(direction_name)
+                )
+                edge_margin, min_gap = self._break_layout_spacing(start_min, end_min, break_durations)
+                required_minutes = (
+                    sum(max(0, int(x)) for x in (break_durations or []))
+                    + (2 * int(edge_margin))
+                    + (int(min_gap) * max(0, len(break_durations or []) - 1))
+                )
+                flexibility = duration - required_minutes
+                return (
+                    item["shift_date"],
+                    self._normalize_direction_key(direction_name),
+                    flexibility,
+                    start_min,
+                    end_min,
+                    int(item["operator_id"])
+                )
+
+            shifts_to_save = []
             for operator_id in operator_ids:
                 blocked_date_map = self._get_shift_auction_operator_blocked_date_map_tx(
                     cursor,
@@ -4250,16 +4301,26 @@ class Database:
                     if not claimed_shifts:
                         continue
                     for claimed in self._merge_shift_auction_claimed_shifts_for_publish(claimed_shifts):
-                        self._save_shift_tx(
-                            cursor=cursor,
-                            operator_id=operator_id,
-                            shift_date=lot_date,
-                            start_time=claimed["start_time"],
-                            end_time=claimed["end_time"],
-                            breaks=None,
-                        )
-                        summary["shifts_saved"] += 1
+                        shifts_to_save.append({
+                            "operator_id": operator_id,
+                            "shift_date": lot_date,
+                            "start_time": claimed["start_time"],
+                            "end_time": claimed["end_time"],
+                            "direction": operator_direction_map.get(operator_id)
+                        })
 
+            for item in sorted(shifts_to_save, key=_publish_shift_sort_key):
+                self._save_shift_tx(
+                    cursor=cursor,
+                    operator_id=item["operator_id"],
+                    shift_date=item["shift_date"],
+                    start_time=item["start_time"],
+                    end_time=item["end_time"],
+                    breaks=None,
+                )
+                summary["shifts_saved"] += 1
+
+            for operator_id in operator_ids:
                 self._recalculate_auto_daily_hours_tx(
                     cursor=cursor,
                     operator_ids=[operator_id],
@@ -14312,6 +14373,92 @@ class Database:
             return start
         return None
 
+    def _break_layout_spacing(self, seg_start, seg_end, break_durations):
+        duration = max(0, int(seg_end) - int(seg_start))
+        count = len(break_durations or [])
+        if duration <= 0 or count <= 0:
+            return 0, 0
+
+        if duration >= 8 * 60:
+            edge_margin = 90
+        elif duration >= 6 * 60:
+            edge_margin = 60
+        else:
+            edge_margin = 45
+        min_gap = 45 if count > 1 else 0
+
+        total_break_minutes = sum(max(0, int(x)) for x in (break_durations or []))
+
+        def required(edge_value, gap_value):
+            return total_break_minutes + (2 * edge_value) + (gap_value * max(0, count - 1))
+
+        while edge_margin > 30 and required(edge_margin, min_gap) > duration:
+            edge_margin -= 5
+        while min_gap > 15 and required(edge_margin, min_gap) > duration:
+            min_gap -= 5
+        while edge_margin > 0 and required(edge_margin, min_gap) > duration:
+            edge_margin -= 5
+        while min_gap > 0 and required(edge_margin, min_gap) > duration:
+            min_gap -= 5
+
+        return max(0, int(edge_margin)), max(0, int(min_gap))
+
+    def _break_start_bounds_for_index(self, seg_start, seg_end, break_durations, index, edge_margin, min_gap):
+        durations = [max(0, int(x)) for x in (break_durations or [])]
+        idx = int(index)
+        count = len(durations)
+        if idx < 0 or idx >= count:
+            return int(seg_start), int(seg_end)
+
+        before_minutes = sum(durations[:idx]) + (int(min_gap) * idx)
+        after_minutes = sum(durations[idx + 1:]) + (int(min_gap) * max(0, count - idx - 1))
+        lower = int(seg_start) + int(edge_margin) + before_minutes
+        upper = int(seg_end) - int(edge_margin) - durations[idx] - after_minutes
+        return int(lower), int(upper)
+
+    def _break_total_overlap_minutes(self, interval, occupied_intervals):
+        total = 0
+        for occ in (occupied_intervals or []):
+            try:
+                overlap = min(int(interval['end']), int(occ['end'])) - max(int(interval['start']), int(occ['start']))
+            except Exception:
+                continue
+            if overlap > 0:
+                total += overlap
+        return total
+
+    def _find_best_break_start(self, desired_start, length, lower_bound, upper_bound, occupied_intervals):
+        step = 5
+        length = int(length)
+        if length <= 0:
+            return None
+
+        lower = int(math.ceil(float(lower_bound) / step) * step)
+        upper = int(math.floor(float(upper_bound) / step) * step)
+        if upper < lower:
+            return None
+
+        desired = int(round(float(desired_start) / step) * step)
+        best = None
+        best_score = None
+        for start in range(lower, upper + 1, step):
+            interval = {'start': start, 'end': start + length}
+            overlap_minutes = self._break_total_overlap_minutes(interval, occupied_intervals)
+            overlap_count = sum(
+                1
+                for occ in (occupied_intervals or [])
+                if self._break_intervals_overlap(interval, occ)
+            )
+            score = (
+                overlap_minutes * 1000 + overlap_count * 100,
+                abs(start - desired),
+                start
+            )
+            if best_score is None or score < best_score:
+                best_score = score
+                best = start
+        return best
+
     def _load_occupied_break_intervals_for_operator_date_tx(self, cursor, operator_id, shift_date):
         """
         Возвращает занятые интервалы перерывов других операторов того же направления
@@ -14373,7 +14520,7 @@ class Database:
             if ne > ns:
                 occupied.append({'start': ns, 'end': ne})
 
-        return self._merge_break_intervals(occupied)
+        return sorted(occupied, key=lambda item: (int(item['start']), int(item['end'])))
 
     def _adjust_shift_breaks_against_occupied_tx(self, cursor, operator_id, shift_date, start_time, end_time, breaks):
         if not isinstance(breaks, list) or not breaks:
@@ -14386,36 +14533,184 @@ class Database:
             return []
 
         occupied = self._load_occupied_break_intervals_for_operator_date_tx(cursor, operator_id, shift_date)
-        new_breaks = []
-        for b in breaks:
+        prepared_breaks = []
+        for b in sorted((breaks or []), key=lambda x: (int(x.get('start', 0)), int(x.get('end', 0)))):
             b_start = int(b.get('start', 0))
             b_end = int(b.get('end', 0))
             length = b_end - b_start
-            if length <= 0 or (seg_end - seg_start) <= 0:
-                continue
+            if length > 0:
+                prepared_breaks.append({'start': b_start, 'end': b_end, 'length': length})
 
-            desired_start = max(seg_start, min(seg_end - length, b_start))
-            found = self._find_non_overlapping_break_start(
+        if not prepared_breaks:
+            return []
+
+        break_durations = [int(b['length']) for b in prepared_breaks]
+        edge_margin, min_gap = self._break_layout_spacing(seg_start, seg_end, break_durations)
+        new_breaks = []
+        for idx, b in enumerate(prepared_breaks):
+            length = int(b['length'])
+            lower, upper = self._break_start_bounds_for_index(
+                seg_start,
+                seg_end,
+                break_durations,
+                idx,
+                edge_margin,
+                min_gap
+            )
+            if new_breaks and min_gap > 0:
+                lower = max(lower, int(new_breaks[-1]['end']) + int(min_gap))
+
+            desired_start = max(lower, min(upper, int(b['start']))) if upper >= lower else int(b['start'])
+            found = self._find_best_break_start(
                 desired_start=desired_start,
                 length=length,
-                seg_start=seg_start,
-                seg_end=seg_end,
+                lower_bound=lower,
+                upper_bound=upper,
                 occupied_intervals=occupied
             )
             if found is not None:
                 nb = {'start': int(found), 'end': int(found) + int(length)}
             else:
-                clamped_start = max(seg_start, min(seg_end - length, b_start))
-                clamped_end = max(seg_start, min(seg_end, b_end))
+                clamped_start = max(seg_start, min(seg_end - length, int(b['start'])))
+                if new_breaks and min_gap > 0:
+                    clamped_start = max(clamped_start, int(new_breaks[-1]['end']) + int(min_gap))
+                clamped_start = min(clamped_start, seg_end - length)
+                clamped_end = clamped_start + length
                 if clamped_end <= clamped_start:
                     continue
                 nb = {'start': int(clamped_start), 'end': int(clamped_end)}
 
             new_breaks.append(nb)
             occupied.append(nb)
-            occupied = self._merge_break_intervals(occupied)
+            occupied.sort(key=lambda item: (int(item['start']), int(item['end'])))
 
         return new_breaks
+
+    def recalculate_work_schedule_breaks(self, start_date, end_date, operator_ids=None):
+        start_date_obj = self._normalize_schedule_date(start_date)
+        end_date_obj = self._normalize_schedule_date(end_date)
+        if end_date_obj < start_date_obj:
+            raise ValueError("end_date must be >= start_date")
+
+        normalized_operator_ids = None
+        if operator_ids is not None:
+            normalized_operator_ids = sorted({
+                int(value)
+                for value in (operator_ids or [])
+                if value is not None and str(value).strip() != ''
+            })
+            if not normalized_operator_ids:
+                return {
+                    "start_date": start_date_obj.strftime('%Y-%m-%d'),
+                    "end_date": end_date_obj.strftime('%Y-%m-%d'),
+                    "operators_requested": 0,
+                    "operators_affected": 0,
+                    "shifts_processed": 0,
+                    "breaks_deleted": 0,
+                    "breaks_inserted": 0
+                }
+
+        with self._get_cursor() as cursor:
+            query = """
+                SELECT ws.id, ws.operator_id, ws.shift_date, ws.start_time, ws.end_time, d.name
+                FROM work_shifts ws
+                JOIN users u ON u.id = ws.operator_id
+                LEFT JOIN directions d ON d.id = u.direction_id
+                WHERE u.role = 'operator'
+                  AND ws.shift_date >= %s
+                  AND ws.shift_date <= %s
+            """
+            params = [start_date_obj, end_date_obj]
+            if normalized_operator_ids is not None:
+                query += " AND ws.operator_id = ANY(%s)"
+                params.append(normalized_operator_ids)
+            query += " ORDER BY ws.shift_date, COALESCE(d.name, ''), ws.start_time, ws.end_time, ws.operator_id, ws.id"
+            cursor.execute(query, params)
+            rows = cursor.fetchall() or []
+
+            if not rows:
+                return {
+                    "start_date": start_date_obj.strftime('%Y-%m-%d'),
+                    "end_date": end_date_obj.strftime('%Y-%m-%d'),
+                    "operators_requested": len(normalized_operator_ids or []),
+                    "operators_affected": 0,
+                    "shifts_processed": 0,
+                    "breaks_deleted": 0,
+                    "breaks_inserted": 0
+                }
+
+            shift_ids = [int(row[0]) for row in rows]
+            cursor.execute("DELETE FROM shift_breaks WHERE shift_id = ANY(%s)", (shift_ids,))
+            breaks_deleted = int(cursor.rowcount or 0)
+
+            direction_rules_cache = {}
+
+            def _rules_for_direction(direction_name):
+                direction_key = self._normalize_direction_key(direction_name)
+                if direction_key not in direction_rules_cache:
+                    direction_rules_cache[direction_key] = self._get_work_schedule_break_rules_for_direction_tx(
+                        cursor,
+                        direction_name
+                    )
+                return direction_rules_cache[direction_key]
+
+            def _sort_key(row):
+                _, operator_id, shift_date, start_time_value, end_time_value, direction_name = row
+                start_min, end_min = self._schedule_interval_minutes(start_time_value, end_time_value)
+                duration = max(0, end_min - start_min)
+                break_durations = self._pick_break_durations_for_shift(
+                    duration,
+                    direction_name=direction_name,
+                    direction_rules=_rules_for_direction(direction_name)
+                )
+                edge_margin, min_gap = self._break_layout_spacing(start_min, end_min, break_durations)
+                required_minutes = (
+                    sum(max(0, int(x)) for x in (break_durations or []))
+                    + (2 * int(edge_margin))
+                    + (int(min_gap) * max(0, len(break_durations or []) - 1))
+                )
+                flexibility = duration - required_minutes
+                return (
+                    shift_date,
+                    self._normalize_direction_key(direction_name),
+                    flexibility,
+                    start_min,
+                    end_min,
+                    int(operator_id)
+                )
+
+            breaks_inserted = 0
+            affected_operator_ids = set()
+            for shift_id, operator_id, shift_date, start_time_value, end_time_value, direction_name in sorted(rows, key=_sort_key):
+                start_min, end_min = self._schedule_interval_minutes(start_time_value, end_time_value)
+                direction_rules = _rules_for_direction(direction_name)
+                computed_breaks = self._compute_auto_shift_breaks_minutes(
+                    start_min,
+                    end_min,
+                    direction_name=direction_name,
+                    direction_rules=direction_rules
+                )
+                adjusted_breaks = self._adjust_shift_breaks_against_occupied_tx(
+                    cursor=cursor,
+                    operator_id=operator_id,
+                    shift_date=shift_date,
+                    start_time=start_time_value,
+                    end_time=end_time_value,
+                    breaks=computed_breaks
+                )
+                self._insert_shift_breaks(cursor, shift_id, adjusted_breaks)
+                breaks_inserted += len(adjusted_breaks)
+                affected_operator_ids.add(int(operator_id))
+
+            return {
+                "start_date": start_date_obj.strftime('%Y-%m-%d'),
+                "end_date": end_date_obj.strftime('%Y-%m-%d'),
+                "operators_requested": len(normalized_operator_ids or []),
+                "operators_affected": len(affected_operator_ids),
+                "shifts_processed": len(rows),
+                "breaks_deleted": breaks_deleted,
+                "breaks_inserted": breaks_inserted
+            }
 
     def _schedule_auto_normalize_flag_status(self, value):
         status = str(value or '').strip().lower()
