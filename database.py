@@ -1002,6 +1002,14 @@ class Database:
                 );
             """)
             cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_daily_fines_operator_day
+                ON daily_fines(operator_id, day);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_daily_fines_daily_hours_id
+                ON daily_fines(daily_hours_id);
+            """)
+            cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_daily_bonuses_operator_day
                 ON daily_bonuses(operator_id, day);
             """)
@@ -15956,6 +15964,7 @@ class Database:
             affected_months.add((int(op_id), day_value.strftime('%Y-%m')))
 
         if upsert_rows:
+            # Auto aggregation owns timing/status fields only; imported call counts must survive recalculations.
             execute_values(
                 cursor,
                 """
@@ -15978,7 +15987,6 @@ class Database:
                     work_time = EXCLUDED.work_time,
                     break_time = EXCLUDED.break_time,
                     talk_time = EXCLUDED.talk_time,
-                    calls = EXCLUDED.calls,
                     efficiency = EXCLUDED.efficiency,
                     training_time = EXCLUDED.training_time,
                     late_minutes = EXCLUDED.late_minutes,
