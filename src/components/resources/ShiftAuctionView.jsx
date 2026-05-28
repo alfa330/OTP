@@ -1930,6 +1930,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [viewSchedulePlanId, setViewSchedulePlanId] = useState('');
   const [periodPreviewLots, setPeriodPreviewLots] = useState([]);
   const [periodPreviewBlockedDates, setPeriodPreviewBlockedDates] = useState([]);
+  const [periodPreviewDayOffs, setPeriodPreviewDayOffs] = useState([]);
+  const [periodPreviewOperators, setPeriodPreviewOperators] = useState([]);
+  const [periodPreviewParticipantWorkloads, setPeriodPreviewParticipantWorkloads] = useState([]);
   const [periodPreviewLoading, setPeriodPreviewLoading] = useState(false);
   const [periodPreviewError, setPeriodPreviewError] = useState('');
   const [appliedInitialPeriodKey, setAppliedInitialPeriodKey] = useState('');
@@ -2072,11 +2075,12 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     setClaimJournal(Array.isArray(safe.claim_journal) ? safe.claim_journal : []);
     setParticipantWorkloads(Array.isArray(safe.participant_workloads) ? safe.participant_workloads : []);
     setDraftSchedulePlanId((current) => {
-      const periodIds = new Set(periods.map((period) => normalizeSchedulePlanId(period?.id)).filter(Boolean));
+      const restartablePeriods = periods.filter((period) => period?.can_restart !== false);
+      const periodIds = new Set(restartablePeriods.map((period) => normalizeSchedulePlanId(period?.id)).filter(Boolean));
       const currentId = normalizeSchedulePlanId(current);
       if (currentId && periodIds.has(currentId)) return String(currentId);
       if (selectedSchedulePlanId && periodIds.has(selectedSchedulePlanId)) return String(selectedSchedulePlanId);
-      const firstAvailableId = normalizeSchedulePlanId(periods[0]?.id);
+      const firstAvailableId = normalizeSchedulePlanId(restartablePeriods[0]?.id);
       return firstAvailableId ? String(firstAvailableId) : '';
     });
     setViewSchedulePlanId((current) => {
@@ -2084,6 +2088,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       const currentId = normalizeSchedulePlanId(current);
       if (currentId && periodIds.has(currentId)) return String(currentId);
       if (selectedSchedulePlanId && periodIds.has(selectedSchedulePlanId)) return String(selectedSchedulePlanId);
+      const firstRestartableId = normalizeSchedulePlanId(periods.find((period) => period?.can_restart !== false)?.id);
+      if (firstRestartableId) return String(firstRestartableId);
       const firstAvailableId = normalizeSchedulePlanId(periods[0]?.id);
       return firstAvailableId ? String(firstAvailableId) : '';
     });
@@ -2141,6 +2147,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     setPeriodPreviewError('');
     setPeriodPreviewLots([]);
     setPeriodPreviewBlockedDates([]);
+    setPeriodPreviewDayOffs([]);
+    setPeriodPreviewOperators([]);
+    setPeriodPreviewParticipantWorkloads([]);
     try {
       const response = await axios.get(`${apiRoot}/api/shift_auction/period_preview`, {
         params: { schedule_plan_id: normalizedPlanId },
@@ -2150,10 +2159,16 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       const preview = response?.data?.preview || {};
       setPeriodPreviewLots(Array.isArray(preview.lots) ? preview.lots : []);
       setPeriodPreviewBlockedDates(Array.isArray(preview.my_blocked_dates) ? preview.my_blocked_dates : []);
+      setPeriodPreviewDayOffs(Array.isArray(preview.my_day_offs) ? preview.my_day_offs.filter(Boolean) : []);
+      setPeriodPreviewOperators(Array.isArray(preview.selected_operators) ? preview.selected_operators : []);
+      setPeriodPreviewParticipantWorkloads(Array.isArray(preview.participant_workloads) ? preview.participant_workloads : []);
     } catch (error) {
       if (axios.isCancel?.(error) || error?.code === 'ERR_CANCELED') return;
       setPeriodPreviewLots([]);
       setPeriodPreviewBlockedDates([]);
+      setPeriodPreviewDayOffs([]);
+      setPeriodPreviewOperators([]);
+      setPeriodPreviewParticipantWorkloads([]);
       setPeriodPreviewError(error?.response?.data?.error || 'Не удалось загрузить выбранную неделю');
     } finally {
       if (!signal?.aborted) setPeriodPreviewLoading(false);
@@ -2321,6 +2336,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     () => operatorOptions.filter((operator) => selectedIds.has(operator.id)),
     [operatorOptions, selectedIds]
   );
+  const restartablePeriods = useMemo(
+    () => availablePeriods.filter((period) => period?.can_restart !== false),
+    [availablePeriods]
+  );
   const selectedFilteredOperatorCount = useMemo(
     () => filteredOperators.reduce((count, operator) => count + (selectedIds.has(operator.id) ? 1 : 0), 0),
     [filteredOperators, selectedIds]
@@ -2330,8 +2349,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const draftStartsAtParts = useMemo(() => splitDateTimeInputValue(draftStartsAt), [draftStartsAt]);
   const draftEndsAtParts = useMemo(() => splitDateTimeInputValue(draftEndsAt), [draftEndsAt]);
   const selectedDraftPeriod = useMemo(
-    () => availablePeriods.find((period) => Number(period?.id) === Number(draftSchedulePlanId)) || null,
-    [availablePeriods, draftSchedulePlanId]
+    () => restartablePeriods.find((period) => Number(period?.id) === Number(draftSchedulePlanId)) || null,
+    [restartablePeriods, draftSchedulePlanId]
   );
   const activeSchedulePlanId = normalizeSchedulePlanId(settings.selected_schedule_plan_id ?? settings.selected_period?.id);
   const selectedViewSchedulePlanId = normalizeSchedulePlanId(viewSchedulePlanId) || activeSchedulePlanId;
@@ -2341,8 +2360,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     [availablePeriods, selectedViewSchedulePlanId, settings.selected_period]
   );
   const monitoredLots = isViewingActivePeriod ? lots : periodPreviewLots;
-  const monitoredMyDayOffs = isViewingActivePeriod ? myDayOffs : [];
+  const monitoredMyDayOffs = isViewingActivePeriod ? myDayOffs : periodPreviewDayOffs;
   const monitoredMyBlockedDates = isViewingActivePeriod ? myBlockedDates : periodPreviewBlockedDates;
+  const monitoredOperators = isViewingActivePeriod ? settings.selected_operators : periodPreviewOperators;
+  const monitoredParticipantWorkloads = isViewingActivePeriod ? participantWorkloads : periodPreviewParticipantWorkloads;
   const draftRangeInvalid = Boolean(
     draftStartsAt
     && draftEndsAt
@@ -2368,8 +2389,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     }
     const planId = String(matchedPeriod.id);
     setViewSchedulePlanId(planId);
-    setDraftSchedulePlanId(planId);
-    if (canManage) setMonitorTab('settings');
+    if (canManage && matchedPeriod.can_restart !== false) {
+      setDraftSchedulePlanId(planId);
+      setMonitorTab('settings');
+    }
     setAppliedInitialPeriodKey(initialPeriodKey);
     onInitialPeriodApplied?.();
   }, [appliedInitialPeriodKey, availablePeriods, canManage, initialPeriodKey, onInitialPeriodApplied]);
@@ -2378,6 +2401,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     if (!selectedViewSchedulePlanId || isViewingActivePeriod) {
       setPeriodPreviewLots([]);
       setPeriodPreviewBlockedDates([]);
+      setPeriodPreviewDayOffs([]);
+      setPeriodPreviewOperators([]);
+      setPeriodPreviewParticipantWorkloads([]);
       setPeriodPreviewError('');
       setPeriodPreviewLoading(false);
       return undefined;
@@ -2626,10 +2652,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const userRate = useMemo(() => {
     const directRate = Number(user?.rate);
     if (Number.isFinite(directRate) && directRate > 0) return directRate;
-    const snapshotOperator = (settings.selected_operators || []).find((operator) => Number(operator?.id) === Number(user?.id));
+    const snapshotOperator = (monitoredOperators || []).find((operator) => Number(operator?.id) === Number(user?.id));
     const snapshotRate = Number(snapshotOperator?.rate);
     return Number.isFinite(snapshotRate) && snapshotRate > 0 ? snapshotRate : 1;
-  }, [settings.selected_operators, user?.id, user?.rate]);
+  }, [monitoredOperators, user?.id, user?.rate]);
 
   const myAuctionWorkload = useMemo(() => {
     const workdayCount = getAuctionNormWorkdayCount(lotDates.length, myBlockedDateMap.size);
@@ -2654,11 +2680,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const operatorWorkloadRows = useMemo(() => {
     if (!canMonitor) return [];
     const operatorsById = new Map(
-      (settings.selected_operators || [])
+      (monitoredOperators || [])
         .filter((operator) => operator && operator.id != null)
         .map((operator) => [Number(operator.id), operator])
     );
-    return (participantWorkloads || [])
+    return (monitoredParticipantWorkloads || [])
       .map((workload) => {
         if (!workload || workload.operator_id == null) return null;
         const operator = operatorsById.get(Number(workload.operator_id)) || {};
@@ -2686,7 +2712,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         };
       })
       .filter(Boolean);
-  }, [canMonitor, participantWorkloads, settings.selected_operators]);
+  }, [canMonitor, monitoredOperators, monitoredParticipantWorkloads]);
 
   const operatorWorkloadStats = useMemo(() => {
     const stats = { total: 0, lagging: 0, complete: 0, over: 0, empty: 0 };
@@ -2703,9 +2729,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const drilldownData = useMemo(() => {
     if (!drilldownOperatorId) return null;
     const opIdNum = Number(drilldownOperatorId);
-    const operator = (settings.selected_operators || []).find((op) => Number(op?.id) === opIdNum) || null;
-    const workload = (participantWorkloads || []).find((w) => Number(w?.operator_id) === opIdNum) || null;
-    const claimedLots = (lots || [])
+    const operator = (monitoredOperators || []).find((op) => Number(op?.id) === opIdNum) || null;
+    const workload = (monitoredParticipantWorkloads || []).find((w) => Number(w?.operator_id) === opIdNum) || null;
+    const claimedLots = (monitoredLots || [])
       .filter((lot) => lot && lot.status === 'claimed' && Number(lot.claimed_by) === opIdNum)
       .sort((a, b) => {
         const dateCmp = String(a.shift_date || '').localeCompare(String(b.shift_date || ''));
@@ -2718,7 +2744,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       workload,
       claimed_lots: claimedLots
     };
-  }, [drilldownOperatorId, lots, participantWorkloads, settings.selected_operators]);
+  }, [drilldownOperatorId, monitoredLots, monitoredOperators, monitoredParticipantWorkloads]);
 
   const filteredOperatorWorkloads = useMemo(() => {
     const normalizedQuery = operatorWorkloadQuery.trim().toLowerCase();
@@ -2967,7 +2993,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           launch_note: draftNote,
           starts_at: draftStartsAt || null,
           ends_at: draftEndsAt || null,
-          schedule_plan_id: selectedDraftPeriod?.id || draftSchedulePlanId || null,
+          schedule_plan_id: selectedDraftPeriod?.id || null,
           operator_ids: Array.from(selectedIds)
         },
         { headers: buildHeaders() }
@@ -3735,7 +3761,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                             claimingLotIds={claimingLotIds}
                                             onClaimLot={handleClaimLot}
                                             userId={user?.id}
-                                            claimBlockReason={claimBlockReasonByLotId.get(Number(lot.id)) || ''}
+                                            claimBlockReason={!isViewingActivePeriod ? 'Выбор доступен только на активной неделе аукциона' : (claimBlockReasonByLotId.get(Number(lot.id)) || '')}
                                             postAuctionActive={isViewingActivePeriod && Boolean(settings.post_auction_active)}
                                             postAuctionNowMs={postAuctionNowMs}
                                             postClaimingLotIds={postClaimingLotIds}
@@ -4178,7 +4204,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                     ) : null}
                   </div>
                   <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                    {availablePeriods.length ? availablePeriods.map((period) => {
+                    {restartablePeriods.length ? restartablePeriods.map((period) => {
                       const active = Number(draftSchedulePlanId) === Number(period.id);
                       const isCurrent = Number(settings.selected_schedule_plan_id) === Number(period.id);
                       return (

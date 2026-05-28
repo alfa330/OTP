@@ -1830,6 +1830,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_shift_auction_test_lots_source_schedule ON shift_auction_test_lots(source_schedule_plan_id, source_schedule_shift_id);
                 CREATE INDEX IF NOT EXISTS idx_shift_auction_test_day_offs_operator ON shift_auction_test_day_offs(operator_id, day_off_date);
                 CREATE INDEX IF NOT EXISTS idx_shift_auction_test_events_id ON shift_auction_test_events(id);
+                CREATE INDEX IF NOT EXISTS idx_shift_auction_test_events_type_id ON shift_auction_test_events(event_type, id);
                 CREATE INDEX IF NOT EXISTS idx_calibration_rooms_month ON calibration_rooms(month);
                 CREATE INDEX IF NOT EXISTS idx_calibration_rooms_operator_id ON calibration_rooms(operator_id);
                 CREATE INDEX IF NOT EXISTS idx_calibration_rooms_admin_id ON calibration_rooms(created_by_admin_id);
@@ -3440,7 +3441,7 @@ class Database:
             total = 0
         return min(2, max(0, total))
 
-    def _get_shift_auction_participant_workloads_tx(self, cursor, participant_rows, lots, lot_dates):
+    def _get_shift_auction_participant_workloads_tx(self, cursor, participant_rows, lots, lot_dates, day_offs_by_operator=None):
         # Per-operator workload (norm vs claimed) computed in one pass.
         # Only the day-off / blocked-period counters need the DB; lot stats are
         # derived from the already-loaded `lots` list.
@@ -3453,19 +3454,23 @@ class Database:
         total_days = len(lot_dates_list)
 
         day_offs_count = {op_id: 0 for op_id in operator_ids}
-        cursor.execute(
-            """
-            SELECT operator_id, COUNT(*)::int
-            FROM shift_auction_test_day_offs
-            WHERE operator_id = ANY(%s)
-            GROUP BY operator_id
-            """,
-            (operator_ids,)
-        )
-        for op_id, count_value in (cursor.fetchall() or []):
-            if op_id is None:
-                continue
-            day_offs_count[int(op_id)] = int(count_value or 0)
+        if day_offs_by_operator is not None:
+            for op_id in operator_ids:
+                day_offs_count[op_id] = len(day_offs_by_operator.get(op_id, set()) or [])
+        else:
+            cursor.execute(
+                """
+                SELECT operator_id, COUNT(*)::int
+                FROM shift_auction_test_day_offs
+                WHERE operator_id = ANY(%s)
+                GROUP BY operator_id
+                """,
+                (operator_ids,)
+            )
+            for op_id, count_value in (cursor.fetchall() or []):
+                if op_id is None:
+                    continue
+                day_offs_count[int(op_id)] = int(count_value or 0)
 
         blocked_days_count = {op_id: 0 for op_id in operator_ids}
         if lot_dates_list:
@@ -3646,7 +3651,6 @@ class Database:
              AND COALESCE(s.meta->>'excludeFromAuction', 'false') <> 'true'
             WHERE p.archived_at IS NULL
               AND p.date_to = p.date_from + 6
-              AND p.date_to >= CURRENT_DATE
             GROUP BY p.id, p.date_from, p.date_to, p.title, p.updated_at
             HAVING COUNT(s.id) > 0
             ORDER BY p.date_from, p.updated_at DESC, p.id DESC
@@ -5090,9 +5094,11 @@ class Database:
             period_row = self._validate_shift_auction_period_tx(
                 cursor,
                 schedule_plan_id,
-                require_restartable=True
+                require_restartable=False
             )
             plan_id = int(period_row[0])
+            period_start = period_row[1]
+            period_end = period_row[2]
             cursor.execute("""
                 SELECT id, shift_date, start_time, end_time, rate_min, breaks, start_minute, end_minute
                 FROM resource_saved_schedule_shifts
@@ -5107,34 +5113,251 @@ class Database:
                 if current_id else []
             )
 
-        lots = [
-            {
-                "id": f"preview-{row[0]}",
-                "shift_date": row[1].strftime('%Y-%m-%d') if row[1] else None,
-                "start_time": row[2].strftime('%H:%M') if row[2] else None,
-                "end_time": row[3].strftime('%H:%M') if row[3] else None,
-                "rate_min": float(row[4]) if row[4] is not None else 0,
-                "status": "available",
-                "claimed_by": None,
-                "claimed_by_name": "",
-                "claimed_at": None,
-                "breaks": row[5] if len(row) > 5 and isinstance(row[5], list) else [],
-                "source_schedule_plan_id": plan_id,
-                "source_schedule_shift_id": row[0],
-                "post_auction_claimed": False,
-                "claimed_by_direction_id": None,
-                "claimed_by_direction": "",
-                "source_start_minute": int(row[6]) if len(row) > 6 and row[6] is not None else None,
-                "source_end_minute": int(row[7]) if len(row) > 7 and row[7] is not None else None,
-                "preview_only": True,
+            cursor.execute("""
+                SELECT e.id, e.event_type, e.payload, e.created_at
+                FROM shift_auction_test_events e
+                WHERE (
+                    e.event_type IN ('lot_claimed', 'lot_released', 'lot_post_auction_claimed')
+                    AND NULLIF(e.payload->'lot'->>'source_schedule_plan_id', '')::INTEGER = %s
+                )
+                OR (
+                    e.event_type IN ('day_off_selected', 'day_off_removed')
+                    AND NULLIF(e.payload->>'date', '')::DATE >= %s
+                    AND NULLIF(e.payload->>'date', '')::DATE <= %s
+                )
+                OR (
+                    e.event_type = 'settings_updated'
+                    AND (
+                        NULLIF(e.payload->>'selected_schedule_plan_id', '')::INTEGER = %s
+                        OR (
+                            e.payload->>'date_from' = %s
+                            AND e.payload->>'date_to' = %s
+                        )
+                    )
+                )
+                ORDER BY e.id
+            """, (
+                plan_id,
+                period_start,
+                period_end,
+                plan_id,
+                period_start.strftime('%Y-%m-%d') if period_start else None,
+                period_end.strftime('%Y-%m-%d') if period_end else None,
+            ))
+            event_rows = cursor.fetchall() or []
+
+            lots_by_shift_id = {}
+            lots_by_time_key = {}
+            lots = []
+            for row in shift_rows:
+                shift_date_text = row[1].strftime('%Y-%m-%d') if row[1] else None
+                start_text = row[2].strftime('%H:%M') if row[2] else None
+                end_text = row[3].strftime('%H:%M') if row[3] else None
+                lot = {
+                    "id": f"preview-{row[0]}",
+                    "shift_date": shift_date_text,
+                    "start_time": start_text,
+                    "end_time": end_text,
+                    "rate_min": float(row[4]) if row[4] is not None else 0,
+                    "status": "available",
+                    "claimed_by": None,
+                    "claimed_by_name": "",
+                    "claimed_at": None,
+                    "breaks": row[5] if len(row) > 5 and isinstance(row[5], list) else [],
+                    "source_schedule_plan_id": plan_id,
+                    "source_schedule_shift_id": row[0],
+                    "post_auction_claimed": False,
+                    "claimed_by_direction_id": None,
+                    "claimed_by_direction": "",
+                    "source_start_minute": int(row[6]) if len(row) > 6 and row[6] is not None else None,
+                    "source_end_minute": int(row[7]) if len(row) > 7 and row[7] is not None else None,
+                    "preview_only": True,
+                }
+                lots.append(lot)
+                lots_by_shift_id[int(row[0])] = lot
+                lots_by_time_key[(shift_date_text, start_text, end_text)] = lot
+
+            selected_operator_ids = []
+            day_offs_by_operator = {}
+            claim_journal_items = []
+            claimed_operator_ids = set()
+
+            def _event_int(value):
+                try:
+                    result = int(value)
+                except Exception:
+                    return None
+                return result if result > 0 else None
+
+            def _event_lot_target(lot_payload):
+                shift_id = _event_int((lot_payload or {}).get("source_schedule_shift_id"))
+                if shift_id and shift_id in lots_by_shift_id:
+                    return lots_by_shift_id[shift_id]
+                key = (
+                    str((lot_payload or {}).get("shift_date") or ""),
+                    str((lot_payload or {}).get("start_time") or "")[:5],
+                    str((lot_payload or {}).get("end_time") or "")[:5],
+                )
+                return lots_by_time_key.get(key)
+
+            def _date_in_period(date_text):
+                if not date_text:
+                    return False
+                try:
+                    value = datetime.strptime(str(date_text), "%Y-%m-%d").date()
+                except Exception:
+                    return False
+                return bool(period_start and period_end and period_start <= value <= period_end)
+
+            for event_id, event_type, payload, created_at in event_rows:
+                event_payload = payload or {}
+                event_type_text = str(event_type or '')
+                if event_type_text == "settings_updated":
+                    raw_ids = event_payload.get("selected_operator_ids")
+                    if isinstance(raw_ids, list):
+                        selected_operator_ids = [
+                            op_id for op_id in (_event_int(item) for item in raw_ids)
+                            if op_id
+                        ]
+                    continue
+
+                if event_type_text in ("day_off_selected", "day_off_removed"):
+                    op_id = _event_int(event_payload.get("operator_id"))
+                    if not op_id:
+                        continue
+                    current_dates = day_offs_by_operator.setdefault(op_id, set())
+                    raw_day_offs = event_payload.get("my_day_offs")
+                    if isinstance(raw_day_offs, list):
+                        day_offs_by_operator[op_id] = {
+                            str(item)
+                            for item in raw_day_offs
+                            if _date_in_period(item)
+                        }
+                    else:
+                        date_text = str(event_payload.get("date") or "")
+                        if not _date_in_period(date_text):
+                            continue
+                        if event_type_text == "day_off_selected":
+                            current_dates.add(date_text)
+                        else:
+                            current_dates.discard(date_text)
+                    continue
+
+                if event_type_text not in ("lot_claimed", "lot_released", "lot_post_auction_claimed"):
+                    continue
+                lot_payload = event_payload.get("lot") if isinstance(event_payload, dict) else {}
+                if not isinstance(lot_payload, dict):
+                    continue
+                target_lot = _event_lot_target(lot_payload)
+                if not target_lot:
+                    continue
+                if event_type_text == "lot_released":
+                    target_lot.update({
+                        "status": "available",
+                        "claimed_by": None,
+                        "claimed_by_name": "",
+                        "claimed_at": None,
+                        "post_auction_claimed": False,
+                        "claimed_by_direction_id": None,
+                        "claimed_by_direction": "",
+                    })
+                    continue
+                claimed_by = _event_int(lot_payload.get("claimed_by"))
+                if claimed_by:
+                    claimed_operator_ids.add(claimed_by)
+                target_lot.update({
+                    "status": "claimed",
+                    "claimed_by": claimed_by,
+                    "claimed_at": lot_payload.get("claimed_at") or (created_at.isoformat() if created_at else None),
+                    "post_auction_claimed": bool(lot_payload.get("post_auction_claimed")),
+                })
+                claim_journal_items.append({
+                    "id": event_id,
+                    "claimed_at": target_lot.get("claimed_at"),
+                    "shift_date": target_lot.get("shift_date"),
+                    "start_time": target_lot.get("start_time"),
+                    "end_time": target_lot.get("end_time"),
+                    "claimed_by": claimed_by,
+                    "source_schedule_plan_id": plan_id,
+                    "period_start": period_start.strftime('%Y-%m-%d') if period_start else None,
+                    "period_end": period_end.strftime('%Y-%m-%d') if period_end else None,
+                })
+
+            operator_ids = []
+            seen_operator_ids = set()
+            for op_id in [*selected_operator_ids, *sorted(claimed_operator_ids), *sorted(day_offs_by_operator.keys())]:
+                if op_id and op_id not in seen_operator_ids:
+                    seen_operator_ids.add(op_id)
+                    operator_ids.append(op_id)
+
+            participant_rows = []
+            if operator_ids:
+                cursor.execute("""
+                    SELECT
+                        u.id,
+                        u.name,
+                        u.role,
+                        u.status,
+                        u.rate,
+                        u.direction_id,
+                        d.name AS direction_name,
+                        u.supervisor_id,
+                        s.name AS supervisor_name,
+                        NULL::timestamp AS selected_at
+                    FROM users u
+                    LEFT JOIN directions d ON d.id = u.direction_id
+                    LEFT JOIN users s ON s.id = u.supervisor_id
+                    WHERE u.id = ANY(%s)
+                    ORDER BY u.name
+                """, (operator_ids,))
+                participant_rows = cursor.fetchall() or []
+
+            operator_info = {
+                int(row[0]): {
+                    "id": row[0],
+                    "name": row[1],
+                    "role": normalize_role_value(row[2]),
+                    "status": row[3],
+                    "rate": float(row[4]) if row[4] is not None else 1.0,
+                    "direction_id": row[5],
+                    "direction": row[6] or "",
+                    "supervisor_id": row[7],
+                    "supervisor_name": row[8] or "",
+                    "selected_at": row[9].isoformat() if row[9] else None,
+                }
+                for row in participant_rows
+                if row and row[0] is not None
             }
-            for row in shift_rows
-        ]
+            for lot in lots:
+                claimed_by = _event_int(lot.get("claimed_by"))
+                if not claimed_by:
+                    continue
+                info = operator_info.get(claimed_by) or {}
+                lot["claimed_by_name"] = info.get("name") or ""
+                lot["claimed_by_direction_id"] = info.get("direction_id")
+                lot["claimed_by_direction"] = info.get("direction") or ""
+
+            participant_workloads = self._get_shift_auction_participant_workloads_tx(
+                cursor,
+                participant_rows,
+                lots,
+                lot_dates,
+                day_offs_by_operator=day_offs_by_operator,
+            )
+            my_day_offs = sorted(day_offs_by_operator.get(current_id, set()) or []) if current_id else []
+            for item in claim_journal_items:
+                item["claimed_by_name"] = (operator_info.get(int(item["claimed_by"] or 0)) or {}).get("name", "")
 
         return {
             "period": self._serialize_shift_auction_period_row(period_row),
             "lots": lots,
             "my_blocked_dates": my_blocked_dates,
+            "my_day_offs": my_day_offs,
+            "selected_operator_ids": operator_ids,
+            "selected_operators": list(operator_info.values()),
+            "participant_workloads": participant_workloads,
+            "claim_journal": list(reversed(claim_journal_items[-50:])),
+            "history_available": bool(event_rows),
         }
 
     def restart_shift_auction_test(self, schedule_plan_id, updated_by=None):
