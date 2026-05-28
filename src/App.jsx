@@ -26648,6 +26648,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [taskFocusRequest, setTaskFocusRequest] = useState(null);
             const [taskRefreshToken, setTaskRefreshToken] = useState(0);
             const [resourceFteInitialView, setResourceFteInitialView] = useState('');
+            const [shiftAuctionInitialPeriod, setShiftAuctionInitialPeriod] = useState(null);
             const [pendingSurveysBadgeCount, setPendingSurveysBadgeCount] = useState(0);
             const [newSvName, setNewSvName] = useState('');
             const [newTableUrl, setNewTableUrl] = useState('');
@@ -28126,9 +28127,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 navigateToView('resource_fte');
             }, [navigateToView]);
 
-            const openShiftAuctionSection = useCallback(() => {
+            const openShiftAuctionSection = useCallback((period = null) => {
+                const dateFrom = String(period?.dateFrom || period?.date_from || '').trim();
+                const dateTo = String(period?.dateTo || period?.date_to || '').trim();
+                setShiftAuctionInitialPeriod(dateFrom || dateTo ? { dateFrom, dateTo } : null);
                 navigateToView('shift_auction');
             }, [navigateToView]);
+
+            const clearShiftAuctionInitialPeriod = useCallback(() => {
+                setShiftAuctionInitialPeriod(null);
+            }, []);
+
+            useEffect(() => {
+                if (view !== 'shift_auction' && shiftAuctionInitialPeriod) {
+                    setShiftAuctionInitialPeriod(null);
+                }
+            }, [shiftAuctionInitialPeriod, view]);
 
             const handleSidebarViewNavigation = useCallback((event, nextView, options = {}) => {
                 if (!nextView) return;
@@ -35408,6 +35422,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     onOpenResourceGeneration={openResourceScheduleGeneration}
+                                    initialPeriod={shiftAuctionInitialPeriod}
+                                    onInitialPeriodApplied={clearShiftAuctionInitialPeriod}
                                 />
                             </Suspense>
                         ))}
