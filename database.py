@@ -5604,6 +5604,166 @@ class Database:
             """, (plan_id, operator_id))
             return cursor.fetchone() is not None
 
+    def get_shift_auction_lots_for_planner_date(self, target_date):
+        """
+        Возвращает «выбранные смены» (claimed лоты) для указанной даты, чтобы
+        раздел «Графики работы → почасовая группировка → План» мог учитывать
+        и активный аукцион, и уже опубликованные исторические периоды.
+
+        Сначала проверяем shift_auction_test_lots (активный план). Если на эту
+        дату там лотов нет — собираем «виртуальные» лоты из
+        resource_saved_schedule_shifts + shift_auction_historical_claims по
+        опубликованным периодам, в чьи даты попадает target_date.
+        Формат лотов совместим со snapshot.lots.
+        """
+        if hasattr(target_date, 'strftime'):
+            date_obj = target_date
+        else:
+            try:
+                date_obj = datetime.strptime(str(target_date), '%Y-%m-%d').date()
+            except Exception:
+                return {"lots": [], "selected_operators": []}
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    l.id, l.shift_date, l.start_time, l.end_time, l.rate_min,
+                    l.status, l.claimed_by, l.claimed_at, l.breaks,
+                    l.source_schedule_plan_id, l.source_schedule_shift_id,
+                    COALESCE(l.post_auction_claimed, FALSE) AS post_auction_claimed,
+                    u.name AS claimed_by_name,
+                    u.direction_id AS claimed_by_direction_id,
+                    cdir.name AS claimed_by_direction
+                FROM shift_auction_test_lots l
+                LEFT JOIN users u ON u.id = l.claimed_by
+                LEFT JOIN directions cdir ON cdir.id = u.direction_id
+                WHERE l.shift_date = %s
+                ORDER BY l.start_time, l.end_time, l.id
+            """, (date_obj,))
+            active_rows = cursor.fetchall() or []
+
+            lots = []
+            for row in active_rows:
+                lots.append({
+                    "id": row[0],
+                    "shift_date": row[1].strftime('%Y-%m-%d') if row[1] else None,
+                    "start_time": row[2].strftime('%H:%M') if row[2] else None,
+                    "end_time": row[3].strftime('%H:%M') if row[3] else None,
+                    "rate_min": float(row[4]) if row[4] is not None else 0,
+                    "status": row[5],
+                    "claimed_by": row[6],
+                    "claimed_at": row[7].isoformat() if row[7] else None,
+                    "breaks": row[8] if isinstance(row[8], list) else [],
+                    "source_schedule_plan_id": row[9],
+                    "source_schedule_shift_id": row[10],
+                    "post_auction_claimed": bool(row[11]),
+                    "claimed_by_name": row[12] or "",
+                    "claimed_by_direction_id": row[13],
+                    "claimed_by_direction": row[14] or "",
+                })
+
+            if lots:
+                participant_plan_ids = sorted({lot.get("source_schedule_plan_id") for lot in lots if lot.get("source_schedule_plan_id")})
+                cursor.execute("""
+                    SELECT DISTINCT u.id, u.name, u.role, u.status, u.rate, u.direction_id, d.name AS direction_name
+                    FROM shift_auction_test_participants p
+                    JOIN users u ON u.id = p.operator_id
+                    LEFT JOIN directions d ON d.id = u.direction_id
+                """)
+                participants = cursor.fetchall() or []
+                selected_operators = [
+                    {
+                        "id": r[0], "name": r[1],
+                        "role": normalize_role_value(r[2]) if r[2] else None,
+                        "status": r[3], "rate": float(r[4]) if r[4] is not None else 1.0,
+                        "direction_id": r[5], "direction": r[6] or "",
+                    } for r in participants
+                ]
+                return {"lots": lots, "selected_operators": selected_operators}
+
+            cursor.execute("""
+                SELECT plan_id, participant_ids
+                FROM shift_auction_published_periods
+                WHERE date_from <= %s AND date_to >= %s
+                ORDER BY published_at DESC
+            """, (date_obj, date_obj))
+            historical_periods = cursor.fetchall() or []
+            if not historical_periods:
+                return {"lots": [], "selected_operators": []}
+
+            plan_ids = [int(row[0]) for row in historical_periods if row and row[0] is not None]
+            participant_ids_union = set()
+            for row in historical_periods:
+                for op_id in (row[1] or []):
+                    try:
+                        op_int = int(op_id)
+                    except Exception:
+                        continue
+                    if op_int > 0:
+                        participant_ids_union.add(op_int)
+
+            cursor.execute("""
+                SELECT
+                    s.id, s.plan_id, s.shift_date, s.start_time, s.end_time,
+                    s.rate_min, s.breaks, s.start_minute, s.end_minute,
+                    hc.claimed_by, hc.claimed_at,
+                    u.name AS claimed_by_name,
+                    u.direction_id AS claimed_by_direction_id,
+                    cdir.name AS claimed_by_direction
+                FROM resource_saved_schedule_shifts s
+                LEFT JOIN shift_auction_historical_claims hc
+                  ON hc.plan_id = s.plan_id AND hc.source_schedule_shift_id = s.id
+                LEFT JOIN users u ON u.id = hc.claimed_by
+                LEFT JOIN directions cdir ON cdir.id = u.direction_id
+                WHERE s.plan_id = ANY(%s)
+                  AND s.shift_date = %s
+                  AND COALESCE(s.meta->>'excludeFromAuction', 'false') <> 'true'
+                ORDER BY s.start_time, s.end_time, s.id
+            """, (plan_ids, date_obj))
+            historical_rows = cursor.fetchall() or []
+            for row in historical_rows:
+                shift_id = int(row[0])
+                plan_id = int(row[1])
+                lots.append({
+                    "id": f"preview-{shift_id}",
+                    "shift_date": row[2].strftime('%Y-%m-%d') if row[2] else None,
+                    "start_time": row[3].strftime('%H:%M') if row[3] else None,
+                    "end_time": row[4].strftime('%H:%M') if row[4] else None,
+                    "rate_min": float(row[5]) if row[5] is not None else 0,
+                    "status": "claimed" if row[9] else "available",
+                    "claimed_by": row[9],
+                    "claimed_at": row[10].isoformat() if row[10] else None,
+                    "breaks": row[6] if isinstance(row[6], list) else [],
+                    "source_schedule_plan_id": plan_id,
+                    "source_schedule_shift_id": shift_id,
+                    "source_start_minute": int(row[7]) if row[7] is not None else None,
+                    "source_end_minute": int(row[8]) if row[8] is not None else None,
+                    "post_auction_claimed": bool(row[9]),
+                    "claimed_by_name": row[11] or "",
+                    "claimed_by_direction_id": row[12],
+                    "claimed_by_direction": row[13] or "",
+                    "preview_only": True,
+                })
+
+            selected_operators = []
+            if participant_ids_union:
+                cursor.execute("""
+                    SELECT u.id, u.name, u.role, u.status, u.rate, u.direction_id, d.name AS direction_name
+                    FROM users u
+                    LEFT JOIN directions d ON d.id = u.direction_id
+                    WHERE u.id = ANY(%s)
+                """, (sorted(participant_ids_union),))
+                selected_operators = [
+                    {
+                        "id": r[0], "name": r[1],
+                        "role": normalize_role_value(r[2]) if r[2] else None,
+                        "status": r[3], "rate": float(r[4]) if r[4] is not None else 1.0,
+                        "direction_id": r[5], "direction": r[6] or "",
+                    } for r in (cursor.fetchall() or [])
+                ]
+
+            return {"lots": lots, "selected_operators": selected_operators}
+
     def _shift_auction_period_has_published_history_tx(self, cursor, plan_id, period_start=None, period_end=None):
         try:
             plan_id = int(plan_id or 0)
