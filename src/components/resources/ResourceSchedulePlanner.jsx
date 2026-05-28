@@ -2385,7 +2385,10 @@ const ResourceSchedulePlanner = ({
             {typeof onOpenShiftAuction === 'function' ? (
               <button
                 type="button"
-                onClick={onOpenShiftAuction}
+                onClick={() => onOpenShiftAuction({
+                  dateFrom: selectedWeekStart || '',
+                  dateTo: selectedPeriodEnd || selectedWeekStart || ''
+                })}
                 className="inline-flex h-10 items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 text-sm font-semibold text-blue-700 transition hover:bg-blue-100"
               >
                 <Gavel size={16} />

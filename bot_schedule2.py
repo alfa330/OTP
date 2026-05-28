@@ -3056,7 +3056,8 @@ def api_shift_auction_test_access():
             launch_note=payload.get('launch_note') or '',
             updated_by=requester_id,
             starts_at=_parse_shift_auction_test_datetime(payload.get('starts_at')),
-            ends_at=_parse_shift_auction_test_datetime(payload.get('ends_at'))
+            ends_at=_parse_shift_auction_test_datetime(payload.get('ends_at')),
+            schedule_plan_id=payload.get('schedule_plan_id') or payload.get('selected_schedule_plan_id')
         )
         return jsonify({"status": "success", "test_access": updated}), 200
     except ValueError as error:
@@ -3153,7 +3154,6 @@ def api_shift_auction_test_snapshot():
             snapshot["claim_journal"] = []
             snapshot["participant_workloads"] = []
         elif not can_monitor_auction:
-            snapshot["available_periods"] = []
             snapshot["claim_journal"] = []
             snapshot["participant_workloads"] = []
         snapshot_fingerprint = hashlib.sha1(
@@ -3171,6 +3171,33 @@ def api_shift_auction_test_snapshot():
         return response, 200
     except Exception as error:
         logging.error(f"Shift auction snapshot API error: {error}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/shift_auction/period_preview', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_shift_auction_period_preview():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        requester_role = _normalize_user_role(requester[3])
+        can_monitor_auction = _is_admin_role(requester_role) or _is_supervisor_role(requester_role)
+        if not (can_monitor_auction or db.is_shift_auction_test_participant(requester_id)):
+            return jsonify({"error": "Not allowed to view shift auction periods"}), 403
+        preview = db.get_shift_auction_period_preview(
+            schedule_plan_id=request.args.get('schedule_plan_id') or request.args.get('plan_id'),
+            current_user_id=requester_id,
+        )
+        return jsonify({"status": "success", "preview": preview}), 200
+    except ValueError as error:
+        return _shift_auction_test_error_response(error)
+    except Exception as error:
+        logging.error(f"Shift auction period preview API error: {error}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 

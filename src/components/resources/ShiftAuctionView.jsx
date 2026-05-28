@@ -188,6 +188,33 @@ const formatCalendarMonthLabel = (value) => {
   return date.toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' });
 };
 
+const getPeriodMonthValue = (period) => String(period?.date_from || period?.date_to || '').slice(0, 7);
+
+const getCurrentMonthValue = () => getTodayDateInputValue().slice(0, 7);
+
+const shiftMonthValue = (value, months) => {
+  const [yearRaw, monthRaw] = String(value || getCurrentMonthValue()).split('-').map(Number);
+  const date = new Date(yearRaw || new Date().getFullYear(), (monthRaw || (new Date().getMonth() + 1)) - 1, 1);
+  date.setMonth(date.getMonth() + Number(months || 0));
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+};
+
+const formatMonthValueLabel = (value) => {
+  const [yearRaw, monthRaw] = String(value || '').split('-').map(Number);
+  if (!Number.isFinite(yearRaw) || !Number.isFinite(monthRaw)) return '';
+  return new Date(yearRaw, monthRaw - 1, 1).toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' });
+};
+
+const periodIntersectsMonth = (period, monthValue) => {
+  if (!period?.date_from || !period?.date_to || !monthValue) return false;
+  const monthStart = `${monthValue}-01`;
+  const [yearRaw, monthRaw] = monthValue.split('-').map(Number);
+  if (!Number.isFinite(yearRaw) || !Number.isFinite(monthRaw)) return false;
+  const monthEndDate = new Date(yearRaw, monthRaw, 0);
+  const monthEnd = toDateInputValue(monthEndDate);
+  return String(period.date_from) <= monthEnd && String(period.date_to) >= monthStart;
+};
+
 const getAuctionDateTimeWithFallback = (value) => {
   const parts = splitDateTimeInputValue(value);
   return {
@@ -697,6 +724,116 @@ const AuctionRangeCalendar = ({
         </div>
       </div>
     </div>
+  );
+};
+
+const AuctionWeekSelector = ({
+  periods = [],
+  selectedPlanId,
+  activePlanId,
+  onSelect,
+  disabled = false,
+  loading = false,
+  error = '',
+  previewOnly = false,
+}) => {
+  const normalizedPeriods = useMemo(
+    () => (Array.isArray(periods) ? periods : []).filter((period) => normalizeSchedulePlanId(period?.id)),
+    [periods]
+  );
+  const selectedPeriod = useMemo(
+    () => normalizedPeriods.find((period) => Number(period?.id) === Number(selectedPlanId)) || null,
+    [normalizedPeriods, selectedPlanId]
+  );
+  const [visibleMonth, setVisibleMonth] = useState(() => (
+    getPeriodMonthValue(selectedPeriod || normalizedPeriods[0]) || getCurrentMonthValue()
+  ));
+
+  useEffect(() => {
+    const nextMonth = getPeriodMonthValue(selectedPeriod);
+    if (nextMonth) setVisibleMonth(nextMonth);
+  }, [selectedPeriod]);
+
+  const monthPeriods = useMemo(
+    () => normalizedPeriods.filter((period) => periodIntersectsMonth(period, visibleMonth)),
+    [normalizedPeriods, visibleMonth]
+  );
+
+  if (!normalizedPeriods.length) return null;
+
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white px-3 py-3 shadow-sm sm:px-4">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+            <CalendarDays size={16} className="text-blue-700" />
+            Неделя аукциона
+          </div>
+          <div className="mt-1 text-xs text-slate-500 sm:text-sm">
+            {selectedPeriod ? formatAuctionPeriodLabel(selectedPeriod) : 'Выберите неделю'}
+            {previewOnly ? ' · просмотр без выбора смен' : ''}
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setVisibleMonth((current) => shiftMonthValue(current, -1))}
+            className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 transition hover:bg-slate-50"
+            title="Предыдущий месяц"
+          >
+            <ChevronLeft size={16} />
+          </button>
+          <label className="min-w-[180px]">
+            <span className="sr-only">Месяц аукциона</span>
+            <input
+              type="month"
+              value={visibleMonth}
+              onChange={(event) => setVisibleMonth(event.target.value || getCurrentMonthValue())}
+              className="h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-800 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+            />
+          </label>
+          <button
+            type="button"
+            onClick={() => setVisibleMonth((current) => shiftMonthValue(current, 1))}
+            className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 transition hover:bg-slate-50"
+            title="Следующий месяц"
+          >
+            <ChevronRight size={16} />
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-3 flex min-w-0 gap-2 overflow-x-auto pb-1">
+        {monthPeriods.length ? monthPeriods.map((period) => {
+          const active = Number(period.id) === Number(selectedPlanId);
+          const isCurrent = Number(period.id) === Number(activePlanId);
+          return (
+            <button
+              key={period.id}
+              type="button"
+              onClick={() => onSelect?.(period)}
+              disabled={disabled || loading}
+              className={`min-w-[170px] shrink-0 rounded-lg border px-3 py-2 text-left transition disabled:cursor-wait disabled:opacity-60 ${
+                active
+                  ? 'border-blue-500 bg-blue-50 text-blue-900'
+                  : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+              }`}
+            >
+              <span className="block text-sm font-semibold">{formatAuctionPeriodLabel(period)}</span>
+              <span className="mt-0.5 block text-xs text-slate-500">
+                {Number(period.shift_count || 0)} смен{isCurrent ? ' · активная' : ''}
+              </span>
+            </button>
+          );
+        }) : (
+          <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-3 text-sm text-slate-500">
+            За {formatMonthValueLabel(visibleMonth) || 'выбранный месяц'} недельных планов нет.
+          </div>
+        )}
+      </div>
+      {loading ? <div className="mt-2 text-xs text-slate-500">Загружаю неделю...</div> : null}
+      {error ? <div className="mt-2 text-xs font-medium text-rose-600">{error}</div> : null}
+    </section>
   );
 };
 
@@ -1706,7 +1843,7 @@ const ShiftAuctionInstructionsModal = ({ open, role, canSwitchRole = false, onCl
   );
 };
 
-const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHeader, showToast, onOpenResourceGeneration }) => {
+const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHeader, showToast, onOpenResourceGeneration, initialPeriod = null, onInitialPeriodApplied = null }) => {
   const role = normalizeRole(user?.role);
   const canManage = isAdminLikeRole(role);
   const canMonitor = canManage || isSupervisorRole(role);
@@ -1790,6 +1927,12 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [notifyPostClaimEnabled, setNotifyPostClaimEnabled] = useState(false);
   const [isSavingNotifyToggle, setIsSavingNotifyToggle] = useState(false);
   const [postAuctionNowMs, setPostAuctionNowMs] = useState(() => Date.now());
+  const [viewSchedulePlanId, setViewSchedulePlanId] = useState('');
+  const [periodPreviewLots, setPeriodPreviewLots] = useState([]);
+  const [periodPreviewBlockedDates, setPeriodPreviewBlockedDates] = useState([]);
+  const [periodPreviewLoading, setPeriodPreviewLoading] = useState(false);
+  const [periodPreviewError, setPeriodPreviewError] = useState('');
+  const [appliedInitialPeriodKey, setAppliedInitialPeriodKey] = useState('');
 
   useEffect(() => {
     showToastRef.current = showToast;
@@ -1936,6 +2079,14 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       const firstAvailableId = normalizeSchedulePlanId(periods[0]?.id);
       return firstAvailableId ? String(firstAvailableId) : '';
     });
+    setViewSchedulePlanId((current) => {
+      const periodIds = new Set(periods.map((period) => normalizeSchedulePlanId(period?.id)).filter(Boolean));
+      const currentId = normalizeSchedulePlanId(current);
+      if (currentId && periodIds.has(currentId)) return String(currentId);
+      if (selectedSchedulePlanId && periodIds.has(selectedSchedulePlanId)) return String(selectedSchedulePlanId);
+      const firstAvailableId = normalizeSchedulePlanId(periods[0]?.id);
+      return firstAvailableId ? String(firstAvailableId) : '';
+    });
   }, []);
 
   const fetchJournalPage = useCallback(async (page = 1) => {
@@ -1982,6 +2133,32 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       if (!silent) setIsLoading(false);
     }
   }, [apiRoot, applySnapshot, buildHeaders, notify, user?.id]);
+
+  const fetchPeriodPreview = useCallback(async (schedulePlanId, { signal } = {}) => {
+    const normalizedPlanId = normalizeSchedulePlanId(schedulePlanId);
+    if (!apiRoot || !user?.id || !normalizedPlanId) return;
+    setPeriodPreviewLoading(true);
+    setPeriodPreviewError('');
+    setPeriodPreviewLots([]);
+    setPeriodPreviewBlockedDates([]);
+    try {
+      const response = await axios.get(`${apiRoot}/api/shift_auction/period_preview`, {
+        params: { schedule_plan_id: normalizedPlanId },
+        headers: buildHeaders(),
+        signal
+      });
+      const preview = response?.data?.preview || {};
+      setPeriodPreviewLots(Array.isArray(preview.lots) ? preview.lots : []);
+      setPeriodPreviewBlockedDates(Array.isArray(preview.my_blocked_dates) ? preview.my_blocked_dates : []);
+    } catch (error) {
+      if (axios.isCancel?.(error) || error?.code === 'ERR_CANCELED') return;
+      setPeriodPreviewLots([]);
+      setPeriodPreviewBlockedDates([]);
+      setPeriodPreviewError(error?.response?.data?.error || 'Не удалось загрузить выбранную неделю');
+    } finally {
+      if (!signal?.aborted) setPeriodPreviewLoading(false);
+    }
+  }, [apiRoot, buildHeaders, user?.id]);
 
   useEffect(() => {
     if (!canMonitor) return;
@@ -2156,6 +2333,16 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     () => availablePeriods.find((period) => Number(period?.id) === Number(draftSchedulePlanId)) || null,
     [availablePeriods, draftSchedulePlanId]
   );
+  const activeSchedulePlanId = normalizeSchedulePlanId(settings.selected_schedule_plan_id ?? settings.selected_period?.id);
+  const selectedViewSchedulePlanId = normalizeSchedulePlanId(viewSchedulePlanId) || activeSchedulePlanId;
+  const isViewingActivePeriod = !selectedViewSchedulePlanId || (activeSchedulePlanId && selectedViewSchedulePlanId === activeSchedulePlanId);
+  const selectedViewPeriod = useMemo(
+    () => availablePeriods.find((period) => Number(period?.id) === Number(selectedViewSchedulePlanId)) || settings.selected_period || null,
+    [availablePeriods, selectedViewSchedulePlanId, settings.selected_period]
+  );
+  const monitoredLots = isViewingActivePeriod ? lots : periodPreviewLots;
+  const monitoredMyDayOffs = isViewingActivePeriod ? myDayOffs : [];
+  const monitoredMyBlockedDates = isViewingActivePeriod ? myBlockedDates : periodPreviewBlockedDates;
   const draftRangeInvalid = Boolean(
     draftStartsAt
     && draftEndsAt
@@ -2166,26 +2353,60 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     [draftEndsAt, draftStartsAt]
   );
 
+  const initialPeriodKey = `${initialPeriod?.dateFrom || initialPeriod?.date_from || ''}|${initialPeriod?.dateTo || initialPeriod?.date_to || ''}`;
+  useEffect(() => {
+    if (!initialPeriodKey || initialPeriodKey === '|' || appliedInitialPeriodKey === initialPeriodKey || !availablePeriods.length) return;
+    const [dateFrom, dateTo] = initialPeriodKey.split('|');
+    const matchedPeriod = availablePeriods.find((period) => (
+      String(period?.date_from || '') === dateFrom
+      && String(period?.date_to || '') === dateTo
+    ));
+    if (!matchedPeriod?.id) {
+      setAppliedInitialPeriodKey(initialPeriodKey);
+      onInitialPeriodApplied?.();
+      return;
+    }
+    const planId = String(matchedPeriod.id);
+    setViewSchedulePlanId(planId);
+    setDraftSchedulePlanId(planId);
+    if (canManage) setMonitorTab('settings');
+    setAppliedInitialPeriodKey(initialPeriodKey);
+    onInitialPeriodApplied?.();
+  }, [appliedInitialPeriodKey, availablePeriods, canManage, initialPeriodKey, onInitialPeriodApplied]);
+
+  useEffect(() => {
+    if (!selectedViewSchedulePlanId || isViewingActivePeriod) {
+      setPeriodPreviewLots([]);
+      setPeriodPreviewBlockedDates([]);
+      setPeriodPreviewError('');
+      setPeriodPreviewLoading(false);
+      return undefined;
+    }
+    const controller = new AbortController();
+    fetchPeriodPreview(selectedViewSchedulePlanId, { signal: controller.signal });
+    return () => controller.abort();
+  }, [fetchPeriodPreview, isViewingActivePeriod, selectedViewSchedulePlanId]);
+
   const lotDates = useMemo(
-    () => Array.from(new Set((lots || []).map((lot) => lot.shift_date).filter(Boolean))).sort(),
-    [lots]
+    () => Array.from(new Set((monitoredLots || []).map((lot) => lot.shift_date).filter(Boolean))).sort(),
+    [monitoredLots]
   );
 
   const myBlockedDateMap = useMemo(() => {
     const map = new Map();
-    (myBlockedDates || []).forEach((item) => {
+    (monitoredMyBlockedDates || []).forEach((item) => {
       const date = typeof item === 'string' ? item : item?.date;
       if (!date || map.has(date)) return;
       const period = typeof item === 'string' ? { date, label: 'Период' } : item;
       map.set(date, { ...period, label: getAuctionBlockedDateLabel(period) });
     });
     return map;
-  }, [myBlockedDates]);
+  }, [monitoredMyBlockedDates]);
 
   const visibleLots = useMemo(() => {
-    if (canMonitor) return lots;
-    return lots.filter((lot) => !myDayOffs.includes(lot.shift_date) && !myBlockedDateMap.has(lot.shift_date));
-  }, [canMonitor, lots, myBlockedDateMap, myDayOffs]);
+    if (canMonitor) return monitoredLots;
+    return monitoredLots.filter((lot) => !monitoredMyDayOffs.includes(lot.shift_date) && !myBlockedDateMap.has(lot.shift_date));
+  }, [canMonitor, monitoredLots, monitoredMyDayOffs, myBlockedDateMap]);
 
   const auctionTableGroups = useMemo(() => {
     const groupMap = new Map(AUCTION_RATE_GROUPS.map((group) => [
@@ -2239,8 +2460,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   }, [lotDates, visibleLots]);
 
   const myClaimedLots = useMemo(
-    () => lots.filter((lot) => lot.status === 'claimed' && Number(lot.claimed_by) === Number(user?.id)),
-    [lots, user?.id]
+    () => monitoredLots.filter((lot) => lot.status === 'claimed' && Number(lot.claimed_by) === Number(user?.id)),
+    [monitoredLots, user?.id]
   );
   const myClaimedDateSet = useMemo(
     () => new Set(
@@ -2258,13 +2479,13 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     [dayOffQuota, myBlockedDateMap.size]
   );
   const selectedManualDayOffCount = useMemo(
-    () => myDayOffs.filter((date) => !myBlockedDateMap.has(date)).length,
-    [myBlockedDateMap, myDayOffs]
+    () => monitoredMyDayOffs.filter((date) => !myBlockedDateMap.has(date)).length,
+    [monitoredMyDayOffs, myBlockedDateMap]
   );
 
   const dayNavigationItems = useMemo(() => {
     return lotDates.map((date) => {
-      const dayLots = lots.filter((lot) => lot.shift_date === date);
+      const dayLots = monitoredLots.filter((lot) => lot.shift_date === date);
       const claimedLots = dayLots.filter((lot) => lot.status === 'claimed');
       const myClaimed = dayLots
         .filter((lot) => lot.status === 'claimed' && Number(lot.claimed_by) === Number(user?.id))
@@ -2274,7 +2495,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           || Number(a.id || 0) - Number(b.id || 0)
         ));
       const myClaimedNetMinutes = myClaimed.reduce((sum, lot) => sum + getAuctionLotNetMinutes(lot), 0);
-      const isDayOff = myDayOffs.includes(date);
+      const isDayOff = monitoredMyDayOffs.includes(date);
       const blockedPeriod = myBlockedDateMap.get(date);
       const availableCount = visibleLots.filter((lot) => lot.shift_date === date && lot.status === 'available').length;
       const lockedCount = dayLots.filter((lot) => lot.status === 'claimed' && Number(lot.claimed_by) !== Number(user?.id)).length;
@@ -2301,13 +2522,13 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         state
       };
     });
-  }, [lotDates, lots, myBlockedDateMap, myDayOffs, user?.id, visibleLots]);
+  }, [lotDates, monitoredLots, monitoredMyDayOffs, myBlockedDateMap, user?.id, visibleLots]);
 
   const adminActiveDayClaimGroups = useMemo(() => {
     if (!canMonitor || !activeDayDate) return [];
 
     const claimedLotsByGroup = new Map(AUCTION_RATE_GROUPS.map((group) => [group.id, []]));
-    lots.forEach((lot) => {
+    monitoredLots.forEach((lot) => {
       if (lot?.shift_date !== activeDayDate || lot.status !== 'claimed') return;
       const groupId = getAuctionRateGroupId(lot);
       const groupLots = claimedLotsByGroup.get(groupId) || [];
@@ -2323,7 +2544,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         || Number(a.id || 0) - Number(b.id || 0)
       ))
     }));
-  }, [activeDayDate, canMonitor, lots]);
+  }, [activeDayDate, canMonitor, monitoredLots]);
 
   const adminActiveDayClaimCount = useMemo(
     () => adminActiveDayClaimGroups.reduce((sum, group) => sum + group.lots.length, 0),
@@ -2400,8 +2621,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
   const isTester = Boolean(settings.enabled && settings.is_current_user_tester);
   const canUseAuction = isTester || canMonitor;
-  const canChoose = isTester && (runtimeStatus === 'scheduled' || runtimeStatus === 'open');
-  const canClaim = isTester && runtimeStatus === 'open';
+  const canChoose = isViewingActivePeriod && isTester && (runtimeStatus === 'scheduled' || runtimeStatus === 'open');
+  const canClaim = isViewingActivePeriod && isTester && runtimeStatus === 'open';
   const userRate = useMemo(() => {
     const directRate = Number(user?.rate);
     if (Number.isFinite(directRate) && directRate > 0) return directRate;
@@ -2535,7 +2756,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
   const claimBlockReasonByLotId = useMemo(() => {
     const reasons = new Map();
-    if (canMonitor || !isTester) return reasons;
+    if (canMonitor || !isTester || !isViewingActivePeriod) return reasons;
     const postAuctionActive = Boolean(settings.post_auction_active);
     const parseHM = (value) => {
       if (!value || typeof value !== 'string') return null;
@@ -2549,7 +2770,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       if (s === null || e === null) return null;
       return [s, e > s ? e : e + 24 * 60];
     };
-    lots.forEach((lot) => {
+    monitoredLots.forEach((lot) => {
       if (!lot) return;
       // In post-auction mode also process 'cancelled' lots (they can be claimed).
       // Outside post-auction mode only 'available' lots are actionable.
@@ -2601,7 +2822,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       }
     });
     return reasons;
-  }, [canMonitor, isTester, isTopupActive, lots, myAuctionWorkload, myBlockedDateMap, myClaimedDateSet, myClaimedLotsByDate, settings.post_auction_active]);
+  }, [canMonitor, isTester, isTopupActive, isViewingActivePeriod, monitoredLots, myAuctionWorkload, myBlockedDateMap, myClaimedDateSet, myClaimedLotsByDate, settings.post_auction_active]);
 
   useEffect(() => {
     if (!canUseAuction || !lotDates.length || typeof window === 'undefined') return undefined;
@@ -2724,6 +2945,13 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     setSelectedIds(new Set());
   }, []);
 
+  const handleViewPeriodSelect = useCallback((period) => {
+    const id = normalizeSchedulePlanId(period?.id);
+    if (!id) return;
+    const planId = String(id);
+    setViewSchedulePlanId(planId);
+  }, []);
+
   const handleSave = useCallback(async () => {
     if (!canManage || !apiRoot) return;
     if (draftRangeInvalid) {
@@ -2739,18 +2967,19 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           launch_note: draftNote,
           starts_at: draftStartsAt || null,
           ends_at: draftEndsAt || null,
+          schedule_plan_id: selectedDraftPeriod?.id || draftSchedulePlanId || null,
           operator_ids: Array.from(selectedIds)
         },
         { headers: buildHeaders() }
       );
       await fetchSnapshot({ silent: true });
-      notify('Настройки тестового аукциона сохранены');
+      notify(selectedDraftPeriod ? `Аукцион сохранен для недели ${formatAuctionPeriodLabel(selectedDraftPeriod)}` : 'Настройки тестового аукциона сохранены');
     } catch (error) {
       notify(error?.response?.data?.error || 'Не удалось сохранить настройки аукциона смен', 'error');
     } finally {
       setIsSaving(false);
     }
-  }, [apiRoot, buildHeaders, canManage, draftEnabled, draftEndsAt, draftNote, draftRangeInvalid, draftStartsAt, fetchSnapshot, notify, selectedIds]);
+  }, [apiRoot, buildHeaders, canManage, draftEnabled, draftEndsAt, draftNote, draftRangeInvalid, draftSchedulePlanId, draftStartsAt, fetchSnapshot, notify, selectedDraftPeriod, selectedIds]);
 
   const handleRestartAuction = useCallback(async () => {
     if (!canManage || !apiRoot) return;
@@ -3331,6 +3560,18 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           </nav>
         )}
 
+        {canUseAuction && (!canMonitor || monitorTab === 'monitoring') && availablePeriods.length ? (
+          <AuctionWeekSelector
+            periods={availablePeriods}
+            selectedPlanId={selectedViewSchedulePlanId}
+            activePlanId={activeSchedulePlanId}
+            onSelect={handleViewPeriodSelect}
+            loading={periodPreviewLoading}
+            error={periodPreviewError}
+            previewOnly={!isViewingActivePeriod}
+          />
+        ) : null}
+
         {canManage && monitorTab === 'monitoring' && (
           <label className="flex flex-col gap-2 rounded-lg border border-slate-200 bg-white px-3 py-3 shadow-sm sm:flex-row sm:items-center sm:justify-between sm:gap-4 sm:px-4">
             <span className="min-w-0">
@@ -3365,7 +3606,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                 <p className="mt-1 text-xs text-slate-500 sm:mt-2 sm:text-sm">Можно выбрать до 2 дней периода. Статусные периоды занимают эту квоту.</p>
                 <div className="mt-2 flex min-w-0 max-w-full gap-1.5 overflow-x-auto overscroll-x-contain pb-1 xl:block xl:space-y-2 xl:overflow-visible xl:pb-0">
                   {lotDates.length ? lotDates.map((date) => {
-                    const active = myDayOffs.includes(date);
+                    const active = monitoredMyDayOffs.includes(date);
                     const blockedPeriod = myBlockedDateMap.get(date);
                     const blockedLabel = blockedPeriod ? getAuctionBlockedDateLabel(blockedPeriod) : '';
                     const quotaReached = !active && selectedManualDayOffCount >= manualDayOffLimit;
@@ -3418,6 +3659,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                 </p>
               </div>
               <div className="min-w-0 sm:p-5">
+                {!isViewingActivePeriod ? (
+                  <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800 sm:text-sm">
+                    Предпросмотр недели {selectedViewPeriod ? formatAuctionPeriodLabel(selectedViewPeriod) : ''}. Выбор смен доступен только на активной неделе аукциона.
+                  </div>
+                ) : null}
                 {auctionTableGroups.length && lotDates.length ? (
                   <div ref={auctionLayoutRef} className="relative min-w-0 max-w-full pb-16 sm:border-y sm:border-slate-200 sm:pb-0">
                     <div
@@ -3470,7 +3716,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                 <tr key={`${group.id}-${rowIndex}`} className="group">
                                   {lotDates.map((date) => {
                                     const lot = (group.lotsByDate.get(date) || [])[rowIndex];
-                                    const isDayOff = myDayOffs.includes(date);
+                                    const isDayOff = monitoredMyDayOffs.includes(date);
                                     const isBlocked = myBlockedDateMap.has(date);
                                     const cellTone = isBlocked
                                       ? 'bg-rose-50/50'
@@ -3490,7 +3736,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                             onClaimLot={handleClaimLot}
                                             userId={user?.id}
                                             claimBlockReason={claimBlockReasonByLotId.get(Number(lot.id)) || ''}
-                                            postAuctionActive={Boolean(settings.post_auction_active)}
+                                            postAuctionActive={isViewingActivePeriod && Boolean(settings.post_auction_active)}
                                             postAuctionNowMs={postAuctionNowMs}
                                             postClaimingLotIds={postClaimingLotIds}
                                             onRequestPostAuctionClaim={handleRequestPostAuctionClaim}
@@ -3589,7 +3835,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                   </div>
                 ) : (
                   <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-10 text-center text-sm text-slate-500">
-                    {lotDates.length
+                    {!isViewingActivePeriod && periodPreviewLoading
+                      ? 'Загружаю выбранную неделю...'
+                      : lotDates.length
                       ? 'Для выбранных дней сейчас нет доступных смен.'
                       : canManage
                         ? 'Выберите недельный план и начните аукцион заново.'
@@ -3851,8 +4099,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                   <button
                     type="button"
                     onClick={handleExportAuctionReport}
-                    disabled={isExportingAuctionReport || !lots.length}
-                    title={lots.length ? 'Выгрузить Excel-отчет по выбранному периоду аукциона' : 'Нет смен для выгрузки'}
+                    disabled={isExportingAuctionReport || !isViewingActivePeriod || !lots.length}
+                    title={!isViewingActivePeriod ? 'Отчет доступен только для активной недели аукциона' : lots.length ? 'Выгрузить Excel-отчет по выбранному периоду аукциона' : 'Нет смен для выгрузки'}
                     className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 text-xs font-semibold text-blue-800 transition hover:bg-blue-100 disabled:cursor-wait disabled:opacity-60 sm:h-10 sm:px-4 sm:text-sm"
                   >
                     <Download size={16} />
