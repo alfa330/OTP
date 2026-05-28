@@ -2230,9 +2230,17 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     fetchSnapshot({ silent: true });
   }, [canMonitor, fetchSnapshot, user?.id]);
 
+  const fetchSnapshotRef = useRef(fetchSnapshot);
+  const handleRealtimeEventRef = useRef(handleRealtimeEvent);
+  const buildHeadersRef = useRef(buildHeaders);
+  useEffect(() => { fetchSnapshotRef.current = fetchSnapshot; }, [fetchSnapshot]);
+  useEffect(() => { handleRealtimeEventRef.current = handleRealtimeEvent; }, [handleRealtimeEvent]);
+  useEffect(() => { buildHeadersRef.current = buildHeaders; }, [buildHeaders]);
+
   useEffect(() => {
-    fetchSnapshot();
-  }, [fetchSnapshot]);
+    fetchSnapshotRef.current?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const canOpenStream = Boolean(apiRoot && user?.id && (canMonitor || settings.is_current_user_tester));
 
@@ -2243,6 +2251,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     let currentAbortController = null;
     let reconnectTimer = null;
     let pollTimer = null;
+    let reconnectAttempt = 0;
 
     const stopPolling = () => {
       if (pollTimer) {
@@ -2254,8 +2263,20 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     const startPolling = () => {
       stopPolling();
       pollTimer = window.setInterval(() => {
-        if (!cancelled) fetchSnapshot({ silent: true });
+        if (!cancelled) fetchSnapshotRef.current?.({ silent: true });
       }, 15000);
+    };
+
+    const scheduleReconnect = () => {
+      if (cancelled || reconnectTimer) return;
+      const delay = Math.min(30000, 2000 * Math.pow(2, Math.min(reconnectAttempt, 4)));
+      reconnectAttempt += 1;
+      setConnectionState('reconnecting');
+      startPolling();
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        if (!cancelled) readStream();
+      }, delay);
     };
 
     const readStream = async () => {
@@ -2268,12 +2289,13 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       setConnectionState('connecting');
       try {
         const response = await fetch(`${apiRoot}/api/shift_auction/test_events?after=${encodeURIComponent(lastEventIdRef.current || 0)}`, {
-          headers: buildHeaders({ Accept: 'text/event-stream' }),
+          headers: buildHeadersRef.current?.({ Accept: 'text/event-stream' }) || { Accept: 'text/event-stream' },
           signal: abortController.signal,
           credentials: 'include'
         });
         if (!response.ok || !response.body) throw new Error('SSE connection failed');
         setConnectionState('online');
+        reconnectAttempt = 0;
         stopPolling();
         const reader = response.body.getReader();
         const decoder = new TextDecoder('utf-8');
@@ -2293,7 +2315,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
               const eventId = Number(event?.id || 0);
               lastEventIdRef.current = Math.max(lastEventIdRef.current, eventId);
               setLastEventId((current) => Math.max(current, eventId));
-              handleRealtimeEvent(event);
+              handleRealtimeEventRef.current?.(event);
             } catch (parseError) {
               console.warn('Failed to parse shift auction event', parseError);
             }
@@ -2301,28 +2323,21 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         }
       } catch (error) {
         if (cancelled || error?.name === 'AbortError') return;
-        setConnectionState('reconnecting');
-        startPolling();
       }
 
-      if (!cancelled) {
-        setConnectionState('reconnecting');
-        startPolling();
-        reconnectTimer = window.setTimeout(() => {
-          if (!cancelled) readStream();
-        }, 2000);
-      }
+      if (!cancelled) scheduleReconnect();
     };
 
     const handleVisibilityChange = () => {
       if (cancelled) return;
       if (document.visibilityState === 'visible') {
-        fetchSnapshot({ silent: true });
-        currentAbortController?.abort?.();
+        fetchSnapshotRef.current?.({ silent: true });
         if (reconnectTimer) {
           window.clearTimeout(reconnectTimer);
           reconnectTimer = null;
         }
+        reconnectAttempt = 0;
+        currentAbortController?.abort?.();
         readStream();
       }
     };
@@ -2339,7 +2354,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', handleVisibilityChange);
     };
-  }, [apiRoot, buildHeaders, canOpenStream, fetchSnapshot, handleRealtimeEvent, user?.id]);
+  }, [apiRoot, canOpenStream, user?.id]);
 
   const operatorOptions = useMemo(
     () => normalizeOperators(operators, settings.selected_operators),
