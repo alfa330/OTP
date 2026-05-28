@@ -3146,7 +3146,11 @@ def api_shift_auction_test_snapshot():
             current_user_id=requester_id,
             include_admin_fields=can_monitor_auction
         )
+        has_period_history_access = False
         if not (can_monitor_auction or snapshot.get('is_current_user_tester')):
+            has_period_history_access = db.has_shift_auction_history_access(requester_id)
+        snapshot["has_period_history_access"] = bool(has_period_history_access)
+        if not (can_monitor_auction or snapshot.get('is_current_user_tester') or has_period_history_access):
             snapshot["lots"] = []
             snapshot["my_day_offs"] = []
             snapshot["my_blocked_dates"] = []
@@ -3156,6 +3160,10 @@ def api_shift_auction_test_snapshot():
         elif not can_monitor_auction:
             snapshot["claim_journal"] = []
             snapshot["participant_workloads"] = []
+            if has_period_history_access and not snapshot.get('is_current_user_tester'):
+                snapshot["lots"] = []
+                snapshot["my_day_offs"] = []
+                snapshot["my_blocked_dates"] = []
         snapshot_fingerprint = hashlib.sha1(
             json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
         ).hexdigest()
@@ -3187,10 +3195,11 @@ def api_shift_auction_period_preview():
             return jsonify({"error": message}), status_code
         requester_role = _normalize_user_role(requester[3])
         can_monitor_auction = _is_admin_role(requester_role) or _is_supervisor_role(requester_role)
-        if not (can_monitor_auction or db.is_shift_auction_test_participant(requester_id)):
+        schedule_plan_id = request.args.get('schedule_plan_id') or request.args.get('plan_id')
+        if not (can_monitor_auction or db.is_shift_auction_period_participant(requester_id, schedule_plan_id)):
             return jsonify({"error": "Not allowed to view shift auction periods"}), 403
         preview = db.get_shift_auction_period_preview(
-            schedule_plan_id=request.args.get('schedule_plan_id') or request.args.get('plan_id'),
+            schedule_plan_id=schedule_plan_id,
             current_user_id=requester_id,
         )
         return jsonify({"status": "success", "preview": preview}), 200
@@ -3469,12 +3478,20 @@ def api_shift_auction_post_claim_lot():
             return jsonify({"error": "Only operators can claim shifts"}), 403
 
         payload = request.get_json(silent=True) or {}
-        try:
-            lot_id = int(payload.get('lot_id') or payload.get('id'))
-        except Exception:
-            return jsonify({"error": "Lot id is required"}), 400
-
-        result = db.post_auction_claim_lot(requester_id, lot_id)
+        source_shift_id = payload.get('source_schedule_shift_id') or payload.get('source_shift_id')
+        source_plan_id = payload.get('schedule_plan_id') or payload.get('source_schedule_plan_id')
+        if source_shift_id and source_plan_id:
+            result = db.post_auction_claim_saved_shift(
+                requester_id,
+                int(source_plan_id),
+                int(source_shift_id)
+            )
+        else:
+            try:
+                lot_id = int(payload.get('lot_id') or payload.get('id'))
+            except Exception:
+                return jsonify({"error": "Lot id is required"}), 400
+            result = db.post_auction_claim_lot(requester_id, lot_id)
         operator_info = result.get('operator') or {}
         operator_name = operator_info.get('name') or requester[1]
         lot_payload = result.get('lot') or {}
