@@ -10239,7 +10239,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         error: ''
                     }));
                     try {
-                        const response = await fetch(`${API_BASE_URL}/api/shift_auction/test_snapshot`, {
+                        const response = await fetch(`${API_BASE_URL}/api/shift_auction/lots_for_date?date=${encodeURIComponent(dateKey)}`, {
                             credentials: 'include',
                             headers: buildGroupingHeaders(),
                             signal: abortController.signal
@@ -10252,7 +10252,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         setPlannerStatusGroupingAuctionState({
                             loading: false,
                             error: '',
-                            snapshot: payload?.snapshot || null
+                            snapshot: {
+                                lots: Array.isArray(payload?.lots) ? payload.lots : [],
+                                selected_operators: Array.isArray(payload?.selected_operators) ? payload.selected_operators : []
+                            }
                         });
                     } catch (error) {
                         if (abortController.signal.aborted) return;

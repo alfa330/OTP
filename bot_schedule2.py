@@ -3182,6 +3182,33 @@ def api_shift_auction_test_snapshot():
         return jsonify({"error": "Internal server error"}), 500
 
 
+@app.route('/api/shift_auction/lots_for_date', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_shift_auction_lots_for_date():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        requester_role = _normalize_user_role(requester[3])
+        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role)):
+            return jsonify({"error": "Not allowed"}), 403
+        date_arg = request.args.get('date')
+        if not date_arg:
+            return jsonify({"error": "Missing required parameter: date"}), 400
+        try:
+            target_date = datetime.strptime(date_arg, '%Y-%m-%d').date()
+        except Exception:
+            return jsonify({"error": "Invalid date format, expected YYYY-MM-DD"}), 400
+        payload = db.get_shift_auction_lots_for_planner_date(target_date)
+        return jsonify({"status": "success", **payload}), 200
+    except Exception as error:
+        logging.error(f"Shift auction lots_for_date API error: {error}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/shift_auction/period_preview', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_shift_auction_period_preview():
