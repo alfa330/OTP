@@ -482,6 +482,14 @@ const getAuctionLotBreakMinutes = (lot) => {
 
 const getAuctionLotNetMinutes = (lot) => Math.max(0, getAuctionLotDurationMinutes(lot) - getAuctionLotBreakMinutes(lot));
 
+const getAuctionLotActionKey = (lotOrId) => {
+  if (lotOrId && typeof lotOrId === 'object') {
+    const raw = lotOrId.id ?? lotOrId.source_schedule_shift_id ?? '';
+    return raw === null || raw === undefined ? '' : String(raw);
+  }
+  return lotOrId === null || lotOrId === undefined ? '' : String(lotOrId);
+};
+
 const getAuctionNormWorkdayCount = (periodDayCount, blockedDayCount = 0) => {
   const totalDays = Math.max(0, Number(periodDayCount || 0));
   const blockedDays = clampNumber(Number(blockedDayCount || 0), 0, totalDays);
@@ -515,8 +523,9 @@ const AuctionLotCell = ({
   const isLotClaimed = lot.status === 'claimed';
   const lotClaimedByCurrentUser = Number(lot.claimed_by) === Number(userId);
   const minRate = Number(lot.rate_min || 0);
-  const isClaiming = claimingLotIds instanceof Set && claimingLotIds.has(Number(lot.id));
-  const isPostClaiming = postClaimingLotIds instanceof Set && postClaimingLotIds.has(Number(lot.id));
+  const lotActionKey = getAuctionLotActionKey(lot);
+  const isClaiming = claimingLotIds instanceof Set && claimingLotIds.has(lotActionKey);
+  const isPostClaiming = postClaimingLotIds instanceof Set && postClaimingLotIds.has(lotActionKey);
   const label = formatAuctionShiftLabel(lot);
   const compactLabel = formatCompactAuctionShiftLabel(lot);
   const breaksLabel = formatAuctionBreaksLabel(lot);
@@ -1875,7 +1884,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     published_to_work_schedules_at: null,
     published_to_work_schedules_by_name: '',
     topup_started_at: null,
-    topup_started_by_name: ''
+    topup_started_by_name: '',
+    post_auction_active: false,
+    has_period_history_access: false
   });
   const [isTogglingTopup, setIsTogglingTopup] = useState(false);
   const [lots, setLots] = useState([]);
@@ -1933,6 +1944,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [periodPreviewDayOffs, setPeriodPreviewDayOffs] = useState([]);
   const [periodPreviewOperators, setPeriodPreviewOperators] = useState([]);
   const [periodPreviewParticipantWorkloads, setPeriodPreviewParticipantWorkloads] = useState([]);
+  const [periodPreviewPostAuctionActive, setPeriodPreviewPostAuctionActive] = useState(false);
   const [periodPreviewLoading, setPeriodPreviewLoading] = useState(false);
   const [periodPreviewError, setPeriodPreviewError] = useState('');
   const [appliedInitialPeriodKey, setAppliedInitialPeriodKey] = useState('');
@@ -2021,10 +2033,17 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     return { data: response?.data || {} };
   }, [apiRoot, buildHeaders]);
 
-  const postAuctionClaimLotApi = useCallback(async (lotId) => {
+  const postAuctionClaimLotApi = useCallback(async (lotOrId) => {
+    const lot = lotOrId && typeof lotOrId === 'object' ? lotOrId : null;
+    const sourceShiftId = normalizeSchedulePlanId(lot?.source_schedule_shift_id);
+    const sourcePlanId = normalizeSchedulePlanId(lot?.source_schedule_plan_id);
+    const numericLotId = Number(lot ? lot.id : lotOrId);
+    const payload = sourceShiftId && sourcePlanId && !Number.isFinite(numericLotId)
+      ? { schedule_plan_id: sourcePlanId, source_schedule_shift_id: sourceShiftId }
+      : { lot_id: lot ? lot.id : lotOrId };
     const response = await axios.post(
       `${apiRoot}/api/shift_auction/post_claim_lot`,
-      { lot_id: lotId },
+      payload,
       { headers: buildHeaders() }
     );
     return { data: response?.data || {} };
@@ -2057,6 +2076,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       published_to_work_schedules_by_name: safe.published_to_work_schedules_by_name || '',
       topup_started_at: safe.topup_started_at || null,
       topup_started_by_name: safe.topup_started_by_name || '',
+      has_period_history_access: Boolean(safe.has_period_history_access),
       post_auction_active: Boolean(safe.post_auction_active)
     });
     setNotifyPostClaimEnabled(Boolean(safe.notify_post_claim_enabled));
@@ -2150,6 +2170,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     setPeriodPreviewDayOffs([]);
     setPeriodPreviewOperators([]);
     setPeriodPreviewParticipantWorkloads([]);
+    setPeriodPreviewPostAuctionActive(false);
     try {
       const response = await axios.get(`${apiRoot}/api/shift_auction/period_preview`, {
         params: { schedule_plan_id: normalizedPlanId },
@@ -2162,6 +2183,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       setPeriodPreviewDayOffs(Array.isArray(preview.my_day_offs) ? preview.my_day_offs.filter(Boolean) : []);
       setPeriodPreviewOperators(Array.isArray(preview.selected_operators) ? preview.selected_operators : []);
       setPeriodPreviewParticipantWorkloads(Array.isArray(preview.participant_workloads) ? preview.participant_workloads : []);
+      setPeriodPreviewPostAuctionActive(Boolean(preview.post_auction_active));
     } catch (error) {
       if (axios.isCancel?.(error) || error?.code === 'ERR_CANCELED') return;
       setPeriodPreviewLots([]);
@@ -2169,6 +2191,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       setPeriodPreviewDayOffs([]);
       setPeriodPreviewOperators([]);
       setPeriodPreviewParticipantWorkloads([]);
+      setPeriodPreviewPostAuctionActive(false);
       setPeriodPreviewError(error?.response?.data?.error || 'Не удалось загрузить выбранную неделю');
     } finally {
       if (!signal?.aborted) setPeriodPreviewLoading(false);
@@ -2364,6 +2387,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const monitoredMyBlockedDates = isViewingActivePeriod ? myBlockedDates : periodPreviewBlockedDates;
   const monitoredOperators = isViewingActivePeriod ? settings.selected_operators : periodPreviewOperators;
   const monitoredParticipantWorkloads = isViewingActivePeriod ? participantWorkloads : periodPreviewParticipantWorkloads;
+  const selectedViewPostAuctionActive = isViewingActivePeriod
+    ? Boolean(settings.post_auction_active)
+    : Boolean(periodPreviewPostAuctionActive);
   const draftRangeInvalid = Boolean(
     draftStartsAt
     && draftEndsAt
@@ -2404,6 +2430,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       setPeriodPreviewDayOffs([]);
       setPeriodPreviewOperators([]);
       setPeriodPreviewParticipantWorkloads([]);
+      setPeriodPreviewPostAuctionActive(false);
       setPeriodPreviewError('');
       setPeriodPreviewLoading(false);
       return undefined;
@@ -2431,8 +2458,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
   const visibleLots = useMemo(() => {
     if (canMonitor) return monitoredLots;
-    return monitoredLots.filter((lot) => !monitoredMyDayOffs.includes(lot.shift_date) && !myBlockedDateMap.has(lot.shift_date));
-  }, [canMonitor, monitoredLots, monitoredMyDayOffs, myBlockedDateMap]);
+    return monitoredLots.filter((lot) => (
+      (selectedViewPostAuctionActive || !monitoredMyDayOffs.includes(lot.shift_date))
+      && !myBlockedDateMap.has(lot.shift_date)
+    ));
+  }, [canMonitor, monitoredLots, monitoredMyDayOffs, myBlockedDateMap, selectedViewPostAuctionActive]);
 
   const auctionTableGroups = useMemo(() => {
     const groupMap = new Map(AUCTION_RATE_GROUPS.map((group) => [
@@ -2646,7 +2676,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         : 'border-amber-200 bg-amber-50 text-amber-800';
 
   const isTester = Boolean(settings.enabled && settings.is_current_user_tester);
-  const canUseAuction = isTester || canMonitor;
+  const canUseAuction = isTester || canMonitor || Boolean(settings.has_period_history_access);
   const canChoose = isViewingActivePeriod && isTester && (runtimeStatus === 'scheduled' || runtimeStatus === 'open');
   const canClaim = isViewingActivePeriod && isTester && runtimeStatus === 'open';
   const userRate = useMemo(() => {
@@ -2782,8 +2812,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
   const claimBlockReasonByLotId = useMemo(() => {
     const reasons = new Map();
-    if (canMonitor || !isTester || !isViewingActivePeriod) return reasons;
-    const postAuctionActive = Boolean(settings.post_auction_active);
+    const canEvaluatePostAuction = selectedViewPostAuctionActive && (isTester || Boolean(settings.has_period_history_access));
+    if (canMonitor || (!isTester && !canEvaluatePostAuction)) return reasons;
+    if (!isViewingActivePeriod && !canEvaluatePostAuction) return reasons;
+    const postAuctionActive = Boolean(selectedViewPostAuctionActive);
     const parseHM = (value) => {
       if (!value || typeof value !== 'string') return null;
       const [h, m] = value.split(':').map(Number);
@@ -2803,9 +2835,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       const isPostAuctionCandidate = postAuctionActive
         && (lot.status === 'available' || lot.status === 'cancelled')
         && !Boolean(lot.post_auction_claimed);
-      if (!isPostAuctionCandidate && lot.status !== 'available') return;
-      const lotId = Number(lot.id);
-      if (!Number.isFinite(lotId)) return;
+      if (!isPostAuctionCandidate && (!isViewingActivePeriod || lot.status !== 'available')) return;
+      const lotId = getAuctionLotActionKey(lot);
+      if (!lotId) return;
       const blockedPeriod = myBlockedDateMap.get(lot.shift_date);
       if (blockedPeriod) {
         reasons.set(lotId, `День закрыт: ${getAuctionBlockedDateLabel(blockedPeriod)}`);
@@ -2848,7 +2880,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       }
     });
     return reasons;
-  }, [canMonitor, isTester, isTopupActive, isViewingActivePeriod, monitoredLots, myAuctionWorkload, myBlockedDateMap, myClaimedDateSet, myClaimedLotsByDate, settings.post_auction_active]);
+  }, [canMonitor, isTester, isTopupActive, isViewingActivePeriod, monitoredLots, myAuctionWorkload, myBlockedDateMap, myClaimedDateSet, myClaimedLotsByDate, selectedViewPostAuctionActive, settings.has_period_history_access]);
 
   useEffect(() => {
     if (!canUseAuction || !lotDates.length || typeof window === 'undefined') return undefined;
@@ -3164,9 +3196,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     if (!canClaim || !apiRoot) return;
     const numericId = Number(lotId);
     if (!Number.isFinite(numericId)) return;
-    if (pendingClaimLotIdsRef.current.has(numericId)) return;
+    const lotKey = getAuctionLotActionKey(numericId);
+    if (pendingClaimLotIdsRef.current.has(lotKey)) return;
 
-    const blockReason = claimBlockReasonByLotId.get(numericId);
+    const blockReason = claimBlockReasonByLotId.get(lotKey);
     if (blockReason) {
       notifyClaimError(blockReason);
       return;
@@ -3175,11 +3208,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     const prevLot = (lotsRef.current || []).find((l) => Number(l?.id) === numericId);
     if (!prevLot || prevLot.status !== 'available') return;
 
-    pendingClaimLotIdsRef.current.add(numericId);
+    pendingClaimLotIdsRef.current.add(lotKey);
     setClaimingLotIds((current) => {
-      if (current.has(numericId)) return current;
+      if (current.has(lotKey)) return current;
       const next = new Set(current);
-      next.add(numericId);
+      next.add(lotKey);
       return next;
     });
 
@@ -3222,11 +3255,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         notifyClaimError(message || 'Не удалось забрать смену');
       }
     } finally {
-      pendingClaimLotIdsRef.current.delete(numericId);
+      pendingClaimLotIdsRef.current.delete(lotKey);
       setClaimingLotIds((current) => {
-        if (!current.has(numericId)) return current;
+        if (!current.has(lotKey)) return current;
         const next = new Set(current);
-        next.delete(numericId);
+        next.delete(lotKey);
         return next;
       });
     }
@@ -3244,47 +3277,69 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const handleConfirmPostAuctionClaim = useCallback(async () => {
     const lot = postClaimConfirmLot;
     if (!lot || !lot.id) return;
-    const numericId = Number(lot.id);
-    if (!Number.isFinite(numericId)) return;
-    if (postClaimingLotIds.has(numericId)) return;
+    const lotKey = getAuctionLotActionKey(lot);
+    if (!lotKey) return;
+    if (postClaimingLotIds.has(lotKey)) return;
 
     setPostClaimingLotIds((current) => {
       const next = new Set(current);
-      next.add(numericId);
+      next.add(lotKey);
       return next;
     });
 
     try {
-      const response = await enqueueAuctionMutation(() => postAuctionClaimLotApi(numericId));
+      const response = await enqueueAuctionMutation(() => postAuctionClaimLotApi(lot));
       const serverLot = response?.data?.lot;
       if (serverLot && serverLot.id) {
+        const sameLot = (currentLot) => {
+          const currentSourceShiftId = normalizeSchedulePlanId(currentLot?.source_schedule_shift_id);
+          const currentSourcePlanId = normalizeSchedulePlanId(currentLot?.source_schedule_plan_id);
+          const serverSourceShiftId = normalizeSchedulePlanId(serverLot?.source_schedule_shift_id);
+          const serverSourcePlanId = normalizeSchedulePlanId(serverLot?.source_schedule_plan_id);
+          if (currentSourceShiftId && serverSourceShiftId && currentSourceShiftId === serverSourceShiftId) {
+            return !serverSourcePlanId || !currentSourcePlanId || serverSourcePlanId === currentSourcePlanId;
+          }
+          return getAuctionLotActionKey(currentLot) === getAuctionLotActionKey(serverLot);
+        };
         setLots((currentLots) => currentLots.map((l) => (
-          Number(l.id) === Number(serverLot.id) ? { ...l, ...serverLot } : l
+          sameLot(l) ? { ...l, ...serverLot } : l
+        )));
+        setPeriodPreviewLots((currentLots) => currentLots.map((l) => (
+          sameLot(l) ? { ...l, ...serverLot } : l
         )));
       }
       notify('Смена забрана и сохранена в графики');
       setPostClaimConfirmLot(null);
       fetchSnapshot({ silent: true });
+      if (!isViewingActivePeriod && selectedViewSchedulePlanId) {
+        fetchPeriodPreview(selectedViewSchedulePlanId, {});
+      }
     } catch (error) {
       const message = error?.response?.data?.error || 'Не удалось забрать смену';
       notifyClaimError(message);
       fetchSnapshot({ silent: true });
+      if (!isViewingActivePeriod && selectedViewSchedulePlanId) {
+        fetchPeriodPreview(selectedViewSchedulePlanId, {});
+      }
     } finally {
       setPostClaimingLotIds((current) => {
-        if (!current.has(numericId)) return current;
+        if (!current.has(lotKey)) return current;
         const next = new Set(current);
-        next.delete(numericId);
+        next.delete(lotKey);
         return next;
       });
     }
   }, [
     enqueueAuctionMutation,
+    fetchPeriodPreview,
     fetchSnapshot,
+    isViewingActivePeriod,
     notify,
     notifyClaimError,
     postAuctionClaimLotApi,
     postClaimConfirmLot,
-    postClaimingLotIds
+    postClaimingLotIds,
+    selectedViewSchedulePlanId
   ]);
 
   const handleToggleAdminNotify = useCallback(async (nextValue) => {
@@ -3309,11 +3364,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   }, [apiRoot, buildHeaders, isSavingNotifyToggle, notify, notifyPostClaimEnabled]);
 
   useEffect(() => {
-    if (!settings.post_auction_active) return undefined;
+    if (!selectedViewPostAuctionActive) return undefined;
     setPostAuctionNowMs(Date.now());
     const interval = window.setInterval(() => setPostAuctionNowMs(Date.now()), 30000);
     return () => window.clearInterval(interval);
-  }, [settings.post_auction_active]);
+  }, [selectedViewPostAuctionActive]);
 
   const openReleaseConfirm = useCallback((lotsToRelease) => {
     const options = (Array.isArray(lotsToRelease) ? lotsToRelease : [lotsToRelease])
@@ -3761,8 +3816,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                             claimingLotIds={claimingLotIds}
                                             onClaimLot={handleClaimLot}
                                             userId={user?.id}
-                                            claimBlockReason={!isViewingActivePeriod ? 'Выбор доступен только на активной неделе аукциона' : (claimBlockReasonByLotId.get(Number(lot.id)) || '')}
-                                            postAuctionActive={isViewingActivePeriod && Boolean(settings.post_auction_active)}
+                                            claimBlockReason={!isViewingActivePeriod && !selectedViewPostAuctionActive ? 'Выбор доступен только на активной неделе аукциона' : (claimBlockReasonByLotId.get(getAuctionLotActionKey(lot)) || '')}
+                                            postAuctionActive={selectedViewPostAuctionActive}
                                             postAuctionNowMs={postAuctionNowMs}
                                             postClaimingLotIds={postClaimingLotIds}
                                             onRequestPostAuctionClaim={handleRequestPostAuctionClaim}
@@ -4688,7 +4743,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       ) : null}
 
       {postClaimConfirmLot ? (() => {
-        const lotInProgress = postClaimingLotIds.has(Number(postClaimConfirmLot.id));
+        const lotInProgress = postClaimingLotIds.has(getAuctionLotActionKey(postClaimConfirmLot));
         return (
           <div
             className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/50 px-4"
