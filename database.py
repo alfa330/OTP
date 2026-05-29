@@ -5676,13 +5676,16 @@ class Database:
                     COALESCE(l.post_auction_claimed, FALSE) AS post_auction_claimed,
                     u.name AS claimed_by_name,
                     u.direction_id AS claimed_by_direction_id,
-                    cdir.name AS claimed_by_direction
+                    cdir.name AS claimed_by_direction,
+                    s.start_minute, s.end_minute
                 FROM shift_auction_test_lots l
                 LEFT JOIN users u ON u.id = l.claimed_by
                 LEFT JOIN directions cdir ON cdir.id = u.direction_id
-                WHERE l.shift_date = %s
-                ORDER BY l.start_time, l.end_time, l.id
-            """, (date_obj,))
+                LEFT JOIN resource_saved_schedule_shifts s
+                    ON s.id = l.source_schedule_shift_id
+                WHERE l.shift_date BETWEEN %s::date - INTERVAL '1 day' AND %s::date
+                ORDER BY l.shift_date, l.start_time, l.end_time, l.id
+            """, (date_obj, date_obj))
             active_rows = cursor.fetchall() or []
 
             lots = []
@@ -5703,6 +5706,8 @@ class Database:
                     "claimed_by_name": row[12] or "",
                     "claimed_by_direction_id": row[13],
                     "claimed_by_direction": row[14] or "",
+                    "source_start_minute": int(row[15]) if row[15] is not None else None,
+                    "source_end_minute": int(row[16]) if row[16] is not None else None,
                 })
 
             if lots:
@@ -5759,10 +5764,10 @@ class Database:
                 LEFT JOIN users u ON u.id = hc.claimed_by
                 LEFT JOIN directions cdir ON cdir.id = u.direction_id
                 WHERE s.plan_id = ANY(%s)
-                  AND s.shift_date = %s
+                  AND s.shift_date BETWEEN %s::date - INTERVAL '1 day' AND %s::date
                   AND COALESCE(s.meta->>'excludeFromAuction', 'false') <> 'true'
-                ORDER BY s.start_time, s.end_time, s.id
-            """, (plan_ids, date_obj))
+                ORDER BY s.shift_date, s.start_time, s.end_time, s.id
+            """, (plan_ids, date_obj, date_obj))
             historical_rows = cursor.fetchall() or []
             for row in historical_rows:
                 shift_id = int(row[0])
