@@ -2114,12 +2114,15 @@ const ShiftAuctionShiftsTable = ({
     const handler = (event) => {
       const meta = event.ctrlKey || event.metaKey;
       if (!meta) return;
-      const key = String(event.key || '').toLowerCase();
-      if (key === 'z') {
+      const code = String(event.code || '');
+      const keyLower = String(event.key || '').toLowerCase();
+      const isZ = code === 'KeyZ' || keyLower === 'z' || keyLower === 'я';
+      const isY = code === 'KeyY' || keyLower === 'y' || keyLower === 'н';
+      if (isZ) {
         event.preventDefault();
         if (event.shiftKey) performRedo();
         else performUndo();
-      } else if (key === 'y') {
+      } else if (isY) {
         event.preventDefault();
         performRedo();
       }
