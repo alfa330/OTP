@@ -29,6 +29,7 @@ import {
   Settings2,
   ShieldCheck,
   Sparkles,
+  Redo2,
   Square,
   Table,
   Undo2,
@@ -1918,6 +1919,9 @@ const ShiftAuctionShiftsTable = ({
   const [selectedCell, setSelectedCell] = useState(null); // { opId, date }
   const [pendingAction, setPendingAction] = useState(null); // { type, lot }
   const [actionLoading, setActionLoading] = useState(false);
+  const [undoStack, setUndoStack] = useState([]);
+  const [redoStack, setRedoStack] = useState([]);
+  const HISTORY_LIMIT = 30;
 
   const lotsByOperatorDate = useMemo(() => {
     const map = new Map();
@@ -2004,18 +2008,37 @@ const ShiftAuctionShiftsTable = ({
     return payload;
   }, [apiRoot, buildHeaders]);
 
+  const lotApiBody = (lot, extra = {}) => {
+    const body = { ...extra };
+    if (Number.isFinite(Number(lot.id)) && !String(lot.id).startsWith('preview-')) {
+      body.lot_id = Number(lot.id);
+    } else {
+      body.plan_id = lot.source_schedule_plan_id;
+      body.source_schedule_shift_id = lot.source_schedule_shift_id;
+    }
+    return body;
+  };
+
+  const pushHistory = useCallback((entry) => {
+    setUndoStack((prev) => [...prev.slice(-HISTORY_LIMIT + 1), entry]);
+    setRedoStack([]);
+  }, []);
+
+  const callUnclaim = useCallback(async (lot) => {
+    await callAdminApi('/api/shift_auction/admin/unclaim_shift', lotApiBody(lot));
+  }, [callAdminApi]);
+
+  const callClaim = useCallback(async (lot, operatorId) => {
+    await callAdminApi('/api/shift_auction/admin/claim_shift_for_operator', lotApiBody(lot, { operator_id: operatorId }));
+  }, [callAdminApi]);
+
   const handleUnclaim = useCallback(async (lot) => {
     if (!lot) return;
+    const operatorId = Number(lot.claimed_by);
     setActionLoading(true);
     try {
-      const body = {};
-      if (Number.isFinite(Number(lot.id)) && !String(lot.id).startsWith('preview-')) {
-        body.lot_id = Number(lot.id);
-      } else {
-        body.plan_id = lot.source_schedule_plan_id;
-        body.source_schedule_shift_id = lot.source_schedule_shift_id;
-      }
-      await callAdminApi('/api/shift_auction/admin/unclaim_shift', body);
+      await callUnclaim(lot);
+      pushHistory({ type: 'unclaim', lot: { ...lot }, operatorId });
       if (typeof notify === 'function') notify('Смена снята с оператора');
       setPendingAction(null);
       if (typeof onActionComplete === 'function') await onActionComplete();
@@ -2024,20 +2047,14 @@ const ShiftAuctionShiftsTable = ({
     } finally {
       setActionLoading(false);
     }
-  }, [callAdminApi, notify, onActionComplete]);
+  }, [callUnclaim, pushHistory, notify, onActionComplete]);
 
   const handleClaim = useCallback(async (lot, operatorId) => {
     if (!lot || !operatorId) return;
     setActionLoading(true);
     try {
-      const body = { operator_id: operatorId };
-      if (Number.isFinite(Number(lot.id)) && !String(lot.id).startsWith('preview-')) {
-        body.lot_id = Number(lot.id);
-      } else {
-        body.plan_id = lot.source_schedule_plan_id;
-        body.source_schedule_shift_id = lot.source_schedule_shift_id;
-      }
-      await callAdminApi('/api/shift_auction/admin/claim_shift_for_operator', body);
+      await callClaim(lot, operatorId);
+      pushHistory({ type: 'claim', lot: { ...lot }, operatorId: Number(operatorId) });
       if (typeof notify === 'function') notify('Смена назначена оператору');
       setPendingAction(null);
       if (typeof onActionComplete === 'function') await onActionComplete();
@@ -2046,7 +2063,70 @@ const ShiftAuctionShiftsTable = ({
     } finally {
       setActionLoading(false);
     }
-  }, [callAdminApi, notify, onActionComplete]);
+  }, [callClaim, pushHistory, notify, onActionComplete]);
+
+  const performUndo = useCallback(async () => {
+    if (!canEdit || actionLoading) return;
+    const last = undoStack[undoStack.length - 1];
+    if (!last) return;
+    setActionLoading(true);
+    try {
+      if (last.type === 'unclaim') {
+        await callClaim(last.lot, last.operatorId);
+      } else {
+        await callUnclaim(last.lot);
+      }
+      setUndoStack((prev) => prev.slice(0, -1));
+      setRedoStack((prev) => [...prev.slice(-HISTORY_LIMIT + 1), last]);
+      if (typeof notify === 'function') notify('Действие отменено');
+      if (typeof onActionComplete === 'function') await onActionComplete();
+    } catch (error) {
+      if (typeof notify === 'function') notify(error?.message || 'Не удалось отменить действие', 'error');
+    } finally {
+      setActionLoading(false);
+    }
+  }, [canEdit, actionLoading, undoStack, callClaim, callUnclaim, notify, onActionComplete]);
+
+  const performRedo = useCallback(async () => {
+    if (!canEdit || actionLoading) return;
+    const last = redoStack[redoStack.length - 1];
+    if (!last) return;
+    setActionLoading(true);
+    try {
+      if (last.type === 'unclaim') {
+        await callUnclaim(last.lot);
+      } else {
+        await callClaim(last.lot, last.operatorId);
+      }
+      setRedoStack((prev) => prev.slice(0, -1));
+      setUndoStack((prev) => [...prev.slice(-HISTORY_LIMIT + 1), last]);
+      if (typeof notify === 'function') notify('Действие повторено');
+      if (typeof onActionComplete === 'function') await onActionComplete();
+    } catch (error) {
+      if (typeof notify === 'function') notify(error?.message || 'Не удалось повторить действие', 'error');
+    } finally {
+      setActionLoading(false);
+    }
+  }, [canEdit, actionLoading, redoStack, callClaim, callUnclaim, notify, onActionComplete]);
+
+  useEffect(() => {
+    if (!canEdit) return undefined;
+    const handler = (event) => {
+      const meta = event.ctrlKey || event.metaKey;
+      if (!meta) return;
+      const key = String(event.key || '').toLowerCase();
+      if (key === 'z') {
+        event.preventDefault();
+        if (event.shiftKey) performRedo();
+        else performUndo();
+      } else if (key === 'y') {
+        event.preventDefault();
+        performRedo();
+      }
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [canEdit, performUndo, performRedo]);
 
   const cellModalData = useMemo(() => {
     if (!selectedCell) return null;
@@ -2074,14 +2154,48 @@ const ShiftAuctionShiftsTable = ({
   return (
     <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
       <div className="border-b border-slate-200 px-3 py-3 sm:px-5 sm:py-4">
-        <div className="flex flex-col gap-1">
-          <h2 className="text-base font-semibold text-slate-950 sm:text-lg">Таблица смен</h2>
-          <p className="text-xs text-slate-600 sm:text-sm">
-            Распределение смен по операторам недели. Подсветка нормы:
-            <span className="ml-1 inline-flex items-center rounded border border-emerald-300 bg-emerald-50 px-1.5 text-[10px] font-semibold text-emerald-800">100%+</span>
-            <span className="ml-1 inline-flex items-center rounded border border-amber-300 bg-amber-50 px-1.5 text-[10px] font-semibold text-amber-800">80–99%</span>
-            <span className="ml-1 inline-flex items-center rounded border border-orange-300 bg-orange-50 px-1.5 text-[10px] font-semibold text-orange-800">&lt;80%</span>
-          </p>
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0">
+            <h2 className="text-base font-semibold text-slate-950 sm:text-lg">Таблица смен</h2>
+            <p className="mt-0.5 text-xs text-slate-600 sm:text-sm">
+              Распределение смен по операторам недели. Подсветка нормы:
+              <span className="ml-1 inline-flex items-center rounded border border-emerald-300 bg-emerald-50 px-1.5 text-[10px] font-semibold text-emerald-800">100%+</span>
+              <span className="ml-1 inline-flex items-center rounded border border-amber-300 bg-amber-50 px-1.5 text-[10px] font-semibold text-amber-800">80–99%</span>
+              <span className="ml-1 inline-flex items-center rounded border border-orange-300 bg-orange-50 px-1.5 text-[10px] font-semibold text-orange-800">&lt;80%</span>
+            </p>
+          </div>
+          {canEdit ? (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={performUndo}
+                disabled={!undoStack.length || actionLoading}
+                title="Отменить (Ctrl/Cmd + Z)"
+                className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-300"
+              >
+                <Undo2 size={13} strokeWidth={2.5} />
+                <span>Отменить</span>
+                {undoStack.length > 0 ? (
+                  <span className="ml-0.5 rounded-full bg-slate-100 px-1.5 text-[10px] tabular-nums">{undoStack.length}</span>
+                ) : null}
+                <span className="hidden text-[10px] font-medium text-slate-400 sm:inline">⌘Z</span>
+              </button>
+              <button
+                type="button"
+                onClick={performRedo}
+                disabled={!redoStack.length || actionLoading}
+                title="Повторить (Ctrl/Cmd + Y или Ctrl/Cmd + Shift + Z)"
+                className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-300"
+              >
+                <Redo2 size={13} strokeWidth={2.5} />
+                <span>Повтор</span>
+                {redoStack.length > 0 ? (
+                  <span className="ml-0.5 rounded-full bg-slate-100 px-1.5 text-[10px] tabular-nums">{redoStack.length}</span>
+                ) : null}
+                <span className="hidden text-[10px] font-medium text-slate-400 sm:inline">⌘Y</span>
+              </button>
+            </div>
+          ) : null}
         </div>
       </div>
       <div className="overflow-x-auto">
