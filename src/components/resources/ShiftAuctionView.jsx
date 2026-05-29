@@ -1865,7 +1865,48 @@ const formatShiftsTableDateHeader = (dateText) => {
   return `${weekday} ${SHIFTS_TABLE_TIME_FORMATTER.format(date).replace(/\./g, '.')}`;
 };
 
-const ShiftAuctionShiftsTable = ({ operators = [], workloads = [], lots = [], lotDates = [] }) => {
+const parseHHMMToMinutes = (text) => {
+  const raw = String(text || '').trim();
+  if (!raw) return null;
+  const match = raw.match(/^(\d{1,2}):(\d{2})/);
+  if (!match) return null;
+  const hh = Number(match[1]);
+  const mm = Number(match[2]);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+  return hh * 60 + mm;
+};
+
+const lotMinuteRange = (lot) => {
+  const sStart = Number(lot?.source_start_minute);
+  const sEnd = Number(lot?.source_end_minute);
+  if (Number.isFinite(sStart) && Number.isFinite(sEnd) && sEnd > sStart) {
+    return [sStart, sEnd];
+  }
+  const start = parseHHMMToMinutes(lot?.start_time);
+  let end = parseHHMMToMinutes(lot?.end_time);
+  if (start == null || end == null) return null;
+  if (end <= start) end += 1440;
+  return [start, end];
+};
+
+const lotsOverlap = (a, b) => {
+  const ra = lotMinuteRange(a);
+  const rb = lotMinuteRange(b);
+  if (!ra || !rb) return false;
+  return ra[0] < rb[1] && rb[0] < ra[1];
+};
+
+const ShiftAuctionShiftsTable = ({
+  operators = [],
+  workloads = [],
+  lots = [],
+  lotDates = [],
+  canEdit = false,
+  apiRoot = '',
+  buildHeaders = null,
+  onActionComplete = null,
+  notify = null
+}) => {
   const workloadById = useMemo(() => {
     const map = new Map();
     (Array.isArray(workloads) ? workloads : []).forEach((w) => {
@@ -1873,6 +1914,10 @@ const ShiftAuctionShiftsTable = ({ operators = [], workloads = [], lots = [], lo
     });
     return map;
   }, [workloads]);
+
+  const [selectedCell, setSelectedCell] = useState(null); // { opId, date }
+  const [pendingAction, setPendingAction] = useState(null); // { type, lot }
+  const [actionLoading, setActionLoading] = useState(false);
 
   const lotsByOperatorDate = useMemo(() => {
     const map = new Map();
@@ -1886,6 +1931,22 @@ const ShiftAuctionShiftsTable = ({ operators = [], workloads = [], lots = [], lo
       const list = map.get(key) || [];
       list.push(lot);
       map.set(key, list);
+    });
+    map.forEach((list) => {
+      list.sort((a, b) => String(a?.start_time || '').localeCompare(String(b?.start_time || '')));
+    });
+    return map;
+  }, [lots]);
+
+  const availableLotsByDate = useMemo(() => {
+    const map = new Map();
+    (Array.isArray(lots) ? lots : []).forEach((lot) => {
+      if (!lot || lot.status !== 'available') return;
+      const date = lot.shift_date;
+      if (!date) return;
+      const list = map.get(date) || [];
+      list.push(lot);
+      map.set(date, list);
     });
     map.forEach((list) => {
       list.sort((a, b) => String(a?.start_time || '').localeCompare(String(b?.start_time || '')));
@@ -1923,6 +1984,81 @@ const ShiftAuctionShiftsTable = ({ operators = [], workloads = [], lots = [], lo
   };
 
   const dates = Array.isArray(lotDates) ? lotDates : [];
+
+  const callAdminApi = useCallback(async (endpoint, body) => {
+    if (!apiRoot) throw new Error('No API root');
+    const headers = typeof buildHeaders === 'function' ? buildHeaders() : {};
+    headers['Content-Type'] = 'application/json';
+    const response = await fetch(`${apiRoot}${endpoint}`, {
+      method: 'POST',
+      headers,
+      credentials: 'include',
+      body: JSON.stringify(body || {})
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const err = new Error(payload?.error || `HTTP ${response.status}`);
+      err.code = payload?.code;
+      throw err;
+    }
+    return payload;
+  }, [apiRoot, buildHeaders]);
+
+  const handleUnclaim = useCallback(async (lot) => {
+    if (!lot) return;
+    setActionLoading(true);
+    try {
+      const body = {};
+      if (Number.isFinite(Number(lot.id)) && !String(lot.id).startsWith('preview-')) {
+        body.lot_id = Number(lot.id);
+      } else {
+        body.plan_id = lot.source_schedule_plan_id;
+        body.source_schedule_shift_id = lot.source_schedule_shift_id;
+      }
+      await callAdminApi('/api/shift_auction/admin/unclaim_shift', body);
+      if (typeof notify === 'function') notify('Смена снята с оператора');
+      setPendingAction(null);
+      if (typeof onActionComplete === 'function') await onActionComplete();
+    } catch (error) {
+      if (typeof notify === 'function') notify(error?.message || 'Не удалось убрать смену', 'error');
+    } finally {
+      setActionLoading(false);
+    }
+  }, [callAdminApi, notify, onActionComplete]);
+
+  const handleClaim = useCallback(async (lot, operatorId) => {
+    if (!lot || !operatorId) return;
+    setActionLoading(true);
+    try {
+      const body = { operator_id: operatorId };
+      if (Number.isFinite(Number(lot.id)) && !String(lot.id).startsWith('preview-')) {
+        body.lot_id = Number(lot.id);
+      } else {
+        body.plan_id = lot.source_schedule_plan_id;
+        body.source_schedule_shift_id = lot.source_schedule_shift_id;
+      }
+      await callAdminApi('/api/shift_auction/admin/claim_shift_for_operator', body);
+      if (typeof notify === 'function') notify('Смена назначена оператору');
+      setPendingAction(null);
+      if (typeof onActionComplete === 'function') await onActionComplete();
+    } catch (error) {
+      if (typeof notify === 'function') notify(error?.message || 'Не удалось назначить смену', 'error');
+    } finally {
+      setActionLoading(false);
+    }
+  }, [callAdminApi, notify, onActionComplete]);
+
+  const cellModalData = useMemo(() => {
+    if (!selectedCell) return null;
+    const { opId, date } = selectedCell;
+    const operator = (Array.isArray(operators) ? operators : []).find((op) => Number(op?.id) === Number(opId)) || null;
+    if (!operator) return null;
+    const workload = workloadById.get(Number(opId)) || {};
+    const claimed = lotsByOperatorDate.get(`${opId}|${date}`) || [];
+    const dayAvailable = availableLotsByDate.get(date) || [];
+    const compatible = dayAvailable.filter((lot) => !claimed.some((c) => lotsOverlap(lot, c)));
+    return { operator, workload, date, claimed, dayAvailable, compatible };
+  }, [selectedCell, operators, workloadById, lotsByOperatorDate, availableLotsByDate]);
 
   if (!rows.length || !dates.length) {
     return (
@@ -1986,10 +2122,14 @@ const ShiftAuctionShiftsTable = ({ operators = [], workloads = [], lots = [], lo
                   </td>
                   {dates.map((date, idx) => {
                     const cellLots = lotsByOperatorDate.get(`${opId}|${date}`) || [];
+                    const interactive = canEdit;
                     return (
                       <td
                         key={`shifts-cell-${opId}-${date}`}
-                        className={`px-2 py-2 align-top ${idx > 0 ? 'border-l border-slate-200' : ''}`}
+                        onClick={interactive ? () => setSelectedCell({ opId, date }) : undefined}
+                        className={`px-2 py-2 align-top transition ${idx > 0 ? 'border-l border-slate-200' : ''} ${
+                          interactive ? 'cursor-pointer hover:bg-slate-50' : ''
+                        }`}
                       >
                         <div className="flex flex-col gap-1">
                           {cellLots.length === 0 ? (
@@ -2015,6 +2155,185 @@ const ShiftAuctionShiftsTable = ({ operators = [], workloads = [], lots = [], lo
           </tbody>
         </table>
       </div>
+      {cellModalData ? (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/40 px-4"
+          onClick={() => {
+            if (actionLoading) return;
+            setSelectedCell(null);
+            setPendingAction(null);
+          }}
+        >
+          <div
+            className="w-full max-w-2xl overflow-hidden rounded-lg border border-slate-200 bg-white shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3 border-b border-slate-200 bg-slate-50 px-5 py-3">
+              <div className="min-w-0">
+                <div className="text-sm font-semibold text-slate-900">{cellModalData.operator?.name || 'Оператор'}</div>
+                <div className="text-xs text-slate-500">
+                  {cellModalData.operator?.direction || ''}
+                  {cellModalData.operator?.direction ? ' · ' : ''}
+                  Ставка {Number(cellModalData.operator?.rate ?? 1).toFixed(2)} · Норма {formatHours(cellModalData.workload?.claimed_net_minutes || 0)} / {formatHours(cellModalData.workload?.norm_minutes || 0)} ч
+                </div>
+              </div>
+              <div className="text-right">
+                <div className="text-sm font-semibold text-slate-700">{formatShiftsTableDateHeader(cellModalData.date)}</div>
+                <button
+                  type="button"
+                  onClick={() => { if (!actionLoading) { setSelectedCell(null); setPendingAction(null); } }}
+                  className="mt-1 text-xs text-slate-500 hover:text-slate-800"
+                >
+                  Закрыть
+                </button>
+              </div>
+            </div>
+            <div className="max-h-[60vh] overflow-y-auto px-5 py-4 text-sm">
+              <section className="mb-5">
+                <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">Взятые смены</h4>
+                {cellModalData.claimed.length === 0 ? (
+                  <p className="text-xs text-slate-400">Нет взятых смен на эту дату.</p>
+                ) : (
+                  <ul className="flex flex-wrap gap-2">
+                    {cellModalData.claimed.map((lot) => {
+                      const lotKey = `${lot.id ?? `${lot.source_schedule_shift_id || ''}-${lot.start_time}-${lot.end_time}`}`;
+                      const isPending = pendingAction?.type === 'unclaim' && pendingAction?.lot === lot;
+                      return (
+                        <li key={`claimed-${lotKey}`} className="flex items-center gap-1.5 rounded border border-blue-200 bg-blue-50 px-2 py-1">
+                          <span className="text-xs font-medium text-blue-900 tabular-nums">
+                            {String(lot.start_time || '').slice(0, 5)}–{String(lot.end_time || '').slice(0, 5)}
+                          </span>
+                          {canEdit ? (
+                            isPending ? (
+                              <>
+                                <button
+                                  type="button"
+                                  disabled={actionLoading}
+                                  onClick={() => handleUnclaim(lot)}
+                                  className="rounded bg-rose-600 px-2 py-0.5 text-[11px] font-semibold text-white hover:bg-rose-700 disabled:opacity-50"
+                                >
+                                  Подтвердить
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={actionLoading}
+                                  onClick={() => setPendingAction(null)}
+                                  className="rounded px-1.5 py-0.5 text-[11px] text-slate-500 hover:text-slate-800"
+                                >
+                                  Отмена
+                                </button>
+                              </>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => setPendingAction({ type: 'unclaim', lot })}
+                                title="Убрать смену"
+                                className="ml-1 rounded p-0.5 text-blue-700 hover:bg-blue-100 hover:text-rose-700"
+                              >
+                                <X size={12} />
+                              </button>
+                            )
+                          ) : null}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </section>
+
+              {canEdit ? (
+                <>
+                  <section className="mb-5">
+                    <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">
+                      Можно добавить ({cellModalData.compatible.length})
+                    </h4>
+                    {cellModalData.compatible.length === 0 ? (
+                      <p className="text-xs text-slate-400">Нет свободных смен, которые не пересекаются с уже взятыми.</p>
+                    ) : (
+                      <ul className="flex flex-wrap gap-2">
+                        {cellModalData.compatible.map((lot) => {
+                          const lotKey = `${lot.id ?? `${lot.source_schedule_shift_id || ''}-${lot.start_time}-${lot.end_time}`}`;
+                          const isPending = pendingAction?.type === 'claim' && pendingAction?.lot === lot;
+                          return (
+                            <li key={`compat-${lotKey}`} className="flex items-center gap-1.5 rounded border border-emerald-200 bg-emerald-50 px-2 py-1">
+                              <span className="text-xs font-medium text-emerald-900 tabular-nums">
+                                {String(lot.start_time || '').slice(0, 5)}–{String(lot.end_time || '').slice(0, 5)}
+                              </span>
+                              {isPending ? (
+                                <>
+                                  <button
+                                    type="button"
+                                    disabled={actionLoading}
+                                    onClick={() => handleClaim(lot, cellModalData.operator.id)}
+                                    className="rounded bg-emerald-600 px-2 py-0.5 text-[11px] font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+                                  >
+                                    Подтвердить
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={actionLoading}
+                                    onClick={() => setPendingAction(null)}
+                                    className="rounded px-1.5 py-0.5 text-[11px] text-slate-500 hover:text-slate-800"
+                                  >
+                                    Отмена
+                                  </button>
+                                </>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => setPendingAction({ type: 'claim', lot })}
+                                  title="Добавить оператору"
+                                  className="ml-1 rounded p-0.5 text-emerald-700 hover:bg-emerald-100"
+                                >
+                                  <Plus size={12} />
+                                </button>
+                              )}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                  </section>
+
+                  <section>
+                    <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">
+                      Все нераспределённые смены этого дня ({cellModalData.dayAvailable.length})
+                    </h4>
+                    {cellModalData.dayAvailable.length === 0 ? (
+                      <p className="text-xs text-slate-400">Все смены этого дня уже распределены.</p>
+                    ) : (
+                      <ul className="flex flex-wrap gap-2">
+                        {cellModalData.dayAvailable.map((lot) => {
+                          const lotKey = `${lot.id ?? `${lot.source_schedule_shift_id || ''}-${lot.start_time}-${lot.end_time}`}`;
+                          const overlaps = !cellModalData.compatible.includes(lot);
+                          return (
+                            <li
+                              key={`avail-${lotKey}`}
+                              className={`inline-flex items-center rounded border px-2 py-1 text-xs tabular-nums ${
+                                overlaps
+                                  ? 'border-slate-200 bg-slate-50 text-slate-400'
+                                  : 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                              }`}
+                              title={overlaps ? 'Пересекается с уже взятыми сменами' : ''}
+                            >
+                              {String(lot.start_time || '').slice(0, 5)}–{String(lot.end_time || '').slice(0, 5)}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                  </section>
+                </>
+              ) : (
+                <p className="text-xs text-slate-400">Только просмотр — для управления нужна роль администратора или супервайзера.</p>
+              )}
+            </div>
+            {actionLoading ? (
+              <div className="border-t border-slate-200 bg-slate-50 px-5 py-2 text-xs text-slate-500">Сохраняем…</div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 };
@@ -4177,6 +4496,17 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
             workloads={monitoredParticipantWorkloads}
             lots={monitoredLots}
             lotDates={lotDates}
+            canEdit={canManage}
+            apiRoot={apiRoot}
+            buildHeaders={buildHeaders}
+            notify={notify}
+            onActionComplete={async () => {
+              if (isViewingActivePeriod) {
+                await fetchSnapshot({ silent: true });
+              } else if (selectedViewSchedulePlanId) {
+                await fetchPeriodPreview(selectedViewSchedulePlanId, {});
+              }
+            }}
           />
         )}
 
