@@ -2134,10 +2134,11 @@ const ShiftAuctionShiftsTable = ({
     const operator = (Array.isArray(operators) ? operators : []).find((op) => Number(op?.id) === Number(opId)) || null;
     if (!operator) return null;
     const workload = workloadById.get(Number(opId)) || {};
+    const isDayOff = Array.isArray(workload?.day_off_dates) && workload.day_off_dates.includes(date);
     const claimed = lotsByOperatorDate.get(`${opId}|${date}`) || [];
     const dayAvailable = availableLotsByDate.get(date) || [];
     const compatible = dayAvailable.filter((lot) => !claimed.some((c) => lotsOverlap(lot, c)));
-    return { operator, workload, date, claimed, dayAvailable, compatible };
+    return { operator, workload, date, claimed, dayAvailable, compatible, isDayOff };
   }, [selectedCell, operators, workloadById, lotsByOperatorDate, availableLotsByDate]);
 
   if (!rows.length || !dates.length) {
@@ -2236,6 +2237,7 @@ const ShiftAuctionShiftsTable = ({
                   </td>
                   {dates.map((date, idx) => {
                     const cellLots = lotsByOperatorDate.get(`${opId}|${date}`) || [];
+                    const isDayOff = Array.isArray(workload?.day_off_dates) && workload.day_off_dates.includes(date);
                     const interactive = canEdit;
                     return (
                       <td
@@ -2246,7 +2248,15 @@ const ShiftAuctionShiftsTable = ({
                         }`}
                       >
                         <div className="flex flex-col gap-1">
-                          {cellLots.length === 0 ? (
+                          {isDayOff ? (
+                            <span
+                              className="inline-flex items-center justify-center rounded border border-violet-200 bg-violet-50 px-1.5 py-0.5 text-[11px] font-medium text-violet-800"
+                              title="Оператор выбрал выходной"
+                            >
+                              Выходной
+                            </span>
+                          ) : null}
+                          {cellLots.length === 0 && !isDayOff ? (
                             <span className="text-[11px] text-slate-300">—</span>
                           ) : (
                             cellLots.map((lot) => (
@@ -2308,6 +2318,17 @@ const ShiftAuctionShiftsTable = ({
             </div>
 
             <div className="max-h-[65vh] space-y-5 overflow-y-auto px-4 py-5">
+              {cellModalData.isDayOff ? (
+                <section>
+                  <div className="mb-2 px-3 text-[11px] font-semibold uppercase tracking-wider text-slate-500">Статус</div>
+                  <div className="rounded-2xl bg-white px-3 py-3 ring-1 ring-slate-200/70">
+                    <span className="inline-flex items-center gap-1.5 rounded-full border border-violet-200 bg-violet-50 px-3 py-1 text-[12.5px] font-semibold text-violet-800">
+                      Оператор выбрал выходной
+                    </span>
+                  </div>
+                </section>
+              ) : null}
+
               <section>
                 <div className="mb-2 px-3 text-[11px] font-semibold uppercase tracking-wider text-slate-500">Взятые смены</div>
                 <div className="rounded-2xl bg-white px-3 py-3 ring-1 ring-slate-200/70">

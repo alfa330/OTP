@@ -3629,23 +3629,34 @@ class Database:
         total_days = len(lot_dates_list)
 
         day_offs_count = {op_id: 0 for op_id in operator_ids}
+        day_off_dates_by_op = {op_id: [] for op_id in operator_ids}
         if day_offs_by_operator is not None:
             for op_id in operator_ids:
-                day_offs_count[op_id] = len(day_offs_by_operator.get(op_id, set()) or [])
+                dates = sorted(day_offs_by_operator.get(op_id, set()) or [])
+                day_offs_count[op_id] = len(dates)
+                day_off_dates_by_op[op_id] = [
+                    d.strftime('%Y-%m-%d') if hasattr(d, 'strftime') else str(d)
+                    for d in dates
+                ]
         else:
             cursor.execute(
                 """
-                SELECT operator_id, COUNT(*)::int
+                SELECT operator_id, day_off_date
                 FROM shift_auction_test_day_offs
                 WHERE operator_id = ANY(%s)
-                GROUP BY operator_id
+                ORDER BY operator_id, day_off_date
                 """,
                 (operator_ids,)
             )
-            for op_id, count_value in (cursor.fetchall() or []):
-                if op_id is None:
+            for op_id, day_off_date in (cursor.fetchall() or []):
+                if op_id is None or day_off_date is None:
                     continue
-                day_offs_count[int(op_id)] = int(count_value or 0)
+                key = int(op_id)
+                day_off_dates_by_op.setdefault(key, []).append(
+                    day_off_date.strftime('%Y-%m-%d') if hasattr(day_off_date, 'strftime') else str(day_off_date)
+                )
+            for op_id in operator_ids:
+                day_offs_count[op_id] = len(day_off_dates_by_op.get(op_id, []))
 
         blocked_days_count = {op_id: 0 for op_id in operator_ids}
         if lot_dates_list:
@@ -3721,6 +3732,7 @@ class Database:
                 "over_minutes": max(0, int(claimed_net) - norm_minutes),
                 "blocked_days": int(blocked),
                 "selected_day_offs": int(day_offs_count.get(op_id, 0)),
+                "day_off_dates": list(day_off_dates_by_op.get(op_id, [])),
                 "lots_claimed_count": len(claimed_lots),
                 "is_complete": bool(norm_minutes > 0 and claimed_net >= norm_minutes - 1),
             })
