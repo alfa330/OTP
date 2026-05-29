@@ -1214,7 +1214,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                     style={{ fontFamily: APPLE_FONT }}
                 >
                     <div
-                        className="flex w-full max-w-2xl flex-col overflow-hidden bg-slate-50 shadow-2xl ring-1 ring-slate-900/10 sm:max-h-[92vh] sm:rounded-3xl"
+                        className="flex w-full max-w-4xl flex-col overflow-hidden bg-slate-50 shadow-2xl ring-1 ring-slate-900/10 sm:max-h-[92vh] sm:rounded-3xl"
                         onClick={(e) => e.stopPropagation()}
                     >
                         {/* Header */}
@@ -1260,23 +1260,25 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
 
                             {/* Основное */}
                             <IosSection title="Основное">
-                                <div>
-                                    <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Название опроса *</label>
-                                    <input
-                                        value={draft.title}
-                                        onChange={(e) => setDraft((p) => ({ ...p, title: e.target.value }))}
-                                        placeholder="Например: Опрос удовлетворённости"
-                                        className={iosInput}
-                                    />
-                                </div>
-                                <div>
-                                    <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Описание</label>
-                                    <input
-                                        value={draft.description}
-                                        onChange={(e) => setDraft((p) => ({ ...p, description: e.target.value }))}
-                                        placeholder="Краткое описание (необязательно)"
-                                        className={iosInput}
-                                    />
+                                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                                    <div>
+                                        <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Название опроса *</label>
+                                        <input
+                                            value={draft.title}
+                                            onChange={(e) => setDraft((p) => ({ ...p, title: e.target.value }))}
+                                            placeholder="Например: Опрос удовлетворённости"
+                                            className={iosInput}
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Описание</label>
+                                        <input
+                                            value={draft.description}
+                                            onChange={(e) => setDraft((p) => ({ ...p, description: e.target.value }))}
+                                            placeholder="Краткое описание (необязательно)"
+                                            className={iosInput}
+                                        />
+                                    </div>
                                 </div>
                                 <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3.5 py-2.5 ring-1 ring-slate-200/60">
                                     <div className="min-w-0">
