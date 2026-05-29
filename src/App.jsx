@@ -8661,6 +8661,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 statusDeleting: false
             });
             const [selectedDays, setSelectedDays] = useState({ cells: [] });
+            const [modalActiveTab, setModalActiveTab] = useState('shifts');
             const [showEditTimelineModal, setShowEditTimelineModal] = useState(false);
             const [showEditStatusJournal, setShowEditStatusJournal] = useState(false);
             const [editTimelineFocusedStatusKey, setEditTimelineFocusedStatusKey] = useState('');
@@ -8674,6 +8675,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 operatorId: null,
                 date: null,
                 mode: 'add',
+                editingId: null,
                 intervals: [],
                 startTime: '09:00',
                 endTime: '10:00',
@@ -9983,6 +9985,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 [plannerStatusRangeKey, plannerStatusFetchRange?.start, plannerStatusFetchRange?.end]
             );
             const shouldLoadPlannerVisibleImportedStatuses = viewMode === 'day';
+            // Подгружаем сохранённые тренинги для всех месяцев видимого диапазона,
+            // чтобы полосы тренингов в таймлайне статусов и список в модалке дня были заполнены.
+            useEffect(() => {
+                if (!user?.id) return;
+                const monthKeys = new Set();
+                (Array.isArray(visibleRange) ? visibleRange : []).forEach(day => {
+                    const monthKey = String(day || '').slice(0, 7);
+                    if (/^\d{4}-\d{2}$/.test(monthKey)) monthKeys.add(monthKey);
+                });
+                monthKeys.forEach(monthKey => {
+                    fetchPlannerTrainingsForMonth(monthKey).catch(error => {
+                        console.error('Error loading planner trainings:', error);
+                    });
+                });
+            }, [user?.id, visibleRange, fetchPlannerTrainingsForMonth]);
             useEffect(() => {
                 if (!user?.id) return;
                 if (user?.role === 'operator') return;
@@ -10053,6 +10070,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 showEditStatusJournal,
                 fetchPlannerImportedStatusesForRange
             ]);
+            // При открытии модалки дня / смене оператора или даты возвращаемся на первый таб.
+            useEffect(() => {
+                if (modalState?.open) setModalActiveTab('shifts');
+            }, [modalState?.open, modalState?.opId, modalState?.date]);
             const minutesInDay = 24 * 60;
             const computeLeftPercent = (m) => (m / minutesInDay) * 100;
             const cellMinWidth = viewMode === 'month' ? 110 : viewMode === 'week' ? 110 : undefined;
@@ -12584,6 +12605,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     operatorId,
                     date: dayKey,
                     mode: String(mode || 'add'),
+                    editingId: preset?.editingId ?? null,
                     intervals: presetIntervals,
                     startTime: startSeed,
                     endTime: endSeed,
@@ -12600,6 +12622,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     operatorId: null,
                     date: null,
                     mode: 'add',
+                    editingId: null,
                     intervals: [],
                     startTime: '09:00',
                     endTime: '10:00',
@@ -12630,7 +12653,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         start_time: plannerTrainingModalState?.startTime,
                         end_time: plannerTrainingModalState?.endTime
                     },
-                    null
+                    plannerTrainingModalState?.editingId ?? null
                 );
             }, [
                 plannerTrainingModalState?.open,
@@ -12639,6 +12662,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 plannerTrainingModalState?.date,
                 plannerTrainingModalState?.startTime,
                 plannerTrainingModalState?.endTime,
+                plannerTrainingModalState?.editingId,
                 plannerTrainingsByOperator
             ]);
 
@@ -12652,6 +12676,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const mode = String(plannerTrainingModalState?.mode || 'add').trim();
                 const isBulkConfirm = mode === 'confirm_training_flag_all';
                 const isFlagConfirmMode = mode === 'confirm_training_flag' || mode === 'confirm_training_flag_all';
+                const editingId = plannerTrainingModalState?.editingId || null;
 
                 if (!Number.isFinite(operatorId) || !dayKey) {
                     setPlannerTrainingModalError('Не удалось определить оператора или дату.');
@@ -12695,7 +12720,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         plannerTrainingsByOperator,
                         [operatorId],
                         { date: dayKey, start_time: interval.startTime, end_time: interval.endTime },
-                        null
+                        editingId
                     ))
                     .find(info => info?.hasOverlap);
                 if (overlappingInterval) {
@@ -12706,9 +12731,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setPlannerTrainingActionLoading(true);
                 setPlannerTrainingModalError('');
                 try {
-                    for (const interval of payloadIntervals) {
-                        const response = await fetch(`${API_BASE_URL}/api/trainings`, {
-                            method: 'POST',
+                    if (editingId) {
+                        const interval = payloadIntervals[0];
+                        const response = await fetch(`${API_BASE_URL}/api/trainings/${editingId}`, {
+                            method: 'PUT',
                             credentials: 'include',
                             headers: withAccessTokenHeader({
                                 'Content-Type': 'application/json'
@@ -12726,6 +12752,29 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const payload = await response.json().catch(() => ({}));
                         if (!response.ok) {
                             throw new Error(payload?.error || `HTTP ${response.status}`);
+                        }
+                    } else {
+                        for (const interval of payloadIntervals) {
+                            const response = await fetch(`${API_BASE_URL}/api/trainings`, {
+                                method: 'POST',
+                                credentials: 'include',
+                                headers: withAccessTokenHeader({
+                                    'Content-Type': 'application/json'
+                                }),
+                                body: JSON.stringify({
+                                    operator_id: operatorId,
+                                    date: dayKey,
+                                    start_time: interval.startTime,
+                                    end_time: interval.endTime,
+                                    reason,
+                                    comment: comment || null,
+                                    count_in_hours: !!plannerTrainingModalState?.countInHours
+                                })
+                            });
+                            const payload = await response.json().catch(() => ({}));
+                            if (!response.ok) {
+                                throw new Error(payload?.error || `HTTP ${response.status}`);
+                            }
                         }
                     }
 
@@ -12751,7 +12800,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                     await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
                     await fetchPlannerTrainingsForMonth(dayKey.slice(0, 7), { force: true });
-                    if (isFlagConfirmMode) {
+                    if (editingId) {
+                        emitAppToast('Тренинг обновлён', 'success');
+                    } else if (isFlagConfirmMode) {
                         emitAppToast(payloadIntervals.length > 1 ? 'Интервалы тренинга подтверждены' : 'Тренинг добавлен и подтвержден', 'success');
                     } else {
                         emitAppToast(payloadIntervals.length > 1 ? 'Интервалы тренинга сохранены' : 'Тренинг добавлен', 'success');
@@ -12761,6 +12812,38 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     console.error('Error saving planner training:', error);
                     setPlannerTrainingModalError(String(error?.message || error || 'Не удалось сохранить тренинг.'));
                     emitAppToast(`Ошибка сохранения тренинга: ${error?.message || error}`, 'error');
+                } finally {
+                    setPlannerTrainingActionLoading(false);
+                }
+            };
+
+            const deletePlannerTraining = async (trainingId, dateKey) => {
+                const id = normalizeTrainingId(trainingId);
+                if (!id) return;
+                const monthKey = String(dateKey || '').slice(0, 7);
+                const confirmed = window.confirm('Удалить тренинг?');
+                if (!confirmed) return;
+                setPlannerTrainingActionLoading(true);
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/trainings/${id}`, {
+                        method: 'DELETE',
+                        credentials: 'include',
+                        headers: withAccessTokenHeader({
+                            'Content-Type': 'application/json'
+                        })
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+                    await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
+                    if (/^\d{4}-\d{2}$/.test(monthKey)) {
+                        await fetchPlannerTrainingsForMonth(monthKey, { force: true });
+                    }
+                    emitAppToast('Тренинг удалён', 'success');
+                } catch (error) {
+                    console.error('Error deleting planner training:', error);
+                    emitAppToast(`Ошибка удаления тренинга: ${error?.message || error}`, 'error');
                 } finally {
                     setPlannerTrainingActionLoading(false);
                 }
@@ -13505,6 +13588,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 ? Array.from(new Set(modalBulkTargets.map(target => target.date))).sort()
                 : (Array.isArray(modalState?.multipleDates) ? [...modalState.multipleDates].sort() : []);
             const isBulkSelectionModal = modalBulkCount > 1;
+            // Табы модалки дня показываем только для одиночного дня (не bulk и не мультидаты).
+            const modalShowTabs = !isBulkSelectionModal && !modalState?.multipleDates;
+            const modalTabShifts = !modalShowTabs || modalActiveTab === 'shifts';
+            const modalTabStatus = !modalShowTabs || modalActiveTab === 'status';
+            const modalTabControl = !modalShowTabs || modalActiveTab === 'control';
             const modalActiveScheduleStatus = useMemo(() => {
                 if (isBulkSelectionModal) return null;
                 if (!modalState?.opId || !modalState?.date) return null;
@@ -13517,6 +13605,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const op = operators.find(o => o.id === modalState.opId);
                 return getPlannerAggregatedFlagsForDate(op, modalState.date);
             }, [isBulkSelectionModal, modalState?.opId, modalState?.date, operators]);
+            const modalSavedTrainings = useMemo(() => {
+                if (isBulkSelectionModal || !modalState?.opId || !modalState?.date) return [];
+                return (plannerTrainingsByOperator[String(modalState.opId)] || [])
+                    .filter(t => String(t?.date || '') === modalState.date)
+                    .slice()
+                    .sort((a, b) => {
+                        const am = timeToMinutes(a?.start_time || a?.start || '00:00');
+                        const bm = timeToMinutes(b?.start_time || b?.start || '00:00');
+                        return (Number.isFinite(am) ? am : 0) - (Number.isFinite(bm) ? bm : 0);
+                    });
+            }, [isBulkSelectionModal, modalState?.opId, modalState?.date, plannerTrainingsByOperator]);
             const modalImportedStatusTimeline = useMemo(() => {
                 if (isBulkSelectionModal) return [];
                 if (!modalState?.opId || !modalState?.date) return [];
@@ -18710,6 +18809,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     };
                                                 })
                                                 .filter(Boolean);
+                                            const trainingBarsForCell = (plannerTrainingsByOperator[String(op.id)] || [])
+                                                .filter(t => String(t?.date || '') === d)
+                                                .map((t, idx) => {
+                                                    const iv = trainingToIntervalMinutes(t);
+                                                    if (!iv) return null;
+                                                    const startMin = Math.max(0, Math.min(1440, iv.start));
+                                                    const endMin = Math.max(0, Math.min(1440, iv.end));
+                                                    if (endMin <= startMin) return null;
+                                                    const reasonText = String(t?.reason || 'Тренинг').trim() || 'Тренинг';
+                                                    const commentText = String(t?.comment || '').trim();
+                                                    return {
+                                                        id: t?.id ?? `training-${idx}`,
+                                                        startMin,
+                                                        endMin,
+                                                        reason: reasonText,
+                                                        title: `Тренинг: ${reasonText} • ${minutesToTime(startMin)} — ${minutesToTime(endMin)}${commentText ? `\n${commentText}` : ''}`
+                                                    };
+                                                })
+                                                .filter(Boolean);
                                             const breakPartsForCell = parts
                                                 .flatMap(p => getBreakPartsForPart(op, p, d))
                                                 .map(b => ({ start: Number(b?.start || 0), end: Number(b?.end || 0) }))
@@ -19104,6 +19222,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             <div
                                                                                 key={`special-tech-issue-${seg.id ?? segIdx}`}
                                                                                 className="absolute bottom-0 h-1.5 z-30 rounded-sm bg-violet-500/85 border border-violet-700/80"
+                                                                                style={{
+                                                                                    left: `${specialTimelineLeftPercent(seg.startMin)}%`,
+                                                                                    width: `${((seg.endMin - seg.startMin) / specialTimelineMinutes) * 100}%`
+                                                                                }}
+                                                                                title={seg.title}
+                                                                            />
+                                                                        ))}
+                                                                        {trainingBarsForCell.map((seg, segIdx) => (
+                                                                            <div
+                                                                                key={`special-training-${seg.id ?? segIdx}`}
+                                                                                className="absolute top-0 h-1.5 z-40 rounded-sm bg-teal-500/90 border border-teal-700/80"
                                                                                 style={{
                                                                                     left: `${specialTimelineLeftPercent(seg.startMin)}%`,
                                                                                     width: `${((seg.endMin - seg.startMin) / specialTimelineMinutes) * 100}%`
@@ -19514,12 +19643,36 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     )}
 
                     <>
-                    {!modalState.multipleDates && (
+                    {modalShowTabs && (
+                        <div className="sticky top-0 z-20 -mx-4 -mt-2 mb-5 px-4 pt-2 pb-3 bg-white/90 backdrop-blur supports-[backdrop-filter]:bg-white/75 border-b border-slate-100">
+                            <div className="inline-flex w-full p-1 bg-slate-100 rounded-2xl gap-1">
+                                {[
+                                    { key: 'shifts', label: 'Смены', icon: 'fa-clock' },
+                                    { key: 'status', label: 'Статус', icon: 'fa-user-clock' },
+                                    { key: 'control', label: 'Контроль', icon: 'fa-shield-alt' }
+                                ].map(tab => {
+                                    const active = modalActiveTab === tab.key;
+                                    return (
+                                        <button
+                                            key={tab.key}
+                                            type="button"
+                                            onClick={() => setModalActiveTab(tab.key)}
+                                            className={`flex-1 px-4 py-1.5 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2 ${active ? 'bg-white shadow-sm text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}
+                                        >
+                                            <FaIcon className={`fas ${tab.icon} text-[11px]`}></FaIcon>
+                                            {tab.label}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    )}
+                    {!modalState.multipleDates && modalTabShifts && (
                     <div className="mb-6 p-4 bg-sky-50 border border-sky-200 rounded-xl">
                         <label className="flex items-center gap-3 cursor-pointer group">
-                            <input 
-                                type="checkbox" 
-                                checked={modalState.isDayOff} 
+                            <input
+                                type="checkbox"
+                                checked={modalState.isDayOff}
                                 onChange={() => toggleDayOff(modalState.opId, modalState.date)}
                                 className="w-5 h-5 rounded text-sky-600 focus:ring-2 focus:ring-sky-500"
                             />
@@ -19538,7 +19691,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </div>
                     )}
 
-                    {!isBulkSelectionModal && (
+                    {!isBulkSelectionModal && modalTabStatus && (
                     <div className="mb-6 p-4 rounded-xl border border-slate-200 bg-slate-50/70">
                         <div className="flex items-center justify-between gap-3 mb-3">
                             <h4 className="text-sm font-semibold text-slate-900 flex items-center gap-2">
@@ -19726,7 +19879,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </div>
                     )}
 
-                    {!isBulkSelectionModal && !modalState.multipleDates && (
+                    {!isBulkSelectionModal && !modalState.multipleDates && modalTabControl && (
                     <div className="mb-6 p-4 rounded-xl border border-amber-200 bg-amber-50/60">
                         <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
                             <h4 className="text-sm font-semibold text-slate-900 flex items-center gap-2">
@@ -20097,6 +20250,92 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </div>
                     )}
 
+                    {!isBulkSelectionModal && !modalState.multipleDates && modalTabControl && (
+                    <div className="mb-6 p-4 rounded-2xl border border-slate-200 bg-white">
+                        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                            <h4 className="text-sm font-semibold text-slate-900 flex items-center gap-2">
+                                <FaIcon className="fas fa-chalkboard-teacher text-teal-600"></FaIcon>
+                                Сохранённые тренинги
+                                {modalSavedTrainings.length > 0 && (
+                                    <span className="px-2 py-0.5 rounded-full bg-teal-50 border border-teal-200 text-teal-700 text-[11px] font-semibold">
+                                        {modalSavedTrainings.length}
+                                    </span>
+                                )}
+                            </h4>
+                            <button
+                                type="button"
+                                onClick={() => openPlannerTrainingModalForCurrentDay('add')}
+                                disabled={plannerTrainingActionLoading}
+                                className="px-3 py-1.5 rounded-lg border border-teal-200 bg-white hover:bg-teal-50 text-teal-700 text-xs font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-1.5"
+                            >
+                                <FaIcon className={`fas ${plannerTrainingActionLoading ? 'fa-spinner fa-spin' : 'fa-plus'}`}></FaIcon>
+                                Добавить тренинг
+                            </button>
+                        </div>
+                        {modalSavedTrainings.length === 0 ? (
+                            <div className="text-center py-6 text-slate-400 bg-slate-50 rounded-xl border border-dashed border-slate-200">
+                                <FaIcon className="fas fa-chalkboard-teacher text-2xl mb-2"></FaIcon>
+                                <div className="text-sm">Тренингов за этот день нет</div>
+                            </div>
+                        ) : (
+                            <div className="space-y-2">
+                                {modalSavedTrainings.map((t, idx) => {
+                                    const hours = computeTrainingDurationHours(t);
+                                    const countInHours = t?.count_in_hours !== false;
+                                    return (
+                                        <div key={t?.id ?? `saved-training-${idx}`} className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2.5 hover:border-slate-300 transition-colors">
+                                            <div className="w-9 h-9 rounded-full bg-teal-50 border border-teal-200 flex items-center justify-center text-teal-600 shrink-0">
+                                                <FaIcon className="fas fa-chalkboard-teacher text-xs"></FaIcon>
+                                            </div>
+                                            <div className="flex-1 min-w-[160px]">
+                                                <div className="flex items-center gap-2 flex-wrap">
+                                                    <span className="text-sm font-semibold text-slate-900 tabular-nums">
+                                                        {(t?.start_time || '—')} — {(t?.end_time || '—')}
+                                                    </span>
+                                                    {hours > 0 && <span className="text-xs text-slate-500 tabular-nums">{hours} ч</span>}
+                                                    <span className={`px-2 py-0.5 rounded-full border text-[10px] font-semibold ${countInHours ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-slate-100 text-slate-500'}`}>
+                                                        {countInHours ? 'В часах' : 'Не в часах'}
+                                                    </span>
+                                                </div>
+                                                <div className="text-sm text-slate-700 mt-0.5">{t?.reason || 'Тренинг'}</div>
+                                                {t?.comment && (
+                                                    <div className="text-xs text-slate-500 mt-0.5">{t.comment}</div>
+                                                )}
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => openPlannerTrainingModalForCurrentDay('edit', {
+                                                        editingId: t?.id,
+                                                        startTime: t?.start_time,
+                                                        endTime: t?.end_time,
+                                                        reason: t?.reason,
+                                                        comment: t?.comment
+                                                    })}
+                                                    disabled={plannerTrainingActionLoading || !t?.id}
+                                                    className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+                                                >
+                                                    <FaIcon className="fas fa-pen text-[10px]"></FaIcon>
+                                                    Изменить
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => deletePlannerTraining(t?.id, modalState.date)}
+                                                    disabled={plannerTrainingActionLoading || !t?.id}
+                                                    className="px-2.5 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                                                    title="Удалить тренинг"
+                                                >
+                                                    <FaIcon className="fas fa-trash-alt text-[10px]"></FaIcon>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </div>
+                    )}
+
                     {isBulkSelectionModal && (
                     <div className="mb-6">
                         <h4 className="text-sm font-semibold text-slate-900 mb-4 flex items-center gap-2">
@@ -20145,7 +20384,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </div>
                     )}
 
-                    {!modalState.isDayOff && !modalState.multipleDates && (
+                    {!modalState.isDayOff && !modalState.multipleDates && modalTabShifts && (
                     <>
                     <div className="mb-6">
                         <h4 className="text-sm font-semibold text-slate-900 mb-3 flex items-center gap-2">
@@ -20507,10 +20746,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <div className="flex items-center justify-between gap-3">
                                 <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
                                     <FaIcon className="fas fa-chalkboard-teacher text-blue-600"></FaIcon>
-                                    {(String(plannerTrainingModalState.mode || '') === 'confirm_training_flag'
-                                        || String(plannerTrainingModalState.mode || '') === 'confirm_training_flag_all')
-                                        ? 'Подтвердить тренинг'
-                                        : 'Добавить тренинг'}
+                                    {plannerTrainingModalState.editingId
+                                        ? 'Редактировать тренинг'
+                                        : (String(plannerTrainingModalState.mode || '') === 'confirm_training_flag'
+                                            || String(plannerTrainingModalState.mode || '') === 'confirm_training_flag_all')
+                                            ? 'Подтвердить тренинг'
+                                            : 'Добавить тренинг'}
                                 </h3>
                                 <button
                                     type="button"
@@ -20645,10 +20886,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <FaIcon className={`fas ${plannerTrainingActionLoading ? 'fa-spinner fa-spin' : 'fa-save'}`}></FaIcon>
                                 {plannerTrainingActionLoading
                                     ? 'Сохраняем...'
-                                    : ((String(plannerTrainingModalState.mode || '') === 'confirm_training_flag'
-                                        || String(plannerTrainingModalState.mode || '') === 'confirm_training_flag_all')
-                                        ? 'Подтвердить'
-                                        : 'Сохранить тренинг')}
+                                    : (plannerTrainingModalState.editingId
+                                        ? 'Обновить тренинг'
+                                        : (String(plannerTrainingModalState.mode || '') === 'confirm_training_flag'
+                                            || String(plannerTrainingModalState.mode || '') === 'confirm_training_flag_all')
+                                            ? 'Подтвердить'
+                                            : 'Сохранить тренинг')}
                             </button>
                         </div>
                     </SimpleModal>
