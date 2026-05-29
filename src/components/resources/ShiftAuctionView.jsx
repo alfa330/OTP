@@ -30,6 +30,7 @@ import {
   ShieldCheck,
   Sparkles,
   Square,
+  Table,
   Undo2,
   Users,
   Wifi,
@@ -1852,6 +1853,170 @@ const ShiftAuctionInstructionsModal = ({ open, role, canSwitchRole = false, onCl
   );
 };
 
+const SHIFTS_TABLE_DAY_LABELS = ['пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс'];
+const SHIFTS_TABLE_TIME_FORMATTER = new Intl.DateTimeFormat('ru-RU', { day: '2-digit', month: '2-digit' });
+
+const formatShiftsTableDateHeader = (dateText) => {
+  if (!dateText) return '';
+  const [year, month, day] = String(dateText).split('-').map(Number);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return dateText;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  const weekday = SHIFTS_TABLE_DAY_LABELS[(date.getUTCDay() + 6) % 7];
+  return `${weekday} ${SHIFTS_TABLE_TIME_FORMATTER.format(date).replace(/\./g, '.')}`;
+};
+
+const ShiftAuctionShiftsTable = ({ operators = [], workloads = [], lots = [], lotDates = [] }) => {
+  const workloadById = useMemo(() => {
+    const map = new Map();
+    (Array.isArray(workloads) ? workloads : []).forEach((w) => {
+      if (w && w.operator_id != null) map.set(Number(w.operator_id), w);
+    });
+    return map;
+  }, [workloads]);
+
+  const lotsByOperatorDate = useMemo(() => {
+    const map = new Map();
+    (Array.isArray(lots) ? lots : []).forEach((lot) => {
+      if (!lot || lot.status !== 'claimed') return;
+      const opId = Number(lot.claimed_by);
+      if (!Number.isFinite(opId) || opId <= 0) return;
+      const date = lot.shift_date;
+      if (!date) return;
+      const key = `${opId}|${date}`;
+      const list = map.get(key) || [];
+      list.push(lot);
+      map.set(key, list);
+    });
+    map.forEach((list) => {
+      list.sort((a, b) => String(a?.start_time || '').localeCompare(String(b?.start_time || '')));
+    });
+    return map;
+  }, [lots]);
+
+  const rows = useMemo(() => {
+    const sortedOperators = [...(Array.isArray(operators) ? operators : [])].sort((a, b) => {
+      const dirCmp = String(a?.direction || '').localeCompare(String(b?.direction || ''), 'ru');
+      if (dirCmp !== 0) return dirCmp;
+      return String(a?.name || '').localeCompare(String(b?.name || ''), 'ru');
+    });
+    return sortedOperators
+      .filter((op) => op && op.id != null)
+      .map((op) => {
+        const opId = Number(op.id);
+        const workload = workloadById.get(opId) || {};
+        return { operator: op, opId, workload };
+      });
+  }, [operators, workloadById]);
+
+  const getNormBadgeClass = (claimedMinutes, normMinutes) => {
+    if (!normMinutes || normMinutes <= 0) return 'bg-slate-100 text-slate-600 border-slate-200';
+    const pct = (claimedMinutes / normMinutes) * 100;
+    if (pct >= 100) return 'bg-emerald-50 text-emerald-800 border-emerald-300';
+    if (pct >= 80) return 'bg-amber-50 text-amber-800 border-amber-300';
+    return 'bg-orange-50 text-orange-800 border-orange-300';
+  };
+
+  const formatHours = (minutes) => {
+    const m = Math.max(0, Number(minutes) || 0);
+    const hours = m / 60;
+    return Number.isInteger(hours) ? `${hours}` : hours.toFixed(1);
+  };
+
+  const dates = Array.isArray(lotDates) ? lotDates : [];
+
+  if (!rows.length || !dates.length) {
+    return (
+      <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+        <h2 className="text-base font-semibold text-slate-950 sm:text-lg">Таблица смен</h2>
+        <p className="mt-2 text-sm text-slate-500">
+          {!dates.length ? 'Нет смен в выбранной неделе.' : 'Нет операторов-участников.'}
+        </p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
+      <div className="border-b border-slate-200 px-3 py-3 sm:px-5 sm:py-4">
+        <div className="flex flex-col gap-1">
+          <h2 className="text-base font-semibold text-slate-950 sm:text-lg">Таблица смен</h2>
+          <p className="text-xs text-slate-600 sm:text-sm">
+            Распределение смен по операторам недели. Подсветка нормы:
+            <span className="ml-1 inline-flex items-center rounded border border-emerald-300 bg-emerald-50 px-1.5 text-[10px] font-semibold text-emerald-800">100%+</span>
+            <span className="ml-1 inline-flex items-center rounded border border-amber-300 bg-amber-50 px-1.5 text-[10px] font-semibold text-amber-800">80–99%</span>
+            <span className="ml-1 inline-flex items-center rounded border border-orange-300 bg-orange-50 px-1.5 text-[10px] font-semibold text-orange-800">&lt;80%</span>
+          </p>
+        </div>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[960px] border-collapse text-xs sm:text-sm">
+          <thead className="bg-slate-50 text-slate-700">
+            <tr>
+              <th className="sticky left-0 z-10 border-b border-slate-200 bg-slate-50 px-3 py-2 text-left font-semibold">ФИО</th>
+              <th className="border-b border-slate-200 px-3 py-2 text-center font-semibold">Ставка</th>
+              <th className="border-b border-slate-200 px-3 py-2 text-center font-semibold">Норма</th>
+              {dates.map((date) => (
+                <th key={`shifts-th-${date}`} className="border-b border-slate-200 px-2 py-2 text-center font-semibold">
+                  {formatShiftsTableDateHeader(date)}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(({ operator, opId, workload }) => {
+              const claimedNet = Number(workload?.claimed_net_minutes || 0);
+              const norm = Number(workload?.norm_minutes || 0);
+              const pct = norm > 0 ? Math.round((claimedNet / norm) * 100) : 0;
+              const badgeClass = getNormBadgeClass(claimedNet, norm);
+              return (
+                <tr key={`shifts-row-${opId}`} className="border-b border-slate-100 hover:bg-slate-50/60">
+                  <td className="sticky left-0 z-10 bg-white px-3 py-2 align-top">
+                    <div className="font-medium text-slate-900">{operator?.name || `Оператор #${opId}`}</div>
+                    <div className="text-[11px] text-slate-500">{operator?.direction || ''}</div>
+                  </td>
+                  <td className="px-3 py-2 text-center align-top tabular-nums text-slate-700">
+                    {Number(operator?.rate ?? workload?.rate ?? 1).toFixed(2)}
+                  </td>
+                  <td className="px-3 py-2 align-top">
+                    <div className={`inline-flex flex-col items-center gap-1 rounded-md border px-2 py-1 ${badgeClass}`}>
+                      <span className="text-[11px] font-semibold tabular-nums">
+                        {formatHours(claimedNet)} / {formatHours(norm)} ч
+                      </span>
+                      <span className="text-[10px] font-bold tabular-nums opacity-80">{pct}%</span>
+                    </div>
+                  </td>
+                  {dates.map((date) => {
+                    const cellLots = lotsByOperatorDate.get(`${opId}|${date}`) || [];
+                    return (
+                      <td key={`shifts-cell-${opId}-${date}`} className="border-l border-slate-100 px-2 py-2 align-top">
+                        <div className="flex flex-col gap-1">
+                          {cellLots.length === 0 ? (
+                            <span className="text-[11px] text-slate-300">—</span>
+                          ) : (
+                            cellLots.map((lot) => (
+                              <span
+                                key={`shifts-lot-${lot.id ?? `${lot.source_schedule_shift_id || ''}-${lot.start_time}-${lot.end_time}`}`}
+                                className="inline-flex items-center justify-center rounded border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[11px] font-medium text-blue-800 tabular-nums"
+                                title={formatAuctionShiftLabel(lot)}
+                              >
+                                {String(lot.start_time || '').slice(0, 5)}–{String(lot.end_time || '').slice(0, 5)}
+                              </span>
+                            ))
+                          )}
+                        </div>
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+};
+
 const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHeader, showToast, onOpenResourceGeneration, initialPeriod = null, onInitialPeriodApplied = null }) => {
   const role = normalizeRole(user?.role);
   const canManage = isAdminLikeRole(role);
@@ -3627,6 +3792,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
             {[
               canManage ? { id: 'settings', label: 'Настройки', icon: Settings2 } : null,
               { id: 'monitoring', label: 'Мониторинг смен', icon: MousePointerClick },
+              { id: 'shifts_table', label: 'Таблица смен', icon: Table },
               { id: 'progress', label: 'Прогресс', icon: Users, badge: operatorWorkloadStats.total > 0 ? operatorWorkloadStats.total : null },
               { id: 'journal', label: 'Журнал', icon: History, badge: journalTotal > 0 ? journalTotal : null }
             ].filter(Boolean).map((tab) => {
@@ -4001,6 +4167,15 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
               </aside>
             ) : null}
           </section>
+        )}
+
+        {canMonitor && monitorTab === 'shifts_table' && (
+          <ShiftAuctionShiftsTable
+            operators={monitoredOperators}
+            workloads={monitoredParticipantWorkloads}
+            lots={monitoredLots}
+            lotDates={lotDates}
+          />
         )}
 
         {canMonitor && monitorTab === 'progress' && (
