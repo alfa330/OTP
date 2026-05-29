@@ -2157,123 +2157,81 @@ const ShiftAuctionShiftsTable = ({
       </div>
       {cellModalData ? (
         <div
-          className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/40 px-4"
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/30 px-4 backdrop-blur-md"
           onClick={() => {
             if (actionLoading) return;
             setSelectedCell(null);
             setPendingAction(null);
           }}
+          style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", system-ui, sans-serif' }}
         >
           <div
-            className="w-full max-w-2xl overflow-hidden rounded-lg border border-slate-200 bg-white shadow-xl"
+            className="w-full max-w-xl overflow-hidden rounded-3xl bg-slate-100 shadow-2xl ring-1 ring-slate-900/5"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-start justify-between gap-3 border-b border-slate-200 bg-slate-50 px-5 py-3">
-              <div className="min-w-0">
-                <div className="text-sm font-semibold text-slate-900">{cellModalData.operator?.name || 'Оператор'}</div>
-                <div className="text-xs text-slate-500">
+            <div className="relative flex items-center justify-between gap-3 border-b border-slate-200/70 bg-white/80 px-6 py-4 backdrop-blur-xl">
+              <div className="min-w-0 flex-1">
+                <div className="text-[15px] font-semibold leading-tight text-slate-900">{cellModalData.operator?.name || 'Оператор'}</div>
+                <div className="mt-0.5 text-[12px] text-slate-500">
                   {cellModalData.operator?.direction || ''}
                   {cellModalData.operator?.direction ? ' · ' : ''}
-                  Ставка {Number(cellModalData.operator?.rate ?? 1).toFixed(2)} · Норма {formatHours(cellModalData.workload?.claimed_net_minutes || 0)} / {formatHours(cellModalData.workload?.norm_minutes || 0)} ч
+                  Ставка {Number(cellModalData.operator?.rate ?? 1).toFixed(2)} · {formatHours(cellModalData.workload?.claimed_net_minutes || 0)}/{formatHours(cellModalData.workload?.norm_minutes || 0)} ч
                 </div>
               </div>
-              <div className="text-right">
-                <div className="text-sm font-semibold text-slate-700">{formatShiftsTableDateHeader(cellModalData.date)}</div>
+              <div className="flex flex-col items-end gap-1.5">
+                <div className="rounded-full bg-slate-100 px-3 py-1 text-[12px] font-semibold text-slate-700">
+                  {formatShiftsTableDateHeader(cellModalData.date)}
+                </div>
                 <button
                   type="button"
                   onClick={() => { if (!actionLoading) { setSelectedCell(null); setPendingAction(null); } }}
-                  className="mt-1 text-xs text-slate-500 hover:text-slate-800"
+                  disabled={actionLoading}
+                  className="text-[13px] font-medium text-blue-600 hover:text-blue-700 disabled:opacity-50"
                 >
-                  Закрыть
+                  Готово
                 </button>
               </div>
             </div>
-            <div className="max-h-[60vh] overflow-y-auto px-5 py-4 text-sm">
-              <section className="mb-5">
-                <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">Взятые смены</h4>
-                {cellModalData.claimed.length === 0 ? (
-                  <p className="text-xs text-slate-400">Нет взятых смен на эту дату.</p>
-                ) : (
-                  <ul className="flex flex-wrap gap-2">
-                    {cellModalData.claimed.map((lot) => {
-                      const lotKey = `${lot.id ?? `${lot.source_schedule_shift_id || ''}-${lot.start_time}-${lot.end_time}`}`;
-                      const isPending = pendingAction?.type === 'unclaim' && pendingAction?.lot === lot;
-                      return (
-                        <li key={`claimed-${lotKey}`} className="flex items-center gap-1.5 rounded border border-blue-200 bg-blue-50 px-2 py-1">
-                          <span className="text-xs font-medium text-blue-900 tabular-nums">
-                            {String(lot.start_time || '').slice(0, 5)}–{String(lot.end_time || '').slice(0, 5)}
-                          </span>
-                          {canEdit ? (
-                            isPending ? (
-                              <>
-                                <button
-                                  type="button"
-                                  disabled={actionLoading}
-                                  onClick={() => handleUnclaim(lot)}
-                                  className="rounded bg-rose-600 px-2 py-0.5 text-[11px] font-semibold text-white hover:bg-rose-700 disabled:opacity-50"
-                                >
-                                  Подтвердить
-                                </button>
-                                <button
-                                  type="button"
-                                  disabled={actionLoading}
-                                  onClick={() => setPendingAction(null)}
-                                  className="rounded px-1.5 py-0.5 text-[11px] text-slate-500 hover:text-slate-800"
-                                >
-                                  Отмена
-                                </button>
-                              </>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() => setPendingAction({ type: 'unclaim', lot })}
-                                title="Убрать смену"
-                                className="ml-1 rounded p-0.5 text-blue-700 hover:bg-blue-100 hover:text-rose-700"
-                              >
-                                <X size={12} />
-                              </button>
-                            )
-                          ) : null}
-                        </li>
-                      );
-                    })}
-                  </ul>
-                )}
-              </section>
 
-              {canEdit ? (
-                <>
-                  <section className="mb-5">
-                    <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">
-                      Можно добавить ({cellModalData.compatible.length})
-                    </h4>
-                    {cellModalData.compatible.length === 0 ? (
-                      <p className="text-xs text-slate-400">Нет свободных смен, которые не пересекаются с уже взятыми.</p>
-                    ) : (
-                      <ul className="flex flex-wrap gap-2">
-                        {cellModalData.compatible.map((lot) => {
-                          const lotKey = `${lot.id ?? `${lot.source_schedule_shift_id || ''}-${lot.start_time}-${lot.end_time}`}`;
-                          const isPending = pendingAction?.type === 'claim' && pendingAction?.lot === lot;
-                          return (
-                            <li key={`compat-${lotKey}`} className="flex items-center gap-1.5 rounded border border-emerald-200 bg-emerald-50 px-2 py-1">
-                              <span className="text-xs font-medium text-emerald-900 tabular-nums">
-                                {String(lot.start_time || '').slice(0, 5)}–{String(lot.end_time || '').slice(0, 5)}
-                              </span>
-                              {isPending ? (
+            <div className="max-h-[65vh] space-y-5 overflow-y-auto px-4 py-5">
+              <section>
+                <div className="mb-2 px-3 text-[11px] font-semibold uppercase tracking-wider text-slate-500">Взятые смены</div>
+                <div className="rounded-2xl bg-white px-3 py-3 ring-1 ring-slate-200/70">
+                  {cellModalData.claimed.length === 0 ? (
+                    <p className="px-1 py-2 text-[13px] text-slate-400">Нет смен на эту дату</p>
+                  ) : (
+                    <ul className="flex flex-wrap gap-2">
+                      {cellModalData.claimed.map((lot) => {
+                        const lotKey = `${lot.id ?? `${lot.source_schedule_shift_id || ''}-${lot.start_time}-${lot.end_time}`}`;
+                        const isPending = pendingAction?.type === 'unclaim' && pendingAction?.lot === lot;
+                        return (
+                          <li
+                            key={`claimed-${lotKey}`}
+                            className={`flex items-center overflow-hidden rounded-full border transition-all ${
+                              isPending
+                                ? 'border-rose-200 bg-rose-50/70'
+                                : 'border-blue-200/80 bg-blue-50/70'
+                            }`}
+                          >
+                            <span className="px-3 py-1 text-[12.5px] font-semibold text-blue-900 tabular-nums">
+                              {String(lot.start_time || '').slice(0, 5)}–{String(lot.end_time || '').slice(0, 5)}
+                            </span>
+                            {canEdit ? (
+                              isPending ? (
                                 <>
                                   <button
                                     type="button"
                                     disabled={actionLoading}
-                                    onClick={() => handleClaim(lot, cellModalData.operator.id)}
-                                    className="rounded bg-emerald-600 px-2 py-0.5 text-[11px] font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+                                    onClick={() => handleUnclaim(lot)}
+                                    className="flex items-center gap-1 border-l border-rose-200 bg-rose-500 px-3 py-1 text-[12px] font-semibold text-white hover:bg-rose-600 disabled:opacity-50"
                                   >
-                                    Подтвердить
+                                    Убрать
                                   </button>
                                   <button
                                     type="button"
                                     disabled={actionLoading}
                                     onClick={() => setPendingAction(null)}
-                                    className="rounded px-1.5 py-0.5 text-[11px] text-slate-500 hover:text-slate-800"
+                                    className="border-l border-rose-200 px-2.5 py-1 text-[12px] font-medium text-slate-500 hover:bg-slate-50 hover:text-slate-800"
                                   >
                                     Отмена
                                   </button>
@@ -2281,55 +2239,131 @@ const ShiftAuctionShiftsTable = ({
                               ) : (
                                 <button
                                   type="button"
-                                  onClick={() => setPendingAction({ type: 'claim', lot })}
-                                  title="Добавить оператору"
-                                  className="ml-1 rounded p-0.5 text-emerald-700 hover:bg-emerald-100"
+                                  onClick={() => setPendingAction({ type: 'unclaim', lot })}
+                                  title="Убрать смену"
+                                  className="flex h-7 w-7 items-center justify-center border-l border-blue-200/80 text-blue-700 transition hover:bg-rose-100 hover:text-rose-600"
                                 >
-                                  <Plus size={12} />
+                                  <X size={13} strokeWidth={2.5} />
                                 </button>
-                              )}
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    )}
+                              )
+                            ) : null}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </div>
+              </section>
+
+              {canEdit ? (
+                <>
+                  <section>
+                    <div className="mb-2 flex items-end justify-between px-3 text-[11px]">
+                      <span className="font-semibold uppercase tracking-wider text-slate-500">Можно добавить</span>
+                      <span className="font-semibold text-slate-400">{cellModalData.compatible.length}</span>
+                    </div>
+                    <div className="rounded-2xl bg-white px-3 py-3 ring-1 ring-slate-200/70">
+                      {cellModalData.compatible.length === 0 ? (
+                        <p className="px-1 py-2 text-[13px] text-slate-400">Нет совместимых смен</p>
+                      ) : (
+                        <ul className="flex flex-wrap gap-2">
+                          {cellModalData.compatible.map((lot) => {
+                            const lotKey = `${lot.id ?? `${lot.source_schedule_shift_id || ''}-${lot.start_time}-${lot.end_time}`}`;
+                            const isPending = pendingAction?.type === 'claim' && pendingAction?.lot === lot;
+                            return (
+                              <li
+                                key={`compat-${lotKey}`}
+                                className={`flex items-center overflow-hidden rounded-full border transition-all ${
+                                  isPending
+                                    ? 'border-emerald-300 bg-emerald-50'
+                                    : 'border-emerald-200/80 bg-emerald-50/70'
+                                }`}
+                              >
+                                <span className="px-3 py-1 text-[12.5px] font-semibold text-emerald-900 tabular-nums">
+                                  {String(lot.start_time || '').slice(0, 5)}–{String(lot.end_time || '').slice(0, 5)}
+                                </span>
+                                {isPending ? (
+                                  <>
+                                    <button
+                                      type="button"
+                                      disabled={actionLoading}
+                                      onClick={() => handleClaim(lot, cellModalData.operator.id)}
+                                      className="border-l border-emerald-300 bg-emerald-500 px-3 py-1 text-[12px] font-semibold text-white hover:bg-emerald-600 disabled:opacity-50"
+                                    >
+                                      Добавить
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={actionLoading}
+                                      onClick={() => setPendingAction(null)}
+                                      className="border-l border-emerald-300 px-2.5 py-1 text-[12px] font-medium text-slate-500 hover:bg-slate-50 hover:text-slate-800"
+                                    >
+                                      Отмена
+                                    </button>
+                                  </>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => setPendingAction({ type: 'claim', lot })}
+                                    title="Добавить оператору"
+                                    className="flex h-7 w-7 items-center justify-center border-l border-emerald-200/80 text-emerald-700 transition hover:bg-emerald-100"
+                                  >
+                                    <Plus size={13} strokeWidth={2.5} />
+                                  </button>
+                                )}
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      )}
+                    </div>
                   </section>
 
                   <section>
-                    <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">
-                      Все нераспределённые смены этого дня ({cellModalData.dayAvailable.length})
-                    </h4>
-                    {cellModalData.dayAvailable.length === 0 ? (
-                      <p className="text-xs text-slate-400">Все смены этого дня уже распределены.</p>
-                    ) : (
-                      <ul className="flex flex-wrap gap-2">
-                        {cellModalData.dayAvailable.map((lot) => {
-                          const lotKey = `${lot.id ?? `${lot.source_schedule_shift_id || ''}-${lot.start_time}-${lot.end_time}`}`;
-                          const overlaps = !cellModalData.compatible.includes(lot);
-                          return (
-                            <li
-                              key={`avail-${lotKey}`}
-                              className={`inline-flex items-center rounded border px-2 py-1 text-xs tabular-nums ${
-                                overlaps
-                                  ? 'border-slate-200 bg-slate-50 text-slate-400'
-                                  : 'border-emerald-200 bg-emerald-50 text-emerald-900'
-                              }`}
-                              title={overlaps ? 'Пересекается с уже взятыми сменами' : ''}
-                            >
-                              {String(lot.start_time || '').slice(0, 5)}–{String(lot.end_time || '').slice(0, 5)}
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    )}
+                    <div className="mb-2 flex items-end justify-between px-3 text-[11px]">
+                      <span className="font-semibold uppercase tracking-wider text-slate-500">Все нераспределённые этого дня</span>
+                      <span className="font-semibold text-slate-400">{cellModalData.dayAvailable.length}</span>
+                    </div>
+                    <div className="rounded-2xl bg-white px-3 py-3 ring-1 ring-slate-200/70">
+                      {cellModalData.dayAvailable.length === 0 ? (
+                        <p className="px-1 py-2 text-[13px] text-slate-400">Все смены распределены</p>
+                      ) : (
+                        <ul className="flex flex-wrap gap-2">
+                          {cellModalData.dayAvailable.map((lot) => {
+                            const lotKey = `${lot.id ?? `${lot.source_schedule_shift_id || ''}-${lot.start_time}-${lot.end_time}`}`;
+                            const overlaps = !cellModalData.compatible.includes(lot);
+                            return (
+                              <li
+                                key={`avail-${lotKey}`}
+                                className={`inline-flex items-center rounded-full border px-3 py-1 text-[12.5px] font-semibold tabular-nums ${
+                                  overlaps
+                                    ? 'border-slate-200 bg-slate-100/70 text-slate-400 line-through decoration-slate-300'
+                                    : 'border-emerald-200/80 bg-emerald-50/70 text-emerald-900'
+                                }`}
+                                title={overlaps ? 'Пересекается с уже взятой сменой' : 'Совместимо'}
+                              >
+                                {String(lot.start_time || '').slice(0, 5)}–{String(lot.end_time || '').slice(0, 5)}
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      )}
+                    </div>
                   </section>
                 </>
               ) : (
-                <p className="text-xs text-slate-400">Только просмотр — для управления нужна роль администратора или супервайзера.</p>
+                <section>
+                  <div className="rounded-2xl bg-white px-4 py-4 text-[13px] text-slate-500 ring-1 ring-slate-200/70">
+                    Только просмотр. Для управления сменами нужна роль администратора или супервайзера.
+                  </div>
+                </section>
               )}
             </div>
+
             {actionLoading ? (
-              <div className="border-t border-slate-200 bg-slate-50 px-5 py-2 text-xs text-slate-500">Сохраняем…</div>
+              <div className="border-t border-slate-200/70 bg-white/80 px-6 py-2.5 text-center text-[12px] font-medium text-slate-500 backdrop-blur-xl">
+                Сохраняем…
+              </div>
             ) : null}
           </div>
         </div>
