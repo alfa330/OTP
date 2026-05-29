@@ -1715,6 +1715,8 @@ class Database:
             cursor.execute("ALTER TABLE shift_auction_test_lots ADD COLUMN IF NOT EXISTS source_schedule_plan_id INTEGER NULL;")
             cursor.execute("ALTER TABLE shift_auction_test_lots ADD COLUMN IF NOT EXISTS source_schedule_shift_id INTEGER NULL;")
             cursor.execute("ALTER TABLE shift_auction_test_lots ADD COLUMN IF NOT EXISTS post_auction_claimed BOOLEAN NOT NULL DEFAULT FALSE;")
+            cursor.execute("ALTER TABLE shift_auction_test_lots ADD COLUMN IF NOT EXISTS post_claim_start_time TIME NULL;")
+            cursor.execute("ALTER TABLE shift_auction_test_lots ADD COLUMN IF NOT EXISTS post_claim_end_time TIME NULL;")
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS shift_auction_test_day_offs (
                     operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1748,9 +1750,13 @@ class Database:
                     source_schedule_shift_id INTEGER NOT NULL REFERENCES resource_saved_schedule_shifts(id) ON DELETE CASCADE,
                     claimed_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                     claimed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    claimed_start_time TIME NULL,
+                    claimed_end_time TIME NULL,
                     PRIMARY KEY (plan_id, source_schedule_shift_id)
                 );
             """)
+            cursor.execute("ALTER TABLE shift_auction_historical_claims ADD COLUMN IF NOT EXISTS claimed_start_time TIME NULL;")
+            cursor.execute("ALTER TABLE shift_auction_historical_claims ADD COLUMN IF NOT EXISTS claimed_end_time TIME NULL;")
 
             # Optimized Indexes (added more based on query patterns)
             cursor.execute("""
@@ -2361,6 +2367,8 @@ class Database:
             plan_id = _parse_int(lot.get('source_schedule_plan_id'))
             shift_id = _parse_int(lot.get('source_schedule_shift_id'))
             claimed_by = _parse_int(lot.get('claimed_by') or payload.get('operator_id'))
+            claim_start_time = lot.get('claim_start_time') or lot.get('post_claim_start_time')
+            claim_end_time = lot.get('claim_end_time') or lot.get('post_claim_end_time')
             claimed_at = created_at
             claimed_at_raw = lot.get('claimed_at')
             if claimed_at_raw:
@@ -2370,16 +2378,16 @@ class Database:
                     claimed_at = created_at
 
             if event_name == 'lot_claimed' and plan_id and shift_id and claimed_by:
-                in_flight[(plan_id, shift_id)] = (claimed_by, claimed_at)
+                in_flight[(plan_id, shift_id)] = (claimed_by, claimed_at, None, None)
             elif event_name == 'lot_released' and plan_id and shift_id:
                 in_flight.pop((plan_id, shift_id), None)
             elif event_name == 'lot_post_auction_claimed' and plan_id and shift_id and claimed_by:
                 cursor.execute("""
                     INSERT INTO shift_auction_historical_claims
-                        (plan_id, source_schedule_shift_id, claimed_by, claimed_at)
-                    VALUES (%s, %s, %s, %s)
+                        (plan_id, source_schedule_shift_id, claimed_by, claimed_at, claimed_start_time, claimed_end_time)
+                    VALUES (%s, %s, %s, %s, %s, %s)
                     ON CONFLICT (plan_id, source_schedule_shift_id) DO NOTHING
-                """, (plan_id, shift_id, claimed_by, claimed_at))
+                """, (plan_id, shift_id, claimed_by, claimed_at, claim_start_time, claim_end_time))
             elif event_name in ('settings_updated', 'auction_restarted'):
                 raw_plan_id = payload.get('selected_schedule_plan_id') or payload.get('plan_id')
                 parsed_plan_id = _parse_int(raw_plan_id)
@@ -2391,15 +2399,15 @@ class Database:
                 raw_plan_id = payload.get('selected_schedule_plan_id') or payload.get('plan_id')
                 publish_plan_id = _parse_int(raw_plan_id) or current_plan_id_for_publish
                 if publish_plan_id:
-                    for (p_id, s_id), (cb, ca) in list(in_flight.items()):
+                    for (p_id, s_id), (cb, ca, cs, ce) in list(in_flight.items()):
                         if p_id != publish_plan_id:
                             continue
                         cursor.execute("""
                             INSERT INTO shift_auction_historical_claims
-                                (plan_id, source_schedule_shift_id, claimed_by, claimed_at)
-                            VALUES (%s, %s, %s, %s)
+                                (plan_id, source_schedule_shift_id, claimed_by, claimed_at, claimed_start_time, claimed_end_time)
+                            VALUES (%s, %s, %s, %s, %s, %s)
                             ON CONFLICT (plan_id, source_schedule_shift_id) DO NOTHING
-                        """, (p_id, s_id, cb, ca))
+                        """, (p_id, s_id, cb, ca, cs, ce))
 
     def create_user(
         self,
@@ -3369,7 +3377,40 @@ class Database:
             "claimed_by_direction": (row[14] or "") if len(row) > 14 else "",
             "source_start_minute": int(row[15]) if len(row) > 15 and row[15] is not None else None,
             "source_end_minute": int(row[16]) if len(row) > 16 and row[16] is not None else None,
+            "claim_start_time": row[17].strftime('%H:%M') if len(row) > 17 and row[17] else None,
+            "claim_end_time": row[18].strftime('%H:%M') if len(row) > 18 and row[18] else None,
         }
+
+    def _get_shift_auction_operator_work_shifts_tx(self, cursor, operator_id, lot_dates=None):
+        try:
+            op_id = int(operator_id)
+        except Exception:
+            return []
+        dates = sorted({
+            item for item in (lot_dates or [])
+            if item is not None
+        })
+        if not dates:
+            return []
+
+        cursor.execute("""
+            SELECT id, shift_date, start_time, end_time
+            FROM work_shifts
+            WHERE operator_id = %s
+              AND shift_date >= %s
+              AND shift_date <= %s
+            ORDER BY shift_date, start_time, end_time, id
+        """, (op_id, dates[0], dates[-1]))
+
+        return [
+            {
+                "id": row[0],
+                "shift_date": row[1].strftime('%Y-%m-%d') if row[1] else None,
+                "start_time": row[2].strftime('%H:%M') if row[2] else None,
+                "end_time": row[3].strftime('%H:%M') if row[3] else None,
+            }
+            for row in (cursor.fetchall() or [])
+        ]
 
     def _cache_shift_auction_participant_ids(self, participant_rows):
         if SHIFT_AUCTION_PARTICIPANT_CACHE_TTL_SECONDS <= 0:
@@ -3458,7 +3499,9 @@ class Database:
                 u.direction_id AS claimed_by_direction_id,
                 claimed_dir.name AS claimed_by_direction,
                 source_shift.start_minute AS source_start_minute,
-                source_shift.end_minute AS source_end_minute
+                source_shift.end_minute AS source_end_minute,
+                l.post_claim_start_time,
+                l.post_claim_end_time
             FROM shift_auction_test_lots l
             LEFT JOIN users u ON u.id = l.claimed_by
             LEFT JOIN directions claimed_dir ON claimed_dir.id = u.direction_id
@@ -3715,8 +3758,8 @@ class Database:
             claimed_break = 0
             for lot in claimed_lots:
                 minutes = self._shift_auction_lot_minutes(
-                    lot.get('start_time'),
-                    lot.get('end_time'),
+                    lot.get('claim_start_time') or lot.get('post_claim_start_time') or lot.get('start_time'),
+                    lot.get('claim_end_time') or lot.get('post_claim_end_time') or lot.get('end_time'),
                     lot.get('breaks') if isinstance(lot.get('breaks'), list) else []
                 )
                 claimed_net += int(minutes.get('net_minutes') or 0)
@@ -3935,7 +3978,7 @@ class Database:
 
         if claimed_rows is None:
             cursor.execute("""
-                SELECT start_time, end_time, breaks
+                SELECT COALESCE(post_claim_start_time, start_time), COALESCE(post_claim_end_time, end_time), breaks
                 FROM shift_auction_test_lots
                 WHERE claimed_by = %s
                   AND status = 'claimed'
@@ -4474,6 +4517,37 @@ class Database:
 
         return merged_start_min, merged_end_min, merge_ids
 
+    def _normalize_post_auction_claim_range(self, source_start_time, source_end_time, claim_start_time=None, claim_end_time=None):
+        source_start_min, source_end_min = self._schedule_interval_minutes(source_start_time, source_end_time)
+        start_obj = self._normalize_schedule_time(
+            claim_start_time if claim_start_time not in (None, '') else source_start_time,
+            'claim_start_time'
+        )
+        end_obj = self._normalize_schedule_time(
+            claim_end_time if claim_end_time not in (None, '') else source_end_time,
+            'claim_end_time'
+        )
+
+        claim_start_min = _time_to_minutes(start_obj.strftime('%H:%M'))
+        claim_end_min = _time_to_minutes(end_obj.strftime('%H:%M'))
+        if source_end_min > 24 * 60 and claim_start_min < source_start_min:
+            claim_start_min += 24 * 60
+        if claim_end_min <= claim_start_min:
+            claim_end_min += 24 * 60
+
+        if claim_end_min <= claim_start_min:
+            raise ValueError("INVALID_PARTIAL_SHIFT_RANGE")
+        if claim_start_min < source_start_min or claim_end_min > source_end_min:
+            raise ValueError("PARTIAL_SHIFT_OUT_OF_RANGE")
+
+        return {
+            "start_time": start_obj,
+            "end_time": end_obj,
+            "start_minute": int(claim_start_min),
+            "end_minute": int(claim_end_min),
+            "is_partial": bool(claim_start_min != source_start_min or claim_end_min != source_end_min),
+        }
+
     def publish_shift_auction_test_to_work_schedules(self, updated_by=None):
         with self._get_cursor() as cursor:
             cursor.execute("""
@@ -4792,7 +4866,9 @@ class Database:
                     u.direction_id AS claimed_by_direction_id,
                     claimed_dir.name AS claimed_by_direction,
                     source_shift.start_minute AS source_start_minute,
-                    source_shift.end_minute AS source_end_minute
+                    source_shift.end_minute AS source_end_minute,
+                    l.post_claim_start_time,
+                    l.post_claim_end_time
                 FROM shift_auction_test_lots l
                 LEFT JOIN users u ON u.id = l.claimed_by
                 LEFT JOIN directions claimed_dir ON claimed_dir.id = u.direction_id
@@ -5230,6 +5306,10 @@ class Database:
                 self._get_shift_auction_operator_blocked_dates_tx(cursor, current_id, lot_dates=lot_dates)
                 if current_id else []
             )
+            my_work_shifts = (
+                self._get_shift_auction_operator_work_shifts_tx(cursor, current_id, lot_dates)
+                if current_id else []
+            )
 
         selected_operator_ids = [int(row[0]) for row in participant_rows if row and row[0] is not None]
         post_auction_active = bool(
@@ -5286,6 +5366,7 @@ class Database:
             "lots": lots,
             "my_day_offs": my_day_offs,
             "my_blocked_dates": my_blocked_dates,
+            "my_work_shifts": my_work_shifts,
             "available_periods": available_periods,
             "participant_workloads": participant_workloads,
             "claim_journal": [
@@ -5335,6 +5416,10 @@ class Database:
             lot_dates = sorted({row[1] for row in shift_rows if row and row[1]})
             my_blocked_dates = (
                 self._get_shift_auction_operator_blocked_dates_tx(cursor, current_id, lot_dates=lot_dates)
+                if current_id else []
+            )
+            my_work_shifts = (
+                self._get_shift_auction_operator_work_shifts_tx(cursor, current_id, lot_dates)
                 if current_id else []
             )
 
@@ -5396,6 +5481,8 @@ class Database:
                     "claimed_by_direction": "",
                     "source_start_minute": int(row[6]) if len(row) > 6 and row[6] is not None else None,
                     "source_end_minute": int(row[7]) if len(row) > 7 and row[7] is not None else None,
+                    "claim_start_time": None,
+                    "claim_end_time": None,
                     "preview_only": True,
                 }
                 lots.append(lot)
@@ -5495,13 +5582,15 @@ class Database:
                     "claimed_by": claimed_by,
                     "claimed_at": lot_payload.get("claimed_at") or (created_at.isoformat() if created_at else None),
                     "post_auction_claimed": bool(lot_payload.get("post_auction_claimed")),
+                    "claim_start_time": lot_payload.get("claim_start_time") or lot_payload.get("post_claim_start_time"),
+                    "claim_end_time": lot_payload.get("claim_end_time") or lot_payload.get("post_claim_end_time"),
                 })
                 claim_journal_items.append({
                     "id": event_id,
                     "claimed_at": target_lot.get("claimed_at"),
                     "shift_date": target_lot.get("shift_date"),
-                    "start_time": target_lot.get("start_time"),
-                    "end_time": target_lot.get("end_time"),
+                    "start_time": target_lot.get("claim_start_time") or target_lot.get("start_time"),
+                    "end_time": target_lot.get("claim_end_time") or target_lot.get("end_time"),
                     "claimed_by": claimed_by,
                     "source_schedule_plan_id": plan_id,
                     "period_start": period_start.strftime('%Y-%m-%d') if period_start else None,
@@ -5563,11 +5652,11 @@ class Database:
                 lot["claimed_by_direction"] = info.get("direction") or ""
 
             cursor.execute("""
-                SELECT source_schedule_shift_id, claimed_by, claimed_at
+                SELECT source_schedule_shift_id, claimed_by, claimed_at, claimed_start_time, claimed_end_time
                 FROM shift_auction_historical_claims
                 WHERE plan_id = %s
             """, (plan_id,))
-            for shift_id_row, claimed_by_row, claimed_at_row in (cursor.fetchall() or []):
+            for shift_id_row, claimed_by_row, claimed_at_row, claim_start_row, claim_end_row in (cursor.fetchall() or []):
                 lot = lots_by_shift_id.get(int(shift_id_row))
                 if not lot:
                     continue
@@ -5576,6 +5665,8 @@ class Database:
                     "claimed_by": int(claimed_by_row) if claimed_by_row is not None else None,
                     "claimed_at": claimed_at_row.isoformat() if claimed_at_row else lot.get("claimed_at"),
                     "post_auction_claimed": True,
+                    "claim_start_time": claim_start_row.strftime('%H:%M') if claim_start_row else lot.get("claim_start_time"),
+                    "claim_end_time": claim_end_row.strftime('%H:%M') if claim_end_row else lot.get("claim_end_time"),
                 })
 
             participant_workloads = self._get_shift_auction_participant_workloads_tx(
@@ -5599,6 +5690,7 @@ class Database:
             "lots": lots,
             "my_blocked_dates": my_blocked_dates,
             "my_day_offs": my_day_offs,
+            "my_work_shifts": my_work_shifts,
             "selected_operator_ids": operator_ids,
             "selected_operators": list(operator_info.values()),
             "participant_workloads": participant_workloads,
@@ -5689,7 +5781,9 @@ class Database:
                     u.name AS claimed_by_name,
                     u.direction_id AS claimed_by_direction_id,
                     cdir.name AS claimed_by_direction,
-                    s.start_minute, s.end_minute
+                    s.start_minute, s.end_minute,
+                    l.post_claim_start_time,
+                    l.post_claim_end_time
                 FROM shift_auction_test_lots l
                 LEFT JOIN users u ON u.id = l.claimed_by
                 LEFT JOIN directions cdir ON cdir.id = u.direction_id
@@ -5720,6 +5814,8 @@ class Database:
                     "claimed_by_direction": row[14] or "",
                     "source_start_minute": int(row[15]) if row[15] is not None else None,
                     "source_end_minute": int(row[16]) if row[16] is not None else None,
+                    "claim_start_time": row[17].strftime('%H:%M') if row[17] else None,
+                    "claim_end_time": row[18].strftime('%H:%M') if row[18] else None,
                 })
 
             if lots:
@@ -5767,6 +5863,7 @@ class Database:
                     s.id, s.plan_id, s.shift_date, s.start_time, s.end_time,
                     s.rate_min, s.breaks, s.start_minute, s.end_minute,
                     hc.claimed_by, hc.claimed_at,
+                    hc.claimed_start_time, hc.claimed_end_time,
                     u.name AS claimed_by_name,
                     u.direction_id AS claimed_by_direction_id,
                     cdir.name AS claimed_by_direction
@@ -5799,9 +5896,11 @@ class Database:
                     "source_start_minute": int(row[7]) if row[7] is not None else None,
                     "source_end_minute": int(row[8]) if row[8] is not None else None,
                     "post_auction_claimed": bool(row[9]),
-                    "claimed_by_name": row[11] or "",
-                    "claimed_by_direction_id": row[12],
-                    "claimed_by_direction": row[13] or "",
+                    "claim_start_time": row[11].strftime('%H:%M') if row[11] else None,
+                    "claim_end_time": row[12].strftime('%H:%M') if row[12] else None,
+                    "claimed_by_name": row[13] or "",
+                    "claimed_by_direction_id": row[14],
+                    "claimed_by_direction": row[15] or "",
                     "preview_only": True,
                 })
 
@@ -6316,7 +6415,7 @@ class Database:
             })
         return {"lot": lot_payload, "event": event}
 
-    def post_auction_claim_lot(self, operator_id, lot_id):
+    def post_auction_claim_lot(self, operator_id, lot_id, claim_start_time=None, claim_end_time=None):
         """
         Забрать смену после окончания аукциона (после публикации в графики).
         Лот должен быть available или cancelled, смена ещё не началась,
@@ -6386,7 +6485,17 @@ class Database:
                     (self.SHIFT_AUCTION_SAVED_SHIFT_LOCK_NAMESPACE, source_shift_id)
                 )
 
-            shift_start_dt = datetime.combine(shift_date, start_time)
+            claim_range = self._normalize_post_auction_claim_range(
+                start_time,
+                end_time,
+                claim_start_time=claim_start_time,
+                claim_end_time=claim_end_time
+            )
+            selected_start_time = claim_range["start_time"]
+            selected_end_time = claim_range["end_time"]
+
+            shift_start_date = shift_date + timedelta(days=1 if claim_range["start_minute"] >= 24 * 60 else 0)
+            shift_start_dt = datetime.combine(shift_start_date, selected_start_time)
             if shift_start_dt <= datetime.now():
                 raise ValueError("SHIFT_ALREADY_STARTED")
 
@@ -6403,7 +6512,8 @@ class Database:
             )
             day_off_row = cursor.fetchone()
 
-            new_start_min, new_end_min = self._schedule_interval_minutes(start_time, end_time)
+            new_start_min = claim_range["start_minute"]
+            new_end_min = claim_range["end_minute"]
 
             cursor.execute("""
                 SELECT id, start_time, end_time
@@ -6425,14 +6535,16 @@ class Database:
                     claimed_by = %s,
                     claimed_at = CURRENT_TIMESTAMP,
                     post_auction_claimed = TRUE,
+                    post_claim_start_time = %s,
+                    post_claim_end_time = %s,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = %s
                   AND COALESCE(post_auction_claimed, FALSE) = FALSE
                   AND status IN ('available', 'cancelled')
                 RETURNING id, shift_date, start_time, end_time, rate_min, status, claimed_by, claimed_at,
                           breaks, source_schedule_plan_id, source_schedule_shift_id,
-                          COALESCE(post_auction_claimed, FALSE)
-            """, (operator_id, lot_id))
+                          COALESCE(post_auction_claimed, FALSE), post_claim_start_time, post_claim_end_time
+            """, (operator_id, selected_start_time, selected_end_time, lot_id))
             updated = cursor.fetchone()
             if not updated:
                 raise ValueError("LOT_ALREADY_CLAIMED")
@@ -6440,10 +6552,10 @@ class Database:
             if source_plan_id and source_shift_id:
                 cursor.execute("""
                     INSERT INTO shift_auction_historical_claims
-                        (plan_id, source_schedule_shift_id, claimed_by, claimed_at)
-                    VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                        (plan_id, source_schedule_shift_id, claimed_by, claimed_at, claimed_start_time, claimed_end_time)
+                    VALUES (%s, %s, %s, CURRENT_TIMESTAMP, %s, %s)
                     ON CONFLICT (plan_id, source_schedule_shift_id) DO NOTHING
-                """, (source_plan_id, source_shift_id, operator_id))
+                """, (source_plan_id, source_shift_id, operator_id, selected_start_time, selected_end_time))
 
             if day_off_row:
                 cursor.execute(
@@ -6474,8 +6586,8 @@ class Database:
                     cursor=cursor,
                     operator_id=operator_id,
                     shift_date=shift_date,
-                    start_time=start_time,
-                    end_time=end_time,
+                    start_time=selected_start_time,
+                    end_time=selected_end_time,
                     breaks=None,
                     shift_type=None,
                 )
@@ -6500,6 +6612,8 @@ class Database:
                 "source_schedule_plan_id": updated[9],
                 "source_schedule_shift_id": updated[10],
                 "post_auction_claimed": bool(updated[11]),
+                "claim_start_time": updated[12].strftime('%H:%M') if updated[12] else None,
+                "claim_end_time": updated[13].strftime('%H:%M') if updated[13] else None,
             }
             event = self._insert_shift_auction_test_event(cursor, "lot_post_auction_claimed", {
                 "lot": lot_payload,
@@ -6515,7 +6629,7 @@ class Database:
             "merged_with_existing": bool(merge_ids),
         }
 
-    def post_auction_claim_saved_shift(self, operator_id, schedule_plan_id, source_schedule_shift_id):
+    def post_auction_claim_saved_shift(self, operator_id, schedule_plan_id, source_schedule_shift_id, claim_start_time=None, claim_end_time=None):
         """
         Забор смены из УЖЕ ОПУБЛИКОВАННОГО прошлого периода (исторический добор).
         Источник правды о занятости — таблица shift_auction_historical_claims
@@ -6595,7 +6709,17 @@ class Database:
             if shift_date is None or start_time is None or end_time is None:
                 raise ValueError("LOT_INVALID")
 
-            shift_start_dt = datetime.combine(shift_date, start_time)
+            claim_range = self._normalize_post_auction_claim_range(
+                start_time,
+                end_time,
+                claim_start_time=claim_start_time,
+                claim_end_time=claim_end_time
+            )
+            selected_start_time = claim_range["start_time"]
+            selected_end_time = claim_range["end_time"]
+
+            shift_start_date = shift_date + timedelta(days=1 if claim_range["start_minute"] >= 24 * 60 else 0)
+            shift_start_dt = datetime.combine(shift_start_date, selected_start_time)
             if shift_start_dt <= datetime.now():
                 raise ValueError("SHIFT_ALREADY_STARTED")
 
@@ -6608,11 +6732,11 @@ class Database:
 
             cursor.execute("""
                 INSERT INTO shift_auction_historical_claims
-                    (plan_id, source_schedule_shift_id, claimed_by, claimed_at)
-                VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                    (plan_id, source_schedule_shift_id, claimed_by, claimed_at, claimed_start_time, claimed_end_time)
+                VALUES (%s, %s, %s, CURRENT_TIMESTAMP, %s, %s)
                 ON CONFLICT (plan_id, source_schedule_shift_id) DO NOTHING
                 RETURNING claimed_at
-            """, (plan_id, source_schedule_shift_id, operator_id))
+            """, (plan_id, source_schedule_shift_id, operator_id, selected_start_time, selected_end_time))
             claim_row = cursor.fetchone()
             if not claim_row:
                 raise ValueError("LOT_ALREADY_CLAIMED")
@@ -6624,7 +6748,8 @@ class Database:
             )
             day_off_row = cursor.fetchone()
 
-            new_start_min, new_end_min = self._schedule_interval_minutes(start_time, end_time)
+            new_start_min = claim_range["start_minute"]
+            new_end_min = claim_range["end_minute"]
 
             cursor.execute("""
                 SELECT id, start_time, end_time
@@ -6669,8 +6794,8 @@ class Database:
                     cursor=cursor,
                     operator_id=operator_id,
                     shift_date=shift_date,
-                    start_time=start_time,
-                    end_time=end_time,
+                    start_time=selected_start_time,
+                    end_time=selected_end_time,
                     breaks=None,
                     shift_type=None,
                 )
@@ -6697,6 +6822,8 @@ class Database:
                 "source_schedule_plan_id": plan_id,
                 "source_schedule_shift_id": int(saved_shift[0]),
                 "post_auction_claimed": True,
+                "claim_start_time": selected_start_time.strftime('%H:%M') if selected_start_time else None,
+                "claim_end_time": selected_end_time.strftime('%H:%M') if selected_end_time else None,
                 "claimed_by_direction_id": operator_row[3],
                 "claimed_by_direction": operator_row[4] or "",
                 "source_start_minute": int(saved_shift[6]) if saved_shift[6] is not None else None,
@@ -6752,7 +6879,8 @@ class Database:
             if lot_id_int:
                 cursor.execute("""
                     SELECT id, shift_date, start_time, end_time, claimed_by,
-                           source_schedule_plan_id, source_schedule_shift_id, status
+                           source_schedule_plan_id, source_schedule_shift_id, status,
+                           post_claim_start_time, post_claim_end_time
                     FROM shift_auction_test_lots
                     WHERE id = %s
                     FOR UPDATE
@@ -6762,7 +6890,9 @@ class Database:
                     raise ValueError("LOT_NOT_FOUND")
                 if lot[7] != 'claimed' or lot[4] is None:
                     raise ValueError("LOT_NOT_CLAIMED")
-                shift_date, start_time, end_time = lot[1], lot[2], lot[3]
+                shift_date = lot[1]
+                start_time = lot[8] or lot[2]
+                end_time = lot[9] or lot[3]
                 operator_id = int(lot[4])
                 resolved_plan_id = int(lot[5]) if lot[5] is not None else resolved_plan_id
                 resolved_shift_id = int(lot[6]) if lot[6] is not None else resolved_shift_id
@@ -6780,6 +6910,8 @@ class Database:
                         claimed_by = NULL,
                         claimed_at = NULL,
                         post_auction_claimed = FALSE,
+                        post_claim_start_time = NULL,
+                        post_claim_end_time = NULL,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = %s
                 """, (lot_id_int,))
@@ -6800,7 +6932,7 @@ class Database:
                     raise ValueError("SHIFT_NOT_FOUND")
                 shift_date, start_time, end_time = saved[0], saved[1], saved[2]
                 cursor.execute("""
-                    SELECT claimed_by FROM shift_auction_historical_claims
+                    SELECT claimed_by, claimed_start_time, claimed_end_time FROM shift_auction_historical_claims
                     WHERE plan_id = %s AND source_schedule_shift_id = %s
                     FOR UPDATE
                 """, (resolved_plan_id, resolved_shift_id))
@@ -6808,6 +6940,8 @@ class Database:
                 if not row:
                     raise ValueError("LOT_NOT_CLAIMED")
                 operator_id = int(row[0])
+                start_time = row[1] or start_time
+                end_time = row[2] or end_time
                 self._lock_shift_auction_operator_tx(cursor, operator_id)
                 cursor.execute("""
                     UPDATE shift_auction_test_lots
@@ -6815,6 +6949,8 @@ class Database:
                         claimed_by = NULL,
                         claimed_at = NULL,
                         post_auction_claimed = FALSE,
+                        post_claim_start_time = NULL,
+                        post_claim_end_time = NULL,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE source_schedule_plan_id = %s
                       AND source_schedule_shift_id = %s
