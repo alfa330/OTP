@@ -2336,39 +2336,74 @@ class Database:
                         list(current_participants),
                     ))
 
-        if not claims_already_filled:
-            cursor.execute("""
-                SELECT payload, created_at
-                FROM shift_auction_test_events
-                WHERE event_type = 'lot_post_auction_claimed'
-                ORDER BY id
-            """)
-            for payload, created_at in (cursor.fetchall() or []):
-                payload = payload or {}
-                lot = payload.get('lot') or {}
-                if not isinstance(lot, dict):
-                    continue
+        # Event-replay для восстановления состояния claim'ов на момент каждой
+        # публикации. Идемпотентно: INSERT ON CONFLICT DO NOTHING — повторные
+        # запуски ничего не дублируют, поэтому выполняем всегда.
+        cursor.execute("""
+            SELECT event_type, payload, created_at
+            FROM shift_auction_test_events
+            WHERE event_type IN ('lot_claimed', 'lot_released', 'lot_post_auction_claimed',
+                                 'auction_restarted', 'auction_published', 'settings_updated')
+            ORDER BY id
+        """)
+        in_flight = {}
+        current_plan_id_for_publish = None
+        for event_type, payload, created_at in (cursor.fetchall() or []):
+            payload = payload or {}
+            event_name = str(event_type or '')
+            lot = payload.get('lot') if isinstance(payload, dict) else None
+            if not isinstance(lot, dict):
+                lot = {}
+
+            def _parse_int(value):
                 try:
-                    plan_id = int(lot.get('source_schedule_plan_id') or 0)
-                    shift_id = int(lot.get('source_schedule_shift_id') or 0)
-                    claimed_by = int(lot.get('claimed_by') or payload.get('operator_id') or 0)
+                    result = int(value)
                 except Exception:
-                    continue
-                if plan_id <= 0 or shift_id <= 0 or claimed_by <= 0:
-                    continue
-                claimed_at_raw = lot.get('claimed_at')
-                claimed_at = created_at
-                if claimed_at_raw:
-                    try:
-                        claimed_at = datetime.fromisoformat(str(claimed_at_raw).replace('Z', '+00:00'))
-                    except Exception:
-                        claimed_at = created_at
+                    return None
+                return result if result > 0 else None
+
+            plan_id = _parse_int(lot.get('source_schedule_plan_id'))
+            shift_id = _parse_int(lot.get('source_schedule_shift_id'))
+            claimed_by = _parse_int(lot.get('claimed_by') or payload.get('operator_id'))
+            claimed_at = created_at
+            claimed_at_raw = lot.get('claimed_at')
+            if claimed_at_raw:
+                try:
+                    claimed_at = datetime.fromisoformat(str(claimed_at_raw).replace('Z', '+00:00'))
+                except Exception:
+                    claimed_at = created_at
+
+            if event_name == 'lot_claimed' and plan_id and shift_id and claimed_by:
+                in_flight[(plan_id, shift_id)] = (claimed_by, claimed_at)
+            elif event_name == 'lot_released' and plan_id and shift_id:
+                in_flight.pop((plan_id, shift_id), None)
+            elif event_name == 'lot_post_auction_claimed' and plan_id and shift_id and claimed_by:
                 cursor.execute("""
                     INSERT INTO shift_auction_historical_claims
                         (plan_id, source_schedule_shift_id, claimed_by, claimed_at)
                     VALUES (%s, %s, %s, %s)
                     ON CONFLICT (plan_id, source_schedule_shift_id) DO NOTHING
                 """, (plan_id, shift_id, claimed_by, claimed_at))
+            elif event_name in ('settings_updated', 'auction_restarted'):
+                raw_plan_id = payload.get('selected_schedule_plan_id') or payload.get('plan_id')
+                parsed_plan_id = _parse_int(raw_plan_id)
+                if parsed_plan_id:
+                    current_plan_id_for_publish = parsed_plan_id
+                if event_name == 'auction_restarted' and parsed_plan_id:
+                    in_flight = {k: v for k, v in in_flight.items() if k[0] != parsed_plan_id}
+            elif event_name == 'auction_published':
+                raw_plan_id = payload.get('selected_schedule_plan_id') or payload.get('plan_id')
+                publish_plan_id = _parse_int(raw_plan_id) or current_plan_id_for_publish
+                if publish_plan_id:
+                    for (p_id, s_id), (cb, ca) in list(in_flight.items()):
+                        if p_id != publish_plan_id:
+                            continue
+                        cursor.execute("""
+                            INSERT INTO shift_auction_historical_claims
+                                (plan_id, source_schedule_shift_id, claimed_by, claimed_at)
+                            VALUES (%s, %s, %s, %s)
+                            ON CONFLICT (plan_id, source_schedule_shift_id) DO NOTHING
+                        """, (p_id, s_id, cb, ca))
 
     def create_user(
         self,
@@ -4631,6 +4666,18 @@ class Database:
                     updated_by,
                     operator_ids,
                 ))
+                cursor.execute("""
+                    INSERT INTO shift_auction_historical_claims
+                        (plan_id, source_schedule_shift_id, claimed_by, claimed_at)
+                    SELECT source_schedule_plan_id, source_schedule_shift_id, claimed_by,
+                           COALESCE(claimed_at, CURRENT_TIMESTAMP)
+                    FROM shift_auction_test_lots
+                    WHERE status = 'claimed'
+                      AND source_schedule_plan_id = %s
+                      AND source_schedule_shift_id IS NOT NULL
+                      AND claimed_by IS NOT NULL
+                    ON CONFLICT (plan_id, source_schedule_shift_id) DO NOTHING
+                """, (selected_schedule_plan_id,))
 
             event = self._insert_shift_auction_test_event(cursor, "auction_published", {
                 **summary,
