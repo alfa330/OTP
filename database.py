@@ -2254,17 +2254,13 @@ class Database:
 
     def _backfill_shift_auction_history_tables_tx(self, cursor):
         """
-        Один раз перенести данные из журнала событий в новые таблицы
+        Перенести данные из журнала событий в новые таблицы
         shift_auction_published_periods и shift_auction_historical_claims.
-        Идемпотентно: пропускает работу, если таблицы уже непустые;
-        внутренние INSERT'ы — ON CONFLICT DO NOTHING.
+        Идемпотентно за счёт ON CONFLICT DO NOTHING — безопасно гонять при
+        каждом старте, повторные записи не появляются.
         """
         cursor.execute("SELECT 1 FROM shift_auction_published_periods LIMIT 1")
         periods_already_filled = cursor.fetchone() is not None
-        cursor.execute("SELECT 1 FROM shift_auction_historical_claims LIMIT 1")
-        claims_already_filled = cursor.fetchone() is not None
-        if periods_already_filled and claims_already_filled:
-            return
 
         if not periods_already_filled:
             cursor.execute("""
