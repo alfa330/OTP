@@ -146,6 +146,48 @@ const FormField = ({ label, children }) => (
 
 const inputCls = "w-full px-3 py-2.5 text-sm border border-gray-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition placeholder-gray-400";
 
+/* ─── iOS / macOS styled primitives (survey builder) ─── */
+
+const APPLE_FONT = '-apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", system-ui, sans-serif';
+// Заполненное поле в стиле iOS «grouped form» — светло-серое внутри белых карточек.
+const iosInput = "w-full px-3.5 py-2.5 text-[14px] rounded-xl bg-slate-100 border-0 text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/70 focus:bg-white transition";
+const iosCard = "rounded-2xl bg-white ring-1 ring-slate-200/70 shadow-[0_1px_2px_rgba(15,23,42,0.04)]";
+const iosGroupLabel = "px-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400";
+
+const IosToggle = ({ checked, onChange, disabled = false }) => (
+    <button
+        type="button"
+        role="switch"
+        aria-checked={!!checked}
+        disabled={disabled}
+        onClick={() => { if (!disabled) onChange(!checked); }}
+        className={`relative inline-flex h-[26px] w-[44px] shrink-0 items-center rounded-full transition-colors duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 ${
+            checked ? 'bg-emerald-500' : 'bg-slate-300'
+        } ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+    >
+        <span
+            className={`inline-block h-[22px] w-[22px] transform rounded-full bg-white shadow-md transition-transform duration-200 ${
+                checked ? 'translate-x-[20px]' : 'translate-x-[2px]'
+            }`}
+        />
+    </button>
+);
+
+const IosSection = ({ title, hint, children, right = null }) => (
+    <section className="space-y-1.5">
+        {(title || right) && (
+            <div className="flex items-end justify-between gap-2">
+                {title ? <div className={iosGroupLabel}>{title}</div> : <span />}
+                {right}
+            </div>
+        )}
+        <div className={`${iosCard} p-4 space-y-3`}>
+            {children}
+        </div>
+        {hint && <div className="px-1 text-[11px] text-slate-400">{hint}</div>}
+    </section>
+);
+
 /* ─── main component ─── */
 
 const SurveysView = ({ user, operators = [], directions = [], showToast, apiBaseUrl, onSurveyProgressChanged }) => {
@@ -283,7 +325,9 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
             const isAlreadySelected = selectedOperatorIds.has(Number(operator.id));
             const byQuery = !query || operator.name.toLowerCase().includes(query) || operator.directionName.toLowerCase().includes(query);
             if (!byQuery) return false;
-            if (isEditMode && isAlreadySelected) return true;
+            // Уже выбранные операторы всегда видны (режим повтора/редактирования),
+            // даже если унаследованные фильтры по направлению/стажу под них не подходят.
+            if (isAlreadySelected) return true;
             if (isEditMode) return true;
 
             const byDirection = selectedDirections.size === 0 || selectedDirections.has(operator.directionId);
@@ -668,6 +712,21 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
         setShowBuilder(false);
         resetBuilder();
     }, [resetBuilder]);
+
+    // Блокируем прокрутку фона и закрываем модалку по Escape, пока открыт конструктор.
+    useEffect(() => {
+        if (!showBuilder) return undefined;
+        const onKeyDown = (event) => {
+            if (event.key === 'Escape' && !isSaving) closeBuilder();
+        };
+        const previousOverflow = document.body.style.overflow;
+        document.body.style.overflow = 'hidden';
+        window.addEventListener('keydown', onKeyDown);
+        return () => {
+            document.body.style.overflow = previousOverflow;
+            window.removeEventListener('keydown', onKeyDown);
+        };
+    }, [showBuilder, isSaving, closeBuilder]);
 
     const startRepeatSurvey = useCallback((survey) => {
         if (!survey || !canManage) return;
@@ -1145,364 +1204,439 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                 </div>
             </div>
 
-            {/* ── Survey Builder ── */}
+            {/* ── Survey Builder (iOS / macOS modal sheet) ── */}
             {canManage && showBuilder && (
-                <div className="bg-white rounded-2xl border border-blue-100 shadow-sm">
-                    <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between gap-3 flex-wrap">
-                        <div className="w-6 h-6 rounded-lg bg-blue-50 flex items-center justify-center">
-                            <FaIcon className="fas fa-pencil-alt text-blue-500 text-xs" />
+                <div
+                    className="fixed inset-0 z-[80] flex items-stretch justify-center bg-slate-900/40 backdrop-blur-md sm:items-center sm:p-6"
+                    role="dialog"
+                    aria-modal="true"
+                    onClick={() => { if (!isSaving) closeBuilder(); }}
+                    style={{ fontFamily: APPLE_FONT }}
+                >
+                    <div
+                        className="flex w-full max-w-2xl flex-col overflow-hidden bg-slate-50 shadow-2xl ring-1 ring-slate-900/10 sm:max-h-[92vh] sm:rounded-3xl"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        {/* Header */}
+                        <div className="relative flex items-center justify-between gap-3 border-b border-slate-200/70 bg-white/80 px-5 py-3.5 backdrop-blur-xl">
+                            <div className="flex min-w-0 items-center gap-3">
+                                <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl shadow-sm ${
+                                    isEditMode ? 'bg-slate-900' : (isRepeatMode ? 'bg-indigo-500' : 'bg-blue-600')
+                                }`}>
+                                    <FaIcon className={`fas ${isEditMode ? 'fa-pen' : (isRepeatMode ? 'fa-redo' : 'fa-plus')} text-xs text-white`} />
+                                </div>
+                                <div className="min-w-0">
+                                    <div className="text-[15px] font-semibold leading-tight text-slate-900">
+                                        {isEditMode ? 'Редактирование' : (isRepeatMode ? 'Повтор опроса' : (draft.isTest ? 'Новый тест' : 'Новый опрос'))}
+                                    </div>
+                                    <div className="mt-0.5 truncate text-[12px] text-slate-500">
+                                        {draft.title?.trim() ? draft.title : 'Название, вопросы и операторы'}
+                                    </div>
+                                </div>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => { if (!isSaving) closeBuilder(); }}
+                                disabled={isSaving}
+                                className="shrink-0 rounded-full p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 disabled:opacity-50"
+                                aria-label="Закрыть"
+                            >
+                                <FaIcon className="fas fa-times text-sm" />
+                            </button>
                         </div>
-                        <span className="font-semibold text-gray-800 text-sm">
-                            {isEditMode ? 'Редактирование опроса' : (isRepeatMode ? 'Повтор опроса' : 'Новый опрос')}
-                        </span>
-                    </div>
 
-                    <div className="p-6 space-y-6">
+                        {/* Body */}
+                        <div className="flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-5">
 
-                        {/* Basic info */}
-                        <div className="space-y-3">
-                            <SectionTitle>Основное</SectionTitle>
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                <FormField label="Название опроса *">
+                            {/* Repeat-mode hint */}
+                            {isRepeatMode && (
+                                <div className="flex items-start gap-3 rounded-2xl border border-indigo-100 bg-indigo-50/70 px-4 py-3">
+                                    <FaIcon className="fas fa-redo mt-0.5 text-indigo-500 text-xs" />
+                                    <div className="text-[12.5px] leading-relaxed text-indigo-900">
+                                        Это повтор опроса. Операторы из прошлого запуска уже выбраны ниже — проверьте список и при необходимости снимите лишних. Уволенные сотрудники исключены автоматически.
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Основное */}
+                            <IosSection title="Основное">
+                                <div>
+                                    <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Название опроса *</label>
                                     <input
                                         value={draft.title}
                                         onChange={(e) => setDraft((p) => ({ ...p, title: e.target.value }))}
                                         placeholder="Например: Опрос удовлетворённости"
-                                        className={inputCls}
+                                        className={iosInput}
                                     />
-                                </FormField>
-                                <FormField label="Описание">
+                                </div>
+                                <div>
+                                    <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Описание</label>
                                     <input
                                         value={draft.description}
                                         onChange={(e) => setDraft((p) => ({ ...p, description: e.target.value }))}
                                         placeholder="Краткое описание (необязательно)"
-                                        className={inputCls}
+                                        className={iosInput}
                                     />
-                                </FormField>
-                            </div>
-                            <label className="inline-flex items-center gap-2 text-xs text-gray-600">
-                                <input
-                                    type="checkbox"
-                                    checked={!!draft.isTest}
-                                    onChange={(e) => toggleTestMode(e.target.checked)}
-                                    className="rounded border-gray-300"
-                                />
-                                Тест (с правильными и неправильными ответами)
-                            </label>
-                            {draft.isTest && (
-                                <div className="text-[11px] text-amber-600">
-                                    В тесте недоступны вопросы типа рейтинг и вариант «Другое».
                                 </div>
-                            )}
-                        </div>
+                                <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3.5 py-2.5 ring-1 ring-slate-200/60">
+                                    <div className="min-w-0">
+                                        <div className="text-[14px] font-medium text-slate-800">Режим теста</div>
+                                        <div className="text-[12px] text-slate-500">Правильные ответы и автоматическая проверка</div>
+                                    </div>
+                                    <IosToggle checked={!!draft.isTest} onChange={(value) => toggleTestMode(value)} />
+                                </div>
+                                {draft.isTest && (
+                                    <div className="px-1 text-[11.5px] text-amber-600">
+                                        В тесте недоступны вопросы типа «рейтинг» и вариант «Другое».
+                                    </div>
+                                )}
+                            </IosSection>
 
-                        {/* Filters */}
-                        <div className="space-y-3">
-                            <SectionTitle>Фильтры назначения</SectionTitle>
-                            <div className="grid grid-cols-2 gap-3">
-                                <FormField label="Стаж от (недель)">
-                                    <input
-                                        type="number" min="0"
-                                        value={draft.tenureWeeksMin}
-                                        onChange={(e) => setDraft((p) => ({ ...p, tenureWeeksMin: e.target.value }))}
-                                        placeholder="Минимум"
-                                        className={inputCls}
-                                    />
-                                </FormField>
-                                <FormField label="Стаж до (недель)">
-                                    <input
-                                        type="number" min="0"
-                                        value={draft.tenureWeeksMax}
-                                        onChange={(e) => setDraft((p) => ({ ...p, tenureWeeksMax: e.target.value }))}
-                                        placeholder="Максимум"
-                                        className={inputCls}
-                                    />
-                                </FormField>
-                            </div>
+                            {/* Фильтры назначения */}
+                            <IosSection
+                                title="Фильтры назначения"
+                                hint="Фильтры помогают быстро отобрать операторов. Уже выбранные остаются в списке даже вне фильтров."
+                            >
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div>
+                                        <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Стаж от (недель)</label>
+                                        <input
+                                            type="number" min="0"
+                                            value={draft.tenureWeeksMin}
+                                            onChange={(e) => setDraft((p) => ({ ...p, tenureWeeksMin: e.target.value }))}
+                                            placeholder="Минимум"
+                                            className={iosInput}
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Стаж до (недель)</label>
+                                        <input
+                                            type="number" min="0"
+                                            value={draft.tenureWeeksMax}
+                                            onChange={(e) => setDraft((p) => ({ ...p, tenureWeeksMax: e.target.value }))}
+                                            placeholder="Максимум"
+                                            className={iosInput}
+                                        />
+                                    </div>
+                                </div>
 
-                            {directionNameById.size > 0 && (
-                                <FormField label="Направления">
-                                    <div className="flex flex-wrap gap-1.5">
-                                        {Array.from(directionNameById.entries()).map(([id, name]) => {
-                                            const active = draft.directionIds.includes(id);
+                                {directionNameById.size > 0 && (
+                                    <div>
+                                        <label className="mb-1.5 block px-1 text-[12px] font-medium text-slate-500">Направления</label>
+                                        <div className="flex flex-wrap gap-1.5">
+                                            {Array.from(directionNameById.entries()).map(([id, name]) => {
+                                                const active = draft.directionIds.includes(id);
+                                                return (
+                                                    <button
+                                                        key={id}
+                                                        onClick={() => toggleArrayValue(setDraft, 'directionIds', id)}
+                                                        className={`rounded-full px-3 py-1.5 text-[12.5px] font-medium transition-all ${
+                                                            active
+                                                                ? 'bg-blue-600 text-white shadow-sm'
+                                                                : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                                        }`}
+                                                    >
+                                                        {name}
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                )}
+                            </IosSection>
+
+                            {/* Операторы */}
+                            <IosSection
+                                title="Операторы *"
+                                right={draft.operatorIds.length > 0 && (
+                                    <span className="rounded-full bg-blue-100 px-2.5 py-0.5 text-[11px] font-semibold text-blue-700">
+                                        {draft.operatorIds.length} выбрано
+                                    </span>
+                                )}
+                            >
+                                <div className="relative">
+                                    <FaIcon className="fas fa-search absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-300 text-xs" />
+                                    <input
+                                        value={operatorQuery}
+                                        onChange={(e) => setOperatorQuery(e.target.value)}
+                                        placeholder="Поиск по имени или направлению"
+                                        className={`${iosInput} pl-9`}
+                                    />
+                                </div>
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <div className="px-1 text-[11.5px] text-slate-500">
+                                        По фильтрам: <strong className="text-slate-700">{selectedFilteredOperatorsCount}/{filteredAssignableOperatorIds.length}</strong>
+                                        {filteredOperators.some((operator) => operator.isDismissed) && (
+                                            <span className="ml-1 text-amber-600">· уволенные показаны только для контроля</span>
+                                        )}
+                                    </div>
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                        <button
+                                            type="button"
+                                            onClick={selectAllFilteredOperators}
+                                            disabled={!hasFilteredOperators || allFilteredOperatorsSelected}
+                                            className="rounded-lg bg-blue-50 px-2.5 py-1 text-[12px] font-medium text-blue-600 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-40"
+                                        >
+                                            Выбрать всех
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={clearFilteredOperators}
+                                            disabled={!hasFilteredOperators || selectedFilteredOperatorsCount === 0}
+                                            className="rounded-lg bg-slate-100 px-2.5 py-1 text-[12px] font-medium text-slate-600 hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-40"
+                                        >
+                                            Снять
+                                        </button>
+                                    </div>
+                                </div>
+                                <div className="max-h-56 overflow-y-auto rounded-xl bg-slate-50 ring-1 ring-slate-200/60">
+                                    {filteredOperators.length === 0 && (
+                                        <div className="px-3 py-6 text-center text-[12.5px] text-slate-400">
+                                            <FaIcon className="fas fa-user-slash mb-1.5 block text-base text-slate-300" />
+                                            Операторы не найдены
+                                        </div>
+                                    )}
+                                    <div className="divide-y divide-slate-200/60">
+                                        {filteredOperators.map((operator) => {
+                                            const checked = draft.operatorIds.includes(operator.id);
+                                            const canToggleOperator = !operator.isDismissed || checked;
+                                            const initial = String(operator.name || '?').trim().charAt(0).toUpperCase() || '?';
                                             return (
-                                                <button
-                                                    key={id}
-                                                    onClick={() => toggleArrayValue(setDraft, 'directionIds', id)}
-                                                    className={`px-3 py-1 rounded-full text-xs font-medium border transition-all ${
-                                                        active
-                                                            ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
-                                                            : 'bg-white text-gray-600 border-gray-200 hover:border-blue-300 hover:text-blue-600'
-                                                    }`}
+                                                <label
+                                                    key={operator.id}
+                                                    className={`flex items-center gap-3 px-3 py-2.5 transition-colors ${
+                                                        checked ? 'bg-blue-50' : 'hover:bg-white'
+                                                    } ${canToggleOperator ? 'cursor-pointer' : 'cursor-not-allowed opacity-70'}`}
                                                 >
-                                                    {name}
-                                                </button>
+                                                    <div className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md border transition-all ${
+                                                        checked ? 'border-blue-600 bg-blue-600' : 'border-slate-300 bg-white'
+                                                    }`}>
+                                                        {checked && <FaIcon className="fas fa-check text-[9px] text-white" />}
+                                                    </div>
+                                                    <input
+                                                        type="checkbox"
+                                                        className="hidden"
+                                                        checked={checked}
+                                                        onChange={() => {
+                                                            if (!canToggleOperator) {
+                                                                notify('Уволенного оператора нельзя назначить в опрос', 'error');
+                                                                return;
+                                                            }
+                                                            toggleArrayValue(setDraft, 'operatorIds', operator.id);
+                                                        }}
+                                                    />
+                                                    <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold ${
+                                                        operator.isDismissed ? 'bg-amber-100 text-amber-700' : 'bg-slate-200 text-slate-600'
+                                                    }`}>
+                                                        {initial}
+                                                    </div>
+                                                    <div className="min-w-0 flex-1">
+                                                        <div className="truncate text-[13.5px] font-medium text-slate-800">{operator.name}</div>
+                                                        <div className="truncate text-[11px] text-slate-400">
+                                                            {operator.directionName} · {operator.tenureLabel}
+                                                        </div>
+                                                    </div>
+                                                    {operator.isDismissed && (
+                                                        <span className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700">Уволен</span>
+                                                    )}
+                                                </label>
                                             );
                                         })}
                                     </div>
-                                </FormField>
-                            )}
-                        </div>
-
-                        {/* Operators */}
-                        <div className="space-y-2">
-                            <div className="flex items-center justify-between">
-                                <SectionTitle>Операторы *</SectionTitle>
-                                {draft.operatorIds.length > 0 && (
-                                    <Badge color="blue">{draft.operatorIds.length} выбрано</Badge>
-                                )}
-                            </div>
-                            <div className="relative">
-                                <FaIcon className="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-300 text-xs" />
-                                <input
-                                    value={operatorQuery}
-                                    onChange={(e) => setOperatorQuery(e.target.value)}
-                                    placeholder="Поиск по имени или направлению"
-                                    className={`${inputCls} pl-8`}
-                                />
-                            </div>
-                            <div className="flex flex-wrap items-center justify-between gap-2">
-                                <div className="text-[11px] text-gray-500">
-                                    По фильтрам: {selectedFilteredOperatorsCount}/{filteredAssignableOperatorIds.length} выбрано
-                                    {filteredOperators.some((operator) => operator.isDismissed) && (
-                                        <span className="ml-1 text-amber-600">
-                                            · уволенные показаны только для контроля
-                                        </span>
-                                    )}
                                 </div>
-                                <div className="flex flex-wrap items-center gap-2">
-                                    <button
-                                        type="button"
-                                        onClick={selectAllFilteredOperators}
-                                        disabled={!hasFilteredOperators || allFilteredOperatorsSelected}
-                                        className="px-2.5 py-1 text-xs rounded-lg border border-blue-200 text-blue-600 hover:bg-blue-50 disabled:opacity-40 disabled:cursor-not-allowed"
-                                    >
-                                        Выбрать всех по фильтрам
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={clearFilteredOperators}
-                                        disabled={!hasFilteredOperators || selectedFilteredOperatorsCount === 0}
-                                        className="px-2.5 py-1 text-xs rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
-                                    >
-                                        Снять по фильтрам
-                                    </button>
-                                </div>
-                            </div>
-                            <div className="max-h-48 overflow-y-auto border border-gray-100 rounded-xl divide-y divide-gray-50 bg-white">
-                                {filteredOperators.length === 0 && (
-                                    <div className="p-3 text-xs text-gray-400 text-center">Операторы не найдены</div>
-                                )}
-                                {filteredOperators.map((operator) => {
-                                    const checked = draft.operatorIds.includes(operator.id);
-                                    const canToggleOperator = !operator.isDismissed || checked;
-                                    return (
-                                        <label
-                                            key={operator.id}
-                                            className={`flex items-center gap-3 px-3 py-2.5 transition-colors ${
-                                                checked ? 'bg-blue-50' : 'hover:bg-gray-50'
-                                            } ${canToggleOperator ? 'cursor-pointer' : 'cursor-not-allowed opacity-70'}`}
-                                        >
-                                            <div className={`w-4 h-4 rounded flex items-center justify-center shrink-0 border transition-all ${checked ? 'bg-blue-600 border-blue-600' : 'border-gray-300'}`}>
-                                                {checked && <FaIcon className="fas fa-check text-white text-[9px]" />}
-                                            </div>
-                                            <input
-                                                type="checkbox"
-                                                className="hidden"
-                                                checked={checked}
-                                                onChange={() => {
-                                                    if (!canToggleOperator) {
-                                                        notify('Уволенного оператора нельзя назначить в опрос', 'error');
-                                                        return;
-                                                    }
-                                                    toggleArrayValue(setDraft, 'operatorIds', operator.id);
-                                                }}
-                                            />
-                                            <span className="text-sm font-medium text-gray-800 flex-1">{operator.name}</span>
-                                            {operator.isDismissed && <Badge color="amber">Уволен</Badge>}
-                                            <span className="text-xs text-gray-400">{operator.directionName}</span>
-                                            <span className="text-xs text-gray-400">{operator.tenureLabel}</span>
-                                        </label>
-                                    );
-                                })}
-                            </div>
-                        </div>
+                            </IosSection>
 
-                        {/* Questions */}
-                        <div className="space-y-3">
-                            <SectionTitle>Вопросы ({draft.questions.length})</SectionTitle>
-                            <div className="space-y-3">
-                                {draft.questions.map((question, index) => {
-                                    const options = Array.isArray(question.options) ? question.options : [];
-                                    const availableQuestionTypes = draft.isTest
-                                        ? QUESTION_TYPES.filter((item) => item.value !== 'rating' && item.value !== QUESTION_TYPE_OTHER_ONLY)
-                                        : QUESTION_TYPES;
-                                    return (
-                                        <div key={question.id} className="border border-gray-200 rounded-xl p-4 space-y-3 bg-gray-50/50">
-                                            <div className="flex items-center justify-between">
-                                                <span className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Вопрос #{index + 1}</span>
-                                                <button
-                                                    disabled={draft.questions.length <= 1}
-                                                    onClick={() => setDraft((p) => ({ ...p, questions: p.questions.filter((item) => item.id !== question.id) }))}
-                                                    className="text-xs px-2 py-1 rounded-lg bg-red-50 text-red-500 hover:bg-red-100 disabled:opacity-30 transition-colors"
-                                                >
-                                                    <FaIcon className="fas fa-trash-alt mr-1" />Удалить
-                                                </button>
-                                            </div>
-
-                                            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                                                <div className="md:col-span-2">
-                                                    <input
-                                                        value={question.text}
-                                                        onChange={(e) => updateQuestion(question.id, { text: e.target.value })}
-                                                        placeholder="Текст вопроса"
-                                                        className={inputCls}
-                                                    />
+                            {/* Вопросы */}
+                            <IosSection title={`Вопросы · ${draft.questions.length}`}>
+                                <div className="space-y-3">
+                                    {draft.questions.map((question, index) => {
+                                        const options = Array.isArray(question.options) ? question.options : [];
+                                        const availableQuestionTypes = draft.isTest
+                                            ? QUESTION_TYPES.filter((item) => item.value !== 'rating' && item.value !== QUESTION_TYPE_OTHER_ONLY)
+                                            : QUESTION_TYPES;
+                                        return (
+                                            <div key={question.id} className="rounded-2xl bg-slate-50 p-3.5 ring-1 ring-slate-200/60">
+                                                <div className="mb-2.5 flex items-center justify-between">
+                                                    <span className="flex h-6 items-center rounded-full bg-blue-100 px-2.5 text-[11px] font-bold text-blue-700">
+                                                        Вопрос {index + 1}
+                                                    </span>
+                                                    <button
+                                                        disabled={draft.questions.length <= 1}
+                                                        onClick={() => setDraft((p) => ({ ...p, questions: p.questions.filter((item) => item.id !== question.id) }))}
+                                                        className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-red-50 hover:text-red-500 disabled:opacity-30"
+                                                        title="Удалить вопрос"
+                                                    >
+                                                        <FaIcon className="fas fa-trash-alt text-xs" />
+                                                    </button>
                                                 </div>
-                                                <select
-                                                    value={question.type}
-                                                    onChange={(e) => {
-                                                        const nextType = e.target.value;
-                                                        const normalizedOptions = toUniqueTrimmedList(question.options);
-                                                        let nextCorrectOptions = toUniqueTrimmedList(question.correctOptions)
-                                                            .filter((option) => normalizedOptions.includes(option));
-                                                        if ((nextType === 'single' || nextType === QUESTION_TYPE_OTHER_ONLY) && nextCorrectOptions.length > 1) {
-                                                            nextCorrectOptions = [nextCorrectOptions[0]];
-                                                        }
-                                                        updateQuestion(question.id, {
-                                                            type: nextType,
-                                                            allowOther: nextType === QUESTION_TYPE_OTHER_ONLY
-                                                                ? true
-                                                                : (draft.isTest ? false : (nextType === 'rating' ? false : question.allowOther)),
-                                                            options: (nextType === 'rating' || nextType === QUESTION_TYPE_OTHER_ONLY)
-                                                                ? []
-                                                                : (question.options?.length ? question.options : ['', '']),
-                                                            correctOptions: nextType === QUESTION_TYPE_OTHER_ONLY ? [] : nextCorrectOptions
-                                                        });
-                                                    }}
-                                                    className={inputCls}
-                                                >
-                                                    {availableQuestionTypes.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
-                                                </select>
-                                            </div>
 
-                                            {question.type !== 'rating' && (
-                                                <div className="space-y-2 pl-1">
-                                                    <div className="text-[11px] text-gray-400 font-medium">Варианты ответа</div>
-                                                    {options.map((option, optionIndex) => {
-                                                        const normalizedOption = String(option || '').trim();
-                                                        const isCorrectOption = draft.isTest
-                                                            && normalizedOption
-                                                            && toUniqueTrimmedList(question.correctOptions).includes(normalizedOption);
+                                                <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+                                                    <div className="md:col-span-2">
+                                                        <input
+                                                            value={question.text}
+                                                            onChange={(e) => updateQuestion(question.id, { text: e.target.value })}
+                                                            placeholder="Текст вопроса"
+                                                            className={`${iosInput} bg-white ring-1 ring-slate-200/60`}
+                                                        />
+                                                    </div>
+                                                    <select
+                                                        value={question.type}
+                                                        onChange={(e) => {
+                                                            const nextType = e.target.value;
+                                                            const normalizedOptions = toUniqueTrimmedList(question.options);
+                                                            let nextCorrectOptions = toUniqueTrimmedList(question.correctOptions)
+                                                                .filter((option) => normalizedOptions.includes(option));
+                                                            if ((nextType === 'single' || nextType === QUESTION_TYPE_OTHER_ONLY) && nextCorrectOptions.length > 1) {
+                                                                nextCorrectOptions = [nextCorrectOptions[0]];
+                                                            }
+                                                            updateQuestion(question.id, {
+                                                                type: nextType,
+                                                                allowOther: nextType === QUESTION_TYPE_OTHER_ONLY
+                                                                    ? true
+                                                                    : (draft.isTest ? false : (nextType === 'rating' ? false : question.allowOther)),
+                                                                options: (nextType === 'rating' || nextType === QUESTION_TYPE_OTHER_ONLY)
+                                                                    ? []
+                                                                    : (question.options?.length ? question.options : ['', '']),
+                                                                correctOptions: nextType === QUESTION_TYPE_OTHER_ONLY ? [] : nextCorrectOptions
+                                                            });
+                                                        }}
+                                                        className={`${iosInput} bg-white ring-1 ring-slate-200/60`}
+                                                    >
+                                                        {availableQuestionTypes.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                                                    </select>
+                                                </div>
 
-                                                        return (
-                                                            <div key={`${question.id}_${optionIndex}`} className="flex items-center gap-2">
-                                                                {draft.isTest ? (
+                                                {question.type !== 'rating' && (
+                                                    <div className="mt-3 space-y-2">
+                                                        <div className="px-1 text-[11px] font-medium text-slate-400">Варианты ответа</div>
+                                                        {options.map((option, optionIndex) => {
+                                                            const normalizedOption = String(option || '').trim();
+                                                            const isCorrectOption = draft.isTest
+                                                                && normalizedOption
+                                                                && toUniqueTrimmedList(question.correctOptions).includes(normalizedOption);
+
+                                                            return (
+                                                                <div key={`${question.id}_${optionIndex}`} className="flex items-center gap-2">
+                                                                    {draft.isTest ? (
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => toggleCorrectOption(question.id, option)}
+                                                                            className={`flex h-5 w-5 shrink-0 items-center justify-center border-2 transition-all ${
+                                                                                question.type === 'single' ? 'rounded-full' : 'rounded'
+                                                                            } ${
+                                                                                isCorrectOption
+                                                                                    ? 'border-emerald-500 bg-emerald-500 text-white'
+                                                                                    : 'border-slate-300 text-transparent hover:border-emerald-400'
+                                                                            }`}
+                                                                            title={isCorrectOption ? 'Правильный вариант' : 'Отметить как правильный'}
+                                                                        >
+                                                                            <FaIcon className="fas fa-check text-[9px]" />
+                                                                        </button>
+                                                                    ) : (
+                                                                        <div className="h-5 w-5 shrink-0 rounded-full border-2 border-slate-200" />
+                                                                    )}
+                                                                    <input
+                                                                        value={option}
+                                                                        onChange={(e) => {
+                                                                            const prevOptionTrimmed = String(options[optionIndex] || '').trim();
+                                                                            const nextOptionValue = e.target.value;
+                                                                            const nextOptionTrimmed = String(nextOptionValue || '').trim();
+                                                                            const nextCorrectOptions = toUniqueTrimmedList(
+                                                                                (question.correctOptions || []).map((value) => {
+                                                                                    const normalizedValue = String(value || '').trim();
+                                                                                    if (!normalizedValue) return '';
+                                                                                    if (normalizedValue !== prevOptionTrimmed) return normalizedValue;
+                                                                                    return nextOptionTrimmed;
+                                                                                })
+                                                                            );
+                                                                            updateQuestion(question.id, {
+                                                                                options: options.map((cur, idx) => (idx === optionIndex ? nextOptionValue : cur)),
+                                                                                correctOptions: nextCorrectOptions
+                                                                            });
+                                                                        }}
+                                                                        placeholder={`Вариант ${optionIndex + 1}`}
+                                                                        className={`${iosInput} bg-white ring-1 ring-slate-200/60`}
+                                                                    />
                                                                     <button
                                                                         type="button"
-                                                                        onClick={() => toggleCorrectOption(question.id, option)}
-                                                                        className={`w-5 h-5 shrink-0 flex items-center justify-center border-2 transition-all ${
-                                                                            question.type === 'single' ? 'rounded-full' : 'rounded'
-                                                                        } ${
-                                                                            isCorrectOption
-                                                                                ? 'bg-emerald-500 border-emerald-500 text-white'
-                                                                                : 'border-gray-300 text-transparent hover:border-emerald-400'
-                                                                        }`}
-                                                                        title={isCorrectOption ? 'Правильный вариант' : 'Отметить как правильный'}
+                                                                        disabled={options.length <= 2}
+                                                                        onClick={() => removeQuestionOption(question.id, optionIndex)}
+                                                                        className="px-1 text-slate-300 transition-colors hover:text-red-400 disabled:opacity-20"
                                                                     >
-                                                                        <FaIcon className="fas fa-check text-[9px]" />
+                                                                        <FaIcon className="fas fa-times" />
                                                                     </button>
-                                                                ) : (
-                                                                    <div className="w-5 h-5 rounded-full border-2 border-gray-200 shrink-0" />
-                                                                )}
-                                                                <input
-                                                                    value={option}
-                                                                    onChange={(e) => {
-                                                                        const prevOptionTrimmed = String(options[optionIndex] || '').trim();
-                                                                        const nextOptionValue = e.target.value;
-                                                                        const nextOptionTrimmed = String(nextOptionValue || '').trim();
-                                                                        const nextCorrectOptions = toUniqueTrimmedList(
-                                                                            (question.correctOptions || []).map((value) => {
-                                                                                const normalizedValue = String(value || '').trim();
-                                                                                if (!normalizedValue) return '';
-                                                                                if (normalizedValue !== prevOptionTrimmed) return normalizedValue;
-                                                                                return nextOptionTrimmed;
-                                                                            })
-                                                                        );
-                                                                        updateQuestion(question.id, {
-                                                                            options: options.map((cur, idx) => (idx === optionIndex ? nextOptionValue : cur)),
-                                                                            correctOptions: nextCorrectOptions
-                                                                        });
-                                                                    }}
-                                                                    placeholder={`Вариант ${optionIndex + 1}`}
-                                                                    className={inputCls}
-                                                                />
-                                                                <button
-                                                                    type="button"
-                                                                    disabled={options.length <= 2}
-                                                                    onClick={() => removeQuestionOption(question.id, optionIndex)}
-                                                                    className="text-gray-300 hover:text-red-400 disabled:opacity-20 transition-colors px-1"
-                                                                >
-                                                                    <FaIcon className="fas fa-times" />
-                                                                </button>
+                                                                </div>
+                                                            );
+                                                        })}
+                                                        {question.type !== QUESTION_TYPE_OTHER_ONLY && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => addQuestionOption(question.id)}
+                                                                className="ml-7 text-[12.5px] font-medium text-blue-600 transition-colors hover:text-blue-700"
+                                                            >
+                                                                <FaIcon className="fas fa-plus mr-1 text-[10px]" />Добавить вариант
+                                                            </button>
+                                                        )}
+
+                                                        {draft.isTest ? (
+                                                            <div className="ml-7 text-[11.5px] text-emerald-600">
+                                                                Отметьте правильные варианты слева от текста ответа.
                                                             </div>
-                                                        );
-                                                    })}
-                                                    {question.type !== QUESTION_TYPE_OTHER_ONLY && (
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => addQuestionOption(question.id)}
-                                                        className="text-xs text-blue-500 hover:text-blue-700 transition-colors ml-7"
-                                                    >
-                                                        <FaIcon className="fas fa-plus mr-1" />Добавить вариант
-                                                    </button>
-                                                    )}
+                                                        ) : question.type === QUESTION_TYPE_OTHER_ONLY ? (
+                                                            <div className="ml-7 text-[11.5px] text-slate-500">
+                                                                Для этого типа доступно только поле «Другое» без фиксированных вариантов.
+                                                            </div>
+                                                        ) : (
+                                                            <label className="ml-7 inline-flex items-center gap-2 text-[12.5px] text-slate-500">
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={!!question.allowOther}
+                                                                    onChange={(e) => updateQuestion(question.id, { allowOther: e.target.checked })}
+                                                                    className="rounded border-slate-300"
+                                                                />
+                                                                Разрешить вариант «Другое»
+                                                            </label>
+                                                        )}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
 
-                                                    {draft.isTest ? (
-                                                        <div className="text-[11px] text-emerald-600 ml-7">
-                                                            Отметьте правильные варианты слева от текста ответа.
-                                                        </div>
-                                                    ) : question.type === QUESTION_TYPE_OTHER_ONLY ? (
-                                                        <div className="text-[11px] text-gray-500 ml-7">
-                                                            Для этого типа доступно только поле "Другое" без фиксированных вариантов.
-                                                        </div>
-                                                    ) : (
-                                                        <label className="inline-flex items-center gap-2 text-xs text-gray-500 ml-7">
-                                                            <input
-                                                                type="checkbox"
-                                                                checked={!!question.allowOther}
-                                                                onChange={(e) => updateQuestion(question.id, { allowOther: e.target.checked })}
-                                                                className="rounded border-gray-300"
-                                                            />
-                                                            Разрешить вариант "Другое"
-                                                        </label>
-                                                    )}
-                                                </div>
-                                            )}
-                                        </div>
-                                    );
-                                })}
-                            </div>
-
-                            <button
-                                onClick={() => setDraft((p) => ({ ...p, questions: [...p.questions, emptyQuestion()] }))}
-                                className="w-full py-2.5 border-2 border-dashed border-gray-200 rounded-xl text-sm text-gray-400 hover:border-blue-300 hover:text-blue-500 transition-all"
-                            >
-                                <FaIcon className="fas fa-plus mr-2" />Добавить вопрос
-                            </button>
+                                <button
+                                    onClick={() => setDraft((p) => ({ ...p, questions: [...p.questions, emptyQuestion()] }))}
+                                    className="w-full rounded-xl border-2 border-dashed border-slate-200 py-2.5 text-[13px] font-medium text-slate-400 transition-all hover:border-blue-300 hover:text-blue-500"
+                                >
+                                    <FaIcon className="fas fa-plus mr-2 text-[11px]" />Добавить вопрос
+                                </button>
+                            </IosSection>
                         </div>
 
-                        {/* Save */}
-                        <div className="flex justify-end pt-2 border-t border-gray-100">
-                            <button
-                                onClick={createSurvey}
-                                disabled={isSaving}
-                                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-all shadow-sm"
-                            >
-                                {isSaving
-                                    ? <><FaIcon className="fas fa-spinner fa-spin" />Сохранение...</>
-                                    : <><FaIcon className="fas fa-check" />{isEditMode ? 'Обновить опрос' : (draft.isTest ? 'Сохранить тест' : 'Сохранить опрос')}</>}
-                            </button>
+                        {/* Footer */}
+                        <div className="flex items-center justify-between gap-3 border-t border-slate-200/70 bg-white/80 px-5 py-3 backdrop-blur-xl">
+                            <div className="hidden text-[12px] text-slate-500 sm:block">
+                                {draft.questions.length} вопр. · {draft.operatorIds.length} оператор(ов)
+                            </div>
+                            <div className="flex w-full items-center justify-end gap-2 sm:w-auto">
+                                <button
+                                    type="button"
+                                    onClick={() => { if (!isSaving) closeBuilder(); }}
+                                    disabled={isSaving}
+                                    className="rounded-xl px-4 py-2.5 text-[13.5px] font-medium text-slate-600 transition-colors hover:bg-slate-100 disabled:opacity-50"
+                                >
+                                    Отмена
+                                </button>
+                                <button
+                                    onClick={createSurvey}
+                                    disabled={isSaving}
+                                    className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-[13.5px] font-semibold text-white shadow-sm transition-all hover:bg-blue-700 disabled:opacity-50"
+                                >
+                                    {isSaving
+                                        ? <><FaIcon className="fas fa-spinner fa-spin" />Сохранение…</>
+                                        : <><FaIcon className="fas fa-check" />{isEditMode ? 'Обновить' : (draft.isTest ? 'Сохранить тест' : 'Сохранить опрос')}</>}
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>
