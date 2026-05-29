@@ -6706,6 +6706,307 @@ class Database:
             "merged_with_existing": bool(merge_ids),
         }
 
+    def admin_unclaim_shift(self, admin_id, lot_id=None, plan_id=None, source_schedule_shift_id=None):
+        """
+        Снять claim с лота админом — для таблицы смен.
+        Принимает либо lot_id (активный план), либо (plan_id, source_schedule_shift_id)
+        (исторический добор). Удаляет work_shifts если есть.
+        """
+        try:
+            admin_id = int(admin_id) if admin_id is not None else None
+        except Exception:
+            admin_id = None
+        try:
+            lot_id_int = int(lot_id) if lot_id not in (None, '') else None
+        except Exception:
+            lot_id_int = None
+        try:
+            plan_id_int = int(plan_id) if plan_id not in (None, '') else None
+        except Exception:
+            plan_id_int = None
+        try:
+            shift_id_int = int(source_schedule_shift_id) if source_schedule_shift_id not in (None, '') else None
+        except Exception:
+            shift_id_int = None
+
+        with self._get_cursor() as cursor:
+            shift_date = None
+            start_time = None
+            end_time = None
+            operator_id = None
+            resolved_plan_id = plan_id_int
+            resolved_shift_id = shift_id_int
+
+            if lot_id_int:
+                cursor.execute("""
+                    SELECT id, shift_date, start_time, end_time, claimed_by,
+                           source_schedule_plan_id, source_schedule_shift_id, status
+                    FROM shift_auction_test_lots
+                    WHERE id = %s
+                    FOR UPDATE
+                """, (lot_id_int,))
+                lot = cursor.fetchone()
+                if not lot:
+                    raise ValueError("LOT_NOT_FOUND")
+                if lot[7] != 'claimed' or lot[4] is None:
+                    raise ValueError("LOT_NOT_CLAIMED")
+                shift_date, start_time, end_time = lot[1], lot[2], lot[3]
+                operator_id = int(lot[4])
+                resolved_plan_id = int(lot[5]) if lot[5] is not None else resolved_plan_id
+                resolved_shift_id = int(lot[6]) if lot[6] is not None else resolved_shift_id
+
+                if resolved_shift_id:
+                    cursor.execute(
+                        "SELECT pg_advisory_xact_lock(%s, %s)",
+                        (self.SHIFT_AUCTION_SAVED_SHIFT_LOCK_NAMESPACE, resolved_shift_id)
+                    )
+                self._lock_shift_auction_operator_tx(cursor, operator_id)
+
+                cursor.execute("""
+                    UPDATE shift_auction_test_lots
+                    SET status = 'available',
+                        claimed_by = NULL,
+                        claimed_at = NULL,
+                        post_auction_claimed = FALSE,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                """, (lot_id_int,))
+            else:
+                if not (resolved_plan_id and resolved_shift_id):
+                    raise ValueError("MISSING_TARGET")
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(%s, %s)",
+                    (self.SHIFT_AUCTION_SAVED_SHIFT_LOCK_NAMESPACE, resolved_shift_id)
+                )
+                cursor.execute("""
+                    SELECT shift_date, start_time, end_time
+                    FROM resource_saved_schedule_shifts
+                    WHERE id = %s AND plan_id = %s
+                """, (resolved_shift_id, resolved_plan_id))
+                saved = cursor.fetchone()
+                if not saved:
+                    raise ValueError("SHIFT_NOT_FOUND")
+                shift_date, start_time, end_time = saved[0], saved[1], saved[2]
+                cursor.execute("""
+                    SELECT claimed_by FROM shift_auction_historical_claims
+                    WHERE plan_id = %s AND source_schedule_shift_id = %s
+                    FOR UPDATE
+                """, (resolved_plan_id, resolved_shift_id))
+                row = cursor.fetchone()
+                if not row:
+                    raise ValueError("LOT_NOT_CLAIMED")
+                operator_id = int(row[0])
+                self._lock_shift_auction_operator_tx(cursor, operator_id)
+                cursor.execute("""
+                    UPDATE shift_auction_test_lots
+                    SET status = 'available',
+                        claimed_by = NULL,
+                        claimed_at = NULL,
+                        post_auction_claimed = FALSE,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE source_schedule_plan_id = %s
+                      AND source_schedule_shift_id = %s
+                      AND status = 'claimed'
+                """, (resolved_plan_id, resolved_shift_id))
+
+            if resolved_plan_id and resolved_shift_id:
+                cursor.execute("""
+                    DELETE FROM shift_auction_historical_claims
+                    WHERE plan_id = %s AND source_schedule_shift_id = %s
+                """, (resolved_plan_id, resolved_shift_id))
+
+            if operator_id and shift_date and start_time and end_time:
+                cursor.execute("""
+                    DELETE FROM work_shifts
+                    WHERE operator_id = %s
+                      AND shift_date = %s
+                      AND start_time = %s
+                      AND end_time = %s
+                """, (operator_id, shift_date, start_time, end_time))
+                self._recalculate_auto_daily_hours_tx(
+                    cursor=cursor,
+                    operator_ids=[operator_id],
+                    start_date=shift_date,
+                    end_date=shift_date
+                )
+
+            event_payload = {
+                "operator_id": operator_id,
+                "lot_id": lot_id_int,
+                "plan_id": resolved_plan_id,
+                "source_schedule_shift_id": resolved_shift_id,
+                "shift_date": shift_date.strftime('%Y-%m-%d') if hasattr(shift_date, 'strftime') else None,
+                "start_time": start_time.strftime('%H:%M') if hasattr(start_time, 'strftime') else None,
+                "end_time": end_time.strftime('%H:%M') if hasattr(end_time, 'strftime') else None,
+                "admin_id": admin_id,
+            }
+            event = self._insert_shift_auction_test_event(cursor, "lot_admin_unclaimed", event_payload)
+
+        return {
+            "operator_id": operator_id,
+            "lot_id": lot_id_int,
+            "plan_id": resolved_plan_id,
+            "source_schedule_shift_id": resolved_shift_id,
+            "shift_date": event_payload["shift_date"],
+            "start_time": event_payload["start_time"],
+            "end_time": event_payload["end_time"],
+            "event": event,
+        }
+
+    def admin_claim_shift_for_operator(self, admin_id, operator_id, lot_id=None, plan_id=None, source_schedule_shift_id=None):
+        """
+        Назначить лот оператору админом. Аналог post_auction_claim_lot/_saved_shift,
+        но без проверки is_participant — админ имеет право.
+        Проверяет непересечение с уже взятыми сменами оператора в этот день.
+        """
+        try:
+            admin_id = int(admin_id) if admin_id is not None else None
+        except Exception:
+            admin_id = None
+        try:
+            operator_id_int = int(operator_id)
+        except Exception:
+            raise ValueError("OPERATOR_NOT_FOUND")
+        try:
+            lot_id_int = int(lot_id) if lot_id not in (None, '') else None
+        except Exception:
+            lot_id_int = None
+        try:
+            plan_id_int = int(plan_id) if plan_id not in (None, '') else None
+        except Exception:
+            plan_id_int = None
+        try:
+            shift_id_int = int(source_schedule_shift_id) if source_schedule_shift_id not in (None, '') else None
+        except Exception:
+            shift_id_int = None
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT u.name, u.role, COALESCE(u.status, '')
+                FROM users u WHERE u.id = %s
+            """, (operator_id_int,))
+            op_row = cursor.fetchone()
+            if not op_row or normalize_role_value(op_row[1]) != 'operator' or str(op_row[2] or '').strip().lower() in ('fired', 'dismissal'):
+                raise ValueError("OPERATOR_NOT_FOUND")
+            operator_name = op_row[0] or f"Operator #{operator_id_int}"
+
+            if lot_id_int:
+                cursor.execute("""
+                    SELECT id, shift_date, start_time, end_time, status, claimed_by,
+                           source_schedule_plan_id, source_schedule_shift_id, rate_min, breaks
+                    FROM shift_auction_test_lots
+                    WHERE id = %s
+                    FOR UPDATE
+                """, (lot_id_int,))
+                lot = cursor.fetchone()
+                if not lot:
+                    raise ValueError("LOT_NOT_FOUND")
+                if lot[4] == 'claimed':
+                    raise ValueError("LOT_ALREADY_CLAIMED")
+                shift_date, start_time, end_time = lot[1], lot[2], lot[3]
+                resolved_plan_id = int(lot[6]) if lot[6] is not None else plan_id_int
+                resolved_shift_id = int(lot[7]) if lot[7] is not None else shift_id_int
+            else:
+                if not (plan_id_int and shift_id_int):
+                    raise ValueError("MISSING_TARGET")
+                resolved_plan_id = plan_id_int
+                resolved_shift_id = shift_id_int
+                cursor.execute("""
+                    SELECT shift_date, start_time, end_time
+                    FROM resource_saved_schedule_shifts
+                    WHERE id = %s AND plan_id = %s
+                      AND COALESCE(meta->>'excludeFromAuction', 'false') <> 'true'
+                """, (resolved_shift_id, resolved_plan_id))
+                saved = cursor.fetchone()
+                if not saved:
+                    raise ValueError("SHIFT_NOT_FOUND")
+                shift_date, start_time, end_time = saved[0], saved[1], saved[2]
+
+            if resolved_shift_id:
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(%s, %s)",
+                    (self.SHIFT_AUCTION_SAVED_SHIFT_LOCK_NAMESPACE, resolved_shift_id)
+                )
+            self._lock_shift_auction_operator_tx(cursor, operator_id_int)
+
+            new_start_min, new_end_min = self._schedule_interval_minutes(start_time, end_time)
+
+            cursor.execute("""
+                SELECT id, start_time, end_time
+                FROM work_shifts
+                WHERE operator_id = %s AND shift_date = %s
+                ORDER BY start_time
+            """, (operator_id_int, shift_date))
+            existing_shifts = cursor.fetchall() or []
+            for _ws_id, ws_start, ws_end in existing_shifts:
+                ws_s, ws_e = self._schedule_interval_minutes(ws_start, ws_end)
+                if ws_s < new_end_min and new_start_min < ws_e:
+                    raise ValueError("SHIFT_OVERLAP")
+
+            if lot_id_int:
+                cursor.execute("""
+                    UPDATE shift_auction_test_lots
+                    SET status = 'claimed', claimed_by = %s, claimed_at = CURRENT_TIMESTAMP,
+                        post_auction_claimed = TRUE, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s AND status <> 'claimed'
+                    RETURNING claimed_at
+                """, (operator_id_int, lot_id_int))
+                updated_row = cursor.fetchone()
+                if not updated_row:
+                    raise ValueError("LOT_ALREADY_CLAIMED")
+                claimed_at = updated_row[0]
+            else:
+                claimed_at = None
+
+            if resolved_plan_id and resolved_shift_id:
+                cursor.execute("""
+                    INSERT INTO shift_auction_historical_claims
+                        (plan_id, source_schedule_shift_id, claimed_by, claimed_at)
+                    VALUES (%s, %s, %s, COALESCE(%s, CURRENT_TIMESTAMP))
+                    ON CONFLICT (plan_id, source_schedule_shift_id) DO NOTHING
+                    RETURNING claimed_at
+                """, (resolved_plan_id, resolved_shift_id, operator_id_int, claimed_at))
+                row = cursor.fetchone()
+                if not row and lot_id_int is None:
+                    raise ValueError("LOT_ALREADY_CLAIMED")
+                if row:
+                    claimed_at = row[0]
+
+            self._save_shift_tx(
+                cursor=cursor,
+                operator_id=operator_id_int,
+                shift_date=shift_date,
+                start_time=start_time,
+                end_time=end_time,
+                breaks=None,
+                shift_type=None,
+            )
+            self._recalculate_auto_daily_hours_tx(
+                cursor=cursor,
+                operator_ids=[operator_id_int],
+                start_date=shift_date,
+                end_date=shift_date
+            )
+
+            event_payload = {
+                "operator_id": operator_id_int,
+                "operator_name": operator_name,
+                "lot_id": lot_id_int,
+                "plan_id": resolved_plan_id,
+                "source_schedule_shift_id": resolved_shift_id,
+                "shift_date": shift_date.strftime('%Y-%m-%d') if hasattr(shift_date, 'strftime') else None,
+                "start_time": start_time.strftime('%H:%M') if hasattr(start_time, 'strftime') else None,
+                "end_time": end_time.strftime('%H:%M') if hasattr(end_time, 'strftime') else None,
+                "admin_id": admin_id,
+            }
+            event = self._insert_shift_auction_test_event(cursor, "lot_admin_claimed", event_payload)
+
+        return {
+            **event_payload,
+            "claimed_at": claimed_at.isoformat() if claimed_at else None,
+            "event": event,
+        }
+
     def get_admin_post_claim_notify_recipients(self):
         """Список admin'ов с включённым тумблером уведомлений (id, name, telegram_id)."""
         with self._get_cursor() as cursor:
