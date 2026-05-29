@@ -3121,6 +3121,8 @@ def _shift_auction_test_error_response(error):
         "POST_AUCTION_NOT_ACTIVE": ("Дополнительные смены можно забирать только после сохранения итогов в графики", 409),
         "LOT_NOT_OPEN_FOR_POST_CLAIM": ("Эту смену больше нельзя забрать", 409),
         "SHIFT_ALREADY_STARTED": ("Эта смена уже началась или прошла", 409),
+        "INVALID_PARTIAL_SHIFT_RANGE": ("Некорректный интервал частичной смены", 400),
+        "PARTIAL_SHIFT_OUT_OF_RANGE": ("Выбранный интервал должен быть внутри исходной смены", 400),
         "LOT_INVALID": ("Смена недоступна", 409),
         "POST_AUCTION_LOT_NOT_RELEASABLE": ("Эту смену нельзя вернуть — она уже сохранена в графики", 409),
         "SHIFT_OVERLAP": ("Смена пересекается по времени с другой сменой оператора", 409),
@@ -3157,6 +3159,7 @@ def api_shift_auction_test_snapshot():
             snapshot["lots"] = []
             snapshot["my_day_offs"] = []
             snapshot["my_blocked_dates"] = []
+            snapshot["my_work_shifts"] = []
             snapshot["available_periods"] = []
             snapshot["claim_journal"] = []
             snapshot["participant_workloads"] = []
@@ -3167,6 +3170,7 @@ def api_shift_auction_test_snapshot():
                 snapshot["lots"] = []
                 snapshot["my_day_offs"] = []
                 snapshot["my_blocked_dates"] = []
+                snapshot["my_work_shifts"] = []
         snapshot_fingerprint = hashlib.sha1(
             json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
         ).hexdigest()
@@ -3528,8 +3532,8 @@ def _notify_admins_post_auction_claim(operator_name, lot_payload):
     except Exception:
         shift_date_obj = None
     date_label = shift_date_obj.strftime('%d.%m.%Y') if shift_date_obj else shift_date_raw or '—'
-    start_label = str(lot_payload.get('start_time') or '').strip() or '—'
-    end_label = str(lot_payload.get('end_time') or '').strip() or '—'
+    start_label = str(lot_payload.get('claim_start_time') or lot_payload.get('post_claim_start_time') or lot_payload.get('start_time') or '').strip() or '—'
+    end_label = str(lot_payload.get('claim_end_time') or lot_payload.get('post_claim_end_time') or lot_payload.get('end_time') or '').strip() or '—'
     now_label = datetime.now().strftime('%d.%m.%Y %H:%M')
     operator_label = str(operator_name or '').strip() or 'Оператор'
 
@@ -3570,18 +3574,27 @@ def api_shift_auction_post_claim_lot():
         payload = request.get_json(silent=True) or {}
         source_shift_id = payload.get('source_schedule_shift_id') or payload.get('source_shift_id')
         source_plan_id = payload.get('schedule_plan_id') or payload.get('source_schedule_plan_id')
+        claim_start_time = payload.get('claim_start_time') or payload.get('selected_start_time')
+        claim_end_time = payload.get('claim_end_time') or payload.get('selected_end_time')
         if source_shift_id and source_plan_id:
             result = db.post_auction_claim_saved_shift(
                 requester_id,
                 int(source_plan_id),
-                int(source_shift_id)
+                int(source_shift_id),
+                claim_start_time=claim_start_time,
+                claim_end_time=claim_end_time
             )
         else:
             try:
                 lot_id = int(payload.get('lot_id') or payload.get('id'))
             except Exception:
                 return jsonify({"error": "Lot id is required"}), 400
-            result = db.post_auction_claim_lot(requester_id, lot_id)
+            result = db.post_auction_claim_lot(
+                requester_id,
+                lot_id,
+                claim_start_time=claim_start_time,
+                claim_end_time=claim_end_time
+            )
         operator_info = result.get('operator') or {}
         operator_name = operator_info.get('name') or requester[1]
         lot_payload = result.get('lot') or {}

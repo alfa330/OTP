@@ -450,6 +450,47 @@ const formatAuctionBreakMinute = (value) => {
   return `${String(Math.floor(normalized / 60)).padStart(2, '0')}:${String(normalized % 60).padStart(2, '0')}`;
 };
 
+const getAuctionLotClaimStartTime = (lot) => lot?.claim_start_time || lot?.post_claim_start_time || lot?.claimed_start_time || '';
+
+const getAuctionLotClaimEndTime = (lot) => lot?.claim_end_time || lot?.post_claim_end_time || lot?.claimed_end_time || '';
+
+const getAuctionLotEffectiveStartTime = (lot) => (
+  Boolean(lot?.post_auction_claimed) && getAuctionLotClaimStartTime(lot)
+    ? getAuctionLotClaimStartTime(lot)
+    : lot?.start_time
+);
+
+const getAuctionLotEffectiveEndTime = (lot) => (
+  Boolean(lot?.post_auction_claimed) && getAuctionLotClaimEndTime(lot)
+    ? getAuctionLotClaimEndTime(lot)
+    : lot?.end_time
+);
+
+const formatAuctionLotEffectiveTimeRangeLabel = (lot) => (
+  `${String(getAuctionLotEffectiveStartTime(lot) || '').slice(0, 5)}–${String(getAuctionLotEffectiveEndTime(lot) || '').slice(0, 5)}`
+);
+
+const getClockRangeWithinSource = (startTime, endTime, sourceRange) => {
+  const start = parseHHMMToMinutes(startTime);
+  let end = parseHHMMToMinutes(endTime);
+  if (start == null || end == null) return null;
+  let adjustedStart = start;
+  if (sourceRange && sourceRange[1] > 1440 && adjustedStart < sourceRange[0]) {
+    adjustedStart += 1440;
+  }
+  if (end <= adjustedStart) end += 1440;
+  return [adjustedStart, end];
+};
+
+const getAuctionLotEffectiveMinuteRange = (lot) => {
+  const sourceRange = lotMinuteRange(lot);
+  return getClockRangeWithinSource(
+    getAuctionLotEffectiveStartTime(lot),
+    getAuctionLotEffectiveEndTime(lot),
+    sourceRange
+  );
+};
+
 const formatAuctionBreaksLabel = (lot) => {
   const breaks = Array.isArray(lot?.breaks) ? lot.breaks : [];
   const labels = breaks
@@ -463,21 +504,21 @@ const formatAuctionBreaksLabel = (lot) => {
 };
 
 const getAuctionLotDurationMinutes = (lot) => {
-  const startMinutes = clockToMinutes(lot?.start_time);
-  const endClockMinutes = clockToMinutes(lot?.end_time);
-  const endMinutes = endClockMinutes <= startMinutes ? endClockMinutes + 1440 : endClockMinutes;
-  return Math.max(0, endMinutes - startMinutes);
+  const range = getAuctionLotEffectiveMinuteRange(lot);
+  return range ? Math.max(0, range[1] - range[0]) : 0;
 };
 
 const getAuctionLotBreakMinutes = (lot) => {
   const duration = getAuctionLotDurationMinutes(lot);
   const breaks = Array.isArray(lot?.breaks) ? lot.breaks : [];
+  const activeRange = getAuctionLotEffectiveMinuteRange(lot);
+  if (!activeRange) return 0;
   const total = breaks.reduce((sum, item) => {
     const start = Number(item?.start || 0);
     let end = Number(item?.end || 0);
     if (!Number.isFinite(start) || !Number.isFinite(end)) return sum;
     if (end <= start) end += 1440;
-    return sum + Math.max(0, end - start);
+    return sum + Math.max(0, Math.min(end, activeRange[1]) - Math.max(start, activeRange[0]));
   }, 0);
   return clampNumber(total, 0, duration);
 };
@@ -518,6 +559,7 @@ const AuctionLotCell = ({
   postAuctionActive = false,
   postAuctionNowMs = 0,
   postClaimingLotIds,
+  postAuctionClaimOption,
   onRequestPostAuctionClaim
 }) => {
   if (!lot) return null;
@@ -549,9 +591,17 @@ const AuctionLotCell = ({
     && !hasStarted
   );
   // Actually takeable only when there is no blocking reason (e.g. time overlap).
-  const postAuctionTakeable = isPostAuctionCandidate && !claimBlockReason;
+  const postAuctionTakeable = isPostAuctionCandidate && !claimBlockReason && (!postAuctionClaimOption || postAuctionClaimOption.canClaim);
+  const postAuctionSegment = postAuctionClaimOption?.recommendedSegment || null;
+  const postAuctionCellLabel = postAuctionSegment && !postAuctionSegment.isFull
+    ? `${postAuctionSegment.start_time}-${postAuctionSegment.end_time}`
+    : label;
+  const postAuctionCompactLabel = postAuctionSegment && !postAuctionSegment.isFull
+    ? `${formatCompactClockValue(postAuctionSegment.start_time)}-${formatCompactClockValue(postAuctionSegment.end_time)}`
+    : compactLabel;
 
-  const title = `${label}${minRate ? ` · ставка ${formatRate(minRate)}` : ''} · в норму ${formatAuctionHours(netMinutes)} ч${breakMinutes ? ` · перерыв ${formatAuctionHours(breakMinutes)} ч` : ''}${breaksLabel ? ` (${breaksLabel})` : ''}${claimBlockReason ? ` · ${claimBlockReason}` : ''}${lot.claimed_by_name ? ` · ${lot.claimed_by_name}` : ''}${postAuctionTakeable ? ' · доступно после аукциона' : ''}`;
+  const title = `${label}${minRate ? ` · ставка ${formatRate(minRate)}`
+    : ''} · в норму ${formatAuctionHours(netMinutes)} ч${breakMinutes ? ` · перерыв ${formatAuctionHours(breakMinutes)} ч` : ''}${breaksLabel ? ` (${breaksLabel})` : ''}${claimBlockReason ? ` · ${claimBlockReason}` : ''}${lot.claimed_by_name ? ` · ${lot.claimed_by_name}` : ''}${postAuctionTakeable ? ` · доступно после аукциона${postAuctionSegment && !postAuctionSegment.isFull ? `: ${postAuctionSegment.start_time}–${postAuctionSegment.end_time}` : ''}` : ''}`;
 
   if (postAuctionTakeable) {
     return (
@@ -561,10 +611,13 @@ const AuctionLotCell = ({
         disabled={isPostClaiming}
         title={title}
         style={postAuctionToneStyle}
-        className="flex h-6 w-full min-w-0 items-center justify-center overflow-hidden rounded border px-1 text-[10px] font-semibold tabular-nums transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-1 disabled:cursor-wait sm:h-8 sm:px-2 sm:text-xs hover:brightness-95"
+        className="relative flex h-6 w-full min-w-0 items-center justify-center overflow-hidden rounded border px-1 text-[10px] font-semibold tabular-nums transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-1 disabled:cursor-wait sm:h-8 sm:px-2 sm:text-xs hover:brightness-95"
       >
-        <span className="truncate sm:hidden">{isPostClaiming ? '...' : compactLabel}</span>
-        <span className="hidden truncate sm:inline">{isPostClaiming ? '...' : label}</span>
+        <span className="truncate sm:hidden">{isPostClaiming ? '...' : postAuctionCompactLabel}</span>
+        <span className="hidden truncate sm:inline">{isPostClaiming ? '...' : postAuctionCellLabel}</span>
+        {postAuctionSegment && !postAuctionSegment.isFull ? (
+          <span className="absolute inset-x-1 bottom-0.5 h-0.5 rounded-full bg-white/80" />
+        ) : null}
       </button>
     );
   }
@@ -1897,6 +1950,297 @@ const lotsOverlap = (a, b) => {
   return ra[0] < rb[1] && rb[0] < ra[1];
 };
 
+const minutesToClockLabel = (minutes) => formatAuctionBreakMinute(minutes);
+
+const rangesOverlap = (left, right) => left[0] < right[1] && right[0] < left[1];
+
+const subtractBusyRanges = (sourceRange, busyRanges) => {
+  let available = [{ start: sourceRange[0], end: sourceRange[1] }];
+  const occupied = [];
+
+  busyRanges
+    .map((range) => [
+      Math.max(sourceRange[0], Number(range?.[0])),
+      Math.min(sourceRange[1], Number(range?.[1]))
+    ])
+    .filter((range) => Number.isFinite(range[0]) && Number.isFinite(range[1]) && range[1] > range[0])
+    .sort((a, b) => a[0] - b[0] || a[1] - b[1])
+    .forEach((busy) => {
+      occupied.push({ start: busy[0], end: busy[1] });
+      const nextAvailable = [];
+      available.forEach((segment) => {
+        if (busy[1] <= segment.start || busy[0] >= segment.end) {
+          nextAvailable.push(segment);
+          return;
+        }
+        if (busy[0] > segment.start) nextAvailable.push({ start: segment.start, end: busy[0] });
+        if (busy[1] < segment.end) nextAvailable.push({ start: busy[1], end: segment.end });
+      });
+      available = nextAvailable;
+    });
+
+  return {
+    available: available.filter((segment) => segment.end - segment.start >= 15),
+    occupied
+  };
+};
+
+const buildPostAuctionClaimOption = (lot, workShifts = [], claimedLots = []) => {
+  const sourceRange = lotMinuteRange(lot);
+  if (!lot || !sourceRange) return null;
+
+  const blockers = [
+    ...(Array.isArray(workShifts) ? workShifts : []),
+    ...((Array.isArray(workShifts) && workShifts.length) ? [] : (Array.isArray(claimedLots) ? claimedLots : []))
+  ];
+  const busyRanges = blockers
+    .filter((item) => item && item.shift_date === lot.shift_date)
+    .map((item) => getClockRangeWithinSource(
+      item.start_time || item.start,
+      item.end_time || item.end,
+      sourceRange
+    ))
+    .filter(Boolean)
+    .filter((range) => rangesOverlap(sourceRange, range));
+
+  const split = subtractBusyRanges(sourceRange, busyRanges);
+  const availableSegments = split.available.map((segment) => ({
+    ...segment,
+    start_time: minutesToClockLabel(segment.start),
+    end_time: minutesToClockLabel(segment.end),
+    minutes: segment.end - segment.start,
+    isFull: segment.start === sourceRange[0] && segment.end === sourceRange[1]
+  }));
+  const occupiedSegments = split.occupied.map((segment) => ({
+    ...segment,
+    start_time: minutesToClockLabel(segment.start),
+    end_time: minutesToClockLabel(segment.end),
+    minutes: segment.end - segment.start
+  }));
+  const recommendedSegment = [...availableSegments].sort((a, b) => b.minutes - a.minutes || a.start - b.start)[0] || null;
+
+  return {
+    sourceStart: sourceRange[0],
+    sourceEnd: sourceRange[1],
+    sourceMinutes: sourceRange[1] - sourceRange[0],
+    availableSegments,
+    occupiedSegments,
+    recommendedSegment,
+    canClaim: Boolean(recommendedSegment),
+    isPartial: Boolean(recommendedSegment && !recommendedSegment.isFull)
+  };
+};
+
+const getSelectionMinuteRange = (lot, selection) => {
+  const sourceRange = lotMinuteRange(lot);
+  if (!sourceRange || !selection?.start_time || !selection?.end_time) return null;
+  return getClockRangeWithinSource(selection.start_time, selection.end_time, sourceRange);
+};
+
+const isSelectionInsideAvailableSegments = (lot, selection, availableSegments = []) => {
+  const range = getSelectionMinuteRange(lot, selection);
+  if (!range || range[1] <= range[0]) return false;
+  return availableSegments.some((segment) => range[0] >= segment.start && range[1] <= segment.end);
+};
+
+const PostAuctionPartialClaimModal = ({
+  lot,
+  option,
+  selection,
+  onSelectionChange,
+  onClose,
+  onConfirm,
+  inProgress
+}) => {
+  if (!lot) return null;
+
+  const safeOption = option || buildPostAuctionClaimOption(lot, [], []);
+  const sourceStart = safeOption?.sourceStart ?? 0;
+  const sourceEnd = safeOption?.sourceEnd ?? sourceStart + Math.max(1, getAuctionLotDurationMinutes(lot));
+  const sourceMinutes = Math.max(1, sourceEnd - sourceStart);
+  const selectedRange = getSelectionMinuteRange(lot, selection);
+  const selectedMinutes = selectedRange ? Math.max(0, selectedRange[1] - selectedRange[0]) : 0;
+  const isValid = Boolean(safeOption?.canClaim && isSelectionInsideAvailableSegments(lot, selection, safeOption.availableSegments));
+  const sourceLabel = `${formatAuctionShiftLabel(lot)} · ${formatAuctionHours(getAuctionLotDurationMinutes({ ...lot, post_auction_claimed: false }))} ч`;
+  const selectedLabel = selectedMinutes > 0
+    ? `${selection.start_time}–${selection.end_time} · ${formatAuctionHours(selectedMinutes)} ч`
+    : 'Интервал не выбран';
+  const selectedIsPartial = selectedRange && (selectedRange[0] !== sourceStart || selectedRange[1] !== sourceEnd);
+  const segmentStyle = (segment) => ({
+    left: `${clampNumber(((segment.start - sourceStart) / sourceMinutes) * 100, 0, 100)}%`,
+    width: `${clampNumber(((segment.end - segment.start) / sourceMinutes) * 100, 0, 100)}%`
+  });
+
+  const applySegment = (segment) => {
+    if (!segment) return;
+    onSelectionChange({ start_time: segment.start_time, end_time: segment.end_time });
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/50 px-4 py-6"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="post-claim-confirm-title"
+      onClick={() => !inProgress && onClose()}
+    >
+      <div
+        className="max-h-[88vh] w-full max-w-2xl overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3 sm:px-5 sm:py-4">
+          <div className="min-w-0">
+            <h3 id="post-claim-confirm-title" className="text-base font-semibold text-slate-950 sm:text-lg">
+              Забрать дополнительную смену
+            </h3>
+            <div className="mt-0.5 text-xs text-slate-500 sm:text-sm">
+              {formatDateLabel(lot.shift_date)} · исходная смена {sourceLabel}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={inProgress}
+            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 transition hover:bg-white hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+            title="Закрыть"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="max-h-[calc(88vh-132px)] overflow-y-auto px-4 py-4 sm:px-5">
+          <div className="rounded-lg border border-slate-200 bg-white p-3 sm:p-4">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div className="text-sm font-semibold text-slate-900">Таймлайн смены</div>
+              <div className="flex flex-wrap items-center gap-2 text-[11px] font-medium text-slate-600">
+                <span className="inline-flex items-center gap-1"><span className="h-2.5 w-2.5 rounded-sm bg-orange-300" />Доступно</span>
+                <span className="inline-flex items-center gap-1"><span className="h-2.5 w-2.5 rounded-sm bg-slate-300" />Ваша смена</span>
+                <span className="inline-flex items-center gap-1"><span className="h-2.5 w-2.5 rounded-sm bg-blue-600" />Выбрано</span>
+              </div>
+            </div>
+
+            <div className="relative h-12 rounded-lg border border-slate-200 bg-slate-100">
+              {(safeOption?.availableSegments || []).map((segment) => (
+                <button
+                  key={`available-${segment.start}-${segment.end}`}
+                  type="button"
+                  onClick={() => applySegment(segment)}
+                  className="absolute top-1 h-10 rounded-md bg-orange-300/80 ring-1 ring-orange-400 transition hover:bg-orange-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
+                  style={segmentStyle(segment)}
+                  title={`Доступно ${segment.start_time}–${segment.end_time}`}
+                />
+              ))}
+              {(safeOption?.occupiedSegments || []).map((segment) => (
+                <div
+                  key={`occupied-${segment.start}-${segment.end}`}
+                  className="absolute top-1 h-10 rounded-md border border-slate-300 bg-slate-300"
+                  style={{
+                    ...segmentStyle(segment),
+                    backgroundImage: 'repeating-linear-gradient(45deg, rgba(100,116,139,.42) 0, rgba(100,116,139,.42) 4px, rgba(203,213,225,.9) 4px, rgba(203,213,225,.9) 8px)'
+                  }}
+                  title={`Занято ${segment.start_time}–${segment.end_time}`}
+                />
+              ))}
+              {selectedRange ? (
+                <div
+                  className="pointer-events-none absolute top-1 h-10 rounded-md bg-blue-600 shadow-sm ring-2 ring-white"
+                  style={segmentStyle({ start: selectedRange[0], end: selectedRange[1] })}
+                  title={`Выбрано ${selection.start_time}–${selection.end_time}`}
+                />
+              ) : null}
+            </div>
+            <div className="mt-2 flex justify-between text-[11px] font-semibold text-slate-500 tabular-nums">
+              <span>{minutesToClockLabel(sourceStart)}</span>
+              <span>{minutesToClockLabel(sourceEnd)}</span>
+            </div>
+          </div>
+
+          {(safeOption?.availableSegments || []).length ? (
+            <div className="mt-4 grid gap-2 sm:grid-cols-2">
+              {safeOption.availableSegments.map((segment) => {
+                const active = selection?.start_time === segment.start_time && selection?.end_time === segment.end_time;
+                return (
+                  <button
+                    key={`segment-${segment.start}-${segment.end}`}
+                    type="button"
+                    onClick={() => applySegment(segment)}
+                    disabled={inProgress}
+                    className={`flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left text-sm transition disabled:cursor-not-allowed disabled:opacity-60 ${
+                      active
+                        ? 'border-blue-300 bg-blue-50 text-blue-900'
+                        : 'border-slate-200 bg-white text-slate-700 hover:border-orange-300 hover:bg-orange-50'
+                    }`}
+                  >
+                    <span className="font-semibold tabular-nums">{segment.start_time}–{segment.end_time}</span>
+                    <span className="text-xs font-semibold tabular-nums">{formatAuctionHours(segment.minutes)} ч</span>
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-600">
+              Для этой смены нет свободного интервала без пересечения с вашим графиком.
+            </div>
+          )}
+
+          <div className="mt-4 grid gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end sm:p-4">
+            <label className="block text-xs font-semibold text-slate-700">
+              Начало
+              <input
+                type="time"
+                value={selection?.start_time || ''}
+                step="300"
+                onChange={(event) => onSelectionChange({ ...selection, start_time: event.target.value })}
+                disabled={inProgress}
+                className="mt-1 h-10 w-full rounded-md border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-900 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+              />
+            </label>
+            <label className="block text-xs font-semibold text-slate-700">
+              Конец
+              <input
+                type="time"
+                value={selection?.end_time || ''}
+                step="300"
+                onChange={(event) => onSelectionChange({ ...selection, end_time: event.target.value })}
+                disabled={inProgress}
+                className="mt-1 h-10 w-full rounded-md border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-900 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+              />
+            </label>
+            <div className={`rounded-md px-3 py-2 text-xs font-semibold tabular-nums ${isValid ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}>
+              {isValid ? selectedLabel : 'Интервал пересекается'}
+            </div>
+          </div>
+
+          <p className="mt-3 text-xs leading-5 text-slate-600">
+            {selectedIsPartial
+              ? 'Будет сохранена выбранная часть исходной смены. Если она стыкуется с вашей сменой, график объединится автоматически.'
+              : 'Будет сохранена вся дополнительная смена. Если она стыкуется с вашей сменой, график объединится автоматически.'}
+          </p>
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t border-slate-200 bg-white px-4 py-3 sm:px-5">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={inProgress}
+            className="inline-flex h-9 items-center justify-center rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 sm:text-sm"
+          >
+            Отмена
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={inProgress || !isValid}
+            className="inline-flex h-9 items-center justify-center rounded-lg bg-orange-600 px-3 text-xs font-semibold text-white transition hover:bg-orange-700 disabled:cursor-not-allowed disabled:bg-orange-300 sm:text-sm"
+          >
+            {inProgress ? 'Забираю...' : 'Забрать'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const ShiftAuctionShiftsTable = ({
   operators = [],
   workloads = [],
@@ -2268,7 +2612,7 @@ const ShiftAuctionShiftsTable = ({
                                 className="inline-flex items-center justify-center rounded border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[11px] font-medium text-blue-800 tabular-nums"
                                 title={formatAuctionShiftLabel(lot)}
                               >
-                                {String(lot.start_time || '').slice(0, 5)}–{String(lot.end_time || '').slice(0, 5)}
+                                {formatAuctionLotEffectiveTimeRangeLabel(lot)}
                               </span>
                             ))
                           )}
@@ -2352,7 +2696,7 @@ const ShiftAuctionShiftsTable = ({
                             }`}
                           >
                             <span className="px-3 py-1 text-[12.5px] font-semibold text-blue-900 tabular-nums">
-                              {String(lot.start_time || '').slice(0, 5)}–{String(lot.end_time || '').slice(0, 5)}
+                              {formatAuctionLotEffectiveTimeRangeLabel(lot)}
                             </span>
                             {canEdit ? (
                               isPending ? (
@@ -2418,7 +2762,7 @@ const ShiftAuctionShiftsTable = ({
                                 }`}
                               >
                                 <span className="px-3 py-1 text-[12.5px] font-semibold text-emerald-900 tabular-nums">
-                                  {String(lot.start_time || '').slice(0, 5)}–{String(lot.end_time || '').slice(0, 5)}
+                                  {formatAuctionLotEffectiveTimeRangeLabel(lot)}
                                 </span>
                                 {isPending ? (
                                   <>
@@ -2480,7 +2824,7 @@ const ShiftAuctionShiftsTable = ({
                                 }`}
                                 title={overlaps ? 'Пересекается с уже взятой сменой' : 'Совместимо'}
                               >
-                                {String(lot.start_time || '').slice(0, 5)}–{String(lot.end_time || '').slice(0, 5)}
+                                {formatAuctionLotEffectiveTimeRangeLabel(lot)}
                               </li>
                             );
                           })}
@@ -2550,6 +2894,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [lots, setLots] = useState([]);
   const [myDayOffs, setMyDayOffs] = useState([]);
   const [myBlockedDates, setMyBlockedDates] = useState([]);
+  const [myWorkShifts, setMyWorkShifts] = useState([]);
   const [lastEventId, setLastEventId] = useState(0);
   const [draftEnabled, setDraftEnabled] = useState(false);
   const [draftNote, setDraftNote] = useState('');
@@ -2592,6 +2937,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [journalLoading, setJournalLoading] = useState(false);
   const [journalError, setJournalError] = useState('');
   const [postClaimConfirmLot, setPostClaimConfirmLot] = useState(null);
+  const [postClaimSelection, setPostClaimSelection] = useState({ start_time: '', end_time: '' });
   const [postClaimingLotIds, setPostClaimingLotIds] = useState(() => new Set());
   const [notifyPostClaimEnabled, setNotifyPostClaimEnabled] = useState(false);
   const [isSavingNotifyToggle, setIsSavingNotifyToggle] = useState(false);
@@ -2600,6 +2946,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [periodPreviewLots, setPeriodPreviewLots] = useState([]);
   const [periodPreviewBlockedDates, setPeriodPreviewBlockedDates] = useState([]);
   const [periodPreviewDayOffs, setPeriodPreviewDayOffs] = useState([]);
+  const [periodPreviewWorkShifts, setPeriodPreviewWorkShifts] = useState([]);
   const [periodPreviewOperators, setPeriodPreviewOperators] = useState([]);
   const [periodPreviewParticipantWorkloads, setPeriodPreviewParticipantWorkloads] = useState([]);
   const [periodPreviewPostAuctionActive, setPeriodPreviewPostAuctionActive] = useState(false);
@@ -2691,7 +3038,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     return { data: response?.data || {} };
   }, [apiRoot, buildHeaders]);
 
-  const postAuctionClaimLotApi = useCallback(async (lotOrId) => {
+  const postAuctionClaimLotApi = useCallback(async (lotOrId, selection = {}) => {
     const lot = lotOrId && typeof lotOrId === 'object' ? lotOrId : null;
     const sourceShiftId = normalizeSchedulePlanId(lot?.source_schedule_shift_id);
     const sourcePlanId = normalizeSchedulePlanId(lot?.source_schedule_plan_id);
@@ -2699,6 +3046,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     const payload = sourceShiftId && sourcePlanId && !Number.isFinite(numericLotId)
       ? { schedule_plan_id: sourcePlanId, source_schedule_shift_id: sourceShiftId }
       : { lot_id: lot ? lot.id : lotOrId };
+    if (selection?.start_time && selection?.end_time) {
+      payload.claim_start_time = selection.start_time;
+      payload.claim_end_time = selection.end_time;
+    }
     const response = await axios.post(
       `${apiRoot}/api/shift_auction/post_claim_lot`,
       payload,
@@ -2741,6 +3092,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     setLots(Array.isArray(safe.lots) ? safe.lots : []);
     setMyDayOffs(Array.isArray(safe.my_day_offs) ? safe.my_day_offs.filter(Boolean) : []);
     setMyBlockedDates(Array.isArray(safe.my_blocked_dates) ? safe.my_blocked_dates.filter((item) => (typeof item === 'string' ? item : item?.date)) : []);
+    setMyWorkShifts(Array.isArray(safe.my_work_shifts) ? safe.my_work_shifts : []);
     const nextEventId = Number(safe.last_event_id || 0);
     lastEventIdRef.current = nextEventId;
     setLastEventId(nextEventId);
@@ -2826,6 +3178,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     setPeriodPreviewLots([]);
     setPeriodPreviewBlockedDates([]);
     setPeriodPreviewDayOffs([]);
+    setPeriodPreviewWorkShifts([]);
     setPeriodPreviewOperators([]);
     setPeriodPreviewParticipantWorkloads([]);
     setPeriodPreviewPostAuctionActive(false);
@@ -2839,6 +3192,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       setPeriodPreviewLots(Array.isArray(preview.lots) ? preview.lots : []);
       setPeriodPreviewBlockedDates(Array.isArray(preview.my_blocked_dates) ? preview.my_blocked_dates : []);
       setPeriodPreviewDayOffs(Array.isArray(preview.my_day_offs) ? preview.my_day_offs.filter(Boolean) : []);
+      setPeriodPreviewWorkShifts(Array.isArray(preview.my_work_shifts) ? preview.my_work_shifts : []);
       setPeriodPreviewOperators(Array.isArray(preview.selected_operators) ? preview.selected_operators : []);
       setPeriodPreviewParticipantWorkloads(Array.isArray(preview.participant_workloads) ? preview.participant_workloads : []);
       setPeriodPreviewPostAuctionActive(Boolean(preview.post_auction_active));
@@ -2847,6 +3201,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       setPeriodPreviewLots([]);
       setPeriodPreviewBlockedDates([]);
       setPeriodPreviewDayOffs([]);
+      setPeriodPreviewWorkShifts([]);
       setPeriodPreviewOperators([]);
       setPeriodPreviewParticipantWorkloads([]);
       setPeriodPreviewPostAuctionActive(false);
@@ -3058,6 +3413,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const monitoredLots = isViewingActivePeriod ? lots : periodPreviewLots;
   const monitoredMyDayOffs = isViewingActivePeriod ? myDayOffs : periodPreviewDayOffs;
   const monitoredMyBlockedDates = isViewingActivePeriod ? myBlockedDates : periodPreviewBlockedDates;
+  const monitoredMyWorkShifts = isViewingActivePeriod ? myWorkShifts : periodPreviewWorkShifts;
   const monitoredOperators = isViewingActivePeriod ? settings.selected_operators : periodPreviewOperators;
   const monitoredParticipantWorkloads = isViewingActivePeriod ? participantWorkloads : periodPreviewParticipantWorkloads;
   const selectedViewPostAuctionActive = isViewingActivePeriod
@@ -3101,6 +3457,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       setPeriodPreviewLots([]);
       setPeriodPreviewBlockedDates([]);
       setPeriodPreviewDayOffs([]);
+      setPeriodPreviewWorkShifts([]);
       setPeriodPreviewOperators([]);
       setPeriodPreviewParticipantWorkloads([]);
       setPeriodPreviewPostAuctionActive(false);
@@ -3483,6 +3840,34 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     return map;
   }, [myClaimedLots]);
 
+  const myWorkShiftsByDate = useMemo(() => {
+    const map = new Map();
+    (monitoredMyWorkShifts || []).forEach((shift) => {
+      if (!shift || !shift.shift_date) return;
+      const list = map.get(shift.shift_date) || [];
+      list.push(shift);
+      map.set(shift.shift_date, list);
+    });
+    return map;
+  }, [monitoredMyWorkShifts]);
+
+  const postAuctionClaimOptionsByLotId = useMemo(() => {
+    const map = new Map();
+    if (!selectedViewPostAuctionActive || canMonitor) return map;
+    (monitoredLots || []).forEach((lot) => {
+      if (!lot || (lot.status !== 'available' && lot.status !== 'cancelled') || Boolean(lot.post_auction_claimed)) return;
+      const lotId = getAuctionLotActionKey(lot);
+      if (!lotId) return;
+      const option = buildPostAuctionClaimOption(
+        lot,
+        myWorkShiftsByDate.get(lot.shift_date) || [],
+        myClaimedLotsByDate.get(lot.shift_date) || []
+      );
+      if (option) map.set(lotId, option);
+    });
+    return map;
+  }, [canMonitor, monitoredLots, myClaimedLotsByDate, myWorkShiftsByDate, selectedViewPostAuctionActive]);
+
   const claimBlockReasonByLotId = useMemo(() => {
     const reasons = new Map();
     const canEvaluatePostAuction = selectedViewPostAuctionActive && (isTester || Boolean(settings.has_period_history_access));
@@ -3516,9 +3901,16 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         reasons.set(lotId, `День закрыт: ${getAuctionBlockedDateLabel(blockedPeriod)}`);
         return;
       }
-      if (isTopupActive || postAuctionActive) {
-        // Top-up and post-auction modes: allow extra shifts on the same date as long
-        // as they don't overlap with an already-claimed shift. Skip norm checks.
+      if (postAuctionActive) {
+        const option = postAuctionClaimOptionsByLotId.get(lotId);
+        if (option && !option.canClaim) {
+          reasons.set(lotId, 'Нет свободного интервала без пересечения');
+        }
+        return;
+      }
+      if (isTopupActive) {
+        // Top-up mode allows extra shifts on the same date as long as they don't
+        // overlap with an already-claimed shift. Skip norm checks.
         const sameDateClaims = myClaimedLotsByDate.get(lot.shift_date) || [];
         if (sameDateClaims.length) {
           const candidateRange = normalizeRange(lot.start_time, lot.end_time);
@@ -3553,7 +3945,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       }
     });
     return reasons;
-  }, [canMonitor, isTester, isTopupActive, isViewingActivePeriod, monitoredLots, myAuctionWorkload, myBlockedDateMap, myClaimedDateSet, myClaimedLotsByDate, selectedViewPostAuctionActive, settings.has_period_history_access]);
+  }, [canMonitor, isTester, isTopupActive, isViewingActivePeriod, monitoredLots, myAuctionWorkload, myBlockedDateMap, myClaimedDateSet, myClaimedLotsByDate, postAuctionClaimOptionsByLotId, selectedViewPostAuctionActive, settings.has_period_history_access]);
 
   useEffect(() => {
     if (!canUseAuction || !lotDates.length || typeof window === 'undefined') return undefined;
@@ -3940,11 +4332,18 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
   const handleRequestPostAuctionClaim = useCallback((lot) => {
     if (!lot || !lot.id) return;
+    const option = postAuctionClaimOptionsByLotId.get(getAuctionLotActionKey(lot));
+    const segment = option?.recommendedSegment || null;
+    setPostClaimSelection({
+      start_time: segment?.start_time || normalizeClockValue(lot.start_time),
+      end_time: segment?.end_time || normalizeClockValue(lot.end_time)
+    });
     setPostClaimConfirmLot(lot);
-  }, []);
+  }, [postAuctionClaimOptionsByLotId]);
 
   const handleClosePostAuctionClaim = useCallback(() => {
     setPostClaimConfirmLot(null);
+    setPostClaimSelection({ start_time: '', end_time: '' });
   }, []);
 
   const handleConfirmPostAuctionClaim = useCallback(async () => {
@@ -3953,6 +4352,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     const lotKey = getAuctionLotActionKey(lot);
     if (!lotKey) return;
     if (postClaimingLotIds.has(lotKey)) return;
+    const option = postAuctionClaimOptionsByLotId.get(lotKey);
+    if (option && !isSelectionInsideAvailableSegments(lot, postClaimSelection, option.availableSegments)) {
+      notifyClaimError('Выбранный интервал пересекается с вашим графиком');
+      return;
+    }
 
     setPostClaimingLotIds((current) => {
       const next = new Set(current);
@@ -3961,7 +4365,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     });
 
     try {
-      const response = await enqueueAuctionMutation(() => postAuctionClaimLotApi(lot));
+      const response = await enqueueAuctionMutation(() => postAuctionClaimLotApi(lot, postClaimSelection));
       const serverLot = response?.data?.lot;
       if (serverLot && serverLot.id) {
         const sameLot = (currentLot) => {
@@ -3983,6 +4387,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       }
       notify('Смена забрана и сохранена в графики');
       setPostClaimConfirmLot(null);
+      setPostClaimSelection({ start_time: '', end_time: '' });
       fetchSnapshot({ silent: true });
       if (!isViewingActivePeriod && selectedViewSchedulePlanId) {
         fetchPeriodPreview(selectedViewSchedulePlanId, {});
@@ -4010,7 +4415,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     notify,
     notifyClaimError,
     postAuctionClaimLotApi,
+    postAuctionClaimOptionsByLotId,
     postClaimConfirmLot,
+    postClaimSelection,
     postClaimingLotIds,
     selectedViewSchedulePlanId
   ]);
@@ -4494,6 +4901,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                             postAuctionActive={selectedViewPostAuctionActive}
                                             postAuctionNowMs={postAuctionNowMs}
                                             postClaimingLotIds={postClaimingLotIds}
+                                            postAuctionClaimOption={postAuctionClaimOptionsByLotId.get(getAuctionLotActionKey(lot))}
                                             onRequestPostAuctionClaim={handleRequestPostAuctionClaim}
                                           />
                                         ) : (
@@ -5339,7 +5747,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                           {lot.shift_date ? formatShortDateLabel(lot.shift_date) : '—'}
                         </span>
                         <span className="truncate font-medium">
-                          {lot.start_time || '—'}–{lot.end_time || '—'}
+                          {formatAuctionLotEffectiveTimeRangeLabel(lot) || '—'}
                           {breakMinutes ? <span className="ml-1 text-xs font-normal text-slate-500">(перерыв {formatAuctionHours(breakMinutes)} ч)</span> : null}
                         </span>
                         <span className="text-xs tabular-nums text-emerald-700">
@@ -5395,7 +5803,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                         disabled={releasingLotId !== null}
                         className={`flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left text-xs transition disabled:cursor-wait disabled:opacity-60 ${selected ? 'border-rose-300 bg-rose-50 text-rose-800' : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50'}`}
                       >
-                        <span className="font-semibold tabular-nums">{lot.start_time} - {lot.end_time}</span>
+                        <span className="font-semibold tabular-nums">{formatAuctionLotEffectiveTimeRangeLabel(lot)}</span>
                         <span className="shrink-0 font-semibold tabular-nums">{formatAuctionHours(getAuctionLotNetMinutes(lot))} ч</span>
                       </button>
                     );
@@ -5403,7 +5811,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                 </div>
               ) : (
                 <div className="mt-0.5 text-xs text-slate-600">
-                  {releaseConfirmLot.start_time} - {releaseConfirmLot.end_time}
+                  {formatAuctionLotEffectiveTimeRangeLabel(releaseConfirmLot)}
                   {' · '}
                   {formatAuctionHours(getAuctionLotNetMinutes(releaseConfirmLot))} ч
                 </div>
@@ -5436,56 +5844,17 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         </div>
       ) : null}
 
-      {postClaimConfirmLot ? (() => {
-        const lotInProgress = postClaimingLotIds.has(getAuctionLotActionKey(postClaimConfirmLot));
-        return (
-          <div
-            className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/50 px-4"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="post-claim-confirm-title"
-            onClick={() => !lotInProgress && handleClosePostAuctionClaim()}
-          >
-            <div
-              className="w-full max-w-md rounded-xl border border-orange-200 bg-white p-5 shadow-2xl"
-              onClick={(event) => event.stopPropagation()}
-            >
-              <h3 id="post-claim-confirm-title" className="text-base font-semibold text-slate-950">
-                Забрать дополнительную смену?
-              </h3>
-              <div className="mt-3 rounded-lg border border-orange-200 bg-orange-50 px-3 py-2">
-                <div className="text-sm font-semibold text-slate-900">{formatDateLabel(postClaimConfirmLot.shift_date)}</div>
-                <div className="mt-0.5 text-xs text-slate-700 tabular-nums">
-                  {postClaimConfirmLot.start_time} - {postClaimConfirmLot.end_time}
-                  {' · '}
-                  {formatAuctionHours(getAuctionLotNetMinutes(postClaimConfirmLot))} ч
-                </div>
-              </div>
-              <p className="mt-3 text-xs leading-5 text-orange-900">
-                Если возьмёте — вернуть смену уже не получится. Она сразу появится в ваших графиках работы. Если смена стыкуется с уже существующей — они объединятся, перерывы будут пересчитаны автоматически.
-              </p>
-              <div className="mt-4 flex items-center justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={handleClosePostAuctionClaim}
-                  disabled={lotInProgress}
-                  className="inline-flex h-9 items-center justify-center rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 sm:text-sm"
-                >
-                  Отмена
-                </button>
-                <button
-                  type="button"
-                  onClick={handleConfirmPostAuctionClaim}
-                  disabled={lotInProgress}
-                  className="inline-flex h-9 items-center justify-center rounded-lg bg-orange-600 px-3 text-xs font-semibold text-white transition hover:bg-orange-700 disabled:cursor-wait disabled:bg-orange-400 sm:text-sm"
-                >
-                  {lotInProgress ? 'Забираю...' : 'Забрать'}
-                </button>
-              </div>
-            </div>
-          </div>
-        );
-      })() : null}
+      {postClaimConfirmLot ? (
+        <PostAuctionPartialClaimModal
+          lot={postClaimConfirmLot}
+          option={postAuctionClaimOptionsByLotId.get(getAuctionLotActionKey(postClaimConfirmLot))}
+          selection={postClaimSelection}
+          onSelectionChange={setPostClaimSelection}
+          onClose={handleClosePostAuctionClaim}
+          onConfirm={handleConfirmPostAuctionClaim}
+          inProgress={postClaimingLotIds.has(getAuctionLotActionKey(postClaimConfirmLot))}
+        />
+      ) : null}
     </div>
   );
 };
