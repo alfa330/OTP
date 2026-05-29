@@ -1908,12 +1908,12 @@ const ShiftAuctionShiftsTable = ({ operators = [], workloads = [], lots = [], lo
       });
   }, [operators, workloadById]);
 
-  const getNormBadgeClass = (claimedMinutes, normMinutes) => {
-    if (!normMinutes || normMinutes <= 0) return 'bg-slate-100 text-slate-600 border-slate-200';
+  const getNormCellClass = (claimedMinutes, normMinutes) => {
+    if (!normMinutes || normMinutes <= 0) return 'bg-slate-100 text-slate-500';
     const pct = (claimedMinutes / normMinutes) * 100;
-    if (pct >= 100) return 'bg-emerald-50 text-emerald-800 border-emerald-300';
-    if (pct >= 80) return 'bg-amber-50 text-amber-800 border-amber-300';
-    return 'bg-orange-50 text-orange-800 border-orange-300';
+    if (pct >= 100) return 'bg-emerald-100 text-emerald-900';
+    if (pct >= 80) return 'bg-amber-100 text-amber-900';
+    return 'bg-orange-100 text-orange-900';
   };
 
   const formatHours = (minutes) => {
@@ -1950,13 +1950,16 @@ const ShiftAuctionShiftsTable = ({ operators = [], workloads = [], lots = [], lo
       </div>
       <div className="overflow-x-auto">
         <table className="w-full min-w-[960px] border-collapse text-xs sm:text-sm">
-          <thead className="bg-slate-50 text-slate-700">
+          <thead className="bg-slate-100 text-slate-700">
             <tr>
-              <th className="sticky left-0 z-10 border-b border-slate-200 bg-slate-50 px-3 py-2 text-left font-semibold">ФИО</th>
-              <th className="border-b border-slate-200 px-3 py-2 text-center font-semibold">Ставка</th>
-              <th className="border-b border-slate-200 px-3 py-2 text-center font-semibold">Норма</th>
-              {dates.map((date) => (
-                <th key={`shifts-th-${date}`} className="border-b border-slate-200 px-2 py-2 text-center font-semibold">
+              <th className="sticky left-0 z-10 border-b border-r border-slate-300 bg-slate-100 px-3 py-2 text-left font-semibold">ФИО</th>
+              <th className="border-b border-r border-slate-300 bg-slate-100 px-3 py-2 text-center font-semibold">Ставка</th>
+              <th className="border-b border-r-2 border-slate-300 bg-slate-100 px-3 py-2 text-center font-semibold">Норма</th>
+              {dates.map((date, idx) => (
+                <th
+                  key={`shifts-th-${date}`}
+                  className={`border-b border-slate-200 px-2 py-2 text-center font-semibold ${idx > 0 ? 'border-l border-slate-200' : ''}`}
+                >
                   {formatShiftsTableDateHeader(date)}
                 </th>
               ))}
@@ -1967,28 +1970,27 @@ const ShiftAuctionShiftsTable = ({ operators = [], workloads = [], lots = [], lo
               const claimedNet = Number(workload?.claimed_net_minutes || 0);
               const norm = Number(workload?.norm_minutes || 0);
               const pct = norm > 0 ? Math.round((claimedNet / norm) * 100) : 0;
-              const badgeClass = getNormBadgeClass(claimedNet, norm);
+              const normCellClass = getNormCellClass(claimedNet, norm);
               return (
-                <tr key={`shifts-row-${opId}`} className="border-b border-slate-100 hover:bg-slate-50/60">
-                  <td className="sticky left-0 z-10 bg-white px-3 py-2 align-top">
+                <tr key={`shifts-row-${opId}`} className="border-b border-slate-200">
+                  <td className="sticky left-0 z-10 border-r border-slate-200 bg-slate-50 px-3 py-2 align-middle">
                     <div className="font-medium text-slate-900">{operator?.name || `Оператор #${opId}`}</div>
                     <div className="text-[11px] text-slate-500">{operator?.direction || ''}</div>
                   </td>
-                  <td className="px-3 py-2 text-center align-top tabular-nums text-slate-700">
+                  <td className="border-r border-slate-200 bg-slate-50 px-3 py-2 text-center align-middle tabular-nums text-slate-700">
                     {Number(operator?.rate ?? workload?.rate ?? 1).toFixed(2)}
                   </td>
-                  <td className="px-3 py-2 align-top">
-                    <div className={`inline-flex flex-col items-center gap-1 rounded-md border px-2 py-1 ${badgeClass}`}>
-                      <span className="text-[11px] font-semibold tabular-nums">
-                        {formatHours(claimedNet)} / {formatHours(norm)} ч
-                      </span>
-                      <span className="text-[10px] font-bold tabular-nums opacity-80">{pct}%</span>
-                    </div>
+                  <td className={`border-r-2 border-slate-300 px-3 py-2 text-center align-middle tabular-nums font-semibold ${normCellClass}`}>
+                    <div className="leading-tight">{formatHours(claimedNet)} / {formatHours(norm)} ч</div>
+                    <div className="text-[10px] font-bold opacity-70">{pct}%</div>
                   </td>
-                  {dates.map((date) => {
+                  {dates.map((date, idx) => {
                     const cellLots = lotsByOperatorDate.get(`${opId}|${date}`) || [];
                     return (
-                      <td key={`shifts-cell-${opId}-${date}`} className="border-l border-slate-100 px-2 py-2 align-top">
+                      <td
+                        key={`shifts-cell-${opId}-${date}`}
+                        className={`px-2 py-2 align-top ${idx > 0 ? 'border-l border-slate-200' : ''}`}
+                      >
                         <div className="flex flex-col gap-1">
                           {cellLots.length === 0 ? (
                             <span className="text-[11px] text-slate-300">—</span>
