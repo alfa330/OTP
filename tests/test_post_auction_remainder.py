@@ -46,16 +46,18 @@ class PostAuctionRemainderTests(unittest.TestCase):
         self.assertIn("_create_post_auction_remainder_lots", names)
         self.assertIn("_break_overlaps_minute_range", names)
 
-    def test_remainder_lots_are_available_and_unlinked_from_source_shift(self):
+    def test_remainder_lots_are_available_and_grouped_by_shift(self):
         source = _method_source("_create_post_auction_remainder_lots")
         # New leftover lots are open for other operators...
         self.assertIn("'available'", source)
         # ...carry the parent link...
         self.assertIn("remainder_of_lot_id", source)
-        # ...and are NOT tied to the source schedule shift (so their own start/end
-        # define the range and they don't collide on the historical-claims key).
-        self.assertIn("source_schedule_shift_id", source)
-        self.assertIn("NULL, 'available'", source)
+        # ...and share the source shift id (so monitoring groups them with it).
+        self.assertIn("source_shift_id", source)
+        # The snapshot nulls source minutes for remainder lots so their own gap
+        # range (start/end) is used by the frontend, not the full shift range.
+        db_source = _source(DATABASE_PATH)
+        self.assertIn("WHEN l.remainder_of_lot_id IS NOT NULL THEN NULL", db_source)
 
     def test_remainder_skips_cross_midnight_gaps(self):
         # A gap that runs past midnight must not be stored on the original date.
