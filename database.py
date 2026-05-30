@@ -1776,6 +1776,9 @@ class Database:
                     END IF;
                 END $$;
             """)
+            # Backfill remainder lots for partial доборы that предшествовали этой логике,
+            # so the free part of an already partially-claimed shift becomes claimable.
+            self._backfill_post_auction_remainder_lots(cursor)
 
             # Optimized Indexes (added more based on query patterns)
             cursor.execute("""
@@ -4651,6 +4654,54 @@ class Database:
             if new_row:
                 created_ids.append(int(new_row[0]))
         return created_ids
+
+    def _backfill_post_auction_remainder_lots(self, cursor):
+        """
+        Создать остаточные лоты для УЖЕ существующих частичных доборов, у которых их
+        ещё нет (например, claim сделан до появления этой логики). Идемпотентно:
+        пропускает лоты, у которых уже есть остаточные. Запускается при инициализации.
+        """
+        try:
+            cursor.execute("""
+                SELECT l.id, l.shift_date, l.start_time, l.end_time, l.rate_min, l.breaks,
+                       l.source_schedule_plan_id, l.source_schedule_shift_id,
+                       l.post_claim_start_time, l.post_claim_end_time
+                FROM shift_auction_test_lots l
+                WHERE COALESCE(l.post_auction_claimed, FALSE) = TRUE
+                  AND l.post_claim_start_time IS NOT NULL
+                  AND l.post_claim_end_time IS NOT NULL
+                  AND l.remainder_of_lot_id IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM shift_auction_test_lots r WHERE r.remainder_of_lot_id = l.id
+                  )
+            """)
+            candidates = cursor.fetchall() or []
+        except Exception:
+            return
+        for (lot_id, shift_date, start_time, end_time, rate_min, breaks,
+             source_plan_id, source_shift_id, pc_start, pc_end) in candidates:
+            try:
+                claim_range = self._normalize_post_auction_claim_range(
+                    start_time, end_time,
+                    pc_start.strftime('%H:%M'), pc_end.strftime('%H:%M')
+                )
+                if not claim_range["is_partial"]:
+                    continue
+                self._create_post_auction_remainder_lots(
+                    cursor,
+                    parent_lot_id=lot_id,
+                    shift_date=shift_date,
+                    full_start_time=start_time,
+                    full_end_time=end_time,
+                    claim_start_min=claim_range["start_minute"],
+                    claim_end_min=claim_range["end_minute"],
+                    rate_min=rate_min,
+                    breaks=breaks if isinstance(breaks, list) else [],
+                    source_plan_id=source_plan_id,
+                    source_shift_id=source_shift_id,
+                )
+            except Exception:
+                continue
 
     @staticmethod
     def _subtract_ranges(start_min, end_min, busy_ranges):
