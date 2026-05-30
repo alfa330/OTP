@@ -3235,6 +3235,7 @@ def api_shift_auction_admin_unclaim_shift():
             lot_id=payload.get('lot_id'),
             plan_id=payload.get('plan_id') or payload.get('schedule_plan_id'),
             source_schedule_shift_id=payload.get('source_schedule_shift_id'),
+            claimed_by=payload.get('claimed_by') or payload.get('operator_id'),
         )
         return jsonify({"status": "success", **result}), 200
     except ValueError as error:
@@ -3532,16 +3533,34 @@ def _notify_admins_post_auction_claim(operator_name, lot_payload):
     except Exception:
         shift_date_obj = None
     date_label = shift_date_obj.strftime('%d.%m.%Y') if shift_date_obj else shift_date_raw or '—'
-    start_label = str(lot_payload.get('claim_start_time') or lot_payload.get('post_claim_start_time') or lot_payload.get('start_time') or '').strip() or '—'
-    end_label = str(lot_payload.get('claim_end_time') or lot_payload.get('post_claim_end_time') or lot_payload.get('end_time') or '').strip() or '—'
+    orig_start = str(lot_payload.get('start_time') or '').strip()
+    orig_end = str(lot_payload.get('end_time') or '').strip()
+    claim_start = str(lot_payload.get('claim_start_time') or lot_payload.get('post_claim_start_time') or '').strip()
+    claim_end = str(lot_payload.get('claim_end_time') or lot_payload.get('post_claim_end_time') or '').strip()
+    # Partial добор: operator took only a slice of the original shift window.
+    is_partial = bool(
+        claim_start and claim_end and orig_start and orig_end
+        and (claim_start != orig_start or claim_end != orig_end)
+    )
     now_label = datetime.now().strftime('%d.%m.%Y %H:%M')
     operator_label = str(operator_name or '').strip() or 'Оператор'
 
+    if is_partial:
+        time_block = (
+            f"🕒 Смена: <b>{orig_start}–{orig_end}</b>\n"
+            f"✂️ Взял часть: <b>{claim_start}–{claim_end}</b>\n"
+        )
+    else:
+        shown_start = claim_start or orig_start or '—'
+        shown_end = claim_end or orig_end or '—'
+        time_block = f"🕒 Время: <b>{shown_start}–{shown_end}</b>\n"
+
     text = (
         "📣 <b>Аукцион смен — дополнительная смена</b>\n\n"
-        f"Оператор <b>{operator_label}</b> взял дополнительную смену.\n"
+        f"Оператор <b>{operator_label}</b> взял "
+        f"{'часть смены (добор)' if is_partial else 'дополнительную смену'}.\n"
         f"📅 Дата: <b>{date_label}</b>\n"
-        f"🕒 Время: <b>{start_label}–{end_label}</b>\n"
+        f"{time_block}"
         f"⏱ Когда взял: {now_label}"
     )
     for recipient in recipients:
