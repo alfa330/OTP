@@ -601,7 +601,7 @@ const AuctionLotCell = ({
     : compactLabel;
 
   const title = `${label}${minRate ? ` · ставка ${formatRate(minRate)}`
-    : ''} · в норму ${formatAuctionHours(netMinutes)} ч${breakMinutes ? ` · перерыв ${formatAuctionHours(breakMinutes)} ч` : ''}${breaksLabel ? ` (${breaksLabel})` : ''}${claimBlockReason ? ` · ${claimBlockReason}` : ''}${lot.claimed_by_name ? ` · ${lot.claimed_by_name}` : ''}${postAuctionTakeable ? ` · доступно после аукциона${postAuctionSegment && !postAuctionSegment.isFull ? `: ${postAuctionSegment.start_time}–${postAuctionSegment.end_time}` : ''}` : ''}`;
+    : ''} · в норму ${formatAuctionHours(netMinutes)} ч${breakMinutes ? ` · перерыв ${formatAuctionHours(breakMinutes)} ч` : ''}${breaksLabel ? ` (${breaksLabel})` : ''}${claimBlockReason ? ` · ${claimBlockReason}` : ''}${lot.claimed_by_name ? ` · ${lot.claimed_by_name}` : ''}${postAuctionTakeable ? ` · доступно после аукциона${postAuctionSegment && !postAuctionSegment.isFull ? `: ${postAuctionSegment.start_time}–${postAuctionSegment.end_time}` : ''}` : ''}${formatPostAuctionClaimTitleSuffix(lot)}`;
 
   if (postAuctionTakeable) {
     return (
@@ -671,9 +671,12 @@ const AuctionLotCell = ({
   const styleToUse = isLotClaimed ? undefined : (isOpenPostStyle ? postAuctionToneStyle : startToneStyle);
 
   return (
-    <div title={title} style={styleToUse} className={`flex h-6 w-full min-w-0 items-center justify-center overflow-hidden rounded border px-1 text-[10px] font-semibold tabular-nums sm:h-8 sm:px-2 sm:text-xs ${tone}`}>
+    <div title={title} style={styleToUse} className={`relative flex h-6 w-full min-w-0 items-center justify-center overflow-hidden rounded border px-1 text-[10px] font-semibold tabular-nums sm:h-8 sm:px-2 sm:text-xs ${tone}`}>
       <span className="truncate sm:hidden">{compactLabel}</span>
       <span className="hidden truncate sm:inline">{label}</span>
+      {isPartialPostAuctionClaim(lot) ? (
+        <span className="pointer-events-none absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-orange-400 ring-1 ring-white" title="Частичный добор" />
+      ) : null}
     </div>
   );
 };
@@ -1954,6 +1957,56 @@ const minutesToClockLabel = (minutes) => formatAuctionBreakMinute(minutes);
 
 const rangesOverlap = (left, right) => left[0] < right[1] && right[0] < left[1];
 
+// --- Post-auction claim (добор) helpers -------------------------------------
+// A post-auction claim is "partial" when the operator took only a slice of the
+// original shift window (claim range ≠ full lot range). Used to surface partial
+// доборы to admins in the monitoring views.
+const getPartialClaimMinute = (value) => parseHHMMToMinutes(String(value || '').slice(0, 5));
+
+const isPartialPostAuctionClaim = (lot) => {
+  if (!lot || !lot.post_auction_claimed) return false;
+  const claimStart = getAuctionLotClaimStartTime(lot);
+  const claimEnd = getAuctionLotClaimEndTime(lot);
+  if (!claimStart || !claimEnd) return false;
+  const claimStartMin = getPartialClaimMinute(claimStart);
+  const claimEndMin = getPartialClaimMinute(claimEnd);
+  const fullStartMin = getPartialClaimMinute(lot.start_time);
+  const fullEndMin = getPartialClaimMinute(lot.end_time);
+  if ([claimStartMin, claimEndMin, fullStartMin, fullEndMin].some((value) => value == null)) return false;
+  return claimStartMin !== fullStartMin || claimEndMin !== fullEndMin;
+};
+
+// Tooltip suffix for cells that already build a `title` string.
+const formatPostAuctionClaimTitleSuffix = (lot) => {
+  if (!lot || !lot.post_auction_claimed) return '';
+  if (isPartialPostAuctionClaim(lot)) {
+    return ` · добор: взято ${formatAuctionLotEffectiveTimeRangeLabel(lot)} из ${formatAuctionShiftLabel(lot)}`;
+  }
+  return ' · добор после аукциона';
+};
+
+const PostAuctionClaimBadge = ({ lot, withOriginal = false, className = '' }) => {
+  if (!lot || !lot.post_auction_claimed) return null;
+  const partial = isPartialPostAuctionClaim(lot);
+  const title = partial
+    ? `Частичный добор: оператор взял ${formatAuctionLotEffectiveTimeRangeLabel(lot)} из смены ${formatAuctionShiftLabel(lot)}`
+    : 'Смена взята после аукциона (добор)';
+  return (
+    <span
+      title={title}
+      className={`inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold leading-none ${
+        partial ? 'bg-orange-100 text-orange-700' : 'bg-amber-50 text-amber-700'
+      } ${className}`}
+    >
+      <span className="h-1.5 w-1.5 rounded-full bg-current" />
+      {partial ? 'добор · часть' : 'добор'}
+      {withOriginal && partial ? (
+        <span className="font-normal opacity-80">из {formatAuctionShiftLabel(lot)}</span>
+      ) : null}
+    </span>
+  );
+};
+
 const subtractBusyRanges = (sourceRange, busyRanges) => {
   let available = [{ start: sourceRange[0], end: sourceRange[1] }];
   const occupied = [];
@@ -2359,6 +2412,8 @@ const ShiftAuctionShiftsTable = ({
     } else {
       body.plan_id = lot.source_schedule_plan_id;
       body.source_schedule_shift_id = lot.source_schedule_shift_id;
+      // Target this operator's specific partial claim (a shift may now have several).
+      if (lot.claimed_by != null) body.claimed_by = Number(lot.claimed_by);
     }
     return body;
   };
@@ -5042,17 +5097,24 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                         {group.lots.length ? (
                           <div className="mt-2 overflow-hidden rounded-md border border-slate-200 bg-white">
                             {group.lots.map((lot) => (
-                              <div key={`admin-day-claim-${lot.id}`} className="grid grid-cols-[82px_minmax(0,1fr)] items-center gap-2 border-b border-slate-100 px-3 py-2 text-sm last:border-b-0">
-                                <span className="font-semibold tabular-nums text-slate-950">{formatAuctionShiftLabel(lot)}</span>
-                                <button
-                                  type="button"
-                                  onClick={() => lot.claimed_by ? setDrilldownOperatorId(Number(lot.claimed_by)) : null}
-                                  disabled={!lot.claimed_by}
-                                  className="truncate text-left text-slate-700 transition hover:text-blue-700 disabled:cursor-default disabled:hover:text-slate-700"
-                                  title="Посмотреть взятые смены этого оператора"
-                                >
-                                  {lot.claimed_by_name || `#${lot.claimed_by || ''}`}
-                                </button>
+                              <div key={`admin-day-claim-${lot.id}`} className="grid grid-cols-[82px_minmax(0,1fr)] items-start gap-2 border-b border-slate-100 px-3 py-2 text-sm last:border-b-0">
+                                <span className="font-semibold tabular-nums text-slate-950" title={isPartialPostAuctionClaim(lot) ? `Частичный добор: взято из смены ${formatAuctionShiftLabel(lot)}` : undefined}>{formatAuctionLotEffectiveTimeRangeLabel(lot)}</span>
+                                <div className="min-w-0">
+                                  <button
+                                    type="button"
+                                    onClick={() => lot.claimed_by ? setDrilldownOperatorId(Number(lot.claimed_by)) : null}
+                                    disabled={!lot.claimed_by}
+                                    className="block max-w-full truncate text-left text-slate-700 transition hover:text-blue-700 disabled:cursor-default disabled:hover:text-slate-700"
+                                    title="Посмотреть взятые смены этого оператора"
+                                  >
+                                    {lot.claimed_by_name || `#${lot.claimed_by || ''}`}
+                                  </button>
+                                  {lot.post_auction_claimed ? (
+                                    <div className="mt-1">
+                                      <PostAuctionClaimBadge lot={lot} withOriginal />
+                                    </div>
+                                  ) : null}
+                                </div>
                               </div>
                             ))}
                           </div>
@@ -5616,7 +5678,24 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                           </button>
                         </td>
                         <td className="border-b border-slate-100 px-3 py-2">
-                          {entry.shift_date ? `${formatShortDateLabel(entry.shift_date)} · ${entry.start_time || ''}-${entry.end_time || ''}` : '—'}
+                          {entry.shift_date ? (
+                            <div className="flex flex-col gap-0.5">
+                              <span>{`${formatShortDateLabel(entry.shift_date)} · ${entry.start_time || ''}-${entry.end_time || ''}`}</span>
+                              {entry.is_post_auction ? (
+                                <span
+                                  title={entry.is_partial && entry.claim_start_time && entry.claim_end_time
+                                    ? `Частичный добор: взято ${entry.claim_start_time}-${entry.claim_end_time} из ${entry.start_time}-${entry.end_time}`
+                                    : 'Смена взята после аукциона (добор)'}
+                                  className={`inline-flex w-fit items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold leading-none ${entry.is_partial ? 'bg-orange-100 text-orange-700' : 'bg-amber-50 text-amber-700'}`}
+                                >
+                                  <span className="h-1.5 w-1.5 rounded-full bg-current" />
+                                  {entry.is_partial && entry.claim_start_time && entry.claim_end_time
+                                    ? `добор · взято ${entry.claim_start_time}-${entry.claim_end_time}`
+                                    : 'добор'}
+                                </span>
+                              ) : null}
+                            </div>
+                          ) : '—'}
                         </td>
                         <td className="border-b border-slate-100 px-3 py-2 sm:px-5">
                           {entry.period_start && entry.period_end
@@ -5746,9 +5825,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                         <span className="font-semibold tabular-nums text-slate-900">
                           {lot.shift_date ? formatShortDateLabel(lot.shift_date) : '—'}
                         </span>
-                        <span className="truncate font-medium">
-                          {formatAuctionLotEffectiveTimeRangeLabel(lot) || '—'}
-                          {breakMinutes ? <span className="ml-1 text-xs font-normal text-slate-500">(перерыв {formatAuctionHours(breakMinutes)} ч)</span> : null}
+                        <span className="flex min-w-0 flex-wrap items-center gap-1 font-medium">
+                          <span className="truncate">{formatAuctionLotEffectiveTimeRangeLabel(lot) || '—'}</span>
+                          {breakMinutes ? <span className="text-xs font-normal text-slate-500">(перерыв {formatAuctionHours(breakMinutes)} ч)</span> : null}
+                          <PostAuctionClaimBadge lot={lot} withOriginal />
                         </span>
                         <span className="text-xs tabular-nums text-emerald-700">
                           {formatAuctionHours(minutes)} ч
