@@ -560,7 +560,8 @@ const AuctionLotCell = ({
   postAuctionNowMs = 0,
   postClaimingLotIds,
   postAuctionClaimOption,
-  onRequestPostAuctionClaim
+  onRequestPostAuctionClaim,
+  onShowDetail
 }) => {
   if (!lot) return null;
 
@@ -670,13 +671,35 @@ const AuctionLotCell = ({
   const isOpenPostStyle = !isLotClaimed && postAuctionActive && (lot.status === 'available' || lot.status === 'cancelled') && !hasStarted;
   const styleToUse = isLotClaimed ? undefined : (isOpenPostStyle ? postAuctionToneStyle : startToneStyle);
 
-  return (
-    <div title={title} style={styleToUse} className={`relative flex h-6 w-full min-w-0 items-center justify-center overflow-hidden rounded border px-1 text-[10px] font-semibold tabular-nums sm:h-8 sm:px-2 sm:text-xs ${tone}`}>
+  const detailClickable = canManage && typeof onShowDetail === 'function';
+  const finalClassName = `relative flex h-6 w-full min-w-0 items-center justify-center overflow-hidden rounded border px-1 text-[10px] font-semibold tabular-nums sm:h-8 sm:px-2 sm:text-xs ${tone}${detailClickable ? ' cursor-pointer transition hover:brightness-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-1' : ''}`;
+  const finalInner = (
+    <>
       <span className="truncate sm:hidden">{compactLabel}</span>
       <span className="hidden truncate sm:inline">{label}</span>
       {isPartialPostAuctionClaim(lot) ? (
         <span className="pointer-events-none absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-orange-400 ring-1 ring-white" title="Частичный добор" />
       ) : null}
+    </>
+  );
+
+  if (detailClickable) {
+    return (
+      <button
+        type="button"
+        title={`${title} · нажмите, чтобы посмотреть кто какую часть взял`}
+        style={styleToUse}
+        className={finalClassName}
+        onClick={() => onShowDetail(lot)}
+      >
+        {finalInner}
+      </button>
+    );
+  }
+
+  return (
+    <div title={title} style={styleToUse} className={finalClassName}>
+      {finalInner}
     </div>
   );
 };
@@ -1961,6 +1984,48 @@ const rangesOverlap = (left, right) => left[0] < right[1] && right[0] < left[1];
 // admin day-details modal.
 const ADMIN_DAY_SEGMENT_COLORS = ['#0A84FF', '#30D158', '#FF9F0A', '#BF5AF2', '#FF375F', '#5AC8FA', '#FFD60A', '#64D2FF'];
 
+// Build the per-shift breakdown (claimed slices + free remainder) for the lots that
+// make up ONE original shift, so the admin can see who took which part of it.
+const buildAuctionShiftSegments = (lots) => {
+  const segments = [];
+  (lots || []).forEach((lot) => {
+    if (!lot || (lot.status !== 'claimed' && lot.status !== 'available')) return;
+    const range = getAuctionLotEffectiveMinuteRange(lot);
+    if (!range) return;
+    segments.push({
+      lot,
+      start: range[0],
+      end: range[1],
+      claimed: lot.status === 'claimed',
+      operatorId: lot.claimed_by != null ? Number(lot.claimed_by) : null,
+      operatorName: lot.claimed_by_name || (lot.claimed_by ? `#${lot.claimed_by}` : ''),
+      netMinutes: getAuctionLotNetMinutes(lot),
+    });
+  });
+  if (!segments.length) return null;
+  segments.sort((a, b) => a.start - b.start || a.end - b.end);
+  const spanStart = Math.min(...segments.map((s) => s.start));
+  const spanEnd = Math.max(...segments.map((s) => s.end));
+  const opColor = new Map();
+  segments.filter((s) => s.claimed).forEach((s) => {
+    const id = s.operatorId ?? `_${opColor.size}`;
+    if (!opColor.has(id)) opColor.set(id, opColor.size % ADMIN_DAY_SEGMENT_COLORS.length);
+  });
+  segments.forEach((s) => { s.colorIdx = s.claimed ? (opColor.get(s.operatorId ?? '') ?? 0) : -1; });
+  const freeMinutes = segments
+    .filter((s) => !s.claimed)
+    .reduce((sum, s) => sum + Math.max(0, s.end - s.start), 0);
+  return {
+    segments,
+    spanStart,
+    spanEnd,
+    span: Math.max(1, spanEnd - spanStart),
+    claimedCount: segments.filter((s) => s.claimed).length,
+    operatorCount: opColor.size,
+    freeMinutes,
+  };
+};
+
 // --- Post-auction claim (добор) helpers -------------------------------------
 // A post-auction claim is "partial" when the operator took only a slice of the
 // original shift window (claim range ≠ full lot range). Used to surface partial
@@ -2989,6 +3054,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [operatorWorkloadQuery, setOperatorWorkloadQuery] = useState('');
   const [monitorTab, setMonitorTab] = useState('monitoring');
   const [drilldownOperatorId, setDrilldownOperatorId] = useState(null);
+  const [shiftDetailLot, setShiftDetailLot] = useState(null);
   const [journalEntries, setJournalEntries] = useState([]);
   const [journalPage, setJournalPage] = useState(1);
   const [journalPerPage] = useState(50);
@@ -3671,69 +3737,30 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
   // Group the day's lots by their original shift so the admin can see, per shift,
   // who took which part (claimed slices) and what is still free (remainder).
-  const adminActiveDayShiftGroups = useMemo(() => {
+  // Flat, tidy list of shifts taken on the active day (one row per claim).
+  const adminActiveDayClaimLots = useMemo(() => {
     if (!canMonitor || !activeDayDate) return [];
-
-    const byShift = new Map();
-    (monitoredLots || []).forEach((lot) => {
-      if (!lot || lot.shift_date !== activeDayDate) return;
-      if (lot.status !== 'claimed' && lot.status !== 'available') return;
-      const range = getAuctionLotEffectiveMinuteRange(lot);
-      if (!range) return;
-      const key = lot.source_schedule_shift_id != null
-        ? `s${lot.source_schedule_shift_id}`
-        : `l${lot.id}`;
-      const entry = byShift.get(key) || { key, segments: [] };
-      entry.segments.push({
-        lot,
-        start: range[0],
-        end: range[1],
-        claimed: lot.status === 'claimed',
-        operatorId: lot.claimed_by != null ? Number(lot.claimed_by) : null,
-        operatorName: lot.claimed_by_name || (lot.claimed_by ? `#${lot.claimed_by}` : ''),
-        netMinutes: getAuctionLotNetMinutes(lot),
-        partial: isPartialPostAuctionClaim(lot),
-      });
-      byShift.set(key, entry);
-    });
-
-    const groups = [];
-    byShift.forEach((entry) => {
-      const claimedSegs = entry.segments.filter((s) => s.claimed);
-      if (!claimedSegs.length) return; // only shifts where something was taken
-      entry.segments.sort((a, b) => a.start - b.start || a.end - b.end);
-      const spanStart = Math.min(...entry.segments.map((s) => s.start));
-      const spanEnd = Math.max(...entry.segments.map((s) => s.end));
-      const opColor = new Map();
-      claimedSegs.forEach((s) => {
-        const id = s.operatorId ?? `_${opColor.size}`;
-        if (!opColor.has(id)) opColor.set(id, opColor.size % ADMIN_DAY_SEGMENT_COLORS.length);
-      });
-      entry.segments.forEach((s) => {
-        s.colorIdx = s.claimed ? (opColor.get(s.operatorId ?? '') ?? 0) : -1;
-      });
-      const freeMinutes = entry.segments
-        .filter((s) => !s.claimed)
-        .reduce((sum, s) => sum + Math.max(0, s.end - s.start), 0);
-      groups.push({
-        key: entry.key,
-        segments: entry.segments,
-        spanStart,
-        spanEnd,
-        span: Math.max(1, spanEnd - spanStart),
-        claimedCount: claimedSegs.length,
-        operatorCount: opColor.size,
-        freeMinutes,
-        isPartial: freeMinutes > 0 || opColor.size > 1 || claimedSegs.some((s) => s.partial),
-      });
-    });
-    groups.sort((a, b) => a.spanStart - b.spanStart || a.spanEnd - b.spanEnd);
-    return groups;
+    return (monitoredLots || [])
+      .filter((lot) => lot && lot.shift_date === activeDayDate && lot.status === 'claimed' && lot.claimed_by != null)
+      .map((lot) => {
+        const range = getAuctionLotEffectiveMinuteRange(lot);
+        return {
+          lot,
+          start: range ? range[0] : 0,
+          netMinutes: getAuctionLotNetMinutes(lot),
+          partial: isPartialPostAuctionClaim(lot),
+          operatorName: lot.claimed_by_name || `#${lot.claimed_by}`,
+        };
+      })
+      .sort((a, b) => (
+        a.start - b.start
+        || String(a.operatorName).localeCompare(String(b.operatorName), 'ru')
+      ));
   }, [activeDayDate, canMonitor, monitoredLots]);
 
   const adminActiveDayClaimCount = useMemo(
-    () => adminActiveDayShiftGroups.reduce((sum, group) => sum + group.claimedCount, 0),
-    [adminActiveDayShiftGroups]
+    () => adminActiveDayClaimLots.length,
+    [adminActiveDayClaimLots]
   );
 
   useEffect(() => {
@@ -3904,6 +3931,24 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       claimed_lots: claimedLots
     };
   }, [drilldownOperatorId, monitoredLots, monitoredOperators, monitoredParticipantWorkloads]);
+
+  // Breakdown of the clicked shift cell: all lots of the same original shift on the
+  // same day (claimed slices + free remainder) → "who took which part of this shift".
+  const shiftDetailData = useMemo(() => {
+    const clicked = shiftDetailLot;
+    if (!clicked) return null;
+    const date = clicked.shift_date;
+    const sourceId = clicked.source_schedule_shift_id;
+    const siblings = (monitoredLots || []).filter((lot) => {
+      if (!lot || lot.shift_date !== date) return false;
+      return sourceId != null
+        ? lot.source_schedule_shift_id === sourceId
+        : String(lot.id) === String(clicked.id);
+    });
+    const breakdown = buildAuctionShiftSegments(siblings);
+    if (!breakdown) return null;
+    return { date, ...breakdown };
+  }, [shiftDetailLot, monitoredLots]);
 
   const filteredOperatorWorkloads = useMemo(() => {
     const normalizedQuery = operatorWorkloadQuery.trim().toLowerCase();
@@ -5002,6 +5047,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                             postClaimingLotIds={postClaimingLotIds}
                                             postAuctionClaimOption={postAuctionClaimOptionsByLotId.get(getAuctionLotActionKey(lot))}
                                             onRequestPostAuctionClaim={handleRequestPostAuctionClaim}
+                                            onShowDetail={canMonitor ? setShiftDetailLot : undefined}
                                           />
                                         ) : (
                                           <div className={`h-6 rounded border border-dashed sm:h-8 ${isBlocked ? 'border-rose-100 bg-rose-50/70' : isDayOff ? 'border-blue-100 bg-blue-50/60' : 'border-transparent bg-slate-50/70'}`} />
@@ -5118,9 +5164,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                       {formatDateLabel(activeDayDate)}
                     </div>
                     <div className="mt-0.5 text-xs text-slate-500">
-                      {adminActiveDayShiftGroups.length
-                        ? `${adminActiveDayShiftGroups.length} смен · ${adminActiveDayClaimCount} взято`
-                        : 'Нет взятых смен'}
+                      {adminActiveDayClaimCount ? `Взято смен: ${adminActiveDayClaimCount}` : 'Нет взятых смен'}
                     </div>
                   </div>
                   <button
@@ -5132,81 +5176,35 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                     <X size={16} />
                   </button>
                 </div>
-                <div className="max-h-[calc(58vh-64px)] overflow-y-auto px-3 py-3 xl:max-h-[calc(100vh-11rem)]">
-                  {adminActiveDayShiftGroups.length ? (
-                    <div className="space-y-2.5">
-                      {adminActiveDayShiftGroups.map((group) => (
-                        <section key={`admin-day-shift-${group.key}`} className="rounded-xl border border-slate-200/80 bg-white p-3 shadow-sm">
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-sm font-semibold tabular-nums text-slate-900">
-                              {minutesToClockLabel(group.spanStart)}–{minutesToClockLabel(group.spanEnd)}
+                <div className="max-h-[calc(58vh-64px)] overflow-y-auto p-3 xl:max-h-[calc(100vh-11rem)]">
+                  {adminActiveDayClaimLots.length ? (
+                    <ul className="space-y-1.5">
+                      {adminActiveDayClaimLots.map(({ lot, netMinutes, partial, operatorName }) => (
+                        <li key={`admin-day-claim-${lot.id}`}>
+                          <button
+                            type="button"
+                            onClick={() => lot.claimed_by ? setDrilldownOperatorId(Number(lot.claimed_by)) : null}
+                            disabled={!lot.claimed_by}
+                            className="flex w-full items-center gap-3 rounded-xl border border-slate-200/80 bg-white px-3 py-2 text-left shadow-sm transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-default disabled:hover:border-slate-200/80 disabled:hover:bg-white"
+                            title="Открыть взятые смены оператора"
+                          >
+                            <span className="shrink-0 rounded-lg bg-slate-100 px-2 py-1 text-[12px] font-semibold tabular-nums text-slate-700">
+                              {formatAuctionLotEffectiveTimeRangeLabel(lot)}
                             </span>
-                            {group.freeMinutes > 0 ? (
-                              <span className="inline-flex items-center rounded-full bg-orange-100 px-2 py-0.5 text-[11px] font-semibold text-orange-700">
-                                свободно {formatAuctionHours(group.freeMinutes)} ч
-                              </span>
-                            ) : (
-                              <span className="inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
-                                заполнено
-                              </span>
-                            )}
-                          </div>
-                          <div className="relative mt-2.5 h-2.5 w-full overflow-hidden rounded-full bg-slate-100">
-                            {group.segments.map((seg, si) => {
-                              const left = ((seg.start - group.spanStart) / group.span) * 100;
-                              const width = ((seg.end - seg.start) / group.span) * 100;
-                              return (
-                                <span
-                                  key={`seg-${group.key}-${si}`}
-                                  className="absolute inset-y-0 rounded-full ring-1 ring-white"
-                                  style={{
-                                    left: `${left}%`,
-                                    width: `${Math.max(2, width)}%`,
-                                    backgroundColor: seg.claimed
-                                      ? ADMIN_DAY_SEGMENT_COLORS[seg.colorIdx % ADMIN_DAY_SEGMENT_COLORS.length]
-                                      : '#E2E8F0',
-                                  }}
-                                  title={seg.claimed
-                                    ? `${seg.operatorName}: ${minutesToClockLabel(seg.start)}–${minutesToClockLabel(seg.end)}`
-                                    : `Свободно: ${minutesToClockLabel(seg.start)}–${minutesToClockLabel(seg.end)}`}
-                                />
-                              );
-                            })}
-                          </div>
-                          <div className="mt-2.5 space-y-0.5">
-                            {group.segments.map((seg, si) => (
-                              seg.claimed ? (
-                                <button
-                                  key={`leg-${group.key}-${si}`}
-                                  type="button"
-                                  onClick={() => seg.operatorId ? setDrilldownOperatorId(seg.operatorId) : null}
-                                  disabled={!seg.operatorId}
-                                  className="flex w-full items-center gap-2 rounded-lg px-1.5 py-1 text-left transition hover:bg-slate-50 disabled:hover:bg-transparent"
-                                  title="Открыть взятые смены оператора"
-                                >
-                                  <span
-                                    className="h-2.5 w-2.5 shrink-0 rounded-full"
-                                    style={{ backgroundColor: ADMIN_DAY_SEGMENT_COLORS[seg.colorIdx % ADMIN_DAY_SEGMENT_COLORS.length] }}
-                                  />
-                                  <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-slate-800">{seg.operatorName || '—'}</span>
-                                  <span className="shrink-0 text-[12px] tabular-nums text-slate-500">
-                                    {minutesToClockLabel(seg.start)}–{minutesToClockLabel(seg.end)}
-                                  </span>
-                                </button>
-                              ) : (
-                                <div key={`leg-${group.key}-${si}`} className="flex items-center gap-2 rounded-lg px-1.5 py-1">
-                                  <span className="h-2.5 w-2.5 shrink-0 rounded-full border border-slate-300 bg-slate-200" />
-                                  <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-slate-400">Свободно</span>
-                                  <span className="shrink-0 text-[12px] tabular-nums text-slate-400">
-                                    {minutesToClockLabel(seg.start)}–{minutesToClockLabel(seg.end)}
-                                  </span>
-                                </div>
-                              )
-                            ))}
-                          </div>
-                        </section>
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-[13px] font-medium text-slate-900">{operatorName}</span>
+                              {partial ? (
+                                <span className="mt-0.5 inline-flex items-center gap-1 rounded-full bg-orange-100 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-orange-700">
+                                  <span className="h-1.5 w-1.5 rounded-full bg-current" />
+                                  добор · часть из {formatAuctionShiftLabel(lot)}
+                                </span>
+                              ) : null}
+                            </span>
+                            <span className="shrink-0 text-[12px] tabular-nums text-slate-400">{formatAuctionHours(netMinutes)} ч</span>
+                          </button>
+                        </li>
                       ))}
-                    </div>
+                    </ul>
                   ) : (
                     <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-4 py-10 text-center text-sm text-slate-500">
                       В этот день пока никто не взял смены.
@@ -5828,6 +5826,101 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           </section>
         )}
       </div>
+
+      {shiftDetailData ? (
+        <div
+          className="fixed inset-0 z-[68] flex items-center justify-center bg-slate-900/40 px-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="shift-detail-title"
+          onClick={() => setShiftDetailLot(null)}
+        >
+          <div
+            className="w-full max-w-md overflow-hidden rounded-2xl bg-white/95 shadow-2xl ring-1 ring-black/5 backdrop-blur-xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3 border-b border-slate-200/70 px-4 py-3.5">
+              <div className="min-w-0">
+                <h3 id="shift-detail-title" className="truncate text-[15px] font-semibold tracking-tight text-slate-900">
+                  Смена {minutesToClockLabel(shiftDetailData.spanStart)}–{minutesToClockLabel(shiftDetailData.spanEnd)}
+                </h3>
+                <div className="mt-0.5 truncate text-xs text-slate-500">
+                  {formatDateLabel(shiftDetailData.date)} · {shiftDetailData.claimedCount} взято
+                  {shiftDetailData.freeMinutes > 0 ? ` · свободно ${formatAuctionHours(shiftDetailData.freeMinutes)} ч` : ''}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShiftDetailLot(null)}
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200 hover:text-slate-700 active:scale-95"
+                title="Закрыть"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="px-4 py-4">
+              <div className="relative h-3 w-full overflow-hidden rounded-full bg-slate-100">
+                {shiftDetailData.segments.map((seg, si) => {
+                  const left = ((seg.start - shiftDetailData.spanStart) / shiftDetailData.span) * 100;
+                  const width = ((seg.end - seg.start) / shiftDetailData.span) * 100;
+                  return (
+                    <span
+                      key={`sd-seg-${si}`}
+                      className="absolute inset-y-0 rounded-full ring-1 ring-white"
+                      style={{
+                        left: `${left}%`,
+                        width: `${Math.max(2, width)}%`,
+                        backgroundColor: seg.claimed
+                          ? ADMIN_DAY_SEGMENT_COLORS[seg.colorIdx % ADMIN_DAY_SEGMENT_COLORS.length]
+                          : '#E2E8F0',
+                      }}
+                      title={seg.claimed
+                        ? `${seg.operatorName}: ${minutesToClockLabel(seg.start)}–${minutesToClockLabel(seg.end)}`
+                        : `Свободно: ${minutesToClockLabel(seg.start)}–${minutesToClockLabel(seg.end)}`}
+                    />
+                  );
+                })}
+              </div>
+              <div className="mt-1 flex justify-between text-[10px] tabular-nums text-slate-400">
+                <span>{minutesToClockLabel(shiftDetailData.spanStart)}</span>
+                <span>{minutesToClockLabel(shiftDetailData.spanEnd)}</span>
+              </div>
+              <div className="mt-3 space-y-0.5">
+                {shiftDetailData.segments.map((seg, si) => (
+                  seg.claimed ? (
+                    <button
+                      key={`sd-leg-${si}`}
+                      type="button"
+                      onClick={() => seg.operatorId ? setDrilldownOperatorId(seg.operatorId) : null}
+                      disabled={!seg.operatorId}
+                      className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left transition hover:bg-slate-50 disabled:hover:bg-transparent"
+                      title="Открыть взятые смены оператора"
+                    >
+                      <span
+                        className="h-2.5 w-2.5 shrink-0 rounded-full"
+                        style={{ backgroundColor: ADMIN_DAY_SEGMENT_COLORS[seg.colorIdx % ADMIN_DAY_SEGMENT_COLORS.length] }}
+                      />
+                      <span className="min-w-0 flex-1 truncate text-sm font-medium text-slate-800">{seg.operatorName || '—'}</span>
+                      <span className="shrink-0 text-[12px] tabular-nums text-slate-500">
+                        {minutesToClockLabel(seg.start)}–{minutesToClockLabel(seg.end)}
+                      </span>
+                      <span className="shrink-0 text-[12px] tabular-nums text-slate-400">{formatAuctionHours(seg.netMinutes)} ч</span>
+                    </button>
+                  ) : (
+                    <div key={`sd-leg-${si}`} className="flex items-center gap-2.5 rounded-lg px-2 py-1.5">
+                      <span className="h-2.5 w-2.5 shrink-0 rounded-full border border-slate-300 bg-slate-200" />
+                      <span className="min-w-0 flex-1 truncate text-sm font-medium text-slate-400">Свободно</span>
+                      <span className="shrink-0 text-[12px] tabular-nums text-slate-400">
+                        {minutesToClockLabel(seg.start)}–{minutesToClockLabel(seg.end)}
+                      </span>
+                    </div>
+                  )
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {drilldownData ? (
         <div
