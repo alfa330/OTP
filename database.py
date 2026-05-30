@@ -3517,8 +3517,11 @@ class Database:
                 COALESCE(l.post_auction_claimed, FALSE) AS post_auction_claimed,
                 u.direction_id AS claimed_by_direction_id,
                 claimed_dir.name AS claimed_by_direction,
-                source_shift.start_minute AS source_start_minute,
-                source_shift.end_minute AS source_end_minute,
+                -- Remainder lots share the source shift id (for grouping) but cover
+                -- only a gap of it; null the source minutes so the frontend uses the
+                -- lot's own start/end (the gap), not the full original shift range.
+                CASE WHEN l.remainder_of_lot_id IS NOT NULL THEN NULL ELSE source_shift.start_minute END AS source_start_minute,
+                CASE WHEN l.remainder_of_lot_id IS NOT NULL THEN NULL ELSE source_shift.end_minute END AS source_end_minute,
                 l.post_claim_start_time,
                 l.post_claim_end_time
             FROM shift_auction_test_lots l
@@ -4591,17 +4594,18 @@ class Database:
     def _create_post_auction_remainder_lots(self, cursor, parent_lot_id, shift_date,
                                             full_start_time, full_end_time,
                                             claim_start_min, claim_end_min,
-                                            rate_min, breaks, source_plan_id):
+                                            rate_min, breaks, source_plan_id, source_shift_id=None):
         """
         После частичного добора вернуть незабранный остаток смены в аукцион:
         для каждого свободного промежутка слева/справа от взятого куска создаём
         новый доступный лот (status='available'), доступный другим операторам.
 
-        Остаточные лоты НЕ привязываются к source_schedule_shift_id — так их
-        временной диапазон считается по собственным start/end (а не по полной
-        исходной смене через JOIN) и не конфликтует с уникальным ключом
-        shift_auction_historical_claims. Связь с родителем хранится в
-        remainder_of_lot_id, чтобы admin_unclaim_shift мог их свести обратно.
+        Остаточные лоты несут тот же source_schedule_shift_id, что и исходная смена —
+        так в мониторинге они группируются с ней (видно «кто какую часть взял»), а
+        повторный claim не конфликтует благодаря PK (plan, shift, claimed_by). В
+        снапшоте source_*_minute для них обнуляются (remainder_of_lot_id IS NOT NULL),
+        поэтому фронт считает диапазон по их собственным start/end (по промежутку).
+        Связь с родителем хранится в remainder_of_lot_id для свода в admin_unclaim.
         """
         full_start_min, full_end_min = self._schedule_interval_minutes(full_start_time, full_end_time)
         candidate_gaps = []
@@ -4639,10 +4643,10 @@ class Database:
                     source_schedule_plan_id, source_schedule_shift_id,
                     status, remainder_of_lot_id
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, NULL, 'available', %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 'available', %s)
                 RETURNING id
             """, (shift_date, gap_start_obj, gap_end_obj, rate_min, Json(gap_breaks),
-                  source_plan_id, parent_lot_id))
+                  source_plan_id, source_shift_id, parent_lot_id))
             new_row = cursor.fetchone()
             if new_row:
                 created_ids.append(int(new_row[0]))
@@ -6814,6 +6818,7 @@ class Database:
                     rate_min=lot[4],
                     breaks=updated[8] if isinstance(updated[8], list) else [],
                     source_plan_id=source_plan_id,
+                    source_shift_id=source_shift_id,
                 )
 
             if day_off_row:
