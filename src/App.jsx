@@ -16935,7 +16935,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     swapExchangePromptHandledRef.current.clear();
                                                 }}
                                                 fullScreenOnMobile={true}
-                                                panelClassName="sm:w-[680px] max-w-[calc(100vw-1rem)] p-0 sm:rounded-[1.75rem]"
+                                                panelClassName="sm:w-[calc(100vw-3rem)] max-w-[1000px] p-0 sm:rounded-[1.75rem]"
                                             >
                                                 <div style={{ fontFamily: IOS_FONT }} className="flex h-full flex-col overflow-hidden bg-slate-50 sm:h-auto sm:max-h-[calc(100vh-2rem)]">
                                                     {/* ── Шапка ── */}
@@ -16973,7 +16973,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </div>
 
                                                     {/* ── Тело ── */}
-                                                    <div className="flex-1 min-h-0 space-y-5 overflow-y-auto px-4 py-4">
+                                                    <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4">
+                                                    <div className="grid grid-cols-1 gap-5 lg:grid-cols-2 lg:items-start">
+                                                    <div className="space-y-5">
 
                                                     {/* Шаг 1 — интервал вашей смены */}
                                                     <section className="space-y-1.5">
@@ -17283,6 +17285,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     )}
                                                     </div>
                                                 </section>
+                                                </div>{/* /левая колонка */}
+
+                                                <div className="space-y-5">
                                                 {!isSwapExchangeMode && (
                                                     <section className="space-y-1.5">
                                                         <div className="flex items-center justify-between gap-2">
@@ -17396,7 +17401,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     : 'Нет операторов без пересечения на выбранный интервал.')}
                                                         </div>
                                                     ) : (
-                                                        <div className="max-h-[42vh] sm:max-h-80 overflow-y-auto pr-1 space-y-2">
+                                                        <div className="max-h-[42vh] sm:max-h-80 lg:max-h-[460px] overflow-y-auto pr-1 space-y-2">
                                                             {swapCandidatesFiltered.map((item, idx) => {
                                                                 const itemId = String(item?.id || '');
                                                                 const isSelected = itemId === String(swapForm.targetOperatorId || '');
@@ -17572,6 +17577,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             )}
                                                         </div>
                                                     </section>
+                                                    </div>{/* /правая колонка */}
+                                                    </div>{/* /сетка */}
 
                                                     </div>
 
