@@ -154,6 +154,19 @@ class HistoricalPostAuctionRemainderTests(unittest.TestCase):
         source = _source(BOT_PATH)
         self.assertIn("claimed_by=payload.get('claimed_by')", source)
 
+    def test_backfill_remainders_for_existing_partial_claims(self):
+        names = {
+            node.name for node in _database_class().body
+            if isinstance(node, ast.FunctionDef)
+        }
+        self.assertIn("_backfill_post_auction_remainder_lots", names)
+        # Runs during schema init so already-claimed partial shifts gain remainders.
+        self.assertIn("self._backfill_post_auction_remainder_lots(cursor)", _source(DATABASE_PATH))
+        src = _method_source("_backfill_post_auction_remainder_lots")
+        # Idempotent: only partial claims that have no remainder lots yet.
+        self.assertIn("remainder_of_lot_id IS NULL", src)
+        self.assertIn("NOT EXISTS", src)
+
 
 if __name__ == "__main__":
     unittest.main()
