@@ -561,7 +561,8 @@ const AuctionLotCell = ({
   postClaimingLotIds,
   postAuctionClaimOption,
   onRequestPostAuctionClaim,
-  onShowDetail
+  onShowDetail,
+  isPartialRemainder = false
 }) => {
   if (!lot) return null;
 
@@ -619,6 +620,9 @@ const AuctionLotCell = ({
         {postAuctionSegment && !postAuctionSegment.isFull ? (
           <span className="absolute inset-x-1 bottom-0.5 h-0.5 rounded-full bg-white/80" />
         ) : null}
+        {isPartialRemainder ? (
+          <span className="pointer-events-none absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-white ring-1 ring-orange-600" title="Часть смены уже взята другим оператором" />
+        ) : null}
       </button>
     );
   }
@@ -672,13 +676,20 @@ const AuctionLotCell = ({
   const styleToUse = isLotClaimed ? undefined : (isOpenPostStyle ? postAuctionToneStyle : startToneStyle);
 
   const detailClickable = canManage && typeof onShowDetail === 'function';
+  // A claimed cell shows the ACTUALLY taken part (effective range), not the full
+  // original shift — so a partial claim reads as "13:00–15:00" with an orange marker
+  // (meaning part of the shift was taken), and the free remainder is its own cell.
+  const finalDisplayLabel = isLotClaimed ? formatAuctionLotEffectiveTimeRangeLabel(lot) : label;
+  const finalDisplayCompact = isLotClaimed ? formatAuctionLotEffectiveTimeRangeLabel(lot) : compactLabel;
   const finalClassName = `relative flex h-6 w-full min-w-0 items-center justify-center overflow-hidden rounded border px-1 text-[10px] font-semibold tabular-nums sm:h-8 sm:px-2 sm:text-xs ${tone}${detailClickable ? ' cursor-pointer transition hover:brightness-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-1' : ''}`;
   const finalInner = (
     <>
-      <span className="truncate sm:hidden">{compactLabel}</span>
-      <span className="hidden truncate sm:inline">{label}</span>
-      {isPartialPostAuctionClaim(lot) ? (
-        <span className="pointer-events-none absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-orange-400 ring-1 ring-white" title="Частичный добор" />
+      <span className="truncate sm:hidden">{finalDisplayCompact}</span>
+      <span className="hidden truncate sm:inline">{finalDisplayLabel}</span>
+      {isPartialRemainder ? (
+        <span className="pointer-events-none absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-white ring-1 ring-orange-600" title="Часть смены уже взята другим оператором" />
+      ) : isPartialPostAuctionClaim(lot) ? (
+        <span className="pointer-events-none absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-orange-400 ring-1 ring-white" title="Часть смены взята другим оператором" />
       ) : null}
     </>
   );
@@ -3612,12 +3623,43 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   }, [monitoredMyBlockedDates]);
 
   const visibleLots = useMemo(() => {
-    if (canMonitor) return monitoredLots;
-    return monitoredLots.filter((lot) => (
-      (selectedViewPostAuctionActive || !monitoredMyDayOffs.includes(lot.shift_date))
+    // A partially-claimed shift = one claimed (taken) lot + one available (free)
+    // remainder lot. We collapse it into a SINGLE cell by hiding the taken part and
+    // keeping only the free part (rendered orange with a marker). Applies to admins
+    // and operators alike; the per-operator breakdown stays available via the modal.
+    const shiftsWithFreeRemainder = new Set();
+    (monitoredLots || []).forEach((lot) => {
+      if (lot && lot.status === 'available' && lot.source_schedule_shift_id != null) {
+        shiftsWithFreeRemainder.add(`${lot.source_schedule_shift_id}|${lot.shift_date}`);
+      }
+    });
+    const isHiddenTakenPart = (lot) => (
+      lot.status === 'claimed'
+      && lot.source_schedule_shift_id != null
+      && shiftsWithFreeRemainder.has(`${lot.source_schedule_shift_id}|${lot.shift_date}`)
+    );
+    if (canMonitor) {
+      return (monitoredLots || []).filter((lot) => lot && !isHiddenTakenPart(lot));
+    }
+    return (monitoredLots || []).filter((lot) => (
+      lot
+      && (selectedViewPostAuctionActive || !monitoredMyDayOffs.includes(lot.shift_date))
       && !myBlockedDateMap.has(lot.shift_date)
+      && !isHiddenTakenPart(lot)
     ));
   }, [canMonitor, monitoredLots, monitoredMyDayOffs, myBlockedDateMap, selectedViewPostAuctionActive]);
+
+  // Shifts that have a taken part — used to mark their free-remainder cell (orange
+  // + marker) so it reads as "part of this shift was already taken by someone".
+  const shiftsWithClaimedPart = useMemo(() => {
+    const set = new Set();
+    (monitoredLots || []).forEach((lot) => {
+      if (lot && lot.status === 'claimed' && lot.source_schedule_shift_id != null) {
+        set.add(`${lot.source_schedule_shift_id}|${lot.shift_date}`);
+      }
+    });
+    return set;
+  }, [monitoredLots]);
 
   const auctionTableGroups = useMemo(() => {
     const groupMap = new Map(AUCTION_RATE_GROUPS.map((group) => [
@@ -5048,6 +5090,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                             postAuctionClaimOption={postAuctionClaimOptionsByLotId.get(getAuctionLotActionKey(lot))}
                                             onRequestPostAuctionClaim={handleRequestPostAuctionClaim}
                                             onShowDetail={canMonitor ? setShiftDetailLot : undefined}
+                                            isPartialRemainder={lot.status === 'available' && lot.source_schedule_shift_id != null && shiftsWithClaimedPart.has(`${lot.source_schedule_shift_id}|${lot.shift_date}`)}
                                           />
                                         ) : (
                                           <div className={`h-6 rounded border border-dashed sm:h-8 ${isBlocked ? 'border-rose-100 bg-rose-50/70' : isDayOff ? 'border-blue-100 bg-blue-50/60' : 'border-transparent bg-slate-50/70'}`} />
