@@ -31,6 +31,14 @@ const normalizeProxyStatusForApi = (value) => {
 };
 const formatProxyStatusLabel = (value) => PROXY_STATUS_LABELS[String(value || '').trim()] || '';
 
+/* ─── iOS / macOS styled form primitives (operator shift-swap "Новый запрос" sheet) ─── */
+const IOS_FONT = '-apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", system-ui, sans-serif';
+// Поле в стиле iOS «grouped form»: светло-серая заливка внутри белых карточек, фокус-кольцо.
+const IOS_FIELD = 'w-full px-3.5 py-2.5 text-[14px] rounded-xl bg-slate-100 border-0 text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/70 focus:bg-white transition appearance-none';
+const IOS_CARD = 'rounded-2xl bg-white ring-1 ring-slate-200/70 shadow-[0_1px_2px_rgba(15,23,42,0.04)]';
+const IOS_GROUP_LABEL = 'px-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400';
+const IOS_FIELD_LABEL = 'mb-1 block px-1 text-[12px] font-medium text-slate-500';
+
 const buildPinnedTaskStorageKey = (userId) =>
     userId ? `${PINNED_TASK_STORAGE_KEY_PREFIX}:${userId}` : '';
 
@@ -16927,18 +16935,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     swapExchangePromptHandledRef.current.clear();
                                                 }}
                                                 fullScreenOnMobile={true}
-                                                panelClassName="sm:w-[calc(100vw-1rem)] max-w-[1200px] p-0 sm:rounded-xl"
+                                                panelClassName="sm:w-[680px] max-w-[calc(100vw-1rem)] p-0 sm:rounded-[1.75rem]"
                                             >
-                                                <div className="p-4 sm:p-5 space-y-4">
-                                                    <div className="flex items-start justify-between gap-3 pb-3 border-b border-slate-200">
-                                                        <div className="min-w-0">
-                                                            <div className="text-base font-semibold text-slate-900">
-                                                                {isSwapExchangeMode ? 'Создать запрос на обмен сменами' : 'Создать запрос на замену смены'}
+                                                <div style={{ fontFamily: IOS_FONT }} className="flex h-full flex-col overflow-hidden bg-slate-50 sm:h-auto sm:max-h-[calc(100vh-2rem)]">
+                                                    {/* ── Шапка ── */}
+                                                    <div className="flex items-center gap-3 border-b border-slate-200/70 bg-white/85 px-4 py-3 backdrop-blur-xl">
+                                                        <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-white shadow-sm ${isSwapExchangeMode ? 'bg-emerald-500' : 'bg-blue-600'}`}>
+                                                            <FaIcon className={`fas ${isSwapExchangeMode ? 'fa-right-left' : 'fa-user-clock'} text-xs`}></FaIcon>
+                                                        </div>
+                                                        <div className="min-w-0 flex-1">
+                                                            <div className="text-[15px] font-semibold leading-tight text-slate-900">
+                                                                {isSwapExchangeMode ? 'Запрос на обмен' : 'Запрос на замену'}
                                                             </div>
-                                                            <div className="text-xs text-slate-500">
-                                                                {!isSwapExchangeMode && swapDraftRequests.length > 0
-                                                                    ? `В очереди: ${swapDraftRequests.length} запр.`
-                                                                    : `Доступных дат: ${mySwapSourceShiftDays.length}`}
+                                                            <div className="truncate text-[12px] text-slate-500">
+                                                                {!swapForm.swapDate
+                                                                    ? 'Выберите дату и интервал смены'
+                                                                    : (!swapTimeValidation.isValid
+                                                                        ? 'Уточните интервал смены'
+                                                                        : (swapForm.targetOperatorId
+                                                                            ? 'Можно отправлять'
+                                                                            : (isSwapExchangeMode ? 'Выберите коллегу для обмена' : 'Выберите коллегу для замены')))}
                                                             </div>
                                                         </div>
                                                         <button
@@ -16949,145 +16965,158 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 setSwapCandidatesSearch('');
                                                                 swapExchangePromptHandledRef.current.clear();
                                                             }}
-                                                            className="w-8 h-8 rounded-md border border-slate-300 text-slate-500 hover:bg-slate-100 inline-flex items-center justify-center"
+                                                            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
                                                             aria-label="Закрыть окно создания запроса"
                                                         >
                                                             <FaIcon className="fas fa-times text-sm"></FaIcon>
                                                         </button>
                                                     </div>
-                                                <div>
-                                                <div className="flex items-center gap-2 mb-2.5">
-                                                    <span className="w-5 h-5 rounded-full bg-blue-600 text-white text-[10px] font-bold flex items-center justify-center flex-shrink-0 leading-none">1</span>
-                                                    <span className="text-xs font-semibold text-slate-600 uppercase tracking-wide">
-                                                        {isSwapExchangeMode ? 'Ваша смена для обмена' : 'Ваша смена для замены'}
-                                                    </span>
-                                                    <span className={`px-2 py-0.5 rounded-md border text-[11px] font-medium ${
-                                                        isSwapExchangeMode
-                                                            ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-                                                            : 'border-slate-200 bg-slate-50 text-slate-600'
-                                                    }`}>
-                                                        {isSwapExchangeMode ? 'Режим: обмен' : 'Режим: обычная замена'}
-                                                    </span>
-                                                </div>
-                                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 items-end">
-                                                    <label className="text-sm">
-                                                        <div className="text-xs text-slate-600 mb-1">Дата начала</div>
-                                                        <select
-                                                            value={swapForm.swapDate}
-                                                            onChange={(e) => {
-                                                                const nextDate = e.target.value;
-                                                                setShowSwapTargetSegmentsModal(false);
-                                                                setSwapForm(prev => ({
-                                                                    ...prev,
-                                                                    swapDate: nextDate,
-                                                                    endDate: nextDate || '',
-                                                                    targetOperatorId: '',
-                                                                    targetSegments: []
-                                                                }));
-                                                            }}
-                                                            className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm bg-white"
-                                                        >
-                                                            <option value="">Выберите дату смены</option>
-                                                            {mySwapSourceShiftDays.map(dayKey => (
-                                                                <option key={`swap-date-${dayKey}`} value={dayKey}>
-                                                                    {formatDateRuShort(dayKey)} ({formatWeekdayRu(dayKey, 'short')})
-                                                                </option>
-                                                            ))}
-                                                        </select>
-                                                    </label>
-                                                    <div className="text-sm">
-                                                        <div className="flex items-center justify-between gap-2 mb-1">
-                                                            <span className="text-xs text-slate-600">Режим интервала</span>
-                                                            <span className="text-[11px] text-slate-500">
-                                                                {swapForm.swapDate
-                                                                    ? (swapEndsNextDay ? `Старт: ${formatDateRuShort(swapNextDayDate)}` : `Старт: ${formatDateRuShort(swapForm.swapDate)}`)
-                                                                    : '—'}
+
+                                                    {/* ── Тело ── */}
+                                                    <div className="flex-1 min-h-0 space-y-5 overflow-y-auto px-4 py-4">
+
+                                                    {/* Шаг 1 — интервал вашей смены */}
+                                                    <section className="space-y-1.5">
+                                                        <div className="flex items-center justify-between gap-2">
+                                                            <div className={IOS_GROUP_LABEL}>{isSwapExchangeMode ? 'Смена для обмена' : 'Смена для замены'}</div>
+                                                            <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${isSwapExchangeMode ? 'bg-emerald-100 text-emerald-700' : 'bg-blue-100 text-blue-700'}`}>
+                                                                {isSwapExchangeMode ? 'Обмен' : 'Замена'}
                                                             </span>
                                                         </div>
-                                                        <div className="inline-flex w-full rounded-lg border border-slate-300 bg-slate-50 p-1 gap-1">
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() => {
-                                                                        setShowSwapTargetSegmentsModal(false);
-                                                                        setSwapForm(prev => ({ ...prev, endDate: prev.swapDate || '', targetOperatorId: '', targetSegments: [] }));
-                                                                    }}
-                                                                    disabled={!swapForm.swapDate}
-                                                                    className={`flex-1 px-2 py-1 rounded-md border text-[11px] font-medium ${
-                                                                        !swapForm.swapDate
-                                                                            ? 'border-slate-200 text-slate-400 cursor-not-allowed'
-                                                                            : (!swapEndsNextDay
-                                                                                ? 'border-blue-300 bg-blue-50 text-blue-700 shadow-[inset_0_0_0_1px_rgba(59,130,246,0.15)]'
-                                                                                : 'border-slate-300 text-slate-600 hover:bg-slate-50')
-                                                                    }`}
-                                                                >
-                                                                    Тот же день
-                                                                </button>
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() => {
-                                                                        setShowSwapTargetSegmentsModal(false);
-                                                                        setSwapForm(prev => ({
-                                                                            ...prev,
-                                                                            endDate: prev.swapDate ? swapNextDayDate : '',
-                                                                            targetOperatorId: '',
-                                                                            targetSegments: []
-                                                                        }));
-                                                                    }}
-                                                                    disabled={!swapForm.swapDate}
-                                                                    className={`flex-1 px-2 py-1 rounded-md border text-[11px] font-medium ${
-                                                                        !swapForm.swapDate
-                                                                            ? 'border-slate-200 text-slate-400 cursor-not-allowed'
-                                                                            : (swapEndsNextDay
-                                                                                ? 'border-blue-300 bg-blue-50 text-blue-700 shadow-[inset_0_0_0_1px_rgba(59,130,246,0.15)]'
-                                                                                : 'border-slate-300 text-slate-600 hover:bg-slate-50')
-                                                                    }`}
-                                                                >
-                                                                    След. день
-                                                                </button>
+                                                        <div className={`${IOS_CARD} space-y-3.5 p-3.5`}>
+                                                            <div>
+                                                                <label className={IOS_FIELD_LABEL}>Дата смены</label>
+                                                                <div className="relative">
+                                                                    <select
+                                                                        value={swapForm.swapDate}
+                                                                        onChange={(e) => {
+                                                                            const nextDate = e.target.value;
+                                                                            setShowSwapTargetSegmentsModal(false);
+                                                                            setSwapForm(prev => ({
+                                                                                ...prev,
+                                                                                swapDate: nextDate,
+                                                                                endDate: nextDate || '',
+                                                                                targetOperatorId: '',
+                                                                                targetSegments: []
+                                                                            }));
+                                                                        }}
+                                                                        className={`${IOS_FIELD} pr-9`}
+                                                                    >
+                                                                        <option value="">Выберите дату смены</option>
+                                                                        {mySwapSourceShiftDays.map(dayKey => (
+                                                                            <option key={`swap-date-${dayKey}`} value={dayKey}>
+                                                                                {formatDateRuShort(dayKey)} ({formatWeekdayRu(dayKey, 'short')})
+                                                                            </option>
+                                                                        ))}
+                                                                    </select>
+                                                                    <FaIcon className="fas fa-chevron-down pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-[11px] text-slate-400"></FaIcon>
+                                                                </div>
+                                                            </div>
+                                                            <div className="space-y-3 border-t border-slate-100 pt-3.5">
+                                                                <div>
+                                                                    <label className={IOS_FIELD_LABEL}>Окончание интервала</label>
+                                                                    <div className="grid grid-cols-2 gap-1 rounded-xl bg-slate-100 p-1">
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => {
+                                                                                setShowSwapTargetSegmentsModal(false);
+                                                                                setSwapForm(prev => ({ ...prev, endDate: prev.swapDate || '', targetOperatorId: '', targetSegments: [] }));
+                                                                            }}
+                                                                            disabled={!swapForm.swapDate}
+                                                                            className={`rounded-lg px-2 py-2 text-[12px] font-medium transition ${
+                                                                                !swapForm.swapDate
+                                                                                    ? 'cursor-not-allowed text-slate-400'
+                                                                                    : (!swapEndsNextDay ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700')
+                                                                            }`}
+                                                                        >
+                                                                            Тот же день
+                                                                        </button>
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => {
+                                                                                setShowSwapTargetSegmentsModal(false);
+                                                                                setSwapForm(prev => ({
+                                                                                    ...prev,
+                                                                                    endDate: prev.swapDate ? swapNextDayDate : '',
+                                                                                    targetOperatorId: '',
+                                                                                    targetSegments: []
+                                                                                }));
+                                                                            }}
+                                                                            disabled={!swapForm.swapDate}
+                                                                            className={`rounded-lg px-2 py-2 text-[12px] font-medium transition ${
+                                                                                !swapForm.swapDate
+                                                                                    ? 'cursor-not-allowed text-slate-400'
+                                                                                    : (swapEndsNextDay ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700')
+                                                                            }`}
+                                                                        >
+                                                                            Следующий день
+                                                                        </button>
+                                                                    </div>
+                                                                </div>
+                                                                <div className="grid grid-cols-2 gap-3">
+                                                                    <div>
+                                                                        <label className={IOS_FIELD_LABEL}>Начало</label>
+                                                                        <input
+                                                                            type="time"
+                                                                            value={swapForm.startTime}
+                                                                            onChange={(e) => {
+                                                                                setShowSwapTargetSegmentsModal(false);
+                                                                                setSwapForm(prev => ({ ...prev, startTime: e.target.value, targetOperatorId: '', targetSegments: [] }));
+                                                                            }}
+                                                                            className={IOS_FIELD}
+                                                                            step={300}
+                                                                        />
+                                                                    </div>
+                                                                    <div>
+                                                                        <label className={IOS_FIELD_LABEL}>Конец</label>
+                                                                        <input
+                                                                            type="time"
+                                                                            value={swapForm.endTime}
+                                                                            onChange={(e) => {
+                                                                                setShowSwapTargetSegmentsModal(false);
+                                                                                setSwapForm(prev => ({ ...prev, endTime: e.target.value, targetOperatorId: '', targetSegments: [] }));
+                                                                            }}
+                                                                            className={IOS_FIELD}
+                                                                            step={300}
+                                                                        />
+                                                                    </div>
+                                                                </div>
+                                                                <div className="flex items-start gap-1.5 px-1 text-[12px]">
+                                                                    {!swapTimeValidation.isValid ? (
+                                                                        <>
+                                                                            <FaIcon className="fas fa-circle-exclamation mt-0.5 text-amber-500"></FaIcon>
+                                                                            <span className="text-amber-700">{swapTimeValidation.message}</span>
+                                                                        </>
+                                                                    ) : (
+                                                                        <>
+                                                                            <FaIcon className="fas fa-circle-check mt-0.5 text-emerald-500"></FaIcon>
+                                                                            <span className="text-slate-600">
+                                                                                {formatSwapDateTimeRangeLabel(
+                                                                                    swapForm.swapDate,
+                                                                                    swapForm.startTime,
+                                                                                    swapForm.endTime,
+                                                                                    swapTimeValidation.effectiveEndDate || swapForm.endDate || swapForm.swapDate
+                                                                                )} · {formatMinutesOnly(swapTimeValidation.durationMin)}
+                                                                            </span>
+                                                                        </>
+                                                                    )}
+                                                                </div>
+                                                            </div>
                                                         </div>
-                                                    </div>
-                                                    <label className="text-sm">
-                                                        <div className="text-xs text-slate-600 mb-1">С</div>
-                                                        <input
-                                                            type="time"
-                                                            value={swapForm.startTime}
-                                                            onChange={(e) => {
-                                                                setShowSwapTargetSegmentsModal(false);
-                                                                setSwapForm(prev => ({ ...prev, startTime: e.target.value, targetOperatorId: '', targetSegments: [] }));
-                                                            }}
-                                                            className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm bg-white"
-                                                            step={300}
-                                                        />
-                                                    </label>
-                                                    <label className="text-sm">
-                                                        <div className="text-xs text-slate-600 mb-1">По</div>
-                                                        <input
-                                                            type="time"
-                                                            value={swapForm.endTime}
-                                                            onChange={(e) => {
-                                                                setShowSwapTargetSegmentsModal(false);
-                                                                setSwapForm(prev => ({ ...prev, endTime: e.target.value, targetOperatorId: '', targetSegments: [] }));
-                                                            }}
-                                                            className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm bg-white"
-                                                            step={300}
-                                                        />
-                                                    </label>
-                                                </div>
-                                                </div>
-                                                <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-2.5 sm:p-3">
-                                                    <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-                                                        <div className="text-xs font-semibold text-slate-700 uppercase tracking-wide">
-                                                            Смена на выбранную дату
-                                                        </div>
-                                                        <div className="text-xs text-slate-500">
+                                                    </section>
+                                                <section className="space-y-1.5">
+                                                    <div className="flex items-center justify-between gap-2">
+                                                        <div className={IOS_GROUP_LABEL}>Ваша смена в этот день</div>
+                                                        <span className="text-[11px] text-slate-400">
                                                             {swapDayTimeline.date
-                                                                ? `${formatDateRuShort(swapDayTimeline.date)} • ${formatMinutesOnly(swapDayTimeline.totalMinutes)}`
+                                                                ? `${formatDateRuShort(swapDayTimeline.date)} · ${formatMinutesOnly(swapDayTimeline.totalMinutes)}`
                                                                 : 'Выберите дату'}
-                                                        </div>
+                                                        </span>
                                                     </div>
+                                                    <div className={`${IOS_CARD} p-3.5`}>
                                                     {swapDayTimeline.date && swapDayTimeline.hasShifts ? (
                                                         <>
-                                                            <div className="relative h-10 rounded-lg border border-slate-300 bg-white overflow-hidden">
+                                                            <div className="relative h-10 overflow-hidden rounded-xl bg-slate-100 ring-1 ring-slate-200">
                                                                 {[0, 6, 12, 18, 24].map(hour => (
                                                                     <div
                                                                         key={`swap-timeline-mark-${hour}`}
@@ -17135,18 +17164,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 <span>18:00</span>
                                                                 <span>24:00</span>
                                                             </div>
-                                                            <div className="mt-2 flex flex-wrap gap-1.5">
-                                                                {swapDayTimeline.segments.map(seg => (
-                                                                    <button
-                                                                        type="button"
-                                                                        key={`swap-seg-chip-${seg.id}`}
-                                                                        onClick={() => handleSelectOwnSwapSegmentFromTimeline(seg)}
-                                                                        className="px-2 py-0.5 rounded-md text-xs border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors"
-                                                                        title="Выбрать весь этот интервал"
-                                                                    >
-                                                                        {seg.label} ({formatMinutesOnly(seg.minutes)})
-                                                                    </button>
-                                                                ))}
+                                                            <div className="mt-2.5">
+                                                                <div className="mb-1.5 px-0.5 text-[11px] text-slate-400">Нажмите смену, чтобы выбрать её целиком</div>
+                                                                <div className="flex flex-wrap gap-1.5">
+                                                                    {swapDayTimeline.segments.map(seg => (
+                                                                        <button
+                                                                            type="button"
+                                                                            key={`swap-seg-chip-${seg.id}`}
+                                                                            onClick={() => handleSelectOwnSwapSegmentFromTimeline(seg)}
+                                                                            className="rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1 text-[12px] font-medium text-blue-700 transition-colors hover:bg-blue-100"
+                                                                            title="Выбрать весь этот интервал"
+                                                                        >
+                                                                            {seg.label} ({formatMinutesOnly(seg.minutes)})
+                                                                        </button>
+                                                                    ))}
+                                                                </div>
                                                             </div>
                                                             {((Array.isArray(swapDayTimeline.draftIntervals) && swapDayTimeline.draftIntervals.length > 0) || swapDayTimeline.selectedInterval) && (
                                                                 <div className="mt-2 flex flex-wrap gap-1.5">
@@ -17168,14 +17200,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             {swapDayTimeline.hasNextDayShifts && (
                                                                 <div className="mt-3 border-t border-slate-200 pt-2">
                                                                     <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
-                                                                        <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+                                                                        <div className={IOS_GROUP_LABEL}>
                                                                             Таймлайн следующего дня
                                                                         </div>
-                                                                        <div className="text-[11px] text-slate-500">
-                                                                            {formatDateRuShort(swapDayTimeline.nextDayDate)} • {formatMinutesOnly(swapDayTimeline.nextDayTotalMinutes)}
+                                                                        <div className="text-[11px] text-slate-400">
+                                                                            {formatDateRuShort(swapDayTimeline.nextDayDate)} · {formatMinutesOnly(swapDayTimeline.nextDayTotalMinutes)}
                                                                         </div>
                                                                     </div>
-                                                                    <div className="relative h-9 rounded-lg border border-slate-300 bg-white overflow-hidden">
+                                                                    <div className="relative h-9 overflow-hidden rounded-xl bg-slate-100 ring-1 ring-slate-200">
                                                                         {[0, 6, 12, 18, 24].map(hour => (
                                                                             <div
                                                                                 key={`swap-next-timeline-mark-${hour}`}
@@ -17243,102 +17275,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             )}
                                                         </>
                                                     ) : (
-                                                        <div className="text-xs text-slate-500">
+                                                        <div className="rounded-xl bg-slate-100 px-3 py-2.5 text-[12px] text-slate-500">
                                                             {swapDayTimeline.date
                                                                 ? 'На выбранную дату у вас нет смен.'
-                                                                : 'Выберите дату, чтобы увидеть ваши смены таймлайном.'}
+                                                                : 'Выберите дату, чтобы увидеть смены на таймлайне.'}
                                                         </div>
                                                     )}
-                                                </div>
-                                                <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-2 sm:gap-3 items-end">
-                                                    <label className="sm:col-span-2 lg:col-span-3 text-sm">
-                                                        <div className="text-xs text-slate-600 mb-1">Комментарий (опционально)</div>
-                                                        <input
-                                                            type="text"
-                                                            value={swapForm.comment}
-                                                            onChange={(e) => setSwapForm(prev => ({ ...prev, comment: e.target.value }))}
-                                                            placeholder="Например: Прошу подменить на время учебы"
-                                                            className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm bg-white"
-                                                            maxLength={400}
-                                                        />
-                                                    </label>
-                                                    {!isSwapExchangeMode && (
-                                                        <button
-                                                            type="button"
-                                                            onClick={handleAddSwapDraft}
-                                                            disabled={swapSubmitting || !canSubmitCurrentSwapDraft}
-                                                            className={`w-full px-3 py-2 rounded-lg text-sm font-medium transition ${
-                                                                swapSubmitting || !canSubmitCurrentSwapDraft
-                                                                    ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
-                                                                    : 'bg-white text-slate-700 border border-slate-300 hover:bg-slate-50'
-                                                            }`}
-                                                        >
-                                                            Добавить в список
-                                                        </button>
-                                                    )}
-                                                    <button
-                                                        type="button"
-                                                        onClick={handleCreateSwapRequest}
-                                                        disabled={swapSubmitting || !canSendSwapRequests}
-                                                        className={`w-full ${isSwapExchangeMode ? 'sm:col-span-2 lg:col-span-3' : 'lg:col-span-2'} px-3 py-2 rounded-lg text-sm font-medium transition ${
-                                                            swapSubmitting || !canSendSwapRequests
-                                                                ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
-                                                                : 'bg-blue-600 text-white hover:bg-blue-700'
-                                                        }`}
-                                                    >
-                                                        {swapSubmitting
-                                                            ? 'Отправка...'
-                                                            : (isSwapExchangeMode
-                                                                ? 'Отправить запрос на обмен'
-                                                                : (swapDraftRequests.length > 0
-                                                                    ? `Отправить запросы (${swapDraftRequests.length})`
-                                                                    : 'Отправить запрос'))}
-                                                    </button>
-                                                </div>
-                                                <div className="mt-2 text-xs">
-                                                    {!swapTimeValidation.isValid && (
-                                                        <div className="text-rose-600">{swapTimeValidation.message}</div>
-                                                    )}
-                                                    {swapTimeValidation.isValid && (
-                                                        <div className="text-slate-500">
-                                                            Интервал: {formatSwapDateTimeRangeLabel(
-                                                                swapForm.swapDate,
-                                                                swapForm.startTime,
-                                                                swapForm.endTime,
-                                                                swapTimeValidation.effectiveEndDate || swapForm.endDate || swapForm.swapDate
-                                                            )} ({formatMinutesOnly(swapTimeValidation.durationMin)})
-                                                        </div>
-                                                    )}
-                                                    {swapForm.targetOperatorId && (
-                                                        <div className="text-slate-500 mt-1">
-                                                            {isSwapExchangeMode
-                                                                ? (
-                                                                    <>
-                                                                        Смены кандидата: {formatSwapSegmentsSummaryLabel(swapForm.swapDate, swapForm.targetSegments)}
-                                                                        {' '}({formatMinutesOnly(selectedSwapTargetSegmentsTotalMinutes)})
-                                                                    </>
-                                                                )
-                                                                : 'Обычная замена: встречная смена кандидата не требуется.'}
-                                                        </div>
-                                                    )}
-                                                    {swapCandidatesError && (
-                                                        <div className="text-rose-600 mt-1">{swapCandidatesError}</div>
-                                                    )}
-                                                </div>
+                                                    </div>
+                                                </section>
                                                 {!isSwapExchangeMode && (
-                                                    <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50/60 p-2.5 sm:p-3">
-                                                        <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-                                                            <div className="text-xs font-semibold text-amber-900 uppercase tracking-wide">
-                                                                Список к отправке
-                                                            </div>
-                                                            <div className="text-xs text-amber-800">
-                                                                Добавлено: <span className="font-semibold tabular-nums">{swapDraftRequests.length}</span>
-                                                                {' '}• {formatMinutesOnly(swapDraftTotalMinutes)}
-                                                            </div>
+                                                    <section className="space-y-1.5">
+                                                        <div className="flex items-center justify-between gap-2">
+                                                            <div className={IOS_GROUP_LABEL}>Список к отправке</div>
+                                                            <span className="text-[11px] text-slate-400">
+                                                                {swapDraftRequests.length} зап. · {formatMinutesOnly(swapDraftTotalMinutes)}
+                                                            </span>
                                                         </div>
+                                                        <div className={`${IOS_CARD} p-3.5`}>
                                                         {swapDraftRequests.length === 0 ? (
-                                                            <div className="text-xs text-slate-600">
-                                                                Выберите свою смену и кандидата, затем нажмите «Добавить в список».
+                                                            <div className="text-[12px] text-slate-500">
+                                                                Выберите смену и кандидата, затем нажмите «Добавить в список».
                                                             </div>
                                                         ) : (
                                                             <div className="max-h-40 overflow-y-auto pr-1 space-y-1.5">
@@ -17394,44 +17350,45 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 })}
                                                             </div>
                                                         )}
-                                                    </div>
-                                                )}
-                                                <div className="mt-3 rounded-lg border border-slate-200 bg-white p-2.5 sm:p-3">
-                                                    <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-                                                        <div className="text-xs font-semibold text-slate-800">
-                                                            {isSwapExchangeMode ? 'Операторы для обмена' : 'Операторы для замены'}
                                                         </div>
-                                                        <div className="text-xs text-slate-500">
+                                                    </section>
+                                                )}
+                                                {/* Шаг 2 — кандидаты */}
+                                                <section className="space-y-1.5">
+                                                    <div className="flex items-center justify-between gap-2">
+                                                        <div className={IOS_GROUP_LABEL}>{isSwapExchangeMode ? 'Кому предложить обмен' : 'Кто заменит'}</div>
+                                                        <span className="text-[11px] text-slate-400">
                                                             {swapForm.targetOperatorId
                                                                 ? (isSwapExchangeMode
-                                                                    ? `Выбран: ${selectedSwapCandidate?.name || '1 кандидат'} • смен: ${selectedSwapTargetSegments.length}`
-                                                                    : `Выбран: ${selectedSwapCandidate?.name || '1 кандидат'}`)
+                                                                    ? `${selectedSwapCandidate?.name || 'Выбран'} · смен: ${selectedSwapTargetSegments.length}`
+                                                                    : (selectedSwapCandidate?.name || 'Выбран'))
                                                                 : (String(swapCandidatesSearch || '').trim()
                                                                     ? `Найдено: ${swapCandidatesFiltered.length} из ${swapCandidates.length}`
-                                                                    : (isSwapExchangeMode ? 'Все кандидаты (с пересечением и без)' : 'Без пересечения по времени'))}
-                                                        </div>
+                                                                    : (isSwapExchangeMode ? 'С пересечением и без' : 'Без пересечения'))}
+                                                        </span>
                                                     </div>
-                                                    <label className="text-sm block mb-2">
-                                                        <div className="text-xs text-slate-600 mb-1">Поиск</div>
-                                                        <input
-                                                            type="text"
-                                                            value={swapCandidatesSearch}
-                                                            onChange={(e) => setSwapCandidatesSearch(e.target.value)}
-                                                            placeholder="ФИО или супервайзер"
-                                                            className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm bg-white"
-                                                            disabled={!swapTimeValidation.isValid || swapCandidatesLoading}
-                                                        />
-                                                    </label>
+                                                    <div className={`${IOS_CARD} p-3.5`}>
+                                                        <div className="relative mb-3">
+                                                            <FaIcon className="fas fa-magnifying-glass pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[12px] text-slate-400"></FaIcon>
+                                                            <input
+                                                                type="text"
+                                                                value={swapCandidatesSearch}
+                                                                onChange={(e) => setSwapCandidatesSearch(e.target.value)}
+                                                                placeholder="Поиск: ФИО или супервайзер"
+                                                                className={`${IOS_FIELD} pl-9 disabled:opacity-60`}
+                                                                disabled={!swapTimeValidation.isValid || swapCandidatesLoading}
+                                                            />
+                                                        </div>
                                                     {!swapTimeValidation.isValid ? (
-                                                        <div className="text-xs text-slate-500">
+                                                        <div className="rounded-xl bg-slate-100 px-3 py-2.5 text-[12px] text-slate-500">
                                                             Выберите корректный интервал, чтобы увидеть список кандидатов.
                                                         </div>
                                                     ) : swapCandidatesLoading ? (
-                                                        <div className="text-xs text-slate-500">
+                                                        <div className="rounded-xl bg-slate-100 px-3 py-2.5 text-[12px] text-slate-500">
                                                             <FaIcon className="fas fa-spinner fa-spin mr-1"></FaIcon>Подбираем кандидатов...
                                                         </div>
                                                     ) : swapCandidatesFiltered.length === 0 ? (
-                                                        <div className="text-xs text-slate-500">
+                                                        <div className="rounded-xl bg-slate-100 px-3 py-2.5 text-[12px] text-slate-500">
                                                             {String(swapCandidatesSearch || '').trim()
                                                                 ? 'По текущему поиску кандидаты не найдены.'
                                                                 : (isSwapExchangeMode
@@ -17454,10 +17411,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 return (
                                                                     <div
                                                                         key={`swap-candidate-card-${item?.id}`}
-                                                                        className={`rounded-lg border p-2.5 ${
+                                                                        className={`rounded-xl p-3 ring-1 transition-colors ${
                                                                             isSelected
-                                                                                ? 'border-blue-400 bg-blue-50/40'
-                                                                                : 'border-slate-200 bg-slate-50/40'
+                                                                                ? 'bg-blue-50 ring-blue-300'
+                                                                                : 'bg-slate-50 ring-slate-200/70'
                                                                         }`}
                                                                     >
                                                                         <div className="flex flex-wrap items-start justify-between gap-2">
@@ -17472,10 +17429,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             <button
                                                                                 type="button"
                                                                                 onClick={() => handleSelectSwapCandidate(item)}
-                                                                                className={`px-2.5 py-1 rounded-md text-xs font-medium border ${
+                                                                                className={`inline-flex min-h-[34px] items-center rounded-full px-3.5 py-1.5 text-[12px] font-semibold transition-colors ${
                                                                                     isSelected
-                                                                                        ? 'bg-blue-600 text-white border-blue-600'
-                                                                                        : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                                                                                        ? 'bg-blue-600 text-white hover:bg-blue-700'
+                                                                                        : 'bg-white text-blue-600 ring-1 ring-blue-200 hover:bg-blue-50'
                                                                                 }`}
                                                                             >
                                                                                 {isSelected ? 'Снять' : 'Выбрать'}
@@ -17483,27 +17440,27 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         </div>
                                                                         <div className="mt-1.5 flex flex-wrap gap-1.5">
                                                                             {hasPriority && (
-                                                                                <span className="px-2 py-0.5 rounded-md text-[11px] border border-emerald-200 bg-emerald-50 text-emerald-700">
+                                                                                <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
                                                                                     Приоритет
                                                                                 </span>
                                                                             )}
                                                                             {matchStart && (
-                                                                                <span className="px-2 py-0.5 rounded-md text-[11px] border border-blue-200 bg-blue-50 text-blue-700">
+                                                                                <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[11px] font-medium text-blue-700">
                                                                                     Стык: старт
                                                                                 </span>
                                                                             )}
                                                                             {matchEnd && (
-                                                                                <span className="px-2 py-0.5 rounded-md text-[11px] border border-indigo-200 bg-indigo-50 text-indigo-700">
+                                                                                <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-medium text-indigo-700">
                                                                                     Стык: конец
                                                                                 </span>
                                                                             )}
                                                                             {isDayOff && (
-                                                                                <span className="px-2 py-0.5 rounded-md text-[11px] border border-sky-200 bg-sky-50 text-sky-700">
+                                                                                <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[11px] font-medium text-sky-700">
                                                                                     Выходной
                                                                                 </span>
                                                                             )}
                                                                         </div>
-                                                                        <div className="mt-2 rounded-md border border-slate-200 bg-white p-2">
+                                                                        <div className="mt-2 rounded-lg bg-white p-2.5 ring-1 ring-slate-200">
                                                                             <div className="text-[11px] font-semibold text-slate-700 mb-1">
                                                                                 Смены кандидата
                                                                             </div>
@@ -17513,7 +17470,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                         {swapForm.swapDate ? formatDateRuShort(swapForm.swapDate) : 'Дата'}
                                                                                     </span>
                                                                                     {dayShifts.length === 0 ? (
-                                                                                        <span className={`px-2 py-0.5 rounded border text-[11px] ${
+                                                                                        <span className={`px-2 py-0.5 rounded-md text-[11px] ${
                                                                                             isDayOff
                                                                                                 ? 'border-sky-200 bg-sky-50 text-sky-700'
                                                                                                 : 'border-slate-200 bg-slate-50 text-slate-500'
@@ -17530,7 +17487,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                             return (
                                                                                                 <span
                                                                                                     key={`swap-candidate-day-${itemId}-${segIdx}`}
-                                                                                                    className="px-2 py-0.5 rounded border text-[11px] font-semibold tabular-nums border-blue-200 bg-blue-100 text-blue-900"
+                                                                                                    className="rounded-md px-2 py-0.5 text-[11px] font-semibold tabular-nums bg-blue-100 text-blue-900"
                                                                                                 >
                                                                                                     {s} — {e}{crossing ? ' (+1)' : ''}
                                                                                                 </span>
@@ -17544,7 +17501,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                             {nextDayDate ? formatDateRuShort(nextDayDate) : 'След. день'}
                                                                                         </span>
                                                                                         {nextDayShifts.length === 0 ? (
-                                                                                            <span className={`px-2 py-0.5 rounded border text-[11px] ${
+                                                                                            <span className={`px-2 py-0.5 rounded-md text-[11px] ${
                                                                                                 isNextDayOff
                                                                                                     ? 'border-sky-200 bg-sky-50 text-sky-700'
                                                                                                     : 'border-slate-200 bg-slate-50 text-slate-500'
@@ -17558,7 +17515,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                                 return (
                                                                                                     <span
                                                                                                         key={`swap-candidate-next-${itemId}-${segIdx}`}
-                                                                                                        className="px-2 py-0.5 rounded border text-[11px] font-semibold tabular-nums border-violet-200 bg-violet-100 text-violet-900"
+                                                                                                        className="rounded-md px-2 py-0.5 text-[11px] font-semibold tabular-nums bg-violet-100 text-violet-900"
                                                                                                     >
                                                                                                         {s} — {e}
                                                                                                     </span>
@@ -17568,23 +17525,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                     </div>
                                                                                 )}
                                                                                 {isSelected && isSwapExchangeMode && (
-                                                                                    <div className="rounded border border-slate-200 bg-slate-50 px-2 py-1.5 flex items-center justify-between gap-2">
+                                                                                    <div className="flex items-center justify-between gap-2 rounded-lg bg-slate-50 px-2.5 py-1.5 ring-1 ring-slate-200">
                                                                                         <div className="text-[11px] text-slate-600">
                                                                                             {selectedSwapTargetSegments.length === 0
                                                                                                 ? 'Смены для обмена не выбраны.'
-                                                                                                : `Выбрано смен: ${selectedSwapTargetSegments.length} • ${formatMinutesOnly(selectedSwapTargetSegmentsTotalMinutes)}`}
+                                                                                                : `Выбрано смен: ${selectedSwapTargetSegments.length} · ${formatMinutesOnly(selectedSwapTargetSegmentsTotalMinutes)}`}
                                                                                         </div>
                                                                                         <button
                                                                                             type="button"
                                                                                             onClick={() => openSwapTargetSegmentsPickerForCandidate(item)}
-                                                                                            className="px-2 py-0.5 rounded border border-slate-300 bg-white text-[11px] text-slate-700 hover:bg-slate-100"
+                                                                                            className="shrink-0 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-blue-600 ring-1 ring-blue-200 hover:bg-blue-50"
                                                                                         >
                                                                                             Выбрать смены
                                                                                         </button>
                                                                                     </div>
                                                                                 )}
                                                                                 {isSelected && !isSwapExchangeMode && (
-                                                                                    <div className="text-[11px] text-slate-600 rounded border border-slate-200 bg-slate-50 px-2 py-1">
+                                                                                    <div className="rounded-lg bg-slate-50 px-2.5 py-1.5 text-[11px] text-slate-600 ring-1 ring-slate-200">
                                                                                         Обычная замена: выбирать смены кандидата не нужно.
                                                                                     </div>
                                                                                 )}
@@ -17595,41 +17552,110 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             })}
                                                         </div>
                                                     )}
-                                                </div>
+                                                    </div>
+                                                </section>
+
+                                                    {/* Шаг 3 — комментарий */}
+                                                    <section className="space-y-1.5">
+                                                        <div className={IOS_GROUP_LABEL}>Комментарий</div>
+                                                        <div className={`${IOS_CARD} p-3.5`}>
+                                                            <input
+                                                                type="text"
+                                                                value={swapForm.comment}
+                                                                onChange={(e) => setSwapForm(prev => ({ ...prev, comment: e.target.value }))}
+                                                                placeholder="Например: прошу подменить на время учёбы"
+                                                                className={IOS_FIELD}
+                                                                maxLength={400}
+                                                            />
+                                                            {swapCandidatesError && (
+                                                                <div className="mt-2 px-1 text-[12px] text-rose-600">{swapCandidatesError}</div>
+                                                            )}
+                                                        </div>
+                                                    </section>
+
+                                                    </div>
+
+                                                    {/* ── Подвал ── */}
+                                                    <div className="flex items-center gap-2 border-t border-slate-200/70 bg-white/85 px-4 py-3 backdrop-blur-xl">
+                                                        <div className="hidden min-w-0 flex-1 truncate text-[12px] text-slate-500 sm:block">
+                                                            {swapForm.targetOperatorId
+                                                                ? (isSwapExchangeMode
+                                                                    ? `Обмен · ${selectedSwapCandidate?.name || 'коллега'}`
+                                                                    : `Замена · ${selectedSwapCandidate?.name || 'коллега'}`)
+                                                                : (!isSwapExchangeMode && swapDraftRequests.length > 0
+                                                                    ? `В списке: ${swapDraftRequests.length} · ${formatMinutesOnly(swapDraftTotalMinutes)}`
+                                                                    : 'Коллега ещё не выбран')}
+                                                        </div>
+                                                        <div className="flex w-full items-center justify-end gap-2 sm:w-auto">
+                                                            {!isSwapExchangeMode && (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={handleAddSwapDraft}
+                                                                    disabled={swapSubmitting || !canSubmitCurrentSwapDraft}
+                                                                    className={`rounded-xl px-4 py-2.5 text-[13.5px] font-medium transition ${
+                                                                        swapSubmitting || !canSubmitCurrentSwapDraft
+                                                                            ? 'cursor-not-allowed text-slate-400'
+                                                                            : 'text-blue-600 hover:bg-blue-50'
+                                                                    }`}
+                                                                >
+                                                                    <FaIcon className="fas fa-plus mr-1.5 text-xs"></FaIcon>В список
+                                                                </button>
+                                                            )}
+                                                            <button
+                                                                type="button"
+                                                                onClick={handleCreateSwapRequest}
+                                                                disabled={swapSubmitting || !canSendSwapRequests}
+                                                                className={`inline-flex items-center gap-2 rounded-xl px-5 py-2.5 text-[13.5px] font-semibold text-white shadow-sm transition-all ${
+                                                                    swapSubmitting || !canSendSwapRequests
+                                                                        ? 'cursor-not-allowed bg-slate-300'
+                                                                        : (isSwapExchangeMode ? 'bg-emerald-500 hover:bg-emerald-600' : 'bg-blue-600 hover:bg-blue-700')
+                                                                }`}
+                                                            >
+                                                                {swapSubmitting
+                                                                    ? <><FaIcon className="fas fa-spinner fa-spin"></FaIcon>Отправка…</>
+                                                                    : (isSwapExchangeMode
+                                                                        ? <><FaIcon className="fas fa-right-left"></FaIcon>Отправить обмен</>
+                                                                        : (swapDraftRequests.length > 0
+                                                                            ? <><FaIcon className="fas fa-paper-plane"></FaIcon>Отправить ({swapDraftRequests.length})</>
+                                                                            : <><FaIcon className="fas fa-paper-plane"></FaIcon>Отправить</>))}
+                                                            </button>
+                                                        </div>
+                                                    </div>
                                                 </div>
                                             </SimpleModal>
                                             <SimpleModal
                                                 open={showSwapTargetSegmentsModal && showSwapCreateModal && isSwapExchangeMode}
                                                 onClose={() => setShowSwapTargetSegmentsModal(false)}
-                                                panelClassName="sm:w-[560px] max-w-[calc(100vw-1rem)] p-0 sm:rounded-xl"
+                                                panelClassName="sm:w-[520px] max-w-[calc(100vw-1rem)] p-0 sm:rounded-3xl"
                                             >
-                                                <div className="p-4 sm:p-5 space-y-3">
-                                                    <div className="flex items-start justify-between gap-3 pb-2 border-b border-slate-200">
+                                                <div style={{ fontFamily: IOS_FONT }} className="bg-white">
+                                                    <div className="flex items-start justify-between gap-3 border-b border-slate-200/70 px-4 py-3.5">
                                                         <div className="min-w-0">
-                                                            <div className="text-sm font-semibold text-slate-900">Выбор смен кандидата</div>
-                                                            <div className="text-xs text-slate-500">
-                                                                {selectedSwapCandidate?.name ? `Кандидат: ${selectedSwapCandidate.name}` : 'Сначала выберите кандидата'}
+                                                            <div className="text-[15px] font-semibold leading-tight text-slate-900">Смены коллеги для обмена</div>
+                                                            <div className="mt-0.5 text-[12px] text-slate-500">
+                                                                {selectedSwapCandidate?.name ? selectedSwapCandidate.name : 'Сначала выберите коллегу'}
                                                             </div>
-                                                            <div className="text-[11px] text-slate-500 mt-1">
-                                                                Для обмена доступны только смены на дату {swapForm.swapDate ? formatDateRuShort(swapForm.swapDate) : 'запроса'}.
+                                                            <div className="mt-1 text-[11px] text-slate-400">
+                                                                Доступны смены на {swapForm.swapDate ? formatDateRuShort(swapForm.swapDate) : 'дату запроса'}.
                                                             </div>
                                                         </div>
                                                         <button
                                                             type="button"
                                                             onClick={() => setShowSwapTargetSegmentsModal(false)}
-                                                            className="w-8 h-8 rounded-md border border-slate-300 text-slate-500 hover:bg-slate-100 inline-flex items-center justify-center"
+                                                            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
                                                             aria-label="Закрыть выбор смен кандидата"
                                                         >
                                                             <FaIcon className="fas fa-times text-sm"></FaIcon>
                                                         </button>
                                                     </div>
+                                                    <div className="space-y-3 px-4 py-4">
                                                     {!selectedSwapCandidate ? (
-                                                        <div className="text-sm text-slate-600">Выберите оператора в списке кандидатов.</div>
+                                                        <div className="rounded-xl bg-slate-100 px-3 py-2.5 text-[13px] text-slate-500">Выберите коллегу в списке кандидатов.</div>
                                                     ) : selectedSwapCandidateSelectableSegments.length === 0 ? (
-                                                        <div className="text-sm text-slate-600">У выбранного оператора нет смен для обмена в выбранный период.</div>
+                                                        <div className="rounded-xl bg-slate-100 px-3 py-2.5 text-[13px] text-slate-500">У выбранного коллеги нет смен для обмена в выбранный период.</div>
                                                     ) : (
                                                         <>
-                                                            <div className="max-h-[46vh] overflow-y-auto pr-1 space-y-2">
+                                                            <div className="max-h-[46vh] space-y-2 overflow-y-auto pr-1">
                                                                 {selectedSwapCandidateSelectableSegments.map((seg, segIdx) => {
                                                                     const segmentPayload = { start: seg.start, end: seg.end, dayOffset: seg.dayOffset };
                                                                     const segmentSelected = isSwapTargetSegmentSelected(segmentPayload);
@@ -17638,46 +17664,50 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             type="button"
                                                                             key={`swap-target-picker-seg-${segIdx}-${seg.start}-${seg.end}-${seg.dayOffset}`}
                                                                             onClick={() => toggleSwapTargetSegmentSelection(selectedSwapCandidate?.id, segmentPayload)}
-                                                                            className={`w-full text-left rounded-md border px-3 py-2 text-sm transition-colors ${
+                                                                            className={`flex w-full items-center justify-between gap-2 rounded-xl px-3.5 py-2.5 text-left text-[14px] ring-1 transition-colors ${
                                                                                 segmentSelected
-                                                                                    ? 'border-emerald-300 bg-emerald-50 text-emerald-900'
-                                                                                    : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                                                                                    ? 'bg-emerald-50 text-emerald-900 ring-emerald-300'
+                                                                                    : 'bg-white text-slate-700 ring-slate-200 hover:bg-slate-50'
                                                                             }`}
                                                                         >
-                                                                            <div className="font-medium">{formatSwapSegmentLabel(swapForm.swapDate, seg)}</div>
-                                                                            <div className="text-xs text-slate-500 mt-0.5">{formatMinutesOnly(seg.durationMin)}</div>
+                                                                            <div>
+                                                                                <div className="font-medium">{formatSwapSegmentLabel(swapForm.swapDate, seg)}</div>
+                                                                                <div className="mt-0.5 text-[12px] text-slate-500">{formatMinutesOnly(seg.durationMin)}</div>
+                                                                            </div>
+                                                                            {segmentSelected && <FaIcon className="fas fa-circle-check text-emerald-500"></FaIcon>}
                                                                         </button>
                                                                     );
                                                                 })}
                                                             </div>
-                                                            <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-200">
-                                                                <div className="text-xs text-slate-600">
+                                                            <div className="flex items-center justify-between gap-2 border-t border-slate-200/70 pt-3">
+                                                                <div className="text-[12px] text-slate-500">
                                                                     {selectedSwapTargetSegments.length === 0
                                                                         ? 'Выберите одну или несколько смен.'
-                                                                        : `Выбрано: ${selectedSwapTargetSegments.length} • ${formatMinutesOnly(selectedSwapTargetSegmentsTotalMinutes)}`}
+                                                                        : `Выбрано: ${selectedSwapTargetSegments.length} · ${formatMinutesOnly(selectedSwapTargetSegmentsTotalMinutes)}`}
                                                                 </div>
                                                                 <button
                                                                     type="button"
                                                                     onClick={() => setShowSwapTargetSegmentsModal(false)}
-                                                                    className="px-3 py-1.5 rounded-md bg-blue-600 text-white text-xs font-medium hover:bg-blue-700"
+                                                                    className="rounded-xl bg-blue-600 px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-blue-700"
                                                                 >
                                                                     Готово
                                                                 </button>
                                                             </div>
                                                         </>
                                                     )}
+                                                    </div>
                                                 </div>
                                             </SimpleModal>
                                             <SimpleModal
                                                 open={!!swapExchangeChoiceModal.open}
                                                 onClose={() => closeSwapExchangeChoiceModal(false)}
-                                                panelClassName="sm:w-[560px] max-w-[calc(100vw-1rem)] p-0 sm:rounded-xl"
+                                                panelClassName="sm:w-[460px] max-w-[calc(100vw-1rem)] p-0 sm:rounded-3xl"
                                             >
-                                                <div className="p-4 sm:p-5 space-y-4">
-                                                    <div className="flex items-start justify-between gap-3 pb-2 border-b border-slate-200">
+                                                <div style={{ fontFamily: IOS_FONT }} className="bg-white">
+                                                    <div className="flex items-start justify-between gap-3 border-b border-slate-200/70 px-4 py-3.5">
                                                         <div className="min-w-0">
-                                                            <div className="text-sm font-semibold text-slate-900">Выбор типа запроса</div>
-                                                            <div className="text-xs text-slate-500 mt-1">
+                                                            <div className="text-[15px] font-semibold leading-tight text-slate-900">Тип запроса</div>
+                                                            <div className="mt-0.5 text-[12px] text-slate-500">
                                                                 {formatSwapDateTimeRangeLabel(
                                                                     swapExchangeChoiceModal.swapDate,
                                                                     swapExchangeChoiceModal.startTime,
@@ -17689,43 +17719,43 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         <button
                                                             type="button"
                                                             onClick={() => closeSwapExchangeChoiceModal(false)}
-                                                            className="w-8 h-8 rounded-md border border-slate-300 text-slate-500 hover:bg-slate-100 inline-flex items-center justify-center"
+                                                            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
                                                             aria-label="Закрыть выбор типа запроса"
                                                         >
                                                             <FaIcon className="fas fa-times text-sm"></FaIcon>
                                                         </button>
                                                     </div>
-                                                    <div className="text-sm text-slate-700">
-                                                        Вы выбрали полную смену. Уточните, хотите сделать обычную замену или именно обмен сменами.
-                                                    </div>
-                                                    <div className="space-y-2">
-                                                        <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5">
-                                                            <div className="text-sm font-semibold text-slate-900">Обычная замена</div>
-                                                            <div className="text-xs text-slate-600 mt-1">
-                                                                Вы передаете свою смену. Встречную смену коллеги выбирать не нужно.
-                                                            </div>
+                                                    <div className="space-y-2.5 px-4 py-4">
+                                                        <div className="px-1 text-[12.5px] leading-relaxed text-slate-500">
+                                                            Вы выбрали полную смену. Что нужно сделать?
                                                         </div>
-                                                        <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2.5">
-                                                            <div className="text-sm font-semibold text-emerald-900">Обмен сменами</div>
-                                                            <div className="text-xs text-emerald-800 mt-1">
-                                                                Вы передаете свою смену и выбираете смены коллеги, которые получаете взамен.
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                    <div className="flex items-center justify-end gap-2 pt-1">
                                                         <button
                                                             type="button"
                                                             onClick={() => closeSwapExchangeChoiceModal(false)}
-                                                            className="px-3 py-1.5 rounded-md border border-slate-300 bg-white text-xs font-medium text-slate-700 hover:bg-slate-100"
+                                                            className="flex w-full items-center gap-3 rounded-2xl bg-slate-50 px-4 py-3 text-left ring-1 ring-slate-200 transition-colors hover:bg-slate-100"
                                                         >
-                                                            Обычная замена
+                                                            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-blue-100 text-blue-600">
+                                                                <FaIcon className="fas fa-user-clock text-sm"></FaIcon>
+                                                            </div>
+                                                            <div className="min-w-0 flex-1">
+                                                                <div className="text-[14px] font-semibold text-slate-900">Обычная замена</div>
+                                                                <div className="mt-0.5 text-[12px] text-slate-500">Вы передаёте смену. Встречную смену коллеги выбирать не нужно.</div>
+                                                            </div>
+                                                            <FaIcon className="fas fa-chevron-right text-xs text-slate-300"></FaIcon>
                                                         </button>
                                                         <button
                                                             type="button"
                                                             onClick={() => closeSwapExchangeChoiceModal(true)}
-                                                            className="px-3 py-1.5 rounded-md bg-emerald-600 text-white text-xs font-medium hover:bg-emerald-700"
+                                                            className="flex w-full items-center gap-3 rounded-2xl bg-emerald-50 px-4 py-3 text-left ring-1 ring-emerald-200 transition-colors hover:bg-emerald-100"
                                                         >
-                                                            Выбрать обмен
+                                                            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-emerald-500 text-white">
+                                                                <FaIcon className="fas fa-right-left text-sm"></FaIcon>
+                                                            </div>
+                                                            <div className="min-w-0 flex-1">
+                                                                <div className="text-[14px] font-semibold text-emerald-900">Обмен сменами</div>
+                                                                <div className="mt-0.5 text-[12px] text-emerald-800/80">Вы передаёте смену и выбираете смены коллеги взамен.</div>
+                                                            </div>
+                                                            <FaIcon className="fas fa-chevron-right text-xs text-emerald-400"></FaIcon>
                                                         </button>
                                                     </div>
                                                 </div>
