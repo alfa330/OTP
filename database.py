@@ -7504,11 +7504,13 @@ class Database:
             "event": event,
         }
 
-    def admin_claim_shift_for_operator(self, admin_id, operator_id, lot_id=None, plan_id=None, source_schedule_shift_id=None):
+    def admin_claim_shift_for_operator(self, admin_id, operator_id, lot_id=None, plan_id=None, source_schedule_shift_id=None,
+                                       claim_start_time=None, claim_end_time=None):
         """
-        Назначить лот оператору админом. Аналог post_auction_claim_lot/_saved_shift,
-        но без проверки is_participant — админ имеет право.
-        Проверяет непересечение с уже взятыми сменами оператора в этот день.
+        Назначить лот/часть смены оператору админом. Аналог post_auction_claim_lot/_saved_shift,
+        но без проверки is_participant — админ имеет право. Если переданы claim_start_time/
+        claim_end_time — назначается ЧАСТЬ смены (свободный кусок), с проверкой пересечения
+        с уже взятыми частями. Иначе — вся смена. Проверяет непересечение со сменами оператора.
         """
         try:
             admin_id = int(admin_id) if admin_id is not None else None
@@ -7580,20 +7582,35 @@ class Database:
                 )
             self._lock_shift_auction_operator_tx(cursor, operator_id_int)
 
-            if lot_id_int is None and resolved_plan_id and resolved_shift_id:
-                # Admin assigns the FULL shift here — refuse if any claim already exists
-                # on it (would double-book, now that multiple claims per shift are
-                # allowed). Partial доборы go through the operator flow, which checks
-                # range overlap precisely.
-                cursor.execute("""
-                    SELECT 1 FROM shift_auction_historical_claims
-                    WHERE plan_id = %s AND source_schedule_shift_id = %s
-                    LIMIT 1
-                """, (resolved_plan_id, resolved_shift_id))
-                if cursor.fetchone():
-                    raise ValueError("LOT_ALREADY_CLAIMED")
+            # When claim times are given, the admin assigns only a PART of the shift.
+            is_partial_assign = bool(claim_start_time and claim_end_time)
+            if is_partial_assign:
+                claim_range = self._normalize_post_auction_claim_range(start_time, end_time, claim_start_time, claim_end_time)
+                eff_start_time = claim_range["start_time"]
+                eff_end_time = claim_range["end_time"]
+                new_start_min = claim_range["start_minute"]
+                new_end_min = claim_range["end_minute"]
+            else:
+                eff_start_time, eff_end_time = start_time, end_time
+                new_start_min, new_end_min = self._schedule_interval_minutes(start_time, end_time)
 
-            new_start_min, new_end_min = self._schedule_interval_minutes(start_time, end_time)
+            if lot_id_int is None and resolved_plan_id and resolved_shift_id:
+                # A full assign is refused if any claim exists; a partial assign only if
+                # it overlaps one (disjoint parts are allowed).
+                cursor.execute("""
+                    SELECT claimed_by, claimed_start_time, claimed_end_time
+                    FROM shift_auction_historical_claims
+                    WHERE plan_id = %s AND source_schedule_shift_id = %s
+                    FOR UPDATE
+                """, (resolved_plan_id, resolved_shift_id))
+                for ex_by, ex_s, ex_e in (cursor.fetchall() or []):
+                    if ex_by is not None and int(ex_by) == operator_id_int:
+                        raise ValueError("LOT_ALREADY_CLAIMED")
+                    if not is_partial_assign or ex_s is None or ex_e is None:
+                        raise ValueError("LOT_ALREADY_CLAIMED")
+                    ex_rng = self._normalize_post_auction_claim_range(start_time, end_time, ex_s.strftime('%H:%M'), ex_e.strftime('%H:%M'))
+                    if new_start_min < ex_rng["end_minute"] and ex_rng["start_minute"] < new_end_min:
+                        raise ValueError("SHIFT_OVERLAPS_EXISTING")
 
             cursor.execute("""
                 SELECT id, start_time, end_time
@@ -7625,11 +7642,13 @@ class Database:
             if resolved_plan_id and resolved_shift_id:
                 cursor.execute("""
                     INSERT INTO shift_auction_historical_claims
-                        (plan_id, source_schedule_shift_id, claimed_by, claimed_at)
-                    VALUES (%s, %s, %s, COALESCE(%s, CURRENT_TIMESTAMP))
+                        (plan_id, source_schedule_shift_id, claimed_by, claimed_at, claimed_start_time, claimed_end_time)
+                    VALUES (%s, %s, %s, COALESCE(%s, CURRENT_TIMESTAMP), %s, %s)
                     ON CONFLICT (plan_id, source_schedule_shift_id, claimed_by) DO NOTHING
                     RETURNING claimed_at
-                """, (resolved_plan_id, resolved_shift_id, operator_id_int, claimed_at))
+                """, (resolved_plan_id, resolved_shift_id, operator_id_int, claimed_at,
+                      eff_start_time if is_partial_assign else None,
+                      eff_end_time if is_partial_assign else None))
                 row = cursor.fetchone()
                 if not row and lot_id_int is None:
                     raise ValueError("LOT_ALREADY_CLAIMED")
@@ -7640,8 +7659,8 @@ class Database:
                 cursor=cursor,
                 operator_id=operator_id_int,
                 shift_date=shift_date,
-                start_time=start_time,
-                end_time=end_time,
+                start_time=eff_start_time,
+                end_time=eff_end_time,
                 breaks=None,
                 shift_type=None,
             )
@@ -7652,6 +7671,24 @@ class Database:
                 end_date=shift_date
             )
 
+            # Partial assign on a single lot: if every minute is now taken, close it.
+            if is_partial_assign and lot_id_int is None and resolved_plan_id and resolved_shift_id:
+                cursor.execute("""
+                    SELECT claimed_start_time, claimed_end_time FROM shift_auction_historical_claims
+                    WHERE plan_id = %s AND source_schedule_shift_id = %s AND claimed_start_time IS NOT NULL
+                """, (resolved_plan_id, resolved_shift_id))
+                fs, fe = self._schedule_interval_minutes(start_time, end_time)
+                cov = []
+                for cs, ce in (cursor.fetchall() or []):
+                    rng = self._normalize_post_auction_claim_range(start_time, end_time, cs.strftime('%H:%M'), ce.strftime('%H:%M'))
+                    cov.append((rng["start_minute"], rng["end_minute"]))
+                if not [g for g in self._subtract_ranges(fs, fe, cov) if g[1] - g[0] > 0]:
+                    cursor.execute("""
+                        UPDATE shift_auction_test_lots
+                        SET status = 'claimed', post_auction_claimed = TRUE, updated_at = CURRENT_TIMESTAMP
+                        WHERE source_schedule_plan_id = %s AND source_schedule_shift_id = %s AND status IN ('available', 'cancelled')
+                    """, (resolved_plan_id, resolved_shift_id))
+
             event_payload = {
                 "operator_id": operator_id_int,
                 "operator_name": operator_name,
@@ -7659,8 +7696,8 @@ class Database:
                 "plan_id": resolved_plan_id,
                 "source_schedule_shift_id": resolved_shift_id,
                 "shift_date": shift_date.strftime('%Y-%m-%d') if hasattr(shift_date, 'strftime') else None,
-                "start_time": start_time.strftime('%H:%M') if hasattr(start_time, 'strftime') else None,
-                "end_time": end_time.strftime('%H:%M') if hasattr(end_time, 'strftime') else None,
+                "start_time": eff_start_time.strftime('%H:%M') if hasattr(eff_start_time, 'strftime') else None,
+                "end_time": eff_end_time.strftime('%H:%M') if hasattr(eff_end_time, 'strftime') else None,
                 "admin_id": admin_id,
             }
             event = self._insert_shift_auction_test_event(cursor, "lot_admin_claimed", event_payload)
