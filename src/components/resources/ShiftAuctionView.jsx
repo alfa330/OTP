@@ -1438,6 +1438,42 @@ const OPERATOR_INSTRUCTION_STEPS = [
     ]
   },
   {
+    icon: MousePointerClick,
+    title: 'Можно взять часть смены',
+    body: 'Оранжевую смену можно забрать не только целиком, но и частью. Если часть смены уже взял другой оператор, смена остаётся оранжевой и показывает только СВОБОДНУЮ часть, а в углу появляется маркер. Нажмите — откроется окно, где можно выбрать удобный интервал внутри свободной части.',
+    visual: (
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="space-y-1">
+            <div className="relative flex h-8 w-20 items-center justify-center rounded border border-orange-700 px-2 text-xs font-semibold tabular-nums text-orange-900 shadow-sm" style={{ backgroundColor: 'rgb(255, 237, 213)' }}>
+              15-20
+              <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-white ring-1 ring-orange-600" />
+            </div>
+            <span className="block text-center text-[10px] font-semibold uppercase tracking-wider text-orange-700">часть занята</span>
+          </div>
+          <span className="text-xs text-slate-500">Маркер в углу = часть смены уже взяли; вам доступна оставшаяся свободная часть (15:00–20:00).</span>
+        </div>
+        <div className="w-full max-w-sm rounded-xl border border-orange-200 bg-white p-4 shadow-sm">
+          <div className="text-sm font-semibold text-slate-950">Забрать часть смены</div>
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            <span className="block text-xs font-semibold text-slate-700">Начало
+              <span className="mt-1 flex h-9 items-center rounded-md border border-slate-200 bg-white px-2 text-sm font-semibold tabular-nums text-slate-900">15:00</span>
+            </span>
+            <span className="block text-xs font-semibold text-slate-700">Конец
+              <span className="mt-1 flex h-9 items-center rounded-md border border-slate-200 bg-white px-2 text-sm font-semibold tabular-nums text-slate-900">20:00</span>
+            </span>
+          </div>
+          <p className="mt-2 text-[11px] leading-5 text-orange-900">Можно выбрать любой интервал внутри свободной части — он сразу попадёт в ваш график.</p>
+        </div>
+      </div>
+    ),
+    nuances: [
+      'Уже взятая кем-то часть недоступна — выбрать можно только в пределах свободной части.',
+      'Если свободных кусков несколько — можно взять любой не пересекающийся.',
+      'Когда всю смену разобрали по частям — она становится серой (полностью занята).'
+    ]
+  },
+  {
     icon: AlertTriangle,
     title: 'На что обратить внимание',
     body: 'Несколько частых ситуаций, которые могут сбить с толку.',
@@ -1683,6 +1719,43 @@ const ADMIN_INSTRUCTION_STEPS = [
       'Тумблер персональный — каждый админ управляет своими уведомлениями.',
       'Для доставки сообщения у админа должен быть привязан telegram_id.',
       'В сообщении: ФИО оператора, дата смены, время начала–конца, отметка времени взятия.'
+    ]
+  },
+  {
+    icon: Users,
+    title: 'Частичный добор: кто какую часть взял',
+    body: 'Одну смену операторы могут разобрать по частям. В мониторинге это видно так: полностью разобранная по частям смена — серая, показывает полный интервал и маркер; частично занятая — оранжевая, показывает свободную часть и маркер. Нажмите на ячейку смены — откроется разбивка: кто какую часть взял и что ещё свободно.',
+    visual: (
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="space-y-1">
+            <div className="relative flex h-8 w-24 items-center justify-center rounded border border-slate-200 bg-slate-100 px-2 text-xs font-semibold tabular-nums text-slate-500 shadow-sm">
+              13-20
+              <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-white ring-1 ring-orange-600" />
+            </div>
+            <span className="block text-center text-[10px] font-semibold uppercase tracking-wider text-slate-500">занята по частям</span>
+          </div>
+          <div className="space-y-1">
+            <div className="relative flex h-8 w-24 items-center justify-center rounded border border-orange-700 px-2 text-xs font-semibold tabular-nums text-orange-900 shadow-sm" style={{ backgroundColor: 'rgb(255, 237, 213)' }}>
+              15-20
+              <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-white ring-1 ring-orange-600" />
+            </div>
+            <span className="block text-center text-[10px] font-semibold uppercase tracking-wider text-orange-700">частично свободна</span>
+          </div>
+        </div>
+        <div className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
+          <div className="text-sm font-semibold text-slate-900">Смена 13:00–20:00</div>
+          <div className="mt-2 space-y-1 text-[12px]">
+            <div className="flex items-center gap-2"><span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: '#0A84FF' }} /><span className="min-w-0 flex-1 truncate text-slate-800">Сергей</span><span className="shrink-0 tabular-nums text-slate-500">13:00–15:00</span></div>
+            <div className="flex items-center gap-2"><span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: '#30D158' }} /><span className="min-w-0 flex-1 truncate text-slate-800">Алия</span><span className="shrink-0 tabular-nums text-slate-500">15:00–20:00</span></div>
+          </div>
+        </div>
+      </div>
+    ),
+    nuances: [
+      'Маркер в углу ячейки = смену разобрали по частям (или часть уже занята).',
+      'Клик по ячейке → модалка с таймлайном: кто какую часть взял и что свободно.',
+      'В «Таблице смен» часть каждого оператора видна в его ячейке; можно назначить свободную часть оператору или снять конкретную часть.'
     ]
   },
   {
