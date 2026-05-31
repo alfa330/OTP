@@ -3268,6 +3268,8 @@ def api_shift_auction_admin_claim_for_operator():
             lot_id=payload.get('lot_id'),
             plan_id=payload.get('plan_id') or payload.get('schedule_plan_id'),
             source_schedule_shift_id=payload.get('source_schedule_shift_id'),
+            claim_start_time=payload.get('claim_start_time'),
+            claim_end_time=payload.get('claim_end_time'),
         )
         return jsonify({"status": "success", **result}), 200
     except ValueError as error:

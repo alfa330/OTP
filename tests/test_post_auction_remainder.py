@@ -138,6 +138,14 @@ class HistoricalPostAuctionRemainderTests(unittest.TestCase):
         source = _source(BOT_PATH)
         self.assertIn("claimed_by=payload.get('claimed_by')", source)
 
+    def test_admin_claim_supports_partial_assign(self):
+        # Admin can assign just the free PART of a partially-taken shift.
+        src = _method_source("admin_claim_shift_for_operator")
+        self.assertIn("is_partial_assign", src)
+        self.assertIn("SHIFT_OVERLAPS_EXISTING", src)
+        # Endpoint forwards the claim window.
+        self.assertIn("claim_start_time=payload.get('claim_start_time')", _source(BOT_PATH))
+
     def test_consolidate_to_single_lot_on_init(self):
         names = {
             node.name for node in _database_class().body

@@ -2451,16 +2451,38 @@ const ShiftAuctionShiftsTable = ({
 
   const lotsByOperatorDate = useMemo(() => {
     const map = new Map();
-    (Array.isArray(lots) ? lots : []).forEach((lot) => {
-      if (!lot || lot.status !== 'claimed') return;
-      const opId = Number(lot.claimed_by);
-      if (!Number.isFinite(opId) || opId <= 0) return;
-      const date = lot.shift_date;
-      if (!date) return;
+    const add = (opId, date, entry) => {
+      if (!Number.isFinite(opId) || opId <= 0 || !date) return;
       const key = `${opId}|${date}`;
       const list = map.get(key) || [];
-      list.push(lot);
+      list.push(entry);
       map.set(key, list);
+    };
+    (Array.isArray(lots) ? lots : []).forEach((lot) => {
+      if (!lot) return;
+      const date = lot.shift_date;
+      if (!date) return;
+      const segs = Array.isArray(lot.claim_segments) ? lot.claim_segments : [];
+      if (segs.length) {
+        // Single-lot model: each operator's taken part comes from claim_segments.
+        segs.forEach((seg, i) => add(Number(seg.claimed_by), date, {
+          id: `seg-${lot.id}-c${seg.claimed_by}-${i}`,
+          shift_date: date,
+          start_time: seg.start_time,
+          end_time: seg.end_time,
+          breaks: [],
+          source_schedule_plan_id: lot.source_schedule_plan_id,
+          source_schedule_shift_id: lot.source_schedule_shift_id,
+          claimed_by: seg.claimed_by != null ? Number(seg.claimed_by) : null,
+          claimed_by_name: seg.claimed_by_name,
+          // carry claim times so undo (re-claim) and per-segment unclaim work
+          claim_start_time: seg.start_time,
+          claim_end_time: seg.end_time,
+        }));
+        return;
+      }
+      if (lot.status !== 'claimed') return;
+      add(Number(lot.claimed_by), date, lot);
     });
     map.forEach((list) => {
       list.sort((a, b) => String(a?.start_time || '').localeCompare(String(b?.start_time || '')));
@@ -2470,13 +2492,36 @@ const ShiftAuctionShiftsTable = ({
 
   const availableLotsByDate = useMemo(() => {
     const map = new Map();
+    const add = (date, entry) => {
+      const list = map.get(date) || [];
+      list.push(entry);
+      map.set(date, list);
+    };
     (Array.isArray(lots) ? lots : []).forEach((lot) => {
-      if (!lot || lot.status !== 'available') return;
+      if (!lot) return;
       const date = lot.shift_date;
       if (!date) return;
-      const list = map.get(date) || [];
-      list.push(lot);
-      map.set(date, list);
+      const segs = Array.isArray(lot.claim_segments) ? lot.claim_segments : [];
+      if (segs.length) {
+        // Partially-taken shift: offer only the FREE part(s).
+        const src = lotMinuteRange(lot);
+        if (!src) return;
+        const busy = segs.map((s) => getClockRangeWithinSource(s.start_time, s.end_time, src)).filter(Boolean);
+        subtractBusyRanges(src, busy).available.forEach((gap, i) => add(date, {
+          id: `free-${lot.id}-${i}`,
+          shift_date: date,
+          start_time: minutesToClockLabel(gap.start),
+          end_time: minutesToClockLabel(gap.end),
+          breaks: [],
+          source_schedule_plan_id: lot.source_schedule_plan_id,
+          source_schedule_shift_id: lot.source_schedule_shift_id,
+          claim_start_time: minutesToClockLabel(gap.start),
+          claim_end_time: minutesToClockLabel(gap.end),
+        }));
+        return;
+      }
+      if (lot.status !== 'available') return;
+      add(date, lot);
     });
     map.forEach((list) => {
       list.sort((a, b) => String(a?.start_time || '').localeCompare(String(b?.start_time || '')));
@@ -2543,6 +2588,11 @@ const ShiftAuctionShiftsTable = ({
       body.source_schedule_shift_id = lot.source_schedule_shift_id;
       // Target this operator's specific partial claim (a shift may now have several).
       if (lot.claimed_by != null) body.claimed_by = Number(lot.claimed_by);
+      // A free-part entry carries the exact slice to assign/unclaim.
+      if (lot.claim_start_time && lot.claim_end_time) {
+        body.claim_start_time = lot.claim_start_time;
+        body.claim_end_time = lot.claim_end_time;
+      }
     }
     return body;
   };
@@ -2582,7 +2632,8 @@ const ShiftAuctionShiftsTable = ({
     setActionLoading(true);
     try {
       await callClaim(lot, operatorId);
-      pushHistory({ type: 'claim', lot: { ...lot }, operatorId: Number(operatorId) });
+      // Keep claimed_by so undo (unclaim) targets THIS operator's part precisely.
+      pushHistory({ type: 'claim', lot: { ...lot, claimed_by: Number(operatorId) }, operatorId: Number(operatorId) });
       if (typeof notify === 'function') notify('Смена назначена оператору');
       setPendingAction(null);
       if (typeof onActionComplete === 'function') await onActionComplete();
