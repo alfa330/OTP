@@ -578,6 +578,11 @@ const AuctionLotCell = ({
   const netMinutes = getAuctionLotNetMinutes(lot);
   const breakMinutes = getAuctionLotBreakMinutes(lot);
   const isPostClaimedLot = Boolean(lot.post_auction_claimed);
+  // A shift was "taken in parts" if it has claim_segments and it isn't a single
+  // whole-shift claim: i.e. it's still partially free (available) OR it was split
+  // among ≥2 operators (claimed but in pieces). Such cells get a marker.
+  const claimSegments = Array.isArray(lot.claim_segments) ? lot.claim_segments : [];
+  const takenInParts = claimSegments.length > 0 && (lot.status !== 'claimed' || claimSegments.length > 1);
   const startToneStyle = getAuctionLotStartTone(lot);
   const postAuctionToneStyle = getAuctionLotPostAuctionTone(lot);
   const lotStartMs = getLotStartDateTimeMs(lot);
@@ -620,7 +625,7 @@ const AuctionLotCell = ({
         {postAuctionSegment && !postAuctionSegment.isFull ? (
           <span className="absolute inset-x-1 bottom-0.5 h-0.5 rounded-full bg-white/80" />
         ) : null}
-        {isPartialRemainder ? (
+        {takenInParts ? (
           <span className="pointer-events-none absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-white ring-1 ring-orange-600" title="Часть смены уже взята другим оператором" />
         ) : null}
       </button>
@@ -676,11 +681,10 @@ const AuctionLotCell = ({
   const styleToUse = isLotClaimed ? undefined : (isOpenPostStyle ? postAuctionToneStyle : startToneStyle);
 
   const detailClickable = canManage && typeof onShowDetail === 'function';
-  // Single-lot model: a partially-taken shift stays one (available) lot carrying
-  // claim_segments (parts taken by others). The cell shows the FREE part + a marker.
-  const claimSegments = Array.isArray(lot.claim_segments) ? lot.claim_segments : [];
+  // Single-lot model: a partially-taken shift stays one lot carrying claim_segments
+  // (parts taken by others). An AVAILABLE such lot shows its FREE part.
   let freeRangeLabel = null;
-  if (claimSegments.length) {
+  if (claimSegments.length && !isLotClaimed) {
     const src = lotMinuteRange(lot);
     if (src) {
       const busy = claimSegments
@@ -692,21 +696,20 @@ const AuctionLotCell = ({
       }
     }
   }
-  const finalDisplayLabel = isLotClaimed
-    ? formatAuctionLotEffectiveTimeRangeLabel(lot)
-    : (freeRangeLabel || label);
-  const finalDisplayCompact = isLotClaimed
-    ? formatAuctionLotEffectiveTimeRangeLabel(lot)
-    : (freeRangeLabel || compactLabel);
+  // Claimed (fully taken) → full shift range, grey. Available + partly taken → free part.
+  // A marker is shown whenever the shift was taken IN PARTS (split / partially taken).
+  const finalDisplayLabel = freeRangeLabel || label;
+  const finalDisplayCompact = freeRangeLabel || compactLabel;
   const finalClassName = `relative flex h-6 w-full min-w-0 items-center justify-center overflow-hidden rounded border px-1 text-[10px] font-semibold tabular-nums sm:h-8 sm:px-2 sm:text-xs ${tone}${detailClickable ? ' cursor-pointer transition hover:brightness-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-1' : ''}`;
   const finalInner = (
     <>
       <span className="truncate sm:hidden">{finalDisplayCompact}</span>
       <span className="hidden truncate sm:inline">{finalDisplayLabel}</span>
-      {isPartialRemainder ? (
-        <span className="pointer-events-none absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-white ring-1 ring-orange-600" title="Часть смены уже взята другим оператором" />
-      ) : isPartialPostAuctionClaim(lot) ? (
-        <span className="pointer-events-none absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-orange-400 ring-1 ring-white" title="Часть смены взята другим оператором" />
+      {takenInParts ? (
+        <span
+          className="pointer-events-none absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-white ring-1 ring-orange-600"
+          title={isLotClaimed ? 'Смена разобрана по частям несколькими операторами' : 'Часть смены уже взята другим оператором'}
+        />
       ) : null}
     </>
   );
@@ -5206,7 +5209,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                             postAuctionClaimOption={postAuctionClaimOptionsByLotId.get(getAuctionLotActionKey(lot))}
                                             onRequestPostAuctionClaim={handleRequestPostAuctionClaim}
                                             onShowDetail={canMonitor ? setShiftDetailLot : undefined}
-                                            isPartialRemainder={Array.isArray(lot.claim_segments) && lot.claim_segments.length > 0}
+                                            isPartialRemainder={lot.status === 'available' && Array.isArray(lot.claim_segments) && lot.claim_segments.length > 0}
                                           />
                                         ) : (
                                           <div className={`h-6 rounded border border-dashed sm:h-8 ${isBlocked ? 'border-rose-100 bg-rose-50/70' : isDayOff ? 'border-blue-100 bg-blue-50/60' : 'border-transparent bg-slate-50/70'}`} />
