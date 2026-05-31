@@ -1776,9 +1776,9 @@ class Database:
                     END IF;
                 END $$;
             """)
-            # Backfill remainder lots for partial доборы that предшествовали этой логике,
-            # so the free part of an already partially-claimed shift becomes claimable.
-            self._backfill_post_auction_remainder_lots(cursor)
+            # Consolidate to the single-lot model: drop legacy remainder lots and
+            # re-open partially-claimed shifts so their free part is claimable again.
+            self._consolidate_post_auction_lots(cursor)
 
             # Optimized Indexes (added more based on query patterns)
             cursor.execute("""
@@ -3401,6 +3401,7 @@ class Database:
             "source_end_minute": int(row[16]) if len(row) > 16 and row[16] is not None else None,
             "claim_start_time": row[17].strftime('%H:%M') if len(row) > 17 and row[17] else None,
             "claim_end_time": row[18].strftime('%H:%M') if len(row) > 18 and row[18] else None,
+            "claim_segments": row[19] if len(row) > 19 and isinstance(row[19], list) else [],
         }
 
     def _get_shift_auction_operator_work_shifts_tx(self, cursor, operator_id, lot_dates=None):
@@ -3523,10 +3524,24 @@ class Database:
                 -- Remainder lots share the source shift id (for grouping) but cover
                 -- only a gap of it; null the source minutes so the frontend uses the
                 -- lot's own start/end (the gap), not the full original shift range.
-                CASE WHEN l.remainder_of_lot_id IS NOT NULL THEN NULL ELSE source_shift.start_minute END AS source_start_minute,
-                CASE WHEN l.remainder_of_lot_id IS NOT NULL THEN NULL ELSE source_shift.end_minute END AS source_end_minute,
+                source_shift.start_minute AS source_start_minute,
+                source_shift.end_minute AS source_end_minute,
                 l.post_claim_start_time,
-                l.post_claim_end_time
+                l.post_claim_end_time,
+                COALESCE((
+                    SELECT jsonb_agg(jsonb_build_object(
+                        'claimed_by', hc.claimed_by,
+                        'claimed_by_name', cu.name,
+                        'start_time', to_char(hc.claimed_start_time, 'HH24:MI'),
+                        'end_time', to_char(hc.claimed_end_time, 'HH24:MI')
+                    ) ORDER BY hc.claimed_start_time)
+                    FROM shift_auction_historical_claims hc
+                    LEFT JOIN users cu ON cu.id = hc.claimed_by
+                    WHERE hc.plan_id = l.source_schedule_plan_id
+                      AND hc.source_schedule_shift_id = l.source_schedule_shift_id
+                      AND hc.claimed_start_time IS NOT NULL
+                      AND hc.claimed_end_time IS NOT NULL
+                ), '[]'::jsonb) AS claim_segments
             FROM shift_auction_test_lots l
             LEFT JOIN users u ON u.id = l.claimed_by
             LEFT JOIN directions claimed_dir ON claimed_dir.id = u.direction_id
@@ -3749,9 +3764,29 @@ class Database:
                     continue
                 blocked_days_count[int(op_id)] = int(count_value or 0)
 
+        # Fully-claimed lots are attributed to their single owner. Lots carrying
+        # claim_segments (partial доборы — possibly several operators per shift) are
+        # attributed per-segment instead, to avoid double counting.
         claimed_by_operator = {op_id: [] for op_id in operator_ids}
+        segments_by_operator = {op_id: [] for op_id in operator_ids}
         for lot in (lots or []):
             if not isinstance(lot, dict):
+                continue
+            segs = lot.get('claim_segments')
+            if isinstance(segs, list) and segs:
+                lot_breaks = lot.get('breaks') if isinstance(lot.get('breaks'), list) else []
+                for seg in segs:
+                    try:
+                        seg_op = int(seg.get('claimed_by')) if seg.get('claimed_by') is not None else None
+                    except Exception:
+                        seg_op = None
+                    if seg_op is None or seg_op not in segments_by_operator:
+                        continue
+                    segments_by_operator[seg_op].append({
+                        'start_time': seg.get('start_time'),
+                        'end_time': seg.get('end_time'),
+                        'breaks': lot_breaks,
+                    })
                 continue
             if str(lot.get('status') or '') != 'claimed':
                 continue
@@ -3779,6 +3814,7 @@ class Database:
             workday_count = self._shift_auction_norm_workday_count(total_days, blocked_days=blocked)
             norm_minutes = int(round(workday_count * 8 * 60 * rate))
             claimed_lots = claimed_by_operator.get(op_id, [])
+            op_segments = segments_by_operator.get(op_id, [])
             claimed_net = 0
             claimed_break = 0
             for lot in claimed_lots:
@@ -3787,6 +3823,10 @@ class Database:
                     lot.get('claim_end_time') or lot.get('post_claim_end_time') or lot.get('end_time'),
                     lot.get('breaks') if isinstance(lot.get('breaks'), list) else []
                 )
+                claimed_net += int(minutes.get('net_minutes') or 0)
+                claimed_break += int(minutes.get('break_minutes') or 0)
+            for seg in op_segments:
+                minutes = self._shift_auction_lot_minutes(seg['start_time'], seg['end_time'], seg['breaks'])
                 claimed_net += int(minutes.get('net_minutes') or 0)
                 claimed_break += int(minutes.get('break_minutes') or 0)
             workloads.append({
@@ -3801,7 +3841,7 @@ class Database:
                 "blocked_days": int(blocked),
                 "selected_day_offs": int(day_offs_count.get(op_id, 0)),
                 "day_off_dates": list(day_off_dates_by_op.get(op_id, [])),
-                "lots_claimed_count": len(claimed_lots),
+                "lots_claimed_count": len(claimed_lots) + len(op_segments),
                 "is_complete": bool(norm_minutes > 0 and claimed_net >= norm_minutes - 1),
             })
         return workloads
@@ -4655,51 +4695,53 @@ class Database:
                 created_ids.append(int(new_row[0]))
         return created_ids
 
-    def _backfill_post_auction_remainder_lots(self, cursor):
+    def _consolidate_post_auction_lots(self, cursor):
         """
-        Создать остаточные лоты для УЖЕ существующих частичных доборов, у которых их
-        ещё нет (например, claim сделан до появления этой логики). Идемпотентно:
-        пропускает лоты, у которых уже есть остаточные. Запускается при инициализации.
+        Привести лоты к единой модели «один лот на смену»: удалить отдельные остаточные
+        лоты (наследие прежней логики) и СНОВА ОТКРЫТЬ частично-взятые лоты — их взятые
+        части лежат в shift_auction_historical_claims, а сам лот показывает свободную
+        часть. Полностью взятые остаются 'claimed'. Идемпотентно; запускается на старте.
         """
         try:
+            cursor.execute("DELETE FROM shift_auction_test_lots WHERE remainder_of_lot_id IS NOT NULL")
+        except Exception:
+            pass
+        try:
             cursor.execute("""
-                SELECT l.id, l.shift_date, l.start_time, l.end_time, l.rate_min, l.breaks,
-                       l.source_schedule_plan_id, l.source_schedule_shift_id,
-                       l.post_claim_start_time, l.post_claim_end_time
+                SELECT l.id, l.start_time, l.end_time, l.source_schedule_plan_id, l.source_schedule_shift_id
                 FROM shift_auction_test_lots l
                 WHERE COALESCE(l.post_auction_claimed, FALSE) = TRUE
-                  AND l.post_claim_start_time IS NOT NULL
-                  AND l.post_claim_end_time IS NOT NULL
-                  AND l.remainder_of_lot_id IS NULL
-                  AND NOT EXISTS (
-                      SELECT 1 FROM shift_auction_test_lots r WHERE r.remainder_of_lot_id = l.id
-                  )
+                  AND l.source_schedule_shift_id IS NOT NULL
             """)
-            candidates = cursor.fetchall() or []
+            rows = cursor.fetchall() or []
         except Exception:
             return
-        for (lot_id, shift_date, start_time, end_time, rate_min, breaks,
-             source_plan_id, source_shift_id, pc_start, pc_end) in candidates:
+        for lot_id, start_time, end_time, plan_id, shift_id in rows:
             try:
-                claim_range = self._normalize_post_auction_claim_range(
-                    start_time, end_time,
-                    pc_start.strftime('%H:%M'), pc_end.strftime('%H:%M')
-                )
-                if not claim_range["is_partial"]:
-                    continue
-                self._create_post_auction_remainder_lots(
-                    cursor,
-                    parent_lot_id=lot_id,
-                    shift_date=shift_date,
-                    full_start_time=start_time,
-                    full_end_time=end_time,
-                    claim_start_min=claim_range["start_minute"],
-                    claim_end_min=claim_range["end_minute"],
-                    rate_min=rate_min,
-                    breaks=breaks if isinstance(breaks, list) else [],
-                    source_plan_id=source_plan_id,
-                    source_shift_id=source_shift_id,
-                )
+                cursor.execute("""
+                    SELECT claimed_start_time, claimed_end_time
+                    FROM shift_auction_historical_claims
+                    WHERE plan_id = %s AND source_schedule_shift_id = %s
+                      AND claimed_start_time IS NOT NULL AND claimed_end_time IS NOT NULL
+                """, (plan_id, shift_id))
+                claims = cursor.fetchall() or []
+                full_start_min, full_end_min = self._schedule_interval_minutes(start_time, end_time)
+                claimed_ranges = []
+                for cs, ce in claims:
+                    rng = self._normalize_post_auction_claim_range(
+                        start_time, end_time, cs.strftime('%H:%M'), ce.strftime('%H:%M')
+                    )
+                    claimed_ranges.append((rng["start_minute"], rng["end_minute"]))
+                free_gaps = [g for g in self._subtract_ranges(full_start_min, full_end_min, claimed_ranges) if g[1] - g[0] > 0]
+                # Only re-open if we actually know the taken parts AND something is free.
+                if claimed_ranges and free_gaps:
+                    cursor.execute("""
+                        UPDATE shift_auction_test_lots
+                        SET status = 'available', claimed_by = NULL, claimed_at = NULL,
+                            post_auction_claimed = FALSE, post_claim_start_time = NULL,
+                            post_claim_end_time = NULL, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                    """, (lot_id,))
             except Exception:
                 continue
 
@@ -5934,20 +5976,64 @@ class Database:
                 lot["claimed_by_direction_id"] = info.get("direction_id")
                 lot["claimed_by_direction"] = info.get("direction") or ""
 
-            # Expand each previewed shift into per-operator claimed slices + available
-            # remainder lots (so other operators can take the leftover free time).
-            if claims_by_shift:
-                synthesized_lots = []
-                for lot in lots:
-                    shift_id = _event_int(lot.get("source_schedule_shift_id"))
-                    claims = claims_by_shift.get(shift_id) if shift_id else None
-                    if not claims:
-                        synthesized_lots.append(lot)
-                        continue
-                    synthesized_lots.extend(
-                        self._build_preview_shift_lots(lot, claims, operator_info)
-                    )
-                lots = synthesized_lots
+            # SINGLE-LOT model: keep ONE lot per shift and attach claim_segments (the
+            # taken parts). Fully-covered shifts → 'claimed' (grey); partially-taken →
+            # stay 'available' and the frontend shows the free part with a marker.
+            for lot in lots:
+                shift_id = _event_int(lot.get("source_schedule_shift_id"))
+                claims = claims_by_shift.get(shift_id) if shift_id else None
+                if not claims:
+                    lot["claim_segments"] = []
+                    continue
+                full_start = lot.get("source_start_minute")
+                full_end = lot.get("source_end_minute")
+                has_range = isinstance(full_start, int) and isinstance(full_end, int) and full_end > full_start
+                segments = []
+                claimed_ranges = []
+                full_block = False
+                for claim in claims:
+                    cs = claim.get("claim_start")
+                    ce = claim.get("claim_end")
+                    info = operator_info.get(int(claim["claimed_by"])) if claim.get("claimed_by") else None
+                    segments.append({
+                        "claimed_by": claim.get("claimed_by"),
+                        "claimed_by_name": (info or {}).get("name") or "",
+                        "start_time": cs.strftime('%H:%M') if cs else lot.get("start_time"),
+                        "end_time": ce.strftime('%H:%M') if ce else lot.get("end_time"),
+                    })
+                    if cs is None or ce is None:
+                        full_block = True
+                    elif has_range:
+                        cs_min = _time_to_minutes(cs.strftime('%H:%M'))
+                        ce_min = _time_to_minutes(ce.strftime('%H:%M'))
+                        if full_end > 24 * 60 and cs_min < full_start:
+                            cs_min += 24 * 60
+                        if ce_min <= cs_min:
+                            ce_min += 24 * 60
+                        claimed_ranges.append((cs_min, ce_min))
+                lot["claim_segments"] = segments
+                free_gaps = (
+                    [g for g in self._subtract_ranges(full_start, full_end, claimed_ranges) if g[1] - g[0] > 0]
+                    if (has_range and not full_block) else []
+                )
+                if not free_gaps:
+                    first = claims[0]
+                    finfo = operator_info.get(int(first["claimed_by"])) if first.get("claimed_by") else None
+                    lot.update({
+                        "status": "claimed",
+                        "post_auction_claimed": True,
+                        "claimed_by": first.get("claimed_by"),
+                        "claimed_by_name": (finfo or {}).get("name") or lot.get("claimed_by_name") or "",
+                    })
+                else:
+                    lot.update({
+                        "status": "available",
+                        "post_auction_claimed": False,
+                        "claimed_by": None,
+                        "claimed_by_name": "",
+                        "claim_start_time": None,
+                        "claim_end_time": None,
+                    })
 
             participant_workloads = self._get_shift_auction_participant_workloads_tx(
                 cursor,
@@ -6827,27 +6913,29 @@ class Database:
                 new_end_min
             )
 
-            cursor.execute("""
-                UPDATE shift_auction_test_lots
-                SET status = 'claimed',
-                    claimed_by = %s,
-                    claimed_at = CURRENT_TIMESTAMP,
-                    post_auction_claimed = TRUE,
-                    post_claim_start_time = %s,
-                    post_claim_end_time = %s,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = %s
-                  AND COALESCE(post_auction_claimed, FALSE) = FALSE
-                  AND status IN ('available', 'cancelled')
-                RETURNING id, shift_date, start_time, end_time, rate_min, status, claimed_by, claimed_at,
-                          breaks, source_schedule_plan_id, source_schedule_shift_id,
-                          COALESCE(post_auction_claimed, FALSE), post_claim_start_time, post_claim_end_time
-            """, (operator_id, selected_start_time, selected_end_time, lot_id))
-            updated = cursor.fetchone()
-            if not updated:
-                raise ValueError("LOT_ALREADY_CLAIMED")
-
+            # SINGLE-LOT model for partial доборы: the shift stays ONE lot. Each taken
+            # piece is recorded in shift_auction_historical_claims (several operators may
+            # take disjoint parts). The lot only becomes fully 'claimed' once every minute
+            # is covered; otherwise it stays 'available' and shows the free part.
+            existing_claims = []
             if source_plan_id and source_shift_id:
+                cursor.execute("""
+                    SELECT claimed_by, claimed_start_time, claimed_end_time
+                    FROM shift_auction_historical_claims
+                    WHERE plan_id = %s AND source_schedule_shift_id = %s
+                    FOR UPDATE
+                """, (source_plan_id, source_shift_id))
+                existing_claims = cursor.fetchall() or []
+                for ex_by, ex_start, ex_end in existing_claims:
+                    if ex_by is not None and int(ex_by) == operator_id:
+                        raise ValueError("LOT_ALREADY_CLAIMED")
+                    if ex_start is None or ex_end is None:
+                        raise ValueError("LOT_ALREADY_CLAIMED")
+                    ex_range = self._normalize_post_auction_claim_range(
+                        start_time, end_time, ex_start.strftime('%H:%M'), ex_end.strftime('%H:%M')
+                    )
+                    if new_start_min < ex_range["end_minute"] and ex_range["start_minute"] < new_end_min:
+                        raise ValueError("SHIFT_OVERLAPS_EXISTING")
                 cursor.execute("""
                     INSERT INTO shift_auction_historical_claims
                         (plan_id, source_schedule_shift_id, claimed_by, claimed_at, claimed_start_time, claimed_end_time)
@@ -6855,22 +6943,47 @@ class Database:
                     ON CONFLICT (plan_id, source_schedule_shift_id, claimed_by) DO NOTHING
                 """, (source_plan_id, source_shift_id, operator_id, selected_start_time, selected_end_time))
 
-            # Re-offer the unclaimed remainder of a partial добор so other operators
-            # can pick up the leftover time (split the gap(s) into fresh available lots).
-            if claim_range["is_partial"]:
-                self._create_post_auction_remainder_lots(
-                    cursor,
-                    parent_lot_id=lot_id,
-                    shift_date=shift_date,
-                    full_start_time=start_time,
-                    full_end_time=end_time,
-                    claim_start_min=claim_range["start_minute"],
-                    claim_end_min=claim_range["end_minute"],
-                    rate_min=lot[4],
-                    breaks=updated[8] if isinstance(updated[8], list) else [],
-                    source_plan_id=source_plan_id,
-                    source_shift_id=source_shift_id,
+            # Does this claim complete the shift? (no source shift = single-claim lot)
+            full_start_min, full_end_min = self._schedule_interval_minutes(start_time, end_time)
+            claimed_ranges = [(new_start_min, new_end_min)]
+            for ex_by, ex_start, ex_end in existing_claims:
+                if ex_start is None or ex_end is None:
+                    continue
+                ex_range = self._normalize_post_auction_claim_range(
+                    start_time, end_time, ex_start.strftime('%H:%M'), ex_end.strftime('%H:%M')
                 )
+                claimed_ranges.append((ex_range["start_minute"], ex_range["end_minute"]))
+            free_gaps = [g for g in self._subtract_ranges(full_start_min, full_end_min, claimed_ranges) if g[1] - g[0] > 0]
+            fully_covered = (not source_shift_id) or (not free_gaps)
+
+            if fully_covered:
+                cursor.execute("""
+                    UPDATE shift_auction_test_lots
+                    SET status = 'claimed',
+                        claimed_by = %s,
+                        claimed_at = CURRENT_TIMESTAMP,
+                        post_auction_claimed = TRUE,
+                        post_claim_start_time = %s,
+                        post_claim_end_time = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s AND status IN ('available', 'cancelled')
+                    RETURNING id, shift_date, start_time, end_time, rate_min, status, claimed_by, claimed_at,
+                              breaks, source_schedule_plan_id, source_schedule_shift_id,
+                              COALESCE(post_auction_claimed, FALSE), post_claim_start_time, post_claim_end_time
+                """, (operator_id, selected_start_time, selected_end_time, lot_id))
+            else:
+                # Partial: keep the lot available so others can take the rest.
+                cursor.execute("""
+                    UPDATE shift_auction_test_lots
+                    SET updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s AND status IN ('available', 'cancelled')
+                    RETURNING id, shift_date, start_time, end_time, rate_min, status, claimed_by, claimed_at,
+                              breaks, source_schedule_plan_id, source_schedule_shift_id,
+                              COALESCE(post_auction_claimed, FALSE), post_claim_start_time, post_claim_end_time
+                """, (lot_id,))
+            updated = cursor.fetchone()
+            if not updated:
+                raise ValueError("LOT_ALREADY_CLAIMED")
 
             if day_off_row:
                 cursor.execute(
@@ -6927,8 +7040,10 @@ class Database:
                 "source_schedule_plan_id": updated[9],
                 "source_schedule_shift_id": updated[10],
                 "post_auction_claimed": bool(updated[11]),
-                "claim_start_time": updated[12].strftime('%H:%M') if updated[12] else None,
-                "claim_end_time": updated[13].strftime('%H:%M') if updated[13] else None,
+                # The journal / Telegram / monitoring need the part this operator took,
+                # even for a partial claim where the lot stays available (post_claim NULL).
+                "claim_start_time": (updated[12].strftime('%H:%M') if updated[12] else (selected_start_time.strftime('%H:%M') if selected_start_time else None)),
+                "claim_end_time": (updated[13].strftime('%H:%M') if updated[13] else (selected_end_time.strftime('%H:%M') if selected_end_time else None)),
             }
             event = self._insert_shift_auction_test_event(cursor, "lot_post_auction_claimed", {
                 "lot": lot_payload,

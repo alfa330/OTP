@@ -46,25 +46,14 @@ class PostAuctionRemainderTests(unittest.TestCase):
         self.assertIn("_create_post_auction_remainder_lots", names)
         self.assertIn("_break_overlaps_minute_range", names)
 
-    def test_remainder_lots_are_available_and_grouped_by_shift(self):
-        source = _method_source("_create_post_auction_remainder_lots")
-        # New leftover lots are open for other operators...
-        self.assertIn("'available'", source)
-        # ...carry the parent link...
-        self.assertIn("remainder_of_lot_id", source)
-        # ...and share the source shift id (so monitoring groups them with it).
-        self.assertIn("source_shift_id", source)
-        # The snapshot nulls source minutes for remainder lots so their own gap
-        # range (start/end) is used by the frontend, not the full shift range.
+    def test_snapshot_exposes_claim_segments(self):
+        # Single-lot model: the snapshot attaches the taken parts as claim_segments.
         db_source = _source(DATABASE_PATH)
-        self.assertIn("WHEN l.remainder_of_lot_id IS NOT NULL THEN NULL", db_source)
+        self.assertIn("AS claim_segments", db_source)
+        self.assertIn('"claim_segments"', db_source)
 
-    def test_remainder_skips_cross_midnight_gaps(self):
-        # A gap that runs past midnight must not be stored on the original date.
-        source = _method_source("_create_post_auction_remainder_lots")
-        self.assertIn("gap_end <= 24 * 60", source)
-
-    def test_partial_claim_creates_remainder_lots(self):
+    def test_partial_claim_keeps_single_lot(self):
+        # No more separate remainder lots: post_auction_claim_lot must NOT split.
         method = _method("post_auction_claim_lot")
         calls = [
             node for node in ast.walk(method)
@@ -72,10 +61,11 @@ class PostAuctionRemainderTests(unittest.TestCase):
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "_create_post_auction_remainder_lots"
         ]
-        self.assertEqual(len(calls), 1)
-        # The split must be guarded by the partial flag.
+        self.assertEqual(len(calls), 0)
+        # Instead it overlap-checks and only marks the lot claimed when fully covered.
         source = _method_source("post_auction_claim_lot")
-        self.assertIn('claim_range["is_partial"]', source)
+        self.assertIn("SHIFT_OVERLAPS_EXISTING", source)
+        self.assertIn("fully_covered", source)
 
     def test_unclaim_reconciles_remainder_lots(self):
         source = _method_source("admin_unclaim_shift")
@@ -129,16 +119,10 @@ class HistoricalPostAuctionRemainderTests(unittest.TestCase):
         self.assertIn("req_start_min", source)
         self.assertIn("ex_range", source)
 
-    def test_preview_builds_remainder_lots(self):
-        names = {
-            node.name for node in _database_class().body
-            if isinstance(node, ast.FunctionDef)
-        }
-        self.assertIn("_build_preview_shift_lots", names)
-        self.assertIn("_subtract_ranges", names)
+    def test_preview_exposes_claim_segments_on_single_lot(self):
         preview = _method_source("get_shift_auction_period_preview")
-        self.assertIn("_build_preview_shift_lots", preview)
         self.assertIn("claims_by_shift", preview)
+        self.assertIn('lot["claim_segments"]', preview)
 
     def test_unclaim_targets_specific_operator(self):
         source = _method_source("admin_unclaim_shift")
@@ -154,18 +138,17 @@ class HistoricalPostAuctionRemainderTests(unittest.TestCase):
         source = _source(BOT_PATH)
         self.assertIn("claimed_by=payload.get('claimed_by')", source)
 
-    def test_backfill_remainders_for_existing_partial_claims(self):
+    def test_consolidate_to_single_lot_on_init(self):
         names = {
             node.name for node in _database_class().body
             if isinstance(node, ast.FunctionDef)
         }
-        self.assertIn("_backfill_post_auction_remainder_lots", names)
-        # Runs during schema init so already-claimed partial shifts gain remainders.
-        self.assertIn("self._backfill_post_auction_remainder_lots(cursor)", _source(DATABASE_PATH))
-        src = _method_source("_backfill_post_auction_remainder_lots")
-        # Idempotent: only partial claims that have no remainder lots yet.
-        self.assertIn("remainder_of_lot_id IS NULL", src)
-        self.assertIn("NOT EXISTS", src)
+        self.assertIn("_consolidate_post_auction_lots", names)
+        # Runs during schema init: drops legacy remainder lots, re-opens partial ones.
+        self.assertIn("self._consolidate_post_auction_lots(cursor)", _source(DATABASE_PATH))
+        src = _method_source("_consolidate_post_auction_lots")
+        self.assertIn("DELETE FROM shift_auction_test_lots WHERE remainder_of_lot_id IS NOT NULL", src)
+        self.assertIn("status = 'available'", src)
 
 
 if __name__ == "__main__":

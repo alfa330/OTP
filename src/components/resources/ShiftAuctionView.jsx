@@ -676,11 +676,28 @@ const AuctionLotCell = ({
   const styleToUse = isLotClaimed ? undefined : (isOpenPostStyle ? postAuctionToneStyle : startToneStyle);
 
   const detailClickable = canManage && typeof onShowDetail === 'function';
-  // A claimed cell shows the ACTUALLY taken part (effective range), not the full
-  // original shift — so a partial claim reads as "13:00–15:00" with an orange marker
-  // (meaning part of the shift was taken), and the free remainder is its own cell.
-  const finalDisplayLabel = isLotClaimed ? formatAuctionLotEffectiveTimeRangeLabel(lot) : label;
-  const finalDisplayCompact = isLotClaimed ? formatAuctionLotEffectiveTimeRangeLabel(lot) : compactLabel;
+  // Single-lot model: a partially-taken shift stays one (available) lot carrying
+  // claim_segments (parts taken by others). The cell shows the FREE part + a marker.
+  const claimSegments = Array.isArray(lot.claim_segments) ? lot.claim_segments : [];
+  let freeRangeLabel = null;
+  if (claimSegments.length) {
+    const src = lotMinuteRange(lot);
+    if (src) {
+      const busy = claimSegments
+        .map((seg) => getClockRangeWithinSource(seg.start_time, seg.end_time, src))
+        .filter(Boolean);
+      const free = subtractBusyRanges(src, busy).available;
+      if (free.length) {
+        freeRangeLabel = free.map((s) => `${minutesToClockLabel(s.start)}-${minutesToClockLabel(s.end)}`).join(' ');
+      }
+    }
+  }
+  const finalDisplayLabel = isLotClaimed
+    ? formatAuctionLotEffectiveTimeRangeLabel(lot)
+    : (freeRangeLabel || label);
+  const finalDisplayCompact = isLotClaimed
+    ? formatAuctionLotEffectiveTimeRangeLabel(lot)
+    : (freeRangeLabel || compactLabel);
   const finalClassName = `relative flex h-6 w-full min-w-0 items-center justify-center overflow-hidden rounded border px-1 text-[10px] font-semibold tabular-nums sm:h-8 sm:px-2 sm:text-xs ${tone}${detailClickable ? ' cursor-pointer transition hover:brightness-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-1' : ''}`;
   const finalInner = (
     <>
@@ -2000,18 +2017,42 @@ const ADMIN_DAY_SEGMENT_COLORS = ['#0A84FF', '#30D158', '#FF9F0A', '#BF5AF2', '#
 const buildAuctionShiftSegments = (lots) => {
   const segments = [];
   (lots || []).forEach((lot) => {
-    if (!lot || (lot.status !== 'claimed' && lot.status !== 'available')) return;
-    const range = getAuctionLotEffectiveMinuteRange(lot);
+    if (!lot) return;
+    const range = lotMinuteRange(lot);
     if (!range) return;
-    segments.push({
-      lot,
-      start: range[0],
-      end: range[1],
-      claimed: lot.status === 'claimed',
-      operatorId: lot.claimed_by != null ? Number(lot.claimed_by) : null,
-      operatorName: lot.claimed_by_name || (lot.claimed_by ? `#${lot.claimed_by}` : ''),
-      netMinutes: getAuctionLotNetMinutes(lot),
-    });
+    const claimSegs = Array.isArray(lot.claim_segments) ? lot.claim_segments : [];
+    if (claimSegs.length) {
+      // Single-lot model: expand the taken parts (per operator) + free remainder.
+      const busy = [];
+      claimSegs.forEach((seg) => {
+        const r = getClockRangeWithinSource(seg.start_time, seg.end_time, range);
+        if (!r) return;
+        busy.push(r);
+        segments.push({
+          start: r[0],
+          end: r[1],
+          claimed: true,
+          operatorId: seg.claimed_by != null ? Number(seg.claimed_by) : null,
+          operatorName: seg.claimed_by_name || (seg.claimed_by ? `#${seg.claimed_by}` : ''),
+          netMinutes: Math.max(0, r[1] - r[0]),
+        });
+      });
+      subtractBusyRanges(range, busy).available.forEach((s) => {
+        segments.push({ start: s.start, end: s.end, claimed: false, operatorId: null, operatorName: '', netMinutes: Math.max(0, s.end - s.start) });
+      });
+    } else if (lot.status === 'claimed') {
+      const eff = getAuctionLotEffectiveMinuteRange(lot) || range;
+      segments.push({
+        start: eff[0],
+        end: eff[1],
+        claimed: true,
+        operatorId: lot.claimed_by != null ? Number(lot.claimed_by) : null,
+        operatorName: lot.claimed_by_name || (lot.claimed_by ? `#${lot.claimed_by}` : ''),
+        netMinutes: getAuctionLotNetMinutes(lot),
+      });
+    } else if (lot.status === 'available') {
+      segments.push({ start: range[0], end: range[1], claimed: false, operatorId: null, operatorName: '', netMinutes: Math.max(0, range[1] - range[0]) });
+    }
   });
   if (!segments.length) return null;
   segments.sort((a, b) => a.start - b.start || a.end - b.end);
@@ -2126,15 +2167,23 @@ const buildPostAuctionClaimOption = (lot, workShifts = [], claimedLots = []) => 
     ...(Array.isArray(workShifts) ? workShifts : []),
     ...((Array.isArray(workShifts) && workShifts.length) ? [] : (Array.isArray(claimedLots) ? claimedLots : []))
   ];
-  const busyRanges = blockers
-    .filter((item) => item && item.shift_date === lot.shift_date)
-    .map((item) => getClockRangeWithinSource(
-      item.start_time || item.start,
-      item.end_time || item.end,
-      sourceRange
-    ))
-    .filter(Boolean)
-    .filter((range) => rangesOverlap(sourceRange, range));
+  const busyRanges = [
+    ...blockers
+      .filter((item) => item && item.shift_date === lot.shift_date)
+      .map((item) => getClockRangeWithinSource(
+        item.start_time || item.start,
+        item.end_time || item.end,
+        sourceRange
+      ))
+      .filter(Boolean)
+      .filter((range) => rangesOverlap(sourceRange, range)),
+    // Parts of THIS shift already taken by other operators (single-lot model):
+    // subtract them so only the free part is offered.
+    ...(Array.isArray(lot.claim_segments) ? lot.claim_segments : [])
+      .map((seg) => getClockRangeWithinSource(seg.start_time, seg.end_time, sourceRange))
+      .filter(Boolean)
+      .filter((range) => rangesOverlap(sourceRange, range)),
+  ];
 
   const split = subtractBusyRanges(sourceRange, busyRanges);
   const availableSegments = split.available.map((segment) => ({
@@ -3623,43 +3672,14 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   }, [monitoredMyBlockedDates]);
 
   const visibleLots = useMemo(() => {
-    // A partially-claimed shift = one claimed (taken) lot + one available (free)
-    // remainder lot. We collapse it into a SINGLE cell by hiding the taken part and
-    // keeping only the free part (rendered orange with a marker). Applies to admins
-    // and operators alike; the per-operator breakdown stays available via the modal.
-    const shiftsWithFreeRemainder = new Set();
-    (monitoredLots || []).forEach((lot) => {
-      if (lot && lot.status === 'available' && lot.source_schedule_shift_id != null) {
-        shiftsWithFreeRemainder.add(`${lot.source_schedule_shift_id}|${lot.shift_date}`);
-      }
-    });
-    const isHiddenTakenPart = (lot) => (
-      lot.status === 'claimed'
-      && lot.source_schedule_shift_id != null
-      && shiftsWithFreeRemainder.has(`${lot.source_schedule_shift_id}|${lot.shift_date}`)
-    );
-    if (canMonitor) {
-      return (monitoredLots || []).filter((lot) => lot && !isHiddenTakenPart(lot));
-    }
-    return (monitoredLots || []).filter((lot) => (
-      lot
-      && (selectedViewPostAuctionActive || !monitoredMyDayOffs.includes(lot.shift_date))
+    // Single-lot model: one lot per shift. Partially-taken shifts carry claim_segments
+    // and stay 'available' (the cell shows the free part). No separate remainder lots.
+    if (canMonitor) return monitoredLots;
+    return monitoredLots.filter((lot) => (
+      (selectedViewPostAuctionActive || !monitoredMyDayOffs.includes(lot.shift_date))
       && !myBlockedDateMap.has(lot.shift_date)
-      && !isHiddenTakenPart(lot)
     ));
   }, [canMonitor, monitoredLots, monitoredMyDayOffs, myBlockedDateMap, selectedViewPostAuctionActive]);
-
-  // Shifts that have a taken part — used to mark their free-remainder cell (orange
-  // + marker) so it reads as "part of this shift was already taken by someone".
-  const shiftsWithClaimedPart = useMemo(() => {
-    const set = new Set();
-    (monitoredLots || []).forEach((lot) => {
-      if (lot && lot.status === 'claimed' && lot.source_schedule_shift_id != null) {
-        set.add(`${lot.source_schedule_shift_id}|${lot.shift_date}`);
-      }
-    });
-    return set;
-  }, [monitoredLots]);
 
   const auctionTableGroups = useMemo(() => {
     const groupMap = new Map(AUCTION_RATE_GROUPS.map((group) => [
@@ -3782,22 +3802,45 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   // Flat, tidy list of shifts taken on the active day (one row per claim).
   const adminActiveDayClaimLots = useMemo(() => {
     if (!canMonitor || !activeDayDate) return [];
-    return (monitoredLots || [])
-      .filter((lot) => lot && lot.shift_date === activeDayDate && lot.status === 'claimed' && lot.claimed_by != null)
-      .map((lot) => {
+    const rows = [];
+    (monitoredLots || []).forEach((lot) => {
+      if (!lot || lot.shift_date !== activeDayDate) return;
+      const claimSegs = Array.isArray(lot.claim_segments) ? lot.claim_segments : [];
+      if (claimSegs.length) {
+        // Partially-taken shift (single lot): one row per taken part.
+        claimSegs.forEach((seg, i) => {
+          const sMin = parseHHMMToMinutes(seg.start_time);
+          const eMin = parseHHMMToMinutes(seg.end_time);
+          const net = (sMin != null && eMin != null) ? Math.max(0, (eMin > sMin ? eMin : eMin + 1440) - sMin) : 0;
+          rows.push({
+            key: `${lot.id}-cs${i}`,
+            start: sMin != null ? sMin : 0,
+            timeLabel: `${String(seg.start_time || '').slice(0, 5)}–${String(seg.end_time || '').slice(0, 5)}`,
+            operatorName: seg.claimed_by_name || `#${seg.claimed_by || ''}`,
+            operatorId: seg.claimed_by != null ? Number(seg.claimed_by) : null,
+            netMinutes: net,
+            partial: true,
+            originalLabel: formatAuctionShiftLabel(lot),
+          });
+        });
+      } else if (lot.status === 'claimed' && lot.claimed_by != null) {
         const range = getAuctionLotEffectiveMinuteRange(lot);
-        return {
-          lot,
+        rows.push({
+          key: `${lot.id}`,
           start: range ? range[0] : 0,
+          timeLabel: formatAuctionLotEffectiveTimeRangeLabel(lot),
+          operatorName: lot.claimed_by_name || `#${lot.claimed_by}`,
+          operatorId: Number(lot.claimed_by),
           netMinutes: getAuctionLotNetMinutes(lot),
           partial: isPartialPostAuctionClaim(lot),
-          operatorName: lot.claimed_by_name || `#${lot.claimed_by}`,
-        };
-      })
-      .sort((a, b) => (
-        a.start - b.start
-        || String(a.operatorName).localeCompare(String(b.operatorName), 'ru')
-      ));
+          originalLabel: formatAuctionShiftLabel(lot),
+        });
+      }
+    });
+    return rows.sort((a, b) => (
+      a.start - b.start
+      || String(a.operatorName).localeCompare(String(b.operatorName), 'ru')
+    ));
   }, [activeDayDate, canMonitor, monitoredLots]);
 
   const adminActiveDayClaimCount = useMemo(
@@ -3959,13 +4002,35 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     const opIdNum = Number(drilldownOperatorId);
     const operator = (monitoredOperators || []).find((op) => Number(op?.id) === opIdNum) || null;
     const workload = (monitoredParticipantWorkloads || []).find((w) => Number(w?.operator_id) === opIdNum) || null;
-    const claimedLots = (monitoredLots || [])
-      .filter((lot) => lot && lot.status === 'claimed' && Number(lot.claimed_by) === opIdNum)
-      .sort((a, b) => {
-        const dateCmp = String(a.shift_date || '').localeCompare(String(b.shift_date || ''));
-        if (dateCmp !== 0) return dateCmp;
-        return String(a.start_time || '').localeCompare(String(b.start_time || ''));
-      });
+    const claimedLots = [];
+    (monitoredLots || []).forEach((lot) => {
+      if (!lot) return;
+      const segs = Array.isArray(lot.claim_segments) ? lot.claim_segments : [];
+      if (segs.length) {
+        // Single-lot model: this operator's partial parts come from claim_segments.
+        segs.forEach((seg, i) => {
+          if (Number(seg.claimed_by) !== opIdNum) return;
+          claimedLots.push({
+            ...lot,
+            id: `${lot.id}-cs${i}`,
+            status: 'claimed',
+            post_auction_claimed: true,
+            claimed_by: opIdNum,
+            // keep lot.start_time/end_time (full shift) so the badge reads "часть из …"
+            claim_start_time: seg.start_time,
+            claim_end_time: seg.end_time,
+            breaks: [],
+          });
+        });
+      } else if (lot.status === 'claimed' && Number(lot.claimed_by) === opIdNum) {
+        claimedLots.push(lot);
+      }
+    });
+    claimedLots.sort((a, b) => {
+      const dateCmp = String(a.shift_date || '').localeCompare(String(b.shift_date || ''));
+      if (dateCmp !== 0) return dateCmp;
+      return String(getAuctionLotEffectiveStartTime(a) || '').localeCompare(String(getAuctionLotEffectiveStartTime(b) || ''));
+    });
     return {
       operator_id: opIdNum,
       operator,
@@ -5090,7 +5155,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                             postAuctionClaimOption={postAuctionClaimOptionsByLotId.get(getAuctionLotActionKey(lot))}
                                             onRequestPostAuctionClaim={handleRequestPostAuctionClaim}
                                             onShowDetail={canMonitor ? setShiftDetailLot : undefined}
-                                            isPartialRemainder={lot.status === 'available' && lot.source_schedule_shift_id != null && shiftsWithClaimedPart.has(`${lot.source_schedule_shift_id}|${lot.shift_date}`)}
+                                            isPartialRemainder={Array.isArray(lot.claim_segments) && lot.claim_segments.length > 0}
                                           />
                                         ) : (
                                           <div className={`h-6 rounded border border-dashed sm:h-8 ${isBlocked ? 'border-rose-100 bg-rose-50/70' : isDayOff ? 'border-blue-100 bg-blue-50/60' : 'border-transparent bg-slate-50/70'}`} />
@@ -5222,28 +5287,28 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                 <div className="max-h-[calc(58vh-64px)] overflow-y-auto p-3 xl:max-h-[calc(100vh-11rem)]">
                   {adminActiveDayClaimLots.length ? (
                     <ul className="space-y-1.5">
-                      {adminActiveDayClaimLots.map(({ lot, netMinutes, partial, operatorName }) => (
-                        <li key={`admin-day-claim-${lot.id}`}>
+                      {adminActiveDayClaimLots.map((row) => (
+                        <li key={`admin-day-claim-${row.key}`}>
                           <button
                             type="button"
-                            onClick={() => lot.claimed_by ? setDrilldownOperatorId(Number(lot.claimed_by)) : null}
-                            disabled={!lot.claimed_by}
+                            onClick={() => row.operatorId ? setDrilldownOperatorId(row.operatorId) : null}
+                            disabled={!row.operatorId}
                             className="flex w-full items-center gap-3 rounded-xl border border-slate-200/80 bg-white px-3 py-2 text-left shadow-sm transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-default disabled:hover:border-slate-200/80 disabled:hover:bg-white"
                             title="Открыть взятые смены оператора"
                           >
                             <span className="shrink-0 rounded-lg bg-slate-100 px-2 py-1 text-[12px] font-semibold tabular-nums text-slate-700">
-                              {formatAuctionLotEffectiveTimeRangeLabel(lot)}
+                              {row.timeLabel}
                             </span>
                             <span className="min-w-0 flex-1">
-                              <span className="block truncate text-[13px] font-medium text-slate-900">{operatorName}</span>
-                              {partial ? (
+                              <span className="block truncate text-[13px] font-medium text-slate-900">{row.operatorName}</span>
+                              {row.partial ? (
                                 <span className="mt-0.5 inline-flex items-center gap-1 rounded-full bg-orange-100 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-orange-700">
                                   <span className="h-1.5 w-1.5 rounded-full bg-current" />
-                                  добор · часть из {formatAuctionShiftLabel(lot)}
+                                  добор · часть из {row.originalLabel}
                                 </span>
                               ) : null}
                             </span>
-                            <span className="shrink-0 text-[12px] tabular-nums text-slate-400">{formatAuctionHours(netMinutes)} ч</span>
+                            <span className="shrink-0 text-[12px] tabular-nums text-slate-400">{formatAuctionHours(row.netMinutes)} ч</span>
                           </button>
                         </li>
                       ))}
