@@ -8772,6 +8772,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const today = todayDateStr(new Date());
                 return { start: today, end: today };
             });
+            const [plannerStatusMatchExportActiveEdge, setPlannerStatusMatchExportActiveEdge] = useState('start');
+            const [plannerStatusMatchExportCalendarMonth, setPlannerStatusMatchExportCalendarMonth] = useState(() => {
+                const today = new Date();
+                return new Date(today.getFullYear(), today.getMonth(), 1);
+            });
             const [plannerStatusMatchExportLoading, setPlannerStatusMatchExportLoading] = useState(false);
             const [plannerStatusMatchExportError, setPlannerStatusMatchExportError] = useState('');
             const [plannerStatusGroupingForecastState, setPlannerStatusGroupingForecastState] = useState({
@@ -11649,17 +11654,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return out;
             };
 
+            const setPlannerStatusMatchExportRangeDraft = (nextRange, activeEdge = 'end') => {
+                const normalizedRange = normalizePlannerStatusMatchExportRange(nextRange);
+                const fallbackDate = todayDateStr(new Date(currentDate || new Date()));
+                const safeRange = normalizedRange || {
+                    start: isPlannerStatusMatchExportDateKey(nextRange?.start) ? nextRange.start : fallbackDate,
+                    end: isPlannerStatusMatchExportDateKey(nextRange?.end) ? nextRange.end : fallbackDate
+                };
+                setPlannerStatusMatchExportRange(safeRange);
+                const monthSource = parseDateStr(safeRange.start);
+                if (!Number.isNaN(monthSource?.getTime?.())) {
+                    setPlannerStatusMatchExportCalendarMonth(new Date(monthSource.getFullYear(), monthSource.getMonth(), 1));
+                }
+                setPlannerStatusMatchExportActiveEdge(activeEdge === 'start' ? 'start' : 'end');
+                setPlannerStatusMatchExportError('');
+            };
+
             const openPlannerStatusMatchExportModal = () => {
                 const sortedVisibleDates = (Array.isArray(visibleRange) ? [...visibleRange] : [])
                     .map(v => String(v || '').trim())
                     .filter(isPlannerStatusMatchExportDateKey)
                     .sort();
                 const fallbackDate = todayDateStr(new Date(currentDate || new Date()));
-                setPlannerStatusMatchExportRange({
+                setPlannerStatusMatchExportRangeDraft({
                     start: sortedVisibleDates[0] || fallbackDate,
                     end: sortedVisibleDates[sortedVisibleDates.length - 1] || fallbackDate
-                });
-                setPlannerStatusMatchExportError('');
+                }, 'end');
                 setShowPlannerStatusMatchExportModal(true);
             };
 
@@ -11671,26 +11691,48 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         .filter(isPlannerStatusMatchExportDateKey)
                         .sort();
                     const fallbackDate = todayDateStr(baseDate);
-                    setPlannerStatusMatchExportRange({
+                    setPlannerStatusMatchExportRangeDraft({
                         start: sortedVisibleDates[0] || fallbackDate,
                         end: sortedVisibleDates[sortedVisibleDates.length - 1] || fallbackDate
-                    });
+                    }, 'end');
                     return;
                 }
                 if (preset === 'week') {
                     const start = weekStart(baseDate);
                     const end = weekEnd(baseDate);
-                    setPlannerStatusMatchExportRange({ start: todayDateStr(start), end: todayDateStr(end) });
+                    setPlannerStatusMatchExportRangeDraft({ start: todayDateStr(start), end: todayDateStr(end) }, 'end');
                     return;
                 }
                 if (preset === 'month') {
                     const start = new Date(baseDate.getFullYear(), baseDate.getMonth(), 1);
                     const end = new Date(baseDate.getFullYear(), baseDate.getMonth() + 1, 0);
-                    setPlannerStatusMatchExportRange({ start: todayDateStr(start), end: todayDateStr(end) });
+                    setPlannerStatusMatchExportRangeDraft({ start: todayDateStr(start), end: todayDateStr(end) }, 'end');
                     return;
                 }
                 const day = todayDateStr(baseDate);
-                setPlannerStatusMatchExportRange({ start: day, end: day });
+                setPlannerStatusMatchExportRangeDraft({ start: day, end: day }, 'end');
+            };
+
+            const selectPlannerStatusMatchExportDate = (dateKey) => {
+                const selectedDateKey = String(dateKey || '').trim();
+                if (!isPlannerStatusMatchExportDateKey(selectedDateKey)) return;
+                const currentRange = normalizePlannerStatusMatchExportRange(plannerStatusMatchExportRange) || {
+                    start: selectedDateKey,
+                    end: selectedDateKey
+                };
+                if (plannerStatusMatchExportActiveEdge === 'start') {
+                    if (selectedDateKey > currentRange.end) {
+                        setPlannerStatusMatchExportRangeDraft({ start: selectedDateKey, end: selectedDateKey }, 'end');
+                    } else {
+                        setPlannerStatusMatchExportRangeDraft({ start: selectedDateKey, end: currentRange.end }, 'end');
+                    }
+                    return;
+                }
+                if (selectedDateKey < currentRange.start) {
+                    setPlannerStatusMatchExportRangeDraft({ start: selectedDateKey, end: currentRange.start }, 'end');
+                    return;
+                }
+                setPlannerStatusMatchExportRangeDraft({ start: currentRange.start, end: selectedDateKey }, 'end');
             };
 
             const filterPlannerOperatorsForStatusMatchExport = (sourceOperators = []) => {
@@ -22093,7 +22135,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     onClose={() => {
                         if (!plannerStatusMatchExportLoading) setShowPlannerStatusMatchExportModal(false);
                     }}
-                    panelClassName="w-[min(92vw,560px)] max-w-[calc(100vw-1rem)] p-0 rounded-[28px] overflow-hidden border border-white/70 bg-white/95 shadow-2xl backdrop-blur-xl"
+                    panelClassName="w-[min(94vw,760px)] max-w-[calc(100vw-1rem)] p-0 rounded-2xl overflow-hidden border border-slate-200 bg-white shadow-2xl"
                 >
                     {(() => {
                         const normalizedRange = normalizePlannerStatusMatchExportRange(plannerStatusMatchExportRange);
@@ -22106,6 +22148,45 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             Array.isArray(selectedStatuses) && selectedStatuses.length > 0 ? selectedStatuses.length : 0,
                             Array.isArray(selectedDirections) && selectedDirections.length > 0 ? selectedDirections.length : 0
                         ].reduce((sum, value) => sum + value, 0);
+                        const monthNames = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
+                        const weekDayLabels = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+                        const calendarBaseMonth = plannerStatusMatchExportCalendarMonth instanceof Date && !Number.isNaN(plannerStatusMatchExportCalendarMonth.getTime())
+                            ? plannerStatusMatchExportCalendarMonth
+                            : new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
+                        const calendarMonths = [
+                            new Date(calendarBaseMonth.getFullYear(), calendarBaseMonth.getMonth(), 1),
+                            new Date(calendarBaseMonth.getFullYear(), calendarBaseMonth.getMonth() + 1, 1)
+                        ];
+                        const todayKey = todayDateStr(new Date());
+                        const buildCalendarCells = (monthDate) => {
+                            const monthStart = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1);
+                            const gridStart = weekStart(monthStart);
+                            return Array.from({ length: 42 }).map((_, idx) => {
+                                const date = addDays(gridStart, idx);
+                                const dateKey = todayDateStr(date);
+                                const inMonth = date.getMonth() === monthStart.getMonth();
+                                const isStart = normalizedRange?.start === dateKey;
+                                const isEnd = normalizedRange?.end === dateKey;
+                                const isInRange = !!normalizedRange && dateKey > normalizedRange.start && dateKey < normalizedRange.end;
+                                return {
+                                    date,
+                                    dateKey,
+                                    inMonth,
+                                    isStart,
+                                    isEnd,
+                                    isInRange,
+                                    isToday: dateKey === todayKey
+                                };
+                            });
+                        };
+                        const setCalendarMonthOffset = (offset) => {
+                            setPlannerStatusMatchExportCalendarMonth(prev => {
+                                const base = prev instanceof Date && !Number.isNaN(prev.getTime())
+                                    ? prev
+                                    : calendarBaseMonth;
+                                return new Date(base.getFullYear(), base.getMonth() + offset, 1);
+                            });
+                        };
                         const presetItems = [
                             { key: 'visible', label: 'Видимый' },
                             { key: 'today', label: 'День' },
@@ -22114,22 +22195,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         ];
                         return (
                             <div className="text-slate-900">
-                                <div className="relative overflow-hidden px-5 pt-5 pb-4 bg-gradient-to-br from-slate-50 via-white to-sky-50 border-b border-slate-200/70">
-                                    <div className="absolute inset-x-0 top-0 h-px bg-white/80" />
+                                <div className="px-5 pt-5 pb-4 bg-slate-50 border-b border-slate-200">
                                     <div className="flex items-start justify-between gap-4">
                                         <div className="min-w-0">
-                                            <div className="inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-emerald-700">
+                                            <div className="inline-flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-emerald-700">
                                                 <FaIcon className="fas fa-file-export text-[10px]"></FaIcon>
                                                 Excel
                                             </div>
-                                            <h3 className="mt-3 text-xl font-semibold text-slate-950">Отчет соответствия</h3>
+                                            <h3 className="mt-3 text-lg font-bold text-slate-900">Отчет соответствия</h3>
                                             <div className="mt-1 text-sm text-slate-500">{rangeLabel}</div>
                                         </div>
                                         <button
                                             type="button"
                                             onClick={() => setShowPlannerStatusMatchExportModal(false)}
                                             disabled={plannerStatusMatchExportLoading}
-                                            className="w-9 h-9 rounded-full border border-slate-200 bg-white/80 hover:bg-white text-slate-500 hover:text-slate-800 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                                            className="w-9 h-9 rounded-xl border border-slate-200 bg-white hover:bg-slate-100 text-slate-500 hover:text-slate-800 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
                                             title="Закрыть"
                                         >
                                             <FaIcon className="fas fa-times text-xs"></FaIcon>
@@ -22137,15 +22217,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </div>
                                 </div>
 
-                                <div className="px-5 py-5 space-y-5">
-                                    <div className="rounded-2xl border border-slate-200 bg-slate-100/70 p-1 shadow-inner grid grid-cols-4 gap-1">
+                                <div className="px-5 py-4 space-y-4">
+                                    <div className="rounded-xl border border-slate-200 bg-slate-100 p-1 grid grid-cols-4 gap-1">
                                         {presetItems.map(item => (
                                             <button
                                                 key={`status-match-export-preset-${item.key}`}
                                                 type="button"
                                                 onClick={() => setPlannerStatusMatchExportPreset(item.key)}
                                                 disabled={plannerStatusMatchExportLoading}
-                                                className="h-9 rounded-xl text-xs font-semibold text-slate-600 hover:text-slate-950 hover:bg-white/70 disabled:opacity-60 disabled:cursor-not-allowed"
+                                                className="h-9 rounded-lg text-xs font-semibold text-slate-600 hover:text-slate-950 hover:bg-white disabled:opacity-60 disabled:cursor-not-allowed"
                                             >
                                                 {item.label}
                                             </button>
@@ -22153,64 +22233,124 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </div>
 
                                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                                        <label className="rounded-2xl border border-slate-200 bg-white px-3 py-3 shadow-sm">
-                                            <span className="block text-[11px] font-semibold uppercase tracking-wide text-slate-400 mb-2">С</span>
-                                            <input
-                                                type="date"
-                                                value={plannerStatusMatchExportRange.start || ''}
-                                                max={plannerStatusMatchExportRange.end || undefined}
-                                                onChange={(e) => {
-                                                    setPlannerStatusMatchExportError('');
-                                                    setPlannerStatusMatchExportRange(prev => ({ ...prev, start: e.target.value }));
-                                                }}
+                                        {[
+                                            { key: 'start', title: 'Начало', value: normalizedRange?.start },
+                                            { key: 'end', title: 'Конец', value: normalizedRange?.end }
+                                        ].map(item => {
+                                            const isActive = plannerStatusMatchExportActiveEdge === item.key;
+                                            return (
+                                                <button
+                                                    key={`status-match-export-edge-${item.key}`}
+                                                    type="button"
+                                                    onClick={() => setPlannerStatusMatchExportActiveEdge(item.key)}
+                                                    disabled={plannerStatusMatchExportLoading}
+                                                    className={`rounded-xl border px-3 py-2 text-left transition disabled:opacity-60 disabled:cursor-not-allowed ${isActive ? 'border-sky-300 bg-sky-50 ring-2 ring-sky-100' : 'border-slate-200 bg-white hover:bg-slate-50'}`}
+                                                >
+                                                    <span className="block text-[11px] font-semibold uppercase tracking-wide text-slate-400">{item.title}</span>
+                                                    <span className="mt-1 block text-sm font-semibold text-slate-900">
+                                                        {item.value ? formatDateRuShort(item.value) : 'Выберите дату'}
+                                                    </span>
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+
+                                    <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
+                                        <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-3">
+                                            <button
+                                                type="button"
+                                                onClick={() => setCalendarMonthOffset(-1)}
                                                 disabled={plannerStatusMatchExportLoading}
-                                                className="w-full h-10 rounded-xl border border-slate-200 bg-slate-50 px-3 text-sm font-medium text-slate-900 outline-none focus:border-sky-300 focus:ring-4 focus:ring-sky-100 disabled:opacity-60"
-                                            />
-                                        </label>
-                                        <label className="rounded-2xl border border-slate-200 bg-white px-3 py-3 shadow-sm">
-                                            <span className="block text-[11px] font-semibold uppercase tracking-wide text-slate-400 mb-2">По</span>
-                                            <input
-                                                type="date"
-                                                value={plannerStatusMatchExportRange.end || ''}
-                                                min={plannerStatusMatchExportRange.start || undefined}
-                                                onChange={(e) => {
-                                                    setPlannerStatusMatchExportError('');
-                                                    setPlannerStatusMatchExportRange(prev => ({ ...prev, end: e.target.value }));
-                                                }}
+                                                className="w-8 h-8 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 text-slate-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                title="Предыдущий месяц"
+                                            >
+                                                <FaIcon className="fas fa-angle-left"></FaIcon>
+                                            </button>
+                                            <div className="text-center min-w-0">
+                                                <div className="text-sm font-semibold text-slate-900">Выберите период</div>
+                                                <div className="text-[11px] text-slate-500">
+                                                    Активно: {plannerStatusMatchExportActiveEdge === 'start' ? 'начало периода' : 'конец периода'}
+                                                </div>
+                                            </div>
+                                            <button
+                                                type="button"
+                                                onClick={() => setCalendarMonthOffset(1)}
                                                 disabled={plannerStatusMatchExportLoading}
-                                                className="w-full h-10 rounded-xl border border-slate-200 bg-slate-50 px-3 text-sm font-medium text-slate-900 outline-none focus:border-sky-300 focus:ring-4 focus:ring-sky-100 disabled:opacity-60"
-                                            />
-                                        </label>
+                                                className="w-8 h-8 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 text-slate-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                title="Следующий месяц"
+                                            >
+                                                <FaIcon className="fas fa-angle-right"></FaIcon>
+                                            </button>
+                                        </div>
+
+                                        <div className="p-3 grid grid-cols-1 md:grid-cols-2 gap-4">
+                                            {calendarMonths.map((monthDate) => (
+                                                <div key={`status-match-export-month-${monthDate.getFullYear()}-${monthDate.getMonth()}`}>
+                                                    <div className="mb-2 text-sm font-semibold text-slate-800">
+                                                        {monthNames[monthDate.getMonth()]} {monthDate.getFullYear()}
+                                                    </div>
+                                                    <div className="grid grid-cols-7 gap-1 text-center">
+                                                        {weekDayLabels.map(label => (
+                                                            <div key={`status-match-export-weekday-${monthDate.getMonth()}-${label}`} className="h-6 flex items-center justify-center text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                                                                {label}
+                                                            </div>
+                                                        ))}
+                                                        {buildCalendarCells(monthDate).map(cell => {
+                                                            const isEndpoint = cell.isStart || cell.isEnd;
+                                                            const dayClass = [
+                                                                'relative h-9 rounded-lg text-sm font-semibold transition flex items-center justify-center disabled:cursor-not-allowed',
+                                                                cell.inMonth ? 'text-slate-700 hover:bg-sky-50' : 'text-slate-300 hover:bg-slate-50',
+                                                                cell.isInRange ? 'bg-sky-50 text-sky-800' : '',
+                                                                isEndpoint ? 'bg-slate-900 text-white hover:bg-slate-800 shadow-sm' : '',
+                                                                cell.isToday && !isEndpoint ? 'ring-1 ring-sky-300' : ''
+                                                            ].filter(Boolean).join(' ');
+                                                            return (
+                                                                <button
+                                                                    key={`status-match-export-day-${cell.dateKey}`}
+                                                                    type="button"
+                                                                    onClick={() => selectPlannerStatusMatchExportDate(cell.dateKey)}
+                                                                    disabled={plannerStatusMatchExportLoading}
+                                                                    className={dayClass}
+                                                                    title={formatDateRuShort(cell.dateKey)}
+                                                                >
+                                                                    {cell.date.getDate()}
+                                                                </button>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
                                     </div>
 
                                     <div className="grid grid-cols-3 gap-2">
-                                        <div className="rounded-2xl border border-slate-200 bg-white px-3 py-2 shadow-sm">
+                                        <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
                                             <div className="text-[11px] text-slate-400">Дней</div>
                                             <div className="mt-0.5 text-lg font-semibold tabular-nums">{dateCount || '-'}</div>
                                         </div>
-                                        <div className="rounded-2xl border border-slate-200 bg-white px-3 py-2 shadow-sm">
+                                        <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
                                             <div className="text-[11px] text-slate-400">Фильтры</div>
                                             <div className="mt-0.5 text-lg font-semibold tabular-nums">{activeFiltersCount || '-'}</div>
                                         </div>
-                                        <div className="rounded-2xl border border-slate-200 bg-white px-3 py-2 shadow-sm">
+                                        <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
                                             <div className="text-[11px] text-slate-400">Листы</div>
                                             <div className="mt-0.5 text-lg font-semibold">1 + группы</div>
                                         </div>
                                     </div>
 
                                     {plannerStatusMatchExportError && (
-                                        <div className="rounded-2xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+                                        <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
                                             {plannerStatusMatchExportError}
                                         </div>
                                     )}
                                 </div>
 
-                                <div className="px-5 py-4 bg-slate-50/80 border-t border-slate-200/70 flex items-center justify-end gap-2">
+                                <div className="px-5 py-4 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2">
                                     <button
                                         type="button"
                                         onClick={() => setShowPlannerStatusMatchExportModal(false)}
                                         disabled={plannerStatusMatchExportLoading}
-                                        className="h-10 px-4 rounded-full border border-slate-200 bg-white hover:bg-slate-50 text-sm font-semibold text-slate-700 disabled:opacity-60 disabled:cursor-not-allowed"
+                                        className="h-10 px-4 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 text-sm font-semibold text-slate-700 disabled:opacity-60 disabled:cursor-not-allowed"
                                     >
                                         Отмена
                                     </button>
@@ -22218,7 +22358,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         type="button"
                                         onClick={handlePlannerStatusMatchExport}
                                         disabled={plannerStatusMatchExportLoading || !normalizedRange || dateCount <= 0}
-                                        className="h-10 px-4 rounded-full bg-slate-950 hover:bg-slate-800 text-white text-sm font-semibold shadow-lg shadow-slate-900/15 disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-2"
+                                        className="h-10 px-4 rounded-lg bg-slate-800 hover:bg-slate-900 text-white text-sm font-semibold shadow-sm disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-2"
                                     >
                                         <FaIcon className={`fas ${plannerStatusMatchExportLoading ? 'fa-spinner fa-spin' : 'fa-download'} text-xs`}></FaIcon>
                                         {plannerStatusMatchExportLoading ? 'Выгрузка...' : 'Выгрузить'}
