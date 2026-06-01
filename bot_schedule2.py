@@ -27371,6 +27371,26 @@ if __name__ == '__main__':
         coalesce=True
     )
 
+    # Ретеншн сырых событий статусов: удаляем operator_status_events старше горизонта хранения
+    # (STATUS_EVENTS_RETENTION_DAYS, по умолчанию 120 дней). Сегменты (источник отчётов) не трогаем;
+    # на оператора сохраняется один «якорный» предшествующий event для корректной пересборки на границе.
+    async def purge_status_events_job():
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(executor_pool, db.purge_old_operator_status_events)
+            logging.info(f"purge_old_operator_status_events result: {result}")
+        except Exception as e:
+            logging.exception(f"Error running purge_status_events_job: {e}")
+
+    scheduler.add_job(
+        purge_status_events_job,
+        CronTrigger(hour=3, minute=30, timezone=ZoneInfo('Asia/Almaty')),
+        id='purge_status_events_daily',
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
+
     scheduler.start()
 
     # Стартовый прогон (не ждём первой минуты)
