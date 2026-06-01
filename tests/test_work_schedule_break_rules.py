@@ -240,6 +240,17 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
         self.assertEqual((start_min, end_min), (11 * 60, 23 * 60))
         self.assertEqual(merge_ids, [2, 1])
 
+    def test_post_auction_merge_preserves_overnight_tail_when_saving(self):
+        namespace = {}
+        exec(_function_source(DATABASE_PATH, "_minutes_to_time"), namespace)
+        minutes_to_time = namespace["_minutes_to_time"]
+
+        self.assertEqual(minutes_to_time(32 * 60), "08:00")
+        for method_name in ("post_auction_claim_lot", "post_auction_claim_saved_shift"):
+            source = _function_source(DATABASE_PATH, method_name, class_name="Database")
+            self.assertIn("_minutes_to_time(merged_end_min)", source)
+            self.assertNotIn("if merged_end_min < 24 * 60 else '00:00'", source)
+
     def test_post_auction_claim_rejects_overlap_with_existing_shift(self):
         namespace = {}
         exec(
