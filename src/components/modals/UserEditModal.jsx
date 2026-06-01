@@ -34,7 +34,8 @@ const KZ_PHONE_PLACEHOLDER = '+7XXXXXXXXXX';
 const PROXY_STATUS_OPTIONS = [
     { value: 'lost', label: 'Утерян' },
     { value: 'returned_to_hr', label: 'Сдан в HR' },
-    { value: 'not_received', label: 'Не получал' }
+    { value: 'not_received', label: 'Не получал' },
+    { value: 'on_hand', label: 'На руках' }
 ];
 const PROXY_STATUS_VALUES = new Set(PROXY_STATUS_OPTIONS.map((option) => option.value));
 
@@ -379,7 +380,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         defaults.close_contact_2_full_name = String(defaults.close_contact_2_full_name ?? '').trim();
         defaults.close_contact_2_phone = String(defaults.close_contact_2_phone ?? '').trim();
         defaults.company_name = String(defaults.company_name ?? '').trim();
-        defaults.employment_type = ['gph', 'of'].includes(String(defaults.employment_type || '').trim().toLowerCase())
+        defaults.employment_type = ['gph', 'of', 'smz'].includes(String(defaults.employment_type || '').trim().toLowerCase())
             ? String(defaults.employment_type || '').trim().toLowerCase()
             : "";
         defaults.internship_in_company = !!defaults.internship_in_company;
@@ -763,7 +764,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             close_contact_2_full_name: String(editedUser?.close_contact_2_full_name || '').trim(),
             close_contact_2_phone: String(editedUser?.close_contact_2_phone || '').trim(),
             company_name: String(editedUser?.company_name || '').trim(),
-            employment_type: ['gph', 'of'].includes(String(editedUser?.employment_type || '').trim().toLowerCase())
+            employment_type: ['gph', 'of', 'smz'].includes(String(editedUser?.employment_type || '').trim().toLowerCase())
                 ? String(editedUser?.employment_type || '').trim().toLowerCase()
                 : '',
             internship_in_company: !!editedUser?.internship_in_company,
@@ -1273,7 +1274,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </div>
 
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Оформлен ГПХ/ОФ</label>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Оформлен как</label>
                         <select
                         value={editedUser?.employment_type || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, employment_type: e.target.value })}
@@ -1283,6 +1284,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <option value="">Не указано</option>
                         <option value="gph">ГПХ</option>
                         <option value="of">ОФ</option>
+                        <option value="smz">СМЗ</option>
                         </select>
                     </div>
 
@@ -1909,7 +1911,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         </div>
 
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Оформлен ГПХ/ОФ</label>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Оформлен как</label>
                             <select
                             value={editedUser?.employment_type || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, employment_type: e.target.value })}
@@ -1919,6 +1921,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             <option value="">Не указано</option>
                             <option value="gph">ГПХ</option>
                             <option value="of">ОФ</option>
+                            <option value="smz">СМЗ</option>
                             </select>
                         </div>
 
