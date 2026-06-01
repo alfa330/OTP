@@ -12103,42 +12103,101 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     usedSheetNames.add(name.toLowerCase());
                     return name;
                 };
-                const cell = (value, type = 'String') => {
+                const cell = (value, type = 'String', styleId = '', attrs = '') => {
                     const numberValue = Number(value);
                     const cellType = type === 'Number' && Number.isFinite(numberValue) ? 'Number' : 'String';
                     const cellValue = cellType === 'Number' ? numberValue : value;
-                    return `<Cell><Data ss:Type="${cellType}">${escapeXml(cellValue)}</Data></Cell>`;
+                    const styleAttr = styleId ? ` ss:StyleID="${escapeXml(styleId)}"` : '';
+                    const extraAttrs = attrs ? ` ${attrs}` : '';
+                    return `<Cell${styleAttr}${extraAttrs}><Data ss:Type="${cellType}">${escapeXml(cellValue)}</Data></Cell>`;
                 };
-                const rowXml = (cells) => `<Row>${cells.join('')}</Row>`;
-                const numberCell = (value) => cell(Number.isFinite(Number(value)) ? Number(value) : '', Number.isFinite(Number(value)) ? 'Number' : 'String');
-                const percentCell = (value) => value == null ? cell('') : numberCell(value);
-                const hoursCell = (minutes) => numberCell(plannerStatusMatchHours(minutes));
+                const rowXml = (cells, styleId = '', attrs = '') => {
+                    const styleAttr = styleId ? ` ss:StyleID="${escapeXml(styleId)}"` : '';
+                    const extraAttrs = attrs ? ` ${attrs}` : '';
+                    return `<Row${styleAttr}${extraAttrs}>${cells.join('')}</Row>`;
+                };
+                const numberCell = (value, styleId = 'Number') => cell(Number.isFinite(Number(value)) ? Number(value) : '', Number.isFinite(Number(value)) ? 'Number' : 'String', styleId);
+                const percentStyle = (value) => {
+                    if (value == null || !Number.isFinite(Number(value))) return 'Muted';
+                    const numeric = Number(value);
+                    if (numeric >= 90) return 'PercentGood';
+                    if (numeric >= 70) return 'PercentMid';
+                    return 'PercentBad';
+                };
+                const percentCell = (value) => value == null ? cell('', 'String', 'Muted') : numberCell(value, percentStyle(value));
+                const hoursCell = (minutes) => numberCell(plannerStatusMatchHours(minutes), 'Hours');
+                const problemCell = (value) => {
+                    const numeric = Number(value || 0);
+                    return numberCell(Math.round(numeric), numeric > 0 ? 'Problem' : 'Number');
+                };
+                const textCell = (value, styleId = 'Text') => cell(value, 'String', styleId);
+                const headerCell = (value) => cell(value, 'String', 'Header');
+                const columnsXml = (widths = []) => widths.map(width => `<Column ss:Width="${Number(width) || 80}"/>`).join('');
+                const worksheetOptionsXml = (freezeRows = 0) => freezeRows > 0 ? `
+ <WorksheetOptions xmlns="urn:schemas-microsoft-com:office:excel">
+  <FreezePanes/>
+  <FrozenNoSplit/>
+  <SplitHorizontal>${freezeRows}</SplitHorizontal>
+  <TopRowBottomPane>${freezeRows}</TopRowBottomPane>
+  <ActivePane>2</ActivePane>
+ </WorksheetOptions>` : '';
+                const worksheetXml = (name, rows, widths, freezeRows = 0) => `
+ <Worksheet ss:Name="${escapeXml(uniqueSheetName(name, name))}">
+  <Table>
+   ${columnsXml(widths)}
+   ${rows.join('')}
+  </Table>
+  ${worksheetOptionsXml(freezeRows)}
+ </Worksheet>`;
+                const periodLabel = `${formatDateRuShort(report.range.start)} - ${formatDateRuShort(report.range.end)}`;
+                const summaryHeaders = [
+                    'Группа',
+                    'Операторов',
+                    'Дней со сменой',
+                    'План, ч',
+                    'Работа план, ч',
+                    'Перерыв план, ч',
+                    'Совпало, ч',
+                    'Совпадение, %',
+                    'Работа, %',
+                    'Перерыв, %',
+                    'Опоздание, мин',
+                    'Ранний уход, мин',
+                    'Переработка, мин',
+                    'Дней без статусов',
+                    'Факт без графика, дней'
+                ];
+                const operatorHeaders = [
+                    'Оператор',
+                    'СВ',
+                    'Ставка',
+                    'Дней со сменой',
+                    'Дней со статусами',
+                    'План, ч',
+                    'Работа план, ч',
+                    'Перерыв план, ч',
+                    'Совпало, ч',
+                    'Совпадение, %',
+                    'Работа, %',
+                    'Перерыв, %',
+                    'Опоздание, мин',
+                    'Ранний уход, мин',
+                    'Переработка, мин',
+                    'Дней без статусов',
+                    'Факт без графика, дней'
+                ];
+                const summaryColumnWidths = [175, 82, 112, 82, 105, 112, 92, 108, 92, 92, 110, 115, 118, 125, 145];
+                const operatorColumnWidths = [210, 150, 72, 112, 122, 82, 105, 112, 92, 108, 92, 92, 110, 115, 118, 125, 145];
 
                 const summaryRows = [];
-                summaryRows.push(rowXml([cell('Период'), cell(`${formatDateRuShort(report.range.start)} - ${formatDateRuShort(report.range.end)}`)]));
-                summaryRows.push(rowXml([cell('Дней'), numberCell(report.dateKeys.length)]));
-                summaryRows.push(rowXml([cell('Операторов в отчете'), numberCell(report.totalOperatorRows)]));
-                summaryRows.push(rowXml([cell('')]));
-                summaryRows.push(rowXml([
-                    cell('Группа'),
-                    cell('Операторов'),
-                    cell('Дней со сменой'),
-                    cell('План, ч'),
-                    cell('Работа план, ч'),
-                    cell('Перерыв план, ч'),
-                    cell('Совпало, ч'),
-                    cell('Совпадение, %'),
-                    cell('Работа, %'),
-                    cell('Перерыв, %'),
-                    cell('Опоздание, мин'),
-                    cell('Ранний уход, мин'),
-                    cell('Переработка, мин'),
-                    cell('Дней без статусов'),
-                    cell('Факт без графика, дней')
-                ]));
+                summaryRows.push(rowXml([cell('Отчет соответствия статусов графику', 'String', 'Title', 'ss:MergeAcross="14"')], '', 'ss:Height="28"'));
+                summaryRows.push(rowXml([textCell('Период', 'MetaLabel'), cell(periodLabel, 'String', 'MetaValue', 'ss:MergeAcross="3"'), textCell('Дней', 'MetaLabel'), numberCell(report.dateKeys.length, 'MetaValueNumber'), textCell('Операторов', 'MetaLabel'), numberCell(report.totalOperatorRows, 'MetaValueNumber')]));
+                summaryRows.push(rowXml([cell('Проценты считаются по минутам: совпавшие плановые минуты / плановые минуты.', 'String', 'Muted', 'ss:MergeAcross="14"')]));
+                summaryRows.push(rowXml([cell('', 'String', 'Blank')]));
+                summaryRows.push(rowXml(summaryHeaders.map(headerCell), 'HeaderRow'));
                 report.groupRows.forEach(group => {
                     summaryRows.push(rowXml([
-                        cell(group.groupName),
+                        textCell(group.groupName, 'TextStrong'),
                         numberCell(group.operatorCount),
                         numberCell(group.totals.scheduledDays),
                         hoursCell(group.totals.totalScheduledMin),
@@ -12148,46 +12207,38 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         percentCell(group.compliancePct),
                         percentCell(group.workCompliancePct),
                         percentCell(group.breakCompliancePct),
-                        numberCell(Math.round(group.totals.lateTotalMin || 0)),
-                        numberCell(Math.round(group.totals.earlyLeaveTotalMin || 0)),
-                        numberCell(Math.round(group.totals.workOutsideShiftMin || 0)),
-                        numberCell(group.totals.missingStatusDays),
-                        numberCell(group.totals.noScheduleWorkDays)
+                        problemCell(group.totals.lateTotalMin),
+                        problemCell(group.totals.earlyLeaveTotalMin),
+                        problemCell(group.totals.workOutsideShiftMin),
+                        problemCell(group.totals.missingStatusDays),
+                        problemCell(group.totals.noScheduleWorkDays)
                     ]));
                 });
 
                 const worksheets = [
-                    `<Worksheet ss:Name="${escapeXml(uniqueSheetName('Общее', 'Общее'))}"><Table>${summaryRows.join('')}</Table></Worksheet>`
+                    worksheetXml('Общее', summaryRows, summaryColumnWidths, 5)
                 ];
-                report.groupRows.forEach((group, groupIdx) => {
+                report.groupRows.forEach((group) => {
                     const rows = [];
-                    rows.push(rowXml([cell('Группа'), cell(group.groupName)]));
-                    rows.push(rowXml([cell('Период'), cell(`${formatDateRuShort(report.range.start)} - ${formatDateRuShort(report.range.end)}`)]));
-                    rows.push(rowXml([cell('')]));
+                    rows.push(rowXml([cell(group.groupName, 'String', 'Title', 'ss:MergeAcross="16"')], '', 'ss:Height="28"'));
+                    rows.push(rowXml([textCell('Период', 'MetaLabel'), cell(periodLabel, 'String', 'MetaValue', 'ss:MergeAcross="3"'), textCell('Операторов', 'MetaLabel'), numberCell(group.operatorCount, 'MetaValueNumber'), textCell('Совпадение', 'MetaLabel'), percentCell(group.compliancePct)]));
                     rows.push(rowXml([
-                        cell('Оператор'),
-                        cell('СВ'),
-                        cell('Ставка'),
-                        cell('Дней со сменой'),
-                        cell('Дней со статусами'),
-                        cell('План, ч'),
-                        cell('Работа план, ч'),
-                        cell('Перерыв план, ч'),
-                        cell('Совпало, ч'),
-                        cell('Совпадение, %'),
-                        cell('Работа, %'),
-                        cell('Перерыв, %'),
-                        cell('Опоздание, мин'),
-                        cell('Ранний уход, мин'),
-                        cell('Переработка, мин'),
-                        cell('Дней без статусов'),
-                        cell('Факт без графика, дней')
+                        textCell('План, ч', 'MetaLabel'),
+                        hoursCell(group.totals.totalScheduledMin),
+                        textCell('Совпало, ч', 'MetaLabel'),
+                        hoursCell(group.totals.matchedTotalMin),
+                        textCell('Опоздание, мин', 'MetaLabel'),
+                        problemCell(group.totals.lateTotalMin),
+                        textCell('Ранний уход, мин', 'MetaLabel'),
+                        problemCell(group.totals.earlyLeaveTotalMin)
                     ]));
+                    rows.push(rowXml([cell('', 'String', 'Blank')]));
+                    rows.push(rowXml(operatorHeaders.map(headerCell), 'HeaderRow'));
                     group.operatorRows.forEach(row => {
                         rows.push(rowXml([
-                            cell(row.operatorName),
-                            cell(row.supervisorName),
-                            cell(row.rate),
+                            textCell(row.operatorName, 'TextStrong'),
+                            textCell(row.supervisorName),
+                            textCell(row.rate),
                             numberCell(row.scheduledDays),
                             numberCell(row.statusDays),
                             hoursCell(row.totalScheduledMin),
@@ -12197,14 +12248,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             percentCell(row.compliancePct),
                             percentCell(row.workCompliancePct),
                             percentCell(row.breakCompliancePct),
-                            numberCell(Math.round(row.lateTotalMin || 0)),
-                            numberCell(Math.round(row.earlyLeaveTotalMin || 0)),
-                            numberCell(Math.round(row.workOutsideShiftMin || 0)),
-                            numberCell(row.missingStatusDays),
-                            numberCell(row.noScheduleWorkDays)
+                            problemCell(row.lateTotalMin),
+                            problemCell(row.earlyLeaveTotalMin),
+                            problemCell(row.workOutsideShiftMin),
+                            problemCell(row.missingStatusDays),
+                            problemCell(row.noScheduleWorkDays)
                         ]));
                     });
-                    worksheets.push(`<Worksheet ss:Name="${escapeXml(uniqueSheetName(group.groupName, `Группа ${groupIdx + 1}`))}"><Table>${rows.join('')}</Table></Worksheet>`);
+                    worksheets.push(worksheetXml(group.groupName, rows, operatorColumnWidths, 5));
                 });
 
                 const workbookXml = `<?xml version="1.0"?>
@@ -12214,6 +12265,97 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
  xmlns:x="urn:schemas-microsoft-com:office:excel"
  xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"
  xmlns:html="http://www.w3.org/TR/REC-html40">
+ <Styles>
+  <Style ss:ID="Default" ss:Name="Normal">
+   <Alignment ss:Vertical="Center"/>
+   <Font ss:FontName="Calibri" ss:Size="11" ss:Color="#0F172A"/>
+  </Style>
+  <Style ss:ID="Title">
+   <Alignment ss:Vertical="Center"/>
+   <Font ss:FontName="Calibri" ss:Size="16" ss:Bold="1" ss:Color="#0F172A"/>
+   <Interior ss:Color="#E2E8F0" ss:Pattern="Solid"/>
+   <Borders><Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#CBD5E1"/></Borders>
+  </Style>
+  <Style ss:ID="Header">
+   <Alignment ss:Horizontal="Center" ss:Vertical="Center" ss:WrapText="1"/>
+   <Font ss:FontName="Calibri" ss:Size="10" ss:Bold="1" ss:Color="#FFFFFF"/>
+   <Interior ss:Color="#334155" ss:Pattern="Solid"/>
+   <Borders>
+    <Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#1E293B"/>
+    <Border ss:Position="Left" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#475569"/>
+    <Border ss:Position="Right" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#475569"/>
+   </Borders>
+  </Style>
+  <Style ss:ID="HeaderRow">
+   <Alignment ss:Vertical="Center"/>
+  </Style>
+  <Style ss:ID="Text">
+   <Alignment ss:Vertical="Center" ss:WrapText="1"/>
+   <Borders><Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#E2E8F0"/></Borders>
+  </Style>
+  <Style ss:ID="TextStrong">
+   <Alignment ss:Vertical="Center" ss:WrapText="1"/>
+   <Font ss:FontName="Calibri" ss:Size="11" ss:Bold="1" ss:Color="#0F172A"/>
+   <Borders><Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#E2E8F0"/></Borders>
+  </Style>
+  <Style ss:ID="Number">
+   <Alignment ss:Horizontal="Right" ss:Vertical="Center"/>
+   <NumberFormat ss:Format="#,##0"/>
+   <Borders><Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#E2E8F0"/></Borders>
+  </Style>
+  <Style ss:ID="Hours">
+   <Alignment ss:Horizontal="Right" ss:Vertical="Center"/>
+   <NumberFormat ss:Format="#,##0.00"/>
+   <Borders><Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#E2E8F0"/></Borders>
+  </Style>
+  <Style ss:ID="PercentGood">
+   <Alignment ss:Horizontal="Right" ss:Vertical="Center"/>
+   <Font ss:FontName="Calibri" ss:Size="11" ss:Bold="1" ss:Color="#166534"/>
+   <Interior ss:Color="#DCFCE7" ss:Pattern="Solid"/>
+   <NumberFormat ss:Format="0.0"/>
+   <Borders><Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#BBF7D0"/></Borders>
+  </Style>
+  <Style ss:ID="PercentMid">
+   <Alignment ss:Horizontal="Right" ss:Vertical="Center"/>
+   <Font ss:FontName="Calibri" ss:Size="11" ss:Bold="1" ss:Color="#92400E"/>
+   <Interior ss:Color="#FEF3C7" ss:Pattern="Solid"/>
+   <NumberFormat ss:Format="0.0"/>
+   <Borders><Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#FDE68A"/></Borders>
+  </Style>
+  <Style ss:ID="PercentBad">
+   <Alignment ss:Horizontal="Right" ss:Vertical="Center"/>
+   <Font ss:FontName="Calibri" ss:Size="11" ss:Bold="1" ss:Color="#991B1B"/>
+   <Interior ss:Color="#FEE2E2" ss:Pattern="Solid"/>
+   <NumberFormat ss:Format="0.0"/>
+   <Borders><Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#FECACA"/></Borders>
+  </Style>
+  <Style ss:ID="Problem">
+   <Alignment ss:Horizontal="Right" ss:Vertical="Center"/>
+   <Font ss:FontName="Calibri" ss:Size="11" ss:Bold="1" ss:Color="#B91C1C"/>
+   <Interior ss:Color="#FEF2F2" ss:Pattern="Solid"/>
+   <NumberFormat ss:Format="#,##0"/>
+   <Borders><Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#FECACA"/></Borders>
+  </Style>
+  <Style ss:ID="MetaLabel">
+   <Alignment ss:Horizontal="Right" ss:Vertical="Center"/>
+   <Font ss:FontName="Calibri" ss:Size="10" ss:Bold="1" ss:Color="#475569"/>
+   <Interior ss:Color="#F8FAFC" ss:Pattern="Solid"/>
+  </Style>
+  <Style ss:ID="MetaValue">
+   <Alignment ss:Vertical="Center"/>
+   <Font ss:FontName="Calibri" ss:Size="11" ss:Bold="1" ss:Color="#0F172A"/>
+  </Style>
+  <Style ss:ID="MetaValueNumber">
+   <Alignment ss:Horizontal="Right" ss:Vertical="Center"/>
+   <Font ss:FontName="Calibri" ss:Size="11" ss:Bold="1" ss:Color="#0F172A"/>
+   <NumberFormat ss:Format="#,##0"/>
+  </Style>
+  <Style ss:ID="Muted">
+   <Alignment ss:Vertical="Center" ss:WrapText="1"/>
+   <Font ss:FontName="Calibri" ss:Size="10" ss:Color="#64748B"/>
+  </Style>
+  <Style ss:ID="Blank"/>
+ </Styles>
  ${worksheets.join('')}
 </Workbook>`;
                 const blob = new Blob([workbookXml], { type: 'application/vnd.ms-excel;charset=utf-8;' });
