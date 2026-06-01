@@ -67,6 +67,11 @@ POOL = None
 POOL_LOCK = threading.Lock()
 POOL_SEMAPHORE = None
 STATUS_IMPORT_INSERT_PAGE_SIZE = max(200, int(os.getenv('STATUS_IMPORT_INSERT_PAGE_SIZE', '2000')))
+# Retention horizon for raw operator_status_events. They are only a rebuild source for
+# operator_status_segments (the durable report data, which is never purged). The daily purge
+# (purge_old_operator_status_events) drops events older than this, and segment rebuilds are
+# clamped to this floor so they never depend on already-purged events. Minimum 30d guard rail.
+STATUS_EVENTS_RETENTION_DAYS = _env_int('STATUS_EVENTS_RETENTION_DAYS', 120, minimum=30)
 SHIFT_AUCTION_TEST_EVENT_NOTIFY_CHANNEL = 'shift_auction_test_events'
 SHIFT_AUCTION_SNAPSHOT_CACHE_TTL_SECONDS = _env_float('SHIFT_AUCTION_SNAPSHOT_CACHE_TTL_SECONDS', 1.5, minimum=0)
 SHIFT_AUCTION_PARTICIPANT_CACHE_TTL_SECONDS = _env_float('SHIFT_AUCTION_PARTICIPANT_CACHE_TTL_SECONDS', 2, minimum=0)
@@ -1341,25 +1346,20 @@ class Database:
                 ON operator_status_events(operator_id, event_date);
             """)
             cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_operator_status_events_imported_by
-                ON operator_status_events(imported_by);
-            """)
-            cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_operator_status_segments_operator_date
                 ON operator_status_segments(operator_id, status_date);
             """)
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_operator_status_segments_operator_start
-                ON operator_status_segments(operator_id, start_at);
-            """)
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_operator_status_segments_status_key
-                ON operator_status_segments(status_key);
-            """)
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_operator_status_segments_imported_by
-                ON operator_status_segments(imported_by);
-            """)
+            # NOTE: indexes idx_operator_status_events_imported_by,
+            # idx_operator_status_segments_imported_by, idx_operator_status_segments_status_key
+            # and idx_operator_status_segments_operator_start were intentionally removed:
+            # no query filters/sorts on imported_by / status_key / start_at (start_at is only a
+            # secondary ORDER BY key served by idx_..._operator_date). Do not re-add without a
+            # query that actually uses them — they were pure dead weight (~78 MB combined).
+            # Proactively drop them if an older deployment recreated them:
+            cursor.execute("DROP INDEX IF EXISTS idx_operator_status_events_imported_by;")
+            cursor.execute("DROP INDEX IF EXISTS idx_operator_status_segments_imported_by;")
+            cursor.execute("DROP INDEX IF EXISTS idx_operator_status_segments_status_key;")
+            cursor.execute("DROP INDEX IF EXISTS idx_operator_status_segments_operator_start;")
 
             # AI feedback cache table
             cursor.execute("""
@@ -17062,6 +17062,21 @@ class Database:
         if end_date_obj < start_date_obj:
             start_date_obj, end_date_obj = end_date_obj, start_date_obj
 
+        # Retention barrier: raw events older than STATUS_EVENTS_RETENTION_DAYS are removed by the
+        # daily purge, so never try to rebuild from a window whose source events may already be gone.
+        # Segments below the floor stay as-is — they are the durable report source, not re-derived.
+        retention_floor = datetime.now().date() - timedelta(days=STATUS_EVENTS_RETENTION_DAYS)
+        if end_date_obj < retention_floor:
+            return {
+                'segments_saved': 0,
+                'deleted_segments': 0,
+                'range_start': start_date_obj.strftime('%Y-%m-%d'),
+                'range_end': end_date_obj.strftime('%Y-%m-%d'),
+                'skipped_below_retention': True
+            }
+        if start_date_obj < retention_floor:
+            start_date_obj = retention_floor
+
         window_start = datetime.combine(start_date_obj, dt_time.min)
         window_end = datetime.combine(end_date_obj + timedelta(days=1), dt_time.min)
         imported_by_id = int(imported_by) if imported_by is not None else None
@@ -17226,6 +17241,91 @@ class Database:
             'deleted_segments': int(deleted_segments),
             'range_start': start_date_obj.strftime('%Y-%m-%d'),
             'range_end': end_date_obj.strftime('%Y-%m-%d')
+        }
+
+    def purge_old_operator_status_events(self, retention_days=None, batch_size=20000, max_batches=2000):
+        """
+        Delete raw operator_status_events older than the retention horizon so the table does not
+        grow without bound. Raw events are only a rebuild source for operator_status_segments (the
+        durable report data, which is NOT purged here).
+
+        Safety design:
+        - Per operator we KEEP the single most recent pre-floor event that the rebuild could
+          actually carry into a window. The anchor subquery therefore uses the SAME candidate
+          filter as _rebuild_operator_status_segments_tx (exclude 'action' events and the
+          CHAT_MANAGER_ACTION_STATUS_KEYS), so we never delete the status event that
+          `previous_events` needs while keeping a useless 'action' row instead.
+        - The purge floor is never more aggressive than the rebuild barrier
+          (days >= STATUS_EVENTS_RETENTION_DAYS), so we cannot delete an event a clamped rebuild
+          at the barrier floor still requires.
+        - Deletes are batched and bounded by lock_timeout so the job never blocks the INSERT-heavy
+          import path indefinitely and never holds ~hundreds-of-thousands of row locks at once.
+        """
+        try:
+            days = int(retention_days) if retention_days is not None else STATUS_EVENTS_RETENTION_DAYS
+        except Exception:
+            days = STATUS_EVENTS_RETENTION_DAYS
+        # Never purge more aggressively than the rebuild barrier clamps to (and never below 30d).
+        days = max(int(days), int(STATUS_EVENTS_RETENTION_DAYS), 30)
+        floor_date = datetime.now().date() - timedelta(days=days)
+
+        action_status_keys = sorted({
+            self._normalize_import_status_key(item)
+            for item in CHAT_MANAGER_ACTION_STATUS_KEYS
+            if self._normalize_import_status_key(item)
+        })
+
+        total_deleted = 0
+        stopped_early = False
+        for _ in range(int(max_batches)):
+            try:
+                with self._get_cursor() as cursor:
+                    cursor.execute("SET LOCAL lock_timeout = '5s'")
+                    cursor.execute("SET LOCAL statement_timeout = '120s'")
+                    cursor.execute(
+                        """
+                        WITH keep AS (
+                            SELECT operator_id, max(event_at) AS anchor_at
+                            FROM operator_status_events
+                            WHERE event_date < %(floor)s
+                              AND COALESCE(event_kind, 'status') <> 'action'
+                              AND NOT (LOWER(TRIM(status_key)) = ANY(%(keys)s))
+                            GROUP BY operator_id
+                        ),
+                        victims AS (
+                            SELECT e.ctid
+                            FROM operator_status_events e
+                            JOIN keep ON keep.operator_id = e.operator_id
+                            WHERE e.event_date < %(floor)s
+                              AND e.event_at < keep.anchor_at
+                            LIMIT %(batch)s
+                        )
+                        DELETE FROM operator_status_events e
+                        USING victims v
+                        WHERE e.ctid = v.ctid
+                        """,
+                        {'floor': floor_date, 'keys': action_status_keys, 'batch': int(batch_size)}
+                    )
+                    n = max(0, int(cursor.rowcount or 0))
+            except Exception as exc:
+                # lock_timeout / deadlock / statement_timeout: commit progress so far, retry tonight.
+                logging.warning("purge_old_operator_status_events: batch aborted (%s); stopping early", exc)
+                stopped_early = True
+                break
+            total_deleted += n
+            if n < int(batch_size):
+                break
+
+        logging.info(
+            "purge_old_operator_status_events: deleted %s raw events older than %s (retention=%sd)%s",
+            total_deleted, floor_date.strftime('%Y-%m-%d'), days,
+            " [stopped early]" if stopped_early else ""
+        )
+        return {
+            'deleted_events': total_deleted,
+            'floor_date': floor_date.strftime('%Y-%m-%d'),
+            'retention_days': days,
+            'stopped_early': stopped_early
         }
 
     def _status_label_from_key(self, status_key_value, fallback_name=None):
