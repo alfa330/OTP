@@ -5007,7 +5007,7 @@ def admin_update_user():
         elif field == 'employment_type':
             value = str(value).strip().lower() if value is not None else ''
             value = value or None
-            if value not in [None, 'gph', 'of']:
+            if value not in [None, 'gph', 'of', 'smz']:
                 return jsonify({"error": "Invalid employment_type value"}), 400
         elif field in ['has_proxy', 'has_driver_license', 'internship_in_company', 'front_office_training', 'study_completed']:
             if isinstance(value, bool):
@@ -9063,7 +9063,7 @@ def add_user():
             front_office_training_date = None
 
         employment_type = str(data.get('employment_type') or '').strip().lower() or None
-        if employment_type not in [None, 'gph', 'of']:
+        if employment_type not in [None, 'gph', 'of', 'smz']:
             return jsonify({"error": "Invalid employment_type value"}), 400
 
         study_completed_raw = data.get('study_completed')

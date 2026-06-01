@@ -75,11 +75,12 @@ SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE_LOCK = threading.Lock()
 SHIFT_AUCTION_PARTICIPANT_CACHE = {"expires_at": 0.0, "ids": frozenset()}
 SHIFT_AUCTION_PARTICIPANT_CACHE_LOCK = threading.Lock()
 
-PROXY_STATUS_VALUES = ('lost', 'returned_to_hr', 'not_received')
+PROXY_STATUS_VALUES = ('lost', 'returned_to_hr', 'not_received', 'on_hand')
 PROXY_STATUS_LABELS = {
     'lost': 'Утерян',
     'returned_to_hr': 'Сдан в HR',
     'not_received': 'Не получал',
+    'on_hand': 'На руках',
 }
 
 
@@ -100,6 +101,9 @@ def normalize_proxy_status_value(value):
         'не получил': 'not_received',
         'not_received': 'not_received',
         'not received': 'not_received',
+        'на руках': 'on_hand',
+        'on_hand': 'on_hand',
+        'on hand': 'on_hand',
     }
     normalized = aliases.get(normalized, normalized)
     if normalized not in PROXY_STATUS_VALUES:
@@ -669,10 +673,10 @@ class Database:
                     instagram VARCHAR(255),
                     telegram_nick VARCHAR(255),
                     company_name VARCHAR(255),
-                    employment_type VARCHAR(10) CHECK (employment_type IN ('gph', 'of') OR employment_type IS NULL),
+                    employment_type VARCHAR(10) CHECK (employment_type IN ('gph', 'of', 'smz') OR employment_type IS NULL),
                     has_proxy BOOLEAN NOT NULL DEFAULT FALSE,
                     proxy_card_number VARCHAR(64),
-                    proxy_status VARCHAR(20) CHECK (proxy_status IN ('lost', 'returned_to_hr', 'not_received') OR proxy_status IS NULL),
+                    proxy_status VARCHAR(20) CHECK (proxy_status IN ('lost', 'returned_to_hr', 'not_received', 'on_hand') OR proxy_status IS NULL),
                     has_driver_license BOOLEAN NOT NULL DEFAULT FALSE,
                     sip_number VARCHAR(64),
                     study_place VARCHAR(255),
@@ -696,8 +700,22 @@ class Database:
             """)
             cursor.execute("""
                 ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS employment_type VARCHAR(10);
+            """)
+            cursor.execute("""
+                ALTER TABLE users
                 ADD COLUMN IF NOT EXISTS proxy_status VARCHAR(20)
-                CHECK (proxy_status IN ('lost', 'returned_to_hr', 'not_received') OR proxy_status IS NULL);
+                CHECK (proxy_status IN ('lost', 'returned_to_hr', 'not_received', 'on_hand') OR proxy_status IS NULL);
+            """)
+            cursor.execute("""
+                ALTER TABLE users
+                DROP CONSTRAINT IF EXISTS users_employment_type_check,
+                DROP CONSTRAINT IF EXISTS users_proxy_status_check;
+                ALTER TABLE users
+                ADD CONSTRAINT users_employment_type_check
+                    CHECK (employment_type IN ('gph', 'of', 'smz') OR employment_type IS NULL),
+                ADD CONSTRAINT users_proxy_status_check
+                    CHECK (proxy_status IN ('lost', 'returned_to_hr', 'not_received', 'on_hand') OR proxy_status IS NULL);
             """)
             cursor.execute("""
                 ALTER TABLE users
@@ -2214,7 +2232,7 @@ class Database:
                     sip_number VARCHAR(64),
                     has_proxy BOOLEAN NOT NULL DEFAULT FALSE,
                     proxy_card_number VARCHAR(64),
-                    proxy_status VARCHAR(20) CHECK (proxy_status IN ('lost', 'returned_to_hr', 'not_received') OR proxy_status IS NULL),
+                    proxy_status VARCHAR(20) CHECK (proxy_status IN ('lost', 'returned_to_hr', 'not_received', 'on_hand') OR proxy_status IS NULL),
                     has_driver_license BOOLEAN NOT NULL DEFAULT FALSE,
                     internship_in_company BOOLEAN NOT NULL DEFAULT FALSE,
                     front_office_training BOOLEAN NOT NULL DEFAULT FALSE,
@@ -2223,7 +2241,12 @@ class Database:
                 );
                 ALTER TABLE operator_profiles
                 ADD COLUMN IF NOT EXISTS proxy_status VARCHAR(20)
-                CHECK (proxy_status IN ('lost', 'returned_to_hr', 'not_received') OR proxy_status IS NULL);
+                CHECK (proxy_status IN ('lost', 'returned_to_hr', 'not_received', 'on_hand') OR proxy_status IS NULL);
+                ALTER TABLE operator_profiles
+                DROP CONSTRAINT IF EXISTS operator_profiles_proxy_status_check;
+                ALTER TABLE operator_profiles
+                ADD CONSTRAINT operator_profiles_proxy_status_check
+                    CHECK (proxy_status IN ('lost', 'returned_to_hr', 'not_received', 'on_hand') OR proxy_status IS NULL);
 
                 -- User HR profiles (кадровые данные)
                 CREATE TABLE IF NOT EXISTS user_hr_profiles (
@@ -2235,7 +2258,7 @@ class Database:
                     instagram VARCHAR(255),
                     telegram_nick VARCHAR(255),
                     company_name VARCHAR(255),
-                    employment_type VARCHAR(10) CHECK (employment_type IN ('gph', 'of') OR employment_type IS NULL),
+                    employment_type VARCHAR(10) CHECK (employment_type IN ('gph', 'of', 'smz') OR employment_type IS NULL),
                     study_place VARCHAR(255),
                     study_course VARCHAR(100),
                     study_completed BOOLEAN NOT NULL DEFAULT FALSE,
@@ -2249,7 +2272,14 @@ class Database:
                     card_number VARCHAR(64)
                 );
                 ALTER TABLE user_hr_profiles
+                ADD COLUMN IF NOT EXISTS employment_type VARCHAR(10);
+                ALTER TABLE user_hr_profiles
                 ADD COLUMN IF NOT EXISTS personal_email VARCHAR(255);
+                ALTER TABLE user_hr_profiles
+                DROP CONSTRAINT IF EXISTS user_hr_profiles_employment_type_check;
+                ALTER TABLE user_hr_profiles
+                ADD CONSTRAINT user_hr_profiles_employment_type_check
+                    CHECK (employment_type IN ('gph', 'of', 'smz') OR employment_type IS NULL);
 
                 -- Admin profiles
                 CREATE TABLE IF NOT EXISTS admin_profiles (
@@ -2538,7 +2568,7 @@ class Database:
         close_contact_2_phone = close_contact_2_phone or None
         card_number = card_number or None
         taxipro_id = taxipro_id or None
-        if employment_type not in (None, 'gph', 'of'):
+        if employment_type not in (None, 'gph', 'of', 'smz'):
             raise ValueError("Invalid employment_type")
         has_proxy_value = None if has_proxy is None else bool(has_proxy)
         if not has_proxy_value:
@@ -12365,6 +12395,11 @@ class Database:
                 value = False if field == 'has_proxy' else None
             if field == 'proxy_status':
                 value = normalize_proxy_status_value(value)
+            if field == 'employment_type':
+                value = str(value).strip().lower() if value is not None else ''
+                value = value or None
+                if value not in (None, 'gph', 'of', 'smz'):
+                    raise ValueError("Invalid employment_type")
             old_value = str(old_field_value) if old_field_value is not None else None
 
             # When an operator is manually returned from dismissal via "Employees",
@@ -14778,6 +14813,8 @@ class Database:
                     return 'ГПХ'
                 if normalized == 'of':
                     return 'ОФ'
+                if normalized == 'smz':
+                    return 'СМЗ'
                 return ''
 
             def _format_gender(value):
@@ -14828,7 +14865,7 @@ class Database:
                 "Курс",
                 "Номер карты",
                 "Наименование ТОО/ИП",
-                "Оформлен ГПХ/ОФ",
+                "Оформлен как",
                 "Практика в компании",
                 "Обучение во фронт офисе",
                 "Дата обучения во фронт офисе",

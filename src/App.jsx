@@ -22,7 +22,8 @@ const PINNED_TASK_STORAGE_KEY_PREFIX = 'otp_pinned_task';
 const PROXY_STATUS_LABELS = {
     lost: 'Утерян',
     returned_to_hr: 'Сдан в HR',
-    not_received: 'Не получал'
+    not_received: 'Не получал',
+    on_hand: 'На руках'
 };
 const PROXY_STATUS_VALUES = new Set(Object.keys(PROXY_STATUS_LABELS));
 const normalizeProxyStatusForApi = (value) => {
@@ -23825,6 +23826,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     directionRows
                                 };
                             });
+                        const rowTotals = rows.reduce((acc, row) => {
+                            acc.forecastFte += Number(row?.forecastFte || 0);
+                            acc.forecastCalls += Number(row?.forecastCalls || 0);
+                            acc.plannedCount += Number(row?.plannedCount || 0);
+                            acc.actualCount += Number(row?.actualCount || 0);
+                            acc.delta += Number(row?.delta || 0);
+                            return acc;
+                        }, {
+                            forecastFte: 0,
+                            forecastCalls: 0,
+                            plannedCount: 0,
+                            actualCount: 0,
+                            delta: 0
+                        });
+                        const isForecastLoadingForEffectiveDay = plannerStatusGroupingForecastState.loading
+                            && plannerStatusGroupingForecastState.dateKey === effectiveDayKey;
                         const expandedParts = String(plannerStatusHourlyExpandedKey || '').split('|');
                         const expandedDateKey = String(expandedParts[0] || '');
                         const expandedHour = Number(expandedParts[1]);
@@ -23868,6 +23885,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     cell(Number(r.delta || 0), 'Number')
                                 ]));
                             });
+                            summaryRowsXml.push(rowXml([
+                                cell('Итого'),
+                                cell(Number(rowTotals.forecastFte || 0), 'Number'),
+                                cell(Number(rowTotals.plannedCount || 0), 'Number'),
+                                cell(Number(rowTotals.actualCount || 0), 'Number'),
+                                cell(Number(rowTotals.delta || 0), 'Number')
+                            ]));
 
                             const detailsRowsXml = [];
                             detailsRowsXml.push(rowXml([
@@ -24079,7 +24103,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 <tr key={`group-row-${row.hour}`} className="border-b last:border-b-0">
                                                                     <td className="px-3 py-2 font-medium text-slate-800 tabular-nums">{row.hourLabel}</td>
                                                                     <td className="px-3 py-2 text-right tabular-nums text-blue-700 font-semibold" title={`Прогноз звонков: ${Number(row.forecastCalls || 0).toFixed(0)}`}>
-                                                                        {plannerStatusGroupingForecastState.loading && plannerStatusGroupingForecastState.dateKey === effectiveDayKey ? '...' : Number(row.forecastFte || 0).toFixed(2)}
+                                                                        {isForecastLoadingForEffectiveDay ? '...' : Number(row.forecastFte || 0).toFixed(2)}
                                                                     </td>
                                                                     <td className="px-3 py-2 text-right">
                                                                         <button
@@ -24106,6 +24130,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             );
                                                         })}
                                                     </tbody>
+                                                    <tfoot className="bg-slate-100 border-t border-slate-200 text-sm">
+                                                        <tr>
+                                                            <td className="px-3 py-2 font-bold text-slate-900">Итого</td>
+                                                            <td className="px-3 py-2 text-right tabular-nums text-blue-800 font-bold" title={`Прогноз звонков: ${Number(rowTotals.forecastCalls || 0).toFixed(0)}`}>
+                                                                {isForecastLoadingForEffectiveDay ? '...' : Number(rowTotals.forecastFte || 0).toFixed(2)}
+                                                            </td>
+                                                            <td className="px-3 py-2 text-right tabular-nums font-bold text-slate-900">{rowTotals.plannedCount}</td>
+                                                            <td className="px-3 py-2 text-right tabular-nums font-bold text-slate-900">{rowTotals.actualCount}</td>
+                                                            <td className={`px-3 py-2 text-right tabular-nums font-bold ${rowTotals.delta < 0 ? 'text-rose-700' : rowTotals.delta > 0 ? 'text-emerald-700' : 'text-slate-600'}`}>
+                                                                {rowTotals.delta > 0 ? `+${rowTotals.delta}` : rowTotals.delta}
+                                                            </td>
+                                                        </tr>
+                                                    </tfoot>
                                                 </table>
                                             </div>
 
@@ -24120,7 +24157,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-800 flex flex-wrap items-center justify-between gap-2">
                                                             <span>{selectedRow.hourLabel} • {expandedScope === 'planned' ? 'План' : 'Факт'}</span>
                                                             <span className="text-blue-700 tabular-nums">
-                                                                Прогноз: {plannerStatusGroupingForecastState.loading && plannerStatusGroupingForecastState.dateKey === effectiveDayKey ? '...' : Number(selectedRow.forecastFte || 0).toFixed(2)}
+                                                                Прогноз: {isForecastLoadingForEffectiveDay ? '...' : Number(selectedRow.forecastFte || 0).toFixed(2)}
                                                             </span>
                                                         </div>
                                                         <div className="rounded-lg border border-slate-200 bg-white overflow-x-auto">
@@ -24141,7 +24178,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     <tr className="border-b bg-blue-50/60">
                                                                         <td className="px-3 py-1.5 font-semibold text-blue-900">Итого</td>
                                                                         <td className="px-3 py-1.5 text-right tabular-nums font-semibold text-blue-700" title={`Прогноз звонков: ${Number(selectedRow.forecastCalls || 0).toFixed(0)}`}>
-                                                                            {plannerStatusGroupingForecastState.loading && plannerStatusGroupingForecastState.dateKey === effectiveDayKey ? '...' : Number(selectedRow.forecastFte || 0).toFixed(2)}
+                                                                            {isForecastLoadingForEffectiveDay ? '...' : Number(selectedRow.forecastFte || 0).toFixed(2)}
                                                                         </td>
                                                                         <td className="px-3 py-1.5 text-right tabular-nums font-semibold text-slate-800">{selectedRow.plannedCount}</td>
                                                                         <td className="px-3 py-1.5 text-right tabular-nums font-semibold text-slate-800">{selectedRow.actualCount}</td>
@@ -28872,6 +28909,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (!normalized) return '-';
                 if (normalized === 'gph') return 'ГПХ';
                 if (normalized === 'of') return 'ОФ';
+                if (normalized === 'smz') return 'СМЗ';
                 return String(value);
             };
 
@@ -29178,7 +29216,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         },
                         {
                             key: 'employment_type',
-                            label: 'ГПХ/ОФ',
+                            label: 'Оформлен как',
                             render: (employee) => formatEmployeeEmploymentTypeLabel(employee?.employment_type)
                         },
                         {
@@ -32793,7 +32831,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 };
                 const normalizeEmploymentTypeForApi = (value) => {
                     const normalized = String(value ?? '').trim().toLowerCase();
-                    return ['gph', 'of'].includes(normalized) ? normalized : null;
+                    return ['gph', 'of', 'smz'].includes(normalized) ? normalized : null;
                 };
                 const normalizeBoolForApi = (value) => {
                     if (typeof value === 'boolean') return value;
