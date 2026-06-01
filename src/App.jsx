@@ -8767,6 +8767,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [plannerStatusHourlyDayKey, setPlannerStatusHourlyDayKey] = useState('');
             const [plannerStatusHourlyExpandedKey, setPlannerStatusHourlyExpandedKey] = useState('');
             const [plannerStatusGroupingDirectionKeys, setPlannerStatusGroupingDirectionKeys] = useState([]);
+            const [showPlannerStatusMatchExportModal, setShowPlannerStatusMatchExportModal] = useState(false);
+            const [plannerStatusMatchExportRange, setPlannerStatusMatchExportRange] = useState(() => {
+                const today = todayDateStr(new Date());
+                return { start: today, end: today };
+            });
+            const [plannerStatusMatchExportLoading, setPlannerStatusMatchExportLoading] = useState(false);
+            const [plannerStatusMatchExportError, setPlannerStatusMatchExportError] = useState('');
             const [plannerStatusGroupingForecastState, setPlannerStatusGroupingForecastState] = useState({
                 loading: false,
                 dateKey: '',
@@ -11613,6 +11620,617 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     emitAppToast(`Ошибка экспорта Excel: ${error?.message || error}`, 'error');
                 } finally {
                     setExcelTransferState(prev => ({ ...prev, exporting: false }));
+                }
+            };
+
+            const isPlannerStatusMatchExportDateKey = (value) => {
+                const text = String(value || '').trim();
+                if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return false;
+                const date = parseDateStr(text);
+                return !Number.isNaN(date?.getTime?.()) && todayDateStr(date) === text;
+            };
+
+            const normalizePlannerStatusMatchExportRange = (range = {}) => {
+                let start = String(range?.start || '').trim();
+                let end = String(range?.end || '').trim();
+                if (!isPlannerStatusMatchExportDateKey(start) || !isPlannerStatusMatchExportDateKey(end)) return null;
+                if (start > end) [start, end] = [end, start];
+                return { start, end };
+            };
+
+            const getPlannerStatusMatchDateKeys = (range = {}) => {
+                const normalized = normalizePlannerStatusMatchExportRange(range);
+                if (!normalized) return [];
+                const out = [];
+                const endDate = parseDateStr(normalized.end);
+                for (let cursor = parseDateStr(normalized.start), guard = 0; cursor <= endDate && guard < 2000; cursor = addDays(cursor, 1), guard += 1) {
+                    out.push(todayDateStr(cursor));
+                }
+                return out;
+            };
+
+            const openPlannerStatusMatchExportModal = () => {
+                const sortedVisibleDates = (Array.isArray(visibleRange) ? [...visibleRange] : [])
+                    .map(v => String(v || '').trim())
+                    .filter(isPlannerStatusMatchExportDateKey)
+                    .sort();
+                const fallbackDate = todayDateStr(new Date(currentDate || new Date()));
+                setPlannerStatusMatchExportRange({
+                    start: sortedVisibleDates[0] || fallbackDate,
+                    end: sortedVisibleDates[sortedVisibleDates.length - 1] || fallbackDate
+                });
+                setPlannerStatusMatchExportError('');
+                setShowPlannerStatusMatchExportModal(true);
+            };
+
+            const setPlannerStatusMatchExportPreset = (preset) => {
+                const baseDate = new Date(currentDate || new Date());
+                if (preset === 'visible') {
+                    const sortedVisibleDates = (Array.isArray(visibleRange) ? [...visibleRange] : [])
+                        .map(v => String(v || '').trim())
+                        .filter(isPlannerStatusMatchExportDateKey)
+                        .sort();
+                    const fallbackDate = todayDateStr(baseDate);
+                    setPlannerStatusMatchExportRange({
+                        start: sortedVisibleDates[0] || fallbackDate,
+                        end: sortedVisibleDates[sortedVisibleDates.length - 1] || fallbackDate
+                    });
+                    return;
+                }
+                if (preset === 'week') {
+                    const start = weekStart(baseDate);
+                    const end = weekEnd(baseDate);
+                    setPlannerStatusMatchExportRange({ start: todayDateStr(start), end: todayDateStr(end) });
+                    return;
+                }
+                if (preset === 'month') {
+                    const start = new Date(baseDate.getFullYear(), baseDate.getMonth(), 1);
+                    const end = new Date(baseDate.getFullYear(), baseDate.getMonth() + 1, 0);
+                    setPlannerStatusMatchExportRange({ start: todayDateStr(start), end: todayDateStr(end) });
+                    return;
+                }
+                const day = todayDateStr(baseDate);
+                setPlannerStatusMatchExportRange({ start: day, end: day });
+            };
+
+            const filterPlannerOperatorsForStatusMatchExport = (sourceOperators = []) => {
+                let filtered = Array.isArray(sourceOperators) ? [...sourceOperators] : [];
+                if (Array.isArray(selectedSupervisors) && selectedSupervisors.length > 0) {
+                    const supervisorSet = new Set(selectedSupervisors.map(v => String(v)));
+                    filtered = filtered.filter(op => supervisorSet.has(String(op?.supervisor_id ?? '')));
+                }
+                if (Array.isArray(selectedStatuses) && selectedStatuses.length > 0) {
+                    filtered = filtered.filter(op => {
+                        const status = String(op?.status || '').trim();
+                        return selectedStatuses.some(sel => {
+                            if (sel === 'bs') return status === 'bs' || status === 'unpaid_leave';
+                            return String(sel) === status;
+                        });
+                    });
+                }
+                if (Array.isArray(selectedDirections) && selectedDirections.length > 0) {
+                    const directionSet = new Set(selectedDirections.map(v => String(v)));
+                    filtered = filtered.filter(op => directionSet.has(String(op?.direction || '')));
+                }
+                return filtered.sort((a, b) => {
+                    const dirCmp = String(a?.direction || a?.direction_name || '').localeCompare(String(b?.direction || b?.direction_name || ''), 'ru');
+                    if (dirCmp !== 0) return dirCmp;
+                    return String(a?.name || '').localeCompare(String(b?.name || ''), 'ru');
+                });
+            };
+
+            const preparePlannerStatusMatchSegment = (seg, operatorName, dateKey) => {
+                const start = seg?.start instanceof Date ? seg.start : new Date(seg?.start);
+                const end = seg?.end instanceof Date ? seg.end : new Date(seg?.end);
+                if (Number.isNaN(start?.getTime?.()) || Number.isNaN(end?.getTime?.()) || end <= start) return null;
+                const statusKey = plannerStatusNormalizeKey(seg?.stateKey || seg?.statusKey || seg?.stateName || seg?.statusName || '');
+                if (!statusKey) return null;
+                const statusName = String(
+                    seg?.stateName
+                    || seg?.statusName
+                    || plannerStatusLabelFromKey(statusKey, 'Статус')
+                ).trim() || plannerStatusLabelFromKey(statusKey, 'Статус');
+                let durationSec = Math.round(Number(seg?.durationSec ?? seg?.duration_sec ?? 0));
+                if (!Number.isFinite(durationSec) || durationSec <= 0) {
+                    durationSec = Math.max(0, Math.round((end - start) / 1000));
+                }
+                if (durationSec <= 0) return null;
+                return {
+                    ...seg,
+                    operatorName,
+                    dateKey,
+                    start,
+                    end,
+                    durationSec,
+                    stateKey: statusKey,
+                    stateName: statusName,
+                    isWork: typeof seg?.isWork === 'boolean' ? seg.isWork : PLANNER_IMPORTED_WORK_STATUS_KEYS.has(statusKey),
+                    isBreak: typeof seg?.isBreak === 'boolean' ? seg.isBreak : PLANNER_IMPORTED_BREAK_STATUS_KEYS.has(statusKey),
+                    isTraining: typeof seg?.isTraining === 'boolean' ? seg.isTraining : plannerStatusIsTrainingKey(statusKey),
+                    isTechnicalReason: typeof seg?.isTechnicalReason === 'boolean' ? seg.isTechnicalReason : plannerStatusIsTechReasonKey(statusKey),
+                    isLateStart: typeof seg?.isLateStart === 'boolean' ? seg.isLateStart : PLANNER_IMPORTED_LATE_START_STATUS_KEYS.has(statusKey),
+                    isLateExcused: typeof seg?.isLateExcused === 'boolean' ? seg.isLateExcused : plannerStatusIsLateExcusedKey(statusKey)
+                };
+            };
+
+            const buildPlannerStatusMatchTimelineMap = (sourceOperators = []) => {
+                const sourceTimelineByDayOperator = new Map();
+                (Array.isArray(sourceOperators) ? sourceOperators : []).forEach(op => {
+                    const operatorName = String(op?.name || op?.login || (op?.id ? `Оператор ${op.id}` : '')).trim();
+                    const operatorNameKey = plannerStatusNormalizeOperatorName(operatorName);
+                    if (!operatorNameKey) return;
+                    const timelineByDay = (op?.importedStatusTimelineDays && typeof op.importedStatusTimelineDays === 'object')
+                        ? op.importedStatusTimelineDays
+                        : {};
+                    Object.entries(timelineByDay).forEach(([dateKeyRaw, dayTimelineRaw]) => {
+                        const dateKey = String(dateKeyRaw || '').trim();
+                        if (!dateKey) return;
+                        const prepared = (Array.isArray(dayTimelineRaw) ? dayTimelineRaw : [])
+                            .map(seg => preparePlannerStatusMatchSegment(seg, operatorName, dateKey))
+                            .filter(Boolean);
+                        if (!prepared.length) return;
+                        const key = `${operatorNameKey}|${dateKey}`;
+                        const current = sourceTimelineByDayOperator.get(key) || [];
+                        sourceTimelineByDayOperator.set(key, [...current, ...prepared]);
+                    });
+                });
+
+                const targetKeys = new Set();
+                sourceTimelineByDayOperator.forEach((_, sourceKey) => {
+                    const splitIndex = sourceKey.lastIndexOf('|');
+                    if (splitIndex <= 0) return;
+                    const nameKey = sourceKey.slice(0, splitIndex);
+                    const sourceDayKey = sourceKey.slice(splitIndex + 1);
+                    const sourceDayObj = parseDateStr(sourceDayKey);
+                    if (!sourceDayObj || Number.isNaN(sourceDayObj.getTime())) return;
+                    targetKeys.add(`${nameKey}|${todayDateStr(addDays(sourceDayObj, -1))}`);
+                    targetKeys.add(`${nameKey}|${sourceDayKey}`);
+                    targetKeys.add(`${nameKey}|${todayDateStr(addDays(sourceDayObj, 1))}`);
+                });
+
+                const map = new Map();
+                targetKeys.forEach(targetKey => {
+                    const splitIndex = targetKey.lastIndexOf('|');
+                    if (splitIndex <= 0) return;
+                    const nameKey = targetKey.slice(0, splitIndex);
+                    const targetDayKey = targetKey.slice(splitIndex + 1);
+                    const targetDayObj = parseDateStr(targetDayKey);
+                    if (!targetDayObj || Number.isNaN(targetDayObj.getTime())) return;
+                    const candidateDayKeys = [
+                        todayDateStr(addDays(targetDayObj, -1)),
+                        targetDayKey,
+                        todayDateStr(addDays(targetDayObj, 1))
+                    ];
+                    const seenSegments = new Set();
+                    const mergedTimeline = [];
+                    candidateDayKeys.forEach(dayKey => {
+                        const sourceTimeline = sourceTimelineByDayOperator.get(`${nameKey}|${dayKey}`) || [];
+                        sourceTimeline.forEach(seg => {
+                            const mins = plannerStatusImportedSegmentToDayMinutes(seg, targetDayKey);
+                            if (!mins) return;
+                            const segKey = [
+                                String(seg?.start || ''),
+                                String(seg?.end || ''),
+                                String(seg?.stateKey || seg?.statusKey || ''),
+                                String(seg?.stateNote || seg?.state_note || ''),
+                                String(mins.start),
+                                String(mins.end)
+                            ].join('|');
+                            if (seenSegments.has(segKey)) return;
+                            seenSegments.add(segKey);
+                            mergedTimeline.push({
+                                ...seg,
+                                startMin: mins.start,
+                                endMin: mins.end
+                            });
+                        });
+                    });
+                    if (!mergedTimeline.length) return;
+                    mergedTimeline.sort((a, b) => (a.startMin - b.startMin) || (a.endMin - b.endMin));
+                    map.set(targetKey, mergedTimeline);
+                });
+                return map;
+            };
+
+            const getPlannerStatusMatchShiftContextBars = (timelineMap, operatorNameRaw, dateKeyRaw) => {
+                const operatorNameKey = plannerStatusNormalizeOperatorName(operatorNameRaw);
+                const dateKey = String(dateKeyRaw || '').trim();
+                if (!operatorNameKey || !dateKey) return [];
+                const dateObj = parseDateStr(dateKey);
+                if (!dateObj || Number.isNaN(dateObj.getTime())) return [];
+                const dayKeys = [
+                    { dayKey: todayDateStr(addDays(dateObj, -1)), offset: -1440 },
+                    { dayKey: dateKey, offset: 0 },
+                    { dayKey: todayDateStr(addDays(dateObj, 1)), offset: 1440 }
+                ];
+                const seen = new Set();
+                const merged = [];
+                dayKeys.forEach(({ dayKey, offset }) => {
+                    const dayBars = timelineMap.get(`${operatorNameKey}|${dayKey}`) || [];
+                    dayBars.forEach(seg => {
+                        const startRaw = Number(seg?.startMin ?? seg?.start ?? 0);
+                        const endRaw = Number(seg?.endMin ?? seg?.end ?? 0);
+                        if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw) || endRaw <= startRaw) return;
+                        const startMin = startRaw + offset;
+                        const endMin = endRaw + offset;
+                        if (!Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) return;
+                        const dedupeKey = [
+                            String(seg?.start || ''),
+                            String(seg?.end || ''),
+                            String(seg?.stateKey || seg?.statusKey || ''),
+                            String(seg?.stateNote || seg?.state_note || ''),
+                            String(startMin),
+                            String(endMin)
+                        ].join('|');
+                        if (seen.has(dedupeKey)) return;
+                        seen.add(dedupeKey);
+                        merged.push({ ...seg, startMin, endMin });
+                    });
+                });
+                merged.sort((a, b) => (Number(a?.startMin || 0) - Number(b?.startMin || 0)) || (Number(a?.endMin || 0) - Number(b?.endMin || 0)));
+                return merged;
+            };
+
+            const createPlannerStatusMatchAccumulator = () => ({
+                totalScheduledMin: 0,
+                scheduledWorkMin: 0,
+                scheduledBreakMin: 0,
+                matchedWorkMin: 0,
+                matchedBreakMin: 0,
+                matchedTotalMin: 0,
+                lateTotalMin: 0,
+                earlyLeaveTotalMin: 0,
+                workOutsideShiftMin: 0,
+                scheduledDays: 0,
+                statusDays: 0,
+                missingStatusDays: 0,
+                noScheduleWorkDays: 0
+            });
+
+            const addPlannerStatusMatchMetrics = (target, dayMetrics, boundaryMetrics, dayHasSchedule, dayHasStatuses, dayHasWorkLikeStatus) => {
+                target.totalScheduledMin += Number(dayMetrics?.totalScheduledMin || 0);
+                target.scheduledWorkMin += Number(dayMetrics?.scheduledWorkMin || 0);
+                target.scheduledBreakMin += Number(dayMetrics?.scheduledBreakMin || 0);
+                target.matchedWorkMin += Number(dayMetrics?.matchedWorkMin || 0);
+                target.matchedBreakMin += Number(dayMetrics?.matchedBreakMin || 0);
+                target.matchedTotalMin += Number(dayMetrics?.matchedTotalMin || 0);
+                target.workOutsideShiftMin += Number(dayMetrics?.workOutsideShiftMin || 0);
+                target.lateTotalMin += Number(boundaryMetrics?.lateTotalMin || 0);
+                target.earlyLeaveTotalMin += Number(boundaryMetrics?.earlyLeaveTotalMin || 0);
+                if (dayHasSchedule) target.scheduledDays += 1;
+                if (dayHasStatuses) target.statusDays += 1;
+                if (dayHasSchedule && !dayHasStatuses) target.missingStatusDays += 1;
+                if (!dayHasSchedule && dayHasWorkLikeStatus) target.noScheduleWorkDays += 1;
+                return target;
+            };
+
+            const mergePlannerStatusMatchAccumulator = (target, source) => {
+                [
+                    'totalScheduledMin',
+                    'scheduledWorkMin',
+                    'scheduledBreakMin',
+                    'matchedWorkMin',
+                    'matchedBreakMin',
+                    'matchedTotalMin',
+                    'lateTotalMin',
+                    'earlyLeaveTotalMin',
+                    'workOutsideShiftMin',
+                    'scheduledDays',
+                    'statusDays',
+                    'missingStatusDays',
+                    'noScheduleWorkDays'
+                ].forEach(key => {
+                    target[key] += Number(source?.[key] || 0);
+                });
+                return target;
+            };
+
+            const plannerStatusMatchPercent = (numerator, denominator) => {
+                const num = Number(numerator || 0);
+                const den = Number(denominator || 0);
+                return den > 0 ? Math.round((num / den) * 1000) / 10 : null;
+            };
+
+            const plannerStatusMatchHours = (minutes) => Math.round((Number(minutes || 0) / 60) * 100) / 100;
+
+            const buildPlannerStatusMatchReport = (sourceOperators = [], range = {}) => {
+                const normalizedRange = normalizePlannerStatusMatchExportRange(range);
+                if (!normalizedRange) return null;
+                const dateKeys = getPlannerStatusMatchDateKeys(normalizedRange);
+                const operatorsForReport = filterPlannerOperatorsForStatusMatchExport(sourceOperators);
+                const timelineMap = buildPlannerStatusMatchTimelineMap(operatorsForReport);
+                const groups = new Map();
+
+                operatorsForReport.forEach(op => {
+                    const operatorName = String(op?.name || op?.login || (op?.id ? `Оператор ${op.id}` : '')).trim();
+                    const operatorNameKey = plannerStatusNormalizeOperatorName(operatorName);
+                    if (!operatorNameKey) return;
+                    const direction = String(op?.direction || op?.direction_name || 'Без направления').trim() || 'Без направления';
+                    const supervisorName = String(op?.supervisor_name || op?.supervisor || '').trim();
+                    const rowAcc = createPlannerStatusMatchAccumulator();
+
+                    dateKeys.forEach(dateKey => {
+                        const dayShiftParts = getShiftPartsForDate(op, dateKey);
+                        const dayBreakParts = dayShiftParts
+                            .flatMap(part => getBreakPartsForPart(op, part, dateKey))
+                            .map(part => ({
+                                start: Math.max(0, Math.min(1440, Number(part?.start || 0))),
+                                end: Math.max(0, Math.min(1440, Number(part?.end || 0)))
+                            }))
+                            .filter(part => part.end > part.start);
+                        const dayStatusBars = timelineMap.get(`${operatorNameKey}|${dateKey}`) || [];
+                        const dayMetrics = plannerComputeShiftStatusMatchMetrics({
+                            shiftParts: dayShiftParts,
+                            breakParts: dayBreakParts,
+                            statusBars: dayStatusBars
+                        });
+
+                        const shiftStartParts = getShiftStartPartsForDate(op, dateKey);
+                        const shiftStartBreakParts = shiftStartParts
+                            .flatMap(part => getBreakPartsForPart(op, part, dateKey))
+                            .map(part => ({ start: Number(part?.start || 0), end: Number(part?.end || 0) }))
+                            .filter(part => part.end > part.start);
+                        const shiftContextBars = getPlannerStatusMatchShiftContextBars(timelineMap, operatorName, dateKey);
+                        const boundaryMetrics = plannerComputeShiftStatusMatchMetrics({
+                            shiftParts: shiftStartParts,
+                            breakParts: shiftStartBreakParts,
+                            statusBars: shiftContextBars
+                        });
+                        const dayHasSchedule = Number(dayMetrics?.totalScheduledMin || 0) > 0;
+                        const dayHasStatuses = dayStatusBars.length > 0;
+                        const dayHasWorkLikeStatus = dayStatusBars.some(seg => {
+                            const statusKey = plannerStatusNormalizeKey(seg?.stateKey || seg?.statusKey || seg?.stateName || seg?.statusName || '');
+                            return typeof seg?.isWork === 'boolean'
+                                ? seg.isWork
+                                : PLANNER_IMPORTED_WORK_STATUS_KEYS.has(statusKey);
+                        });
+                        addPlannerStatusMatchMetrics(rowAcc, dayMetrics, boundaryMetrics, dayHasSchedule, dayHasStatuses, dayHasWorkLikeStatus);
+                    });
+
+                    const hasRangeData = rowAcc.totalScheduledMin > 0 || rowAcc.statusDays > 0 || rowAcc.workOutsideShiftMin > 0;
+                    if (!hasRangeData) return;
+                    const row = {
+                        operatorName,
+                        supervisorName,
+                        direction,
+                        status: String(op?.status || '').trim(),
+                        rate: op?.rate ?? op?.fte ?? op?.employment_rate ?? '',
+                        ...rowAcc,
+                        compliancePct: plannerStatusMatchPercent(rowAcc.matchedTotalMin, rowAcc.totalScheduledMin),
+                        workCompliancePct: plannerStatusMatchPercent(rowAcc.matchedWorkMin, rowAcc.scheduledWorkMin),
+                        breakCompliancePct: plannerStatusMatchPercent(rowAcc.matchedBreakMin, rowAcc.scheduledBreakMin)
+                    };
+
+                    const groupKey = plannerNormalizeDirectionKey(direction) || 'no-direction';
+                    if (!groups.has(groupKey)) {
+                        groups.set(groupKey, {
+                            key: groupKey,
+                            groupName: direction,
+                            operatorRows: [],
+                            totals: createPlannerStatusMatchAccumulator()
+                        });
+                    }
+                    const group = groups.get(groupKey);
+                    group.operatorRows.push(row);
+                    mergePlannerStatusMatchAccumulator(group.totals, rowAcc);
+                });
+
+                const groupRows = Array.from(groups.values())
+                    .map(group => ({
+                        ...group,
+                        operatorCount: group.operatorRows.length,
+                        compliancePct: plannerStatusMatchPercent(group.totals.matchedTotalMin, group.totals.totalScheduledMin),
+                        workCompliancePct: plannerStatusMatchPercent(group.totals.matchedWorkMin, group.totals.scheduledWorkMin),
+                        breakCompliancePct: plannerStatusMatchPercent(group.totals.matchedBreakMin, group.totals.scheduledBreakMin),
+                        operatorRows: group.operatorRows.sort((a, b) => String(a.operatorName || '').localeCompare(String(b.operatorName || ''), 'ru'))
+                    }))
+                    .sort((a, b) => String(a.groupName || '').localeCompare(String(b.groupName || ''), 'ru'));
+
+                return {
+                    range: normalizedRange,
+                    dateKeys,
+                    groupRows,
+                    totalOperatorRows: groupRows.reduce((sum, group) => sum + group.operatorRows.length, 0)
+                };
+            };
+
+            const downloadPlannerStatusMatchReportWorkbook = (report) => {
+                const escapeXml = (value) => String(value ?? '')
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&apos;');
+                const cleanSheetName = (value, fallback) => {
+                    const raw = String(value || fallback || 'Лист')
+                        .replace(/[\[\]\*\/\\\?:]/g, ' ')
+                        .replace(/\s+/g, ' ')
+                        .trim() || String(fallback || 'Лист');
+                    return raw.slice(0, 31);
+                };
+                const usedSheetNames = new Set();
+                const uniqueSheetName = (value, fallback) => {
+                    const base = cleanSheetName(value, fallback);
+                    let name = base;
+                    let idx = 2;
+                    while (usedSheetNames.has(name.toLowerCase())) {
+                        const suffix = ` ${idx}`;
+                        name = `${base.slice(0, Math.max(1, 31 - suffix.length))}${suffix}`;
+                        idx += 1;
+                    }
+                    usedSheetNames.add(name.toLowerCase());
+                    return name;
+                };
+                const cell = (value, type = 'String') => {
+                    const numberValue = Number(value);
+                    const cellType = type === 'Number' && Number.isFinite(numberValue) ? 'Number' : 'String';
+                    const cellValue = cellType === 'Number' ? numberValue : value;
+                    return `<Cell><Data ss:Type="${cellType}">${escapeXml(cellValue)}</Data></Cell>`;
+                };
+                const rowXml = (cells) => `<Row>${cells.join('')}</Row>`;
+                const numberCell = (value) => cell(Number.isFinite(Number(value)) ? Number(value) : '', Number.isFinite(Number(value)) ? 'Number' : 'String');
+                const percentCell = (value) => value == null ? cell('') : numberCell(value);
+                const hoursCell = (minutes) => numberCell(plannerStatusMatchHours(minutes));
+
+                const summaryRows = [];
+                summaryRows.push(rowXml([cell('Период'), cell(`${formatDateRuShort(report.range.start)} - ${formatDateRuShort(report.range.end)}`)]));
+                summaryRows.push(rowXml([cell('Дней'), numberCell(report.dateKeys.length)]));
+                summaryRows.push(rowXml([cell('Операторов в отчете'), numberCell(report.totalOperatorRows)]));
+                summaryRows.push(rowXml([cell('')]));
+                summaryRows.push(rowXml([
+                    cell('Группа'),
+                    cell('Операторов'),
+                    cell('Дней со сменой'),
+                    cell('План, ч'),
+                    cell('Работа план, ч'),
+                    cell('Перерыв план, ч'),
+                    cell('Совпало, ч'),
+                    cell('Совпадение, %'),
+                    cell('Работа, %'),
+                    cell('Перерыв, %'),
+                    cell('Опоздание, мин'),
+                    cell('Ранний уход, мин'),
+                    cell('Переработка, мин'),
+                    cell('Дней без статусов'),
+                    cell('Факт без графика, дней')
+                ]));
+                report.groupRows.forEach(group => {
+                    summaryRows.push(rowXml([
+                        cell(group.groupName),
+                        numberCell(group.operatorCount),
+                        numberCell(group.totals.scheduledDays),
+                        hoursCell(group.totals.totalScheduledMin),
+                        hoursCell(group.totals.scheduledWorkMin),
+                        hoursCell(group.totals.scheduledBreakMin),
+                        hoursCell(group.totals.matchedTotalMin),
+                        percentCell(group.compliancePct),
+                        percentCell(group.workCompliancePct),
+                        percentCell(group.breakCompliancePct),
+                        numberCell(Math.round(group.totals.lateTotalMin || 0)),
+                        numberCell(Math.round(group.totals.earlyLeaveTotalMin || 0)),
+                        numberCell(Math.round(group.totals.workOutsideShiftMin || 0)),
+                        numberCell(group.totals.missingStatusDays),
+                        numberCell(group.totals.noScheduleWorkDays)
+                    ]));
+                });
+
+                const worksheets = [
+                    `<Worksheet ss:Name="${escapeXml(uniqueSheetName('Общее', 'Общее'))}"><Table>${summaryRows.join('')}</Table></Worksheet>`
+                ];
+                report.groupRows.forEach((group, groupIdx) => {
+                    const rows = [];
+                    rows.push(rowXml([cell('Группа'), cell(group.groupName)]));
+                    rows.push(rowXml([cell('Период'), cell(`${formatDateRuShort(report.range.start)} - ${formatDateRuShort(report.range.end)}`)]));
+                    rows.push(rowXml([cell('')]));
+                    rows.push(rowXml([
+                        cell('Оператор'),
+                        cell('СВ'),
+                        cell('Ставка'),
+                        cell('Дней со сменой'),
+                        cell('Дней со статусами'),
+                        cell('План, ч'),
+                        cell('Работа план, ч'),
+                        cell('Перерыв план, ч'),
+                        cell('Совпало, ч'),
+                        cell('Совпадение, %'),
+                        cell('Работа, %'),
+                        cell('Перерыв, %'),
+                        cell('Опоздание, мин'),
+                        cell('Ранний уход, мин'),
+                        cell('Переработка, мин'),
+                        cell('Дней без статусов'),
+                        cell('Факт без графика, дней')
+                    ]));
+                    group.operatorRows.forEach(row => {
+                        rows.push(rowXml([
+                            cell(row.operatorName),
+                            cell(row.supervisorName),
+                            cell(row.rate),
+                            numberCell(row.scheduledDays),
+                            numberCell(row.statusDays),
+                            hoursCell(row.totalScheduledMin),
+                            hoursCell(row.scheduledWorkMin),
+                            hoursCell(row.scheduledBreakMin),
+                            hoursCell(row.matchedTotalMin),
+                            percentCell(row.compliancePct),
+                            percentCell(row.workCompliancePct),
+                            percentCell(row.breakCompliancePct),
+                            numberCell(Math.round(row.lateTotalMin || 0)),
+                            numberCell(Math.round(row.earlyLeaveTotalMin || 0)),
+                            numberCell(Math.round(row.workOutsideShiftMin || 0)),
+                            numberCell(row.missingStatusDays),
+                            numberCell(row.noScheduleWorkDays)
+                        ]));
+                    });
+                    worksheets.push(`<Worksheet ss:Name="${escapeXml(uniqueSheetName(group.groupName, `Группа ${groupIdx + 1}`))}"><Table>${rows.join('')}</Table></Worksheet>`);
+                });
+
+                const workbookXml = `<?xml version="1.0"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:o="urn:schemas-microsoft-com:office:office"
+ xmlns:x="urn:schemas-microsoft-com:office:excel"
+ xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:html="http://www.w3.org/TR/REC-html40">
+ ${worksheets.join('')}
+</Workbook>`;
+                const blob = new Blob([workbookXml], { type: 'application/vnd.ms-excel;charset=utf-8;' });
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `status_schedule_match_${report.range.start.replace(/-/g, '')}_${report.range.end.replace(/-/g, '')}.xls`;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                window.URL.revokeObjectURL(url);
+            };
+
+            const handlePlannerStatusMatchExport = async () => {
+                if (user?.role === 'operator' || plannerStatusMatchExportLoading) return;
+                const normalizedRange = normalizePlannerStatusMatchExportRange(plannerStatusMatchExportRange);
+                if (!normalizedRange) {
+                    setPlannerStatusMatchExportError('Проверьте даты периода');
+                    return;
+                }
+                const dateKeys = getPlannerStatusMatchDateKeys(normalizedRange);
+                if (!dateKeys.length) {
+                    setPlannerStatusMatchExportError('В периоде нет дат для выгрузки');
+                    return;
+                }
+                setPlannerStatusMatchExportLoading(true);
+                setPlannerStatusMatchExportError('');
+                try {
+                    const requestStart = todayDateStr(addDays(parseDateStr(normalizedRange.start), -1));
+                    const requestEnd = todayDateStr(addDays(parseDateStr(normalizedRange.end), 1));
+                    const queryParams = new URLSearchParams({
+                        start_date: requestStart,
+                        end_date: requestEnd,
+                        include_imported_statuses: '1',
+                        include_technical_issues: '0',
+                        include_offline_activities: '0'
+                    });
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/operators?${queryParams.toString()}`, {
+                        credentials: 'include',
+                        headers: withAccessTokenHeader()
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+                    const sourceOperators = Array.isArray(payload?.operators) ? payload.operators : [];
+                    const report = buildPlannerStatusMatchReport(sourceOperators, normalizedRange);
+                    if (!report || report.totalOperatorRows <= 0 || report.groupRows.length === 0) {
+                        setPlannerStatusMatchExportError('Нет данных по графику или статусам за выбранный период с текущими фильтрами');
+                        return;
+                    }
+                    downloadPlannerStatusMatchReportWorkbook(report);
+                    setShowPlannerStatusMatchExportModal(false);
+                    emitAppToast('Отчет соответствия выгружен', 'success');
+                } catch (error) {
+                    console.error('Error exporting status schedule match report:', error);
+                    setPlannerStatusMatchExportError(error?.message || 'Не удалось выгрузить отчет');
+                } finally {
+                    setPlannerStatusMatchExportLoading(false);
                 }
             };
 
@@ -18531,6 +19149,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </button>
 
                                             <button
+                                                onClick={() => {
+                                                    setShowPlannerTopActionsMenu(false);
+                                                    openPlannerStatusMatchExportModal();
+                                                }}
+                                                disabled={plannerStatusMatchExportLoading}
+                                                className="w-full px-3 py-2 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                                                title="Выгрузить соответствие статусов с графиком за выбранный период"
+                                            >
+                                                <FaIcon className={`fas ${plannerStatusMatchExportLoading ? 'fa-spinner fa-spin' : 'fa-file-arrow-down'}`}></FaIcon>
+                                                {plannerStatusMatchExportLoading ? 'Выгрузка...' : 'Отчет соответствия'}
+                                            </button>
+
+                                            <button
                                                 onClick={openPlannerBreakRulesSettings}
                                                 className="w-full px-3 py-2 rounded-xl border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800 text-sm font-medium flex items-center gap-2"
                                                 title="Настроить автогенерацию перерывов по направлениям"
@@ -21457,6 +22088,147 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </SimpleModal>
                 )}
 
+                <SimpleModal
+                    open={!!showPlannerStatusMatchExportModal && user?.role !== 'operator'}
+                    onClose={() => {
+                        if (!plannerStatusMatchExportLoading) setShowPlannerStatusMatchExportModal(false);
+                    }}
+                    panelClassName="w-[min(92vw,560px)] max-w-[calc(100vw-1rem)] p-0 rounded-[28px] overflow-hidden border border-white/70 bg-white/95 shadow-2xl backdrop-blur-xl"
+                >
+                    {(() => {
+                        const normalizedRange = normalizePlannerStatusMatchExportRange(plannerStatusMatchExportRange);
+                        const dateCount = normalizedRange ? getPlannerStatusMatchDateKeys(normalizedRange).length : 0;
+                        const rangeLabel = normalizedRange
+                            ? `${formatDateRuShort(normalizedRange.start)} - ${formatDateRuShort(normalizedRange.end)}`
+                            : 'Период не выбран';
+                        const activeFiltersCount = [
+                            Array.isArray(selectedSupervisors) && selectedSupervisors.length > 0 ? selectedSupervisors.length : 0,
+                            Array.isArray(selectedStatuses) && selectedStatuses.length > 0 ? selectedStatuses.length : 0,
+                            Array.isArray(selectedDirections) && selectedDirections.length > 0 ? selectedDirections.length : 0
+                        ].reduce((sum, value) => sum + value, 0);
+                        const presetItems = [
+                            { key: 'visible', label: 'Видимый' },
+                            { key: 'today', label: 'День' },
+                            { key: 'week', label: 'Неделя' },
+                            { key: 'month', label: 'Месяц' }
+                        ];
+                        return (
+                            <div className="text-slate-900">
+                                <div className="relative overflow-hidden px-5 pt-5 pb-4 bg-gradient-to-br from-slate-50 via-white to-sky-50 border-b border-slate-200/70">
+                                    <div className="absolute inset-x-0 top-0 h-px bg-white/80" />
+                                    <div className="flex items-start justify-between gap-4">
+                                        <div className="min-w-0">
+                                            <div className="inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-emerald-700">
+                                                <FaIcon className="fas fa-file-export text-[10px]"></FaIcon>
+                                                Excel
+                                            </div>
+                                            <h3 className="mt-3 text-xl font-semibold text-slate-950">Отчет соответствия</h3>
+                                            <div className="mt-1 text-sm text-slate-500">{rangeLabel}</div>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowPlannerStatusMatchExportModal(false)}
+                                            disabled={plannerStatusMatchExportLoading}
+                                            className="w-9 h-9 rounded-full border border-slate-200 bg-white/80 hover:bg-white text-slate-500 hover:text-slate-800 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                                            title="Закрыть"
+                                        >
+                                            <FaIcon className="fas fa-times text-xs"></FaIcon>
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div className="px-5 py-5 space-y-5">
+                                    <div className="rounded-2xl border border-slate-200 bg-slate-100/70 p-1 shadow-inner grid grid-cols-4 gap-1">
+                                        {presetItems.map(item => (
+                                            <button
+                                                key={`status-match-export-preset-${item.key}`}
+                                                type="button"
+                                                onClick={() => setPlannerStatusMatchExportPreset(item.key)}
+                                                disabled={plannerStatusMatchExportLoading}
+                                                className="h-9 rounded-xl text-xs font-semibold text-slate-600 hover:text-slate-950 hover:bg-white/70 disabled:opacity-60 disabled:cursor-not-allowed"
+                                            >
+                                                {item.label}
+                                            </button>
+                                        ))}
+                                    </div>
+
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                        <label className="rounded-2xl border border-slate-200 bg-white px-3 py-3 shadow-sm">
+                                            <span className="block text-[11px] font-semibold uppercase tracking-wide text-slate-400 mb-2">С</span>
+                                            <input
+                                                type="date"
+                                                value={plannerStatusMatchExportRange.start || ''}
+                                                max={plannerStatusMatchExportRange.end || undefined}
+                                                onChange={(e) => {
+                                                    setPlannerStatusMatchExportError('');
+                                                    setPlannerStatusMatchExportRange(prev => ({ ...prev, start: e.target.value }));
+                                                }}
+                                                disabled={plannerStatusMatchExportLoading}
+                                                className="w-full h-10 rounded-xl border border-slate-200 bg-slate-50 px-3 text-sm font-medium text-slate-900 outline-none focus:border-sky-300 focus:ring-4 focus:ring-sky-100 disabled:opacity-60"
+                                            />
+                                        </label>
+                                        <label className="rounded-2xl border border-slate-200 bg-white px-3 py-3 shadow-sm">
+                                            <span className="block text-[11px] font-semibold uppercase tracking-wide text-slate-400 mb-2">По</span>
+                                            <input
+                                                type="date"
+                                                value={plannerStatusMatchExportRange.end || ''}
+                                                min={plannerStatusMatchExportRange.start || undefined}
+                                                onChange={(e) => {
+                                                    setPlannerStatusMatchExportError('');
+                                                    setPlannerStatusMatchExportRange(prev => ({ ...prev, end: e.target.value }));
+                                                }}
+                                                disabled={plannerStatusMatchExportLoading}
+                                                className="w-full h-10 rounded-xl border border-slate-200 bg-slate-50 px-3 text-sm font-medium text-slate-900 outline-none focus:border-sky-300 focus:ring-4 focus:ring-sky-100 disabled:opacity-60"
+                                            />
+                                        </label>
+                                    </div>
+
+                                    <div className="grid grid-cols-3 gap-2">
+                                        <div className="rounded-2xl border border-slate-200 bg-white px-3 py-2 shadow-sm">
+                                            <div className="text-[11px] text-slate-400">Дней</div>
+                                            <div className="mt-0.5 text-lg font-semibold tabular-nums">{dateCount || '-'}</div>
+                                        </div>
+                                        <div className="rounded-2xl border border-slate-200 bg-white px-3 py-2 shadow-sm">
+                                            <div className="text-[11px] text-slate-400">Фильтры</div>
+                                            <div className="mt-0.5 text-lg font-semibold tabular-nums">{activeFiltersCount || '-'}</div>
+                                        </div>
+                                        <div className="rounded-2xl border border-slate-200 bg-white px-3 py-2 shadow-sm">
+                                            <div className="text-[11px] text-slate-400">Листы</div>
+                                            <div className="mt-0.5 text-lg font-semibold">1 + группы</div>
+                                        </div>
+                                    </div>
+
+                                    {plannerStatusMatchExportError && (
+                                        <div className="rounded-2xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+                                            {plannerStatusMatchExportError}
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div className="px-5 py-4 bg-slate-50/80 border-t border-slate-200/70 flex items-center justify-end gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowPlannerStatusMatchExportModal(false)}
+                                        disabled={plannerStatusMatchExportLoading}
+                                        className="h-10 px-4 rounded-full border border-slate-200 bg-white hover:bg-slate-50 text-sm font-semibold text-slate-700 disabled:opacity-60 disabled:cursor-not-allowed"
+                                    >
+                                        Отмена
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={handlePlannerStatusMatchExport}
+                                        disabled={plannerStatusMatchExportLoading || !normalizedRange || dateCount <= 0}
+                                        className="h-10 px-4 rounded-full bg-slate-950 hover:bg-slate-800 text-white text-sm font-semibold shadow-lg shadow-slate-900/15 disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-2"
+                                    >
+                                        <FaIcon className={`fas ${plannerStatusMatchExportLoading ? 'fa-spinner fa-spin' : 'fa-download'} text-xs`}></FaIcon>
+                                        {plannerStatusMatchExportLoading ? 'Выгрузка...' : 'Выгрузить'}
+                                    </button>
+                                </div>
+                            </div>
+                        );
+                    })()}
+                </SimpleModal>
+
                 {showEditStatusJournal && modalState.open && !isBulkSelectionModal && modalState.opId && modalState.date && (() => {
                     const journalOp = operators.find(o => o.id === modalState.opId);
                     const journalDate = String(modalState.date || '');
@@ -23532,12 +24304,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                 .filter(b => b.end > b.start)
                                                                             : [];
                                                                         const statusTimelineBars = matchedPlannerOperator
+                                                                            ? (importedStatusTimelineByOperatorDateKey.get(`${plannerStatusNormalizeOperatorName(matchedPlannerOperator?.name)}|${day.dateKey}`) || [])
+                                                                            : [];
+                                                                        const statusTimelineBarsForShiftContext = matchedPlannerOperator
                                                                             ? getImportedStatusBarsForShiftContext(matchedPlannerOperator?.name, day.dateKey)
                                                                             : [];
                                                                         const shiftStatusMatchMetrics = plannerComputeShiftStatusMatchMetrics({
                                                                             shiftParts: plannedShiftStartParts,
                                                                             breakParts: plannedShiftStartBreakParts,
-                                                                            statusBars: statusTimelineBars
+                                                                            statusBars: statusTimelineBarsForShiftContext
                                                                         });
                                                                         const shiftLateBars = (shiftStatusMatchMetrics?.perShift || [])
                                                                             .map(sh => {
