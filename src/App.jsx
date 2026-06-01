@@ -8777,6 +8777,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const today = new Date();
                 return new Date(today.getFullYear(), today.getMonth(), 1);
             });
+            const [plannerStatusMatchExportGroupMode, setPlannerStatusMatchExportGroupMode] = useState('supervisor');
             const [plannerStatusMatchExportLoading, setPlannerStatusMatchExportLoading] = useState(false);
             const [plannerStatusMatchExportError, setPlannerStatusMatchExportError] = useState('');
             const [plannerStatusGroupingForecastState, setPlannerStatusGroupingForecastState] = useState({
@@ -11974,10 +11975,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
 
             const plannerStatusMatchHours = (minutes) => Math.round((Number(minutes || 0) / 60) * 100) / 100;
+            const normalizePlannerStatusMatchGroupMode = (value) => {
+                const mode = String(value || '').trim();
+                return ['overall', 'supervisor', 'direction'].includes(mode) ? mode : 'supervisor';
+            };
 
-            const buildPlannerStatusMatchReport = (sourceOperators = [], range = {}) => {
+            const buildPlannerStatusMatchReport = (sourceOperators = [], range = {}, groupModeRaw = 'supervisor') => {
                 const normalizedRange = normalizePlannerStatusMatchExportRange(range);
                 if (!normalizedRange) return null;
+                const groupMode = normalizePlannerStatusMatchGroupMode(groupModeRaw);
                 const dateKeys = getPlannerStatusMatchDateKeys(normalizedRange);
                 const operatorsForReport = filterPlannerOperatorsForStatusMatchExport(sourceOperators);
                 const timelineMap = buildPlannerStatusMatchTimelineMap(operatorsForReport);
@@ -11988,7 +11994,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const operatorNameKey = plannerStatusNormalizeOperatorName(operatorName);
                     if (!operatorNameKey) return;
                     const direction = String(op?.direction || op?.direction_name || 'Без направления').trim() || 'Без направления';
-                    const supervisorName = String(op?.supervisor_name || op?.supervisor || '').trim();
+                    const supervisorId = Number(op?.supervisor_id ?? op?.sv_id);
+                    const supervisorNameRaw = String(op?.supervisor_name || op?.sv_name || op?.supervisor || '').trim();
+                    const supervisorName = supervisorNameRaw || (Number.isFinite(supervisorId) && supervisorId > 0 ? `СВ #${Math.trunc(supervisorId)}` : 'Без супервайзера');
                     const rowAcc = createPlannerStatusMatchAccumulator();
 
                     dateKeys.forEach(dateKey => {
@@ -12043,11 +12051,28 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         breakCompliancePct: plannerStatusMatchPercent(rowAcc.matchedBreakMin, rowAcc.scheduledBreakMin)
                     };
 
-                    const groupKey = plannerNormalizeDirectionKey(direction) || 'no-direction';
+                    const groupMeta = (() => {
+                        if (groupMode === 'overall') {
+                            return { key: 'overall', name: 'Все операторы' };
+                        }
+                        if (groupMode === 'direction') {
+                            return {
+                                key: `dir:${plannerNormalizeDirectionKey(direction) || 'without-direction'}`,
+                                name: direction
+                            };
+                        }
+                        return {
+                            key: (Number.isFinite(supervisorId) && supervisorId > 0)
+                                ? `sv:${Math.trunc(supervisorId)}`
+                                : `sv-name:${plannerStatusNormalizeOperatorName(supervisorName) || 'without-supervisor'}`,
+                            name: supervisorName
+                        };
+                    })();
+                    const groupKey = groupMeta.key;
                     if (!groups.has(groupKey)) {
                         groups.set(groupKey, {
                             key: groupKey,
-                            groupName: direction,
+                            groupName: groupMeta.name,
                             operatorRows: [],
                             totals: createPlannerStatusMatchAccumulator()
                         });
@@ -12070,6 +12095,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 return {
                     range: normalizedRange,
+                    groupMode,
                     dateKeys,
                     groupRows,
                     totalOperatorRows: groupRows.reduce((sum, group) => sum + group.operatorRows.length, 0)
@@ -12150,8 +12176,27 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
   ${worksheetOptionsXml(freezeRows)}
  </Worksheet>`;
                 const periodLabel = `${formatDateRuShort(report.range.start)} - ${formatDateRuShort(report.range.end)}`;
+                const groupMode = normalizePlannerStatusMatchGroupMode(report?.groupMode);
+                const groupModeLabel = groupMode === 'direction'
+                    ? 'направлениям'
+                    : groupMode === 'overall'
+                        ? 'общий'
+                        : 'супервайзерам';
+                const summaryGroupHeader = groupMode === 'direction'
+                    ? 'Направление'
+                    : groupMode === 'overall'
+                        ? 'Срез'
+                        : 'Супервайзер';
+                const detailExtraColumns = groupMode === 'supervisor'
+                    ? [{ label: 'Направление', width: 150, value: (row) => row.direction }]
+                    : groupMode === 'direction'
+                        ? [{ label: 'СВ', width: 150, value: (row) => row.supervisorName }]
+                        : [
+                            { label: 'СВ', width: 150, value: (row) => row.supervisorName },
+                            { label: 'Направление', width: 150, value: (row) => row.direction }
+                        ];
                 const summaryHeaders = [
-                    'Группа',
+                    summaryGroupHeader,
                     'Операторов',
                     'Дней со сменой',
                     'План, ч',
@@ -12169,7 +12214,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 ];
                 const operatorHeaders = [
                     'Оператор',
-                    'СВ',
+                    ...detailExtraColumns.map(column => column.label),
                     'Ставка',
                     'Дней со сменой',
                     'Дней со статусами',
@@ -12187,11 +12232,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     'Факт без графика, дней'
                 ];
                 const summaryColumnWidths = [175, 82, 112, 82, 105, 112, 92, 108, 92, 92, 110, 115, 118, 125, 145];
-                const operatorColumnWidths = [210, 150, 72, 112, 122, 82, 105, 112, 92, 108, 92, 92, 110, 115, 118, 125, 145];
+                const operatorColumnWidths = [210, ...detailExtraColumns.map(column => column.width), 72, 112, 122, 82, 105, 112, 92, 108, 92, 92, 110, 115, 118, 125, 145];
+                const detailTitleMergeAcross = Math.max(0, operatorHeaders.length - 1);
 
                 const summaryRows = [];
-                summaryRows.push(rowXml([cell('Отчет соответствия статусов графику', 'String', 'Title', 'ss:MergeAcross="14"')], '', 'ss:Height="28"'));
-                summaryRows.push(rowXml([textCell('Период', 'MetaLabel'), cell(periodLabel, 'String', 'MetaValue', 'ss:MergeAcross="3"'), textCell('Дней', 'MetaLabel'), numberCell(report.dateKeys.length, 'MetaValueNumber'), textCell('Операторов', 'MetaLabel'), numberCell(report.totalOperatorRows, 'MetaValueNumber')]));
+                summaryRows.push(rowXml([cell(`Отчет соответствия статусов графику: ${groupModeLabel}`, 'String', 'Title', 'ss:MergeAcross="14"')], '', 'ss:Height="28"'));
+                summaryRows.push(rowXml([textCell('Период', 'MetaLabel'), cell(periodLabel, 'String', 'MetaValue', 'ss:MergeAcross="3"'), textCell('Группировка', 'MetaLabel'), cell(groupModeLabel, 'String', 'MetaValue'), textCell('Операторов', 'MetaLabel'), numberCell(report.totalOperatorRows, 'MetaValueNumber')]));
                 summaryRows.push(rowXml([cell('Проценты считаются по минутам: совпавшие плановые минуты / плановые минуты.', 'String', 'Muted', 'ss:MergeAcross="14"')]));
                 summaryRows.push(rowXml([cell('', 'String', 'Blank')]));
                 summaryRows.push(rowXml(summaryHeaders.map(headerCell), 'HeaderRow'));
@@ -12220,7 +12266,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 ];
                 report.groupRows.forEach((group) => {
                     const rows = [];
-                    rows.push(rowXml([cell(group.groupName, 'String', 'Title', 'ss:MergeAcross="16"')], '', 'ss:Height="28"'));
+                    rows.push(rowXml([cell(group.groupName, 'String', 'Title', `ss:MergeAcross="${detailTitleMergeAcross}"`)], '', 'ss:Height="28"'));
                     rows.push(rowXml([textCell('Период', 'MetaLabel'), cell(periodLabel, 'String', 'MetaValue', 'ss:MergeAcross="3"'), textCell('Операторов', 'MetaLabel'), numberCell(group.operatorCount, 'MetaValueNumber'), textCell('Совпадение', 'MetaLabel'), percentCell(group.compliancePct)]));
                     rows.push(rowXml([
                         textCell('План, ч', 'MetaLabel'),
@@ -12237,7 +12283,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     group.operatorRows.forEach(row => {
                         rows.push(rowXml([
                             textCell(row.operatorName, 'TextStrong'),
-                            textCell(row.supervisorName),
+                            ...detailExtraColumns.map(column => textCell(column.value(row))),
                             textCell(row.rate),
                             numberCell(row.scheduledDays),
                             numberCell(row.statusDays),
@@ -12255,7 +12301,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             problemCell(row.noScheduleWorkDays)
                         ]));
                     });
-                    worksheets.push(worksheetXml(group.groupName, rows, operatorColumnWidths, 5));
+                    worksheets.push(worksheetXml(groupMode === 'overall' ? 'Операторы' : group.groupName, rows, operatorColumnWidths, 5));
                 });
 
                 const workbookXml = `<?xml version="1.0"?>
@@ -12362,7 +12408,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const url = window.URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = `status_schedule_match_${report.range.start.replace(/-/g, '')}_${report.range.end.replace(/-/g, '')}.xls`;
+                a.download = `status_schedule_match_${groupMode}_${report.range.start.replace(/-/g, '')}_${report.range.end.replace(/-/g, '')}.xls`;
                 document.body.appendChild(a);
                 a.click();
                 a.remove();
@@ -12402,7 +12448,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         throw new Error(payload?.error || `HTTP ${response.status}`);
                     }
                     const sourceOperators = Array.isArray(payload?.operators) ? payload.operators : [];
-                    const report = buildPlannerStatusMatchReport(sourceOperators, normalizedRange);
+                    const report = buildPlannerStatusMatchReport(sourceOperators, normalizedRange, plannerStatusMatchExportGroupMode);
                     if (!report || report.totalOperatorRows <= 0 || report.groupRows.length === 0) {
                         setPlannerStatusMatchExportError('Нет данных по графику или статусам за выбранный период с текущими фильтрами');
                         return;
@@ -22335,6 +22381,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             { key: 'week', label: 'Неделя' },
                             { key: 'month', label: 'Месяц' }
                         ];
+                        const reportGroupModeItems = [
+                            { key: 'overall', label: 'Общий' },
+                            { key: 'supervisor', label: 'По СВ' },
+                            { key: 'direction', label: 'По направлениям' }
+                        ];
+                        const reportGroupMode = normalizePlannerStatusMatchGroupMode(plannerStatusMatchExportGroupMode);
                         return (
                             <div className="text-slate-900">
                                 <div className="px-5 pt-5 pb-4 bg-slate-50 border-b border-slate-200">
@@ -22372,6 +22424,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 {item.label}
                                             </button>
                                         ))}
+                                    </div>
+
+                                    <div className="rounded-xl border border-slate-200 bg-white p-3">
+                                        <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400 mb-2">Группировка отчета</div>
+                                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                                            {reportGroupModeItems.map(item => {
+                                                const selected = reportGroupMode === item.key;
+                                                return (
+                                                    <button
+                                                        key={`status-match-export-group-mode-${item.key}`}
+                                                        type="button"
+                                                        onClick={() => setPlannerStatusMatchExportGroupMode(item.key)}
+                                                        disabled={plannerStatusMatchExportLoading}
+                                                        className={`h-9 rounded-lg border text-xs font-semibold transition disabled:opacity-60 disabled:cursor-not-allowed ${selected ? 'border-slate-800 bg-slate-800 text-white' : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-white hover:text-slate-900'}`}
+                                                    >
+                                                        {item.label}
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
                                     </div>
 
                                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -22476,7 +22548,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </div>
                                         <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
                                             <div className="text-[11px] text-slate-400">Листы</div>
-                                            <div className="mt-0.5 text-lg font-semibold">1 + группы</div>
+                                            <div className="mt-0.5 text-lg font-semibold">{reportGroupMode === 'overall' ? 'Общий' : '1 + группы'}</div>
                                         </div>
                                     </div>
 
