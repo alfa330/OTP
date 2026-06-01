@@ -3062,6 +3062,27 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             </div>
             ) : null;
 
+            const workTimeMarkerDots = [
+                trainings.length > 0 ? { key: 'training', className: 'bg-yellow-400 ring-yellow-500', title: 'Тренинг' } : null,
+                technicalIssues.length > 0 ? { key: 'technical', className: 'bg-violet-500 ring-violet-700', title: `Тех причины: ${technicalIssues.length}` } : null,
+                offlineActivities.length > 0 ? { key: 'offline', className: 'bg-emerald-500 ring-emerald-700', title: `Офлайн активность: ${offlineActivities.length}` } : null,
+                fines.length > 0 ? { key: 'fines', className: 'bg-red-400 ring-red-500', title: `Штрафы: ${fines.length}` } : null,
+            ].filter(Boolean);
+
+            const renderWorkTimeMarkerRow = () => workTimeMarkerDots.length > 0 ? (
+                <div className="mt-0.5 flex h-2 items-center justify-center gap-1">
+                    {workTimeMarkerDots.map(marker => (
+                        <span
+                            key={marker.key}
+                            className={`block h-2 w-2 shrink-0 rounded-full ring-1 ${marker.className}`}
+                            title={marker.title}
+                        />
+                    ))}
+                </div>
+            ) : null;
+
+            const workTimeCellClass = `relative w-full h-8 rounded-md flex flex-col items-center px-1 ${workTimeMarkerDots.length > 0 ? 'justify-between py-1' : 'justify-center'}`;
+
             if (selectedTab === 'work_time') {
             const baseWork = d ? Number(d.work_time || 0) : 0;
             const countedTrainingHours = computeUniqueTrainingDurationHours(trainings || [], t => t && t.count_in_hours !== false);
@@ -3072,34 +3093,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             if (!hasData && isPast) {
                 return (
-                <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-400 text-white">
-                    <span>—</span>
-                    {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
-                    {technicalIssues.length > 0 && <div className="absolute top-1 right-4 w-2 h-2 rounded-full bg-violet-500 ring-1 ring-violet-700" title={`Тех причины: ${technicalIssues.length}`}></div>}
-                    {offlineActivities.length > 0 && <div className="absolute top-1 right-7 w-2 h-2 rounded-full bg-emerald-500 ring-1 ring-emerald-700" title={`Офлайн активность: ${offlineActivities.length}`}></div>}
-                    {fines.length > 0 && <div className="absolute top-4 right-1 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
+                <div className={`${workTimeCellClass} bg-gray-400 text-white`}>
+                    <span className="text-xs leading-none">—</span>
+                    {renderWorkTimeMarkerRow()}
                 </div>
                 );
             }
             if (!hasData && isFuture) {
                 return (
-                <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-200 text-gray-600">
-                    <span>—</span>
-                    {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
-                    {technicalIssues.length > 0 && <div className="absolute top-1 right-4 w-2 h-2 rounded-full bg-violet-500 ring-1 ring-violet-700" title={`Тех причины: ${technicalIssues.length}`}></div>}
-                    {offlineActivities.length > 0 && <div className="absolute top-1 right-7 w-2 h-2 rounded-full bg-emerald-500 ring-1 ring-emerald-700" title={`Офлайн активность: ${offlineActivities.length}`}></div>}
-                    {fines.length > 0 && <div className="absolute top-4 right-1 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
+                <div className={`${workTimeCellClass} bg-gray-200 text-gray-600`}>
+                    <span className="text-xs leading-none">—</span>
+                    {renderWorkTimeMarkerRow()}
                 </div>
                 );
             }
             if (!hasData && !isPast && !isFuture) {
                 return (
-                <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-100 text-gray-600">
-                    <span>—</span>
-                    {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
-                    {technicalIssues.length > 0 && <div className="absolute top-1 right-4 w-2 h-2 rounded-full bg-violet-500 ring-1 ring-violet-700" title={`Тех причины: ${technicalIssues.length}`}></div>}
-                    {offlineActivities.length > 0 && <div className="absolute top-1 right-7 w-2 h-2 rounded-full bg-emerald-500 ring-1 ring-emerald-700" title={`Офлайн активность: ${offlineActivities.length}`}></div>}
-                    {fines.length > 0 && <div className="absolute top-4 right-1 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
+                <div className={`${workTimeCellClass} bg-gray-100 text-gray-600`}>
+                    <span className="text-xs leading-none">—</span>
+                    {renderWorkTimeMarkerRow()}
                 </div>
                 );
             }
@@ -3111,12 +3123,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const display = work ? work.toFixed(2) : '0.00';
 
                 return (
-                <div className={`relative w-full h-8 rounded-md flex items-center justify-center ${textClass}`} style={{ backgroundColor: bg }}>
-                <span className="text-xs font-medium truncate" style={{maxWidth: '110px', display: 'inline-block'}} title={display}>{display}</span>
-                {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
-                {technicalIssues.length > 0 && <div className="absolute top-1 right-4 w-2 h-2 rounded-full bg-violet-500 ring-1 ring-violet-700" title={`Тех причины: ${technicalIssues.length}`}></div>}
-                {offlineActivities.length > 0 && <div className="absolute top-1 right-7 w-2 h-2 rounded-full bg-emerald-500 ring-1 ring-emerald-700" title={`Офлайн активность: ${offlineActivities.length}`}></div>}
-                {fines.length > 0 && <div className="absolute top-4 right-1 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
+                <div className={`${workTimeCellClass} ${textClass}`} style={{ backgroundColor: bg }}>
+                <span className="text-xs font-medium leading-none truncate" style={{maxWidth: '110px', display: 'inline-block'}} title={display}>{display}</span>
+                {renderWorkTimeMarkerRow()}
                 </div>
             );
             }
@@ -31861,6 +31870,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             const roundedCellHours = Number(cell.hours || 0);
                             const cellHoursDisplay = Number.isFinite(roundedCellHours) ? roundedCellHours.toFixed(2) : "0.00";
                             const [cellHoursInt, cellHoursFrac] = cellHoursDisplay.split(".");
+                            const calendarActivityMarkerDots = [
+                                cell.hasTraining ? { key: 'training', className: 'bg-yellow-400', title: 'Тренинг' } : null,
+                                cell.hasTechnicalIssues ? { key: 'technical', className: 'bg-violet-500', title: 'Тех причины' } : null,
+                                cell.hasOfflineActivities ? { key: 'offline', className: 'bg-emerald-500', title: 'Офлайн активность' } : null,
+                                cell.hasFines ? { key: 'fines', className: 'bg-red-400', title: 'Штрафы' } : null,
+                            ].filter(Boolean);
                             return (
                             <div
                             key={cell.dateStr}
@@ -31874,7 +31889,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             >
                             {/* Часы */}
                             {cell.hours > 0 ? (
-                                <div className="flex items-center">
+                                <div className={`flex items-center leading-none ${calendarActivityMarkerDots.length > 0 ? '-translate-y-1' : ''}`}>
                                 <span className="text-sm">{cellHoursInt}</span>
                                 <span className="text-[10px]">.{cellHoursFrac}</span>
                                 </div>
@@ -31882,14 +31897,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 ""
                             )}
 
-                            {/* 🔶 Маркер тренинга */}
-                            {cell.hasTraining && <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 shadow" />}
-                            {/* 🟣 Маркер техсбоя */}
-                            {cell.hasTechnicalIssues && <span className="absolute top-1 right-7 w-2 h-2 rounded-full bg-violet-500 shadow" />}
-                            {/* 🟢 Маркер офлайн-активности */}
-                            {cell.hasOfflineActivities && <span className="absolute top-1 right-10 w-2 h-2 rounded-full bg-emerald-500 shadow" />}
-                            {/* 🔴 Маркер штрафов */}
-                            {cell.hasFines && <span className="absolute top-1 right-4 w-2 h-2 rounded-full bg-red-400 shadow" />}
+                            {calendarActivityMarkerDots.length > 0 && (
+                                <div className="absolute bottom-1 left-1/2 flex -translate-x-1/2 items-center justify-center gap-1">
+                                    {calendarActivityMarkerDots.map(marker => (
+                                        <span
+                                            key={marker.key}
+                                            className={`block h-2 w-2 shrink-0 rounded-full shadow ${marker.className}`}
+                                            title={marker.title}
+                                        />
+                                    ))}
+                                </div>
+                            )}
 
                             {/* Tooltip ячейки (дата) */}
                             <div className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-1 bg-gray-900 text-white text-xs rounded-lg shadow-lg opacity-0 group-hover:opacity-100 group-focus:opacity-100 z-50 transition-opacity">
