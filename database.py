@@ -6997,7 +6997,7 @@ class Database:
                     _minutes_to_time(merged_start_min % (24 * 60)), 'start'
                 )
                 merged_end_obj = self._normalize_schedule_time(
-                    _minutes_to_time(merged_end_min % (24 * 60)) if merged_end_min < 24 * 60 else '00:00',
+                    _minutes_to_time(merged_end_min),
                     'end'
                 )
                 self._save_shift_tx(
@@ -7231,7 +7231,7 @@ class Database:
                     _minutes_to_time(merged_start_min % (24 * 60)), 'start'
                 )
                 merged_end_obj = self._normalize_schedule_time(
-                    _minutes_to_time(merged_end_min % (24 * 60)) if merged_end_min < 24 * 60 else '00:00',
+                    _minutes_to_time(merged_end_min),
                     'end'
                 )
                 self._save_shift_tx(
