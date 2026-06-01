@@ -1238,7 +1238,7 @@ def _is_valid_kz_phone(phone_number):
 
 
 def _build_sensitive_qr_token(session_id, user_id):
-    expires_at = datetime.utcnow() + timedelta(seconds=SENSITIVE_QR_TTL_SECONDS)
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=SENSITIVE_QR_TTL_SECONDS)
     payload = {
         "sid": str(session_id),
         "uid": int(user_id),
@@ -1296,7 +1296,7 @@ def _decode_sensitive_qr_token(token):
     return {
         "session_id": session_id,
         "user_id": user_id,
-        "expires_at": datetime.utcfromtimestamp(exp_ts)
+        "expires_at": datetime.fromtimestamp(exp_ts, timezone.utc)
     }
 
 
@@ -4165,7 +4165,7 @@ def request_sensitive_access_qr():
             "status": "success",
             "qr_payload": qr_payload,
             "token": token,
-            "token_expires_at": expires_at.isoformat() + "Z",
+            "token_expires_at": expires_at.isoformat().replace("+00:00", "Z"),
             "granted": _is_sensitive_access_unlocked(requester_id, session_id),
             "required": True
         }), 200

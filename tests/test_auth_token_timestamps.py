@@ -32,6 +32,35 @@ class AuthTokenTimestampTests(unittest.TestCase):
                     "timezone.utc",
                 )
 
+    def test_sensitive_qr_builder_uses_timezone_aware_utc_expiry(self):
+        function = _function("_build_sensitive_qr_token")
+        expires_assignment = next(
+            node for node in function.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "expires_at" for target in node.targets)
+        )
+
+        self.assertIsInstance(expires_assignment.value, ast.BinOp)
+        now_call = expires_assignment.value.left
+        self.assertIsInstance(now_call, ast.Call)
+        self.assertIsInstance(now_call.func, ast.Attribute)
+        self.assertEqual(now_call.func.attr, "now")
+        self.assertEqual(ast.unparse(now_call.args[0]), "timezone.utc")
+
+        utcnow_calls = [
+            node for node in ast.walk(function)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and ast.unparse(node.func.value) == "datetime"
+            and node.func.attr == "utcnow"
+        ]
+        self.assertEqual(utcnow_calls, [])
+
+    def test_sensitive_qr_response_serializes_aware_utc_as_z(self):
+        function_source = ast.unparse(_function("request_sensitive_access_qr"))
+        self.assertIn('expires_at.isoformat().replace(\'+00:00\', \'Z\')', function_source)
+        self.assertNotIn('expires_at.isoformat() + \'Z\'', function_source)
+
 
 if __name__ == "__main__":
     unittest.main()
