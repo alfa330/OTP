@@ -74,9 +74,18 @@ class PostAuctionRemainderTests(unittest.TestCase):
     def test_journal_includes_post_auction_claims(self):
         source = _method_source("get_shift_auction_test_journal")
         self.assertIn("lot_post_auction_claimed", source)
+        # Partial post-auction claims keep the lot available, so lot.claimed_by may be
+        # empty; the journal must fall back to the event-level operator payload.
+        self.assertIn("payload->>'operator_id'", source)
+        self.assertIn("payload->>'operator_name'", source)
         # Journal entries expose the claimed slice + a partial flag.
         self.assertIn("is_partial", source)
         self.assertIn("claim_start_time", source)
+
+    def test_history_replay_uses_event_operator_for_partial_post_claims(self):
+        source = _method_source("get_shift_auction_period_preview")
+        self.assertIn('event_type_text == "lot_post_auction_claimed"', source)
+        self.assertIn('event_payload.get("operator_id")', source)
 
     def test_telegram_notification_shows_original_and_claimed_part(self):
         source = _source(BOT_PATH)

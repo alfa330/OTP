@@ -3597,14 +3597,20 @@ class Database:
                     NULLIF(e.payload->'lot'->>'shift_date', '') AS shift_date,
                     NULLIF(e.payload->'lot'->>'start_time', '') AS start_time,
                     NULLIF(e.payload->'lot'->>'end_time', '') AS end_time,
-                    NULLIF(e.payload->'lot'->>'claimed_by', '')::INTEGER AS claimed_by,
-                    COALESCE(u.name, '') AS claimed_by_name,
+                    COALESCE(
+                        NULLIF(e.payload->'lot'->>'claimed_by', ''),
+                        NULLIF(e.payload->>'operator_id', '')
+                    )::INTEGER AS claimed_by,
+                    COALESCE(u.name, NULLIF(e.payload->>'operator_name', ''), '') AS claimed_by_name,
                     NULLIF(e.payload->'lot'->>'source_schedule_plan_id', '')::INTEGER AS source_schedule_plan_id,
                     p.date_from,
                     p.date_to
                 FROM shift_auction_test_events e
                 LEFT JOIN users u
-                  ON u.id = NULLIF(e.payload->'lot'->>'claimed_by', '')::INTEGER
+                  ON u.id = COALESCE(
+                      NULLIF(e.payload->'lot'->>'claimed_by', ''),
+                      NULLIF(e.payload->>'operator_id', '')
+                  )::INTEGER
                 LEFT JOIN resource_saved_schedule_plans p
                   ON p.id = NULLIF(e.payload->'lot'->>'source_schedule_plan_id', '')::INTEGER
                 WHERE e.event_type = 'lot_claimed'
@@ -5978,6 +5984,8 @@ class Database:
                     })
                     continue
                 claimed_by = _event_int(lot_payload.get("claimed_by"))
+                if not claimed_by and event_type_text == "lot_post_auction_claimed":
+                    claimed_by = _event_int(event_payload.get("operator_id"))
                 if claimed_by:
                     claimed_operator_ids.add(claimed_by)
                 target_lot.update({
@@ -6571,8 +6579,11 @@ class Database:
                     NULLIF(e.payload->'lot'->>'shift_date', '') AS shift_date,
                     NULLIF(e.payload->'lot'->>'start_time', '') AS start_time,
                     NULLIF(e.payload->'lot'->>'end_time', '') AS end_time,
-                    NULLIF(e.payload->'lot'->>'claimed_by', '')::INTEGER AS claimed_by,
-                    COALESCE(u.name, '') AS claimed_by_name,
+                    COALESCE(
+                        NULLIF(e.payload->'lot'->>'claimed_by', ''),
+                        NULLIF(e.payload->>'operator_id', '')
+                    )::INTEGER AS claimed_by,
+                    COALESCE(u.name, NULLIF(e.payload->>'operator_name', ''), '') AS claimed_by_name,
                     NULLIF(e.payload->'lot'->>'source_schedule_plan_id', '')::INTEGER AS source_schedule_plan_id,
                     p.date_from,
                     p.date_to,
@@ -6581,7 +6592,10 @@ class Database:
                     NULLIF(e.payload->'lot'->>'claim_end_time', '') AS claim_end_time
                 FROM shift_auction_test_events e
                 LEFT JOIN users u
-                  ON u.id = NULLIF(e.payload->'lot'->>'claimed_by', '')::INTEGER
+                  ON u.id = COALESCE(
+                      NULLIF(e.payload->'lot'->>'claimed_by', ''),
+                      NULLIF(e.payload->>'operator_id', '')
+                  )::INTEGER
                 LEFT JOIN resource_saved_schedule_plans p
                   ON p.id = NULLIF(e.payload->'lot'->>'source_schedule_plan_id', '')::INTEGER
                 WHERE e.event_type IN ('lot_claimed', 'lot_post_auction_claimed')
