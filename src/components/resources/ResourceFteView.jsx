@@ -2539,64 +2539,68 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
 
         {activeDashboardView === 'overview' && (
           <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
               <div>
                 <h2 className="text-lg font-semibold text-slate-950">Прирост и выдержка прогноза</h2>
-                <p className="text-sm text-slate-500">Последние 6 дней до текущего дня формируют риск, а ближайшие 7 дней показывают уже построенный прирост.</p>
+                <p className="mt-1 max-w-2xl text-sm text-slate-500">Последние 6 дней до текущего дня формируют риск, а ближайшие 7 дней показывают уже построенный прирост.</p>
               </div>
-              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
-                Источник: {incidentRiskProfile.source_start ? formatDate(incidentRiskProfile.source_start) : '-'} - {incidentRiskProfile.source_end ? formatDate(incidentRiskProfile.source_end) : '-'}
+              <div className="shrink-0 text-sm text-slate-500 sm:text-right">
+                Источник
+                <div className="font-medium text-slate-600">{incidentRiskProfile.source_start ? formatDate(incidentRiskProfile.source_start) : '—'} — {incidentRiskProfile.source_end ? formatDate(incidentRiskProfile.source_end) : '—'}</div>
               </div>
             </div>
 
-            <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-              <div className={`rounded-lg border px-3 py-3 ${incidentRiskSummary.overloadDayCount > 0 ? 'border-rose-200 bg-rose-50' : 'border-emerald-200 bg-emerald-50'}`}>
-                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Выдержка</div>
-                <div className={`mt-1 text-2xl font-semibold ${incidentRiskSummary.overloadDayCount > 0 ? 'text-rose-700' : 'text-emerald-700'}`}>
+            <div className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
+              <div className="rounded-2xl bg-slate-50 p-4">
+                <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  <span className={`h-1.5 w-1.5 rounded-full ${incidentRiskSummary.overloadDayCount > 0 ? 'bg-rose-500' : 'bg-emerald-500'}`} aria-hidden="true" />
+                  Выдержка
+                </div>
+                <div className={`mt-2 text-[26px] font-semibold leading-none tabular-nums ${incidentRiskSummary.overloadDayCount > 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
                   {formatInt(incidentRiskSummary.heldDayCount)} / {formatInt(incidentRiskSummary.sourceDayCount)}
                 </div>
-                <div className="mt-1 text-xs text-slate-500">дней без почасового превышения</div>
+                <div className="mt-1.5 text-xs text-slate-500">дней без почасового превышения</div>
               </div>
-              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
-                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Факт - прогноз</div>
-                <div className={`mt-1 text-2xl font-semibold ${incidentRiskSummary.totalDeltaCalls > 0 ? 'text-rose-700' : incidentRiskSummary.totalDeltaCalls < 0 ? 'text-emerald-700' : 'text-slate-900'}`}>{formatSignedNumber(incidentRiskSummary.totalDeltaCalls, 0)}</div>
-                <div className="mt-1 text-xs text-slate-500">{formatInt(incidentRiskSummary.totalActualCalls)} факт / {formatInt(incidentRiskSummary.totalForecastCalls)} прогноз</div>
+              <div className="rounded-2xl bg-slate-50 p-4">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Факт − прогноз</div>
+                <div className={`mt-2 text-[26px] font-semibold leading-none tabular-nums ${incidentRiskSummary.totalDeltaCalls > 0 ? 'text-rose-600' : incidentRiskSummary.totalDeltaCalls < 0 ? 'text-emerald-600' : 'text-slate-900'}`}>{formatSignedNumber(incidentRiskSummary.totalDeltaCalls, 0)}</div>
+                <div className="mt-1.5 text-xs text-slate-500">{formatInt(incidentRiskSummary.totalActualCalls)} факт · {formatInt(incidentRiskSummary.totalForecastCalls)} прогноз</div>
               </div>
-              <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-3">
-                <div className="text-xs font-semibold uppercase tracking-wide text-rose-600">Превышение</div>
-                <div className="mt-1 text-2xl font-semibold text-rose-700">+{formatInt(incidentRiskSummary.totalPositiveDeltaCalls)}</div>
-                <div className="mt-1 text-xs text-rose-700">только часы выше прогноза</div>
+              <div className="rounded-2xl bg-slate-50 p-4">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Превышение</div>
+                <div className="mt-2 text-[26px] font-semibold leading-none tabular-nums text-rose-600">+{formatInt(incidentRiskSummary.totalPositiveDeltaCalls)}</div>
+                <div className="mt-1.5 text-xs text-slate-500">только часы выше прогноза</div>
               </div>
-              <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-3">
-                <div className="text-xs font-semibold uppercase tracking-wide text-emerald-700">Прирост 7 дней</div>
-                <div className="mt-1 text-2xl font-semibold text-emerald-700">+{formatInt(incidentProjection.incident_uplift_calls)}</div>
-                <div className="mt-1 text-xs text-emerald-700">звонков: {formatDate(incidentProjection.period_start)} - {formatDate(incidentProjection.period_end)}</div>
+              <div className="rounded-2xl bg-slate-50 p-4">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Прирост 7 дней</div>
+                <div className="mt-2 text-[26px] font-semibold leading-none tabular-nums text-emerald-600">+{formatInt(incidentProjection.incident_uplift_calls)}</div>
+                <div className="mt-1.5 text-xs text-slate-500">звонков · {formatDate(incidentProjection.period_start)} — {formatDate(incidentProjection.period_end)}</div>
               </div>
-              <div className="rounded-lg border border-emerald-200 bg-white px-3 py-3">
-                <div className="text-xs font-semibold uppercase tracking-wide text-emerald-700">Доп. FTE</div>
-                <div className="mt-1 text-2xl font-semibold text-emerald-700">+{formatNumber(incidentProjection.incident_uplift_fte_hours, 1)}</div>
-                <div className="mt-1 text-xs text-slate-500">FTE-ч на ближайшие 7 дней</div>
+              <div className="col-span-2 rounded-2xl bg-slate-50 p-4 md:col-span-1">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Доп. FTE</div>
+                <div className="mt-2 text-[26px] font-semibold leading-none tabular-nums text-emerald-600">+{formatNumber(incidentProjection.incident_uplift_fte_hours, 1)}</div>
+                <div className="mt-1.5 text-xs text-slate-500">FTE-ч на ближайшие 7 дней</div>
               </div>
             </div>
 
             <div className="mt-5 grid gap-4 xl:grid-cols-2">
-              <div className="min-w-0 rounded-lg border border-slate-200 bg-white p-3">
+              <div className="min-w-0 rounded-2xl bg-slate-50 p-4">
                 <div className="mb-3 flex items-center justify-between gap-3">
                   <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-                    <ShieldAlert size={16} />
+                    <ShieldAlert size={16} className="text-slate-400" />
                     Последние 6 дней
                   </div>
-                  <span className="text-xs font-medium text-slate-500">ближайшие дни в истории имеют больший вес</span>
+                  <span className="text-xs text-slate-500">ближайшие дни имеют больший вес</span>
                 </div>
                 {incidentRiskDailyData.length ? (
                   <div className="h-72">
                     <ResponsiveContainer width="100%" height="100%">
-                      <ComposedChart data={incidentRiskDailyData} margin={{ top: 10, right: 18, left: 0, bottom: 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                        <XAxis dataKey="dateLabel" tick={{ fontSize: 11 }} />
-                        <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
-                        <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} />
-                        <Tooltip content={<IncidentRiskTooltip />} />
+                      <ComposedChart data={incidentRiskDailyData} margin={{ top: 10, right: 12, left: 0, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" vertical={false} />
+                        <XAxis dataKey="dateLabel" tick={{ fontSize: 11, fill: '#94a3b8' }} tickLine={false} axisLine={false} />
+                        <YAxis yAxisId="left" tick={{ fontSize: 11, fill: '#94a3b8' }} tickLine={false} axisLine={false} width={36} />
+                        <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11, fill: '#94a3b8' }} tickLine={false} axisLine={false} width={36} />
+                        <Tooltip content={<IncidentRiskTooltip />} cursor={{ fill: 'rgba(148, 163, 184, 0.08)' }} />
                         <Bar yAxisId="left" dataKey="forecastCalls" fill="#bfdbfe" radius={[4, 4, 0, 0]} />
                         <Bar yAxisId="left" dataKey="positiveDeltaCalls" fill="#fecdd3" radius={[4, 4, 0, 0]} />
                         <Line yAxisId="right" type="monotone" dataKey="actualCalls" stroke="#0f172a" strokeWidth={2} dot={{ r: 3 }} />
@@ -2608,23 +2612,23 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                 )}
               </div>
 
-              <div className="min-w-0 rounded-lg border border-slate-200 bg-white p-3">
+              <div className="min-w-0 rounded-2xl bg-slate-50 p-4">
                 <div className="mb-3 flex items-center justify-between gap-3">
                   <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-                    <TrendingUp size={16} />
+                    <TrendingUp size={16} className="text-slate-400" />
                     Построенный прирост на 7 дней
                   </div>
-                  <span className="text-xs font-medium text-slate-500">от текущего дня, без влияния выбранного периода</span>
+                  <span className="text-xs text-slate-500">от текущего дня, без влияния периода</span>
                 </div>
                 {incidentProjectionData.length ? (
                   <div className="h-72">
                     <ResponsiveContainer width="100%" height="100%">
-                      <ComposedChart data={incidentProjectionData} margin={{ top: 10, right: 18, left: 0, bottom: 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                        <XAxis dataKey="dateLabel" tick={{ fontSize: 11 }} />
-                        <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
-                        <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} />
-                        <Tooltip content={<IncidentProjectionTooltip />} />
+                      <ComposedChart data={incidentProjectionData} margin={{ top: 10, right: 12, left: 0, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" vertical={false} />
+                        <XAxis dataKey="dateLabel" tick={{ fontSize: 11, fill: '#94a3b8' }} tickLine={false} axisLine={false} />
+                        <YAxis yAxisId="left" tick={{ fontSize: 11, fill: '#94a3b8' }} tickLine={false} axisLine={false} width={36} />
+                        <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11, fill: '#94a3b8' }} tickLine={false} axisLine={false} width={36} />
+                        <Tooltip content={<IncidentProjectionTooltip />} cursor={{ fill: 'rgba(148, 163, 184, 0.08)' }} />
                         <Bar yAxisId="left" dataKey="forecastCalls" stackId="calls" fill="#bfdbfe" radius={[0, 0, 0, 0]} />
                         <Bar yAxisId="left" dataKey="upliftCalls" stackId="calls" fill="#86efac" radius={[4, 4, 0, 0]} />
                         <Line yAxisId="right" type="monotone" dataKey="upliftFte" stroke="#059669" strokeWidth={2} dot={{ r: 3 }} />
@@ -2637,53 +2641,54 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
               </div>
             </div>
 
-            <div className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
-              <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+            <div className="mt-6 grid gap-6 xl:grid-cols-[minmax(0,1fr)_340px]">
+              <div className="min-w-0">
                 <div className="mb-3 text-sm font-semibold text-slate-900">Дни, которые сформировали риск</div>
-                <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
                   {incidentRiskDailyData.length ? incidentRiskDailyData.map((row) => (
-                    <div key={row.date} className={`rounded-lg border bg-white px-3 py-2 ${row.status === 'overload' ? 'border-rose-200' : 'border-emerald-200'}`}>
+                    <div key={row.date} className="rounded-2xl bg-slate-50 p-3.5">
                       <div className="flex items-center justify-between gap-2">
                         <div className="font-semibold text-slate-900">{formatDate(row.date)}</div>
-                        <span className={`rounded-md px-2 py-0.5 text-[11px] font-semibold ${row.status === 'overload' ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                        <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold ${row.status === 'overload' ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                          <span className={`h-1.5 w-1.5 rounded-full ${row.status === 'overload' ? 'bg-rose-500' : 'bg-emerald-500'}`} aria-hidden="true" />
                           {row.status === 'overload' ? 'не выдержал' : 'выдержал'}
                         </span>
                       </div>
-                      <div className="mt-2 grid grid-cols-3 gap-2 text-xs text-slate-500">
-                        <span>прогноз <b className="text-blue-700">{formatNumber(row.forecastCalls, 0)}</b></span>
-                        <span>факт <b className="text-slate-900">{formatNumber(row.actualCalls, 0)}</b></span>
-                        <span>вес <b className="text-slate-900">{formatNumber(row.weight, 0)}</b></span>
+                      <div className="mt-2.5 grid grid-cols-3 gap-2 text-xs text-slate-500">
+                        <span>прогноз <b className="font-semibold text-slate-900">{formatNumber(row.forecastCalls, 0)}</b></span>
+                        <span>факт <b className="font-semibold text-slate-900">{formatNumber(row.actualCalls, 0)}</b></span>
+                        <span>вес <b className="font-semibold text-slate-900">{formatNumber(row.weight, 0)}</b></span>
                       </div>
-                      <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200">
+                      <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-slate-200/80">
                         <div className={`h-full rounded-full ${row.status === 'overload' ? 'bg-rose-500' : 'bg-emerald-500'}`} style={{ width: `${Math.min(100, Math.max(6, row.positiveHourShare * 100))}%` }} />
                       </div>
                     </div>
                   )) : (
-                    <div className="rounded-lg border border-dashed border-slate-300 bg-white p-4 text-sm text-slate-500 md:col-span-2 xl:col-span-3">Нет загруженных дней для расчета риска.</div>
+                    <div className="rounded-2xl bg-slate-50 p-6 text-center text-sm text-slate-500 sm:col-span-2 xl:col-span-3">Нет загруженных дней для расчёта риска.</div>
                   )}
                 </div>
               </div>
 
-              <div className="rounded-lg border border-slate-200 bg-white p-4">
+              <div className="min-w-0">
                 <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-900">
-                  <Clock3 size={16} />
+                  <Clock3 size={16} className="text-slate-400" />
                   Часы прироста
                 </div>
-                <div className="space-y-3">
+                <div className="space-y-2.5">
                   {incidentRiskTopHours.length ? incidentRiskTopHours.map((row) => (
-                    <div key={row.hour} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                    <div key={row.hour} className="rounded-2xl bg-slate-50 p-3.5">
                       <div className="flex items-center justify-between gap-3">
                         <div className="font-semibold text-slate-900">{row.hourLabel}</div>
-                        <div className="rounded-md bg-emerald-100 px-2 py-1 text-xs font-semibold text-emerald-700">+{formatNumber(row.weightedDeltaCalls, 1)} зв.</div>
+                        <div className="rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-semibold text-emerald-700">+{formatNumber(row.weightedDeltaCalls, 1)} зв.</div>
                       </div>
-                      <div className="mt-2 grid grid-cols-3 gap-2 text-xs text-slate-500">
-                        <span>риск <b className="text-emerald-700">{formatPercent(row.growthRatio, 0)}</b></span>
-                        <span>надежн. <b className="text-slate-900">{formatPercent(row.confidence, 0)}</b></span>
-                        <span>дней <b className="text-slate-900">{formatInt(row.positiveSourceCount)}/{formatInt(row.sourceCount)}</b></span>
+                      <div className="mt-2.5 grid grid-cols-3 gap-2 text-xs text-slate-500">
+                        <span>риск <b className="font-semibold text-emerald-700">{formatPercent(row.growthRatio, 0)}</b></span>
+                        <span>надёжн. <b className="font-semibold text-slate-900">{formatPercent(row.confidence, 0)}</b></span>
+                        <span>дней <b className="font-semibold text-slate-900">{formatInt(row.positiveSourceCount)}/{formatInt(row.sourceCount)}</b></span>
                       </div>
                     </div>
                   )) : (
-                    <div className="rounded-lg border border-dashed border-slate-300 p-4 text-sm text-slate-500">За последние 6 дней нет часов, где факт был выше прогноза.</div>
+                    <div className="rounded-2xl bg-slate-50 p-6 text-center text-sm text-slate-500">За последние 6 дней нет часов, где факт был выше прогноза.</div>
                   )}
                 </div>
               </div>
