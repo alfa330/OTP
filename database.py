@@ -4612,6 +4612,76 @@ class Database:
 
         return merged_start_min, merged_end_min, merge_ids
 
+    def _split_post_auction_shift_slice_tx(self, cursor, operator_id, shift_date,
+                                           slice_start_time, slice_end_time):
+        """
+        Корректное «разъединение» при отмене добора — операция, обратная слиянию в
+        _resolve_post_auction_merged_shift_range. Находит смену графика, которая
+        содержит отменяемый отрезок (при взятии добор мог слиться с соседней сменой
+        в один блок), удаляет её и заново создаёт оставшиеся части (0, 1 или 2).
+
+        Для каждой оставшейся части перерывы пересчитываются по ТЕКУЩИМ правилам
+        направления (_save_shift_tx с breaks=None) — чтобы на укоротившейся смене не
+        остался перерыв от объединённого блока и у операторов не было проблем позже.
+
+        Работает в минутах с учётом смен через полночь: отрезок выравнивается в
+        систему координат смены сдвигом на сутки. Возвращает True, если содержащая
+        смена найдена и обработана, иначе False (вызывающий код делает запасное
+        точное удаление).
+        """
+        if not (shift_date and slice_start_time and slice_end_time):
+            return False
+
+        def _slice_minute(value):
+            if isinstance(value, dt_time):
+                return value.hour * 60 + value.minute
+            return _time_to_minutes(str(value))
+
+        DAY = 24 * 60
+        raw_start = _slice_minute(slice_start_time)
+        raw_end = _slice_minute(slice_end_time)
+
+        cursor.execute("""
+            SELECT id, start_time, end_time
+            FROM work_shifts
+            WHERE operator_id = %s AND shift_date = %s
+            ORDER BY start_time
+        """, (operator_id, shift_date))
+        shifts = cursor.fetchall() or []
+
+        for sh_id, ws_start, ws_end in shifts:
+            ws_start_min, ws_end_min = self._schedule_interval_minutes(ws_start, ws_end)
+            s_start = raw_start
+            while s_start < ws_start_min:
+                s_start += DAY
+            s_end = raw_end
+            while s_end <= s_start:
+                s_end += DAY
+            # Отрезок добора должен целиком лежать внутри этой смены.
+            if s_start < ws_start_min or s_end > ws_end_min:
+                continue
+
+            cursor.execute("DELETE FROM work_shifts WHERE id = %s", (sh_id,))
+            remaining = []
+            if s_start > ws_start_min:
+                remaining.append((ws_start_min, s_start))
+            if s_end < ws_end_min:
+                remaining.append((s_end, ws_end_min))
+            for part_start, part_end in remaining:
+                start_obj = self._normalize_schedule_time(_minutes_to_time(part_start % DAY), 'start')
+                end_obj = self._normalize_schedule_time(_minutes_to_time(part_end), 'end')
+                self._save_shift_tx(
+                    cursor=cursor,
+                    operator_id=operator_id,
+                    shift_date=shift_date,
+                    start_time=start_obj,
+                    end_time=end_obj,
+                    breaks=None,
+                    shift_type=None,
+                )
+            return True
+        return False
+
     def _normalize_post_auction_claim_range(self, source_start_time, source_end_time, claim_start_time=None, claim_end_time=None):
         source_start_min, source_end_min = self._schedule_interval_minutes(source_start_time, source_end_time)
         start_obj = self._normalize_schedule_time(
@@ -7526,6 +7596,295 @@ class Database:
         return {
             "operator_id": operator_id,
             "lot_id": lot_id_int,
+            "plan_id": resolved_plan_id,
+            "source_schedule_shift_id": resolved_shift_id,
+            "shift_date": event_payload["shift_date"],
+            "start_time": event_payload["start_time"],
+            "end_time": event_payload["end_time"],
+            "event": event,
+        }
+
+    def get_operator_recent_post_auction_claims(self, operator_id, window_hours=24, limit=30, cancel_window_minutes=10):
+        """
+        Список НЕДАВНИХ доборов оператора (взятых доп. смен) за последние
+        window_hours часов, новые сверху. Используется панелью «Мои доборы»:
+        оператор видит, что он взял, и может отменить смену, если с момента
+        взятия прошло не больше cancel_window_minutes (по умолчанию 10 минут).
+
+        Объединяет два источника:
+          • shift_auction_historical_claims — доборы с исходной сменой (как из
+            активного периода, так и из опубликованных прошлых периодов);
+          • shift_auction_test_lots — синтетические лоты без исходной смены.
+
+        cancel_seconds_left считается на часах БД (CURRENT_TIMESTAMP) — один
+        источник времени, чтобы отсчёт на клиенте не зависел от рассинхронизации
+        часов браузера.
+        """
+        try:
+            operator_id = int(operator_id)
+        except Exception:
+            return []
+        window_hours = int(window_hours) if window_hours else 24
+        limit = max(1, int(limit) if limit else 30)
+        cancel_window_minutes = int(cancel_window_minutes) if cancel_window_minutes else 10
+
+        def _fmt_time(value):
+            return value.strftime('%H:%M') if hasattr(value, 'strftime') else None
+
+        entries = []
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT hc.plan_id, hc.source_schedule_shift_id, hc.claimed_at,
+                       hc.claimed_start_time, hc.claimed_end_time,
+                       s.shift_date, s.start_time, s.end_time, s.rate_min,
+                       l.id AS lot_id,
+                       GREATEST(0, EXTRACT(EPOCH FROM (
+                           hc.claimed_at + (%s * INTERVAL '1 minute') - CURRENT_TIMESTAMP
+                       )))::int AS cancel_seconds_left
+                FROM shift_auction_historical_claims hc
+                JOIN resource_saved_schedule_shifts s
+                  ON s.id = hc.source_schedule_shift_id AND s.plan_id = hc.plan_id
+                LEFT JOIN shift_auction_test_lots l
+                  ON l.source_schedule_plan_id = hc.plan_id
+                 AND l.source_schedule_shift_id = hc.source_schedule_shift_id
+                WHERE hc.claimed_by = %s
+                  AND hc.claimed_at >= CURRENT_TIMESTAMP - (%s * INTERVAL '1 hour')
+                ORDER BY hc.claimed_at DESC
+                LIMIT %s
+            """, (cancel_window_minutes, operator_id, window_hours, limit))
+            for row in (cursor.fetchall() or []):
+                claimed_at = row[2]
+                seconds_left = int(row[10] or 0)
+                entries.append({
+                    "_claimed_at": claimed_at,
+                    "lot_id": int(row[9]) if row[9] is not None else None,
+                    "plan_id": int(row[0]) if row[0] is not None else None,
+                    "source_schedule_shift_id": int(row[1]) if row[1] is not None else None,
+                    "shift_date": row[5].strftime('%Y-%m-%d') if row[5] else None,
+                    "start_time": _fmt_time(row[3]) or _fmt_time(row[6]),
+                    "end_time": _fmt_time(row[4]) or _fmt_time(row[7]),
+                    "rate_min": float(row[8]) if row[8] is not None else 0.0,
+                    "claimed_at": claimed_at.isoformat() if claimed_at else None,
+                    "cancel_seconds_left": seconds_left,
+                    "can_cancel": seconds_left > 0,
+                })
+
+            cursor.execute("""
+                SELECT l.id, l.shift_date, l.start_time, l.end_time, l.rate_min,
+                       l.claimed_at, l.post_claim_start_time, l.post_claim_end_time,
+                       GREATEST(0, EXTRACT(EPOCH FROM (
+                           l.claimed_at + (%s * INTERVAL '1 minute') - CURRENT_TIMESTAMP
+                       )))::int AS cancel_seconds_left
+                FROM shift_auction_test_lots l
+                WHERE l.claimed_by = %s
+                  AND COALESCE(l.post_auction_claimed, FALSE) = TRUE
+                  AND l.source_schedule_shift_id IS NULL
+                  AND l.claimed_at IS NOT NULL
+                  AND l.claimed_at >= CURRENT_TIMESTAMP - (%s * INTERVAL '1 hour')
+                ORDER BY l.claimed_at DESC
+                LIMIT %s
+            """, (cancel_window_minutes, operator_id, window_hours, limit))
+            for row in (cursor.fetchall() or []):
+                claimed_at = row[5]
+                seconds_left = int(row[8] or 0)
+                entries.append({
+                    "_claimed_at": claimed_at,
+                    "lot_id": int(row[0]) if row[0] is not None else None,
+                    "plan_id": None,
+                    "source_schedule_shift_id": None,
+                    "shift_date": row[1].strftime('%Y-%m-%d') if row[1] else None,
+                    "start_time": _fmt_time(row[6]) or _fmt_time(row[2]),
+                    "end_time": _fmt_time(row[7]) or _fmt_time(row[3]),
+                    "rate_min": float(row[4]) if row[4] is not None else 0.0,
+                    "claimed_at": claimed_at.isoformat() if claimed_at else None,
+                    "cancel_seconds_left": seconds_left,
+                    "can_cancel": seconds_left > 0,
+                })
+
+        entries.sort(key=lambda item: item["_claimed_at"] or datetime.min, reverse=True)
+        entries = entries[:limit]
+        for item in entries:
+            item.pop("_claimed_at", None)
+        return entries
+
+    def operator_cancel_post_auction_claim(self, operator_id, lot_id=None, plan_id=None,
+                                           source_schedule_shift_id=None, cancel_window_minutes=10):
+        """
+        Оператор сам отменяет недавно взятую дополнительную смену (добор), если с
+        момента взятия прошло не больше cancel_window_minutes (по умолчанию 10).
+        Смена возвращается в доступные и убирается из графика. Это «зеркало»
+        admin_unclaim_shift, но строго для СВОЕГО claim'а и с лимитом по времени.
+        Окно проверяется по часам БД (CURRENT_TIMESTAMP), а не по часам клиента.
+
+        Смена убирается из графика «разъединением» (_split_post_auction_shift_slice_tx):
+        если добор был слит с соседней сменой, отрезок добора вычитается, а оставшиеся
+        части пересоздаются с пересчётом перерывов по текущим правилам направления.
+        """
+        operator_id = int(operator_id)
+        try:
+            lot_id_int = int(lot_id) if lot_id not in (None, '') else None
+        except Exception:
+            lot_id_int = None
+        try:
+            plan_id_int = int(plan_id) if plan_id not in (None, '') else None
+        except Exception:
+            plan_id_int = None
+        try:
+            shift_id_int = int(source_schedule_shift_id) if source_schedule_shift_id not in (None, '') else None
+        except Exception:
+            shift_id_int = None
+        cancel_window_minutes = int(cancel_window_minutes) if cancel_window_minutes else 10
+
+        with self._get_cursor() as cursor:
+            self._lock_shift_auction_operator_tx(cursor, operator_id)
+
+            shift_date = None
+            start_time = None
+            end_time = None
+            claimed_at = None
+            resolved_plan_id = plan_id_int
+            resolved_shift_id = shift_id_int
+            used_lot_id = None
+
+            if resolved_plan_id and resolved_shift_id:
+                # Добор с исходной сменой — источник правды shift_auction_historical_claims.
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(%s, %s)",
+                    (self.SHIFT_AUCTION_SAVED_SHIFT_LOCK_NAMESPACE, resolved_shift_id)
+                )
+                cursor.execute("""
+                    SELECT claimed_at, claimed_start_time, claimed_end_time
+                    FROM shift_auction_historical_claims
+                    WHERE plan_id = %s AND source_schedule_shift_id = %s AND claimed_by = %s
+                    FOR UPDATE
+                """, (resolved_plan_id, resolved_shift_id, operator_id))
+                claim_row = cursor.fetchone()
+                if not claim_row:
+                    raise ValueError("CLAIM_NOT_FOUND")
+                claimed_at = claim_row[0]
+                cursor.execute("""
+                    SELECT shift_date, start_time, end_time
+                    FROM resource_saved_schedule_shifts
+                    WHERE id = %s AND plan_id = %s
+                """, (resolved_shift_id, resolved_plan_id))
+                saved = cursor.fetchone()
+                if not saved:
+                    raise ValueError("SHIFT_NOT_FOUND")
+                shift_date = saved[0]
+                start_time = claim_row[1] or saved[1]
+                end_time = claim_row[2] or saved[2]
+            elif lot_id_int:
+                # Синтетический лот активного плана без исходной смены.
+                cursor.execute("""
+                    SELECT shift_date, start_time, end_time, claimed_by, claimed_at, status,
+                           source_schedule_plan_id, source_schedule_shift_id,
+                           post_claim_start_time, post_claim_end_time,
+                           COALESCE(post_auction_claimed, FALSE)
+                    FROM shift_auction_test_lots
+                    WHERE id = %s
+                    FOR UPDATE
+                """, (lot_id_int,))
+                lot = cursor.fetchone()
+                if not lot:
+                    raise ValueError("LOT_NOT_FOUND")
+                if lot[5] != 'claimed' or lot[3] is None:
+                    raise ValueError("LOT_NOT_CLAIMED")
+                if int(lot[3]) != operator_id:
+                    raise ValueError("LOT_NOT_OWNED")
+                if not bool(lot[10]):
+                    # Отменять так можно только пост-аукционные доборы; обычный
+                    # claim во время аукциона возвращается через release.
+                    raise ValueError("POST_AUCTION_LOT_NOT_RELEASABLE")
+                used_lot_id = lot_id_int
+                shift_date = lot[0]
+                start_time = lot[8] or lot[1]
+                end_time = lot[9] or lot[2]
+                claimed_at = lot[4]
+                resolved_plan_id = int(lot[6]) if lot[6] is not None else None
+                resolved_shift_id = int(lot[7]) if lot[7] is not None else None
+                if resolved_shift_id:
+                    cursor.execute(
+                        "SELECT pg_advisory_xact_lock(%s, %s)",
+                        (self.SHIFT_AUCTION_SAVED_SHIFT_LOCK_NAMESPACE, resolved_shift_id)
+                    )
+            else:
+                raise ValueError("MISSING_TARGET")
+
+            if claimed_at is None:
+                raise ValueError("CLAIM_NOT_FOUND")
+
+            # Окно отмены — авторитетно по часам БД.
+            cursor.execute(
+                "SELECT (%s + (%s * INTERVAL '1 minute')) < CURRENT_TIMESTAMP",
+                (claimed_at, cancel_window_minutes)
+            )
+            window_expired = bool((cursor.fetchone() or [True])[0])
+            if window_expired:
+                raise ValueError("CANCEL_WINDOW_EXPIRED")
+
+            # Возвращаем лот(ы) в доступные.
+            if used_lot_id and not (resolved_plan_id and resolved_shift_id):
+                cursor.execute("""
+                    UPDATE shift_auction_test_lots
+                    SET status = 'available', claimed_by = NULL, claimed_at = NULL,
+                        post_auction_claimed = FALSE, post_claim_start_time = NULL,
+                        post_claim_end_time = NULL, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                """, (used_lot_id,))
+
+            if resolved_plan_id and resolved_shift_id:
+                cursor.execute("""
+                    UPDATE shift_auction_test_lots
+                    SET status = 'available', claimed_by = NULL, claimed_at = NULL,
+                        post_auction_claimed = FALSE, post_claim_start_time = NULL,
+                        post_claim_end_time = NULL, updated_at = CURRENT_TIMESTAMP
+                    WHERE source_schedule_plan_id = %s
+                      AND source_schedule_shift_id = %s
+                      AND status = 'claimed'
+                      AND claimed_by = %s
+                """, (resolved_plan_id, resolved_shift_id, operator_id))
+                # Снимаем ТОЛЬКО claim этого оператора — частичные доборы других
+                # операторов на той же смене остаются нетронутыми.
+                cursor.execute("""
+                    DELETE FROM shift_auction_historical_claims
+                    WHERE plan_id = %s AND source_schedule_shift_id = %s AND claimed_by = %s
+                """, (resolved_plan_id, resolved_shift_id, operator_id))
+
+            if shift_date and start_time and end_time:
+                # Корректное разъединение: вычитаем отрезок добора, оставшиеся части
+                # пересоздаём с пересчётом перерывов по текущим правилам. Если смена,
+                # содержащая отрезок, не найдена — запасное точное удаление.
+                split_done = self._split_post_auction_shift_slice_tx(
+                    cursor, operator_id, shift_date, start_time, end_time
+                )
+                if not split_done:
+                    cursor.execute("""
+                        DELETE FROM work_shifts
+                        WHERE operator_id = %s AND shift_date = %s
+                          AND start_time = %s AND end_time = %s
+                    """, (operator_id, shift_date, start_time, end_time))
+                self._recalculate_auto_daily_hours_tx(
+                    cursor=cursor,
+                    operator_ids=[operator_id],
+                    start_date=shift_date,
+                    end_date=shift_date
+                )
+
+            event_payload = {
+                "operator_id": operator_id,
+                "lot_id": used_lot_id,
+                "plan_id": resolved_plan_id,
+                "source_schedule_shift_id": resolved_shift_id,
+                "shift_date": shift_date.strftime('%Y-%m-%d') if hasattr(shift_date, 'strftime') else None,
+                "start_time": start_time.strftime('%H:%M') if hasattr(start_time, 'strftime') else None,
+                "end_time": end_time.strftime('%H:%M') if hasattr(end_time, 'strftime') else None,
+                "self_cancelled": True,
+            }
+            event = self._insert_shift_auction_test_event(cursor, "lot_post_auction_cancelled", event_payload)
+
+        return {
+            "operator_id": operator_id,
+            "lot_id": used_lot_id,
             "plan_id": resolved_plan_id,
             "source_schedule_shift_id": resolved_shift_id,
             "shift_date": event_payload["shift_date"],

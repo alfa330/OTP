@@ -3128,6 +3128,8 @@ def _shift_auction_test_error_response(error):
         "SHIFT_OVERLAP": ("Смена пересекается по времени с другой сменой оператора", 409),
         "SHIFT_NOT_FOUND": ("Смена не найдена в плане", 404),
         "MISSING_TARGET": ("Не указан лот или смена", 400),
+        "CLAIM_NOT_FOUND": ("Эта смена не найдена среди ваших взятых", 404),
+        "CANCEL_WINDOW_EXPIRED": ("Отменить смену можно только в течение 10 минут после того, как вы её взяли", 409),
     })
     message, status = mapping.get(code, ("Ошибка аукциона смен", 400))
     return jsonify({"error": message, "code": code}), status
@@ -3628,6 +3630,56 @@ def api_shift_auction_post_claim_lot():
         return _shift_auction_test_error_response(error)
     except Exception as error:
         logging.error(f"Post-auction claim API error: {error}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/shift_auction/my_post_claims', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_shift_auction_my_post_claims():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if _normalize_user_role(requester[3]) != 'operator':
+            return jsonify({"error": "Only operators can view their claimed shifts"}), 403
+        claims = db.get_operator_recent_post_auction_claims(requester_id)
+        return jsonify({"status": "success", "claims": claims}), 200
+    except ValueError as error:
+        return _shift_auction_test_error_response(error)
+    except Exception as error:
+        logging.error(f"My post-auction claims API error: {error}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/shift_auction/cancel_post_claim', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_shift_auction_cancel_post_claim():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if _normalize_user_role(requester[3]) != 'operator':
+            return jsonify({"error": "Only operators can cancel their claimed shifts"}), 403
+        payload = request.get_json(silent=True) or {}
+        result = db.operator_cancel_post_auction_claim(
+            operator_id=requester_id,
+            lot_id=payload.get('lot_id'),
+            plan_id=payload.get('plan_id') or payload.get('schedule_plan_id') or payload.get('source_schedule_plan_id'),
+            source_schedule_shift_id=payload.get('source_schedule_shift_id') or payload.get('source_shift_id'),
+        )
+        return jsonify({"status": "success", **result}), 200
+    except ValueError as error:
+        return _shift_auction_test_error_response(error)
+    except Exception as error:
+        logging.error(f"Cancel post-auction claim API error: {error}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 

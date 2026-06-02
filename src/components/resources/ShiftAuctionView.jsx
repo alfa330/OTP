@@ -38,6 +38,16 @@ import {
   X
 } from 'lucide-react';
 import { isAdminLikeRole, isSupervisorRole, normalizeRole } from '../../utils/roles';
+import { IosModal, IosBadge, iosCard } from '../ui/ios';
+
+// Стабильный ключ недавнего добора: (lot_id | plan_id | source_schedule_shift_id).
+const getPostClaimKey = (claim) => {
+  if (!claim) return '';
+  const lotId = claim.lot_id != null ? String(claim.lot_id) : '';
+  const planId = claim.plan_id != null ? String(claim.plan_id) : '';
+  const shiftId = claim.source_schedule_shift_id != null ? String(claim.source_schedule_shift_id) : '';
+  return `${lotId}|${planId}|${shiftId}`;
+};
 
 const normalizeOperatorId = (value) => {
   const id = Number(value);
@@ -3254,6 +3264,13 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [notifyPostClaimEnabled, setNotifyPostClaimEnabled] = useState(false);
   const [isSavingNotifyToggle, setIsSavingNotifyToggle] = useState(false);
   const [postAuctionNowMs, setPostAuctionNowMs] = useState(() => Date.now());
+  const [myClaimsOpen, setMyClaimsOpen] = useState(false);
+  const [myClaims, setMyClaims] = useState([]);
+  const [myClaimsLoading, setMyClaimsLoading] = useState(false);
+  const [myClaimsError, setMyClaimsError] = useState('');
+  const [myClaimsFetchedAt, setMyClaimsFetchedAt] = useState(0);
+  const [cancelingClaimKey, setCancelingClaimKey] = useState('');
+  const [claimsNowMs, setClaimsNowMs] = useState(() => Date.now());
   const [viewSchedulePlanId, setViewSchedulePlanId] = useState('');
   const [periodPreviewLots, setPeriodPreviewLots] = useState([]);
   const [periodPreviewBlockedDates, setPeriodPreviewBlockedDates] = useState([]);
@@ -4828,6 +4845,76 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     return () => window.clearInterval(interval);
   }, [selectedViewPostAuctionActive]);
 
+  const fetchMyClaims = useCallback(async () => {
+    if (!apiRoot || !user?.id) return;
+    setMyClaimsLoading(true);
+    setMyClaimsError('');
+    try {
+      const response = await axios.get(`${apiRoot}/api/shift_auction/my_post_claims`, {
+        headers: buildHeaders()
+      });
+      setMyClaims(Array.isArray(response?.data?.claims) ? response.data.claims : []);
+      setMyClaimsFetchedAt(Date.now());
+    } catch (error) {
+      setMyClaimsError(error?.response?.data?.error || 'Не удалось загрузить взятые смены');
+    } finally {
+      setMyClaimsLoading(false);
+    }
+  }, [apiRoot, buildHeaders, user?.id]);
+
+  const openMyClaims = useCallback(() => {
+    setMyClaimsOpen(true);
+    fetchMyClaims();
+  }, [fetchMyClaims]);
+
+  const handleCancelMyClaim = useCallback(async (claim) => {
+    const key = getPostClaimKey(claim);
+    if (!key || cancelingClaimKey) return;
+    setCancelingClaimKey(key);
+    try {
+      const payload = (claim.plan_id && claim.source_schedule_shift_id)
+        ? { plan_id: claim.plan_id, source_schedule_shift_id: claim.source_schedule_shift_id }
+        : { lot_id: claim.lot_id };
+      await enqueueAuctionMutation(() => axios.post(
+        `${apiRoot}/api/shift_auction/cancel_post_claim`,
+        payload,
+        { headers: buildHeaders() }
+      ));
+      notify('Смена отменена и снова доступна для других');
+      setMyClaims((current) => current.filter((item) => getPostClaimKey(item) !== key));
+      fetchSnapshot({ silent: true });
+      if (!isViewingActivePeriod && selectedViewSchedulePlanId) {
+        fetchPeriodPreview(selectedViewSchedulePlanId, {});
+      }
+      fetchMyClaims();
+    } catch (error) {
+      notifyClaimError(error?.response?.data?.error || 'Не удалось отменить смену');
+      fetchMyClaims();
+    } finally {
+      setCancelingClaimKey('');
+    }
+  }, [
+    apiRoot,
+    buildHeaders,
+    cancelingClaimKey,
+    enqueueAuctionMutation,
+    fetchMyClaims,
+    fetchPeriodPreview,
+    fetchSnapshot,
+    isViewingActivePeriod,
+    notify,
+    notifyClaimError,
+    selectedViewSchedulePlanId
+  ]);
+
+  // Посекундный тик для обратного отсчёта окна отмены, пока панель открыта.
+  useEffect(() => {
+    if (!myClaimsOpen) return undefined;
+    setClaimsNowMs(Date.now());
+    const interval = window.setInterval(() => setClaimsNowMs(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, [myClaimsOpen]);
+
   const openReleaseConfirm = useCallback((lotsToRelease) => {
     const options = (Array.isArray(lotsToRelease) ? lotsToRelease : [lotsToRelease])
       .filter((lot) => lot && lot.id);
@@ -5032,6 +5119,17 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
               <BookOpen size={16} />
               Инструкция
             </button>
+            {!canMonitor && canUseAuction ? (
+              <button
+                type="button"
+                onClick={openMyClaims}
+                className="inline-flex h-9 flex-1 items-center justify-center gap-2 rounded-lg border border-violet-200 bg-violet-50 px-3 text-xs font-semibold text-violet-800 shadow-sm transition hover:bg-violet-100 sm:h-10 sm:flex-none sm:px-4 sm:text-sm"
+                aria-label="Мои взятые смены"
+              >
+                <Hand size={16} />
+                Мои доп. смены
+              </button>
+            ) : null}
             <div className={`inline-flex h-9 flex-1 items-center justify-center gap-2 rounded-lg border px-2.5 text-xs sm:h-10 sm:flex-none sm:px-3 sm:text-sm ${connectionState === 'online' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-600'}`}>
               <Wifi size={15} />
               <span className="truncate">{connectionState === 'online' ? 'Realtime online' : connectionState === 'connecting' ? 'Подключение...' : connectionState === 'reconnecting' ? 'Переподключение...' : 'Realtime idle'}</span>
@@ -6349,6 +6447,94 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           inProgress={postClaimingLotIds.has(getAuctionLotActionKey(postClaimConfirmLot))}
         />
       ) : null}
+
+      <IosModal
+        open={myClaimsOpen}
+        onClose={() => setMyClaimsOpen(false)}
+        title="Мои доп. смены"
+        subtitle="Недавно взятые дополнительные смены"
+        maxWidth="max-w-md"
+      >
+        <div className="space-y-3">
+          <div className="flex items-start gap-2.5 rounded-2xl bg-blue-50 px-3.5 py-3 text-[12.5px] leading-5 text-blue-800 ring-1 ring-blue-100">
+            <Info size={16} className="mt-0.5 shrink-0 text-blue-500" />
+            <span>Отменить взятую смену можно в течение <b>10 минут</b> после того, как вы её взяли. Позже смена закрепляется в графике — обратитесь к руководителю.</span>
+          </div>
+
+          {myClaimsLoading && !myClaims.length ? (
+            <div className="flex items-center justify-center gap-2 py-12 text-[13px] text-slate-400">
+              <RefreshCw size={15} className="animate-spin" />
+              Загрузка…
+            </div>
+          ) : myClaimsError ? (
+            <div className="rounded-2xl bg-rose-50 px-3.5 py-3 text-[13px] text-rose-600 ring-1 ring-rose-100">
+              {myClaimsError}
+            </div>
+          ) : !myClaims.length ? (
+            <div className="flex flex-col items-center gap-2 py-12 text-center">
+              <div className="grid h-14 w-14 place-items-center rounded-full bg-slate-100 text-slate-400">
+                <CalendarDays size={24} />
+              </div>
+              <div className="text-[14px] font-semibold text-slate-600">Нет недавно взятых смен</div>
+              <div className="max-w-[260px] text-[12px] leading-5 text-slate-400">
+                Здесь появятся дополнительные смены, которые вы возьмёте, — с возможностью отменить их в первые 10 минут.
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {myClaims.map((claim) => {
+                const key = getPostClaimKey(claim);
+                const baseLeftMs = (Number(claim.cancel_seconds_left) || 0) * 1000;
+                const elapsedMs = Math.max(0, claimsNowMs - myClaimsFetchedAt);
+                const remainingMs = baseLeftMs - elapsedMs;
+                const canCancel = remainingMs > 0;
+                const busy = cancelingClaimKey === key;
+                const totalSec = Math.max(0, Math.ceil(remainingMs / 1000));
+                const countdown = `${Math.floor(totalSec / 60)}:${String(totalSec % 60).padStart(2, '0')}`;
+                return (
+                  <div key={key} className={`${iosCard} p-3.5`}>
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-[14.5px] font-semibold capitalize text-slate-900">
+                          {formatDateLabel(claim.shift_date)}
+                        </div>
+                        <div className="mt-1 flex items-center gap-1.5 text-[13px] text-slate-500">
+                          <Clock3 size={14} className="shrink-0 text-slate-400" />
+                          <span className="tabular-nums">{claim.start_time}–{claim.end_time}</span>
+                        </div>
+                      </div>
+                      {canCancel ? (
+                        <IosBadge tone="amber" className="tabular-nums">
+                          <Clock3 size={12} />
+                          {countdown}
+                        </IosBadge>
+                      ) : (
+                        <IosBadge tone="green">
+                          <CheckCircle2 size={12} />
+                          В графике
+                        </IosBadge>
+                      )}
+                    </div>
+                    {canCancel ? (
+                      <div className="mt-3">
+                        <button
+                          type="button"
+                          onClick={() => handleCancelMyClaim(claim)}
+                          disabled={busy}
+                          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-rose-50 px-4 py-2.5 text-[13.5px] font-semibold text-rose-600 ring-1 ring-rose-100 transition-all hover:bg-rose-100 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {busy ? <RefreshCw size={15} className="animate-spin" /> : <Undo2 size={15} />}
+                          {busy ? 'Отмена…' : `Отменить · ${countdown}`}
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </IosModal>
     </div>
   );
 };
