@@ -12,7 +12,10 @@
       function gtag(){dataLayer.push(arguments);}
       gtag('js', new Date());
 
-      gtag('config', 'G-DDGZC3W1MZ');
+      // send_page_view: false — page_view шлётся вручную из приложения с корректным
+      // page_title (см. trackAppViewAnalytics в src/App.jsx). Иначе на загрузке
+      // улетал бы лишний page_view со статичным title "iCORE".
+      gtag('config', 'G-DDGZC3W1MZ', { send_page_view: false });
     </script>
   </head>
   <body class="bg-gray-50 font-sans antialiased text-gray-900">

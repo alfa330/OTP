@@ -70,10 +70,20 @@ const notifyEmbeddedCallEvaluationSectionView = ({ section = 'journal', role = '
 };
 
 const trackCallEvaluationAppView = ({ section = 'journal', role = '' } = {}) => {
-    if (typeof window === 'undefined' || typeof window.gtag !== 'function') return false;
-    if (window.parent && window.parent !== window) return false;
+    if (typeof window === 'undefined') return false;
 
     const sectionId = normalizeAnalyticsToken(section) || 'journal';
+    const pageParams = buildCallEvaluationAnalyticsPageParams(sectionId);
+    // Держим document.title в соответствии с активным разделом, чтобы GA привязывал
+    // автоматически собираемые события к нужному page_title, а не к статичному заголовку.
+    if (typeof document !== 'undefined' && pageParams.page_title) {
+        document.title = pageParams.page_title;
+    }
+
+    // В iframe аналитику владеет родительское окно (через postMessage) — page_view отсюда не шлём.
+    if (window.parent && window.parent !== window) return false;
+    if (typeof window.gtag !== 'function') return false;
+
     const roleId = normalizeAnalyticsToken(role === 'supervisor' ? 'sv' : role);
     const subviewId = `call_evaluation_${sectionId}`;
     const params = {
@@ -81,7 +91,7 @@ const trackCallEvaluationAppView = ({ section = 'journal', role = '' } = {}) => 
         app_view_name: 'Call evaluation',
         app_subview_id: subviewId,
         app_subview_name: CALL_EVALUATION_SECTION_NAMES[sectionId] || formatAnalyticsName(subviewId),
-        ...buildCallEvaluationAnalyticsPageParams(sectionId)
+        ...pageParams
     };
 
     if (roleId) {

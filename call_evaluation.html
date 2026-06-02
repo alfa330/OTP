@@ -14,7 +14,10 @@
       function gtag(){dataLayer.push(arguments);}
       gtag('js', new Date());
 
-      gtag('config', 'G-DDGZC3W1MZ');
+      // send_page_view: false — page_view шлётся вручную (см. trackCallEvaluationAppView
+      // в src/call_evaluation/main.jsx). Иначе на загрузке улетал бы лишний page_view
+      // со статичным title "Оценки операторов".
+      gtag('config', 'G-DDGZC3W1MZ', { send_page_view: false });
     </script>
     <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
   </head>
