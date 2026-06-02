@@ -266,11 +266,18 @@ const resolveAppViewAnalyticsSubview = ({ view, calculatorType, callEvaluationTa
     return '';
 };
 const trackAppViewAnalytics = ({ view, subview = '', role = '' } = {}) => {
-    if (typeof window === 'undefined' || typeof window.gtag !== 'function') return false;
+    if (typeof window === 'undefined') return false;
     const viewId = normalizeAnalyticsToken(view) || 'unknown';
     const subviewId = normalizeAnalyticsToken(subview);
-    const normalizedRole = normalizeRole(role);
     const pageParams = buildAppViewAnalyticsPageParams({ view: viewId, subview: subviewId });
+    // Держим заголовок вкладки в соответствии с активным разделом: GA берёт page_title
+    // автоматически собираемых событий (scroll, user_engagement, клики) из document.title.
+    // Без этого они все падали бы в один общий заголовок "iCORE".
+    if (typeof document !== 'undefined' && pageParams.page_title) {
+        document.title = pageParams.page_title;
+    }
+    if (typeof window.gtag !== 'function') return false;
+    const normalizedRole = normalizeRole(role);
     const params = {
         app_view_id: viewId,
         app_view_name: getAppViewAnalyticsName(viewId),
