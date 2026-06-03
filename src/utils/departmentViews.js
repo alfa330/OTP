@@ -1,4 +1,4 @@
-import { isAdminLikeRole } from './roles';
+import { isAdminLikeRole, isDepartmentHead } from './roles';
 
 /*
  * Хардкод-карта «отдел → разрешённые разделы» (view-ключи из App.jsx).
@@ -21,6 +21,9 @@ export const departmentCodeOf = (user) => {
 };
 
 export const departmentRestrictsViews = (user) => {
+    // Админы и главы отдела (управленцы) не ограничиваются allowlist'ом отдела —
+    // ограничение касается рядовых сотрудников (операторов) спец-отделов.
+    if (isAdminLikeRole(user?.role) || isDepartmentHead(user)) return false;
     const code = departmentCodeOf(user);
     return !!(code && DEPARTMENT_VIEW_ALLOWLIST[code]);
 };
@@ -30,7 +33,7 @@ export const departmentAllowsView = (user, viewKey) => {
     const code = departmentCodeOf(user);
     const allow = code ? DEPARTMENT_VIEW_ALLOWLIST[code] : null;
     if (!allow) return true;                        // отдел без ограничений
-    if (isAdminLikeRole(user?.role)) return true;   // админы не ограничиваются отделом
+    if (isAdminLikeRole(user?.role) || isDepartmentHead(user)) return true;  // управленцы — без ограничений
     return allow.includes(viewKey);
 };
 

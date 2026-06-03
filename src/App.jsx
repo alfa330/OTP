@@ -15,7 +15,7 @@ import MonitoringScaleView from './components/monitoring/MonitoringScaleView';
 import FaIcon from './components/common/FaIcon';
 import AuthEntranceSplash from './components/common/AuthEntranceSplash';
 import OrazAitSplash from './components/common/OrazAitSplash';
-import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole } from './utils/roles';
+import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead } from './utils/roles';
 import { departmentAllowsView, departmentRestrictsViews, firstAllowedView } from './utils/departmentViews';
 
 const CHUNK_RELOAD_STORAGE_KEY = 'otp_chunk_reload_attempted';
@@ -36332,6 +36332,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             )}
                                         </>
                                     )}
+                                    {isDepartmentHead(user) && !isAdminLikeRole && (
+                                        <>
+                                            {renderSidebarDividerInner()}
+                                            <li>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'monitoring_scale')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'monitoring_scale' ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-chart-bar"></FaIcon> <span className="sidebar-text">Мониторинговая шкала</span>
+                                                </button>
+                                            </li>
+                                        </>
+                                    )}
                                     {currentUserRole === 'sv' && (
                                         <>
                                             {canAccessLmsSection && renderSidebarDividerInner()}
@@ -38502,10 +38512,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <MonitoringScaleView
                                         user={user}
                                         apiBaseUrl={API_BASE_URL}
-                                        directions={directions}
-                                        onDirectionsChange={setDirections}
-                                        onRefresh={fetchDirections}
-                                        onSave={saveDirections}
+                                        departments={departments}
                                         showToast={showToast}
                                         canEdit={isAdminLikeRoleFn(user?.role)}
                                     />
@@ -38562,6 +38569,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 ))}
                             </>
                         )}
+                        {/* Глава отдела (не админ): Мониторинговая шкала, ограниченная своим отделом */}
+                        {( view === "monitoring_scale" && !isAdminLikeRole && isDepartmentHead(user) && (
+                            <MonitoringScaleView
+                                user={user}
+                                apiBaseUrl={API_BASE_URL}
+                                departments={departments}
+                                showToast={showToast}
+                                canEdit={true}
+                            />
+                        ))}
                         {(user.role === 'sv' || user.role === 'supervisor' || user.role === 'trainer') && (
                             <>
                                 {view === 'qr_access' && (
