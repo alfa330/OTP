@@ -28169,6 +28169,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             });
             const [directions, setDirections] = useState([]);
             const [departments, setDepartments] = useState([]);
+            const [manageUsersDeptFilter, setManageUsersDeptFilter] = useState('');
             const [selectedMonth, setSelectedMonth] = useState(() => getStoredValue('selectedMonth', currentMonth));
             const [users, setUsers] = useState([]);
             const [adminUsers, setAdminUsers] = useState([]);
@@ -35929,6 +35930,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (fallback && fallback !== view) setView(fallback);
             }, [user?.id, user?.role, user?.department_code, view]);
 
+            // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
+            // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
+            useEffect(() => {
+                if (!user?.id) return;
+                if (!(isAdminLikeRoleFn(user?.role) || isSupervisorRole(user?.role))) return;
+                const managementViews = ['manage_users', 'employees', 'sv_list', 'manage_trainers', 'manage_admins', 'manage_operators', 'departments'];
+                if (showUserEditModal || managementViews.includes(view)) {
+                    fetchDepartments();
+                }
+            }, [showUserEditModal, view, user?.id, user?.role]);
+
             useEffect(() => {
                 if (!user || !user.id || !isSupervisorRole(user?.role)) return;
                 fetchSvData(selectedReportMonth || selectedMonth);
@@ -37684,12 +37696,29 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <h2 className="text-2xl font-semibold text-gray-800">Операторы</h2>
 
                                     <div className="flex items-center gap-3">
+                                        {isAdminLikeRole && (departments || []).length > 0 && (
+                                        <div className="flex items-center gap-2">
+                                            <FaIcon className="fa-solid fa-layer-group text-gray-400" />
+                                            <select
+                                                value={manageUsersDeptFilter}
+                                                onChange={(e) => setManageUsersDeptFilter(e.target.value)}
+                                                className="px-3 py-3 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+                                                title="Фильтр по отделу"
+                                            >
+                                                <option value="">Все отделы</option>
+                                                {(departments || []).map((dep) => (
+                                                    <option key={dep.id} value={dep.id}>{dep.name}</option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                        )}
                                         <button
                                         onClick={() => {
                                             setUserToEdit({
                                             name: "",
                                             rate: 1.0,
                                             direction_id: "",
+                                            department_id: manageUsersDeptFilter || "",
                                             hire_date: "",
                                             supervisor_id: "",
                                             status: "working",
@@ -37721,7 +37750,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     {/* Tabs */}
                                     <div className="flex flex-wrap gap-3 mb-6">
                                     {(() => {
-                                        const allUsers = Array.isArray(users) ? users : [];
+                                        const _deptFilter = manageUsersDeptFilter ? Number(manageUsersDeptFilter) : null;
+                                        const allUsers = (Array.isArray(users) ? users : [])
+                                            .filter((u) => _deptFilter == null || Number(u?.department_id) === _deptFilter);
                                         return USER_STATUS_FILTER_TABS.map((tab) => {
                                             const count = allUsers.filter((u) => isEmployeeVisibleByStatusTab(u?.status, tab.key)).length;
                                             const isActive = activeUserTab === tab.key;
@@ -37745,8 +37776,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <p className="text-center text-gray-600">Загрузка...</p>
                                     ) : (
                                     (() => {
-                                        // Фильтруем по статусу
-                                        const filteredByStatus = (users || []).filter((u) => isEmployeeVisibleByStatusTab(u?.status, activeUserTab));
+                                        // Фильтруем по статусу и (опц.) по отделу
+                                        const _deptFilter = manageUsersDeptFilter ? Number(manageUsersDeptFilter) : null;
+                                        const filteredByStatus = (users || [])
+                                            .filter((u) => isEmployeeVisibleByStatusTab(u?.status, activeUserTab))
+                                            .filter((u) => _deptFilter == null || Number(u?.department_id) === _deptFilter);
 
                                         if (filteredByStatus.length === 0) {
                                         return <p className="text-center text-gray-600">Операторы не найдены.</p>;
