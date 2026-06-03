@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import FaIcon from '../common/FaIcon';
 import { normalizeRole } from '../../utils/roles';
 import {
@@ -41,6 +41,12 @@ const DepartmentsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader })
     const [history, setHistory] = useState([]);
     const [historyLoading, setHistoryLoading] = useState(false);
 
+    // Держим showToast в ref, чтобы он не попадал в зависимости useCallback/useEffect:
+    // иначе при каждом новом toast меняется идентичность колбэка и происходит лишний
+    // перезапрос отделов (и «перемонтирование» эффекта загрузки).
+    const showToastRef = useRef(showToast);
+    showToastRef.current = showToast;
+
     const authHeaders = useCallback(
         (extra = {}) => withAccessTokenHeader({ 'X-User-Id': String(user.id), ...extra }),
         [withAccessTokenHeader, user?.id]
@@ -55,13 +61,13 @@ const DepartmentsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader })
             });
             const data = await resp.json().catch(() => ({}));
             if (resp.ok && data.departments) setDepartments(data.departments);
-            else showToast?.(data.error || 'Не удалось загрузить отделы', 'error');
+            else showToastRef.current?.(data.error || 'Не удалось загрузить отделы', 'error');
         } catch {
-            showToast?.('Ошибка сети при загрузке отделов', 'error');
+            showToastRef.current?.('Ошибка сети при загрузке отделов', 'error');
         } finally {
             setLoading(false);
         }
-    }, [apiBaseUrl, authHeaders, showToast]);
+    }, [apiBaseUrl, authHeaders]);
 
     const fetchUsers = useCallback(async () => {
         try {
@@ -99,7 +105,7 @@ const DepartmentsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader })
     const submitForm = async (e) => {
         e?.preventDefault?.();
         if (!form.name.trim() || (!editingId && !form.code.trim())) {
-            showToast?.('Код и название обязательны', 'error');
+            showToastRef.current?.('Код и название обязательны', 'error');
             return;
         }
         setSaving(true);
@@ -122,13 +128,13 @@ const DepartmentsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader })
                 setDepartments((prev) => isEdit
                     ? prev.map((d) => (d.id === editingId ? data.department : d))
                     : [...prev, data.department]);
-                showToast?.(isEdit ? 'Отдел обновлён' : 'Отдел создан', 'success');
+                showToastRef.current?.(isEdit ? 'Отдел обновлён' : 'Отдел создан', 'success');
                 closeForm();
             } else {
-                showToast?.(data.error || 'Ошибка сохранения', 'error');
+                showToastRef.current?.(data.error || 'Ошибка сохранения', 'error');
             }
         } catch {
-            showToast?.('Ошибка сети', 'error');
+            showToastRef.current?.('Ошибка сети', 'error');
         } finally {
             setSaving(false);
         }
@@ -162,14 +168,14 @@ const DepartmentsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader })
             const data = await resp.json().catch(() => ({}));
             if (resp.ok && data.department) {
                 setDepartments((prev) => prev.map((d) => (d.id === headDept.id ? data.department : d)));
-                showToast?.(userId ? 'Глава отдела назначена' : 'Глава отдела снята', 'success');
+                showToastRef.current?.(userId ? 'Глава отдела назначена' : 'Глава отдела снята', 'success');
                 setHeadDept(null);
                 setHeadQuery('');
             } else {
-                showToast?.(data.error || 'Не удалось изменить главу', 'error');
+                showToastRef.current?.(data.error || 'Не удалось изменить главу', 'error');
             }
         } catch {
-            showToast?.('Ошибка сети', 'error');
+            showToastRef.current?.('Ошибка сети', 'error');
         } finally {
             setHeadSaving(false);
         }
@@ -187,9 +193,9 @@ const DepartmentsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader })
             });
             const data = await resp.json().catch(() => ({}));
             if (resp.ok && data.history) setHistory(data.history);
-            else showToast?.(data.error || 'Не удалось загрузить историю', 'error');
+            else showToastRef.current?.(data.error || 'Не удалось загрузить историю', 'error');
         } catch {
-            showToast?.('Ошибка сети', 'error');
+            showToastRef.current?.('Ошибка сети', 'error');
         } finally {
             setHistoryLoading(false);
         }
@@ -287,7 +293,7 @@ const DepartmentsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader })
                                 </div>
                                 <div className="flex shrink-0 items-center gap-1">
                                     <button onClick={() => { setHeadDept(dept); setHeadQuery(''); }} className={iosBtnGhost} title="Назначить / сменить главу">
-                                        <FaIcon className="fas fa-user-pen" />
+                                        <FaIcon className="fas fa-user-edit" />
                                         <span className="hidden sm:inline">{dept.head_user_id ? 'Сменить' : 'Назначить'}</span>
                                     </button>
                                     <button onClick={() => openHistory(dept)} className={iosBtnGhost} title="История смены главы">
