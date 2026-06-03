@@ -216,7 +216,7 @@ const compressAvatarImageFile = async (sourceFile, cropState = null) => {
     });
 };
 
-const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = [], onSave, user }) => {
+const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = [], departments = [], onSave, user }) => {
     const [editedUser, setEditedUser] = useState(userToEdit || {});
     const [isLoading, setIsLoading] = useState(false);
     const [modalError, setModalError] = useState("");
@@ -315,6 +315,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         const defaults = {
         rate: base.rate ?? 1.0,
         direction_id: isTrainerBase ? "" : (base.direction_id ?? ""),
+        department_id: base.department_id ?? "",
         supervisor_id: isTrainerBase ? "" : (base.supervisor_id ?? (isAdminLikeRequester ? "" : (user?.id ?? ""))),
         status: initialStatus,
         gender: base.gender ?? "",
@@ -581,6 +582,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         birth_date: "",
         gender: "",
         direction_id: "",
+        department_id: "",
         supervisor_id: isTrainerCreateRole ? "" : (isAdminLikeRequester ? "" : (user?.id ?? "")),
         status: "working",
         role: createRole,
@@ -1470,6 +1472,24 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             </div>
                             </>
                         )}
+                    </div>
+                    )}
+
+                    {isAdminLikeRequester && (
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Отдел</label>
+                        <select
+                        value={editedUser?.department_id || ""}
+                        onChange={(e) => setEditedUser({ ...editedUser, department_id: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading || !!createdCredentials}
+                        >
+                        <option value="">По умолчанию (СЗоВ)</option>
+                        {(departments || []).filter(d => d.is_active !== false).map((dep) => (
+                            <option key={dep.id} value={dep.id}>{dep.name}</option>
+                        ))}
+                        </select>
+                        <p className="mt-1 text-xs text-slate-500">Отдел определяет доступные сотруднику разделы.</p>
                     </div>
                     )}
 

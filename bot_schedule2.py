@@ -657,13 +657,15 @@ def _get_user_payload(user):
         avatar_blob_path = user.get("avatar_blob_path")
         avatar_updated_at = user.get("avatar_updated_at")
     department_id = None
+    department_code = None
     headed_department_id = None
     if user_id is not None:
         try:
-            department_id = db.get_user_department_id(user_id)
+            department_id, department_code = db.get_user_department(user_id)
             headed_department_id = db.headed_department_id_for_user(user_id)
         except Exception:
             department_id = None
+            department_code = None
             headed_department_id = None
     return {
         "role": role,
@@ -672,6 +674,7 @@ def _get_user_payload(user):
         "telegram_id": telegram_id,
         "gender": gender,
         "department_id": department_id,
+        "department_code": department_code,
         "headed_department_id": headed_department_id,
         "avatar_url": _build_avatar_signed_url(avatar_bucket, avatar_blob_path),
         "avatar_updated_at": avatar_updated_at.isoformat() if hasattr(avatar_updated_at, "isoformat") else avatar_updated_at
@@ -4934,7 +4937,8 @@ def get_admin_users():
                         u.front_office_training_date,
                         u.taxipro_id,
                         COALESCE(u.study_completed, FALSE) as study_completed,
-                        u.study_completion_year
+                        u.study_completion_year,
+                        u.department_id
                     FROM users u
                     LEFT JOIN directions d ON u.direction_id = d.id
                     LEFT JOIN users s ON u.supervisor_id = s.id
@@ -5019,7 +5023,8 @@ def get_admin_users():
                         "front_office_training_date": row[44].strftime('%Y-%m-%d') if row[44] else None,
                         "taxipro_id": row[45] or "",
                         "study_completed": bool(row[46]) if row[46] is not None else False,
-                        "study_completion_year": int(row[47]) if row[47] is not None else None
+                        "study_completion_year": int(row[47]) if row[47] is not None else None,
+                        "department_id": row[48]
                     })
         return jsonify({"status": "success", "users": users}), 200
     except Exception as e:

@@ -8541,6 +8541,20 @@ class Database:
             r = cursor.fetchone()
             return r[0] if r else None
 
+    def get_user_department(self, user_id):
+        """Вернуть (department_id, department_code) пользователя одним запросом."""
+        if not user_id:
+            return (None, None)
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT u.department_id, d.code
+                FROM users u
+                LEFT JOIN departments d ON d.id = u.department_id
+                WHERE u.id = %s
+            """, (user_id,))
+            r = cursor.fetchone()
+            return (r[0], r[1]) if r else (None, None)
+
     def get_department_member_ids(self, department_id):
         """Множество id пользователей, принадлежащих отделу (для скоупа главы)."""
         if not department_id:
