@@ -2307,8 +2307,137 @@ class Database:
                 INSERT INTO departments (code, slug, name, description)
                 VALUES ('szov', 'szov', 'СЗоВ — Служба заботы о водителях', 'Техническая поддержка водителей. Контроль качества звонков, оценка операторов, графики, обучение.')
                 ON CONFLICT (code) DO NOTHING;
+
+                -- =========================================================
+                -- Этап 1: масштабируемая модель отделов + профилей
+                -- (глава отдела с историей, перенос полей, JSONB-спецполя)
+                -- =========================================================
+
+                -- Глава отдела (денормализованный «текущий глава» для быстрых проверок)
+                ALTER TABLE departments
+                ADD COLUMN IF NOT EXISTS head_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+
+                -- Журнал назначений/снятий главы отдела (история)
+                CREATE TABLE IF NOT EXISTS department_head_assignments (
+                    id SERIAL PRIMARY KEY,
+                    department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+                    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    action VARCHAR(20) NOT NULL CHECK (action IN ('assigned', 'unassigned')),
+                    changed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+
+                -- HR-профиль добирает перенесённые из users поля (proxy / driver license / онбординг)
+                ALTER TABLE user_hr_profiles ADD COLUMN IF NOT EXISTS has_proxy BOOLEAN NOT NULL DEFAULT FALSE;
+                ALTER TABLE user_hr_profiles ADD COLUMN IF NOT EXISTS proxy_card_number VARCHAR(64);
+                ALTER TABLE user_hr_profiles ADD COLUMN IF NOT EXISTS proxy_status VARCHAR(20);
+                ALTER TABLE user_hr_profiles
+                DROP CONSTRAINT IF EXISTS user_hr_profiles_proxy_status_check;
+                ALTER TABLE user_hr_profiles
+                ADD CONSTRAINT user_hr_profiles_proxy_status_check
+                    CHECK (proxy_status IN ('lost', 'returned_to_hr', 'not_received', 'on_hand') OR proxy_status IS NULL);
+                ALTER TABLE user_hr_profiles ADD COLUMN IF NOT EXISTS has_driver_license BOOLEAN NOT NULL DEFAULT FALSE;
+                ALTER TABLE user_hr_profiles ADD COLUMN IF NOT EXISTS internship_in_company BOOLEAN NOT NULL DEFAULT FALSE;
+                ALTER TABLE user_hr_profiles ADD COLUMN IF NOT EXISTS front_office_training BOOLEAN NOT NULL DEFAULT FALSE;
+                ALTER TABLE user_hr_profiles ADD COLUMN IF NOT EXISTS front_office_training_date DATE;
+
+                -- JSONB-масштабируемость (гибрид): уникальные поля конкретного отдела
+                ALTER TABLE operator_profiles ADD COLUMN IF NOT EXISTS attributes JSONB NOT NULL DEFAULT '{}'::jsonb;
+                ALTER TABLE departments ADD COLUMN IF NOT EXISTS operator_field_schema JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+                -- Индексы для новых сущностей
+                CREATE INDEX IF NOT EXISTS idx_departments_head_user_id ON departments(head_user_id);
+                CREATE INDEX IF NOT EXISTS idx_dept_head_assignments_dept ON department_head_assignments(department_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_operator_profiles_attributes ON operator_profiles USING GIN (attributes);
+
+                -- Сид схемы спец-полей для СЗоВ (единственное уникальное поле — taxipro_id)
+                UPDATE departments
+                SET operator_field_schema = '[{"key":"taxipro_id","label":"TaxiPro ID","type":"text"}]'::jsonb
+                WHERE code = 'szov' AND operator_field_schema = '[]'::jsonb;
             """)
             self._backfill_shift_auction_history_tables_tx(cursor)
+            self._backfill_user_profiles_tx(cursor)
+
+    def _backfill_user_profiles_tx(self, cursor):
+        """
+        Этап 1 рефакторинга «отделы + профили»: идемпотентно выровнять профильные
+        таблицы по авторитетному источнику `users`.
+
+        - создаёт недостающие строки профилей (на случай будущих пользователей);
+        - переносит в user_hr_profiles перенесённые поля (proxy / driver license /
+          онбординг);
+        - чинит исторический дрейф operator_profiles (например, direction_id) по users;
+        - кладёт taxipro_id в operator_profiles.attributes (JSONB).
+
+        Идемпотентность: каждый UPDATE ограничен `IS DISTINCT FROM`, поэтому при
+        отсутствии расхождений это no-op. Источник истины — `users` (на время
+        «фундамента»; до Этапа 8 users держится в синхроне двойной записью).
+        ВНИМАНИЕ: на Этапе 8 (drop колонок users) этот бэкофилл удалить.
+        """
+        # 1) гарантируем наличие строк профилей
+        cursor.execute("""
+            INSERT INTO user_hr_profiles (user_id)
+            SELECT id FROM users
+            ON CONFLICT (user_id) DO NOTHING
+        """)
+        cursor.execute("""
+            INSERT INTO operator_profiles (user_id)
+            SELECT id FROM users WHERE role IN ('operator', 'trainee')
+            ON CONFLICT (user_id) DO NOTHING
+        """)
+
+        # 2) HR-поля, перенесённые из users (proxy / driver license / онбординг)
+        cursor.execute("""
+            UPDATE user_hr_profiles h SET
+                has_proxy = u.has_proxy,
+                proxy_card_number = u.proxy_card_number,
+                proxy_status = u.proxy_status,
+                has_driver_license = u.has_driver_license,
+                internship_in_company = u.internship_in_company,
+                front_office_training = u.front_office_training,
+                front_office_training_date = u.front_office_training_date
+            FROM users u
+            WHERE h.user_id = u.id
+              AND (
+                    h.has_proxy IS DISTINCT FROM u.has_proxy
+                 OR h.proxy_card_number IS DISTINCT FROM u.proxy_card_number
+                 OR h.proxy_status IS DISTINCT FROM u.proxy_status
+                 OR h.has_driver_license IS DISTINCT FROM u.has_driver_license
+                 OR h.internship_in_company IS DISTINCT FROM u.internship_in_company
+                 OR h.front_office_training IS DISTINCT FROM u.front_office_training
+                 OR h.front_office_training_date IS DISTINCT FROM u.front_office_training_date
+              )
+        """)
+
+        # 3) операторские overlap-поля — чиним дрейф по users (например, direction_id)
+        cursor.execute("""
+            UPDATE operator_profiles o SET
+                direction_id = u.direction_id,
+                supervisor_id = u.supervisor_id,
+                is_active = u.is_active,
+                rate = u.rate,
+                sip_number = u.sip_number
+            FROM users u
+            WHERE o.user_id = u.id
+              AND (
+                    o.direction_id IS DISTINCT FROM u.direction_id
+                 OR o.supervisor_id IS DISTINCT FROM u.supervisor_id
+                 OR o.is_active IS DISTINCT FROM u.is_active
+                 OR o.rate IS DISTINCT FROM u.rate
+                 OR o.sip_number IS DISTINCT FROM u.sip_number
+              )
+        """)
+
+        # 4) taxipro_id -> JSONB attributes (спец-поле отдела СЗоВ)
+        cursor.execute("""
+            UPDATE operator_profiles o SET
+                attributes = COALESCE(o.attributes, '{}'::jsonb)
+                             || jsonb_build_object('taxipro_id', u.taxipro_id)
+            FROM users u
+            WHERE o.user_id = u.id
+              AND u.taxipro_id IS NOT NULL AND u.taxipro_id <> ''
+              AND (o.attributes->>'taxipro_id') IS DISTINCT FROM u.taxipro_id
+        """)
 
     def _backfill_shift_auction_history_tables_tx(self, cursor):
         """
@@ -2925,7 +3054,7 @@ class Database:
         """Получить все направления из таблицы directions."""
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT id, name, has_file_upload, criteria, is_active, calculation_model_code
+                SELECT id, name, has_file_upload, criteria, is_active, calculation_model_code, department_id
                 FROM directions
                 WHERE is_active = TRUE  -- Added filter for performance
                 ORDER BY name
@@ -2938,8 +3067,10 @@ class Database:
                     "criteria": row[3],
                     "isActive": row[4],
                     "calculationModelCode": normalize_calculation_model_code(row[5], row[1]),
-                    "calculation_model_code": normalize_calculation_model_code(row[5], row[1])
-                } for row in cursor.fetchall()  
+                    "calculation_model_code": normalize_calculation_model_code(row[5], row[1]),
+                    "departmentId": row[6],
+                    "department_id": row[6]
+                } for row in cursor.fetchall()
             ]
 
     def _parse_resource_schedule_date_value(self, value, field_name="date"):
@@ -8240,28 +8371,39 @@ class Database:
 
     # ── Department CRUD ──────────────────────────────────────────────
 
+    @staticmethod
+    def _department_row_to_dict(r):
+        return {
+            "id": r[0], "code": r[1], "slug": r[2], "name": r[3],
+            "description": r[4], "is_active": r[5],
+            "head_user_id": r[6], "head_name": r[7],
+            "operator_field_schema": r[8] if r[8] is not None else [],
+        }
+
     def get_departments(self):
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT id, code, slug, name, description, is_active
-                FROM departments
-                ORDER BY name
+                SELECT d.id, d.code, d.slug, d.name, d.description, d.is_active,
+                       d.head_user_id, h.name, d.operator_field_schema
+                FROM departments d
+                LEFT JOIN users h ON h.id = d.head_user_id
+                ORDER BY d.name
             """)
-            return [
-                {"id": r[0], "code": r[1], "slug": r[2], "name": r[3], "description": r[4], "is_active": r[5]}
-                for r in cursor.fetchall()
-            ]
+            return [self._department_row_to_dict(r) for r in cursor.fetchall()]
 
     def get_department_by_id(self, department_id):
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT id, code, slug, name, description, is_active
-                FROM departments WHERE id = %s
+                SELECT d.id, d.code, d.slug, d.name, d.description, d.is_active,
+                       d.head_user_id, h.name, d.operator_field_schema
+                FROM departments d
+                LEFT JOIN users h ON h.id = d.head_user_id
+                WHERE d.id = %s
             """, (department_id,))
             r = cursor.fetchone()
             if not r:
                 return None
-            return {"id": r[0], "code": r[1], "slug": r[2], "name": r[3], "description": r[4], "is_active": r[5]}
+            return self._department_row_to_dict(r)
 
     def create_department(self, code, name, description=None, slug=None):
         if not slug:
@@ -8270,29 +8412,118 @@ class Database:
             cursor.execute("""
                 INSERT INTO departments (code, slug, name, description)
                 VALUES (%s, %s, %s, %s)
-                RETURNING id, code, slug, name, description, is_active
+                RETURNING id, code, slug, name, description, is_active, head_user_id, operator_field_schema
             """, (code, slug, name, description))
             r = cursor.fetchone()
-            return {"id": r[0], "code": r[1], "slug": r[2], "name": r[3], "description": r[4], "is_active": r[5]}
+            return {
+                "id": r[0], "code": r[1], "slug": r[2], "name": r[3],
+                "description": r[4], "is_active": r[5],
+                "head_user_id": r[6], "head_name": None,
+                "operator_field_schema": r[7] if r[7] is not None else [],
+            }
 
     def update_department(self, department_id, **kwargs):
-        allowed = {'code', 'slug', 'name', 'description', 'is_active'}
+        allowed = {'code', 'slug', 'name', 'description', 'is_active', 'operator_field_schema'}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
             return self.get_department_by_id(department_id)
         from psycopg2 import sql as _sql
+        from psycopg2.extras import Json as _Json
         set_clause = _sql.SQL(', ').join(
             _sql.SQL("{} = %s").format(_sql.Identifier(k)) for k in updates
         )
+        params = [
+            _Json(v) if k == 'operator_field_schema' else v
+            for k, v in updates.items()
+        ]
         with self._get_cursor() as cursor:
             cursor.execute(
-                _sql.SQL("UPDATE departments SET {} WHERE id = %s RETURNING id, code, slug, name, description, is_active").format(set_clause),
-                list(updates.values()) + [department_id]
+                _sql.SQL("UPDATE departments SET {} WHERE id = %s RETURNING id").format(set_clause),
+                params + [department_id]
             )
-            r = cursor.fetchone()
-            if not r:
+            if cursor.fetchone() is None:
                 return None
-            return {"id": r[0], "code": r[1], "slug": r[2], "name": r[3], "description": r[4], "is_active": r[5]}
+        return self.get_department_by_id(department_id)
+
+    def set_department_head(self, department_id, user_id, changed_by=None):
+        """Назначить/снять главу отдела с записью в журнал истории.
+
+        user_id=None снимает текущего главу. Денормализованный «текущий глава»
+        хранится в departments.head_user_id, полная история — в
+        department_head_assignments. Возвращает обновлённый отдел или None.
+        """
+        new_head = int(user_id) if user_id not in (None, '') else None
+        with self._get_cursor() as cursor:
+            cursor.execute("SELECT head_user_id FROM departments WHERE id = %s", (department_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            current_head = row[0]
+            if current_head != new_head:
+                cursor.execute(
+                    "UPDATE departments SET head_user_id = %s WHERE id = %s",
+                    (new_head, department_id)
+                )
+                if current_head is not None:
+                    cursor.execute("""
+                        INSERT INTO department_head_assignments (department_id, user_id, action, changed_by)
+                        VALUES (%s, %s, 'unassigned', %s)
+                    """, (department_id, current_head, changed_by))
+                if new_head is not None:
+                    cursor.execute("""
+                        INSERT INTO department_head_assignments (department_id, user_id, action, changed_by)
+                        VALUES (%s, %s, 'assigned', %s)
+                    """, (department_id, new_head, changed_by))
+        return self.get_department_by_id(department_id)
+
+    def get_department_head_history(self, department_id):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT a.id, a.user_id, u.name, a.action, a.changed_by, cb.name, a.created_at
+                FROM department_head_assignments a
+                LEFT JOIN users u ON u.id = a.user_id
+                LEFT JOIN users cb ON cb.id = a.changed_by
+                WHERE a.department_id = %s
+                ORDER BY a.created_at DESC, a.id DESC
+            """, (department_id,))
+            return [
+                {
+                    "id": r[0],
+                    "user_id": r[1],
+                    "user_name": r[2],
+                    "action": r[3],
+                    "changed_by": r[4],
+                    "changed_by_name": r[5],
+                    "created_at": r[6].isoformat() if r[6] else None,
+                }
+                for r in cursor.fetchall()
+            ]
+
+    def headed_department_id_for_user(self, user_id):
+        """Вернуть id отдела, главой которого является пользователь, иначе None."""
+        if not user_id:
+            return None
+        with self._get_cursor() as cursor:
+            cursor.execute("SELECT id FROM departments WHERE head_user_id = %s LIMIT 1", (user_id,))
+            r = cursor.fetchone()
+            return r[0] if r else None
+
+    def get_user_department_id(self, user_id):
+        """Лёгкий доступ к users.department_id без позиционного кортежа get_user."""
+        if not user_id:
+            return None
+        with self._get_cursor() as cursor:
+            cursor.execute("SELECT department_id FROM users WHERE id = %s", (user_id,))
+            r = cursor.fetchone()
+            return r[0] if r else None
+
+    def get_department_member_ids(self, department_id):
+        """Множество id пользователей, принадлежащих отделу (для скоупа главы)."""
+        if not department_id:
+            return set()
+        with self._get_cursor() as cursor:
+            cursor.execute("SELECT id FROM users WHERE department_id = %s", (department_id,))
+            return {r[0] for r in cursor.fetchall()}
 
     def assign_user_department(self, user_id, department_id):
         with self._get_cursor() as cursor:
@@ -12717,6 +12948,7 @@ class Database:
         allowed_fields = [
             'direction_id',
             'supervisor_id',
+            'department_id',
             'status',
             'rate',
             'hire_date',

@@ -656,12 +656,23 @@ def _get_user_payload(user):
         avatar_bucket = user.get("avatar_bucket")
         avatar_blob_path = user.get("avatar_blob_path")
         avatar_updated_at = user.get("avatar_updated_at")
+    department_id = None
+    headed_department_id = None
+    if user_id is not None:
+        try:
+            department_id = db.get_user_department_id(user_id)
+            headed_department_id = db.headed_department_id_for_user(user_id)
+        except Exception:
+            department_id = None
+            headed_department_id = None
     return {
         "role": role,
         "id": user_id,
         "name": name,
         "telegram_id": telegram_id,
         "gender": gender,
+        "department_id": department_id,
+        "headed_department_id": headed_department_id,
         "avatar_url": _build_avatar_signed_url(avatar_bucket, avatar_blob_path),
         "avatar_updated_at": avatar_updated_at.isoformat() if hasattr(avatar_updated_at, "isoformat") else avatar_updated_at
     }
@@ -1329,9 +1340,56 @@ def _sanitize_evaluations_for_access(evaluations, reveal_sensitive, hide_hidden_
     return result
 
 
+def _headed_department_id(requester_id):
+    """id отдела, главой которого является пользователь (кэш в g на запрос).
+
+    Возвращает None, если пользователь не глава никакого отдела. Глава отдела
+    получает админ-подобный доступ, но строго в рамках своего отдела.
+    """
+    if not requester_id:
+        return None
+    cache = getattr(g, '_headed_dept_cache', None)
+    if cache is None:
+        cache = {}
+        try:
+            g._headed_dept_cache = cache
+        except Exception:
+            pass
+    if requester_id in cache:
+        return cache[requester_id]
+    try:
+        dept = db.headed_department_id_for_user(requester_id)
+    except Exception:
+        dept = None
+    cache[requester_id] = dept
+    return dept
+
+
+def _operator_item_id(item):
+    """Извлечь id оператора из элемента списка (dict или кортеж)."""
+    if isinstance(item, dict):
+        for key in ('id', 'operator_id', 'user_id'):
+            if item.get(key) is not None:
+                try:
+                    return int(item[key])
+                except (TypeError, ValueError):
+                    pass
+        return None
+    try:
+        return int(item[0])
+    except Exception:
+        return None
+
+
 def _authorize_operator_scope(requester, requester_id, operator_id):
     role = _normalize_user_role(requester[3])
-    if _is_admin_role(role) or role == 'sv':
+    if _is_admin_role(role):
+        return True
+    # Глава отдела: доступ только к операторам своего отдела (замещает базовую роль)
+    headed_dept = _headed_department_id(requester_id)
+    if headed_dept is not None:
+        return db.get_user_department_id(operator_id) == headed_dept
+    if role == 'sv':
         return True
     if role == 'operator':
         return requester_id == operator_id
@@ -1365,6 +1423,12 @@ def _requester_can_access_target_user(
         return True
     if allow_self and requester_id == target_user_id:
         return True
+    # Глава отдела: управляет любым НЕ-админом своего отдела (замещает базовую роль)
+    headed_dept = _headed_department_id(requester_id)
+    if headed_dept is not None:
+        if _is_admin_role(target_role):
+            return False
+        return db.get_user_department_id(target_user_id) == headed_dept
     if _is_supervisor_role(requester_role):
         if target_role not in set(supervisor_target_roles or ()):
             return False
@@ -1407,6 +1471,11 @@ def _filter_operators_for_requester_scope(requester, requester_id, operators):
     items = list(operators or [])
     if _is_admin_role(requester_role):
         return items
+    # Глава отдела: только операторы своего отдела (замещает базовую роль)
+    headed_dept = _headed_department_id(requester_id)
+    if headed_dept is not None:
+        member_ids = db.get_department_member_ids(headed_dept)
+        return [it for it in items if _operator_item_id(it) in member_ids]
     if _is_supervisor_role(requester_role):
         return items
     return []
@@ -1416,7 +1485,11 @@ def _resolve_management_requester():
     requester_id, requester, auth_error = _get_authenticated_requester()
     if auth_error:
         return None, None, auth_error
-    if not (_is_admin_role(requester[3]) or _is_supervisor_role(requester[3])):
+    if not (
+        _is_admin_role(requester[3])
+        or _is_supervisor_role(requester[3])
+        or _headed_department_id(requester_id) is not None
+    ):
         return None, None, ("Forbidden", 403)
     return requester_id, requester, None
 
@@ -4978,6 +5051,13 @@ def admin_update_user():
                     value = int(value) if value else None
                 except (TypeError, ValueError):
                     return jsonify({"error": f"Invalid {field}"}), 400
+        elif field == 'department_id':
+            try:
+                value = int(value) if value else None
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid department_id"}), 400
+            if value is not None and not db.get_department_by_id(value):
+                return jsonify({"error": "Department not found"}), 400
         elif field == 'name':
             # Validate name and prevent duplicates
             if not value or not str(value).strip():
@@ -5093,6 +5173,8 @@ def admin_update_user():
             return jsonify({"error": "Only admins can update users"}), 403
         if target_role in ('admin', 'super_admin') and requester_role != 'super_admin':
             return jsonify({"error": "Only super admins can update admin users"}), 403
+        if field == 'department_id' and requester_role not in ('super_admin', 'admin'):
+            return jsonify({"error": "Only admins can reassign a user's department"}), 403
         if field == 'rate' and requester_role == 'sv':
             if not _is_supervisor_rate_change_day():
                 return jsonify({"error": "Supervisor can change rate only on the first day of the month"}), 403
@@ -5284,14 +5366,17 @@ def api_admin_departments():
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
         requester_role = _normalize_user_role(requester[3])
-        if not _is_super_admin_role(requester_role):
-            return jsonify({"error": "Only super admins can manage departments"}), 403
 
         if request.method == 'GET':
+            # Список отделов доступен админам (для назначения главы и т.п.)
+            if not _is_admin_role(requester_role):
+                return jsonify({"error": "Forbidden"}), 403
             departments = db.get_departments()
             return jsonify({"status": "success", "departments": departments}), 200
 
-        # POST — create
+        # POST — create (структурные изменения — только супер-админ)
+        if not _is_super_admin_role(requester_role):
+            return jsonify({"error": "Only super admins can create departments"}), 403
         data = request.get_json() or {}
         code = str(data.get('code') or '').strip()
         name = str(data.get('name') or '').strip()
@@ -5334,6 +5419,70 @@ def api_admin_update_department(department_id):
         if 'departments_code_key' in str(e) or 'departments_slug_key' in str(e):
             return jsonify({"error": "Department with this code already exists"}), 409
         logging.error(f"Error updating department: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/admin/departments/<int:department_id>/head', methods=['PUT', 'OPTIONS'])
+@require_api_key
+def api_admin_set_department_head(department_id):
+    """Назначить/снять главу отдела (с записью в журнал истории). Доступно админам."""
+    try:
+        if request.method == 'OPTIONS':
+            return _build_cors_preflight_response()
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        requester_role = _normalize_user_role(requester[3])
+        if not _is_admin_role(requester_role):
+            return jsonify({"error": "Only admins can assign a department head"}), 403
+
+        department = db.get_department_by_id(department_id)
+        if not department:
+            return jsonify({"error": "Department not found"}), 404
+
+        data = request.get_json() or {}
+        user_id_raw = data.get('user_id')
+        new_head_id = None
+        if user_id_raw not in (None, ''):
+            try:
+                new_head_id = int(user_id_raw)
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid user_id"}), 400
+            head_user = db.get_user(id=new_head_id)
+            if not head_user:
+                return jsonify({"error": "User not found"}), 404
+            # Глава должен принадлежать назначаемому отделу
+            if db.get_user_department_id(new_head_id) != department_id:
+                return jsonify({"error": "Head must belong to this department"}), 400
+
+        updated = db.set_department_head(department_id, new_head_id, changed_by=requester_id)
+        return jsonify({"status": "success", "department": updated}), 200
+    except Exception as e:
+        logging.error(f"Error setting department head: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/admin/departments/<int:department_id>/head/history', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_admin_department_head_history(department_id):
+    """История назначений/снятий главы отдела. Доступно админам."""
+    try:
+        if request.method == 'OPTIONS':
+            return _build_cors_preflight_response()
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        requester_role = _normalize_user_role(requester[3])
+        if not _is_admin_role(requester_role):
+            return jsonify({"error": "Forbidden"}), 403
+        if not db.get_department_by_id(department_id):
+            return jsonify({"error": "Department not found"}), 404
+        history = db.get_department_head_history(department_id)
+        return jsonify({"status": "success", "history": history}), 200
+    except Exception as e:
+        logging.error(f"Error fetching department head history: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 
@@ -9185,6 +9334,19 @@ def add_user():
         if role != 'operator':
             sip_number = None
 
+        # Department assignment (optional). Only admins may choose; others -> default (szov).
+        department_id = None
+        department_raw = data.get('department_id')
+        if department_raw not in [None, '']:
+            if requester_role not in ('super_admin', 'admin'):
+                return jsonify({"error": "Only admins can assign a department"}), 403
+            try:
+                department_id = int(department_raw)
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid department_id"}), 400
+            if not db.get_department_by_id(department_id):
+                return jsonify({"error": "Department not found"}), 400
+
         if role == 'trainer':
             login_prefix = 'trainer'
         elif role == 'sv':
@@ -9236,7 +9398,8 @@ def add_user():
             internship_in_company=internship_in_company,
             front_office_training=front_office_training,
             front_office_training_date=front_office_training_date,
-            taxipro_id=taxipro_id
+            taxipro_id=taxipro_id,
+            department_id=department_id
         )
 
         changed_by = requester_id

@@ -30,3 +30,17 @@ export const roleIsAny = (role, allowedRoles = []) => {
 
 export const isSupervisorRole = (role) => normalizeRole(role) === 'sv';
 export const isAdminLikeRole = (role) => roleHasMin(role, 'admin');
+
+// Глава отдела определяется не ролью, а фактом назначения: departments.head_user_id.
+// Бэкенд отдаёт это в payload пользователя как headed_department_id.
+export const isDepartmentHead = (user) => {
+    if (!user || typeof user !== 'object') return false;
+    const dept = user.headed_department_id ?? user.headedDepartmentId;
+    return dept != null && dept !== '';
+};
+
+export const headedDepartmentId = (user) => {
+    if (!user || typeof user !== 'object') return null;
+    const dept = user.headed_department_id ?? user.headedDepartmentId;
+    return dept != null && dept !== '' ? Number(dept) : null;
+};
