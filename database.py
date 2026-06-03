@@ -2378,6 +2378,12 @@ class Database:
                 UPDATE departments
                 SET operator_field_schema = '[{"key":"taxipro_id","label":"TaxiPro ID","type":"text"}]'::jsonb
                 WHERE code = 'szov' AND operator_field_schema = '[]'::jsonb;
+
+                -- Бэкофилл привязки направлений к отделу: всё, что без отдела — в СЗоВ
+                -- (исторически направления создавались до разделения на отделы).
+                UPDATE directions
+                SET department_id = (SELECT id FROM departments WHERE code = 'szov' LIMIT 1)
+                WHERE department_id IS NULL;
             """)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
@@ -3074,15 +3080,23 @@ class Database:
             })
         return result
             
-    def get_directions(self):
-        """Получить все направления из таблицы directions."""
+    def get_directions(self, department_id=None):
+        """Получить активные направления. Если задан department_id — только этого отдела."""
         with self._get_cursor() as cursor:
-            cursor.execute("""
-                SELECT id, name, has_file_upload, criteria, is_active, calculation_model_code, department_id
-                FROM directions
-                WHERE is_active = TRUE  -- Added filter for performance
-                ORDER BY name
-            """)
+            if department_id is not None:
+                cursor.execute("""
+                    SELECT id, name, has_file_upload, criteria, is_active, calculation_model_code, department_id
+                    FROM directions
+                    WHERE is_active = TRUE AND department_id = %s
+                    ORDER BY name
+                """, (department_id,))
+            else:
+                cursor.execute("""
+                    SELECT id, name, has_file_upload, criteria, is_active, calculation_model_code, department_id
+                    FROM directions
+                    WHERE is_active = TRUE  -- Added filter for performance
+                    ORDER BY name
+                """)
             return [
                 {
                     "id": row[0],
@@ -9847,22 +9861,38 @@ class Database:
 
         return {"month": month, "work_days": work_days, "processed": int(processed)}
 
-    def save_directions(self, directions):
-        """Сохранить направления в таблицу directions, создавая новые версии при изменениях."""
+    def save_directions(self, directions, scope_department_id=None):
+        """Сохранить направления в таблицу directions, создавая новые версии при изменениях.
+
+        Если задан scope_department_id — операция ограничена этим отделом:
+        сравнение/деактивация берут только направления этого отдела, новые версии и
+        новые направления получают этот department_id, направления других отделов
+        не затрагиваются. Это нужно, чтобы глава отдела (или админ, редактирующий
+        конкретный отдел) не «обнулял» направления других отделов.
+        """
+        scoped = scope_department_id is not None
         with self._get_cursor() as cursor:
-            # 1. Получаем текущие активные направления (только нужные поля)
-            cursor.execute("""
-                SELECT id, name, has_file_upload, criteria, version, calculation_model_code
-                FROM directions
-                WHERE is_active = TRUE
-            """)
+            # 1. Получаем текущие активные направления (в рамках отдела, если задан scope)
+            if scoped:
+                cursor.execute("""
+                    SELECT id, name, has_file_upload, criteria, version, calculation_model_code, department_id
+                    FROM directions
+                    WHERE is_active = TRUE AND department_id = %s
+                """, (scope_department_id,))
+            else:
+                cursor.execute("""
+                    SELECT id, name, has_file_upload, criteria, version, calculation_model_code, department_id
+                    FROM directions
+                    WHERE is_active = TRUE
+                """)
             existing_directions = {
                 row[1]: {
                     "id": row[0],
                     "has_file_upload": row[2],
                     "criteria": json.dumps(row[3] or [], ensure_ascii=False, sort_keys=True),
                     "version": row[4],
-                    "calculation_model_code": normalize_calculation_model_code(row[5], row[1])
+                    "calculation_model_code": normalize_calculation_model_code(row[5], row[1]),
+                    "department_id": row[6]
                 } for row in cursor.fetchall()
             }
             
@@ -9892,12 +9922,14 @@ class Database:
                     directions_to_deactivate.append(existing['id'])
                     insert_values.append((
                         name, has_file_upload, criteria, calculation_model_code,
-                        existing['version'] + 1, existing['id']
+                        existing['version'] + 1, existing['id'],
+                        scope_department_id if scoped else existing.get('department_id')
                     ))
                 else:
                     insert_values.append((
                         name, has_file_upload, criteria, calculation_model_code,
-                        1, None  # version=1, no previous version
+                        1, None,  # version=1, no previous version
+                        scope_department_id  # NULL для глобального режима (без scope)
                     ))
             
             # 3. Пакетное деактивирование старых версий
@@ -9913,13 +9945,26 @@ class Database:
                 cursor.executemany("""
                     INSERT INTO directions (
                         name, has_file_upload, criteria, calculation_model_code,
-                        version, previous_version_id
+                        version, previous_version_id, department_id
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """, insert_values)
-            
-            # 5. Деактивируем направления, которых нет в новом списке
-            if new_direction_names:
+
+            # 5. Деактивируем направления, которых нет в новом списке (в рамках scope-отдела, если задан)
+            if scoped:
+                if new_direction_names:
+                    cursor.execute("""
+                        UPDATE directions
+                        SET is_active = FALSE
+                        WHERE is_active = TRUE AND department_id = %s AND name NOT IN %s
+                    """, (scope_department_id, tuple(new_direction_names)))
+                else:
+                    cursor.execute("""
+                        UPDATE directions
+                        SET is_active = FALSE
+                        WHERE is_active = TRUE AND department_id = %s
+                    """, (scope_department_id,))
+            elif new_direction_names:
                 cursor.execute("""
                     UPDATE directions
                     SET is_active = FALSE

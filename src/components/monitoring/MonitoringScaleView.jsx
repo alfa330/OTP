@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
 import FaIcon from '../common/FaIcon';
+import { isAdminLikeRole, isDepartmentHead, headedDepartmentId } from '../../utils/roles';
 
 const CALCULATION_MODEL_OPERATOR = 'operator';
 const CALCULATION_MODEL_CHAT_MANAGER = 'chat_manager';
@@ -167,6 +168,7 @@ export default function MonitoringScaleView({
   canEdit = true,
   user,
   apiBaseUrl,
+  departments = [],
 }) {
   const { toasts, show, remove } = useToast();
   const [directions, setDirections] = useState(() => normalizeDirections(initialDirections));
@@ -189,8 +191,20 @@ export default function MonitoringScaleView({
   const [isFetching, setIsFetching] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
 
+  // Скоуп по отделу (Этап 11): глава отдела залочен на свой отдел, админ может выбирать.
+  const isHead = isDepartmentHead(user);
+  const isAdmin = isAdminLikeRole(user?.role);
+  const headDeptId = headedDepartmentId(user);
+  const canChooseDept = isAdmin && !isHead;
+  const [scopeDeptId, setScopeDeptId] = useState(() => {
+    if (isHead && headDeptId != null) return headDeptId;
+    return user?.department_id != null ? Number(user.department_id) : null;
+  });
+  const scopeDeptName = (departments || []).find((d) => Number(d.id) === Number(scopeDeptId))?.name || null;
+
   const apiRoot = String(apiBaseUrl || '').trim().replace(/\/+$/, '');
   const canUseApi = Boolean(apiRoot && user?.id);
+  const directionsParams = scopeDeptId != null ? { department_id: scopeDeptId } : undefined;
 
   const notify = (message, type = 'success') => {
     if (typeof showToast === 'function') {
@@ -244,6 +258,7 @@ export default function MonitoringScaleView({
       try {
         const response = await axios.get(`${apiRoot}/api/admin/directions`, {
           headers: buildHeaders(),
+          params: directionsParams,
         });
         const data = response.data;
         if (data?.status === 'success') {
@@ -300,6 +315,7 @@ export default function MonitoringScaleView({
       try {
         const response = await axios.get(`${apiRoot}/api/admin/directions`, {
           headers: buildHeaders(),
+          params: directionsParams,
         });
         const data = response.data;
         if (cancelled) return;
@@ -324,7 +340,7 @@ export default function MonitoringScaleView({
     return () => {
       cancelled = true;
     };
-  }, [apiRoot, canUseApi, user?.id]);
+  }, [apiRoot, canUseApi, user?.id, scopeDeptId]);
 
   const submitDirection = () => {
     if (!canEdit) return;
@@ -557,7 +573,7 @@ export default function MonitoringScaleView({
       if (canUseApi) {
         const response = await axios.post(
           `${apiRoot}/api/admin/save_directions`,
-          { directions },
+          { directions, department_id: scopeDeptId },
           { headers: buildHeaders(true) }
         );
         const data = response.data;
@@ -1556,6 +1572,28 @@ export default function MonitoringScaleView({
           </div>
 
           <div className="msv-header-actions">
+            {canChooseDept ? (
+              <select
+                value={scopeDeptId ?? ''}
+                onChange={(event) => setScopeDeptId(event.target.value ? Number(event.target.value) : null)}
+                style={{ maxWidth: 240 }}
+                title="Отдел"
+                disabled={isBusy}
+              >
+                {(departments || []).length === 0 ? (
+                  <option value="">— нет отделов —</option>
+                ) : (
+                  (departments || []).map((dep) => (
+                    <option key={dep.id} value={dep.id}>{dep.name}</option>
+                  ))
+                )}
+              </select>
+            ) : (
+              <span className="chip blue" title="Ваш отдел">
+                <Icon icon="fa-layer-group" size={11} />
+                {scopeDeptName || 'Мой отдел'}
+              </span>
+            )}
             <button
               type="button"
               className="btn-ghost"

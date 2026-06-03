@@ -9447,7 +9447,21 @@ def get_directions():
         if not (_is_admin_role(role) or _is_supervisor_role(role) or role == 'operator'):
             return jsonify({"error": "Only admins, supervisors and operators can access directions"}), 403
 
-        directions = db.get_directions()
+        # Скоуп по отделу: глава отдела (не супер-админ) видит только свои направления;
+        # админ/супер-админ могут фильтровать через ?department_id=.
+        headed_dept = db.headed_department_id_for_user(requester_id)
+        scope_dept = None
+        if headed_dept is not None and not _is_super_admin_role(role):
+            scope_dept = headed_dept
+        elif _is_admin_role(role):
+            dep_param = request.args.get('department_id')
+            if dep_param not in (None, ''):
+                try:
+                    scope_dept = int(dep_param)
+                except (TypeError, ValueError):
+                    scope_dept = None
+
+        directions = db.get_directions(department_id=scope_dept)
         return jsonify({
             "status": "success",
             "directions": directions,
@@ -9485,18 +9499,36 @@ def save_directions():
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
-        if not _is_admin_role(requester[3]):
-            return jsonify({"error": "Only admins can save directions"}), 403
+        role = _normalize_user_role(requester[3])
+        headed_dept = db.headed_department_id_for_user(requester_id)
+        is_head = headed_dept is not None
+        if not (_is_admin_role(role) or is_head):
+            return jsonify({"error": "Only admins or department heads can save directions"}), 403
 
         data = request.get_json()
         if not data or 'directions' not in data:
             return jsonify({"error": "Missing directions data"}), 400
 
-        directions = data['directions']
-        db.save_directions(directions)
+        # Определяем отдел-scope: глава отдела (не супер-админ) — строго свой отдел;
+        # админ/супер-админ обязаны указать department_id (какой отдел редактируют).
+        if is_head and not _is_super_admin_role(role):
+            scope_dept = headed_dept
+        else:
+            dep_raw = data.get('department_id')
+            try:
+                scope_dept = int(dep_raw) if dep_raw not in (None, '') else None
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid department_id"}), 400
+            if scope_dept is None:
+                return jsonify({"error": "department_id is required"}), 400
+            if not db.get_department_by_id(scope_dept):
+                return jsonify({"error": "Department not found"}), 400
 
-        # Получаем обновлённый список направлений с id
-        updated_directions = db.get_directions()
+        directions = data['directions']
+        db.save_directions(directions, scope_department_id=scope_dept)
+
+        # Возвращаем обновлённый список направлений этого отдела
+        updated_directions = db.get_directions(department_id=scope_dept)
 
         return jsonify({
             "status": "success",
