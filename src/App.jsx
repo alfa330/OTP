@@ -36263,7 +36263,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <FaIcon className="fas fa-award"></FaIcon> <span className="sidebar-text">Конкурсы</span>
                                                 </button>
                                             </li>
-                                            {isSuperAdmin && (
+                                            {isAdminLikeRole && (
                                                 <>
                                                     {renderSidebarDividerInner()}
                                                     <li>
@@ -38453,15 +38453,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 ))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
-                                {( view === "departments" && isSuperAdmin && (
+                                {( view === "departments" && isAdminLikeRole && (
                                     <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                         <DepartmentsView
                                             user={user}
                                             showToast={showToast}
                                             apiBaseUrl={API_BASE_URL}
                                             withAccessTokenHeader={withAccessTokenHeader}
-                                            initialDashboardView={resourceFteInitialView}
-                                            onOpenShiftAuction={openShiftAuctionSection}
                                         />
                                     </Suspense>
                                 ))}
