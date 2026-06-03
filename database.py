@@ -516,7 +516,7 @@ class Database:
     SURVEY_OTHER_ANSWER_MAX_LENGTH = 500
     SCHEMA_INIT_LOCK_KEY = 915904137
     SCHEMA_INIT_LOCK_TIMEOUT_SEC = 120
-    SCHEMA_INIT_RETRY_ATTEMPTS = 4
+    SCHEMA_INIT_RETRY_ATTEMPTS = 6
     SHIFT_AUCTION_OPERATOR_LOCK_NAMESPACE = 915904138
     SHIFT_AUCTION_SAVED_SHIFT_LOCK_NAMESPACE = 915904139
 
@@ -595,20 +595,30 @@ class Database:
 
     def _init_db_with_retry(self):
         last_error = None
-        for attempt in range(1, int(self.SCHEMA_INIT_RETRY_ATTEMPTS) + 1):
+        attempts = int(self.SCHEMA_INIT_RETRY_ATTEMPTS)
+        for attempt in range(1, attempts + 1):
             try:
                 with self._schema_init_lock():
                     self._init_db()
                 return
             except psycopg2.Error as exc:
                 last_error = exc
-                # 40P01 = deadlock_detected
-                if getattr(exc, "pgcode", None) == '40P01' and attempt < int(self.SCHEMA_INIT_RETRY_ATTEMPTS):
-                    delay = min(3.0, 0.4 * attempt)
+                # 40P01 = deadlock_detected; OperationalError/InterfaceError = транзиентный
+                # обрыв соединения (например, кратковременный рестарт/блип managed-Postgres
+                # во время деплоя — «server closed the connection unexpectedly» / SSL EOF).
+                is_deadlock = getattr(exc, "pgcode", None) == '40P01'
+                is_transient_conn = isinstance(exc, (psycopg2.OperationalError, psycopg2.InterfaceError))
+                if (is_deadlock or is_transient_conn) and attempt < attempts:
+                    if is_transient_conn:
+                        # Пул мог частично создаться с «протухшими» соединениями —
+                        # сбрасываем, чтобы следующая попытка построила его заново.
+                        self._reset_pool_after_transient_error()
+                    delay = min(5.0, (1.0 if is_transient_conn else 0.4) * attempt)
                     logging.warning(
-                        "Deadlock during DB init (attempt %s/%s). Retrying in %.1fs",
+                        "Transient error during DB init (%s, attempt %s/%s). Retrying in %.1fs",
+                        getattr(exc, "pgcode", None) or type(exc).__name__,
                         attempt,
-                        self.SCHEMA_INIT_RETRY_ATTEMPTS,
+                        attempts,
                         delay
                     )
                     time.sleep(delay)
@@ -616,6 +626,20 @@ class Database:
                 raise
         if last_error:
             raise last_error
+
+    @staticmethod
+    def _reset_pool_after_transient_error():
+        """Сбросить глобальный пул соединений после транзиентного обрыва БД,
+        чтобы повторная инициализация построила свежие соединения."""
+        global POOL, POOL_SEMAPHORE
+        with POOL_LOCK:
+            if POOL is not None:
+                try:
+                    POOL.closeall()
+                except Exception:
+                    pass
+            POOL = None
+            POOL_SEMAPHORE = None
 
     def _init_db(self):
         with self._get_cursor() as cursor:
