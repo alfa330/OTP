@@ -32554,9 +32554,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         setIsLoading(true);
                         try {
                             const response = await axios.get(`${API_BASE_URL}/api/admin/directions`, {
-                                headers: {
-                                    'X-User-Id': user.id
-                                }
+                                headers: withAccessTokenHeader({ 'X-User-Id': user.id })
                             });
                             const data = response.data;
                             if (data.status === 'success' && isMounted.current) {
@@ -32589,32 +32587,37 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     }
                 };
 
-            const saveDirections = async (newDirections) => {
+            const saveDirections = async (newDirections, departmentId = null) => {
                 setIsLoading(true);
                 try {
+                    const payload = { directions: newDirections };
+                    if (departmentId !== null && departmentId !== undefined && departmentId !== '') {
+                        payload.department_id = departmentId;
+                    }
                     const response = await axios.post(
                         `${API_BASE_URL}/api/admin/save_directions`,
-                        { directions: newDirections },
+                        payload,
                         {
-                            headers: {
+                            headers: withAccessTokenHeader({
                                 'Content-Type': 'application/json',
                                 'X-User-Id': user.id
-                            }
+                            })
                         }
                     );
                     const data = response.data;
-                    if (data.status === 'success' && isMounted.current) {
-                        const updatedDirections = Array.isArray(data.directions)
-                            ? data.directions.filter((direction) => direction?.isActive !== false)
-                            : newDirections;
-                        setDirections(updatedDirections);
+                    if (data.status === 'success') {
+                        // Сохранение по отделу — точечное; перезагружаем полный список,
+                        // чтобы глобальный directions не схлопнулся до одного отдела.
+                        await fetchDirections();
                         showToast('Directions saved successfully', 'success');
                     } else {
                         showToast(data.error || 'Failed to save directions', 'error');
+                        throw new Error(data.error || 'Failed to save directions');
                     }
                 } catch (err) {
                     console.error('Save directions error:', err);
                     showToast(err.response?.data?.error || 'Failed to save directions', 'error');
+                    throw err;
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
@@ -38539,7 +38542,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {( view === "monitoring_scale" && (
                                     <MonitoringScaleView
                                         user={user}
-                                        apiBaseUrl={API_BASE_URL}
+                                        directions={directions}
+                                        onSave={saveDirections}
+                                        onRefresh={fetchDirections}
                                         departments={departments}
                                         showToast={showToast}
                                         canEdit={isAdminLikeRoleFn(user?.role)}
@@ -38601,7 +38606,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {( view === "monitoring_scale" && !isAdminLikeRole && isDepartmentHead(user) && (
                             <MonitoringScaleView
                                 user={user}
-                                apiBaseUrl={API_BASE_URL}
+                                directions={directions}
+                                onSave={saveDirections}
+                                onRefresh={fetchDirections}
                                 departments={departments}
                                 showToast={showToast}
                                 canEdit={true}

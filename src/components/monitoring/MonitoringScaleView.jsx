@@ -1,5 +1,4 @@
 import React, { useEffect, useState } from 'react';
-import axios from 'axios';
 import FaIcon from '../common/FaIcon';
 import { isAdminLikeRole, isDepartmentHead, headedDepartmentId } from '../../utils/roles';
 
@@ -161,13 +160,11 @@ const SummaryCard = ({ icon, label, value, tone = 'blue' }) => {
 
 export default function MonitoringScaleView({
   directions: initialDirections = [],
-  onDirectionsChange,
   onRefresh,
   onSave,
   showToast,
   canEdit = true,
   user,
-  apiBaseUrl,
   departments = [],
 }) {
   const { toasts, show, remove } = useToast();
@@ -202,9 +199,8 @@ export default function MonitoringScaleView({
   });
   const scopeDeptName = (departments || []).find((d) => Number(d.id) === Number(scopeDeptId))?.name || null;
 
-  const apiRoot = String(apiBaseUrl || '').trim().replace(/\/+$/, '');
-  const canUseApi = Boolean(apiRoot && user?.id);
-  const directionsParams = scopeDeptId != null ? { department_id: scopeDeptId } : undefined;
+  // Компонент управляемый: список направлений приходит из props (initialDirections),
+  // сохранение/обновление — через onSave/onRefresh. Свои запросы к API НЕ делаем.
 
   const notify = (message, type = 'success') => {
     if (typeof showToast === 'function') {
@@ -212,21 +208,6 @@ export default function MonitoringScaleView({
       return;
     }
     show(message, type);
-  };
-
-  const syncDirections = (nextDirections) => {
-    const normalized = normalizeDirections(nextDirections);
-    setDirections(normalized);
-    if (typeof onDirectionsChange === 'function') {
-      onDirectionsChange(normalized);
-    }
-  };
-
-  const buildHeaders = (json = false) => {
-    const headers = {};
-    if (json) headers['Content-Type'] = 'application/json';
-    if (user?.id) headers['X-User-Id'] = String(user.id);
-    return headers;
   };
 
   const totalWeight = (directionIndex) =>
@@ -252,44 +233,38 @@ export default function MonitoringScaleView({
     setEditingCrit(null);
   };
 
-  const loadDirections = async ({ quiet = false } = {}) => {
-    if (canUseApi) {
-      if (!quiet) setIsFetching(true);
-      try {
-        const response = await axios.get(`${apiRoot}/api/admin/directions`, {
-          headers: buildHeaders(),
-          params: directionsParams,
-        });
-        const data = response.data;
-        if (data?.status === 'success') {
-          syncDirections(data.directions || []);
-          return data.directions || [];
-        }
-        notify(data?.error || 'Не удалось получить направления.', 'error');
-      } catch (error) {
-        notify(error.response?.data?.error || 'Не удалось получить направления.', 'error');
-      } finally {
-        if (!quiet) setIsFetching(false);
-      }
-      return null;
+  const loadDirections = async () => {
+    if (typeof onRefresh !== 'function') return;
+    setIsFetching(true);
+    try {
+      await onRefresh();
+    } catch (error) {
+      notify(error?.message || 'Не удалось обновить направления.', 'error');
+    } finally {
+      setIsFetching(false);
     }
-
-    if (typeof onRefresh === 'function') {
-      try {
-        const result = await onRefresh();
-        if (Array.isArray(result)) {
-          syncDirections(result);
-        }
-      } catch (error) {
-        notify(error?.message || 'Не удалось обновить направления.', 'error');
-      }
-    }
-    return null;
   };
 
+  // Источник направлений — props (initialDirections), отфильтрованные по выбранному отделу.
+  // App отдаёт главе уже только его отдел; админу — все, поэтому фильтруем по scopeDeptId.
   useEffect(() => {
-    setDirections(normalizeDirections(initialDirections));
-  }, [initialDirections]);
+    const norm = normalizeDirections(initialDirections);
+    const scoped = scopeDeptId == null
+      ? norm
+      : norm.filter((d) => Number(d.department_id ?? d.departmentId) === Number(scopeDeptId));
+    setDirections(scoped);
+  }, [initialDirections, scopeDeptId]);
+
+  // Гарантируем валидный отдел-скоуп (иначе сохранение направлений невозможно):
+  // глава — свой отдел; админ — свой отдел/СЗоВ/первый из списка, когда отделы загрузятся.
+  useEffect(() => {
+    if (scopeDeptId != null) return;
+    if (isHead && headDeptId != null) { setScopeDeptId(headDeptId); return; }
+    if (canChooseDept && (departments || []).length > 0) {
+      const szov = departments.find((d) => String(d.code || '').toLowerCase() === 'szov');
+      setScopeDeptId(szov ? szov.id : departments[0].id);
+    }
+  }, [departments, scopeDeptId, isHead, headDeptId, canChooseDept]);
 
   useEffect(() => {
     setSelectedDir((prev) => clampIndex(prev, directions.length));
@@ -304,43 +279,6 @@ export default function MonitoringScaleView({
     setCriterionMode('view');
     resetCriterionForm();
   }, [selectedDir]);
-
-  useEffect(() => {
-    if (!canUseApi) return undefined;
-
-    let cancelled = false;
-
-    const fetchData = async () => {
-      setIsFetching(true);
-      try {
-        const response = await axios.get(`${apiRoot}/api/admin/directions`, {
-          headers: buildHeaders(),
-          params: directionsParams,
-        });
-        const data = response.data;
-        if (cancelled) return;
-        if (data?.status === 'success') {
-          syncDirections(data.directions || []);
-          return;
-        }
-        notify(data?.error || 'Не удалось получить направления.', 'error');
-      } catch (error) {
-        if (!cancelled) {
-          notify(error.response?.data?.error || 'Не удалось получить направления.', 'error');
-        }
-      } finally {
-        if (!cancelled) {
-          setIsFetching(false);
-        }
-      }
-    };
-
-    fetchData();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [apiRoot, canUseApi, user?.id, scopeDeptId]);
 
   const submitDirection = () => {
     if (!canEdit) return;
@@ -568,29 +506,18 @@ export default function MonitoringScaleView({
       return;
     }
 
+    if (typeof onSave !== 'function') {
+      notify('Сохранение недоступно.', 'error');
+      return;
+    }
+
     setIsSaving(true);
     try {
-      if (canUseApi) {
-        const response = await axios.post(
-          `${apiRoot}/api/admin/save_directions`,
-          { directions, department_id: scopeDeptId },
-          { headers: buildHeaders(true) }
-        );
-        const data = response.data;
-        if (data?.status !== 'success') {
-          notify(data?.error || 'Ошибка при сохранении.', 'error');
-          return;
-        }
-
-        syncDirections(data.directions || directions);
-        notify('Мониторинговая шкала сохранена.');
-        return;
-      }
-
-      await onSave?.(directions);
+      // Сохраняем через App (он шлёт запрос и обновляет список). Отдел — текущий scope.
+      await onSave(directions, scopeDeptId);
       notify('Мониторинговая шкала сохранена.');
     } catch (error) {
-      notify(error.response?.data?.error || 'Ошибка при сохранении.', 'error');
+      notify(error?.response?.data?.error || error?.message || 'Ошибка при сохранении.', 'error');
     } finally {
       setIsSaving(false);
     }
@@ -1598,7 +1525,7 @@ export default function MonitoringScaleView({
               type="button"
               className="btn-ghost"
               onClick={() => loadDirections()}
-              disabled={isBusy || (!canUseApi && typeof onRefresh !== 'function')}
+              disabled={isBusy || typeof onRefresh !== 'function'}
             >
               <Icon
                 icon="fa-arrows-rotate"
