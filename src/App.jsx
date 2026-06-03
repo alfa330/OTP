@@ -16,6 +16,7 @@ import FaIcon from './components/common/FaIcon';
 import AuthEntranceSplash from './components/common/AuthEntranceSplash';
 import OrazAitSplash from './components/common/OrazAitSplash';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole } from './utils/roles';
+import { departmentAllowsView, departmentRestrictsViews, firstAllowedView } from './utils/departmentViews';
 
 const CHUNK_RELOAD_STORAGE_KEY = 'otp_chunk_reload_attempted';
 const PINNED_TASK_STORAGE_KEY_PREFIX = 'otp_pinned_task';
@@ -28167,6 +28168,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 confirm_password: ''
             });
             const [directions, setDirections] = useState([]);
+            const [departments, setDepartments] = useState([]);
             const [selectedMonth, setSelectedMonth] = useState(() => getStoredValue('selectedMonth', currentMonth));
             const [users, setUsers] = useState([]);
             const [adminUsers, setAdminUsers] = useState([]);
@@ -32568,7 +32570,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         }
                     });
                 };
-            
+
+                const fetchDepartments = async () => {
+                    if (!user || !user.id) return;
+                    try {
+                        const response = await axios.get(`${API_BASE_URL}/api/admin/departments`, {
+                            headers: withAccessTokenHeader({ 'X-User-Id': user.id })
+                        });
+                        const data = response.data;
+                        if (data?.status === 'success' && Array.isArray(data.departments) && isMounted.current) {
+                            setDepartments(data.departments);
+                        }
+                    } catch (err) {
+                        // мягко игнорируем — селект отдела просто будет пустым
+                        console.error('Fetch departments error:', err);
+                    }
+                };
+
             const saveDirections = async (newDirections) => {
                 setIsLoading(true);
                 try {
@@ -32962,6 +32980,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             role: editedUser.role || "operator",
                             supervisor_id: isCreatedTrainer ? null : (editedUser.supervisor_id || null),
                             direction_id: isCreatedTrainer ? null : (editedUser.direction_id || null),
+                            department_id: editedUser.department_id ? Number(editedUser.department_id) : null,
                             rate: editedUser.rate || 1.0,
                             hire_date: normalizeDateForApi(editedUser.hire_date),
                             gender: editedUser.gender || null,
@@ -33114,6 +33133,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 user_id: editedUser.id,
                                 field: 'supervisor_id',
                                 value: editedUser.supervisor_id
+                            }, {
+                                headers: { 'X-User-Id': user.id }
+                            });
+                        }
+                    }
+                    // Department reassignment (только админы; бэкенд тоже это проверяет)
+                    if (isAdminLikeRoleFn(user?.role)) {
+                        const nextDept = editedUser.department_id ? Number(editedUser.department_id) : null;
+                        const prevDept = userToEdit?.department_id ? Number(userToEdit.department_id) : null;
+                        if (nextDept !== null && nextDept !== prevDept) {
+                            await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                                user_id: editedUser.id,
+                                field: 'department_id',
+                                value: nextDept
                             }, {
                                 headers: { 'X-User-Id': user.id }
                             });
@@ -35869,10 +35902,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     fetchSvList();
                     fetchDirections();
                     fetchUsers();
+                    fetchDepartments();
                 } else if (isSupervisorRole(user?.role)) {
                     fetchSvList();
                     fetchUsers();
                     fetchDirections();
+                    fetchDepartments();
                 } else if (user.role === 'trainer') {
                     fetchUsers();
                     fetchDirections();
@@ -35883,6 +35918,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     fetchSurveysPendingBadgeCount();
                 }
             }, [user?.id, user?.role]);
+
+            // Гард видимости разделов по отделу (Этап 10): если отдел ограничивает
+            // набор разделов и текущий view недоступен — перенаправляем на разрешённый.
+            useEffect(() => {
+                if (!user || !user.id) return;
+                if (!departmentRestrictsViews(user)) return;
+                if (departmentAllowsView(user, view)) return;
+                const fallback = firstAllowedView(user, ['profile', 'salary', view]) || 'salary';
+                if (fallback && fallback !== view) setView(fallback);
+            }, [user?.id, user?.role, user?.department_code, view]);
 
             useEffect(() => {
                 if (!user || !user.id || !isSupervisorRole(user?.role)) return;
@@ -36073,7 +36118,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                   </span>
                                 </h1>
                                 <ul ref={sidebarMenuScrollRef} className={`space-y-2 flex-1 min-h-0 sidebar-menu-scroll`}>
-                                    {canAccessLmsSection && (
+                                    {canAccessLmsSection && departmentAllowsView(user, 'lms') && (
                                         <>
                                             <li>
                                                 <button
@@ -36405,22 +36450,29 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     )}
                                     {currentUserRole === 'operator' && (
                                         <>
-                                            {canAccessLmsSection && renderSidebarDividerInner()}
+                                            {canAccessLmsSection && !departmentRestrictsViews(user) && renderSidebarDividerInner()}
+                                            {departmentAllowsView(user, 'profile') && (
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'profile')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'profile' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-user-circle"></FaIcon> <span className="sidebar-text">Профиль</span>
                                                 </button>
                                             </li>
+                                            )}
+                                            {departmentAllowsView(user, 'hours') && (
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'hours')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'hours' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-clock"></FaIcon> <span className="sidebar-text">Мои часы</span>
                                                 </button>
                                             </li>
+                                            )}
+                                            {departmentAllowsView(user, 'work_schedules') && (
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'work_schedules')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-calendar-alt"></FaIcon> <span className="sidebar-text">Мои смены</span>
                                                 </button>
                                             </li>
+                                            )}
+                                            {departmentAllowsView(user, 'shift_auction') && (
                                             <li>
                                                 <button
                                                     onClick={(e) => handleSidebarViewNavigation(e, 'shift_auction')}
@@ -36429,32 +36481,43 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <FaIcon className="fas fa-gavel" /> <span className="sidebar-text">Аукцион смен</span>
                                                 </button>
                                             </li>
+                                            )}
+                                            {departmentAllowsView(user, 'evaluation') && (
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'evaluation')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'evaluation' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-chart-bar"></FaIcon> <span className="sidebar-text">Мои оценки</span>
                                                 </button>
                                             </li>
+                                            )}
+                                            {departmentAllowsView(user, 'ai_feedback') && (
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'ai_feedback')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'ai_feedback' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-sparkles"></FaIcon> <span className="sidebar-text">Dos AI</span>
                                                 </button>
                                             </li>
-                                            {renderSidebarDividerInner()}
+                                            )}
+                                            {!departmentRestrictsViews(user) && renderSidebarDividerInner()}
+                                            {departmentAllowsView(user, 'surveys') && (
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'surveys')} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadgeInner()} {renderSurveysSidebarLabelInner()}
                                                 </button>
                                             </li>
+                                            )}
+                                            {departmentAllowsView(user, 'contests') && (
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'contests')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'contests' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-award"></FaIcon> <span className="sidebar-text">Конкурсы</span>
                                                 </button>
                                             </li>
+                                            )}
+                                            {departmentAllowsView(user, 'salary') && (
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'salary')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'salary' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-calculator"></FaIcon> <span className="sidebar-text">Калькулятор зарплаты</span>
                                                 </button>
                                             </li>
+                                            )}
                                         </>
                                     )}
                                     {!isAdminLikeRole && currentUserRole !== 'sv' && currentUserRole !== 'operator' && currentUserRole !== 'trainer' && currentUserRole !== 'trainee' && (
@@ -41500,6 +41563,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     userToEdit={userToEdit}
                                     svList={svList}
                                     directions={directions}
+                                    departments={departments}
                                     user={user}
                                     onSave={saveUserChanges}
                                 />
