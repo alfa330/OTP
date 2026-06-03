@@ -8577,6 +8577,15 @@ class Database:
             cursor.execute("SELECT id FROM users WHERE department_id = %s", (department_id,))
             return {r[0] for r in cursor.fetchall()}
 
+    def get_direction_department_id(self, direction_id):
+        """Вернуть department_id направления (для проверки принадлежности отделу)."""
+        if not direction_id:
+            return None
+        with self._get_cursor() as cursor:
+            cursor.execute("SELECT department_id FROM directions WHERE id = %s", (direction_id,))
+            r = cursor.fetchone()
+            return r[0] if r else None
+
     def assign_user_department(self, user_id, department_id):
         with self._get_cursor() as cursor:
             cursor.execute("UPDATE users SET department_id = %s WHERE id = %s RETURNING id", (department_id, user_id))

@@ -6273,7 +6273,8 @@ def get_sv_list():
                         taxipro_id,
                         rate,
                         direction_id,
-                        supervisor_id
+                        supervisor_id,
+                        department_id
                     FROM users
                     WHERE LOWER(COALESCE(role, '')) IN ('sv', 'supervisor')
                     ORDER BY name
@@ -6320,11 +6321,12 @@ def get_sv_list():
                         "taxipro_id": sv[35] or "",
                         "rate": float(sv[36]) if sv[36] is not None else 1.0,
                         "direction_id": sv[37],
-                        "supervisor_id": sv[38]
+                        "supervisor_id": sv[38],
+                        "department_id": sv[39]
                     })
             else:
                 cursor.execute("""
-                    SELECT id, name, hours_table_url, role, hire_date, status, avatar_bucket, avatar_blob_path
+                    SELECT id, name, hours_table_url, role, hire_date, status, avatar_bucket, avatar_blob_path, department_id
                     FROM users
                     WHERE LOWER(COALESCE(role, '')) IN ('sv', 'supervisor')
                     ORDER BY name
@@ -6338,7 +6340,8 @@ def get_sv_list():
                         "role": _normalize_user_role(sv[3]),
                         "hire_date": sv[4].strftime('%d-%m-%Y') if sv[4] else None,
                         "status": sv[5],
-                        "avatar_url": _build_avatar_signed_url(sv[6], sv[7])
+                        "avatar_url": _build_avatar_signed_url(sv[6], sv[7]),
+                        "department_id": sv[8]
                     }
                     for sv in supervisors
                 ]
@@ -9153,8 +9156,12 @@ def add_user():
                 return jsonify({"error": "Invalid rate"}), 400
 
         if requester_role == 'sv':
-            supervisor_id = requester_id
-            if role == 'operator':
+            # По умолчанию супервайзер — сам СВ, но он может выбрать другого СВ своего отдела.
+            if not supervisor_id:
+                supervisor_id = requester_id
+            # Направление берём выбранное в модалке (оно ограничено отделом СВ);
+            # если не выбрано — наследуем направление самого СВ.
+            if role == 'operator' and not direction_id:
                 requester_direction_name = str(requester[4] or '').strip()
                 if requester_direction_name:
                     requester_direction_id = next(
@@ -9339,18 +9346,34 @@ def add_user():
         if role != 'operator':
             sip_number = None
 
-        # Department assignment (optional). Only admins may choose; others -> default (szov).
+        # Отдел: админ выбирает любой; СВ/глава отдела создают строго в своём отделе.
+        requester_headed_dept = db.headed_department_id_for_user(requester_id)
+        requester_dept_id = requester_headed_dept if requester_headed_dept is not None else db.get_user_department_id(requester_id)
         department_id = None
-        department_raw = data.get('department_id')
-        if department_raw not in [None, '']:
-            if requester_role not in ('super_admin', 'admin'):
-                return jsonify({"error": "Only admins can assign a department"}), 403
-            try:
-                department_id = int(department_raw)
-            except (TypeError, ValueError):
-                return jsonify({"error": "Invalid department_id"}), 400
-            if not db.get_department_by_id(department_id):
-                return jsonify({"error": "Department not found"}), 400
+        if _is_admin_role(requester_role):
+            department_raw = data.get('department_id')
+            if department_raw not in [None, '']:
+                try:
+                    department_id = int(department_raw)
+                except (TypeError, ValueError):
+                    return jsonify({"error": "Invalid department_id"}), 400
+                if not db.get_department_by_id(department_id):
+                    return jsonify({"error": "Department not found"}), 400
+        else:
+            # СВ / глава отдела — отдел создающего (выбор клиента игнорируем)
+            department_id = requester_dept_id
+
+        # Валидация принадлежности направления и супервайзера выбранному отделу
+        # (когда отдел известен явно: для СВ/главы всегда, для админа — если выбрал отдел).
+        if department_id is not None:
+            if role == 'operator' and direction_id is not None:
+                dir_dept = db.get_direction_department_id(direction_id)
+                if dir_dept is not None and int(dir_dept) != int(department_id):
+                    return jsonify({"error": "Направление не принадлежит выбранному отделу"}), 400
+            if supervisor_id is not None:
+                sup_dept = db.get_user_department_id(supervisor_id)
+                if sup_dept is not None and int(sup_dept) != int(department_id):
+                    return jsonify({"error": "Супервайзер не из выбранного отдела"}), 400
 
         if role == 'trainer':
             login_prefix = 'trainer'

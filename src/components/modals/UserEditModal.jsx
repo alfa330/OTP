@@ -270,6 +270,19 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     const isSupervisorRequester = requesterRole === 'sv';
     // Отдел по умолчанию (СЗоВ) — когда отдел у пользователя не выбран явно.
     const szovDeptId = (departments || []).find((d) => String(d.code || '').toLowerCase() === 'szov')?.id ?? null;
+    // Скоуп отдела создающего: супервайзер/глава видят и могут назначать только свой отдел.
+    const requesterHeadedDeptId = user?.headed_department_id ?? user?.headedDepartmentId ?? null;
+    const requesterOwnDeptId = user?.department_id ?? null;
+    const requesterScopeDeptId = isAdminLikeRequester
+        ? null
+        : ((requesterHeadedDeptId != null ? requesterHeadedDeptId : requesterOwnDeptId) ?? null);
+    const isDeptScoped = !isAdminLikeRequester && requesterScopeDeptId != null;
+    // Эффективный отдел сотрудника: выбранный в модалке, иначе — отдел создающего (для скоупа) или СЗоВ.
+    const effectiveDeptId = (() => {
+        const d = editedUser?.department_id;
+        if (d !== '' && d != null) return Number(d);
+        return isDeptScoped ? requesterScopeDeptId : szovDeptId;
+    })();
     const directionDeptOf = (dir) => dir?.department_id ?? dir?.departmentId ?? null;
     // Направления, доступные для выбранного отдела сотрудника (Этап 11):
     // показываем только направления отдела; если отдел не определён — все.
@@ -339,7 +352,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         const defaults = {
         rate: base.rate ?? 1.0,
         direction_id: isTrainerBase ? "" : (base.direction_id ?? ""),
-        department_id: base.department_id ?? "",
+        department_id: base.department_id ?? (isDeptScoped ? requesterScopeDeptId : ""),
         supervisor_id: isTrainerBase ? "" : (base.supervisor_id ?? (isAdminLikeRequester ? "" : (user?.id ?? ""))),
         status: initialStatus,
         gender: base.gender ?? "",
@@ -1498,24 +1511,29 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </div>
                     )}
 
-                    {isAdminLikeRequester && (
+                    {(isAdminLikeRequester || isDeptScoped) && (
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Отдел</label>
                         <CustomSelect
-                        value={editedUser?.department_id || ""}
+                        value={editedUser?.department_id || (isDeptScoped ? requesterScopeDeptId : "")}
                         onChange={handleDepartmentChange}
-                        disabled={isLoading || !!createdCredentials}
+                        disabled={isLoading || !!createdCredentials || isDeptScoped}
                         placeholder="По умолчанию (СЗоВ)"
-                        options={[
-                            { value: "", label: "По умолчанию (СЗоВ)" },
-                            ...(departments || []).filter(d => d.is_active !== false).map((dep) => ({ value: dep.id, label: dep.name })),
-                        ]}
+                        options={isDeptScoped
+                            ? (departments || []).filter((dep) => Number(dep.id) === Number(requesterScopeDeptId)).map((dep) => ({ value: dep.id, label: dep.name }))
+                            : [
+                                { value: "", label: "По умолчанию (СЗоВ)" },
+                                ...(departments || []).filter(d => d.is_active !== false).map((dep) => ({ value: dep.id, label: dep.name })),
+                            ]
+                        }
                         />
-                        <p className="mt-1 text-xs text-slate-500">Отдел определяет доступные сотруднику разделы.</p>
+                        <p className="mt-1 text-xs text-slate-500">
+                            {isDeptScoped ? 'Сотрудник создаётся в вашем отделе.' : 'Отдел определяет доступные сотруднику разделы.'}
+                        </p>
                     </div>
                     )}
 
-                    {isAdminLikeRequester && isOperatorDraft(editedUser) && (
+                    {(isAdminLikeRequester || isDeptScoped) && isOperatorDraft(editedUser) && (
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Супервайзер</label>
                         <CustomSelect
@@ -1527,6 +1545,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             { value: "", label: "Выберите супервайзера" },
                             ...(svList || [])
                                 .filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status)
+                                .filter(sv => effectiveDeptId == null || Number(sv.department_id ?? sv.departmentId) === Number(effectiveDeptId))
                                 .map((sv) => ({ value: sv.id, label: sv.name })),
                         ]}
                         />
@@ -1564,11 +1583,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         placeholder="Выберите направление"
                         options={[
                             { value: "", label: "Выберите направление" },
-                            ...directionsForSelectedDept(
-                                (editedUser?.department_id !== '' && editedUser?.department_id != null)
-                                    ? Number(editedUser.department_id)
-                                    : szovDeptId
-                            ).map((dir) => ({ value: dir.id, label: dir.name })),
+                            ...directionsForSelectedDept(effectiveDeptId).map((dir) => ({ value: dir.id, label: dir.name })),
                         ]}
                         />
                     </div>
