@@ -28170,6 +28170,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [directions, setDirections] = useState([]);
             const [departments, setDepartments] = useState([]);
             const [manageUsersDeptFilter, setManageUsersDeptFilter] = useState('');
+            const [svListDeptFilter, setSvListDeptFilter] = useState('');
             const [selectedMonth, setSelectedMonth] = useState(() => getStoredValue('selectedMonth', currentMonth));
             const [users, setUsers] = useState([]);
             const [adminUsers, setAdminUsers] = useState([]);
@@ -35225,8 +35226,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 canAdd = true,
                 canRemoveSupervisor = false,
                 canDismissAdmin = false,
+                departmentFilter = '',
+                setDepartmentFilter = null,
+                departmentOptions = [],
             }) => {
-                const rows = Array.isArray(items) ? items : [];
+                const allRows = Array.isArray(items) ? items : [];
+                const rows = departmentFilter
+                    ? allRows.filter((r) => Number(r?.department_id ?? r?.departmentId) === Number(departmentFilter))
+                    : allRows;
                 const columns = buildEmployeeSectionColumns(role === 'operator' ? 'operator' : 'staff');
 
                 const renderRowActionMenu = (employee) => {
@@ -35343,15 +35350,33 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         <div className="flex items-center justify-between mb-6">
                             <h2 className="text-2xl font-semibold text-gray-800">{title}</h2>
 
-                            {canAdd && (
-                                <button
-                                    type="button"
-                                    onClick={() => openCreateEmployeeModalForRole(role)}
-                                    className="inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition"
-                                >
-                                    <FaIcon className={addIcon}></FaIcon> {addLabel}
-                                </button>
-                            )}
+                            <div className="flex items-center gap-3">
+                                {setDepartmentFilter && (departmentOptions || []).length > 0 && (
+                                    <div className="flex items-center gap-2">
+                                        <FaIcon className="fa-solid fa-layer-group text-gray-400" />
+                                        <select
+                                            value={departmentFilter}
+                                            onChange={(event) => setDepartmentFilter(event.target.value)}
+                                            className="px-3 py-3 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+                                            title="Фильтр по отделу"
+                                        >
+                                            <option value="">Все отделы</option>
+                                            {(departmentOptions || []).map((dep) => (
+                                                <option key={dep.id} value={dep.id}>{dep.name}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                )}
+                                {canAdd && (
+                                    <button
+                                        type="button"
+                                        onClick={() => openCreateEmployeeModalForRole(role)}
+                                        className="inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition"
+                                    >
+                                        <FaIcon className={addIcon}></FaIcon> {addLabel}
+                                    </button>
+                                )}
+                            </div>
                         </div>
 
                         <div className="flex flex-wrap gap-3 mb-6">
@@ -37221,6 +37246,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 emptySearchText: 'Супервайзеры по запросу не найдены.',
                                 countLabel: 'супервайзеров',
                                 canRemoveSupervisor: true,
+                                departmentFilter: svListDeptFilter,
+                                setDepartmentFilter: isAdminLikeRole ? setSvListDeptFilter : null,
+                                departmentOptions: departments,
                             })}
 
                             {false && view === 'sv_list' && (
