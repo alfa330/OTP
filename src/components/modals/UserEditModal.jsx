@@ -1,6 +1,7 @@
 ﻿import React, { useEffect, useState } from 'react';
 import FaIcon from '../common/FaIcon';
 import { isAdminLikeRole as isAdminLikeRoleFn, normalizeRole } from '../../utils/roles';
+import CustomSelect from '../ui/CustomSelect';
 
 const PERIOD_STATUS_VALUES = new Set(['bs', 'sick_leave', 'annual_leave', 'dismissal']);
 const DISMISSAL_REASON_WITH_END_DATE = 'Б/С на летний период';
@@ -267,6 +268,29 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     const isAdminLikeRequester = isAdminLikeRoleFn(user?.role);
     const requesterRole = normalizeRole(user?.role);
     const isSupervisorRequester = requesterRole === 'sv';
+    // Отдел по умолчанию (СЗоВ) — когда отдел у пользователя не выбран явно.
+    const szovDeptId = (departments || []).find((d) => String(d.code || '').toLowerCase() === 'szov')?.id ?? null;
+    const directionDeptOf = (dir) => dir?.department_id ?? dir?.departmentId ?? null;
+    // Направления, доступные для выбранного отдела сотрудника (Этап 11):
+    // показываем только направления отдела; если отдел не определён — все.
+    const directionsForSelectedDept = (effectiveDeptId) => {
+        if (effectiveDeptId == null) return directions || [];
+        return (directions || []).filter((dir) => Number(directionDeptOf(dir)) === Number(effectiveDeptId));
+    };
+    // Сменить отдел: если текущее направление не принадлежит новому отделу — сбрасываем его.
+    const handleDepartmentChange = (deptValue) => {
+        setEditedUser((prev) => {
+            const next = { ...prev, department_id: deptValue };
+            const effDept = (deptValue !== '' && deptValue != null) ? Number(deptValue) : szovDeptId;
+            if (prev?.direction_id) {
+                const dir = (directions || []).find((d) => String(d.id) === String(prev.direction_id));
+                if (dir && effDept != null && Number(directionDeptOf(dir)) !== Number(effDept)) {
+                    next.direction_id = '';
+                }
+            }
+            return next;
+        });
+    };
     const isExistingUserEdit = Boolean(userToEdit?.id);
     const isSupervisorRateEditDay = getAlmatyDayOfMonth() === 1;
     const isSupervisorRateLocked = isSupervisorRequester && isOperatorDraft(editedUser) && isExistingUserEdit && !isSupervisorRateEditDay;
@@ -1024,16 +1048,17 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Пол</label>
-                        <select
+                        <CustomSelect
                         value={editedUser?.gender || ""}
-                        onChange={(e) => setEditedUser({ ...editedUser, gender: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        onChange={(v) => setEditedUser({ ...editedUser, gender: v })}
                         disabled={isLoading || !!createdCredentials}
-                        >
-                        <option value="">Не указан</option>
-                        <option value="male">Мужской</option>
-                        <option value="female">Женский</option>
-                        </select>
+                        placeholder="Не указан"
+                        options={[
+                            { value: "", label: "Не указан" },
+                            { value: "male", label: "Мужской" },
+                            { value: "female", label: "Женский" },
+                        ]}
+                        />
                     </div>
 
                     <div>
@@ -1277,17 +1302,18 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Оформлен как</label>
-                        <select
+                        <CustomSelect
                         value={editedUser?.employment_type || ""}
-                        onChange={(e) => setEditedUser({ ...editedUser, employment_type: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        onChange={(v) => setEditedUser({ ...editedUser, employment_type: v })}
                         disabled={isLoading || !!createdCredentials}
-                        >
-                        <option value="">Не указано</option>
-                        <option value="gph">ГПХ</option>
-                        <option value="of">ОФ</option>
-                        <option value="smz">СМЗ</option>
-                        </select>
+                        placeholder="Не указано"
+                        options={[
+                            { value: "", label: "Не указано" },
+                            { value: "gph", label: "ГПХ" },
+                            { value: "of", label: "ОФ" },
+                            { value: "smz", label: "СМЗ" },
+                        ]}
+                        />
                     </div>
 
                     <div>
@@ -1350,10 +1376,9 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     <>
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Статус</label>
-                        <select
+                        <CustomSelect
                         value={editedUser?.status || "working"}
-                        onChange={(e) => {
-                            const nextStatus = e.target.value;
+                        onChange={(nextStatus) => {
                             const currentStart = editedUser?.status_period_start_date || todayInputDate();
                             setEditedUser({
                                 ...editedUser,
@@ -1364,15 +1389,15 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 use_schedule_status_period: usesScheduleStatusPeriodForm(nextStatus) ? true : editedUser?.use_schedule_status_period
                             });
                         }}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                         disabled={isLoading || !!createdCredentials}
-                        >
-                        <option value="working">Работает</option>
-                        <option value="fired">Уволен</option>
-                        <option value="bs">Б/С</option>
-                        <option value="sick_leave">Больничный</option>
-                        <option value="annual_leave">Ежегодный отпуск</option>
-                        </select>
+                        options={[
+                            { value: "working", label: "Работает" },
+                            { value: "fired", label: "Уволен" },
+                            { value: "bs", label: "Б/С" },
+                            { value: "sick_leave", label: "Больничный" },
+                            { value: "annual_leave", label: "Ежегодный отпуск" },
+                        ]}
+                        />
                     </div>
 
                     {usesScheduleStatusPeriodForm(editedUser?.status) && (
@@ -1418,10 +1443,9 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             <>
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Причина увольнения</label>
-                                <select
+                                <CustomSelect
                                     value={editedUser?.status_period_dismissal_reason || ""}
-                                    onChange={(e) => {
-                                        const nextReason = e.target.value;
+                                    onChange={(nextReason) => {
                                         setEditedUser((prev) => ({
                                             ...prev,
                                             status_period_dismissal_reason: nextReason,
@@ -1431,14 +1455,13 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                                 : ''
                                         }));
                                     }}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                                     disabled={isLoading || !!createdCredentials}
-                                >
-                                    <option value="">Выберите причину</option>
-                                    {DISMISSAL_REASON_OPTIONS.map(reason => (
-                                        <option key={reason} value={reason}>{reason}</option>
-                                    ))}
-                                </select>
+                                    placeholder="Выберите причину"
+                                    options={[
+                                        { value: "", label: "Выберите причину" },
+                                        ...DISMISSAL_REASON_OPTIONS.map((reason) => ({ value: reason, label: reason })),
+                                    ]}
+                                />
                             </div>
                             <div>
                                 <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
@@ -1478,17 +1501,16 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     {isAdminLikeRequester && (
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Отдел</label>
-                        <select
+                        <CustomSelect
                         value={editedUser?.department_id || ""}
-                        onChange={(e) => setEditedUser({ ...editedUser, department_id: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        onChange={handleDepartmentChange}
                         disabled={isLoading || !!createdCredentials}
-                        >
-                        <option value="">По умолчанию (СЗоВ)</option>
-                        {(departments || []).filter(d => d.is_active !== false).map((dep) => (
-                            <option key={dep.id} value={dep.id}>{dep.name}</option>
-                        ))}
-                        </select>
+                        placeholder="По умолчанию (СЗоВ)"
+                        options={[
+                            { value: "", label: "По умолчанию (СЗоВ)" },
+                            ...(departments || []).filter(d => d.is_active !== false).map((dep) => ({ value: dep.id, label: dep.name })),
+                        ]}
+                        />
                         <p className="mt-1 text-xs text-slate-500">Отдел определяет доступные сотруднику разделы.</p>
                     </div>
                     )}
@@ -1496,41 +1518,34 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     {isAdminLikeRequester && isOperatorDraft(editedUser) && (
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Супервайзер</label>
-                        <select
+                        <CustomSelect
                         value={editedUser?.supervisor_id || ""}
-                        onChange={(e) => setEditedUser({ ...editedUser, supervisor_id: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        onChange={(v) => setEditedUser({ ...editedUser, supervisor_id: v })}
                         disabled={isLoading || !!createdCredentials}
-                        >
-                        <option value="">Выберите супервайзера</option>
-                        {(svList || [])
-                            .filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status)
-                            .map((sv) => (
-                            <option key={sv.id} value={sv.id}>
-                                {sv.name}
-                            </option>
-                            ))}
-                        </select>
+                        placeholder="Выберите супервайзера"
+                        options={[
+                            { value: "", label: "Выберите супервайзера" },
+                            ...(svList || [])
+                                .filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status)
+                                .map((sv) => ({ value: sv.id, label: sv.name })),
+                        ]}
+                        />
                     </div>
                     )}
 
                     {(!isSupervisorRequester || isOperatorDraft(editedUser)) && (
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Ставка</label>
-                        <select
+                        <CustomSelect
                         value={editedUser?.rate ?? 1.0}
-                        onChange={(e) => setEditedUser({ ...editedUser, rate: parseFloat(e.target.value) })}
-                        className={`w-full px-3 py-2 border rounded-lg shadow-sm focus:outline-none transition-all ${
-                            isSupervisorRateLocked
-                                ? 'border-slate-200 bg-slate-100 text-slate-400 cursor-not-allowed dark:border-slate-700 dark:bg-slate-800/70 dark:text-slate-400'
-                                : 'border-gray-300 focus:ring-2 focus:ring-blue-500 bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100'
-                        }`}
+                        onChange={(v) => setEditedUser({ ...editedUser, rate: Number(v) })}
                         disabled={isLoading || !!createdCredentials || isSupervisorRateLocked}
-                        >
-                        <option value={1.0}>1.00</option>
-                        <option value={0.75}>0.75</option>
-                        <option value={0.5}>0.50</option>
-                        </select>
+                        options={[
+                            { value: 1.0, label: "1.00" },
+                            { value: 0.75, label: "0.75" },
+                            { value: 0.5, label: "0.50" },
+                        ]}
+                        />
                         {isSupervisorRateLocked && (
                         <p className="mt-1 text-xs text-slate-500">
                             Для супервайзеров изменение ставки доступно только 1-го числа месяца.
@@ -1542,19 +1557,20 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     {isOperatorDraft(editedUser) && (
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Направление</label>
-                        <select
+                        <CustomSelect
                         value={editedUser?.direction_id || ""}
-                        onChange={(e) => setEditedUser({ ...editedUser, direction_id: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        onChange={(v) => setEditedUser({ ...editedUser, direction_id: v })}
                         disabled={isLoading || !!createdCredentials}
-                        >
-                        <option value="">Выберите направление</option>
-                        {directions.map((dir) => (
-                            <option key={dir.id} value={dir.id}>
-                            {dir.name}
-                            </option>
-                        ))}
-                        </select>
+                        placeholder="Выберите направление"
+                        options={[
+                            { value: "", label: "Выберите направление" },
+                            ...directionsForSelectedDept(
+                                (editedUser?.department_id !== '' && editedUser?.department_id != null)
+                                    ? Number(editedUser.department_id)
+                                    : szovDeptId
+                            ).map((dir) => ({ value: dir.id, label: dir.name })),
+                        ]}
+                        />
                     </div>
                     )}
 
@@ -1589,17 +1605,16 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     )}
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Статус прокси</label>
-                        <select
+                        <CustomSelect
                         value={normalizeProxyStatus(editedUser?.proxy_status)}
-                        onChange={(e) => setEditedUser({ ...editedUser, proxy_status: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        onChange={(v) => setEditedUser({ ...editedUser, proxy_status: v })}
                         disabled={isLoading || !!createdCredentials}
-                        >
-                        <option value="">Не указан</option>
-                        {PROXY_STATUS_OPTIONS.map((option) => (
-                            <option key={option.value} value={option.value}>{option.label}</option>
-                        ))}
-                        </select>
+                        placeholder="Не указан"
+                        options={[
+                            { value: "", label: "Не указан" },
+                            ...PROXY_STATUS_OPTIONS.map((option) => ({ value: option.value, label: option.label })),
+                        ]}
+                        />
                     </div>
                     {isOperatorDraft(editedUser) && (
                     <>
