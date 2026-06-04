@@ -35954,7 +35954,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (!user || !user.id) return;
                 if (!departmentRestrictsViews(user)) return;
                 if (departmentAllowsView(user, view)) return;
-                const fallback = firstAllowedView(user, ['profile', 'salary', view]) || 'salary';
+                // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
+                const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) setView(fallback);
             }, [user?.id, user?.role, user?.department_code, view]);
 
@@ -36372,18 +36373,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     )}
                                     {currentUserRole === 'sv' && (
                                         <>
-                                            {canAccessLmsSection && renderSidebarDividerInner()}
+                                            {canAccessLmsSection && !departmentRestrictsViews(user) && renderSidebarDividerInner()}
+                                            {departmentAllowsView(user, 'manage_operators') && (
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'manage_operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-user-edit"></FaIcon> <span className="sidebar-text">Учет сотрудников</span>
                                                 </button>
                                             </li>
+                                            )}
+                                            {departmentAllowsView(user, 'qr_access') && (
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'qr_access')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'qr_access' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-qrcode"></FaIcon> <span className="sidebar-text">QR доступ</span>
                                                 </button>
                                             </li>
-                                            {renderSidebarDividerInner()}
+                                            )}
+                                            {!departmentRestrictsViews(user) && renderSidebarDividerInner()}
+                                            {departmentAllowsView(user, 'call_evaluation') && (
                                             <li>
                                                 <button
                                                     onClick={(e) => stableSidebarOpenCallEvaluationSection({
@@ -36395,6 +36401,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <FaIcon className="fas fa-clipboard-check"></FaIcon> <span className="sidebar-text">Журнал оценок</span>
                                                 </button>
                                             </li>
+                                            )}
+                                            {departmentAllowsView(user, 'call_division') && (
                                             <li>
                                                 <button
                                                     onClick={(e) => handleSidebarViewNavigation(e, 'call_division')}
@@ -36403,7 +36411,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <FaIcon className="fas fa-random" /> <span className="sidebar-text">Деление звонков</span>
                                                 </button>
                                             </li>
-                                            {renderSidebarDividerInner()}
+                                            )}
+                                            {!departmentRestrictsViews(user) && renderSidebarDividerInner()}
+                                            {departmentAllowsView(user, 'work_schedules') && (
                                             <li>
                                                 <button
                                                     onClick={(e) => handleSidebarViewNavigation(e, 'work_schedules')}
@@ -36412,6 +36422,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <FaIcon className="fas fa-calendar-alt" /> <span className="sidebar-text">Графики работы</span>
                                                 </button>
                                             </li>
+                                            )}
+                                            {departmentAllowsView(user, 'sv_hours') && (
                                             <li>
                                                 <button
                                                     onClick={(e) => handleSidebarViewNavigation(e, 'sv_hours')}
@@ -36420,7 +36432,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <FaIcon className="fas fa-clock" /> <span className="sidebar-text">Учет часов</span>
                                                 </button>
                                             </li>
-                                            {canAccessResourceFteSection && (
+                                            )}
+                                            {canAccessResourceFteSection && departmentAllowsView(user, 'resource_fte') && (
                                                 <li>
                                                     <button
                                                         onClick={(e) => handleSidebarViewNavigation(e, 'resource_fte')}
@@ -36430,6 +36443,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </button>
                                                 </li>
                                             )}
+                                            {departmentAllowsView(user, 'shift_auction') && (
                                             <li>
                                                 <button
                                                     onClick={(e) => handleSidebarViewNavigation(e, 'shift_auction')}
@@ -36438,37 +36452,50 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <FaIcon className="fas fa-gavel" /> <span className="sidebar-text">Аукцион смен</span>
                                                 </button>
                                             </li>
+                                            )}
+                                            {departmentAllowsView(user, 'trainings') && (
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'trainings')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-book"></FaIcon> <span className="sidebar-text">Учет тренингов</span>
                                                 </button>
                                             </li>
+                                            )}
+                                            {departmentAllowsView(user, 'technical_issues') && (
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'technical_issues')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'technical_issues' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-tools"></FaIcon> <span className="sidebar-text">Тех причины</span>
                                                 </button>
                                             </li>
-                                            {renderSidebarDividerInner()}
+                                            )}
+                                            {!departmentRestrictsViews(user) && renderSidebarDividerInner()}
+                                            {departmentAllowsView(user, 'surveys') && (
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'surveys')} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadgeInner()} {renderSurveysSidebarLabelInner()}
                                                 </button>
                                             </li>
+                                            )}
+                                            {departmentAllowsView(user, 'tasks') && (
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'tasks')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'tasks' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-tasks"></FaIcon> <span className="sidebar-text">Задачи</span>
                                                 </button>
                                             </li>
+                                            )}
+                                            {departmentAllowsView(user, 'contests') && (
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'contests')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'contests' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-award"></FaIcon> <span className="sidebar-text">Конкурсы</span>
                                                 </button>
                                             </li>
+                                            )}
+                                            {departmentAllowsView(user, 'salary') && (
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'salary')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'salary' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-calculator"></FaIcon> <span className="sidebar-text">Калькулятор зарплаты</span>
                                                 </button>
                                             </li>
+                                            )}
                                         </>
                                     )}
                                     {currentUserRole === 'trainer' && (
