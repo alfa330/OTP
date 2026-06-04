@@ -820,26 +820,21 @@ const RateChangeReportToggle = ({ user, showToast }) => {
     };
 
     return (
-        <div className="mb-4 rounded-2xl border border-gray-200 bg-white p-4 flex items-center justify-between gap-4">
-            <div className="min-w-0">
-                <p className="text-sm font-semibold text-gray-900 flex items-center gap-2">
-                    <FaIcon className="fab fa-telegram text-sky-500"></FaIcon>
-                    Telegram-отчёт о сменах ставок
-                </p>
-                <p className="text-xs text-gray-500 mt-0.5">
-                    2-го числа в 00:05 — итоги смен ставок за 1-е число{state.scopeLabel ? ` · ${state.scopeLabel}` : ''}.
-                    {!state.telegram ? ' Привяжите Telegram, чтобы получать отчёт.' : ''}
-                </p>
-            </div>
+        <div
+            className="flex items-center gap-2.5 rounded-xl border border-slate-200 bg-slate-50/70 px-3 py-2 text-sm"
+            title={`Отчёт 2-го числа в 00:05 — итоги смен ставок за 1-е число${state.scopeLabel ? ` · ${state.scopeLabel}` : ''}.${!state.telegram ? ' Привяжите Telegram, чтобы получать отчёт.' : ''}`}
+        >
+            <FaIcon className="fab fa-telegram text-sky-500" />
+            <span className="font-medium text-gray-700 whitespace-nowrap">Отчёт о сменах ставок</span>
             <button
                 type="button"
                 onClick={toggle}
                 disabled={saving}
                 role="switch"
                 aria-checked={state.enabled}
-                className={`relative inline-flex h-7 w-12 flex-shrink-0 rounded-full transition-colors duration-200 ${state.enabled ? 'bg-blue-600' : 'bg-gray-300'} ${saving ? 'opacity-60' : ''}`}
+                className={`relative inline-flex h-6 w-11 flex-shrink-0 rounded-full transition-colors duration-200 ${state.enabled ? 'bg-blue-600' : 'bg-gray-300'} ${saving ? 'opacity-60' : ''}`}
             >
-                <span className={`inline-block h-6 w-6 transform rounded-full bg-white shadow transition-transform duration-200 mt-0.5 ${state.enabled ? 'translate-x-[22px]' : 'translate-x-0.5'}`}></span>
+                <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform duration-200 mt-0.5 ${state.enabled ? 'translate-x-[20px]' : 'translate-x-0.5'}`}></span>
             </button>
         </div>
     );
@@ -3860,7 +3855,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         return (
             <div className="bg-white p-5 rounded-xl shadow-md">
             <div className="mb-4 flex flex-wrap items-stretch justify-between gap-3">
-                {/* === Параметры: период + охват отчёта + супервайзер === */}
+                {/* === Параметры (+ переключатель отчёта в той же линии) === */}
+                <div className="flex flex-wrap items-stretch gap-3">
                 <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-slate-50/70 p-2">
                     <span className="px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Параметры</span>
 
@@ -3902,6 +3898,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     />
                 </div>
 
+                    <RateChangeReportToggle user={user} showToast={showToast} />
+                </div>
+
                 {/* === Действия: обновить + выгрузить === */}
                 <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-slate-50/70 p-2">
                     <span className="px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Действия</span>
@@ -3931,8 +3930,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </button>
                 </div>
             </div>
-
-            <RateChangeReportToggle user={user} showToast={showToast} />
 
             {/* Второй ряд: фильтры операторов и переключатель метрик */}
             <div className="mb-4 flex flex-wrap items-stretch justify-between gap-3">
