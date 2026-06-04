@@ -1386,17 +1386,16 @@ def _operator_item_id(item):
 
 def _authorize_operator_scope(requester, requester_id, operator_id):
     role = _normalize_user_role(requester[3])
-    if _is_admin_role(role):
-        return True
-    # Глава отдела: доступ только к операторам своего отдела (замещает базовую роль)
-    headed_dept = _headed_department_id(requester_id)
-    if headed_dept is not None:
-        return db.get_user_department_id(operator_id) == headed_dept
-    if role == 'sv':
+    # Видят всех: супер-админ, админы, тренер
+    if _is_admin_role(role) or role == 'trainer':
         return True
     if role == 'operator':
         return requester_id == operator_id
-    return False
+    # Супервайзер / глава отдела — только операторы СВОЕГО отдела
+    scope = db.get_user_department_id(requester_id)
+    if scope is None:
+        return False
+    return db.get_user_department_id(operator_id) == scope
 
 
 def _target_user_supervisor_id(target_user):
@@ -1435,7 +1434,11 @@ def _requester_can_access_target_user(
     if _is_supervisor_role(requester_role):
         if target_role not in set(supervisor_target_roles or ()):
             return False
-        return True
+        # Супервайзер управляет сотрудниками только СВОЕГО отдела
+        scope = db.get_user_department_id(requester_id)
+        if scope is None:
+            return True
+        return db.get_user_department_id(target_user_id) == scope
     return False
 
 
@@ -1472,15 +1475,16 @@ def _load_target_user_with_scope(
 def _filter_operators_for_requester_scope(requester, requester_id, operators):
     requester_role = _normalize_user_role(requester[3])
     items = list(operators or [])
-    if _is_admin_role(requester_role):
+    # Видят всех: супер-админ, админы, тренер
+    if _is_admin_role(requester_role) or requester_role == 'trainer':
         return items
-    # Глава отдела: только операторы своего отдела (замещает базовую роль)
-    headed_dept = _headed_department_id(requester_id)
-    if headed_dept is not None:
-        member_ids = db.get_department_member_ids(headed_dept)
+    # Супервайзер / глава отдела — только операторы своего отдела
+    if _is_supervisor_role(requester_role) or _headed_department_id(requester_id) is not None:
+        scope = db.get_user_department_id(requester_id)
+        if scope is None:
+            return items
+        member_ids = db.get_department_member_ids(scope)
         return [it for it in items if _operator_item_id(it) in member_ids]
-    if _is_supervisor_role(requester_role):
-        return items
     return []
 
 
@@ -5026,6 +5030,12 @@ def get_admin_users():
                         "study_completion_year": int(row[47]) if row[47] is not None else None,
                         "department_id": row[48]
                     })
+        # Изоляция отделов: супервайзер видит сотрудников только своего отдела.
+        # Супер-админ, админы и тренер видят все отделы.
+        if requester_role == 'sv':
+            scope_dept = db.get_user_department_id(requester_id)
+            if scope_dept is not None:
+                users = [u for u in users if u.get('department_id') == scope_dept]
         return jsonify({"status": "success", "users": users}), 200
     except Exception as e:
         logging.error(f"Error fetching users: {e}")
@@ -6325,12 +6335,23 @@ def get_sv_list():
                         "department_id": sv[39]
                     })
             else:
-                cursor.execute("""
-                    SELECT id, name, hours_table_url, role, hire_date, status, avatar_bucket, avatar_blob_path, department_id
-                    FROM users
-                    WHERE LOWER(COALESCE(role, '')) IN ('sv', 'supervisor')
-                    ORDER BY name
-                """)
+                # Супервайзер видит только супервайзеров СВОЕГО отдела
+                sv_scope_dept = db.get_user_department_id(requester_id)
+                if sv_scope_dept is not None:
+                    cursor.execute("""
+                        SELECT id, name, hours_table_url, role, hire_date, status, avatar_bucket, avatar_blob_path, department_id
+                        FROM users
+                        WHERE LOWER(COALESCE(role, '')) IN ('sv', 'supervisor')
+                          AND department_id = %s
+                        ORDER BY name
+                    """, (sv_scope_dept,))
+                else:
+                    cursor.execute("""
+                        SELECT id, name, hours_table_url, role, hire_date, status, avatar_bucket, avatar_blob_path, department_id
+                        FROM users
+                        WHERE LOWER(COALESCE(role, '')) IN ('sv', 'supervisor')
+                        ORDER BY name
+                    """)
                 supervisors = cursor.fetchall()
                 sv_data = [
                     {
@@ -9599,8 +9620,13 @@ def get_sv_operators_moderka():
             return jsonify({"error": message}), status_code
         if not _is_supervisor_role(requester[3]):
             return jsonify({"error": "Unauthorized: Only supervisors can access this"}), 403
-        
+
         operators = db.get_all_operators_with_details() or []
+        # Изоляция отделов: супервайзер видит операторов только своего отдела
+        scope_dept = db.get_user_department_id(supervisor_id)
+        if scope_dept is not None:
+            member_ids = db.get_department_member_ids(scope_dept)
+            operators = [op for op in operators if _operator_item_id(op) in member_ids]
         for operator in operators:
             operator['avatar_url'] = _build_avatar_signed_url(
                 operator.get('avatar_bucket'),
@@ -9644,6 +9670,12 @@ def get_sv_data():
         requester_role = _normalize_user_role(requester[3])
         if not (_is_admin_role(requester_role) or requester_role == 'sv'):
             return jsonify({"error": "Forbidden"}), 403
+
+        # Изоляция отделов: супервайзер видит данные только по СВ своего отдела.
+        if not _is_admin_role(requester_role):
+            scope_dept = db.get_user_department_id(requester_id)
+            if scope_dept is not None and db.get_user_department_id(user_id) != scope_dept:
+                return jsonify({"error": "Доступ только к супервайзерам своего отдела"}), 403
 
         # fetch user (accept any caller role; admin can call this endpoint)
         user = db.get_user(id=user_id)
