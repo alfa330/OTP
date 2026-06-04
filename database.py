@@ -966,6 +966,20 @@ class Database:
                 );
             """)
 
+            # Помесячная ставка оператора. NULL = ставка не задана явно за месяц
+            # (на чтении подхватывается переносом с прошлых месяцев / из users.rate).
+            cursor.execute("""
+                ALTER TABLE work_hours
+                ADD COLUMN IF NOT EXISTS rate DECIMAL(3,2);
+            """)
+            cursor.execute("""
+                ALTER TABLE work_hours
+                DROP CONSTRAINT IF EXISTS work_hours_rate_check;
+                ALTER TABLE work_hours
+                ADD CONSTRAINT work_hours_rate_check
+                    CHECK (rate IS NULL OR rate IN (1.00, 0.75, 0.50));
+            """)
+
             cursor.execute("""
                 CREATE EXTENSION IF NOT EXISTS pgcrypto;
                 CREATE TABLE IF NOT EXISTS daily_hours (
@@ -2387,6 +2401,123 @@ class Database:
             """)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
+            self._backfill_work_hours_rate_from_history_tx(cursor)
+
+    def _backfill_work_hours_rate_from_history_tx(self, cursor):
+        """
+        Идемпотентный одноразовый backfill помесячной ставки `work_hours.rate`.
+
+        Раньше ставка оператора (`users.rate`) была статичной — одинаковой для всех
+        месяцев. Теперь ставка хранится отдельно на каждый месяц и переносится на
+        следующие месяцы (carry-forward) до очередного изменения.
+
+        Для операторов, у которых ставка менялась (есть записи в `user_history` с
+        field_changed='rate'), проставляем историческую ставку за каждый прошедший
+        месяц по правилу «ставка месяца = значение, действовавшее на конец месяца».
+        `norm_hours` не пересчитывается и не перезаписывается.
+
+        Текущий и будущие месяцы оставляем NULL: на чтении они подхватывают актуальную
+        ставку по переносу/из `users.rate`, а изменение ставки якорит текущий месяц.
+
+        Идемпотентность: заполняются только строки прошлых месяцев с rate IS NULL,
+        поэтому повторные запуски (каждый деплой) ничего не портят.
+        """
+        # Текущий месяц по серверной дате БД.
+        cursor.execute("SELECT TO_CHAR(CURRENT_DATE, 'YYYY-MM')")
+        current_month = cursor.fetchone()[0]
+
+        # Быстрый guard: есть ли вообще что заполнять (прошлые месяцы без ставки).
+        cursor.execute(
+            "SELECT 1 FROM work_hours WHERE rate IS NULL AND month < %s LIMIT 1",
+            (current_month,),
+        )
+        if cursor.fetchone() is None:
+            return
+
+        allowed_rates = (1.0, 0.75, 0.5)
+
+        def _snap(raw):
+            try:
+                val = float(raw)
+            except (TypeError, ValueError):
+                return None
+            return min(allowed_rates, key=lambda a: abs(a - val))
+
+        # История изменений ставок: оператор -> отсортированный по времени список
+        # (changed_at, new_rate); плюс ставка до самого первого изменения.
+        cursor.execute(
+            """
+            SELECT user_id, old_value, new_value, changed_at
+            FROM user_history
+            WHERE field_changed = 'rate'
+            ORDER BY user_id, changed_at
+            """
+        )
+        changes_by_op = {}
+        first_old_by_op = {}
+        for user_id, old_value, new_value, changed_at in cursor.fetchall():
+            new_rate = _snap(new_value)
+            if new_rate is None or changed_at is None:
+                continue
+            if user_id not in changes_by_op:
+                changes_by_op[user_id] = []
+                first_old_by_op[user_id] = _snap(old_value)
+            changes_by_op[user_id].append((changed_at, new_rate))
+
+        if not changes_by_op:
+            return
+
+        def _next_month_start(month_str):
+            year, mon = map(int, month_str.split('-'))
+            return datetime(year + 1, 1, 1) if mon == 12 else datetime(year, mon + 1, 1)
+
+        def _rate_for_month(user_id, month_str):
+            changes = changes_by_op.get(user_id)
+            if not changes:
+                return None
+            # конец месяца = строго до начала следующего месяца
+            ref = _next_month_start(month_str)
+            eff = None
+            for changed_at, new_rate in changes:
+                if changed_at < ref:
+                    eff = new_rate
+                else:
+                    break
+            if eff is None:
+                # месяц раньше самого первого изменения — берём ставку до него
+                eff = first_old_by_op.get(user_id)
+            return eff
+
+        # Заполняем только существующие строки прошлых месяцев без ставки и только
+        # для операторов, у которых ставка менялась.
+        cursor.execute(
+            "SELECT operator_id, month FROM work_hours WHERE rate IS NULL AND month < %s",
+            (current_month,),
+        )
+        updates = []
+        for operator_id, month_str in cursor.fetchall():
+            if operator_id not in changes_by_op:
+                continue
+            rate_val = _rate_for_month(operator_id, month_str)
+            if rate_val is None:
+                continue
+            updates.append((rate_val, operator_id, month_str))
+
+        if not updates:
+            return
+
+        cursor.executemany(
+            """
+            UPDATE work_hours
+            SET rate = %s
+            WHERE operator_id = %s AND month = %s AND rate IS NULL
+            """,
+            updates,
+        )
+        logging.info(
+            "work_hours.rate backfill: проставлено %s помесячных ставок для %s операторов",
+            len(updates), len({u[1] for u in updates}),
+        )
 
     def _backfill_user_profiles_tx(self, cursor):
         """
@@ -9279,7 +9410,13 @@ class Database:
             # 2) Получаем имя/ставку + данные work_hours одним LEFT JOIN запросом (включая fines)
             cursor.execute(
                 """
-                SELECT u.name, u.rate,
+                SELECT u.name,
+                    COALESCE(
+                        (SELECT wr.rate FROM work_hours wr
+                         WHERE wr.operator_id = u.id AND wr.rate IS NOT NULL AND wr.month <= %s
+                         ORDER BY wr.month DESC LIMIT 1),
+                        u.rate
+                    ) AS rate,
                     d.name as direction_name,
                     d.calculation_model_code,
                     COALESCE(w.norm_hours, 0) AS norm_hours,
@@ -9297,7 +9434,7 @@ class Database:
                 WHERE u.id = %s
                 LIMIT 1
                 """,
-                (month, operator_id),
+                (month, month, operator_id),
             )
             row = cursor.fetchone()
 
@@ -9404,7 +9541,14 @@ class Database:
         with self._get_cursor() as cursor:
             # Получаем операторов + ставка + norm_hours + агрегаты work_hours (включая fines)
             cursor.execute("""
-                SELECT u.id, u.name, u.rate, u.status, u.supervisor_id,
+                SELECT u.id, u.name,
+                    COALESCE(
+                        (SELECT wr.rate FROM work_hours wr
+                         WHERE wr.operator_id = u.id AND wr.rate IS NOT NULL AND wr.month <= %s
+                         ORDER BY wr.month DESC LIMIT 1),
+                        u.rate
+                    ) AS rate,
+                    u.status, u.supervisor_id,
                     d.name as direction_name,
                     d.calculation_model_code,
                     COALESCE(w.norm_hours, 0) as norm_hours,
@@ -9421,7 +9565,7 @@ class Database:
                 LEFT JOIN directions d ON u.direction_id = d.id
                 WHERE u.role = 'operator' AND u.supervisor_id = %s
                 ORDER BY u.name
-            """, (month, supervisor_id))
+            """, (month, month, supervisor_id))
             operator_rows = cursor.fetchall()  # list of tuples
 
             if not operator_rows:
@@ -9626,7 +9770,14 @@ class Database:
 
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT u.id, u.name, u.rate, u.status, u.supervisor_id,
+                SELECT u.id, u.name,
+                    COALESCE(
+                        (SELECT wr.rate FROM work_hours wr
+                         WHERE wr.operator_id = u.id AND wr.rate IS NOT NULL AND wr.month <= %s
+                         ORDER BY wr.month DESC LIMIT 1),
+                        u.rate
+                    ) AS rate,
+                    u.status, u.supervisor_id,
                     d.name as direction_name,
                     d.calculation_model_code,
                     COALESCE(w.norm_hours, 0) as norm_hours,
@@ -9643,7 +9794,7 @@ class Database:
                 LEFT JOIN directions d ON u.direction_id = d.id
                 WHERE u.role = 'operator'
                 ORDER BY u.name
-            """, (month,))
+            """, (month, month))
             operator_rows = cursor.fetchall()
 
             if not operator_rows:
@@ -9857,13 +10008,17 @@ class Database:
             # Для операторов без строки в work_hours будет INSERT, для существующих с norm_hours=0 — UPDATE.
             cursor.execute("""
                 INSERT INTO work_hours (operator_id, month, norm_hours)
-                SELECT u.id, %s as month, (%s::float * 8.0 * COALESCE(u.rate, 1.0))::float
+                SELECT u.id, %s as month, (%s::float * 8.0 * COALESCE(
+                    (SELECT wr.rate FROM work_hours wr
+                     WHERE wr.operator_id = u.id AND wr.rate IS NOT NULL AND wr.month <= %s
+                     ORDER BY wr.month DESC LIMIT 1),
+                    u.rate, 1.0))::float
                 FROM users u
                 WHERE u.role = 'operator'
                 ON CONFLICT (operator_id, month) DO UPDATE
                   SET norm_hours = EXCLUDED.norm_hours
                   WHERE COALESCE(work_hours.norm_hours, 0) = 0
-            """, (month, work_days))
+            """, (month, work_days, month))
 
             # rowcount может быть не точен при ON CONFLICT, но даёт оценку затронутых строк
             processed = cursor.rowcount if cursor.rowcount is not None else 0
@@ -13140,7 +13295,38 @@ class Database:
                     INSERT INTO user_history (user_id, changed_by, field_changed, old_value, new_value)
                     VALUES (%s, %s, %s, %s, %s)
                 """, (user_id, changed_by, field, old_value, str(value)))
-            
+
+            # При смене ставки фиксируем помесячную ставку (work_hours.rate):
+            #  - прошлые месяцы без явной ставки «замораживаем» на прежнем значении,
+            #    чтобы перенос (carry-forward) не переписал историю задним числом;
+            #  - текущий месяц якорим на новой ставке — перенос распространит её на
+            #    последующие месяцы до очередного изменения.
+            # norm_hours при этом не трогаем.
+            if updated and field == 'rate':
+                try:
+                    new_rate = float(value)
+                except (TypeError, ValueError):
+                    new_rate = None
+                if new_rate is not None:
+                    try:
+                        old_rate = float(old_value) if old_value is not None else None
+                    except (TypeError, ValueError):
+                        old_rate = None
+                    if old_rate is not None:
+                        cursor.execute("""
+                            UPDATE work_hours
+                            SET rate = %s
+                            WHERE operator_id = %s
+                              AND rate IS NULL
+                              AND month < TO_CHAR(CURRENT_DATE, 'YYYY-MM')
+                        """, (old_rate, user_id))
+                    cursor.execute("""
+                        INSERT INTO work_hours (operator_id, month, rate)
+                        VALUES (%s, TO_CHAR(CURRENT_DATE, 'YYYY-MM'), %s)
+                        ON CONFLICT (operator_id, month)
+                        DO UPDATE SET rate = EXCLUDED.rate
+                    """, (user_id, new_rate))
+
             return updated
 
     def promote_operator_to_supervisor(self, user_id, changed_by=None):
