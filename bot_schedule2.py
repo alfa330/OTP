@@ -9491,19 +9491,19 @@ def get_directions():
         if not (_is_admin_role(role) or _is_supervisor_role(role) or role == 'operator'):
             return jsonify({"error": "Only admins, supervisors and operators can access directions"}), 403
 
-        # Скоуп по отделу: глава отдела (не супер-админ) видит только свои направления;
-        # админ/супер-админ могут фильтровать через ?department_id=.
-        headed_dept = db.headed_department_id_for_user(requester_id)
-        scope_dept = None
-        if headed_dept is not None and not _is_super_admin_role(role):
-            scope_dept = headed_dept
-        elif _is_admin_role(role):
+        # Скоуп по отделу: админ/супер-админ видят все направления (опц. фильтр
+        # ?department_id=); глава отдела / супервайзер / оператор — только направления
+        # СВОЕГО отдела (изоляция отделов, в т.ч. в настройках перерывов графиков).
+        if _is_admin_role(role):
+            scope_dept = None
             dep_param = request.args.get('department_id')
             if dep_param not in (None, ''):
                 try:
                     scope_dept = int(dep_param)
                 except (TypeError, ValueError):
                     scope_dept = None
+        else:
+            scope_dept = _headed_department_id(requester_id) or db.get_user_department_id(requester_id)
 
         directions = db.get_directions(department_id=scope_dept)
         return jsonify({
