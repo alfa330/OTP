@@ -275,6 +275,7 @@ const TOKEN_TO_ICON = {
     'fa-tasks': 'ListTodo',
     'fa-taxi': 'Car',
     'fa-desktop': 'Laptop',
+    'fa-telegram': 'Send',
     'fa-telegram-plane': 'Send',
     'fa-thumbs-up': 'ThumbsUp',
     'fa-times': 'X',
