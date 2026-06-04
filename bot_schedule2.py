@@ -16373,10 +16373,18 @@ def get_work_schedule_break_rules():
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
-        if not (_is_admin_role(user_data[3]) or _is_supervisor_role(user_data[3])):
+        role = _normalize_user_role(user_data[3])
+        if not (_is_admin_role(role) or _is_supervisor_role(role)):
             return jsonify({"error": "Forbidden"}), 403
 
-        direction_rules = db.get_work_schedule_break_rules()
+        # Изоляция отделов: админ/супер-админ видят правила перерывов всех
+        # направлений; глава отдела / супервайзер — только направлений своего отдела.
+        if _is_admin_role(role):
+            scope_dept = None
+        else:
+            scope_dept = _headed_department_id(requester_id) or db.get_user_department_id(requester_id)
+
+        direction_rules = db.get_work_schedule_break_rules(department_id=scope_dept)
         return jsonify({"direction_rules": direction_rules}), 200
 
     except ValueError as e:
@@ -16419,7 +16427,28 @@ def save_work_schedule_break_rules():
         if not isinstance(direction_rules, list):
             return jsonify({"error": "direction_rules must be a list"}), 400
 
-        saved = db.save_work_schedule_break_rules(direction_rules)
+        # Изоляция отделов: глава/супервайзер может сохранять правила перерывов
+        # только для направлений своего отдела (не может затронуть чужой отдел).
+        role = _normalize_user_role(user_data[3])
+        scope_dept = None
+        if not _is_admin_role(role):
+            scope_dept = _headed_department_id(requester_id) or db.get_user_department_id(requester_id)
+            if scope_dept is None:
+                return jsonify({"error": "Forbidden"}), 403
+            allowed_names = {
+                str(d.get('name') or '').strip().lower()
+                for d in (db.get_directions(department_id=scope_dept) or [])
+            }
+            allowed_names.discard('')
+            direction_rules = [
+                item for item in direction_rules
+                if isinstance(item, dict)
+                and str(item.get('direction') or item.get('direction_name') or '').strip().lower() in allowed_names
+            ]
+
+        db.save_work_schedule_break_rules(direction_rules)
+        # Возвращаем правила в рамках того же скоупа, что и GET (без утечки чужих отделов).
+        saved = db.get_work_schedule_break_rules(department_id=scope_dept)
         return jsonify({
             "message": "Break rules saved successfully",
             "direction_rules": saved
