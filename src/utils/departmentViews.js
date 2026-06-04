@@ -14,9 +14,9 @@ import { isAdminLikeRole, isDepartmentHead, normalizeRole } from './roles';
  */
 export const DEPARTMENT_VIEW_ALLOWLIST = {
     op: {
-        // Операторы продаж: только Зарплата + Профиль
-        operator: ['salary', 'profile'],
-        trainee: ['salary', 'profile'],
+        // Операторы ОП: Профиль, Зарплата + Мои смены, Мои оценки, Опросы
+        operator: ['salary', 'profile', 'work_schedules', 'evaluation', 'surveys'],
+        trainee: ['salary', 'profile', 'work_schedules', 'evaluation', 'surveys'],
         // Супервайзеры продаж: их рабочий набор разделов
         sv: [
             'manage_operators',   // Учет сотрудников (их группа)
