@@ -3932,6 +3932,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 </div>
             </div>
 
+            <RateChangeReportToggle user={user} showToast={showToast} />
+
             {/* Второй ряд: фильтры операторов и переключатель метрик */}
             <div className="mb-4 flex flex-wrap items-stretch justify-between gap-3">
                 {/* === Операторы: статус + направления === */}
@@ -4020,8 +4022,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 </>
                 )}
             </div>
-
-            <RateChangeReportToggle user={user} showToast={showToast} />
 
             {/* Table */}
             <div className="overflow-auto border rounded-md">
