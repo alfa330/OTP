@@ -325,10 +325,10 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
             const isAlreadySelected = selectedOperatorIds.has(Number(operator.id));
             const byQuery = !query || operator.name.toLowerCase().includes(query) || operator.directionName.toLowerCase().includes(query);
             if (!byQuery) return false;
-            // Уже выбранные операторы всегда видны (режим повтора/редактирования),
-            // даже если унаследованные фильтры по направлению/стажу под них не подходят.
+            // Уже выбранные операторы всегда видны, а в режиме повтора/редактирования
+            // можно добрать других действующих сотрудников вне старых фильтров.
             if (isAlreadySelected) return true;
-            if (isEditMode) return true;
+            if (isEditMode || isRepeatMode) return true;
 
             const byDirection = selectedDirections.size === 0 || selectedDirections.has(operator.directionId);
             const hasTenure = Number.isFinite(operator.tenureWeeks);
@@ -336,7 +336,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
             const byMax = maxWeeks == null || (hasTenure && operator.tenureWeeks <= maxWeeks);
             return byDirection && byQuery && byMin && byMax;
         });
-    }, [draft.directionIds, draft.operatorIds, draft.tenureWeeksMax, draft.tenureWeeksMin, isEditMode, normalizedOperators, operatorQuery]);
+    }, [draft.directionIds, draft.operatorIds, draft.tenureWeeksMax, draft.tenureWeeksMin, isEditMode, isRepeatMode, normalizedOperators, operatorQuery]);
 
     const filteredOperatorIds = useMemo(
         () => filteredOperators.map((operator) => Number(operator.id)).filter(Number.isFinite),
@@ -1253,7 +1253,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                 <div className="flex items-start gap-3 rounded-2xl border border-indigo-100 bg-indigo-50/70 px-4 py-3">
                                     <FaIcon className="fas fa-redo mt-0.5 text-indigo-500 text-xs" />
                                     <div className="text-[12.5px] leading-relaxed text-indigo-900">
-                                        Это повтор опроса. Операторы из прошлого запуска уже выбраны ниже — проверьте список и при необходимости снимите лишних. Уволенные сотрудники исключены автоматически.
+                                        Это повтор опроса. Операторы из прошлого запуска уже выбраны ниже — проверьте список, снимите лишних или добавьте других действующих сотрудников. Уволенные сотрудники исключены автоматически.
                                     </div>
                                 </div>
                             )}
