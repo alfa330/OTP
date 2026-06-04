@@ -750,6 +750,12 @@ class Database:
                 ALTER TABLE users
                 ADD COLUMN IF NOT EXISTS personal_email VARCHAR(255);
             """)
+            # Переключатель получения Telegram-отчёта о сменах ставок операторов
+            # (для админов — глобальный отчёт, для глав отделов — по своему отделу).
+            cursor.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS rate_change_report_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+            """)
             # Calls table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operator_activity_logs (
@@ -3210,7 +3216,200 @@ class Database:
                 "telegram_id": int(row[2]) if row[2] is not None else None
             })
         return result
-            
+
+    # ---- Telegram-отчёт о сменах ставок операторов ----
+
+    def get_rate_change_report_setting(self, user_id) -> Optional[bool]:
+        """Текущее значение переключателя отчёта о сменах ставок. None если юзер не найден."""
+        try:
+            uid = int(user_id)
+        except (TypeError, ValueError):
+            return None
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "SELECT COALESCE(rate_change_report_enabled, FALSE) FROM users WHERE id = %s",
+                (uid,)
+            )
+            row = cursor.fetchone()
+            return bool(row[0]) if row else None
+
+    def set_rate_change_report_setting(self, user_id, enabled: bool) -> Optional[bool]:
+        try:
+            uid = int(user_id)
+        except (TypeError, ValueError):
+            return None
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE users SET rate_change_report_enabled = %s
+                WHERE id = %s
+                RETURNING COALESCE(rate_change_report_enabled, FALSE)
+                """,
+                (bool(enabled), uid)
+            )
+            row = cursor.fetchone()
+            return bool(row[0]) if row else None
+
+    def get_rate_change_report_recipients(self) -> List[Dict[str, Any]]:
+        """Получатели отчёта о сменах ставок.
+
+        - Админы с включённым переключателем -> глобальный отчёт (department_id=None).
+        - Главы отделов с включённым переключателем -> отчёт по своему отделу.
+        Если пользователь и админ, и глава отдела — оставляем только глобальный.
+        """
+        recipients = []
+        seen_user_ids = set()
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, name, telegram_id
+                FROM users
+                WHERE LOWER(COALESCE(role, '')) IN ('admin', 'super_admin')
+                  AND telegram_id IS NOT NULL
+                  AND COALESCE(rate_change_report_enabled, FALSE) = TRUE
+                ORDER BY name
+            """)
+            for row in cursor.fetchall():
+                recipients.append({
+                    "id": int(row[0]), "name": row[1] or "",
+                    "telegram_id": int(row[2]),
+                    "department_id": None, "department_name": None,
+                })
+                seen_user_ids.add(int(row[0]))
+
+            cursor.execute("""
+                SELECT h.id, h.name, h.telegram_id, d.id, d.name
+                FROM departments d
+                JOIN users h ON h.id = d.head_user_id
+                WHERE h.telegram_id IS NOT NULL
+                  AND COALESCE(h.rate_change_report_enabled, FALSE) = TRUE
+                ORDER BY d.name
+            """)
+            for row in cursor.fetchall():
+                if int(row[0]) in seen_user_ids:
+                    continue
+                recipients.append({
+                    "id": int(row[0]), "name": row[1] or "",
+                    "telegram_id": int(row[2]),
+                    "department_id": int(row[3]), "department_name": row[4] or "",
+                })
+        return recipients
+
+    def get_rate_change_report_data(self, window_start, window_end, department_id=None) -> Dict[str, Any]:
+        """Данные для отчёта о сменах ставок за окно [window_start, window_end).
+
+        window_start/window_end — naive-datetime в локальном времени Алматы
+        (так же хранится user_history.changed_at). Для каждого оператора берём
+        итоговый переход за окно (с какой ставки на какую), пропуская net-zero.
+        """
+        allowed_rates = (1.0, 0.75, 0.5)
+
+        def _snap(raw):
+            try:
+                v = float(raw)
+            except (TypeError, ValueError):
+                return None
+            return min(allowed_rates, key=lambda a: abs(a - v))
+
+        params = [window_start, window_end]
+        dept_clause = ""
+        if department_id is not None:
+            dept_clause = " AND u.department_id = %s"
+            params.append(int(department_id))
+
+        with self._get_cursor() as cursor:
+            cursor.execute(f"""
+                SELECT uh.user_id, u.name, dep.name, dir.name, sv.name,
+                       uh.old_value, uh.new_value, uh.changed_at,
+                       uh.changed_by, cb.name
+                FROM user_history uh
+                JOIN users u ON u.id = uh.user_id
+                LEFT JOIN departments dep ON dep.id = u.department_id
+                LEFT JOIN directions dir ON dir.id = u.direction_id
+                LEFT JOIN users sv ON sv.id = u.supervisor_id
+                LEFT JOIN users cb ON cb.id = uh.changed_by
+                WHERE uh.field_changed = 'rate'
+                  AND uh.changed_at >= %s AND uh.changed_at < %s
+                  AND LOWER(COALESCE(u.role, '')) = 'operator'
+                  {dept_clause}
+                ORDER BY uh.user_id, uh.changed_at, uh.id
+            """, params)
+            rows = cursor.fetchall()
+
+        by_op = {}
+        order = []
+        for uid, name, dept, direction, sv, old_v, new_v, changed_at, changed_by, cb_name in rows:
+            if uid not in by_op:
+                by_op[uid] = {
+                    "operator_id": int(uid), "operator_name": name or "",
+                    "department_name": dept or "", "direction_name": direction or "",
+                    "supervisor_name": sv or "",
+                    "first_old": _snap(old_v),
+                    "change_count": 0,
+                    "last_changed_at": changed_at,
+                    "last_changed_by_id": changed_by,
+                    "last_changed_by_name": cb_name or "",
+                    "self_involved": False,
+                }
+                order.append(uid)
+            rec = by_op[uid]
+            rec["last_new"] = _snap(new_v)
+            rec["change_count"] += 1
+            rec["last_changed_at"] = changed_at
+            rec["last_changed_by_id"] = changed_by
+            rec["last_changed_by_name"] = cb_name or ""
+            if changed_by is not None and int(changed_by) == int(uid):
+                rec["self_involved"] = True
+
+        changes = []
+        new_rate_dist = {1.0: 0, 0.75: 0, 0.5: 0}
+        self_count = 0
+        for uid in order:
+            rec = by_op[uid]
+            old_r = rec.get("first_old")
+            new_r = rec.get("last_new")
+            if old_r is None or new_r is None or abs(old_r - new_r) < 1e-9:
+                continue  # нет реального перехода
+            rec["old_rate"] = old_r
+            rec["new_rate"] = new_r
+            rec["by_self"] = (
+                rec["last_changed_by_id"] is not None
+                and int(rec["last_changed_by_id"]) == int(uid)
+            )
+            changes.append(rec)
+            if new_r in new_rate_dist:
+                new_rate_dist[new_r] += 1
+            if rec["self_involved"]:
+                self_count += 1
+
+        cur_params = []
+        cur_dept = ""
+        if department_id is not None:
+            cur_dept = " AND department_id = %s"
+            cur_params.append(int(department_id))
+        current_dist = {1.0: 0, 0.75: 0, 0.5: 0}
+        with self._get_cursor() as cursor:
+            cursor.execute(f"""
+                SELECT rate, COUNT(*) FROM users
+                WHERE LOWER(COALESCE(role, '')) = 'operator'{cur_dept}
+                GROUP BY rate
+            """, cur_params)
+            for rate, cnt in cursor.fetchall():
+                r = _snap(rate)
+                if r in current_dist:
+                    current_dist[r] += int(cnt)
+
+        return {
+            "changes": changes,
+            "summary": {
+                "changed_count": len(changes),
+                "total_change_events": sum(r["change_count"] for r in changes),
+                "self_count": self_count,
+                "by_other_count": len(changes) - self_count,
+                "new_rate_distribution": new_rate_dist,
+            },
+            "current_distribution": current_dist,
+        }
+
     def get_directions(self, department_id=None):
         """Получить активные направления. Если задан department_id — только этого отдела."""
         with self._get_cursor() as cursor:
