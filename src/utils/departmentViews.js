@@ -1,18 +1,36 @@
-import { isAdminLikeRole, isDepartmentHead } from './roles';
+import { isAdminLikeRole, isDepartmentHead, normalizeRole } from './roles';
 
 /*
- * Хардкод-карта «отдел → разрешённые разделы» (view-ключи из App.jsx).
+ * Хардкод-карта «отдел → роль → разрешённые разделы» (view-ключи из App.jsx).
  *
  * Правила:
- *  - Отдел отсутствует в карте  => ограничений НЕТ (поведение как раньше, напр. СЗоВ
- *    и любой отдел без конфига видят свои разделы по роли как обычно).
- *  - Для отделов из карты НЕ-админские роли видят ТОЛЬКО перечисленные разделы.
- *  - Админы / супер-админы отделом не ограничиваются (управляют всем).
+ *  - Отдел отсутствует в карте  => ограничений НЕТ (напр. СЗоВ — все видят свои
+ *    разделы по роли как обычно).
+ *  - Роль отсутствует в конфиге отдела => для этой роли ограничений НЕТ.
+ *  - Админы / супер-админы и главы отдела (управленцы) НЕ ограничиваются.
+ *  - Для остальных ролей спец-отдела показываем ТОЛЬКО перечисленные разделы.
  *
- * Ключ — это departments.code (нижний регистр). Значение — массив view-ключей.
+ * Ключ верхнего уровня — departments.code (lowercase). Внутри — роль → [view-ключи].
  */
 export const DEPARTMENT_VIEW_ALLOWLIST = {
-    op: ['salary', 'profile'], // Отдел продаж: пока только Зарплата + Профиль
+    op: {
+        // Операторы продаж: только Зарплата + Профиль
+        operator: ['salary', 'profile'],
+        trainee: ['salary', 'profile'],
+        // Супервайзеры продаж: их рабочий набор разделов
+        sv: [
+            'manage_operators',   // Учет сотрудников (их группа)
+            'qr_access',          // QR доступ
+            'call_evaluation',    // Журнал оценок
+            'call_division',      // Деление звонков
+            'work_schedules',     // Графики работы
+            'trainings',          // Учет тренингов
+            'technical_issues',   // Тех причины
+            'surveys',            // Опросы
+            'tasks',              // Задачи
+            'salary',             // Калькулятор зарплаты
+        ],
+    },
 };
 
 export const departmentCodeOf = (user) => {
@@ -20,27 +38,32 @@ export const departmentCodeOf = (user) => {
     return code ? String(code).toLowerCase() : null;
 };
 
-export const departmentRestrictsViews = (user) => {
-    // Админы и главы отдела (управленцы) не ограничиваются allowlist'ом отдела —
-    // ограничение касается рядовых сотрудников (операторов) спец-отделов.
-    if (isAdminLikeRole(user?.role) || isDepartmentHead(user)) return false;
+// Возвращает массив разрешённых разделов для пользователя, либо null (без ограничений).
+const allowlistFor = (user) => {
+    // Управленцы (админы/главы) — без ограничений по отделу.
+    if (isAdminLikeRole(user?.role) || isDepartmentHead(user)) return null;
     const code = departmentCodeOf(user);
-    return !!(code && DEPARTMENT_VIEW_ALLOWLIST[code]);
+    const deptCfg = code ? DEPARTMENT_VIEW_ALLOWLIST[code] : null;
+    if (!deptCfg) return null;
+    const role = normalizeRole(user?.role);
+    const allow = deptCfg[role];
+    return Array.isArray(allow) ? allow : null;
 };
 
-// Разрешён ли раздел viewKey пользователю с учётом его отдела.
+export const departmentRestrictsViews = (user) => Array.isArray(allowlistFor(user));
+
+// Разрешён ли раздел viewKey пользователю с учётом его отдела и роли.
 export const departmentAllowsView = (user, viewKey) => {
-    const code = departmentCodeOf(user);
-    const allow = code ? DEPARTMENT_VIEW_ALLOWLIST[code] : null;
-    if (!allow) return true;                        // отдел без ограничений
-    if (isAdminLikeRole(user?.role) || isDepartmentHead(user)) return true;  // управленцы — без ограничений
+    const allow = allowlistFor(user);
+    if (!allow) return true; // нет ограничений
     return allow.includes(viewKey);
 };
 
-// Первый разрешённый раздел из списка кандидатов (для дефолта/редиректа).
+// Первый разрешённый раздел: сначала из переданных кандидатов, иначе — первый из allowlist.
 export const firstAllowedView = (user, candidates = []) => {
+    const allow = allowlistFor(user);
     for (const v of candidates) {
-        if (departmentAllowsView(user, v)) return v;
+        if (!allow || allow.includes(v)) return v;
     }
-    return null;
+    return allow && allow.length ? allow[0] : null;
 };
