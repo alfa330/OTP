@@ -16732,9 +16732,12 @@ class Database:
             prev = cur
         return normalized
 
-    def get_work_schedule_break_rules(self):
+    def get_work_schedule_break_rules(self, department_id=None):
         """
         Возвращает правила автоперерывов по направлениям.
+        Если задан department_id — только правила направлений этого отдела
+        (изоляция отделов для настроек перерывов у супервайзера); правила
+        сопоставляются с отделом по имени направления (directions.name).
         Формат:
         [
           {
@@ -16749,8 +16752,12 @@ class Database:
             cursor.execute("""
                 SELECT direction_name, min_shift_minutes, max_shift_minutes, break_durations_json
                 FROM work_schedule_break_rules
+                WHERE (%(dept)s IS NULL OR LOWER(TRIM(direction_name)) IN (
+                    SELECT LOWER(TRIM(d.name)) FROM directions d
+                    WHERE d.department_id = %(dept)s
+                ))
                 ORDER BY LOWER(direction_name), min_shift_minutes, max_shift_minutes, id
-            """)
+            """, {'dept': department_id})
             rows = cursor.fetchall() or []
 
         by_direction = {}
