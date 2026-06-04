@@ -5214,6 +5214,43 @@ def admin_update_user():
         logging.error(f"Error updating user: {e}")
         return jsonify({"error": f"Internal server error"}), 500
 
+@app.route('/api/operator/change_own_rate', methods=['POST'])
+@require_api_key
+def operator_change_own_rate():
+    """Оператор сам меняет свою ставку — только в окно 1-го числа месяца (Asia/Almaty)."""
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        requester_role = _normalize_user_role(requester[3]) if requester else ''
+        if requester_role != 'operator':
+            return jsonify({"error": "Только операторы могут менять свою ставку"}), 403
+
+        if not _is_supervisor_rate_change_day():
+            return jsonify({"error": "Изменить ставку можно только 1-го числа месяца"}), 403
+
+        data = request.get_json(silent=True) or {}
+        try:
+            value = float(data.get('rate'))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Некорректный формат ставки"}), 400
+        if value not in (1.0, 0.75, 0.5):
+            return jsonify({"error": "Недопустимое значение ставки"}), 400
+
+        try:
+            success = db.update_user(requester_id, 'rate', value, changed_by=requester_id)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        if not success:
+            return jsonify({"error": "Не удалось обновить ставку"}), 500
+
+        return jsonify({"status": "success", "rate": value}), 200
+    except Exception as e:
+        logging.error(f"Error in operator_change_own_rate: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
 @app.route('/api/admin/users/bulk_update', methods=['POST'])
 @require_api_key
 def admin_bulk_update_users():
@@ -6425,6 +6462,73 @@ def admin_call_feedback_report_setting():
 
     except Exception:
         logging.exception("Error in /api/admin/call_feedback_report_setting")
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/api/reports/rate_change_setting', methods=['GET', 'POST'])
+@require_api_key
+def rate_change_report_setting():
+    """Переключатель Telegram-отчёта о сменах ставок. Доступен админам (глобальный
+    отчёт) и главам отделов (отчёт по своему отделу)."""
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        requester_role = _normalize_user_role(requester[3]) if requester else ''
+        headed_dept_id = db.headed_department_id_for_user(requester_id)
+        if not _is_admin_role(requester_role) and headed_dept_id is None:
+            return jsonify({"error": "Доступно только админам и главам отделов"}), 403
+
+        if _is_admin_role(requester_role):
+            scope = 'global'
+            scope_label = 'Все отделы'
+        else:
+            scope = 'department'
+            dept = db.get_department_by_id(headed_dept_id) if headed_dept_id else None
+            scope_label = (dept or {}).get('name') if isinstance(dept, dict) else None
+
+        if request.method == 'GET':
+            enabled = db.get_rate_change_report_setting(requester_id)
+            if enabled is None:
+                return jsonify({"error": "User not found"}), 404
+            return jsonify({
+                "status": "success",
+                "enabled": bool(enabled),
+                "telegram_connected": bool(requester[1]),
+                "scope": scope,
+                "scope_label": scope_label,
+            }), 200
+
+        data = request.get_json(silent=True) or {}
+        raw_enabled = data.get('enabled')
+        if isinstance(raw_enabled, bool):
+            enabled = raw_enabled
+        elif isinstance(raw_enabled, (int, float)):
+            enabled = bool(raw_enabled)
+        elif isinstance(raw_enabled, str):
+            norm = raw_enabled.strip().lower()
+            if norm in ('1', 'true', 'yes', 'on'):
+                enabled = True
+            elif norm in ('0', 'false', 'no', 'off', ''):
+                enabled = False
+            else:
+                return jsonify({"error": "Invalid enabled value"}), 400
+        else:
+            return jsonify({"error": "enabled is required"}), 400
+
+        updated = db.set_rate_change_report_setting(requester_id, enabled)
+        if updated is None:
+            return jsonify({"error": "User not found"}), 404
+        return jsonify({
+            "status": "success",
+            "enabled": bool(updated),
+            "telegram_connected": bool(requester[1]),
+            "scope": scope,
+            "scope_label": scope_label,
+        }), 200
+    except Exception:
+        logging.exception("Error in /api/reports/rate_change_setting")
         return jsonify({"error": "Internal server error"}), 500
 
 @app.route('/api/call_evaluations', methods=['GET'])
@@ -27473,6 +27577,161 @@ async def send_weekly_call_feedback_report():
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(executor_pool, sync_send_weekly_call_feedback_report)
 
+
+def _build_rate_change_report_xlsx(data, window_day_label, scope_label):
+    """Сформировать аккуратный Excel-отчёт о сменах ставок (xlsxwriter, in-memory)."""
+    output = BytesIO()
+    workbook = xlsxwriter.Workbook(output, {'in_memory': True})
+    ws = workbook.add_worksheet('Смены ставок')
+
+    title_fmt = workbook.add_format({'bold': True, 'font_size': 14, 'valign': 'vcenter'})
+    sub_fmt = workbook.add_format({'font_size': 10, 'font_color': '#555555'})
+    section_fmt = workbook.add_format({'bold': True, 'font_size': 11, 'bg_color': '#F2F4F7', 'border': 1})
+    kv_label_fmt = workbook.add_format({'bold': True, 'border': 1, 'bg_color': '#FAFAFA'})
+    kv_val_fmt = workbook.add_format({'border': 1})
+    header_fmt = workbook.add_format({
+        'bold': True, 'bg_color': '#2563EB', 'font_color': 'white', 'border': 1,
+        'align': 'center', 'valign': 'vcenter', 'text_wrap': True
+    })
+    cell_fmt = workbook.add_format({'border': 1, 'valign': 'vcenter'})
+    cell_center = workbook.add_format({'border': 1, 'align': 'center', 'valign': 'vcenter'})
+    rate_fmt = workbook.add_format({'border': 1, 'align': 'center', 'num_format': '0.00'})
+
+    summary = data.get('summary') or {}
+    new_dist = summary.get('new_rate_distribution') or {}
+    cur_dist = data.get('current_distribution') or {}
+
+    state = {'row': 0}
+    ws.merge_range(0, 0, 0, 9, f"Отчёт о сменах ставок — {window_day_label}", title_fmt)
+    state['row'] = 1
+    ws.write(state['row'], 0, f"Область: {scope_label}", sub_fmt)
+    state['row'] += 2
+
+    ws.merge_range(state['row'], 0, state['row'], 9, "Сводка", section_fmt)
+    state['row'] += 1
+
+    def kv(label, value):
+        r = state['row']
+        ws.write(r, 0, label, kv_label_fmt)
+        ws.merge_range(r, 1, r, 4, str(value), kv_val_fmt)
+        state['row'] = r + 1
+
+    kv("Сменили ставку (операторов)", summary.get('changed_count', 0))
+    kv("Всего изменений", summary.get('total_change_events', 0))
+    kv("Из них самостоятельно", summary.get('self_count', 0))
+    kv("Изменено СВ/админом", summary.get('by_other_count', 0))
+    kv("Новые ставки (среди сменивших)",
+       f"1.0 — {new_dist.get(1.0, 0)}  |  0.75 — {new_dist.get(0.75, 0)}  |  0.5 — {new_dist.get(0.5, 0)}")
+    kv("Распределение ставок сейчас (всего)",
+       f"1.0 — {cur_dist.get(1.0, 0)}  |  0.75 — {cur_dist.get(0.75, 0)}  |  0.5 — {cur_dist.get(0.5, 0)}")
+    state['row'] += 1
+
+    headers = ['№', 'Оператор', 'Отдел', 'Направление', 'Супервайзер',
+               'Было', 'Стало', 'Изменений', 'Кто изменил', 'Самостоятельно']
+    hr = state['row']
+    for col, h in enumerate(headers):
+        ws.write(hr, col, h, header_fmt)
+    state['row'] = hr + 1
+
+    for idx, ch in enumerate(data.get('changes') or [], start=1):
+        r = state['row']
+        ws.write_number(r, 0, idx, cell_center)
+        ws.write(r, 1, ch.get('operator_name') or '', cell_fmt)
+        ws.write(r, 2, ch.get('department_name') or '', cell_fmt)
+        ws.write(r, 3, ch.get('direction_name') or '', cell_fmt)
+        ws.write(r, 4, ch.get('supervisor_name') or '', cell_fmt)
+        ws.write_number(r, 5, float(ch.get('old_rate') or 0), rate_fmt)
+        ws.write_number(r, 6, float(ch.get('new_rate') or 0), rate_fmt)
+        ws.write_number(r, 7, int(ch.get('change_count') or 1), cell_center)
+        ws.write(r, 8, ch.get('last_changed_by_name') or '', cell_fmt)
+        ws.write(r, 9, 'Да' if ch.get('by_self') else 'Нет', cell_center)
+        state['row'] = r + 1
+
+    widths = [5, 28, 18, 20, 22, 8, 8, 11, 22, 14]
+    for col, w in enumerate(widths):
+        ws.set_column(col, col, w)
+
+    workbook.close()
+    output.seek(0)
+    return output.getvalue()
+
+
+def sync_send_monthly_rate_change_report():
+    """Отчёт о сменах ставок за окно 1-го числа. Запуск 2-го числа в 00:05 (Алматы).
+
+    Окно = [1-е 00:00, 2-е 00:00) по Asia/Almaty (так же хранится changed_at).
+    Получатели: админы (глобальный отчёт) и главы отделов (по своему отделу),
+    у которых включён переключатель и привязан Telegram. Если в зоне видимости
+    получателя нет смен — отчёт ему не отправляется.
+    """
+    try:
+        try:
+            now_dt = datetime.now(ZoneInfo('Asia/Almaty'))
+        except Exception:
+            now_dt = datetime.now()
+
+        today = now_dt.date()
+        window_end = datetime(today.year, today.month, today.day)   # 2-е 00:00 (naive Almaty)
+        window_start = window_end - timedelta(days=1)                # 1-е 00:00
+        window_day_label = window_start.strftime('%d.%m.%Y')
+        month_label = window_start.strftime('%Y-%m')
+
+        recipients = db.get_rate_change_report_recipients() or []
+        if not recipients:
+            logging.info("Rate change report skipped: no opted-in recipients")
+            return True
+
+        telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendDocument"
+        sent = 0
+        for recipient in recipients:
+            chat_id = recipient.get('telegram_id')
+            if not chat_id:
+                continue
+            dept_id = recipient.get('department_id')
+            try:
+                data = db.get_rate_change_report_data(window_start, window_end, department_id=dept_id)
+            except Exception:
+                logging.exception("Failed to build rate change report data for recipient %s", recipient.get('id'))
+                continue
+            changes = data.get('changes') or []
+            if not changes:
+                continue
+
+            scope_label = recipient.get('department_name') if dept_id is not None else 'Все отделы'
+            xlsx_bytes = _build_rate_change_report_xlsx(data, window_day_label, scope_label)
+            filename = f"Rate_changes_{month_label}.xlsx"
+            summary = data.get('summary') or {}
+            caption = (
+                f"📊 Смены ставок за {window_day_label}\n"
+                f"Область: {scope_label}\n"
+                f"Сменили ставку: {summary.get('changed_count', 0)} "
+                f"(сами: {summary.get('self_count', 0)}, СВ/админ: {summary.get('by_other_count', 0)})"
+            )
+            try:
+                files = {'document': (filename, xlsx_bytes, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')}
+                resp = requests.post(telegram_url, files=files, data={'chat_id': chat_id, 'caption': caption}, timeout=30)
+                if resp.status_code != 200:
+                    logging.warning("Rate change report send failed for recipient %s: %s",
+                                    recipient.get('id'), _get_telegram_error_text(resp))
+                else:
+                    sent += 1
+            except Exception:
+                logging.exception("Failed to send rate change report to recipient %s", recipient.get('id'))
+
+        logging.info("Rate change report: sent to %s recipients (window %s)", sent, window_day_label)
+        return True
+    except Exception:
+        logging.exception("Critical error in monthly rate change report job")
+        return False
+    finally:
+        _trim_process_memory('rate_change_report', force=True)
+
+
+async def send_monthly_rate_change_report():
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(executor_pool, sync_send_monthly_rate_change_report)
+
+
 def sync_schedule_statuses_to_user_statuses_job():
     """Background job: sync users.status with active schedule status periods."""
     try:
@@ -27722,6 +27981,17 @@ if __name__ == '__main__':
         purge_status_events_job,
         CronTrigger(hour=3, minute=30, timezone=ZoneInfo('Asia/Almaty')),
         id='purge_status_events_daily',
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # Отчёт о сменах ставок: 2-го числа в 00:05 (Asia/Almaty) — сразу после закрытия
+    # 24-часового окна смены ставки (1-е число месяца).
+    scheduler.add_job(
+        send_monthly_rate_change_report,
+        CronTrigger(day='2', hour=0, minute=5, timezone=ZoneInfo('Asia/Almaty')),
+        id='monthly_rate_change_report',
         misfire_grace_time=3600,
         max_instances=1,
         coalesce=True

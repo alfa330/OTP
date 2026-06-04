@@ -620,6 +620,231 @@ const isOrazAitSplashDay = (date = new Date()) => {
     );
 };
 
+// Окно самостоятельной смены ставки оператором — только 1-е число месяца (Asia/Almaty).
+const isFirstOfMonthAlmaty = () => {
+    try {
+        const dayValue = new Intl.DateTimeFormat('en-US', {
+            timeZone: 'Asia/Almaty',
+            day: 'numeric'
+        }).format(new Date());
+        return Number(dayValue) === 1;
+    } catch (_) {
+        return new Date().getDate() === 1;
+    }
+};
+
+const RATE_SELF_OPTIONS = [
+    { value: 1.0, label: '1.0', hint: 'Полная ставка' },
+    { value: 0.75, label: '0.75', hint: '¾ ставки' },
+    { value: 0.5, label: '0.5', hint: 'Половина ставки' },
+];
+
+// Баннер + аккуратная (iOS-style) модалка: оператор сам меняет свою ставку 1-го числа.
+// Открывается кнопкой баннера или событием 'open-self-rate-modal' (клик по ставке-маркеру).
+const RateSelfChangeCard = ({ user, currentRate, showToast, onChanged }) => {
+    const windowOpen = isFirstOfMonthAlmaty();
+    const [open, setOpen] = useState(false);
+    const [selected, setSelected] = useState(() => {
+        const n = Number(currentRate);
+        return [1, 0.75, 0.5].includes(n) ? n : 1.0;
+    });
+    const [saving, setSaving] = useState(false);
+
+    useEffect(() => {
+        const n = Number(currentRate);
+        if ([1, 0.75, 0.5].includes(n)) setSelected(n);
+    }, [currentRate]);
+
+    useEffect(() => {
+        if (!windowOpen) return undefined;
+        const handler = () => setOpen(true);
+        window.addEventListener('open-self-rate-modal', handler);
+        return () => window.removeEventListener('open-self-rate-modal', handler);
+    }, [windowOpen]);
+
+    if (!user || user.role !== 'operator' || !windowOpen) return null;
+
+    const curLabel = [1, 0.75, 0.5].includes(Number(currentRate)) ? String(Number(currentRate)) : '—';
+
+    const submit = async () => {
+        if (saving) return;
+        setSaving(true);
+        try {
+            await axios.post(
+                `${API_BASE_URL}/api/operator/change_own_rate`,
+                { rate: selected },
+                { headers: withAccessTokenHeader({ 'X-User-Id': user.id }) }
+            );
+            if (typeof showToast === 'function') showToast('Ставка обновлена', 'success');
+            if (typeof onChanged === 'function') onChanged(selected);
+            setOpen(false);
+        } catch (e) {
+            const msg = e?.response?.data?.error || 'Не удалось обновить ставку';
+            if (typeof showToast === 'function') showToast(msg, 'error');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    return (
+        <>
+            <button
+                type="button"
+                onClick={() => setOpen(true)}
+                className="w-full text-left mb-6 rounded-2xl border border-blue-200 bg-gradient-to-r from-blue-50 to-indigo-50 p-4 sm:p-5 flex items-center gap-4 hover:shadow-md transition-all duration-200 active:scale-[0.99]"
+            >
+                <div className="relative flex-shrink-0">
+                    <div className="w-11 h-11 rounded-full bg-blue-600 text-white flex items-center justify-center shadow">
+                        <FaIcon className="fas fa-sliders-h"></FaIcon>
+                    </div>
+                    <span className="absolute -top-1 -right-1 flex h-3 w-3">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500"></span>
+                    </span>
+                </div>
+                <div className="flex-1 min-w-0">
+                    <p className="text-sm sm:text-base font-semibold text-gray-900">Сегодня можно изменить свою ставку</p>
+                    <p className="text-xs sm:text-sm text-gray-600 mt-0.5">
+                        Окно открыто только 1-го числа (24 часа). Текущая ставка:{' '}
+                        <span className="font-semibold text-blue-700">{curLabel}</span>
+                    </p>
+                </div>
+                <span className="flex-shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-blue-600 text-white text-xs font-medium">
+                    Изменить <FaIcon className="fas fa-chevron-right text-[10px]"></FaIcon>
+                </span>
+            </button>
+
+            {open && (
+                <div
+                    className="fixed inset-0 z-[1000] flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/40 backdrop-blur-sm"
+                    onClick={() => !saving && setOpen(false)}
+                >
+                    <div
+                        className="w-full sm:max-w-md bg-white rounded-t-3xl sm:rounded-3xl shadow-2xl overflow-hidden"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="px-6 pt-5 pb-3 text-center border-b border-gray-100">
+                            <div className="mx-auto mb-3 w-12 h-1.5 rounded-full bg-gray-200 sm:hidden"></div>
+                            <h3 className="text-lg font-bold text-gray-900">Изменение ставки</h3>
+                            <p className="text-xs text-gray-500 mt-1">Выберите свою ставку на этот месяц</p>
+                        </div>
+                        <div className="p-5 space-y-2.5">
+                            {RATE_SELF_OPTIONS.map(opt => {
+                                const active = Number(selected) === opt.value;
+                                return (
+                                    <button
+                                        key={opt.value}
+                                        type="button"
+                                        onClick={() => setSelected(opt.value)}
+                                        className={`w-full flex items-center justify-between px-4 py-3.5 rounded-2xl border-2 transition-all duration-150 ${active ? 'border-blue-600 bg-blue-50' : 'border-gray-200 bg-white hover:border-gray-300'}`}
+                                    >
+                                        <span className="flex items-center gap-3">
+                                            <span className={`text-xl font-bold ${active ? 'text-blue-700' : 'text-gray-800'}`}>{opt.label}</span>
+                                            <span className="text-xs text-gray-500">{opt.hint}</span>
+                                        </span>
+                                        <span className={`w-6 h-6 rounded-full flex items-center justify-center border-2 ${active ? 'border-blue-600 bg-blue-600 text-white' : 'border-gray-300 text-transparent'}`}>
+                                            <FaIcon className="fas fa-check text-[11px]"></FaIcon>
+                                        </span>
+                                    </button>
+                                );
+                            })}
+                        </div>
+                        <div className="px-5 pb-5 pt-1 flex gap-3">
+                            <button
+                                type="button"
+                                onClick={() => !saving && setOpen(false)}
+                                className="flex-1 py-3 rounded-2xl bg-gray-100 text-gray-700 font-medium hover:bg-gray-200 transition active:scale-95"
+                            >
+                                Отмена
+                            </button>
+                            <button
+                                type="button"
+                                onClick={submit}
+                                disabled={saving}
+                                className={`flex-1 py-3 rounded-2xl text-white font-semibold transition active:scale-95 ${saving ? 'bg-blue-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'}`}
+                            >
+                                {saving ? 'Сохранение…' : 'Сохранить'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </>
+    );
+};
+
+// Переключатель Telegram-отчёта о сменах ставок. Самогейтится: рендерится только тем,
+// кому эндпоинт разрешает (админы и главы отделов).
+const RateChangeReportToggle = ({ user, showToast }) => {
+    const [state, setState] = useState({ loaded: false, eligible: false, enabled: false, telegram: false, scopeLabel: '' });
+    const [saving, setSaving] = useState(false);
+
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            try {
+                const resp = await axios.get(
+                    `${API_BASE_URL}/api/reports/rate_change_setting`,
+                    { headers: withAccessTokenHeader({ 'X-User-Id': user?.id }) }
+                );
+                if (cancelled) return;
+                const d = resp.data || {};
+                setState({ loaded: true, eligible: true, enabled: !!d.enabled, telegram: !!d.telegram_connected, scopeLabel: d.scope_label || '' });
+            } catch (_) {
+                if (!cancelled) setState(s => ({ ...s, loaded: true, eligible: false }));
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [user?.id]);
+
+    if (!state.loaded || !state.eligible) return null;
+
+    const toggle = async () => {
+        if (saving) return;
+        const next = !state.enabled;
+        setSaving(true);
+        try {
+            const resp = await axios.post(
+                `${API_BASE_URL}/api/reports/rate_change_setting`,
+                { enabled: next },
+                { headers: withAccessTokenHeader({ 'X-User-Id': user?.id }) }
+            );
+            const d = resp.data || {};
+            setState(s => ({ ...s, enabled: !!d.enabled }));
+            if (typeof showToast === 'function') showToast(next ? 'Отчёт о сменах ставок включён' : 'Отчёт о сменах ставок выключен', 'success');
+        } catch (e) {
+            if (typeof showToast === 'function') showToast(e?.response?.data?.error || 'Не удалось сохранить настройку', 'error');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    return (
+        <div className="mb-4 rounded-2xl border border-gray-200 bg-white p-4 flex items-center justify-between gap-4">
+            <div className="min-w-0">
+                <p className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+                    <FaIcon className="fab fa-telegram text-sky-500"></FaIcon>
+                    Telegram-отчёт о сменах ставок
+                </p>
+                <p className="text-xs text-gray-500 mt-0.5">
+                    2-го числа в 00:05 — итоги смен ставок за 1-е число{state.scopeLabel ? ` · ${state.scopeLabel}` : ''}.
+                    {!state.telegram ? ' Привяжите Telegram, чтобы получать отчёт.' : ''}
+                </p>
+            </div>
+            <button
+                type="button"
+                onClick={toggle}
+                disabled={saving}
+                role="switch"
+                aria-checked={state.enabled}
+                className={`relative inline-flex h-7 w-12 flex-shrink-0 rounded-full transition-colors duration-200 ${state.enabled ? 'bg-blue-600' : 'bg-gray-300'} ${saving ? 'opacity-60' : ''}`}
+            >
+                <span className={`inline-block h-6 w-6 transform rounded-full bg-white shadow transition-transform duration-200 mt-0.5 ${state.enabled ? 'translate-x-[22px]' : 'translate-x-0.5'}`}></span>
+            </button>
+        </div>
+    );
+};
+
 const canAccessLmsSectionForUser = (userLike) => {
     const role = normalizeRole(userLike?.role);
     const userId = Number(userLike?.id);
@@ -3795,6 +4020,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 </>
                 )}
             </div>
+
+            <RateChangeReportToggle user={user} showToast={showToast} />
 
             {/* Table */}
             <div className="overflow-auto border rounded-md">
@@ -39656,7 +39883,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         Профиль
                                       </span>
                                     </h2>
-                            
+
+                                    <RateSelfChangeCard
+                                      user={user}
+                                      currentRate={profileData?.rate ?? user?.rate}
+                                      showToast={showToast}
+                                      onChanged={(r) => setProfileData((prev) => (prev ? { ...prev, rate: r } : prev))}
+                                    />
+
                                     {isLoading ? (
                                       <ProfilePageSkeleton />
                                     ) : profileData ? (
@@ -39783,13 +40017,27 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                           </div>
 
                                           {/* Rate */}
-                                          <div className="bg-gray-50 p-4 rounded-xl shadow-sm hover:shadow-md transition flex items-center gap-3">
-                                            <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-blue-100 flex items-center justify-center shrink-0">
+                                          <div
+                                            className={`bg-gray-50 p-4 rounded-xl shadow-sm hover:shadow-md transition flex items-center gap-3 ${isFirstOfMonthAlmaty() ? 'cursor-pointer ring-2 ring-blue-400 ring-offset-1' : ''}`}
+                                            onClick={() => { if (isFirstOfMonthAlmaty()) window.dispatchEvent(new CustomEvent('open-self-rate-modal')); }}
+                                          >
+                                            <div className="relative w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-blue-100 flex items-center justify-center shrink-0">
                                               <FaIcon className="fas fa-briefcase text-blue-600 text-lg"></FaIcon>
+                                              {isFirstOfMonthAlmaty() && (
+                                                <span className="absolute -top-0.5 -right-0.5 flex h-3 w-3">
+                                                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
+                                                  <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500"></span>
+                                                </span>
+                                              )}
                                             </div>
                                             <div className="min-w-0">
                                               <p className="text-xs uppercase tracking-wide text-gray-500">Ставка</p>
-                                              <p className="text-base sm:text-lg font-semibold text-gray-900 truncate">{formatRateValue(profileData.rate)}</p>
+                                              <p className="text-base sm:text-lg font-semibold text-gray-900 truncate">
+                                                {formatRateValue(profileData.rate)}
+                                                {isFirstOfMonthAlmaty() && (
+                                                  <span className="ml-2 text-xs font-medium text-blue-600 normal-case">Изменить</span>
+                                                )}
+                                              </p>
                                             </div>
                                           </div>
 
