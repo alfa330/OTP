@@ -14680,6 +14680,15 @@ class Database:
         where_parts = []
         params = []
 
+        # Изоляция отделов: обычный супервайзер видит тех. причины только своего
+        # отдела; админ/супер-админ — все. Без отдела СВ не видит ничего (а не всё).
+        if not role_has_min(role_norm, 'admin'):
+            scope_dept = self.get_user_department_id(requester_id)
+            if scope_dept is None:
+                return {'total': 0, 'items': []}
+            where_parts.append("op.department_id = %s")
+            params.append(scope_dept)
+
         if issue_date:
             issue_date_obj = self._parse_technical_issue_date(issue_date, field_name='date')
             where_parts.append("ti.issue_date = %s")
