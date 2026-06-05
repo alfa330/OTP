@@ -29884,10 +29884,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 body.append('checklist_items', JSON.stringify(Array.isArray(payload.checklist_items) ? payload.checklist_items : []));
             }, []);
 
-            const createPinnedTask = useCallback(async (payload) => {
+            const createPinnedTask = useCallback(async (payload, files = []) => {
                 if (!user?.id) throw new Error('User is not authenticated');
                 const body = new FormData();
                 appendPinnedTaskPayloadFormData(body, payload);
+                (Array.isArray(files) ? files : []).filter(Boolean).forEach((file) => {
+                    body.append('files', file);
+                });
                 const response = await axios.post(
                     `${API_BASE_URL}/api/tasks`,
                     body,
