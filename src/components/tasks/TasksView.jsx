@@ -730,10 +730,25 @@ styleTag.textContent = `
     gap: 9px;
   }
   .tv-notes-panel.is-fullscreen {
+    display: flex;
+    flex-direction: column;
     flex: 1;
     min-height: 0;
     height: 100%;
     box-shadow: none;
+  }
+  .tv-notes-panel.is-fullscreen .tv-notes-list {
+    flex: 0 0 auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    padding-right: 0;
+    padding-bottom: 10px;
+    max-height: min(180px, 34vh);
+    overflow-y: auto;
+  }
+  .tv-notes-panel.is-fullscreen .tv-notes-editor {
+    flex: 1;
+    min-height: 0;
   }
   .tv-notes-list {
     min-width: 0;
@@ -1285,11 +1300,42 @@ styleTag.textContent = `
   .tv-pin-task-form .tv-form-field label {
     font-size: 10.5px;
   }
+  .tv-checklist-editor.is-compact {
+    gap: 6px;
+  }
   .tv-checklist-editor.is-compact .tv-checklist-editor-row {
-    grid-template-columns: minmax(0, 1fr) 34px;
+    grid-template-columns: 32px minmax(0, 1fr) 34px;
+    gap: 6px;
+    padding: 6px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface);
+  }
+  .tv-checklist-editor.is-compact .tv-input {
+    padding: 8px 9px;
+    border-radius: 8px;
+    background: var(--surface-2);
   }
   .tv-checklist-editor.is-compact .tv-checklist-required {
-    grid-column: 1 / -1;
+    width: 32px;
+    height: 34px;
+    justify-content: center;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-2);
+    font-size: 0;
+  }
+  .tv-checklist-editor.is-compact .tv-checklist-required input {
+    margin: 0;
+  }
+  .tv-checklist-editor.is-compact .tv-checklist-editor-remove {
+    background: var(--surface-2);
+  }
+  .tv-checklist-editor.is-compact .tv-btn {
+    align-self: stretch;
+    justify-content: center;
+    border-style: dashed;
+    background: transparent;
   }
   .tv-pin-form-error {
     color: var(--rose);
@@ -1302,6 +1348,142 @@ styleTag.textContent = `
     background: #e0e7ff;
     border-color: #c7d2fe;
     color: #3730a3;
+  }
+  .tv-file-dropzone-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .tv-file-dropzone {
+    position: relative;
+    display: grid;
+    grid-template-columns: 34px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 9px;
+    min-height: 64px;
+    padding: 10px;
+    border: 1.5px dashed var(--border-strong);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--surface-2) 78%, transparent);
+    color: var(--ink-2);
+    cursor: pointer;
+    transition: border-color .15s ease, background .15s ease, color .15s ease, box-shadow .15s ease;
+  }
+  .tv-file-dropzone:hover,
+  .tv-file-dropzone.is-dragging {
+    border-color: var(--accent);
+    background: var(--surface);
+    color: var(--ink);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 11%, transparent);
+  }
+  .tv-file-dropzone.is-disabled {
+    opacity: .58;
+    cursor: not-allowed;
+    box-shadow: none;
+  }
+  .tv-file-dropzone-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .tv-file-dropzone-icon {
+    width: 34px;
+    height: 34px;
+    border-radius: 9px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--ink-2);
+  }
+  .tv-file-dropzone-copy {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .tv-file-dropzone-copy strong {
+    color: var(--ink);
+    font-size: 12.5px;
+    font-weight: 800;
+  }
+  .tv-file-dropzone-copy span {
+    color: var(--ink-3);
+    font-size: 11.5px;
+  }
+  .tv-file-dropzone-count {
+    align-self: center;
+    padding: 4px 8px;
+    border-radius: 999px;
+    background: #eef2ff;
+    color: #3730a3;
+    border: 1px solid #c7d2fe;
+    font-size: 11px;
+    font-weight: 800;
+    white-space: nowrap;
+  }
+  .tv-selected-file-list {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .tv-selected-file-pill {
+    display: grid;
+    grid-template-columns: 18px minmax(0, 1fr) 26px;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 7px;
+    border-radius: 9px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--ink-2);
+  }
+  .tv-selected-file-text {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .tv-selected-file-text strong {
+    color: var(--ink);
+    font-size: 12px;
+    font-weight: 700;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tv-selected-file-text span {
+    color: var(--ink-3);
+    font-size: 10.5px;
+  }
+  .tv-file-mark {
+    color: var(--indigo);
+    font-weight: 800;
+  }
+  .tv-file-remove-btn {
+    width: 26px;
+    height: 26px;
+    border-radius: 7px;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--ink-3);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all .15s ease;
+  }
+  .tv-file-remove-btn:hover:not(:disabled) {
+    color: var(--rose);
+    background: #fff1f2;
+    border-color: #fecdd3;
+  }
+  .tv-pin-task-form.is-fullscreen .tv-file-dropzone {
+    min-height: 76px;
+    padding: 12px;
   }
   .tv-pin-menu-trigger {
     width: 30px;
@@ -1559,14 +1741,14 @@ styleTag.textContent = `
     .tv-pin-widget {
       width: min(360px, calc(100vw - 16px));
     }
-    .tv-checklist-editor-row,
+    .tv-checklist-editor:not(.is-compact) .tv-checklist-editor-row,
     .tv-pin-task-form-grid {
       grid-template-columns: minmax(0, 1fr);
     }
-    .tv-checklist-editor-row {
+    .tv-checklist-editor:not(.is-compact) .tv-checklist-editor-row {
       grid-template-columns: minmax(0, 1fr) 34px;
     }
-    .tv-checklist-required {
+    .tv-checklist-editor:not(.is-compact) .tv-checklist-required {
       grid-column: 1 / -1;
     }
     .tv-notes-panel,
@@ -1996,6 +2178,31 @@ const appendTaskFormData = (body, values) => {
   body.append('checklist_items', JSON.stringify(payload.checklist_items));
 };
 
+const filesFromList = (files) => Array.from(files || []).filter(Boolean);
+
+const fileIdentity = (file) => [
+  file?.name || '',
+  file?.size || 0,
+  file?.lastModified || 0,
+].join(':');
+
+const mergeSelectedFiles = (currentFiles, incomingFiles) => {
+  const seen = new Set();
+  return [...filesFromList(currentFiles), ...filesFromList(incomingFiles)].filter((file) => {
+    const key = fileIdentity(file);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
+const formatFileSize = (size) => {
+  const bytes = Number(size || 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 KB';
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(bytes >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
+};
+
 const pluralRu = (n, one, few, many) => {
   const absN = Math.abs(Number(n) || 0);
   const n10 = absN % 10;
@@ -2148,6 +2355,121 @@ const AvatarCircle = ({ className, name, avatarUrl }) => (
       : initials(name)}
   </span>
 );
+
+const TaskFileDropzone = React.memo(({
+  files = [],
+  disabled = false,
+  onChange,
+  title = 'Вложения',
+  prompt = 'Перетащите файлы сюда',
+  hint = 'или нажмите, чтобы выбрать',
+}) => {
+  const inputRef = useRef(null);
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
+  const selectedFiles = useMemo(() => filesFromList(files), [files]);
+
+  const addFiles = useCallback((nextFiles) => {
+    const incomingFiles = filesFromList(nextFiles);
+    if (!incomingFiles.length) return;
+    onChange?.(mergeSelectedFiles(selectedFiles, incomingFiles));
+  }, [onChange, selectedFiles]);
+
+  const removeFile = useCallback((index) => {
+    onChange?.(selectedFiles.filter((_, fileIndex) => fileIndex !== index));
+  }, [onChange, selectedFiles]);
+
+  const openFilePicker = useCallback(() => {
+    if (disabled) return;
+    inputRef.current?.click?.();
+  }, [disabled]);
+
+  const handleKeyDown = useCallback((event) => {
+    if (disabled) return;
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    openFilePicker();
+  }, [disabled, openFilePicker]);
+
+  const handleDragOver = useCallback((event) => {
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = disabled ? 'none' : 'copy';
+    if (!disabled) setIsDraggingFile(true);
+  }, [disabled]);
+
+  const handleDragLeave = useCallback((event) => {
+    const nextTarget = event.relatedTarget;
+    if (nextTarget && event.currentTarget.contains(nextTarget)) return;
+    setIsDraggingFile(false);
+  }, []);
+
+  const handleDrop = useCallback((event) => {
+    event.preventDefault();
+    setIsDraggingFile(false);
+    if (disabled) return;
+    addFiles(event.dataTransfer?.files);
+  }, [addFiles, disabled]);
+
+  return (
+    <div className="tv-file-dropzone-wrap">
+      <div
+        className={`tv-file-dropzone ${isDraggingFile ? 'is-dragging' : ''} ${selectedFiles.length ? 'has-files' : ''} ${disabled ? 'is-disabled' : ''}`}
+        role="button"
+        tabIndex={disabled ? -1 : 0}
+        aria-disabled={disabled}
+        onClick={openFilePicker}
+        onKeyDown={handleKeyDown}
+        onDragEnter={handleDragOver}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+        <input
+          ref={inputRef}
+          type="file"
+          multiple
+          className="tv-file-dropzone-input"
+          disabled={disabled}
+          onChange={(event) => {
+            addFiles(event.target.files);
+            event.target.value = '';
+          }}
+        />
+        <span className="tv-file-dropzone-icon"><FileIcon /></span>
+        <span className="tv-file-dropzone-copy">
+          <strong>{prompt}</strong>
+          <span>{hint}</span>
+        </span>
+        {selectedFiles.length > 0 && (
+          <span className="tv-file-dropzone-count">
+            {selectedFiles.length} {pluralRu(selectedFiles.length, 'файл', 'файла', 'файлов')}
+          </span>
+        )}
+      </div>
+      {selectedFiles.length > 0 && (
+        <div className="tv-selected-file-list" aria-label={title}>
+          {selectedFiles.map((file, index) => (
+            <div className="tv-selected-file-pill" key={`${fileIdentity(file)}:${index}`}>
+              <FileIcon />
+              <span className="tv-selected-file-text">
+                <strong title={file.name}>{file.name}</strong>
+                <span>{formatFileSize(file.size)} · <span className="tv-file-mark">новый файл</span></span>
+              </span>
+              <button
+                type="button"
+                className="tv-file-remove-btn"
+                disabled={disabled}
+                aria-label={`Убрать файл ${file.name}`}
+                onClick={() => removeFile(index)}
+              >
+                <CloseIcon />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+});
 
 /* ─── TaskRow — defined outside to avoid remount ─── */
 const useLocalNotes = (userId) => {
@@ -2315,6 +2637,17 @@ const ChecklistDraftEditor = React.memo(({ items, disabled = false, onChange, co
     <div className={`tv-checklist-editor ${compact ? 'is-compact' : ''}`}>
       {list.map((item, index) => (
         <div className="tv-checklist-editor-row" key={`checklist-draft-${index}`}>
+          {compact && (
+            <label className="tv-checklist-required" title="Обязательный пункт">
+              <input
+                type="checkbox"
+                checked={item.is_required !== false}
+                disabled={disabled}
+                onChange={(event) => onChange?.(updateChecklistDraftItem(list, index, { is_required: event.target.checked }))}
+              />
+              Обязательный
+            </label>
+          )}
           <input
             className="tv-input"
             value={item.title || ''}
@@ -2322,15 +2655,17 @@ const ChecklistDraftEditor = React.memo(({ items, disabled = false, onChange, co
             placeholder={`Пункт чек-листа ${index + 1}`}
             onChange={(event) => onChange?.(updateChecklistDraftItem(list, index, { title: event.target.value }))}
           />
-          <label className="tv-checklist-required">
-            <input
-              type="checkbox"
-              checked={item.is_required !== false}
-              disabled={disabled}
-              onChange={(event) => onChange?.(updateChecklistDraftItem(list, index, { is_required: event.target.checked }))}
-            />
-            Обязательный
-          </label>
+          {!compact && (
+            <label className="tv-checklist-required">
+              <input
+                type="checkbox"
+                checked={item.is_required !== false}
+                disabled={disabled}
+                onChange={(event) => onChange?.(updateChecklistDraftItem(list, index, { is_required: event.target.checked }))}
+              />
+              Обязательный
+            </label>
+          )}
           <button
             type="button"
             className="tv-checklist-editor-remove"
@@ -2715,6 +3050,7 @@ export const PinnedTaskWidget = React.memo(({
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [quickFormMode, setQuickFormMode] = useState('');
   const [quickForm, setQuickForm] = useState(() => buildEmptyTaskForm());
+  const [quickFormFiles, setQuickFormFiles] = useState([]);
   const [quickFormLoading, setQuickFormLoading] = useState(false);
   const [quickFormError, setQuickFormError] = useState('');
   const notesState = useLocalNotes(user?.id);
@@ -2911,6 +3247,7 @@ export const PinnedTaskWidget = React.memo(({
       assignedTo: String(task?.assignee?.id || currentUserId || ''),
       priority: task?.priority || 'normal',
     }));
+    setQuickFormFiles([]);
     setQuickFormError('');
     setQuickFormMode('create');
     setExpanded(true);
@@ -2923,6 +3260,7 @@ export const PinnedTaskWidget = React.memo(({
   const openQuickEdit = useCallback(() => {
     if (!task?.id) return;
     setQuickForm(taskToTaskForm(task, currentUserId));
+    setQuickFormFiles([]);
     setQuickFormError('');
     setQuickFormMode('edit');
     setExpanded(true);
@@ -2934,6 +3272,7 @@ export const PinnedTaskWidget = React.memo(({
 
   const closeQuickForm = useCallback(() => {
     setQuickFormMode('');
+    setQuickFormFiles([]);
     setQuickFormError('');
   }, []);
 
@@ -2954,15 +3293,16 @@ export const PinnedTaskWidget = React.memo(({
     try {
       const nextTask = quickFormMode === 'edit'
         ? await onEditTask?.(task, payload)
-        : await onCreateTask?.(payload);
+        : await onCreateTask?.(payload, quickFormFiles);
       if (nextTask?.id) onSelectTask?.(nextTask);
+      setQuickFormFiles([]);
       setQuickFormMode('');
     } catch (error) {
       setQuickFormError(error?.response?.data?.error || error?.message || 'Не удалось сохранить задачу');
     } finally {
       setQuickFormLoading(false);
     }
-  }, [onCreateTask, onEditTask, onSelectTask, quickForm, quickFormMode, task]);
+  }, [onCreateTask, onEditTask, onSelectTask, quickForm, quickFormFiles, quickFormMode, task]);
 
   const handleQuickDelete = useCallback(async () => {
     if (!task?.id || !onDeleteTask) return;
@@ -2984,6 +3324,11 @@ export const PinnedTaskWidget = React.memo(({
 
   const updateQuickFormChecklist = useCallback((items) => {
     setQuickForm((prev) => ({ ...prev, checklistItems: items }));
+    setQuickFormError('');
+  }, []);
+
+  const updateQuickFormFiles = useCallback((files) => {
+    setQuickFormFiles(filesFromList(files));
     setQuickFormError('');
   }, []);
 
@@ -3199,6 +3544,33 @@ export const PinnedTaskWidget = React.memo(({
           onChange={updateQuickFormChecklist}
         />
       </div>
+      {quickFormMode === 'create' ? (
+        <div className="tv-form-field">
+          <label>Вложения</label>
+          <TaskFileDropzone
+            files={quickFormFiles}
+            disabled={quickFormLoading}
+            onChange={updateQuickFormFiles}
+          />
+        </div>
+      ) : attachments.length > 0 ? (
+        <div className="tv-soft-block tv-pin-file-section">
+          <p className="tv-block-label">Прикрепленные файлы</p>
+          <div className="tv-file-list">
+            {attachments.map((att) => (
+              <button
+                key={att.id}
+                type="button"
+                className="tv-file-btn"
+                onClick={() => onDownloadAttachment?.(att)}
+              >
+                <FileIcon />
+                {att.file_name}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
       {quickFormError && <span className="tv-pin-form-error">{quickFormError}</span>}
       <div className="tv-pin-task-form-actions">
         <button type="button" className="tv-btn tv-btn-ghost" disabled={quickFormLoading} onClick={closeQuickForm}>
