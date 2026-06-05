@@ -29869,12 +29869,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             }, [user?.id, withAccessTokenHeader, showToast, updatePinnedTaskEverywhere]);
 
-            const handlePinnedTaskLocalNoteChange = useCallback((task, note) => {
-                const taskId = Number(task?.id || 0);
-                if (!taskId) return;
-                updatePinnedTaskEverywhere(taskId, (current) => ({ ...current, local_note: note }));
-            }, [updatePinnedTaskEverywhere]);
-
             const appendPinnedTaskPayloadFormData = useCallback((body, payload = {}) => {
                 body.append('subject', String(payload.subject || ''));
                 body.append('description', String(payload.description || ''));
@@ -42501,7 +42495,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             onRunAction={runPinnedTaskAction}
                             onDownloadAttachment={downloadPinnedTaskAttachment}
                             onToggleChecklistItem={togglePinnedTaskChecklistItem}
-                            onLocalNoteChange={handlePinnedTaskLocalNoteChange}
                             onCreateTask={createPinnedTask}
                             onEditTask={editPinnedTask}
                             onDeleteTask={deletePinnedTask}

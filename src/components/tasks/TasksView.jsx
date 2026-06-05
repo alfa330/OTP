@@ -714,6 +714,88 @@ styleTag.textContent = `
     background: #fffdf5;
     border-color: #fde68a;
   }
+  .tv-notes-panel {
+    display: grid;
+    grid-template-columns: minmax(160px, .45fr) minmax(0, 1fr);
+    gap: 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    padding: 12px;
+    box-shadow: var(--shadow-sm);
+  }
+  .tv-notes-panel.is-compact {
+    grid-template-columns: minmax(120px, .42fr) minmax(0, 1fr);
+    padding: 10px;
+    gap: 9px;
+  }
+  .tv-notes-panel.is-fullscreen {
+    flex: 1;
+    min-height: 0;
+    height: 100%;
+    box-shadow: none;
+  }
+  .tv-notes-list {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    border-right: 1px solid var(--border);
+    padding-right: 10px;
+    overflow: hidden;
+  }
+  .tv-notes-list-head,
+  .tv-notes-editor-footer,
+  .tv-notes-editor-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .tv-notes-list-head,
+  .tv-notes-editor-footer {
+    justify-content: space-between;
+  }
+  .tv-note-topic-btn {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-2);
+    color: var(--ink);
+    padding: 8px 9px;
+    cursor: pointer;
+    text-align: left;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .tv-note-topic-btn:hover,
+  .tv-note-topic-btn.is-active {
+    border-color: var(--accent);
+    background: var(--bg);
+  }
+  .tv-note-topic-title {
+    font-size: 12.5px;
+    font-weight: 800;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tv-note-topic-date {
+    color: var(--ink-3);
+    font-size: 10.5px;
+  }
+  .tv-notes-editor {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .tv-notes-editor .tv-note-textarea {
+    flex: 1;
+    min-height: 150px;
+  }
+  .tv-pin-widget.is-detached .tv-notes-editor .tv-note-textarea {
+    min-height: 0;
+  }
   .tv-form-inline-grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
@@ -1063,6 +1145,9 @@ styleTag.textContent = `
   }
   .tv-pin-widget.is-detached .tv-pin-body:not(.is-menu-open) {
     overflow-y: auto;
+  }
+  .tv-pin-widget.is-detached .tv-pin-body.is-notes-open {
+    overflow: hidden;
   }
   .tv-pin-badges {
     display: flex;
@@ -1449,6 +1534,18 @@ styleTag.textContent = `
     .tv-checklist-required {
       grid-column: 1 / -1;
     }
+    .tv-notes-panel,
+    .tv-notes-panel.is-compact {
+      grid-template-columns: 1fr;
+    }
+    .tv-notes-list {
+      border-right: 0;
+      border-bottom: 1px solid var(--border);
+      padding-right: 0;
+      padding-bottom: 10px;
+      max-height: 180px;
+      overflow-y: auto;
+    }
     .tv-pin-meta {
       grid-template-columns: 1fr;
     }
@@ -1724,57 +1821,68 @@ const checklistProgress = (items) => {
   return { done, total: list.length };
 };
 
-const taskLocalNoteKey = (userId, taskId) => `otp:task-note:${Number(userId || 0)}:${Number(taskId || 0)}`;
+const LOCAL_NOTES_EVENT = 'otp:task-notes-changed';
+const localNotesKey = (userId) => `otp:task-notes:${Number(userId || 0)}`;
+const EMPTY_LOCAL_NOTE = { id: '', title: '', body: '', saved_at: null, created_at: null };
 
-const EMPTY_LOCAL_NOTE = { title: '', body: '', saved_at: null };
+const createLocalNoteId = () => (
+  `note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+);
 
-const normalizeTaskLocalNote = (value) => {
-  if (!value) return EMPTY_LOCAL_NOTE;
-  if (typeof value === 'object') {
-    return {
-      title: String(value.title || '').slice(0, 120),
-      body: String(value.body || value.text || ''),
-      saved_at: value.saved_at || value.updated_at || null,
-    };
-  }
-  const raw = String(value || '');
-  if (!raw.trim()) return EMPTY_LOCAL_NOTE;
+const normalizeLocalNote = (value) => {
+  const source = value && typeof value === 'object' ? value : {};
+  return {
+    id: String(source.id || createLocalNoteId()),
+    title: String(source.title || '').slice(0, 120),
+    body: String(source.body || source.text || ''),
+    saved_at: source.saved_at || source.updated_at || null,
+    created_at: source.created_at || source.saved_at || source.updated_at || new Date().toISOString(),
+  };
+};
+
+const createEmptyLocalNote = () => ({
+  ...EMPTY_LOCAL_NOTE,
+  id: createLocalNoteId(),
+  title: 'Новая тема',
+  created_at: new Date().toISOString(),
+});
+
+const normalizeLocalNotesList = (value) => {
+  const raw = Array.isArray(value) ? value : (Array.isArray(value?.notes) ? value.notes : []);
+  const seen = new Set();
+  return raw
+    .map(normalizeLocalNote)
+    .filter((note) => {
+      if (!note.id || seen.has(note.id)) return false;
+      seen.add(note.id);
+      return true;
+    })
+    .sort((a, b) => new Date(b.saved_at || b.created_at || 0) - new Date(a.saved_at || a.created_at || 0));
+};
+
+const readLocalNotes = (userId) => {
+  if (typeof window === 'undefined' || !userId) return [];
   try {
-    const parsed = JSON.parse(raw);
-    return normalizeTaskLocalNote(parsed);
+    const raw = window.localStorage.getItem(localNotesKey(userId));
+    if (!raw) return [];
+    return normalizeLocalNotesList(JSON.parse(raw));
   } catch (error) {
-    return { ...EMPTY_LOCAL_NOTE, body: raw };
+    return [];
   }
 };
 
-const readTaskLocalNote = (userId, taskId) => {
-  if (typeof window === 'undefined' || !userId || !taskId) return EMPTY_LOCAL_NOTE;
+const writeLocalNotes = (userId, notes) => {
+  if (typeof window === 'undefined' || !userId) return;
+  const normalized = normalizeLocalNotesList(notes);
   try {
-    return normalizeTaskLocalNote(window.localStorage.getItem(taskLocalNoteKey(userId, taskId)));
-  } catch (error) {
-    return EMPTY_LOCAL_NOTE;
-  }
-};
-
-const writeTaskLocalNote = (userId, taskId, note) => {
-  if (typeof window === 'undefined' || !userId || !taskId) return;
-  try {
-    const key = taskLocalNoteKey(userId, taskId);
-    const normalized = normalizeTaskLocalNote(note);
-    if (normalized.title.trim() || normalized.body.trim()) {
-      window.localStorage.setItem(key, JSON.stringify({ ...normalized, version: 2 }));
-    }
-    else window.localStorage.removeItem(key);
+    window.localStorage.setItem(localNotesKey(userId), JSON.stringify({ version: 1, notes: normalized }));
+    window.dispatchEvent(new CustomEvent(LOCAL_NOTES_EVENT, {
+      detail: { userId: Number(userId || 0), notes: normalized },
+    }));
   } catch (error) {
     // Local notes are best-effort browser state.
   }
 };
-
-const attachLocalNotes = (list, userId) => (
-  Array.isArray(list)
-    ? list.map((task) => ({ ...task, local_note: readTaskLocalNote(userId, task?.id) }))
-    : []
-);
 
 const EMPTY_TASK_FORM = {
   subject: '',
@@ -2007,6 +2115,165 @@ const AvatarCircle = ({ className, name, avatarUrl }) => (
 );
 
 /* ─── TaskRow — defined outside to avoid remount ─── */
+const useLocalNotes = (userId) => {
+  const normalizedUserId = Number(userId || 0);
+  const [notes, setNotes] = useState(() => readLocalNotes(normalizedUserId));
+  const [activeNoteId, setActiveNoteId] = useState('');
+  const [draft, setDraft] = useState(EMPTY_LOCAL_NOTE);
+
+  const applyNotes = useCallback((nextNotes, preferredId = '') => {
+    const normalized = normalizeLocalNotesList(nextNotes);
+    setNotes(normalized);
+    setActiveNoteId((prev) => {
+      const preferred = preferredId || prev;
+      if (preferred && normalized.some((note) => note.id === preferred)) return preferred;
+      return normalized[0]?.id || '';
+    });
+  }, []);
+
+  useEffect(() => {
+    applyNotes(readLocalNotes(normalizedUserId));
+  }, [applyNotes, normalizedUserId]);
+
+  useEffect(() => {
+    const active = notes.find((note) => note.id === activeNoteId) || null;
+    setDraft(active || EMPTY_LOCAL_NOTE);
+  }, [activeNoteId, notes]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const handleNotesChange = (event) => {
+      const eventUserId = Number(event?.detail?.userId || 0);
+      if (eventUserId !== normalizedUserId) return;
+      applyNotes(event?.detail?.notes || readLocalNotes(normalizedUserId), activeNoteId);
+    };
+    const handleStorage = (event) => {
+      if (event.key !== localNotesKey(normalizedUserId)) return;
+      applyNotes(readLocalNotes(normalizedUserId), activeNoteId);
+    };
+    window.addEventListener(LOCAL_NOTES_EVENT, handleNotesChange);
+    window.addEventListener('storage', handleStorage);
+    return () => {
+      window.removeEventListener(LOCAL_NOTES_EVENT, handleNotesChange);
+      window.removeEventListener('storage', handleStorage);
+    };
+  }, [activeNoteId, applyNotes, normalizedUserId]);
+
+  const createNote = useCallback(() => {
+    const nextNote = createEmptyLocalNote();
+    const nextNotes = [nextNote, ...notes];
+    writeLocalNotes(normalizedUserId, nextNotes);
+    applyNotes(nextNotes, nextNote.id);
+  }, [applyNotes, normalizedUserId, notes]);
+
+  const saveNote = useCallback(() => {
+    const base = draft?.id ? draft : createEmptyLocalNote();
+    const now = new Date().toISOString();
+    const nextNote = normalizeLocalNote({
+      ...base,
+      title: String(draft?.title || '').trim() || 'Без темы',
+      body: draft?.body || '',
+      saved_at: now,
+      created_at: base.created_at || now,
+    });
+    const exists = notes.some((note) => note.id === nextNote.id);
+    const nextNotes = exists
+      ? notes.map((note) => note.id === nextNote.id ? nextNote : note)
+      : [nextNote, ...notes];
+    writeLocalNotes(normalizedUserId, nextNotes);
+    applyNotes(nextNotes, nextNote.id);
+  }, [applyNotes, draft, normalizedUserId, notes]);
+
+  const deleteNote = useCallback((noteId = activeNoteId) => {
+    if (!noteId) return;
+    const nextNotes = notes.filter((note) => note.id !== noteId);
+    writeLocalNotes(normalizedUserId, nextNotes);
+    applyNotes(nextNotes);
+  }, [activeNoteId, applyNotes, normalizedUserId, notes]);
+
+  return {
+    notes,
+    activeNoteId,
+    draft,
+    setDraft,
+    selectNote: setActiveNoteId,
+    createNote,
+    saveNote,
+    deleteNote,
+  };
+};
+
+const TaskNotesPanel = React.memo(({ notesState, compact = false, fullScreen = false }) => {
+  const {
+    notes,
+    activeNoteId,
+    draft,
+    setDraft,
+    selectNote,
+    createNote,
+    saveNote,
+    deleteNote,
+  } = notesState;
+  const hasActiveDraft = Boolean(draft?.id);
+
+  return (
+    <div className={`tv-notes-panel ${compact ? 'is-compact' : ''} ${fullScreen ? 'is-fullscreen' : ''}`}>
+      <aside className="tv-notes-list">
+        <div className="tv-notes-list-head">
+          <span className="tv-block-label" style={{ margin: 0 }}>Темы</span>
+          <button type="button" className="tv-btn tv-btn-primary" onClick={createNote}>
+            <PlusIcon /> Новая
+          </button>
+        </div>
+        {notes.length > 0 ? notes.map((note) => (
+          <button
+            key={note.id}
+            type="button"
+            className={`tv-note-topic-btn ${note.id === activeNoteId ? 'is-active' : ''}`}
+            onClick={() => selectNote(note.id)}
+          >
+            <span className="tv-note-topic-title">{note.title || 'Без темы'}</span>
+            <span className="tv-note-topic-date">{note.saved_at ? fmtShortDateTime(note.saved_at) : 'Черновик'}</span>
+          </button>
+        )) : (
+          <span className="tv-pin-empty-actions">Тем пока нет. Создайте первую заметку.</span>
+        )}
+      </aside>
+
+      <section className="tv-notes-editor">
+        <input
+          className="tv-input"
+          value={draft?.title || ''}
+          maxLength={120}
+          placeholder="Тема заметки"
+          onChange={(event) => setDraft((prev) => ({ ...normalizeLocalNote(prev), title: event.target.value }))}
+        />
+        <textarea
+          className="tv-textarea tv-note-textarea"
+          value={draft?.body || ''}
+          placeholder="Текст заметки"
+          onChange={(event) => setDraft((prev) => ({ ...normalizeLocalNote(prev), body: event.target.value }))}
+        />
+        <div className="tv-notes-editor-footer">
+          <span className="tv-pin-empty-actions">
+            {draft?.saved_at ? `Сохранено: ${fmtShortDateTime(draft.saved_at)}` : 'Пока не сохранено'}
+          </span>
+          <div className="tv-notes-editor-actions">
+            {hasActiveDraft && (
+              <button type="button" className="tv-btn tv-btn-rose" onClick={() => deleteNote(draft.id)}>
+                Удалить
+              </button>
+            )}
+            <button type="button" className="tv-btn tv-btn-amber" onClick={saveNote}>
+              Сохранить
+            </button>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+});
+
 const ChecklistDraftEditor = React.memo(({ items, disabled = false, onChange, compact = false }) => {
   const list = Array.isArray(items) && items.length ? items : [createEmptyChecklistDraftItem()];
   return (
@@ -2106,7 +2373,7 @@ const TaskDrawer = React.memo(({
   task, onClose, actionLoadingKey,
   getActionButtons, openCompleteModal, openStatusModal, updateStatus, downloadAttachment,
   onEditTask, onDeleteTask, onTogglePinTask, onCopyTaskLink, onToggleChecklistItem,
-  onLocalNoteChange, isPinned,
+  isPinned,
 }) => {
   const sm = STATUS_META[task.status] || { label: task.status, badge: 'tv-badge-gray' };
   const tm = TAG_META[task.tag]       || { label: task.tag || '—', badge: 'tv-badge-gray' };
@@ -2117,7 +2384,6 @@ const TaskDrawer = React.memo(({
   const checklist       = Array.isArray(task.checklist)              ? task.checklist              : [];
   const progress        = checklistProgress(checklist);
   const deadlineLabel   = taskDeadlineLabel(task);
-  const [noteDraft, setNoteDraft] = useState(() => normalizeTaskLocalNote(task?.local_note));
   const btns            = getActionButtons(task);
   const editBtn         = btns.find((btn) => btn.action === 'edit');
   const deleteBtn       = btns.find((btn) => btn.action === 'delete');
@@ -2131,10 +2397,6 @@ const TaskDrawer = React.memo(({
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [onClose]);
-
-  useEffect(() => {
-    setNoteDraft(normalizeTaskLocalNote(task?.local_note));
-  }, [task?.id, task?.local_note]);
 
   const resolveHistorySide = useCallback((item) => {
     const changedById = Number(item?.changed_by || 0);
@@ -2307,40 +2569,6 @@ const TaskDrawer = React.memo(({
             </>
           )}
 
-          <hr className="tv-divider" />
-          <div>
-            <p className="tv-block-label">Локальные заметки</p>
-            <input
-              className="tv-input"
-              value={noteDraft.title}
-              maxLength={120}
-              placeholder="Тема заметки"
-              style={{ marginBottom: 8 }}
-              onChange={(event) => setNoteDraft((prev) => ({ ...prev, title: event.target.value }))}
-            />
-            <textarea
-              className="tv-textarea tv-note-textarea"
-              value={noteDraft.body}
-              placeholder="Личная заметка только в этом браузере"
-              onChange={(event) => setNoteDraft((prev) => ({ ...prev, body: event.target.value }))}
-            />
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginTop: 8 }}>
-              <span className="tv-pin-empty-actions">
-                {noteDraft.saved_at ? `Сохранено: ${fmtShortDateTime(noteDraft.saved_at)}` : 'Пока не сохранено'}
-              </span>
-              <button
-                type="button"
-                className="tv-btn tv-btn-amber"
-                onClick={() => onLocalNoteChange?.(task, {
-                  ...noteDraft,
-                  saved_at: new Date().toISOString()
-                })}
-              >
-                Сохранить заметку
-              </button>
-            </div>
-          </div>
-
           {(task.completion_summary || compAttachments.length > 0) && (
             <>
               <hr className="tv-divider" />
@@ -2433,7 +2661,6 @@ export const PinnedTaskWidget = React.memo(({
   onRunAction,
   onDownloadAttachment,
   onToggleChecklistItem,
-  onLocalNoteChange,
   onCreateTask,
   onEditTask,
   onDeleteTask,
@@ -2453,7 +2680,7 @@ export const PinnedTaskWidget = React.memo(({
   const [quickForm, setQuickForm] = useState(() => buildEmptyTaskForm());
   const [quickFormLoading, setQuickFormLoading] = useState(false);
   const [quickFormError, setQuickFormError] = useState('');
-  const [localNote, setLocalNote] = useState(EMPTY_LOCAL_NOTE);
+  const notesState = useLocalNotes(user?.id);
   const [paletteId, setPaletteId] = useState(() => {
     if (typeof window === 'undefined') return PIN_PALETTES[0].id;
     try {
@@ -2629,10 +2856,6 @@ export const PinnedTaskWidget = React.memo(({
   }, [initialExpanded, task?.id]);
 
   useEffect(() => {
-    setLocalNote(normalizeTaskLocalNote(task?.local_note ?? readTaskLocalNote(user?.id, task?.id)));
-  }, [task?.id, task?.local_note, user?.id]);
-
-  useEffect(() => {
     if (typeof window === 'undefined') return;
     try {
       window.localStorage.setItem(PIN_PALETTE_STORAGE_KEY, activePalette.id);
@@ -2645,16 +2868,6 @@ export const PinnedTaskWidget = React.memo(({
     if (!pipWindow) return;
     pipWindow.document.body.style.background = activePalette.vars['--bg'] || '#f4f3f0';
   }, [pipWindow, activePalette]);
-
-  const saveLocalNote = useCallback(() => {
-    const next = {
-      ...normalizeTaskLocalNote(localNote),
-      saved_at: new Date().toISOString(),
-    };
-    setLocalNote(next);
-    writeTaskLocalNote(user?.id, task?.id, next);
-    onLocalNoteChange?.(task, next);
-  }, [localNote, onLocalNoteChange, task, user?.id]);
 
   const openQuickCreate = useCallback(() => {
     setQuickForm(buildEmptyTaskForm({
@@ -3043,7 +3256,8 @@ export const PinnedTaskWidget = React.memo(({
         </div>
       </header>
 
-      <div className={`tv-pin-body ${taskMenuOpen ? 'is-menu-open' : ''}`}>
+      <div className={`tv-pin-body ${taskMenuOpen ? 'is-menu-open' : ''} ${noteOpen ? 'is-notes-open' : ''}`}>
+        {!noteOpen && (
         <div className="tv-pin-menu-head">
           <button
             type="button"
@@ -3062,8 +3276,11 @@ export const PinnedTaskWidget = React.memo(({
             {task?.is_regulation && <span className="tv-badge tv-badge-teal">Регламент</span>}
           </div>
         </div>
+        )}
 
-        {paletteOpen ? (
+        {noteOpen ? (
+          <TaskNotesPanel notesState={notesState} compact fullScreen={!!pipWindow} />
+        ) : paletteOpen ? (
           <div className="tv-pin-note-panel">
             <p className="tv-block-label" style={{ margin: 0 }}>Палитра PiP</p>
             <div className="tv-pin-palette-row">
@@ -3158,37 +3375,6 @@ export const PinnedTaskWidget = React.memo(({
           </div>
         ) : (
           <>
-            {noteOpen && (
-              <div className="tv-pin-note-panel">
-                <p className="tv-block-label" style={{ margin: 0 }}>Локальные заметки</p>
-                <input
-                  className="tv-input"
-                  value={localNote.title || ''}
-                  maxLength={120}
-                  placeholder="Тема заметки"
-                  onChange={(event) => setLocalNote((prev) => ({
-                    ...normalizeTaskLocalNote(prev),
-                    title: event.target.value,
-                  }))}
-                />
-                <textarea
-                  value={localNote.body || ''}
-                  placeholder="Личная заметка только в этом браузере"
-                  onChange={(event) => setLocalNote((prev) => ({
-                    ...normalizeTaskLocalNote(prev),
-                    body: event.target.value,
-                  }))}
-                />
-                <div className="tv-pin-note-footer">
-                  <span className="tv-pin-empty-actions">
-                    {localNote.saved_at ? `Сохранено: ${fmtShortDateTime(localNote.saved_at)}` : 'Пока не сохранено'}
-                  </span>
-                  <button type="button" className="tv-btn tv-btn-amber" onClick={saveLocalNote}>
-                    Сохранить заметку
-                  </button>
-                </div>
-              </div>
-            )}
             {quickTaskForm}
             {expanded && (
               <div className="tv-pin-summary">
@@ -3404,6 +3590,8 @@ const TasksView = ({
   const handledFocusRequestRef = useRef(0);
   const hasSyncedDrawerUrlRef   = useRef(false);
   const [form, setForm] = useState(() => buildEmptyTaskForm());
+  const [notesOpen, setNotesOpen] = useState(false);
+  const notesState = useLocalNotes(user?.id);
 
   const showToastRef = useRef(showToast);
   useEffect(() => { showToastRef.current = showToast; }, [showToast]);
@@ -3446,13 +3634,13 @@ const TasksView = ({
     setIsTasksLoading(true);
     try {
       const res  = await axios.get(`${apiBaseUrl}/api/tasks`, { headers: buildHeaders() });
-      const list = attachLocalNotes(Array.isArray(res?.data?.tasks) ? res.data.tasks : [], user?.id);
+      const list = Array.isArray(res?.data?.tasks) ? res.data.tasks : [];
       setTasks(list);
       setDrawerTask(prev => prev ? (list.find(t => t.id === prev.id) ?? prev) : null);
     } catch (e) {
       notify(e?.response?.data?.error || 'Не удалось загрузить задачи', 'error');
     } finally { setIsTasksLoading(false); }
-  }, [apiBaseUrl, buildHeaders, notify, user?.id]);
+  }, [apiBaseUrl, buildHeaders, notify]);
 
   useEffect(() => {
     if (!pinnedTaskId || typeof onPinnedTaskSync !== 'function') return;
@@ -3495,7 +3683,7 @@ const TasksView = ({
       if (requestId !== pagedRequestIdRef.current) return;
 
       const data = res?.data || {};
-      const list = attachLocalNotes(Array.isArray(data?.tasks) ? data.tasks : [], user?.id);
+      const list = Array.isArray(data?.tasks) ? data.tasks : [];
       const totals = data?.totals || {};
       const totalAll = Number(totals?.all);
       const totalFiltered = Number(totals?.filtered);
@@ -3520,7 +3708,6 @@ const TasksView = ({
     filterStatus,
     filterTag,
     filterPriority,
-    user?.id
   ]);
 
   useEffect(() => {
@@ -3608,7 +3795,7 @@ const TasksView = ({
       if (requestId !== personTasksRequestIdRef.current) return;
 
       const data = res?.data || {};
-      const list = attachLocalNotes(Array.isArray(data?.tasks) ? data.tasks : [], user?.id);
+      const list = Array.isArray(data?.tasks) ? data.tasks : [];
       const totalFiltered = Number(data?.totals?.filtered);
       setPersonTasks(list);
       setPersonTasksTotal(Number.isFinite(totalFiltered) ? totalFiltered : list.length);
@@ -3651,13 +3838,6 @@ const TasksView = ({
     setDrawerTask(prev => (Number(prev?.id || 0) === normalizedTaskId ? nextTask : prev));
     if (Number(pinnedTaskId || 0) === normalizedTaskId) onPinnedTaskSync?.(nextTask);
   }, [drawerTask, tasks, pagedTasks, personTasks, pinnedTaskId, onPinnedTaskSync]);
-
-  const updateLocalNote = useCallback((task, note) => {
-    const taskId = Number(task?.id || 0);
-    if (!taskId) return;
-    writeTaskLocalNote(user?.id, taskId, note);
-    patchTaskEverywhere(taskId, (current) => ({ ...current, local_note: note }));
-  }, [patchTaskEverywhere, user?.id]);
 
   const toggleChecklistItem = useCallback(async (task, item, isDone) => {
     const taskId = Number(task?.id || 0);
@@ -4127,6 +4307,14 @@ const TasksView = ({
       <div className="tv-topbar">
         <h1 className="tv-topbar-title">Задачи</h1>
         <div className="tv-topbar-actions">
+          <button
+            className={`tv-btn ${notesOpen ? 'tv-btn-amber' : 'tv-btn-ghost'}`}
+            type="button"
+            onClick={() => setNotesOpen((prev) => !prev)}
+          >
+            <StickyNote size={13} strokeWidth={2} />
+            Заметки
+          </button>
           <button className="tv-btn tv-btn-ghost" onClick={refreshTasksData} disabled={isAnyTasksLoading}>
             <RefreshCw size={13} strokeWidth={2} style={{ transition: 'transform .4s', transform: isAnyTasksLoading ? 'rotate(360deg)' : 'none' }} />
             {isAnyTasksLoading ? 'Обновляю...' : 'Обновить'}
@@ -4136,6 +4324,15 @@ const TasksView = ({
           </button>
         </div>
       </div>
+
+      {notesOpen && (
+        <div className="tv-section">
+          <div className="tv-section-header">
+            <span className="tv-section-title heading">Заметки</span>
+          </div>
+          <TaskNotesPanel notesState={notesState} />
+        </div>
+      )}
 
       {/* Stats strip */}
       <div className="tv-stats-strip">
@@ -4333,7 +4530,6 @@ const TasksView = ({
           onDeleteTask={openDeleteModal}
           onCopyTaskLink={copyTaskLink}
           onToggleChecklistItem={toggleChecklistItem}
-          onLocalNoteChange={updateLocalNote}
           onTogglePinTask={(task) => {
             if (Number(task?.id || 0) === Number(pinnedTaskId)) {
               onUnpinTask?.();
