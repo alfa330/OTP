@@ -3161,6 +3161,7 @@ export const PinnedTaskWidget = React.memo(({
   const checklist = Array.isArray(task?.checklist) ? task.checklist : [];
   const progress = checklistProgress(checklist);
   const activePalette = PIN_PALETTES.find((item) => item.id === paletteId) || PIN_PALETTES[0];
+  const canUseDocumentPictureInPicture = typeof window !== 'undefined' && Boolean(window.documentPictureInPicture?.requestWindow);
   const actionButtons = useMemo(
     () => buildTaskActionButtons(task, currentUserId, currentUserRole)
       .filter((btn) => !['edit', 'delete'].includes(btn.action)),
@@ -3466,7 +3467,7 @@ export const PinnedTaskWidget = React.memo(({
       pipWindow.focus?.();
       return;
     }
-    if (typeof window === 'undefined' || !window.documentPictureInPicture?.requestWindow) return;
+    if (!canUseDocumentPictureInPicture) return;
     try {
       const nextPipWindow = await window.documentPictureInPicture.requestWindow({
         width: 420,
@@ -3486,7 +3487,7 @@ export const PinnedTaskWidget = React.memo(({
     } catch (error) {
       // The browser can reject PiP if it is unavailable or not user-triggered.
     }
-  }, [activePalette.vars, onStateChange, pipWindow]);
+  }, [activePalette.vars, canUseDocumentPictureInPicture, onStateChange, pipWindow]);
 
   useEffect(() => {
     if (!autoOpenPipRequestId) return;
@@ -3732,7 +3733,7 @@ export const PinnedTaskWidget = React.memo(({
           >
             <Palette size={15} strokeWidth={2} />
           </button>
-          {!pipWindow && typeof window !== 'undefined' && window.documentPictureInPicture?.requestWindow && (
+          {!pipWindow && canUseDocumentPictureInPicture && (
             <button
               type="button"
               className="tv-pin-header-btn"
@@ -4066,7 +4067,8 @@ export const PinnedTaskWidget = React.memo(({
     </section>
   );
 
-  return pipContainer ? createPortal(widgetMarkup, pipContainer) : widgetMarkup;
+  if (pipContainer) return createPortal(widgetMarkup, pipContainer);
+  return canUseDocumentPictureInPicture ? null : widgetMarkup;
 });
 
 /* ─── Skeleton loading ─── */
