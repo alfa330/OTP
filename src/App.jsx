@@ -28330,10 +28330,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [pinnedTask, setPinnedTask] = useState(null);
             const [pinnedTaskPool, setPinnedTaskPool] = useState([]);
             const [isPinnedTaskPoolLoading, setIsPinnedTaskPoolLoading] = useState(false);
+            const [pinnedTaskRecipients, setPinnedTaskRecipients] = useState([]);
+            const [isPinnedTaskRecipientsLoading, setIsPinnedTaskRecipientsLoading] = useState(false);
             const [pinnedTaskWidgetState, setPinnedTaskWidgetState] = useState({
                 expanded: false,
                 position: null,
             });
+            const [pinnedTaskPipRequestId, setPinnedTaskPipRequestId] = useState(0);
             const [pinnedTaskActionLoadingKey, setPinnedTaskActionLoadingKey] = useState('');
             const [taskFocusRequest, setTaskFocusRequest] = useState(null);
             const [taskRefreshToken, setTaskRefreshToken] = useState(0);
@@ -29627,6 +29630,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setPinnedTaskActionLoadingKey('');
                 setPinnedTaskPool([]);
                 setIsPinnedTaskPoolLoading(false);
+                setPinnedTaskRecipients([]);
+                setIsPinnedTaskRecipientsLoading(false);
 
                 const storageKey = buildPinnedTaskStorageKey(user?.id);
                 const storage = safeGetBrowserStorage('localStorage');
@@ -29678,6 +29683,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const handlePinTask = useCallback((task) => {
                 if (!task?.id) return;
                 setPinnedTask(task);
+                setPinnedTaskWidgetState((prev) => ({
+                    ...prev,
+                    expanded: true,
+                }));
+                setPinnedTaskPipRequestId((prev) => prev + 1);
                 setPinnedTaskPool((prev) => {
                     const next = Array.isArray(prev) ? [...prev] : [];
                     const existingIndex = next.findIndex((item) => Number(item?.id || 0) === Number(task.id));
@@ -29733,10 +29743,38 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             }, [user?.id, canUsePinnedTasks, withAccessTokenHeader]);
 
+            const refreshPinnedTaskRecipients = useCallback(async () => {
+                if (!user?.id || !canUsePinnedTasks) {
+                    setPinnedTaskRecipients([]);
+                    return [];
+                }
+
+                setIsPinnedTaskRecipientsLoading(true);
+                try {
+                    const response = await axios.get(`${API_BASE_URL}/api/tasks/recipients`, {
+                        headers: withAccessTokenHeader({
+                            'X-User-Id': String(user.id),
+                        }),
+                    });
+                    const recipients = Array.isArray(response?.data?.recipients) ? response.data.recipients : [];
+                    setPinnedTaskRecipients(recipients);
+                    return recipients;
+                } catch (error) {
+                    return [];
+                } finally {
+                    setIsPinnedTaskRecipientsLoading(false);
+                }
+            }, [user?.id, canUsePinnedTasks, withAccessTokenHeader]);
+
             useEffect(() => {
                 if (!user?.id || !canUsePinnedTasks) return;
                 refreshPinnedTaskPool();
             }, [user?.id, canUsePinnedTasks, taskRefreshToken, refreshPinnedTaskPool]);
+
+            useEffect(() => {
+                if (!user?.id || !canUsePinnedTasks) return;
+                refreshPinnedTaskRecipients();
+            }, [user?.id, canUsePinnedTasks, refreshPinnedTaskRecipients]);
 
             const openPinnedTaskDetails = useCallback((task) => {
                 const taskId = Number(task?.id || 0);
@@ -29836,6 +29874,100 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (!taskId) return;
                 updatePinnedTaskEverywhere(taskId, (current) => ({ ...current, local_note: note }));
             }, [updatePinnedTaskEverywhere]);
+
+            const appendPinnedTaskPayloadFormData = useCallback((body, payload = {}) => {
+                body.append('subject', String(payload.subject || ''));
+                body.append('description', String(payload.description || ''));
+                body.append('tag', String(payload.tag || 'task'));
+                body.append('priority', String(payload.priority || 'normal'));
+                body.append('assigned_to', String(payload.assigned_to || ''));
+                body.append('deadline_days', String(payload.deadline_days || '0'));
+                body.append('deadline_hours', String(payload.deadline_hours || '0'));
+                body.append('deadline_minutes', String(payload.deadline_minutes || '0'));
+                body.append('is_regulation', payload.is_regulation ? '1' : '0');
+                body.append('recurrence_type', String(payload.recurrence_type || ''));
+                body.append('recurrence_interval', String(payload.recurrence_interval || '1'));
+                body.append('checklist_items', JSON.stringify(Array.isArray(payload.checklist_items) ? payload.checklist_items : []));
+            }, []);
+
+            const createPinnedTask = useCallback(async (payload) => {
+                if (!user?.id) throw new Error('User is not authenticated');
+                const body = new FormData();
+                appendPinnedTaskPayloadFormData(body, payload);
+                const response = await axios.post(
+                    `${API_BASE_URL}/api/tasks`,
+                    body,
+                    {
+                        headers: withAccessTokenHeader({
+                            'X-User-Id': String(user.id),
+                        }),
+                    }
+                );
+                showToast(response?.data?.message || 'Задача создана', 'success');
+                if (response?.data?.warning) showToast(response.data.warning, 'error');
+                const createdTaskId = Number(response?.data?.task_id || 0);
+                const list = await refreshPinnedTaskPool();
+                const createdTask = list.find((item) => Number(item?.id || 0) === createdTaskId) || null;
+                setTaskRefreshToken((prev) => prev + 1);
+                return createdTask;
+            }, [appendPinnedTaskPayloadFormData, refreshPinnedTaskPool, showToast, user?.id, withAccessTokenHeader]);
+
+            const editPinnedTask = useCallback(async (task, payload) => {
+                const taskId = Number(task?.id || 0);
+                if (!taskId || !user?.id) throw new Error('Task is not available');
+                const key = `${taskId}:edit`;
+                setPinnedTaskActionLoadingKey(key);
+                try {
+                    const response = await axios.patch(
+                        `${API_BASE_URL}/api/tasks/${taskId}`,
+                        payload,
+                        {
+                            headers: withAccessTokenHeader({
+                                'X-User-Id': String(user.id),
+                            }),
+                        }
+                    );
+                    showToast(response?.data?.message || 'Задача обновлена', 'success');
+                    if (response?.data?.warning) showToast(response.data.warning, 'error');
+                    const list = await refreshPinnedTaskPool();
+                    const updatedTask = list.find((item) => Number(item?.id || 0) === taskId) || null;
+                    if (updatedTask) setPinnedTask(updatedTask);
+                    setTaskRefreshToken((prev) => prev + 1);
+                    return updatedTask || response?.data?.task || null;
+                } finally {
+                    setPinnedTaskActionLoadingKey('');
+                }
+            }, [refreshPinnedTaskPool, showToast, user?.id, withAccessTokenHeader]);
+
+            const deletePinnedTask = useCallback(async (task) => {
+                const taskId = Number(task?.id || 0);
+                if (!taskId || !user?.id) throw new Error('Task is not available');
+                const key = `${taskId}:delete`;
+                setPinnedTaskActionLoadingKey(key);
+                try {
+                    const response = await axios.delete(
+                        `${API_BASE_URL}/api/tasks/${taskId}`,
+                        {
+                            headers: withAccessTokenHeader({
+                                'X-User-Id': String(user.id),
+                            }),
+                        }
+                    );
+                    showToast(response?.data?.message || 'Задача удалена', 'success');
+                    if (response?.data?.warning) showToast(response.data.warning, 'error');
+                    setPinnedTaskPool((prev) => (
+                        Array.isArray(prev)
+                            ? prev.filter((item) => Number(item?.id || 0) !== taskId)
+                            : prev
+                    ));
+                    setPinnedTask((prev) => (Number(prev?.id || 0) === taskId ? null : prev));
+                    setTaskRefreshToken((prev) => prev + 1);
+                    await refreshPinnedTaskPool();
+                    return true;
+                } finally {
+                    setPinnedTaskActionLoadingKey('');
+                }
+            }, [refreshPinnedTaskPool, showToast, user?.id, withAccessTokenHeader]);
 
             const downloadPinnedTaskAttachment = useCallback(async (attachment) => {
                 const attachmentId = Number(attachment?.id || 0);
@@ -42358,8 +42490,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             user={user}
                             availableTasks={pinnedTaskPool}
                             isTasksLoading={isPinnedTaskPoolLoading}
+                            taskRecipients={pinnedTaskRecipients}
+                            isTaskRecipientsLoading={isPinnedTaskRecipientsLoading}
                             initialExpanded={pinnedTaskWidgetState.expanded}
                             initialPosition={pinnedTaskWidgetState.position}
+                            autoOpenPipRequestId={pinnedTaskPipRequestId}
                             actionLoadingKey={pinnedTaskActionLoadingKey}
                             onUnpin={handleUnpinTask}
                             onOpenDetails={openPinnedTaskDetails}
@@ -42367,6 +42502,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             onDownloadAttachment={downloadPinnedTaskAttachment}
                             onToggleChecklistItem={togglePinnedTaskChecklistItem}
                             onLocalNoteChange={handlePinnedTaskLocalNoteChange}
+                            onCreateTask={createPinnedTask}
+                            onEditTask={editPinnedTask}
+                            onDeleteTask={deletePinnedTask}
                             onSelectTask={handlePinTask}
                             onStateChange={setPinnedTaskWidgetState}
                         />
