@@ -1146,7 +1146,8 @@ styleTag.textContent = `
   .tv-pin-widget.is-detached .tv-pin-body:not(.is-menu-open) {
     overflow-y: auto;
   }
-  .tv-pin-widget.is-detached .tv-pin-body.is-notes-open {
+  .tv-pin-widget.is-detached .tv-pin-body.is-notes-open,
+  .tv-pin-widget.is-detached .tv-pin-body.is-task-form-open {
     overflow: hidden;
   }
   .tv-pin-badges {
@@ -1229,6 +1230,40 @@ styleTag.textContent = `
     border-radius: 10px;
     background: var(--surface-2);
     border: 1px solid var(--border);
+  }
+  .tv-pin-task-form.is-fullscreen {
+    flex: 1;
+    min-height: 0;
+    height: 100%;
+    overflow-y: auto;
+    padding: 12px;
+    border-radius: 0;
+    border: 0;
+    background: var(--surface);
+  }
+  .tv-pin-task-form.is-fullscreen .tv-pin-task-form-title {
+    padding: 2px 0 4px;
+    border-bottom: 1px solid var(--border);
+  }
+  .tv-pin-task-form.is-fullscreen .tv-form-field,
+  .tv-pin-task-form.is-fullscreen .tv-soft-block {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    padding: 9px;
+  }
+  .tv-pin-task-form.is-fullscreen .tv-soft-block .tv-form-field {
+    background: transparent;
+    border: 0;
+    padding: 0;
+  }
+  .tv-pin-task-form.is-fullscreen .tv-pin-task-form-actions {
+    position: sticky;
+    bottom: 0;
+    margin-top: auto;
+    padding-top: 8px;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
   }
   .tv-pin-task-form-title {
     margin: 0;
@@ -2513,7 +2548,9 @@ const TaskDrawer = React.memo(({
           <div className="tv-info-grid">
             <div className="tv-info-item"><label>Создано</label><span>{fmt(task.created_at)}</span></div>
             <div className="tv-info-item"><label>Статус</label><span>{sm.label}</span></div>
-            <div className="tv-info-item"><label>Дедлайн</label><span className={isTaskOverdue(task) ? 'tv-deadline-chip is-overdue' : ''}>{deadlineLabel || '—'}</span></div>
+            {deadlineLabel && (
+              <div className="tv-info-item"><label>Дедлайн</label><span className={isTaskOverdue(task) ? 'tv-deadline-chip is-overdue' : ''}>{deadlineLabel}</span></div>
+            )}
             <div className="tv-info-item"><label>Повторение</label><span>{task?.recurrence_type ? `${RECURRENCE_OPTIONS.find(item => item.value === task.recurrence_type)?.label || task.recurrence_type}${Number(task?.recurrence_interval || 1) > 1 ? ` · раз в ${task.recurrence_interval}` : ''}` : (task?.is_regulation ? 'Разовый регламент' : '—')}</span></div>
           </div>
 
@@ -3020,8 +3057,23 @@ export const PinnedTaskWidget = React.memo(({
 
   if (!task?.id) return null;
 
+  const pinHeaderKicker = noteOpen
+    ? 'Локальные заметки'
+    : quickFormMode === 'create'
+      ? 'Создание задачи'
+      : quickFormMode === 'edit'
+        ? 'Редактирование задачи'
+        : 'Закрепленная задача';
+  const pinHeaderTitle = noteOpen
+    ? 'Темы и заметки'
+    : quickFormMode === 'create'
+      ? 'Новая задача'
+      : quickFormMode === 'edit'
+        ? (task.subject || 'Редактирование')
+        : (task.subject || 'Без темы');
+
   const quickTaskForm = quickFormMode ? (
-    <form className="tv-pin-task-form" onSubmit={submitQuickForm}>
+    <form className={`tv-pin-task-form ${pipWindow ? 'is-fullscreen' : ''}`} onSubmit={submitQuickForm}>
       <p className="tv-pin-task-form-title">
         {quickFormMode === 'edit' ? 'Редактирование задачи' : 'Новая задача'}
       </p>
@@ -3185,8 +3237,8 @@ export const PinnedTaskWidget = React.memo(({
           </button>
         )}
         <div className="tv-pin-heading">
-          <span className="tv-pin-kicker">Закрепленная задача</span>
-          <h2 className="tv-pin-title">{task.subject || 'Без темы'}</h2>
+          <span className="tv-pin-kicker">{pinHeaderKicker}</span>
+          <h2 className="tv-pin-title">{pinHeaderTitle}</h2>
         </div>
         <div className="tv-pin-header-actions">
           <button
@@ -3256,8 +3308,8 @@ export const PinnedTaskWidget = React.memo(({
         </div>
       </header>
 
-      <div className={`tv-pin-body ${taskMenuOpen ? 'is-menu-open' : ''} ${noteOpen ? 'is-notes-open' : ''}`}>
-        {!noteOpen && (
+      <div className={`tv-pin-body ${taskMenuOpen ? 'is-menu-open' : ''} ${noteOpen ? 'is-notes-open' : ''} ${quickFormMode ? 'is-task-form-open' : ''}`}>
+        {!noteOpen && !quickFormMode && (
         <div className="tv-pin-menu-head">
           <button
             type="button"
@@ -3280,6 +3332,8 @@ export const PinnedTaskWidget = React.memo(({
 
         {noteOpen ? (
           <TaskNotesPanel notesState={notesState} compact fullScreen={!!pipWindow} />
+        ) : quickFormMode ? (
+          quickTaskForm
         ) : paletteOpen ? (
           <div className="tv-pin-note-panel">
             <p className="tv-block-label" style={{ margin: 0 }}>Палитра PiP</p>
@@ -3375,7 +3429,6 @@ export const PinnedTaskWidget = React.memo(({
           </div>
         ) : (
           <>
-            {quickTaskForm}
             {expanded && (
               <div className="tv-pin-summary">
                 <p className="tv-pin-description">
@@ -3390,14 +3443,18 @@ export const PinnedTaskWidget = React.memo(({
                     <span className="tv-pin-meta-label">Постановщик</span>
                     <span className="tv-pin-meta-value">{task?.creator?.name || '—'}</span>
                   </div>
-                  <div className="tv-pin-meta-item">
-                    <span className="tv-pin-meta-label">Дедлайн</span>
-                    <span className="tv-pin-meta-value">{taskDeadlineLabel(task) || '—'}</span>
-                  </div>
-                  <div className="tv-pin-meta-item">
-                    <span className="tv-pin-meta-label">Чек-лист</span>
-                    <span className="tv-pin-meta-value">{progress.total ? `${progress.done}/${progress.total}` : '—'}</span>
-                  </div>
+                  {task?.due_at && (
+                    <div className="tv-pin-meta-item">
+                      <span className="tv-pin-meta-label">Дедлайн</span>
+                      <span className="tv-pin-meta-value">{taskDeadlineLabel(task)}</span>
+                    </div>
+                  )}
+                  {progress.total > 0 && (
+                    <div className="tv-pin-meta-item">
+                      <span className="tv-pin-meta-label">Чек-лист</span>
+                      <span className="tv-pin-meta-value">{`${progress.done}/${progress.total}`}</span>
+                    </div>
+                  )}
                 </div>
                 {checklist.length > 0 && (
                   <div className="tv-pin-mini-checklist">
