@@ -727,6 +727,42 @@ styleTag.textContent = `
     color: var(--ink-2);
   }
   .tv-form-switch input { accent-color: var(--ink); }
+  .tv-checklist-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .tv-checklist-editor-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto 34px;
+    gap: 8px;
+    align-items: center;
+  }
+  .tv-checklist-required {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--ink-2);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .tv-checklist-required input { accent-color: var(--emerald); }
+  .tv-checklist-editor-remove {
+    width: 34px;
+    height: 34px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--rose);
+    cursor: pointer;
+  }
+  .tv-checklist-editor-remove:hover:not(:disabled) {
+    background: #fff1f2;
+    border-color: #fecdd3;
+  }
 
   .tv-completion-block {
     background: #f0f4ff; border: 1px solid #c7d2fe;
@@ -1092,6 +1128,53 @@ styleTag.textContent = `
   .tv-pin-mini-checklist .tv-checklist-row {
     padding: 7px 8px;
   }
+  .tv-pin-note-footer,
+  .tv-pin-task-form-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .tv-pin-task-form {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    padding: 10px;
+    border-radius: 10px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+  }
+  .tv-pin-task-form-title {
+    margin: 0;
+    color: var(--ink);
+    font-size: 13px;
+    font-weight: 800;
+  }
+  .tv-pin-task-form-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .tv-pin-task-form .tv-textarea {
+    min-height: 64px;
+  }
+  .tv-pin-task-form .tv-form-field {
+    margin: 0;
+  }
+  .tv-pin-task-form .tv-form-field label {
+    font-size: 10.5px;
+  }
+  .tv-checklist-editor.is-compact .tv-checklist-editor-row {
+    grid-template-columns: minmax(0, 1fr) 34px;
+  }
+  .tv-checklist-editor.is-compact .tv-checklist-required {
+    grid-column: 1 / -1;
+  }
+  .tv-pin-form-error {
+    color: var(--rose);
+    font-size: 12px;
+  }
   .tv-pin-file-section .tv-block-label {
     margin: 0 0 6px;
   }
@@ -1167,8 +1250,9 @@ styleTag.textContent = `
   }
   .tv-pin-person-btn:hover,
   .tv-pin-person-btn.is-active {
-    border-color: #c7d2fe;
-    background: #eef2ff;
+    border-color: var(--accent);
+    background: var(--surface-2);
+    color: var(--ink);
   }
   .tv-pin-person-btn .tv-avatar-md {
     width: 30px;
@@ -1268,8 +1352,9 @@ styleTag.textContent = `
   }
   .tv-pin-person-task:hover,
   .tv-pin-person-task.is-active {
-    border-color: #c7d2fe;
-    background: #eef2ff;
+    border-color: var(--accent);
+    background: var(--surface-2);
+    color: var(--ink);
   }
   .tv-pin-person-task-title {
     font-size: 12px;
@@ -1353,6 +1438,16 @@ styleTag.textContent = `
     .tv-participants { flex-direction: column; gap: 10px; }
     .tv-pin-widget {
       width: min(360px, calc(100vw - 16px));
+    }
+    .tv-checklist-editor-row,
+    .tv-pin-task-form-grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .tv-checklist-editor-row {
+      grid-template-columns: minmax(0, 1fr) 34px;
+    }
+    .tv-checklist-required {
+      grid-column: 1 / -1;
     }
     .tv-pin-meta {
       grid-template-columns: 1fr;
@@ -1581,19 +1676,47 @@ const splitDeadlineMinutes = (totalMinutes) => {
   return { days: String(days || ''), hours: String(hours || ''), minutes: String(minutes || '') };
 };
 
-const normalizeChecklistText = (value) => (
-  String(value || '')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .join('\n')
-);
+const createEmptyChecklistDraftItem = () => ({ title: '', is_required: true });
 
-const checklistToText = (items) => (
-  Array.isArray(items)
-    ? items.map((item) => item?.title || '').filter(Boolean).join('\n')
-    : ''
-);
+const normalizeChecklistItems = (items) => {
+  const source = Array.isArray(items) ? items : String(items || '').split('\n');
+  const seen = new Set();
+  return source
+    .map((item) => {
+      const title = String((typeof item === 'string' ? item : item?.title) || '').trim();
+      if (!title) return null;
+      const key = title.toLocaleLowerCase('ru-RU');
+      if (seen.has(key)) return null;
+      seen.add(key);
+      return {
+        title,
+        is_required: typeof item === 'object' ? item?.is_required !== false : true,
+      };
+    })
+    .filter(Boolean);
+};
+
+const checklistToFormItems = (items) => {
+  const normalized = normalizeChecklistItems(items);
+  return normalized.length ? normalized : [createEmptyChecklistDraftItem()];
+};
+
+const updateChecklistDraftItem = (items, index, patch) => {
+  const list = Array.isArray(items) && items.length ? items : [createEmptyChecklistDraftItem()];
+  return list.map((item, itemIndex) => (
+    itemIndex === index ? { ...item, ...patch } : item
+  ));
+};
+
+const appendChecklistDraftItem = (items) => [
+  ...(Array.isArray(items) ? items : []),
+  createEmptyChecklistDraftItem(),
+];
+
+const removeChecklistDraftItem = (items, index) => {
+  const next = (Array.isArray(items) ? items : []).filter((_, itemIndex) => itemIndex !== index);
+  return next.length ? next : [createEmptyChecklistDraftItem()];
+};
 
 const checklistProgress = (items) => {
   const list = Array.isArray(items) ? items : [];
@@ -1603,12 +1726,33 @@ const checklistProgress = (items) => {
 
 const taskLocalNoteKey = (userId, taskId) => `otp:task-note:${Number(userId || 0)}:${Number(taskId || 0)}`;
 
-const readTaskLocalNote = (userId, taskId) => {
-  if (typeof window === 'undefined' || !userId || !taskId) return '';
+const EMPTY_LOCAL_NOTE = { title: '', body: '', saved_at: null };
+
+const normalizeTaskLocalNote = (value) => {
+  if (!value) return EMPTY_LOCAL_NOTE;
+  if (typeof value === 'object') {
+    return {
+      title: String(value.title || '').slice(0, 120),
+      body: String(value.body || value.text || ''),
+      saved_at: value.saved_at || value.updated_at || null,
+    };
+  }
+  const raw = String(value || '');
+  if (!raw.trim()) return EMPTY_LOCAL_NOTE;
   try {
-    return window.localStorage.getItem(taskLocalNoteKey(userId, taskId)) || '';
+    const parsed = JSON.parse(raw);
+    return normalizeTaskLocalNote(parsed);
   } catch (error) {
-    return '';
+    return { ...EMPTY_LOCAL_NOTE, body: raw };
+  }
+};
+
+const readTaskLocalNote = (userId, taskId) => {
+  if (typeof window === 'undefined' || !userId || !taskId) return EMPTY_LOCAL_NOTE;
+  try {
+    return normalizeTaskLocalNote(window.localStorage.getItem(taskLocalNoteKey(userId, taskId)));
+  } catch (error) {
+    return EMPTY_LOCAL_NOTE;
   }
 };
 
@@ -1616,8 +1760,10 @@ const writeTaskLocalNote = (userId, taskId, note) => {
   if (typeof window === 'undefined' || !userId || !taskId) return;
   try {
     const key = taskLocalNoteKey(userId, taskId);
-    const value = String(note || '');
-    if (value.trim()) window.localStorage.setItem(key, value);
+    const normalized = normalizeTaskLocalNote(note);
+    if (normalized.title.trim() || normalized.body.trim()) {
+      window.localStorage.setItem(key, JSON.stringify({ ...normalized, version: 2 }));
+    }
     else window.localStorage.removeItem(key);
   } catch (error) {
     // Local notes are best-effort browser state.
@@ -1642,16 +1788,34 @@ const EMPTY_TASK_FORM = {
   isRegulation: false,
   recurrenceType: '',
   recurrenceInterval: '1',
-  checklistText: '',
+  checklistItems: [],
 };
 
-const formChecklistItems = (text) => (
-  normalizeChecklistText(text)
-    .split('\n')
-    .map((title) => title.trim())
-    .filter(Boolean)
-    .map((title) => ({ title, is_required: true }))
-);
+const buildEmptyTaskForm = (overrides = {}) => ({
+  ...EMPTY_TASK_FORM,
+  checklistItems: [createEmptyChecklistDraftItem()],
+  ...overrides,
+});
+
+const taskToTaskForm = (task, fallbackAssignedTo = '') => {
+  const deadline = splitDeadlineMinutes(task?.deadline_duration_minutes);
+  return buildEmptyTaskForm({
+    subject: task?.subject || '',
+    description: task?.description || '',
+    tag: task?.tag || 'task',
+    priority: task?.priority || 'normal',
+    assignedTo: String(task?.assignee?.id || fallbackAssignedTo || ''),
+    deadlineDays: deadline.days,
+    deadlineHours: deadline.hours,
+    deadlineMinutes: deadline.minutes,
+    isRegulation: Boolean(task?.is_regulation || task?.recurrence_type),
+    recurrenceType: task?.recurrence_type || '',
+    recurrenceInterval: String(task?.recurrence_interval || '1'),
+    checklistItems: checklistToFormItems(task?.checklist),
+  });
+};
+
+const formChecklistItems = (items) => normalizeChecklistItems(items);
 
 const numberFieldValue = (value) => {
   const num = Number(value);
@@ -1670,7 +1834,7 @@ const buildTaskJsonPayload = (values) => ({
   is_regulation: Boolean(values.isRegulation),
   recurrence_type: values.isRegulation ? (values.recurrenceType || 'daily') : '',
   recurrence_interval: values.isRegulation ? numberFieldValue(values.recurrenceInterval || '1') : '1',
-  checklist_items: formChecklistItems(values.checklistText),
+  checklist_items: formChecklistItems(values.checklistItems),
 });
 
 const appendTaskFormData = (body, values) => {
@@ -1843,6 +2007,52 @@ const AvatarCircle = ({ className, name, avatarUrl }) => (
 );
 
 /* ─── TaskRow — defined outside to avoid remount ─── */
+const ChecklistDraftEditor = React.memo(({ items, disabled = false, onChange, compact = false }) => {
+  const list = Array.isArray(items) && items.length ? items : [createEmptyChecklistDraftItem()];
+  return (
+    <div className={`tv-checklist-editor ${compact ? 'is-compact' : ''}`}>
+      {list.map((item, index) => (
+        <div className="tv-checklist-editor-row" key={`checklist-draft-${index}`}>
+          <input
+            className="tv-input"
+            value={item.title || ''}
+            disabled={disabled}
+            placeholder={`Пункт чек-листа ${index + 1}`}
+            onChange={(event) => onChange?.(updateChecklistDraftItem(list, index, { title: event.target.value }))}
+          />
+          <label className="tv-checklist-required">
+            <input
+              type="checkbox"
+              checked={item.is_required !== false}
+              disabled={disabled}
+              onChange={(event) => onChange?.(updateChecklistDraftItem(list, index, { is_required: event.target.checked }))}
+            />
+            Обязательный
+          </label>
+          <button
+            type="button"
+            className="tv-checklist-editor-remove"
+            disabled={disabled}
+            title="Удалить пункт"
+            aria-label="Удалить пункт"
+            onClick={() => onChange?.(removeChecklistDraftItem(list, index))}
+          >
+            <CloseIcon />
+          </button>
+        </div>
+      ))}
+      <button
+        type="button"
+        className="tv-btn tv-btn-ghost"
+        disabled={disabled}
+        onClick={() => onChange?.(appendChecklistDraftItem(list))}
+      >
+        <PlusIcon /> Добавить пункт чек-листа
+      </button>
+    </div>
+  );
+});
+
 const TaskRow = React.memo(({ task, onClick, onPin, isPinned }) => {
   const sm = STATUS_META[task.status] || { label: task.status, badge: 'tv-badge-gray', dot: '#ccc' };
   const tm = TAG_META[task.tag]       || { label: task.tag || '—', badge: 'tv-badge-gray' };
@@ -1907,6 +2117,7 @@ const TaskDrawer = React.memo(({
   const checklist       = Array.isArray(task.checklist)              ? task.checklist              : [];
   const progress        = checklistProgress(checklist);
   const deadlineLabel   = taskDeadlineLabel(task);
+  const [noteDraft, setNoteDraft] = useState(() => normalizeTaskLocalNote(task?.local_note));
   const btns            = getActionButtons(task);
   const editBtn         = btns.find((btn) => btn.action === 'edit');
   const deleteBtn       = btns.find((btn) => btn.action === 'delete');
@@ -1920,6 +2131,10 @@ const TaskDrawer = React.memo(({
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [onClose]);
+
+  useEffect(() => {
+    setNoteDraft(normalizeTaskLocalNote(task?.local_note));
+  }, [task?.id, task?.local_note]);
 
   const resolveHistorySide = useCallback((item) => {
     const changedById = Number(item?.changed_by || 0);
@@ -2095,12 +2310,35 @@ const TaskDrawer = React.memo(({
           <hr className="tv-divider" />
           <div>
             <p className="tv-block-label">Локальные заметки</p>
+            <input
+              className="tv-input"
+              value={noteDraft.title}
+              maxLength={120}
+              placeholder="Тема заметки"
+              style={{ marginBottom: 8 }}
+              onChange={(event) => setNoteDraft((prev) => ({ ...prev, title: event.target.value }))}
+            />
             <textarea
               className="tv-textarea tv-note-textarea"
-              value={task?.local_note || ''}
+              value={noteDraft.body}
               placeholder="Личная заметка только в этом браузере"
-              onChange={(event) => onLocalNoteChange?.(task, event.target.value)}
+              onChange={(event) => setNoteDraft((prev) => ({ ...prev, body: event.target.value }))}
             />
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginTop: 8 }}>
+              <span className="tv-pin-empty-actions">
+                {noteDraft.saved_at ? `Сохранено: ${fmtShortDateTime(noteDraft.saved_at)}` : 'Пока не сохранено'}
+              </span>
+              <button
+                type="button"
+                className="tv-btn tv-btn-amber"
+                onClick={() => onLocalNoteChange?.(task, {
+                  ...noteDraft,
+                  saved_at: new Date().toISOString()
+                })}
+              >
+                Сохранить заметку
+              </button>
+            </div>
           </div>
 
           {(task.completion_summary || compAttachments.length > 0) && (
@@ -2184,8 +2422,11 @@ export const PinnedTaskWidget = React.memo(({
   user,
   availableTasks = [],
   isTasksLoading = false,
+  taskRecipients = [],
+  isTaskRecipientsLoading = false,
   initialExpanded = false,
   initialPosition = null,
+  autoOpenPipRequestId = 0,
   actionLoadingKey,
   onUnpin,
   onOpenDetails,
@@ -2193,6 +2434,9 @@ export const PinnedTaskWidget = React.memo(({
   onDownloadAttachment,
   onToggleChecklistItem,
   onLocalNoteChange,
+  onCreateTask,
+  onEditTask,
+  onDeleteTask,
   onSelectTask,
   onStateChange,
 }) => {
@@ -2205,7 +2449,11 @@ export const PinnedTaskWidget = React.memo(({
   const [taskMenuOpen, setTaskMenuOpen] = useState(false);
   const [noteOpen, setNoteOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [localNote, setLocalNote] = useState('');
+  const [quickFormMode, setQuickFormMode] = useState('');
+  const [quickForm, setQuickForm] = useState(() => buildEmptyTaskForm());
+  const [quickFormLoading, setQuickFormLoading] = useState(false);
+  const [quickFormError, setQuickFormError] = useState('');
+  const [localNote, setLocalNote] = useState(EMPTY_LOCAL_NOTE);
   const [paletteId, setPaletteId] = useState(() => {
     if (typeof window === 'undefined') return PIN_PALETTES[0].id;
     try {
@@ -2236,6 +2484,24 @@ export const PinnedTaskWidget = React.memo(({
       .filter((btn) => !['edit', 'delete'].includes(btn.action)),
     [task, currentUserId, currentUserRole]
   );
+  const managementButtons = useMemo(
+    () => buildTaskActionButtons(task, currentUserId, currentUserRole)
+      .filter((btn) => ['edit', 'delete'].includes(btn.action)),
+    [task, currentUserId, currentUserRole]
+  );
+  const canEditTask = managementButtons.some((btn) => btn.action === 'edit');
+  const canDeleteTask = managementButtons.some((btn) => btn.action === 'delete');
+  const recipientOptions = useMemo(() => {
+    const unique = new Map();
+    const addRecipient = (person) => {
+      const id = Number(person?.id || 0);
+      if (!id || unique.has(id)) return;
+      unique.set(id, person);
+    };
+    (Array.isArray(taskRecipients) ? taskRecipients : []).forEach(addRecipient);
+    addRecipient(task?.assignee);
+    return Array.from(unique.values());
+  }, [taskRecipients, task?.assignee]);
   const taskOptions = useMemo(() => {
     const unique = new Map();
     [...availableTasks, task].filter(Boolean).forEach((item) => {
@@ -2359,7 +2625,11 @@ export const PinnedTaskWidget = React.memo(({
   }, [position]);
 
   useEffect(() => {
-    setLocalNote(task?.local_note ?? readTaskLocalNote(user?.id, task?.id));
+    setExpanded(Boolean(initialExpanded));
+  }, [initialExpanded, task?.id]);
+
+  useEffect(() => {
+    setLocalNote(normalizeTaskLocalNote(task?.local_note ?? readTaskLocalNote(user?.id, task?.id)));
   }, [task?.id, task?.local_note, user?.id]);
 
   useEffect(() => {
@@ -2376,11 +2646,96 @@ export const PinnedTaskWidget = React.memo(({
     pipWindow.document.body.style.background = activePalette.vars['--bg'] || '#f4f3f0';
   }, [pipWindow, activePalette]);
 
-  const handleLocalNoteChange = useCallback((value) => {
-    setLocalNote(value);
-    writeTaskLocalNote(user?.id, task?.id, value);
-    onLocalNoteChange?.(task, value);
-  }, [onLocalNoteChange, task, user?.id]);
+  const saveLocalNote = useCallback(() => {
+    const next = {
+      ...normalizeTaskLocalNote(localNote),
+      saved_at: new Date().toISOString(),
+    };
+    setLocalNote(next);
+    writeTaskLocalNote(user?.id, task?.id, next);
+    onLocalNoteChange?.(task, next);
+  }, [localNote, onLocalNoteChange, task, user?.id]);
+
+  const openQuickCreate = useCallback(() => {
+    setQuickForm(buildEmptyTaskForm({
+      assignedTo: String(task?.assignee?.id || currentUserId || ''),
+      priority: task?.priority || 'normal',
+    }));
+    setQuickFormError('');
+    setQuickFormMode('create');
+    setExpanded(true);
+    onStateChange?.({ expanded: true, position: latestPositionRef.current });
+    setNoteOpen(false);
+    setPaletteOpen(false);
+    setTaskMenuOpen(false);
+  }, [currentUserId, onStateChange, task?.assignee?.id, task?.priority]);
+
+  const openQuickEdit = useCallback(() => {
+    if (!task?.id) return;
+    setQuickForm(taskToTaskForm(task, currentUserId));
+    setQuickFormError('');
+    setQuickFormMode('edit');
+    setExpanded(true);
+    onStateChange?.({ expanded: true, position: latestPositionRef.current });
+    setNoteOpen(false);
+    setPaletteOpen(false);
+    setTaskMenuOpen(false);
+  }, [currentUserId, onStateChange, task]);
+
+  const closeQuickForm = useCallback(() => {
+    setQuickFormMode('');
+    setQuickFormError('');
+  }, []);
+
+  const submitQuickForm = useCallback(async (event) => {
+    event?.preventDefault?.();
+    if (!quickFormMode) return;
+    if (!String(quickForm.subject || '').trim()) {
+      setQuickFormError('Укажите тему задачи');
+      return;
+    }
+    if (!quickForm.assignedTo) {
+      setQuickFormError('Выберите исполнителя');
+      return;
+    }
+    const payload = buildTaskJsonPayload(quickForm);
+    setQuickFormLoading(true);
+    setQuickFormError('');
+    try {
+      const nextTask = quickFormMode === 'edit'
+        ? await onEditTask?.(task, payload)
+        : await onCreateTask?.(payload);
+      if (nextTask?.id) onSelectTask?.(nextTask);
+      setQuickFormMode('');
+    } catch (error) {
+      setQuickFormError(error?.response?.data?.error || error?.message || 'Не удалось сохранить задачу');
+    } finally {
+      setQuickFormLoading(false);
+    }
+  }, [onCreateTask, onEditTask, onSelectTask, quickForm, quickFormMode, task]);
+
+  const handleQuickDelete = useCallback(async () => {
+    if (!task?.id || !onDeleteTask) return;
+    const confirmHost = pipWindow || window;
+    if (!confirmHost.confirm('Удалить эту задачу?')) return;
+    setQuickFormLoading(true);
+    try {
+      await onDeleteTask(task);
+      setQuickFormMode('');
+    } finally {
+      setQuickFormLoading(false);
+    }
+  }, [onDeleteTask, pipWindow, task]);
+
+  const updateQuickFormField = useCallback((field, value) => {
+    setQuickForm((prev) => ({ ...prev, [field]: value }));
+    setQuickFormError('');
+  }, []);
+
+  const updateQuickFormChecklist = useCallback((items) => {
+    setQuickForm((prev) => ({ ...prev, checklistItems: items }));
+    setQuickFormError('');
+  }, []);
 
   useEffect(() => {
     if (!creatorGroups.length) {
@@ -2414,7 +2769,16 @@ export const PinnedTaskWidget = React.memo(({
   }, [pipWindow]);
 
   const openDocumentPictureInPicture = useCallback(async () => {
-    if (typeof window === 'undefined' || !window.documentPictureInPicture?.requestWindow || pipWindow) return;
+    setExpanded(true);
+    onStateChange?.({
+      expanded: true,
+      position: latestPositionRef.current,
+    });
+    if (pipWindow) {
+      pipWindow.focus?.();
+      return;
+    }
+    if (typeof window === 'undefined' || !window.documentPictureInPicture?.requestWindow) return;
     try {
       const nextPipWindow = await window.documentPictureInPicture.requestWindow({
         width: 420,
@@ -2425,7 +2789,7 @@ export const PinnedTaskWidget = React.memo(({
         nextPipWindow.document.head.appendChild(node.cloneNode(true));
       });
       nextPipWindow.document.body.style.margin = '0';
-      nextPipWindow.document.body.style.background = '#f4f3f0';
+      nextPipWindow.document.body.style.background = activePalette.vars['--bg'] || '#f4f3f0';
       nextPipWindow.document.body.style.minHeight = '100vh';
       const root = nextPipWindow.document.createElement('div');
       nextPipWindow.document.body.appendChild(root);
@@ -2434,9 +2798,153 @@ export const PinnedTaskWidget = React.memo(({
     } catch (error) {
       // The browser can reject PiP if it is unavailable or not user-triggered.
     }
-  }, [pipWindow]);
+  }, [activePalette.vars, onStateChange, pipWindow]);
+
+  useEffect(() => {
+    if (!autoOpenPipRequestId) return;
+    openDocumentPictureInPicture();
+  }, [autoOpenPipRequestId, openDocumentPictureInPicture]);
 
   if (!task?.id) return null;
+
+  const quickTaskForm = quickFormMode ? (
+    <form className="tv-pin-task-form" onSubmit={submitQuickForm}>
+      <p className="tv-pin-task-form-title">
+        {quickFormMode === 'edit' ? 'Редактирование задачи' : 'Новая задача'}
+      </p>
+      <div className="tv-form-field">
+        <label>Тема *</label>
+        <input
+          className="tv-input"
+          value={quickForm.subject}
+          maxLength={255}
+          disabled={quickFormLoading}
+          placeholder="Введите тему задачи"
+          onChange={(event) => updateQuickFormField('subject', event.target.value)}
+        />
+      </div>
+      <div className="tv-form-field">
+        <label>Описание</label>
+        <textarea
+          className="tv-textarea"
+          value={quickForm.description}
+          disabled={quickFormLoading}
+          onChange={(event) => updateQuickFormField('description', event.target.value)}
+        />
+      </div>
+      <div className="tv-pin-task-form-grid">
+        <div className="tv-form-field">
+          <label>Тип</label>
+          <select
+            className="tv-select"
+            value={quickForm.tag}
+            disabled={quickFormLoading}
+            onChange={(event) => updateQuickFormField('tag', event.target.value)}
+          >
+            {TAG_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+          </select>
+        </div>
+        <div className="tv-form-field">
+          <label>Срочность</label>
+          <select
+            className="tv-select"
+            value={quickForm.priority}
+            disabled={quickFormLoading}
+            onChange={(event) => updateQuickFormField('priority', event.target.value)}
+          >
+            {PRIORITY_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+          </select>
+        </div>
+      </div>
+      <div className="tv-form-field">
+        <label>Исполнитель *</label>
+        <select
+          className="tv-select"
+          value={quickForm.assignedTo}
+          disabled={quickFormLoading || isTaskRecipientsLoading}
+          onChange={(event) => updateQuickFormField('assignedTo', event.target.value)}
+        >
+          <option value="">{isTaskRecipientsLoading ? 'Загрузка...' : 'Выберите сотрудника'}</option>
+          {recipientOptions.map((recipient) => (
+            <option key={recipient.id} value={recipient.id}>
+              {recipient.name} ({ROLE_LABELS[recipient.role] || recipient.role})
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="tv-form-field">
+        <label>Дедлайн через</label>
+        <div className="tv-form-inline-grid">
+          <input className="tv-input" type="number" min="0" placeholder="Дней" value={quickForm.deadlineDays} disabled={quickFormLoading}
+            onChange={(event) => updateQuickFormField('deadlineDays', event.target.value)} />
+          <input className="tv-input" type="number" min="0" max="23" placeholder="Часов" value={quickForm.deadlineHours} disabled={quickFormLoading}
+            onChange={(event) => updateQuickFormField('deadlineHours', event.target.value)} />
+          <input className="tv-input" type="number" min="0" max="59" placeholder="Минут" value={quickForm.deadlineMinutes} disabled={quickFormLoading}
+            onChange={(event) => updateQuickFormField('deadlineMinutes', event.target.value)} />
+        </div>
+      </div>
+      <div className="tv-soft-block">
+        <label className="tv-form-switch">
+          <input
+            type="checkbox"
+            checked={!!quickForm.isRegulation}
+            disabled={quickFormLoading}
+            onChange={(event) => setQuickForm((prev) => ({
+              ...prev,
+              isRegulation: event.target.checked,
+              recurrenceType: event.target.checked ? (prev.recurrenceType || 'daily') : ''
+            }))}
+          />
+          Регламентная задача
+        </label>
+        {quickForm.isRegulation && (
+          <div className="tv-pin-task-form-grid" style={{ marginTop: 8 }}>
+            <div className="tv-form-field">
+              <label>Период</label>
+              <select
+                className="tv-select"
+                value={quickForm.recurrenceType || 'daily'}
+                disabled={quickFormLoading}
+                onChange={(event) => updateQuickFormField('recurrenceType', event.target.value)}
+              >
+                {RECURRENCE_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+              </select>
+            </div>
+            <div className="tv-form-field">
+              <label>Интервал</label>
+              <input
+                className="tv-input"
+                type="number"
+                min="1"
+                max="365"
+                value={quickForm.recurrenceInterval}
+                disabled={quickFormLoading}
+                onChange={(event) => updateQuickFormField('recurrenceInterval', event.target.value)}
+              />
+            </div>
+          </div>
+        )}
+      </div>
+      <div className="tv-form-field">
+        <label>Чек-лист</label>
+        <ChecklistDraftEditor
+          compact
+          items={quickForm.checklistItems}
+          disabled={quickFormLoading}
+          onChange={updateQuickFormChecklist}
+        />
+      </div>
+      {quickFormError && <span className="tv-pin-form-error">{quickFormError}</span>}
+      <div className="tv-pin-task-form-actions">
+        <button type="button" className="tv-btn tv-btn-ghost" disabled={quickFormLoading} onClick={closeQuickForm}>
+          Отмена
+        </button>
+        <button type="submit" className="tv-btn tv-btn-primary" disabled={quickFormLoading || isTaskRecipientsLoading}>
+          {quickFormLoading ? 'Сохраняю...' : 'Сохранить'}
+        </button>
+      </div>
+    </form>
+  ) : null;
 
   const widgetMarkup = (
     <section
@@ -2653,13 +3161,35 @@ export const PinnedTaskWidget = React.memo(({
             {noteOpen && (
               <div className="tv-pin-note-panel">
                 <p className="tv-block-label" style={{ margin: 0 }}>Локальные заметки</p>
-                <textarea
-                  value={localNote}
-                  placeholder="Личная заметка только в этом браузере"
-                  onChange={(event) => handleLocalNoteChange(event.target.value)}
+                <input
+                  className="tv-input"
+                  value={localNote.title || ''}
+                  maxLength={120}
+                  placeholder="Тема заметки"
+                  onChange={(event) => setLocalNote((prev) => ({
+                    ...normalizeTaskLocalNote(prev),
+                    title: event.target.value,
+                  }))}
                 />
+                <textarea
+                  value={localNote.body || ''}
+                  placeholder="Личная заметка только в этом браузере"
+                  onChange={(event) => setLocalNote((prev) => ({
+                    ...normalizeTaskLocalNote(prev),
+                    body: event.target.value,
+                  }))}
+                />
+                <div className="tv-pin-note-footer">
+                  <span className="tv-pin-empty-actions">
+                    {localNote.saved_at ? `Сохранено: ${fmtShortDateTime(localNote.saved_at)}` : 'Пока не сохранено'}
+                  </span>
+                  <button type="button" className="tv-btn tv-btn-amber" onClick={saveLocalNote}>
+                    Сохранить заметку
+                  </button>
+                </div>
               </div>
             )}
+            {quickTaskForm}
             {expanded && (
               <div className="tv-pin-summary">
                 <p className="tv-pin-description">
@@ -2746,7 +3276,37 @@ export const PinnedTaskWidget = React.memo(({
             )}
 
             <div className="tv-pin-actions">
-              {actionButtons.length > 0 ? actionButtons.map((btn) => {
+              {onCreateTask && (
+                <button
+                  type="button"
+                  className="tv-btn tv-btn-primary"
+                  disabled={!!actionLoadingKey || quickFormLoading}
+                  onClick={openQuickCreate}
+                >
+                  <PlusIcon /> Новая задача
+                </button>
+              )}
+              {canEditTask && onEditTask && (
+                <button
+                  type="button"
+                  className="tv-btn tv-btn-ghost"
+                  disabled={!!actionLoadingKey || quickFormLoading}
+                  onClick={openQuickEdit}
+                >
+                  Редактировать
+                </button>
+              )}
+              {canDeleteTask && onDeleteTask && (
+                <button
+                  type="button"
+                  className="tv-btn tv-btn-rose"
+                  disabled={!!actionLoadingKey || quickFormLoading}
+                  onClick={handleQuickDelete}
+                >
+                  Удалить
+                </button>
+              )}
+              {actionButtons.map((btn) => {
                 const loading = actionLoadingKey === `${task.id}:${btn.action}`;
                 return (
                   <button
@@ -2760,7 +3320,8 @@ export const PinnedTaskWidget = React.memo(({
                     {loading ? 'Сохраняю...' : btn.label}
                   </button>
                 );
-              }) : (
+              })}
+              {!onCreateTask && !(canEditTask && onEditTask) && !(canDeleteTask && onDeleteTask) && actionButtons.length === 0 && (
                 <span className="tv-pin-empty-actions">Для текущего статуса быстрых действий нет.</span>
               )}
             </div>
@@ -2822,7 +3383,7 @@ const TasksView = ({
   const [createOpen,        setCreateOpen]        = useState(false);
   const [editModal,         setEditModal]         = useState({ open: false, taskId: null, taskSubject: '' });
   const [deleteModal,       setDeleteModal]       = useState({ open: false, taskId: null, taskSubject: '' });
-  const [editForm,          setEditForm]          = useState(EMPTY_TASK_FORM);
+  const [editForm,          setEditForm]          = useState(() => buildEmptyTaskForm());
   const [drawerTask,        setDrawerTask]        = useState(null);
   const [completeModal,     setCompleteModal]     = useState({ open: false, taskId: null, taskSubject: '' });
   const [statusModal,       setStatusModal]       = useState({ open: false, taskId: null, action: '', taskSubject: '' });
@@ -2842,7 +3403,7 @@ const TasksView = ({
   const personTasksRequestIdRef = useRef(0);
   const handledFocusRequestRef = useRef(0);
   const hasSyncedDrawerUrlRef   = useRef(false);
-  const [form, setForm] = useState(EMPTY_TASK_FORM);
+  const [form, setForm] = useState(() => buildEmptyTaskForm());
 
   const showToastRef = useRef(showToast);
   useEffect(() => { showToastRef.current = showToast; }, [showToast]);
@@ -3208,7 +3769,7 @@ const TasksView = ({
       const res = await axios.post(`${apiBaseUrl}/api/tasks`, body, { headers: buildHeaders() });
       notify(res?.data?.message || 'Задача создана');
       if (res?.data?.warning) notify(res.data.warning, 'error');
-      setForm(EMPTY_TASK_FORM);
+      setForm(buildEmptyTaskForm());
       setSelectedFiles([]);
       setCreateOpen(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -3221,21 +3782,7 @@ const TasksView = ({
   /* ── Edit / Delete ── */
   const openEditModal = useCallback((task) => {
     if (!task?.id) return;
-    const deadline = splitDeadlineMinutes(task?.deadline_duration_minutes);
-    setEditForm({
-      subject: task?.subject || '',
-      description: task?.description || '',
-      tag: task?.tag || 'task',
-      priority: task?.priority || 'normal',
-      assignedTo: String(task?.assignee?.id || ''),
-      deadlineDays: deadline.days,
-      deadlineHours: deadline.hours,
-      deadlineMinutes: deadline.minutes,
-      isRegulation: Boolean(task?.is_regulation || task?.recurrence_type),
-      recurrenceType: task?.recurrence_type || '',
-      recurrenceInterval: String(task?.recurrence_interval || '1'),
-      checklistText: checklistToText(task?.checklist)
-    });
+    setEditForm(taskToTaskForm(task));
     setEditModal({
       open: true,
       taskId: task.id,
@@ -3245,7 +3792,7 @@ const TasksView = ({
 
   const closeEditModal = useCallback(() => {
     setEditModal({ open: false, taskId: null, taskSubject: '' });
-    setEditForm(EMPTY_TASK_FORM);
+    setEditForm(buildEmptyTaskForm());
   }, []);
 
   const submitEditTask = useCallback(async (e) => {
@@ -3893,9 +4440,11 @@ const TasksView = ({
                   </div>
                   <div className="tv-form-field">
                     <label>Чек-лист</label>
-                    <textarea className="tv-textarea" value={form.checklistText} disabled={isCreateLoading}
-                      placeholder="Каждый пункт с новой строки"
-                      onChange={e => setForm(p => ({ ...p, checklistText: e.target.value }))} />
+                    <ChecklistDraftEditor
+                      items={form.checklistItems}
+                      disabled={isCreateLoading}
+                      onChange={(next) => setForm((p) => ({ ...p, checklistItems: next }))}
+                    />
                   </div>
                   <div className="tv-form-field">
                     <label>Прикрепить файлы</label>
@@ -4061,12 +4610,10 @@ const TasksView = ({
                   </div>
                   <div className="tv-form-field">
                     <label>Чек-лист</label>
-                    <textarea
-                      className="tv-textarea"
-                      value={editForm.checklistText}
+                    <ChecklistDraftEditor
+                      items={editForm.checklistItems}
                       disabled={!!actionLoadingKey}
-                      placeholder="Каждый пункт с новой строки"
-                      onChange={e => setEditForm(p => ({ ...p, checklistText: e.target.value }))}
+                      onChange={(next) => setEditForm((p) => ({ ...p, checklistItems: next }))}
                     />
                   </div>
                 </div>
