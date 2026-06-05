@@ -1317,16 +1317,24 @@ styleTag.textContent = `
     background: var(--surface-2);
   }
   .tv-checklist-editor.is-compact .tv-checklist-required {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     width: 32px;
     height: 34px;
-    justify-content: center;
+    margin: 0;
+    padding: 0;
     border: 1px solid var(--border);
     border-radius: 8px;
     background: var(--surface-2);
     font-size: 0;
+    line-height: 0;
   }
   .tv-checklist-editor.is-compact .tv-checklist-required input {
+    width: 14px;
+    height: 14px;
     margin: 0;
+    flex: 0 0 auto;
   }
   .tv-checklist-editor.is-compact .tv-checklist-editor-remove {
     background: var(--surface-2);
@@ -1514,6 +1522,79 @@ styleTag.textContent = `
     color: var(--ink-2);
     font-size: 12px;
     font-weight: 700;
+    flex: 1;
+    min-width: 0;
+  }
+  .tv-pin-menu-head-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+  .tv-pin-menu-create-btn {
+    padding: 7px 10px;
+    font-size: 12px;
+  }
+  .tv-pin-task-menu-shell {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 0;
+  }
+  .tv-pin-widget.is-detached .tv-pin-task-menu-shell {
+    flex: 1;
+    min-height: 0;
+  }
+  .tv-pin-menu-tabs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+    padding: 3px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .tv-pin-menu-tab {
+    border: 0;
+    border-radius: 8px;
+    padding: 6px 8px;
+    background: transparent;
+    color: var(--ink-2);
+    font-size: 11.5px;
+    font-weight: 800;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    cursor: pointer;
+    transition: all .15s ease;
+  }
+  .tv-pin-menu-tab:hover:not(:disabled) {
+    color: var(--ink);
+  }
+  .tv-pin-menu-tab.is-active {
+    background: var(--surface);
+    color: var(--ink);
+    box-shadow: var(--shadow-sm);
+  }
+  .tv-pin-menu-tab-count {
+    min-width: 18px;
+    height: 17px;
+    padding: 0 5px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--ink-2);
+    font-size: 10px;
+    line-height: 1;
+  }
+  .tv-pin-menu-tab.is-active .tv-pin-menu-tab-count {
+    background: #eef2ff;
+    border-color: #c7d2fe;
+    color: #3730a3;
   }
   .tv-pin-task-menu {
     display: grid;
@@ -3053,6 +3134,7 @@ export const PinnedTaskWidget = React.memo(({
   const [quickFormFiles, setQuickFormFiles] = useState([]);
   const [quickFormLoading, setQuickFormLoading] = useState(false);
   const [quickFormError, setQuickFormError] = useState('');
+  const [taskMenuScope, setTaskMenuScope] = useState('incoming');
   const notesState = useLocalNotes(user?.id);
   const [paletteId, setPaletteId] = useState(() => {
     if (typeof window === 'undefined') return PIN_PALETTES[0].id;
@@ -3062,7 +3144,7 @@ export const PinnedTaskWidget = React.memo(({
       return PIN_PALETTES[0].id;
     }
   });
-  const [selectedCreatorKey, setSelectedCreatorKey] = useState(null);
+  const [selectedMenuPersonKey, setSelectedMenuPersonKey] = useState(null);
   const [pipContainer, setPipContainer] = useState(null);
   const [pipWindow, setPipWindow] = useState(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -3119,13 +3201,22 @@ export const PinnedTaskWidget = React.memo(({
     () => taskOptions.filter((item) => Number(item?.assignee?.id || 0) === currentUserId),
     [currentUserId, taskOptions]
   );
-  const creatorGroups = useMemo(
+  const outgoingTaskOptions = useMemo(
+    () => taskOptions.filter((item) => Number(item?.creator?.id || 0) === currentUserId),
+    [currentUserId, taskOptions]
+  );
+  const incomingMenuGroups = useMemo(
     () => groupTasksByPerson(incomingTaskOptions, (item) => item?.creator),
     [incomingTaskOptions]
   );
-  const activeCreatorGroup = useMemo(
-    () => creatorGroups.find((group) => group.key === selectedCreatorKey) || creatorGroups[0] || null,
-    [creatorGroups, selectedCreatorKey]
+  const outgoingMenuGroups = useMemo(
+    () => groupTasksByPerson(outgoingTaskOptions, (item) => item?.assignee),
+    [outgoingTaskOptions]
+  );
+  const taskMenuGroups = taskMenuScope === 'outgoing' ? outgoingMenuGroups : incomingMenuGroups;
+  const activeTaskMenuGroup = useMemo(
+    () => taskMenuGroups.find((group) => group.key === selectedMenuPersonKey) || taskMenuGroups[0] || null,
+    [selectedMenuPersonKey, taskMenuGroups]
   );
 
   const clampPosition = useCallback((nextX, nextY) => {
@@ -3333,17 +3424,19 @@ export const PinnedTaskWidget = React.memo(({
   }, []);
 
   useEffect(() => {
-    if (!creatorGroups.length) {
-      setSelectedCreatorKey(null);
+    if (!taskMenuGroups.length) {
+      setSelectedMenuPersonKey(null);
       return;
     }
-    setSelectedCreatorKey((prev) => {
-      if (prev && creatorGroups.some((group) => group.key === prev)) return prev;
-      const taskCreatorId = Number(task?.creator?.id || 0);
-      const matchingGroup = creatorGroups.find((group) => Number(group?.personId || 0) === taskCreatorId);
-      return matchingGroup?.key || creatorGroups[0].key;
+    setSelectedMenuPersonKey((prev) => {
+      if (prev && taskMenuGroups.some((group) => group.key === prev)) return prev;
+      const currentPersonId = taskMenuScope === 'outgoing'
+        ? Number(task?.assignee?.id || 0)
+        : Number(task?.creator?.id || 0);
+      const matchingGroup = taskMenuGroups.find((group) => Number(group?.personId || 0) === currentPersonId);
+      return matchingGroup?.key || taskMenuGroups[0].key;
     });
-  }, [creatorGroups, task?.creator?.id]);
+  }, [task?.assignee?.id, task?.creator?.id, taskMenuGroups, taskMenuScope]);
 
   useEffect(() => {
     if (!pipWindow) return undefined;
@@ -3693,12 +3786,27 @@ export const PinnedTaskWidget = React.memo(({
             <LucideChevronLeft size={15} strokeWidth={2} />
           </button>
           <p className="tv-pin-menu-title">{taskMenuOpen ? 'Меню задач' : 'Текущая задача'}</p>
-          <div className="tv-pin-badges">
-            <span className={`tv-badge ${sm.badge}`}>{sm.label}</span>
-            <span className={`tv-badge ${tm.badge}`}>{tm.label}</span>
-            {task?.priority && <span className={`tv-badge ${pm.badge}`}>{pm.label}</span>}
-            {task?.is_regulation && <span className="tv-badge tv-badge-teal">Регламент</span>}
-          </div>
+          {taskMenuOpen ? (
+            <div className="tv-pin-menu-head-actions">
+              {onCreateTask && (
+                <button
+                  type="button"
+                  className="tv-btn tv-btn-primary tv-pin-menu-create-btn"
+                  disabled={!!actionLoadingKey || quickFormLoading}
+                  onClick={openQuickCreate}
+                >
+                  <PlusIcon /> Новая
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="tv-pin-badges">
+              <span className={`tv-badge ${sm.badge}`}>{sm.label}</span>
+              <span className={`tv-badge ${tm.badge}`}>{tm.label}</span>
+              {task?.priority && <span className={`tv-badge ${pm.badge}`}>{pm.label}</span>}
+              {task?.is_regulation && <span className="tv-badge tv-badge-teal">Регламент</span>}
+            </div>
+          )}
         </div>
         )}
 
@@ -3727,16 +3835,35 @@ export const PinnedTaskWidget = React.memo(({
             </div>
           </div>
         ) : taskMenuOpen ? (
-          <div className="tv-pin-task-menu">
+          <div className="tv-pin-task-menu-shell">
+            <div className="tv-pin-menu-tabs" role="tablist" aria-label="Фильтр задач">
+              <button
+                type="button"
+                className={`tv-pin-menu-tab ${taskMenuScope === 'incoming' ? 'is-active' : ''}`}
+                onClick={() => setTaskMenuScope('incoming')}
+              >
+                Входящие
+                <span className="tv-pin-menu-tab-count">{incomingTaskOptions.length}</span>
+              </button>
+              <button
+                type="button"
+                className={`tv-pin-menu-tab ${taskMenuScope === 'outgoing' ? 'is-active' : ''}`}
+                onClick={() => setTaskMenuScope('outgoing')}
+              >
+                Исходящие
+                <span className="tv-pin-menu-tab-count">{outgoingTaskOptions.length}</span>
+              </button>
+            </div>
+            <div className="tv-pin-task-menu">
             <div className="tv-pin-people-rail">
-              {creatorGroups.map((group) => (
+              {taskMenuGroups.map((group) => (
                 <button
                   key={group.key}
                   type="button"
-                  className={`tv-pin-person-btn ${activeCreatorGroup?.key === group.key ? 'is-active' : ''}`}
+                  className={`tv-pin-person-btn ${activeTaskMenuGroup?.key === group.key ? 'is-active' : ''}`}
                   title={group.name}
                   aria-label={group.name}
-                  onClick={() => setSelectedCreatorKey(group.key)}
+                  onClick={() => setSelectedMenuPersonKey(group.key)}
                 >
                   <AvatarCircle className="tv-avatar-md" name={group.name} avatarUrl={group.avatarUrl} />
                   {(group.active + group.notAccepted) > 0 && (
@@ -3751,26 +3878,26 @@ export const PinnedTaskWidget = React.memo(({
               ))}
             </div>
             <div className="tv-pin-menu-panel">
-              {activeCreatorGroup ? (
+              {activeTaskMenuGroup ? (
                 <>
                   <div className="tv-pin-person-summary">
-                    <span className="tv-pin-person-summary-name">{activeCreatorGroup.name}</span>
+                    <span className="tv-pin-person-summary-name">{activeTaskMenuGroup.name}</span>
                     <span className="tv-pin-person-summary-stats">
                       <span className="tv-pin-person-summary-chip">
-                        <span className="tv-task-count">{activeCreatorGroup.done}</span> выполнено
+                        <span className="tv-task-count">{activeTaskMenuGroup.done}</span> выполнено
                       </span>
                       <span className="tv-pin-person-summary-chip">
-                        <span className="tv-task-count">{activeCreatorGroup.active}</span> в работе
+                        <span className="tv-task-count">{activeTaskMenuGroup.active}</span> в работе
                       </span>
                       <span className="tv-pin-person-summary-chip">
-                        <span className={`tv-task-count ${activeCreatorGroup.notAccepted > 0 ? 'is-alert' : ''}`}>
-                          {activeCreatorGroup.notAccepted}
+                        <span className={`tv-task-count ${activeTaskMenuGroup.notAccepted > 0 ? 'is-alert' : ''}`}>
+                          {activeTaskMenuGroup.notAccepted}
                         </span> ждут принятия
                       </span>
                     </span>
                   </div>
                   <div className="tv-pin-person-task-list">
-                    {activeCreatorGroup.tasks.map((item) => {
+                    {activeTaskMenuGroup.tasks.map((item) => {
                       const itemStatus = STATUS_META[item.status] || { label: item.status || '—', badge: 'tv-badge-gray' };
                       return (
                         <button
@@ -3794,9 +3921,12 @@ export const PinnedTaskWidget = React.memo(({
                 </>
               ) : (
                 <span className="tv-pin-empty-actions">
-                  {isTasksLoading ? 'Загружаю задачи...' : 'Входящих задач пока нет.'}
+                  {isTasksLoading
+                    ? 'Загружаю задачи...'
+                    : (taskMenuScope === 'outgoing' ? 'Исходящих задач пока нет.' : 'Входящих задач пока нет.')}
                 </span>
               )}
+            </div>
             </div>
           </div>
         ) : (
@@ -3891,16 +4021,6 @@ export const PinnedTaskWidget = React.memo(({
             )}
 
             <div className="tv-pin-actions">
-              {onCreateTask && (
-                <button
-                  type="button"
-                  className="tv-btn tv-btn-primary"
-                  disabled={!!actionLoadingKey || quickFormLoading}
-                  onClick={openQuickCreate}
-                >
-                  <PlusIcon /> Новая задача
-                </button>
-              )}
               {canEditTask && onEditTask && (
                 <button
                   type="button"
@@ -3936,7 +4056,7 @@ export const PinnedTaskWidget = React.memo(({
                   </button>
                 );
               })}
-              {!onCreateTask && !(canEditTask && onEditTask) && !(canDeleteTask && onDeleteTask) && actionButtons.length === 0 && (
+              {!(canEditTask && onEditTask) && !(canDeleteTask && onDeleteTask) && actionButtons.length === 0 && (
                 <span className="tv-pin-empty-actions">Для текущего статуса быстрых действий нет.</span>
               )}
             </div>
