@@ -29786,6 +29786,57 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             }, [user?.id, withAccessTokenHeader, showToast]);
 
+            const updatePinnedTaskEverywhere = useCallback((taskId, updater) => {
+                const normalizedTaskId = Number(taskId || 0);
+                if (!normalizedTaskId || typeof updater !== 'function') return;
+                setPinnedTask((prev) => (
+                    Number(prev?.id || 0) === normalizedTaskId ? updater(prev) : prev
+                ));
+                setPinnedTaskPool((prev) => (
+                    Array.isArray(prev)
+                        ? prev.map((item) => Number(item?.id || 0) === normalizedTaskId ? updater(item) : item)
+                        : prev
+                ));
+            }, []);
+
+            const togglePinnedTaskChecklistItem = useCallback(async (task, item, isDone) => {
+                const taskId = Number(task?.id || 0);
+                const itemId = Number(item?.id || 0);
+                if (!taskId || !itemId || !user?.id) return;
+                const key = `${taskId}:checklist:${itemId}`;
+                setPinnedTaskActionLoadingKey(key);
+                try {
+                    const response = await axios.patch(
+                        `${API_BASE_URL}/api/tasks/${taskId}/checklist/${itemId}`,
+                        { is_done: Boolean(isDone) },
+                        {
+                            headers: withAccessTokenHeader({
+                                'X-User-Id': String(user.id),
+                            }),
+                        }
+                    );
+                    const updatedItem = response?.data?.item || { ...item, is_done: Boolean(isDone) };
+                    updatePinnedTaskEverywhere(taskId, (current) => ({
+                        ...current,
+                        checklist: (Array.isArray(current?.checklist) ? current.checklist : [])
+                            .map((row) => Number(row?.id || 0) === itemId ? { ...row, ...updatedItem } : row)
+                    }));
+                    showToast(isDone ? 'Пункт чек-листа выполнен' : 'Пункт чек-листа открыт', 'success');
+                    if (response?.data?.warning) showToast(response.data.warning, 'error');
+                    setTaskRefreshToken((prev) => prev + 1);
+                } catch (error) {
+                    showToast(error?.response?.data?.error || 'Не удалось обновить чек-лист', 'error');
+                } finally {
+                    setPinnedTaskActionLoadingKey('');
+                }
+            }, [user?.id, withAccessTokenHeader, showToast, updatePinnedTaskEverywhere]);
+
+            const handlePinnedTaskLocalNoteChange = useCallback((task, note) => {
+                const taskId = Number(task?.id || 0);
+                if (!taskId) return;
+                updatePinnedTaskEverywhere(taskId, (current) => ({ ...current, local_note: note }));
+            }, [updatePinnedTaskEverywhere]);
+
             const downloadPinnedTaskAttachment = useCallback(async (attachment) => {
                 const attachmentId = Number(attachment?.id || 0);
                 if (!attachmentId || !user?.id) return;
@@ -42314,6 +42365,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             onOpenDetails={openPinnedTaskDetails}
                             onRunAction={runPinnedTaskAction}
                             onDownloadAttachment={downloadPinnedTaskAttachment}
+                            onToggleChecklistItem={togglePinnedTaskChecklistItem}
+                            onLocalNoteChange={handlePinnedTaskLocalNoteChange}
                             onSelectTask={handlePinTask}
                             onStateChange={setPinnedTaskWidgetState}
                         />

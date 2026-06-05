@@ -1749,6 +1749,8 @@ def _build_signed_audio_url(audio_path):
 
 TASK_ALLOWED_TAGS = {'task', 'problem', 'suggestion'}
 TASK_ALLOWED_ACTIONS = {'in_progress', 'completed', 'accepted', 'returned', 'reopened'}
+TASK_ALLOWED_PRIORITIES = {'normal', 'urgent', 'critical'}
+TASK_ALLOWED_RECURRENCE_TYPES = {'daily', 'weekly', 'monthly'}
 TASK_MAX_FILES = 10
 TASK_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
 TASK_ATTACHMENTS_UPLOAD_FOLDER = (os.getenv('TASK_ATTACHMENTS_UPLOAD_FOLDER') or 'TaskAttachments/').strip()
@@ -1769,6 +1771,16 @@ TASK_TAG_LABELS = {
     'task': 'Задача',
     'problem': 'Проблема',
     'suggestion': 'Предложение'
+}
+TASK_PRIORITY_LABELS = {
+    'normal': 'Обычная',
+    'urgent': 'Срочная',
+    'critical': 'Критичная'
+}
+TASK_RECURRENCE_LABELS = {
+    'daily': 'Ежедневно',
+    'weekly': 'Еженедельно',
+    'monthly': 'Ежемесячно'
 }
 SENSITIVE_ACCESS_ROLE_LABELS = {
     'super_admin': 'Супер админ',
@@ -1800,6 +1812,82 @@ def _escape_telegram_html(text, max_chars=None):
     if max_chars is not None:
         value = _truncate_for_telegram(value, max_chars)
     return html.escape(value)
+
+
+def _parse_task_bool(value):
+    if isinstance(value, bool):
+        return value
+    return str(value or '').strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+
+
+def _parse_task_int(value, field_name, default=0, minimum=0, maximum=None):
+    raw = str(value if value is not None else '').strip()
+    if raw == '':
+        return int(default)
+    try:
+        parsed = int(raw)
+    except Exception:
+        raise ValueError(f"{field_name} must be an integer")
+    if parsed < minimum:
+        raise ValueError(f"{field_name} must be >= {minimum}")
+    if maximum is not None and parsed > maximum:
+        raise ValueError(f"{field_name} must be <= {maximum}")
+    return parsed
+
+
+def _parse_task_deadline_minutes(source):
+    days = _parse_task_int(source.get('deadline_days'), 'deadline_days', default=0, minimum=0, maximum=3650)
+    hours = _parse_task_int(source.get('deadline_hours'), 'deadline_hours', default=0, minimum=0, maximum=23)
+    minutes = _parse_task_int(source.get('deadline_minutes'), 'deadline_minutes', default=0, minimum=0, maximum=59)
+    total = days * 24 * 60 + hours * 60 + minutes
+    return total if total > 0 else None
+
+
+def _parse_task_checklist_items(raw_value):
+    if raw_value is None:
+        return []
+    if isinstance(raw_value, list):
+        raw_items = raw_value
+    else:
+        raw_text = str(raw_value or '').strip()
+        if not raw_text:
+            return []
+        try:
+            parsed = json.loads(raw_text)
+            raw_items = parsed if isinstance(parsed, list) else []
+        except Exception:
+            raw_items = [line.strip() for line in raw_text.splitlines()]
+
+    items = []
+    seen = set()
+    for raw_item in raw_items:
+        if isinstance(raw_item, dict):
+            title = str(raw_item.get('title') or raw_item.get('text') or '').strip()
+            is_required = bool(raw_item.get('is_required', True))
+        else:
+            title = str(raw_item or '').strip()
+            is_required = True
+        if not title:
+            continue
+        title = title[:255]
+        dedup_key = title.casefold()
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+        items.append({"title": title, "is_required": is_required})
+        if len(items) >= 50:
+            break
+    return items
+
+
+def _format_task_due_for_notification(value):
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+        return parsed.strftime('%d.%m.%Y %H:%M')
+    except Exception:
+        return str(value)
 
 
 def _build_task_deep_link(task_id, referer_url=None, origin_url=None):
@@ -2213,7 +2301,7 @@ def _fetch_task_notification_context(task_id):
     with db._get_cursor() as cursor:
         cursor.execute("""
             SELECT
-                t.id, t.subject, t.tag, t.created_by,
+                t.id, t.subject, t.tag, t.priority, t.due_at, t.created_by,
                 creator.telegram_id, creator.name,
                 t.assigned_to, assignee.telegram_id, assignee.name
             FROM tasks t
@@ -2229,12 +2317,14 @@ def _fetch_task_notification_context(task_id):
         "id": row[0],
         "subject": row[1],
         "tag": row[2],
-        "created_by": row[3],
-        "creator_telegram_id": row[4],
-        "creator_name": row[5],
-        "assigned_to": row[6],
-        "assignee_telegram_id": row[7],
-        "assignee_name": row[8]
+        "priority": row[3],
+        "due_at": row[4].isoformat() if hasattr(row[4], 'isoformat') else row[4],
+        "created_by": row[5],
+        "creator_telegram_id": row[6],
+        "creator_name": row[7],
+        "assigned_to": row[8],
+        "assignee_telegram_id": row[9],
+        "assignee_name": row[10]
     }
 
 
@@ -2281,8 +2371,11 @@ def _build_task_status_notification_html(
 ):
     action_norm = (action or '').strip().lower()
     tag_label = TASK_TAG_LABELS.get((task_ctx.get('tag') or 'task').strip().lower(), 'Задача')
+    priority_label = TASK_PRIORITY_LABELS.get((task_ctx.get('priority') or 'normal').strip().lower(), 'Обычная')
+    due_label = _format_task_due_for_notification(task_ctx.get('due_at'))
     subject_safe = _build_task_subject_notification_html(task_ctx, task_link)
     tag_safe = _escape_telegram_html(tag_label, 60)
+    priority_safe = _escape_telegram_html(priority_label, 60)
     actor_safe = _escape_telegram_html(actor_name or 'Сотрудник', 80)
 
     header_map = {
@@ -2304,10 +2397,13 @@ def _build_task_status_notification_html(
         f"<b>{header_map.get(action_norm, '🔔 Обновление статуса задачи')}</b>",
         "",
         f"<b>Тип:</b> {tag_safe}",
+        f"<b>Срочность:</b> {priority_safe}",
         f"<b>Тема:</b> {subject_safe}",
         f"<b>Статус:</b> {status_map.get(action_norm, 'Обновлён')}",
         f"<b>Кто изменил:</b> {actor_safe}"
     ]
+    if due_label:
+        lines.insert(4, f"<b>Дедлайн:</b> {_escape_telegram_html(due_label, 80)}")
 
     if comment:
         lines.extend([
@@ -2333,8 +2429,11 @@ def _build_task_status_notification_html(
 def _build_task_event_notification_html(event, task_ctx, actor_name, changed_fields=None, task_link=None):
     event_norm = (event or '').strip().lower()
     tag_label = TASK_TAG_LABELS.get((task_ctx.get('tag') or 'task').strip().lower(), 'Задача')
+    priority_label = TASK_PRIORITY_LABELS.get((task_ctx.get('priority') or 'normal').strip().lower(), 'Обычная')
+    due_label = _format_task_due_for_notification(task_ctx.get('due_at'))
     subject_safe = _build_task_subject_notification_html(task_ctx, task_link)
     tag_safe = _escape_telegram_html(tag_label, 60)
+    priority_safe = _escape_telegram_html(priority_label, 60)
     actor_safe = _escape_telegram_html(actor_name or 'Сотрудник', 80)
 
     header_map = {
@@ -2346,15 +2445,22 @@ def _build_task_event_notification_html(event, task_ctx, actor_name, changed_fie
         f"<b>{header_map.get(event_norm, '🔔 Обновление задачи')}</b>",
         "",
         f"<b>Тип:</b> {tag_safe}",
+        f"<b>Срочность:</b> {priority_safe}",
         f"<b>Тема:</b> {subject_safe}",
         f"<b>Кто изменил:</b> {actor_safe}"
     ]
+    if due_label:
+        lines.insert(4, f"<b>Дедлайн:</b> {_escape_telegram_html(due_label, 80)}")
 
     if event_norm == 'edited':
         labels = {
             'subject': 'тема',
             'description': 'описание',
             'tag': 'тип',
+            'priority': 'срочность',
+            'deadline': 'дедлайн',
+            'recurrence': 'регламент',
+            'checklist': 'чек-лист',
             'assigned_to': 'исполнитель'
         }
         changed_items = []
@@ -2366,6 +2472,30 @@ def _build_task_event_notification_html(event, task_ctx, actor_name, changed_fie
         if changed_items:
             lines.append(f"<b>Изменено:</b> {_escape_telegram_html(', '.join(changed_items), 120)}")
 
+    message = "\n".join(lines)
+    if len(message) > TELEGRAM_MAX_MESSAGE_CHARS:
+        message = message[:TELEGRAM_MAX_MESSAGE_CHARS]
+    return message
+
+
+def _build_task_checklist_notification_html(task_ctx, checklist_item, actor_name, is_done, task_link=None):
+    tag_label = TASK_TAG_LABELS.get((task_ctx.get('tag') or 'task').strip().lower(), 'Задача')
+    priority_label = TASK_PRIORITY_LABELS.get((task_ctx.get('priority') or 'normal').strip().lower(), 'Обычная')
+    due_label = _format_task_due_for_notification(task_ctx.get('due_at'))
+    subject_safe = _build_task_subject_notification_html(task_ctx, task_link)
+    status_label = 'выполнен' if is_done else 'снова открыт'
+    lines = [
+        "<b>☑️ Обновление чек-листа</b>",
+        "",
+        f"<b>Тип:</b> {_escape_telegram_html(tag_label, 60)}",
+        f"<b>Срочность:</b> {_escape_telegram_html(priority_label, 60)}",
+        f"<b>Тема:</b> {subject_safe}",
+        f"<b>Пункт:</b> {_escape_telegram_html(checklist_item.get('title') or 'Пункт чек-листа', 180)}",
+        f"<b>Статус:</b> {_escape_telegram_html(status_label, 40)}",
+        f"<b>Кто изменил:</b> {_escape_telegram_html(actor_name or 'Сотрудник', 80)}"
+    ]
+    if due_label:
+        lines.insert(4, f"<b>Дедлайн:</b> {_escape_telegram_html(due_label, 80)}")
     message = "\n".join(lines)
     if len(message) > TELEGRAM_MAX_MESSAGE_CHARS:
         message = message[:TELEGRAM_MAX_MESSAGE_CHARS]
@@ -11042,9 +11172,44 @@ def handle_tasks():
         requester_role = requester[3]
 
         if request.method == 'GET':
+            try:
+                created_regulation_task_ids = db.materialize_due_regulation_tasks()
+                for created_task_id in created_regulation_task_ids[:20]:
+                    task_ctx = _fetch_task_notification_context(created_task_id)
+                    if not task_ctx:
+                        continue
+                    assignee_chat_id = task_ctx.get('assignee_telegram_id')
+                    if not assignee_chat_id:
+                        continue
+                    task_link = _build_current_task_deep_link(created_task_id)
+                    tag_label = TASK_TAG_LABELS.get((task_ctx.get('tag') or 'task').strip().lower(), 'Задача')
+                    priority_label = TASK_PRIORITY_LABELS.get((task_ctx.get('priority') or 'normal').strip().lower(), 'Обычная')
+                    due_label = _format_task_due_for_notification(task_ctx.get('due_at'))
+                    task_subject_html = _build_task_subject_notification_html(task_ctx, task_link)
+                    lines = [
+                        "<b>🔁 Новая регламентная задача</b>",
+                        "",
+                        f"<b>Тип:</b> {_escape_telegram_html(tag_label, 60)}",
+                        f"<b>Срочность:</b> {_escape_telegram_html(priority_label, 60)}",
+                        f"<b>Тема:</b> {task_subject_html}",
+                        "",
+                        "<b>Откройте раздел «Задачи», чтобы посмотреть детали.</b>"
+                    ]
+                    if due_label:
+                        lines.insert(4, f"<b>Дедлайн:</b> {_escape_telegram_html(due_label, 80)}")
+                    _send_telegram_text_message(
+                        assignee_chat_id,
+                        "\n".join(lines),
+                        parse_mode='HTML',
+                        reply_markup=_build_task_notification_reply_markup(task_link)
+                    )
+            except Exception as materialize_error:
+                logging.warning("Failed to materialize due regulation tasks: %s", materialize_error)
+
             query_text = (request.args.get('q') or request.args.get('search') or '').strip()
             status_filter = (request.args.get('status') or '').strip().lower() or None
             tag_filter = (request.args.get('tag') or '').strip().lower() or None
+            priority_filter = (request.args.get('priority') or '').strip().lower() or None
             only_my_raw = (request.args.get('only_my') or '').strip().lower()
             only_my = only_my_raw in {'1', 'true', 'yes', 'y', 'on'}
             person_scope = (request.args.get('person_scope') or '').strip().lower() or None
@@ -11084,6 +11249,7 @@ def handle_tasks():
                     search=query_text,
                     status=status_filter,
                     tag=tag_filter,
+                    priority=priority_filter,
                     limit=limit,
                     offset=offset,
                     only_my=only_my,
@@ -11096,6 +11262,8 @@ def handle_tasks():
                     return jsonify({"error": "Invalid status filter"}), 400
                 if error_code == 'INVALID_TASK_TAG_FILTER':
                     return jsonify({"error": "Invalid tag filter"}), 400
+                if error_code == 'INVALID_TASK_PRIORITY_FILTER':
+                    return jsonify({"error": "Invalid priority filter"}), 400
                 if error_code == 'INVALID_TASK_LIMIT':
                     return jsonify({"error": "Invalid limit value"}), 400
                 if error_code == 'INVALID_TASK_OFFSET':
@@ -11149,6 +11317,7 @@ def handle_tasks():
                 "filters": {
                     "status": status_filter,
                     "tag": tag_filter,
+                    "priority": priority_filter,
                     "only_my": only_my,
                     "person_id": person_id,
                     "person_scope": person_scope
@@ -11158,12 +11327,25 @@ def handle_tasks():
         subject = (request.form.get('subject') or '').strip()
         description = (request.form.get('description') or '').strip()
         tag = (request.form.get('tag') or 'task').strip().lower() or 'task'
+        priority = (request.form.get('priority') or 'normal').strip().lower() or 'normal'
+        recurrence_type = (request.form.get('recurrence_type') or '').strip().lower() or None
+        try:
+            recurrence_interval = _parse_task_int(request.form.get('recurrence_interval'), 'recurrence_interval', default=1, minimum=1, maximum=365)
+            is_regulation = _parse_task_bool(request.form.get('is_regulation')) or bool(recurrence_type)
+            deadline_minutes = _parse_task_deadline_minutes(request.form)
+            checklist_items = _parse_task_checklist_items(request.form.get('checklist_items'))
+        except ValueError as parse_error:
+            return jsonify({"error": str(parse_error)}), 400
         assigned_to_raw = request.form.get('assigned_to')
 
         if not subject:
             return jsonify({"error": "subject is required"}), 400
         if tag not in TASK_ALLOWED_TAGS:
             return jsonify({"error": "Invalid tag"}), 400
+        if priority not in TASK_ALLOWED_PRIORITIES:
+            return jsonify({"error": "Invalid priority"}), 400
+        if recurrence_type and recurrence_type not in TASK_ALLOWED_RECURRENCE_TYPES:
+            return jsonify({"error": "Invalid recurrence_type"}), 400
         if not assigned_to_raw:
             return jsonify({"error": "assigned_to is required"}), 400
 
@@ -11195,8 +11377,27 @@ def handle_tasks():
                 tag=tag,
                 assigned_to=assigned_to,
                 created_by=requester_id,
-                attachments=attachments
+                attachments=attachments,
+                priority=priority,
+                deadline_minutes=deadline_minutes,
+                is_regulation=is_regulation,
+                recurrence_type=recurrence_type,
+                recurrence_interval=recurrence_interval,
+                checklist_items=checklist_items
             )
+        except ValueError as create_error:
+            _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths)
+            code = str(create_error)
+            error_map = {
+                "SUBJECT_REQUIRED": "subject is required",
+                "INVALID_TAG": "Invalid tag",
+                "INVALID_PRIORITY": "Invalid priority",
+                "INVALID_DEADLINE": "Invalid deadline",
+                "INVALID_RECURRENCE_TYPE": "Invalid recurrence_type",
+                "INVALID_RECURRENCE_INTERVAL": "Invalid recurrence_interval",
+                "INVALID_CHECKLIST": "Invalid checklist"
+            }
+            return jsonify({"error": error_map.get(code, code)}), 400
         except Exception:
             # DB write failed after upload -> cleanup uploaded blobs
             _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths)
@@ -11209,6 +11410,8 @@ def handle_tasks():
             if assignee_chat_id:
                 task_link = _build_current_task_deep_link(created.get("id"))
                 tag_label = TASK_TAG_LABELS.get(tag, 'Задача')
+                priority_label = TASK_PRIORITY_LABELS.get(priority, 'Обычная')
+                due_label = _format_task_due_for_notification(created.get('due_at'))
                 requester_name = requester[2] if requester else 'Система'
                 task_subject_html = _escape_telegram_html(subject, 220)
                 if task_link:
@@ -11217,13 +11420,19 @@ def handle_tasks():
                         f'{task_subject_html}'
                         '</a>'
                     )
-                message = (
-                    "<b>🆕 Новая задача</b>\n\n"
-                    f"<b>Тип:</b> {_escape_telegram_html(tag_label, 60)}\n"
-                    f"<b>Тема:</b> {task_subject_html}\n"
-                    f"<b>От:</b> {_escape_telegram_html(requester_name, 80)}\n\n"
+                message_lines = [
+                    "<b>🆕 Новая задача</b>",
+                    "",
+                    f"<b>Тип:</b> {_escape_telegram_html(tag_label, 60)}",
+                    f"<b>Срочность:</b> {_escape_telegram_html(priority_label, 60)}",
+                    f"<b>Тема:</b> {task_subject_html}",
+                    f"<b>От:</b> {_escape_telegram_html(requester_name, 80)}",
+                    "",
                     "<b>Откройте раздел «Задачи», чтобы посмотреть детали.</b>"
-                )
+                ]
+                if due_label:
+                    message_lines.insert(4, f"<b>Дедлайн:</b> {_escape_telegram_html(due_label, 80)}")
+                message = "\n".join(message_lines)
                 reply_markup = _build_task_notification_reply_markup(task_link)
                 tg_response = _send_telegram_text_message(
                     assignee_chat_id,
@@ -11271,14 +11480,43 @@ def handle_single_task(task_id):
             has_description = 'description' in data
             has_tag = 'tag' in data
             has_assigned_to = 'assigned_to' in data
+            has_priority = 'priority' in data
+            has_deadline = any(key in data for key in ('deadline_days', 'deadline_hours', 'deadline_minutes'))
+            has_is_regulation = 'is_regulation' in data
+            has_recurrence_type = 'recurrence_type' in data
+            has_recurrence_interval = 'recurrence_interval' in data
+            has_checklist = 'checklist_items' in data
 
-            if not any([has_subject, has_description, has_tag, has_assigned_to]):
+            if not any([
+                has_subject, has_description, has_tag, has_assigned_to,
+                has_priority, has_deadline, has_is_regulation,
+                has_recurrence_type, has_recurrence_interval, has_checklist
+            ]):
                 return jsonify({"error": "No fields to update"}), 400
 
             subject = data.get('subject') if has_subject else None
             description = data.get('description') if has_description else None
             tag = data.get('tag') if has_tag else None
+            priority = (str(data.get('priority') or '').strip().lower() or 'normal') if has_priority else None
             assigned_to = None
+
+            if has_priority and priority not in TASK_ALLOWED_PRIORITIES:
+                return jsonify({"error": "Invalid priority"}), 400
+
+            try:
+                deadline_minutes = _parse_task_deadline_minutes(data) if has_deadline else None
+                recurrence_type = (str(data.get('recurrence_type') or '').strip().lower() or None) if has_recurrence_type else None
+                recurrence_interval = (
+                    _parse_task_int(data.get('recurrence_interval'), 'recurrence_interval', default=1, minimum=1, maximum=365)
+                    if has_recurrence_interval else None
+                )
+                is_regulation = _parse_task_bool(data.get('is_regulation')) if has_is_regulation else None
+                checklist_items = _parse_task_checklist_items(data.get('checklist_items')) if has_checklist else None
+            except ValueError as parse_error:
+                return jsonify({"error": str(parse_error)}), 400
+
+            if has_recurrence_type and recurrence_type and recurrence_type not in TASK_ALLOWED_RECURRENCE_TYPES:
+                return jsonify({"error": "Invalid recurrence_type"}), 400
 
             if has_assigned_to:
                 assigned_to_raw = data.get('assigned_to')
@@ -11293,15 +11531,29 @@ def handle_single_task(task_id):
                     return jsonify({"error": "You cannot assign a task to this user"}), 403
 
             try:
-                result = db.edit_task(
-                    task_id=task_id,
-                    requester_id=requester_id,
-                    requester_role=requester_role,
-                    subject=subject if has_subject else None,
-                    description=description if has_description else None,
-                    tag=tag if has_tag else None,
-                    assigned_to=assigned_to if has_assigned_to else None
-                )
+                edit_kwargs = {
+                    "task_id": task_id,
+                    "requester_id": requester_id,
+                    "requester_role": requester_role,
+                    "subject": subject if has_subject else None,
+                    "description": description if has_description else None,
+                    "tag": tag if has_tag else None,
+                    "assigned_to": assigned_to if has_assigned_to else None
+                }
+                if has_priority:
+                    edit_kwargs["priority"] = priority
+                if has_deadline:
+                    edit_kwargs["deadline_minutes"] = deadline_minutes
+                if has_is_regulation:
+                    edit_kwargs["is_regulation"] = is_regulation
+                if has_recurrence_type:
+                    edit_kwargs["recurrence_type"] = recurrence_type
+                if has_recurrence_interval:
+                    edit_kwargs["recurrence_interval"] = recurrence_interval
+                if has_checklist:
+                    edit_kwargs["checklist_items"] = checklist_items
+
+                result = db.edit_task(**edit_kwargs)
             except ValueError as value_error:
                 code = str(value_error)
                 if code == 'TASK_NOT_FOUND':
@@ -11312,6 +11564,16 @@ def handle_single_task(task_id):
                     return jsonify({"error": "subject is required"}), 400
                 if code == 'INVALID_TAG':
                     return jsonify({"error": "Invalid tag"}), 400
+                if code == 'INVALID_PRIORITY':
+                    return jsonify({"error": "Invalid priority"}), 400
+                if code == 'INVALID_DEADLINE':
+                    return jsonify({"error": "Invalid deadline"}), 400
+                if code == 'INVALID_RECURRENCE_TYPE':
+                    return jsonify({"error": "Invalid recurrence_type"}), 400
+                if code == 'INVALID_RECURRENCE_INTERVAL':
+                    return jsonify({"error": "Invalid recurrence_interval"}), 400
+                if code == 'INVALID_CHECKLIST':
+                    return jsonify({"error": "Invalid checklist"}), 400
                 if code == 'INVALID_ASSIGNED_TO':
                     return jsonify({"error": "Invalid assigned_to value"}), 400
                 return jsonify({"error": code}), 400
@@ -11494,6 +11756,8 @@ def update_task_status(task_id):
                 return jsonify({"error": "Task not found"}), 404
             if code in ('INVALID_ACTION', 'INVALID_TRANSITION'):
                 return jsonify({"error": "Invalid task status transition"}), 400
+            if code == 'CHECKLIST_INCOMPLETE':
+                return jsonify({"error": "Сначала завершите обязательные пункты чек-листа"}), 400
             return jsonify({"error": code}), 400
         except PermissionError as permission_error:
             _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths)
@@ -11572,6 +11836,82 @@ def update_task_status(task_id):
     except Exception as e:
         logging.error(f"Error in update_task_status: {e}")
         return jsonify({"error": f"Internal server error"}), 500
+
+
+@app.route('/api/tasks/<int:task_id>/checklist/<int:item_id>', methods=['PATCH', 'OPTIONS'])
+@require_api_key
+def update_task_checklist_item(task_id, item_id):
+    try:
+        requester_id, requester, guard_response, guard_status = _task_route_guard()
+        if guard_response is not None:
+            return guard_response, guard_status
+
+        data = request.get_json() or {}
+        if 'is_done' not in data:
+            return jsonify({"error": "is_done is required"}), 400
+        is_done = _parse_task_bool(data.get('is_done'))
+
+        try:
+            item = db.update_task_checklist_item(
+                task_id=task_id,
+                checklist_item_id=item_id,
+                requester_id=requester_id,
+                requester_role=requester[3],
+                is_done=is_done
+            )
+        except ValueError as value_error:
+            code = str(value_error)
+            if code == 'CHECKLIST_ITEM_NOT_FOUND':
+                return jsonify({"error": "Checklist item not found"}), 404
+            return jsonify({"error": code}), 400
+        except PermissionError as permission_error:
+            code = str(permission_error)
+            if code == 'TASK_FORBIDDEN':
+                return jsonify({"error": "You do not have access to this task"}), 403
+            return jsonify({"error": code}), 403
+
+        telegram_warnings = []
+        try:
+            task_ctx = _fetch_task_notification_context(task_id)
+            if task_ctx:
+                actor_name = requester[2] if requester and len(requester) > 2 else 'Сотрудник'
+                task_link = _build_current_task_deep_link(task_id)
+                reply_markup = _build_task_notification_reply_markup(task_link)
+                recipients = _collect_task_notification_recipients(task_ctx, requester_id)
+                for recipient in recipients:
+                    message_html = _build_task_checklist_notification_html(
+                        task_ctx=task_ctx,
+                        checklist_item=item,
+                        actor_name=actor_name,
+                        is_done=is_done,
+                        task_link=task_link
+                    )
+                    response = _send_telegram_text_message(
+                        recipient.get('chat_id'),
+                        message_html,
+                        parse_mode='HTML',
+                        reply_markup=reply_markup
+                    )
+                    if response.status_code != 200:
+                        recipient_name = recipient.get('name') or 'участник'
+                        telegram_warnings.append(
+                            f"Не удалось отправить уведомление ({recipient_name}): {_get_telegram_error_text(response)}"
+                        )
+        except Exception as notify_error:
+            telegram_warnings.append(f"Ошибка отправки Telegram-уведомления: {notify_error}")
+
+        response_payload = {
+            "status": "success",
+            "message": "Checklist item updated",
+            "item": item
+        }
+        if telegram_warnings:
+            response_payload["warning"] = _truncate_for_telegram(" | ".join(telegram_warnings), 1000)
+        return jsonify(response_payload), 200
+
+    except Exception as e:
+        logging.error(f"Error in update_task_checklist_item: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/tasks/attachments/<int:attachment_id>/download', methods=['GET', 'OPTIONS'])

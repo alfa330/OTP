@@ -37,6 +37,8 @@ logging.basicConfig(level=logging.INFO)
 os.environ['TZ'] = 'Asia/Almaty'
 time.tzset()
 
+_UNSET = object()
+
 def _env_int(name, default, minimum=None):
     try:
         value = int(str(os.getenv(name, default)).strip())
@@ -1548,9 +1550,18 @@ class Database:
                     subject VARCHAR(255) NOT NULL,
                     description TEXT,
                     tag VARCHAR(32) NOT NULL DEFAULT 'task' CHECK (tag IN ('task', 'problem', 'suggestion')),
+                    priority VARCHAR(16) NOT NULL DEFAULT 'normal' CHECK (priority IN ('normal', 'urgent', 'critical')),
                     status VARCHAR(32) NOT NULL DEFAULT 'assigned' CHECK (status IN ('assigned', 'in_progress', 'completed', 'accepted', 'returned')),
                     assigned_to INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                     created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    deadline_duration_minutes INTEGER CHECK (deadline_duration_minutes IS NULL OR deadline_duration_minutes >= 0),
+                    due_at TIMESTAMP,
+                    is_regulation BOOLEAN NOT NULL DEFAULT FALSE,
+                    recurrence_type VARCHAR(16) CHECK (recurrence_type IS NULL OR recurrence_type IN ('daily', 'weekly', 'monthly')),
+                    recurrence_interval INTEGER CHECK (recurrence_interval IS NULL OR recurrence_interval >= 1),
+                    recurrence_next_at TIMESTAMP,
+                    regulation_parent_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+                    regulation_iteration INTEGER NOT NULL DEFAULT 0,
                     completion_summary TEXT,
                     completed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
                     completed_at TIMESTAMP,
@@ -1586,6 +1597,45 @@ class Database:
                     attachment_kind VARCHAR(16) NOT NULL DEFAULT 'initial' CHECK (attachment_kind IN ('initial', 'result')),
                     uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
                     created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+            """)
+
+            cursor.execute("""
+                ALTER TABLE tasks ADD COLUMN IF NOT EXISTS priority VARCHAR(16) NOT NULL DEFAULT 'normal'
+                    CHECK (priority IN ('normal', 'urgent', 'critical'));
+            """)
+            cursor.execute("""
+                ALTER TABLE tasks ADD COLUMN IF NOT EXISTS deadline_duration_minutes INTEGER
+                    CHECK (deadline_duration_minutes IS NULL OR deadline_duration_minutes >= 0);
+            """)
+            cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS due_at TIMESTAMP;")
+            cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS is_regulation BOOLEAN NOT NULL DEFAULT FALSE;")
+            cursor.execute("""
+                ALTER TABLE tasks ADD COLUMN IF NOT EXISTS recurrence_type VARCHAR(16)
+                    CHECK (recurrence_type IS NULL OR recurrence_type IN ('daily', 'weekly', 'monthly'));
+            """)
+            cursor.execute("""
+                ALTER TABLE tasks ADD COLUMN IF NOT EXISTS recurrence_interval INTEGER
+                    CHECK (recurrence_interval IS NULL OR recurrence_interval >= 1);
+            """)
+            cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS recurrence_next_at TIMESTAMP;")
+            cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS regulation_parent_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL;")
+            cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS regulation_iteration INTEGER NOT NULL DEFAULT 0;")
+
+            # Task checklist items
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS task_checklist_items (
+                    id SERIAL PRIMARY KEY,
+                    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    title VARCHAR(255) NOT NULL,
+                    position INTEGER NOT NULL DEFAULT 0,
+                    is_required BOOLEAN NOT NULL DEFAULT TRUE,
+                    is_done BOOLEAN NOT NULL DEFAULT FALSE,
+                    completed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    completed_at TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    UNIQUE (task_id, position)
                 );
             """)
 
@@ -1928,8 +1978,12 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_tasks_assigned_to ON tasks(assigned_to);
                 CREATE INDEX IF NOT EXISTS idx_tasks_created_by ON tasks(created_by);
                 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+                CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority);
+                CREATE INDEX IF NOT EXISTS idx_tasks_due_at ON tasks(due_at);
+                CREATE INDEX IF NOT EXISTS idx_tasks_recurrence_next ON tasks(recurrence_next_at);
                 CREATE INDEX IF NOT EXISTS idx_task_status_history_task_id ON task_status_history(task_id);
                 CREATE INDEX IF NOT EXISTS idx_task_attachments_task_id ON task_attachments(task_id);
+                CREATE INDEX IF NOT EXISTS idx_task_checklist_items_task_id ON task_checklist_items(task_id, position);
                 CREATE INDEX IF NOT EXISTS idx_raw_resource_uploads_report_date ON raw_resource_uploads(report_date DESC);
                 CREATE INDEX IF NOT EXISTS idx_daily_resource_hours_report_hour ON daily_resource_hours(report_date, hour);
                 CREATE INDEX IF NOT EXISTS idx_daily_resource_summary_weekday_date ON daily_resource_summary(weekday, report_date DESC);
@@ -26219,13 +26273,154 @@ class Database:
             for row in rows
         ]
 
-    def create_task(self, subject, description, tag, assigned_to, created_by, attachments=None):
+    def _task_now(self):
+        return datetime.now()
+
+    def _task_dt_to_iso(self, value):
+        return value.isoformat() if hasattr(value, 'isoformat') else value
+
+    def _normalize_task_priority(self, priority):
+        priority_norm = (priority or 'normal').strip().lower() or 'normal'
+        if priority_norm not in ('normal', 'urgent', 'critical'):
+            raise ValueError("INVALID_PRIORITY")
+        return priority_norm
+
+    def _normalize_task_deadline_minutes(self, deadline_minutes):
+        if deadline_minutes is None or deadline_minutes is _UNSET:
+            return None
+        try:
+            minutes = int(deadline_minutes)
+        except Exception:
+            raise ValueError("INVALID_DEADLINE")
+        if minutes <= 0:
+            return None
+        if minutes > 10 * 365 * 24 * 60:
+            raise ValueError("INVALID_DEADLINE")
+        return minutes
+
+    def _split_task_deadline(self, deadline_minutes):
+        if deadline_minutes is None:
+            return {"days": 0, "hours": 0, "minutes": 0, "total_minutes": None}
+        try:
+            total = max(0, int(deadline_minutes))
+        except Exception:
+            total = 0
+        days = total // (24 * 60)
+        remainder = total % (24 * 60)
+        hours = remainder // 60
+        minutes = remainder % 60
+        return {
+            "days": int(days),
+            "hours": int(hours),
+            "minutes": int(minutes),
+            "total_minutes": int(total)
+        }
+
+    def _normalize_task_recurrence(self, is_regulation=False, recurrence_type=None, recurrence_interval=None):
+        recurrence_type_norm = (recurrence_type or '').strip().lower() or None
+        is_regulation_norm = bool(is_regulation or recurrence_type_norm)
+        if recurrence_type_norm and recurrence_type_norm not in ('daily', 'weekly', 'monthly'):
+            raise ValueError("INVALID_RECURRENCE_TYPE")
+        if recurrence_type_norm:
+            try:
+                interval_norm = int(recurrence_interval or 1)
+            except Exception:
+                raise ValueError("INVALID_RECURRENCE_INTERVAL")
+            if interval_norm < 1 or interval_norm > 365:
+                raise ValueError("INVALID_RECURRENCE_INTERVAL")
+        else:
+            interval_norm = None
+        return is_regulation_norm, recurrence_type_norm, interval_norm
+
+    def _add_task_recurrence_interval(self, base_dt, recurrence_type, interval):
+        base = base_dt or self._task_now()
+        interval_norm = max(1, int(interval or 1))
+        recurrence_type_norm = (recurrence_type or '').strip().lower()
+        if recurrence_type_norm == 'daily':
+            return base + timedelta(days=interval_norm)
+        if recurrence_type_norm == 'weekly':
+            return base + timedelta(weeks=interval_norm)
+        if recurrence_type_norm == 'monthly':
+            month_index = base.month - 1 + interval_norm
+            year = base.year + month_index // 12
+            month = month_index % 12 + 1
+            day = min(base.day, calendar.monthrange(year, month)[1])
+            return base.replace(year=year, month=month, day=day)
+        return None
+
+    def _normalize_task_checklist_items(self, checklist_items):
+        if not checklist_items:
+            return []
+        if not isinstance(checklist_items, list):
+            raise ValueError("INVALID_CHECKLIST")
+
+        normalized = []
+        seen = set()
+        for raw_item in checklist_items:
+            if isinstance(raw_item, str):
+                title = raw_item.strip()
+                is_required = True
+            elif isinstance(raw_item, dict):
+                title = str(raw_item.get('title') or raw_item.get('text') or '').strip()
+                is_required = bool(raw_item.get('is_required', True))
+            else:
+                continue
+            if not title:
+                continue
+            title = title[:255]
+            dedup_key = title.casefold()
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+            normalized.append({
+                "title": title,
+                "position": len(normalized),
+                "is_required": is_required
+            })
+            if len(normalized) >= 50:
+                break
+        return normalized
+
+    def _insert_task_checklist_items(self, cursor, task_id, checklist_items):
+        normalized = self._normalize_task_checklist_items(checklist_items)
+        for item in normalized:
+            cursor.execute("""
+                INSERT INTO task_checklist_items (task_id, title, position, is_required)
+                VALUES (%s, %s, %s, %s)
+            """, (task_id, item["title"], item["position"], item["is_required"]))
+        return normalized
+
+    def create_task(
+            self,
+            subject,
+            description,
+            tag,
+            assigned_to,
+            created_by,
+            attachments=None,
+            priority='normal',
+            deadline_minutes=None,
+            is_regulation=False,
+            recurrence_type=None,
+            recurrence_interval=None,
+            checklist_items=None
+    ):
         subject_norm = (subject or '').strip()
         description_norm = (description or '').strip() or None
         tag_norm = (tag or 'task').strip().lower() or 'task'
         assigned_to_id = int(assigned_to)
         created_by_id = int(created_by) if created_by is not None else None
         attachments = attachments or []
+        priority_norm = self._normalize_task_priority(priority)
+        deadline_minutes_norm = self._normalize_task_deadline_minutes(deadline_minutes)
+        now = self._task_now()
+        due_at = now + timedelta(minutes=deadline_minutes_norm) if deadline_minutes_norm else None
+        is_regulation_norm, recurrence_type_norm, recurrence_interval_norm = self._normalize_task_recurrence(
+            is_regulation=is_regulation,
+            recurrence_type=recurrence_type,
+            recurrence_interval=recurrence_interval
+        )
+        recurrence_next_at = self._add_task_recurrence_interval(now, recurrence_type_norm, recurrence_interval_norm) if recurrence_type_norm else None
 
         if not subject_norm:
             raise ValueError("SUBJECT_REQUIRED")
@@ -26234,16 +26429,38 @@ class Database:
 
         with self._get_cursor() as cursor:
             cursor.execute("""
-                INSERT INTO tasks (subject, description, tag, status, assigned_to, created_by, created_at, updated_at)
-                VALUES (%s, %s, %s, 'assigned', %s, %s, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'), (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
+                INSERT INTO tasks (
+                    subject, description, tag, priority, status, assigned_to, created_by,
+                    deadline_duration_minutes, due_at, is_regulation, recurrence_type,
+                    recurrence_interval, recurrence_next_at, regulation_iteration,
+                    created_at, updated_at
+                )
+                VALUES (%s, %s, %s, %s, 'assigned', %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s)
                 RETURNING id, created_at, updated_at
-            """, (subject_norm, description_norm, tag_norm, assigned_to_id, created_by_id))
+            """, (
+                subject_norm,
+                description_norm,
+                tag_norm,
+                priority_norm,
+                assigned_to_id,
+                created_by_id,
+                deadline_minutes_norm,
+                due_at,
+                is_regulation_norm,
+                recurrence_type_norm,
+                recurrence_interval_norm,
+                recurrence_next_at,
+                now,
+                now
+            ))
             task_id, created_at, updated_at = cursor.fetchone()
 
             cursor.execute("""
                 INSERT INTO task_status_history (task_id, status_code, changed_by)
                 VALUES (%s, 'assigned', %s)
             """, (task_id, created_by_id))
+
+            self._insert_task_checklist_items(cursor, task_id, checklist_items)
 
             for attachment in attachments:
                 file_name = (attachment.get('file_name') or 'attachment').strip() or 'attachment'
@@ -26266,8 +26483,11 @@ class Database:
 
         return {
             "id": task_id,
-            "created_at": created_at.isoformat() if hasattr(created_at, 'isoformat') else created_at,
-            "updated_at": updated_at.isoformat() if hasattr(updated_at, 'isoformat') else updated_at
+            "created_at": self._task_dt_to_iso(created_at),
+            "updated_at": self._task_dt_to_iso(updated_at),
+            "due_at": self._task_dt_to_iso(due_at),
+            "priority": priority_norm,
+            "is_regulation": is_regulation_norm
         }
 
     def edit_task(
@@ -26278,7 +26498,13 @@ class Database:
             subject=None,
             description=None,
             tag=None,
-            assigned_to=None
+            assigned_to=None,
+            priority=_UNSET,
+            deadline_minutes=_UNSET,
+            is_regulation=_UNSET,
+            recurrence_type=_UNSET,
+            recurrence_interval=_UNSET,
+            checklist_items=_UNSET
     ):
         task_id = int(task_id)
         requester_id = int(requester_id)
@@ -26288,16 +26514,29 @@ class Database:
         has_description = description is not None
         has_tag = tag is not None
         has_assigned_to = assigned_to is not None
+        has_priority = priority is not _UNSET
+        has_deadline = deadline_minutes is not _UNSET
+        has_is_regulation = is_regulation is not _UNSET
+        has_recurrence_type = recurrence_type is not _UNSET
+        has_recurrence_interval = recurrence_interval is not _UNSET
+        has_checklist = checklist_items is not _UNSET
 
-        if not any([has_subject, has_description, has_tag, has_assigned_to]):
+        if not any([
+            has_subject, has_description, has_tag, has_assigned_to,
+            has_priority, has_deadline, has_is_regulation,
+            has_recurrence_type, has_recurrence_interval, has_checklist
+        ]):
             raise ValueError("NOTHING_TO_UPDATE")
 
         with self._get_cursor() as cursor:
             cursor.execute("""
                 SELECT
-                    t.id, t.subject, t.description, t.tag,
+                    t.id, t.subject, t.description, t.tag, t.priority,
                     t.created_by, t.assigned_to,
-                    assignee.role, assignee.supervisor_id
+                    assignee.role, assignee.supervisor_id,
+                    t.deadline_duration_minutes, t.due_at,
+                    t.is_regulation, t.recurrence_type, t.recurrence_interval,
+                    t.recurrence_next_at
                 FROM tasks t
                 LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 WHERE t.id = %s
@@ -26309,10 +26548,17 @@ class Database:
             current_subject = (row[1] or '').strip()
             current_description = (row[2] or '').strip() or None
             current_tag = (row[3] or 'task').strip().lower() or 'task'
-            created_by = row[4]
-            current_assigned_to = row[5]
-            assignee_role = row[6]
-            assignee_supervisor_id = row[7]
+            current_priority = (row[4] or 'normal').strip().lower() or 'normal'
+            created_by = row[5]
+            current_assigned_to = row[6]
+            assignee_role = row[7]
+            assignee_supervisor_id = row[8]
+            current_deadline_minutes = row[9]
+            current_due_at = row[10]
+            current_is_regulation = bool(row[11])
+            current_recurrence_type = (row[12] or '').strip().lower() or None
+            current_recurrence_interval = row[13]
+            current_recurrence_next_at = row[14]
 
             if not self._task_visible_for_requester(role, requester_id, created_by, current_assigned_to, assignee_role, assignee_supervisor_id):
                 raise PermissionError("TASK_FORBIDDEN")
@@ -26346,6 +26592,39 @@ class Database:
             if tag_new not in ('task', 'problem', 'suggestion'):
                 raise ValueError("INVALID_TAG")
 
+            priority_new = current_priority if not has_priority else self._normalize_task_priority(priority)
+
+            if has_deadline:
+                deadline_minutes_new = self._normalize_task_deadline_minutes(deadline_minutes)
+                due_at_new = self._task_now() + timedelta(minutes=deadline_minutes_new) if deadline_minutes_new else None
+            else:
+                deadline_minutes_new = current_deadline_minutes
+                due_at_new = current_due_at
+
+            if has_is_regulation and not bool(is_regulation):
+                recurrence_type_input = None
+                recurrence_interval_input = None
+                is_regulation_input = False
+            else:
+                recurrence_type_input = recurrence_type if has_recurrence_type else current_recurrence_type
+                recurrence_interval_input = recurrence_interval if has_recurrence_interval else current_recurrence_interval
+                is_regulation_input = is_regulation if has_is_regulation else current_is_regulation
+            is_regulation_new, recurrence_type_new, recurrence_interval_new = self._normalize_task_recurrence(
+                is_regulation=is_regulation_input,
+                recurrence_type=recurrence_type_input,
+                recurrence_interval=recurrence_interval_input
+            )
+            recurrence_schedule_changed = (
+                is_regulation_new != current_is_regulation
+                or recurrence_type_new != current_recurrence_type
+                or recurrence_interval_new != current_recurrence_interval
+            )
+            recurrence_next_at_new = (
+                self._add_task_recurrence_interval(self._task_now(), recurrence_type_new, recurrence_interval_new)
+                if recurrence_type_new and recurrence_schedule_changed
+                else (current_recurrence_next_at if recurrence_type_new else None)
+            )
+
             changed_fields = []
             if subject_new != current_subject:
                 changed_fields.append("subject")
@@ -26353,8 +26632,16 @@ class Database:
                 changed_fields.append("description")
             if tag_new != current_tag:
                 changed_fields.append("tag")
+            if priority_new != current_priority:
+                changed_fields.append("priority")
             if assigned_to_new != current_assigned_to:
                 changed_fields.append("assigned_to")
+            if deadline_minutes_new != current_deadline_minutes or due_at_new != current_due_at:
+                changed_fields.append("deadline")
+            if recurrence_schedule_changed:
+                changed_fields.append("recurrence")
+            if has_checklist:
+                changed_fields.append("checklist")
 
             if not changed_fields:
                 return {
@@ -26365,8 +26652,15 @@ class Database:
                     "subject": current_subject,
                     "description": current_description,
                     "tag": current_tag,
+                    "priority": current_priority,
                     "assigned_to": current_assigned_to,
-                    "previous_assigned_to": current_assigned_to
+                    "previous_assigned_to": current_assigned_to,
+                    "deadline_duration_minutes": current_deadline_minutes,
+                    "due_at": self._task_dt_to_iso(current_due_at),
+                    "is_regulation": current_is_regulation,
+                    "recurrence_type": current_recurrence_type,
+                    "recurrence_interval": current_recurrence_interval,
+                    "recurrence_next_at": self._task_dt_to_iso(current_recurrence_next_at)
                 }
 
             cursor.execute("""
@@ -26375,24 +26669,55 @@ class Database:
                     subject = %s,
                     description = %s,
                     tag = %s,
+                    priority = %s,
                     assigned_to = %s,
+                    deadline_duration_minutes = %s,
+                    due_at = %s,
+                    is_regulation = %s,
+                    recurrence_type = %s,
+                    recurrence_interval = %s,
+                    recurrence_next_at = %s,
                     updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 WHERE id = %s
                 RETURNING updated_at
-            """, (subject_new, description_new, tag_new, assigned_to_new, task_id))
+            """, (
+                subject_new,
+                description_new,
+                tag_new,
+                priority_new,
+                assigned_to_new,
+                deadline_minutes_new,
+                due_at_new,
+                is_regulation_new,
+                recurrence_type_new,
+                recurrence_interval_new,
+                recurrence_next_at_new,
+                task_id
+            ))
             updated_row = cursor.fetchone()
             updated_at = updated_row[0] if updated_row else None
+
+            if has_checklist:
+                cursor.execute("DELETE FROM task_checklist_items WHERE task_id = %s", (task_id,))
+                self._insert_task_checklist_items(cursor, task_id, checklist_items)
 
             return {
                 "task_id": task_id,
                 "updated": True,
                 "changed_fields": changed_fields,
-                "updated_at": updated_at.isoformat() if hasattr(updated_at, 'isoformat') else updated_at,
+                "updated_at": self._task_dt_to_iso(updated_at),
                 "subject": subject_new,
                 "description": description_new,
                 "tag": tag_new,
+                "priority": priority_new,
                 "assigned_to": assigned_to_new,
-                "previous_assigned_to": current_assigned_to
+                "previous_assigned_to": current_assigned_to,
+                "deadline_duration_minutes": deadline_minutes_new,
+                "due_at": self._task_dt_to_iso(due_at_new),
+                "is_regulation": is_regulation_new,
+                "recurrence_type": recurrence_type_new,
+                "recurrence_interval": recurrence_interval_new,
+                "recurrence_next_at": self._task_dt_to_iso(recurrence_next_at_new)
             }
 
     def delete_task(self, task_id, requester_id, requester_role):
@@ -26463,6 +26788,115 @@ class Database:
             "attachments": attachments
         }
 
+    def materialize_due_regulation_tasks(self, max_templates=25, max_occurrences_per_template=3):
+        created_task_ids = []
+        now = self._task_now()
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    t.id, t.subject, t.description, t.tag, t.priority, t.assigned_to, t.created_by,
+                    t.deadline_duration_minutes, t.recurrence_type, t.recurrence_interval,
+                    t.recurrence_next_at
+                FROM tasks t
+                WHERE t.is_regulation = TRUE
+                  AND t.regulation_parent_id IS NULL
+                  AND t.recurrence_type IS NOT NULL
+                  AND t.recurrence_next_at IS NOT NULL
+                  AND t.recurrence_next_at <= %s
+                ORDER BY t.recurrence_next_at ASC, t.id ASC
+                LIMIT %s
+                FOR UPDATE SKIP LOCKED
+            """, (now, int(max_templates or 25)))
+            templates = cursor.fetchall()
+
+            for template in templates:
+                (
+                    root_id, subject, description, tag, priority, assigned_to, created_by,
+                    deadline_minutes, recurrence_type, recurrence_interval, next_at
+                ) = template
+
+                cursor.execute("""
+                    SELECT title, position, is_required
+                    FROM task_checklist_items
+                    WHERE task_id = %s
+                    ORDER BY position ASC, id ASC
+                """, (root_id,))
+                checklist_rows = cursor.fetchall()
+
+                occurrence_count = 0
+                latest_next_at = next_at
+                while latest_next_at and latest_next_at <= now and occurrence_count < int(max_occurrences_per_template or 3):
+                    occurrence_count += 1
+                    due_at = (
+                        latest_next_at + timedelta(minutes=int(deadline_minutes))
+                        if deadline_minutes is not None else None
+                    )
+                    cursor.execute("""
+                        SELECT COALESCE(MAX(regulation_iteration), 0)
+                        FROM tasks
+                        WHERE regulation_parent_id = %s
+                    """, (root_id,))
+                    iteration_row = cursor.fetchone()
+                    next_iteration = int(iteration_row[0] or 0) + 1
+
+                    cursor.execute("""
+                        INSERT INTO tasks (
+                            subject, description, tag, priority, status, assigned_to, created_by,
+                            deadline_duration_minutes, due_at, is_regulation,
+                            recurrence_type, recurrence_interval, recurrence_next_at,
+                            regulation_parent_id, regulation_iteration,
+                            created_at, updated_at
+                        )
+                        VALUES (
+                            %s, %s, %s, %s, 'assigned', %s, %s,
+                            %s, %s, TRUE,
+                            NULL, NULL, NULL,
+                            %s, %s,
+                            (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                            (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                        )
+                        RETURNING id
+                    """, (
+                        subject,
+                        description,
+                        tag,
+                        priority or 'normal',
+                        assigned_to,
+                        created_by,
+                        deadline_minutes,
+                        due_at,
+                        root_id,
+                        next_iteration
+                    ))
+                    created_id = cursor.fetchone()[0]
+                    created_task_ids.append(created_id)
+
+                    cursor.execute("""
+                        INSERT INTO task_status_history (task_id, status_code, changed_by)
+                        VALUES (%s, 'assigned', %s)
+                    """, (created_id, created_by))
+
+                    for item in checklist_rows:
+                        cursor.execute("""
+                            INSERT INTO task_checklist_items (task_id, title, position, is_required)
+                            VALUES (%s, %s, %s, %s)
+                        """, (created_id, item[0], item[1], item[2]))
+
+                    latest_next_at = self._add_task_recurrence_interval(
+                        latest_next_at,
+                        recurrence_type,
+                        recurrence_interval
+                    )
+
+                cursor.execute("""
+                    UPDATE tasks
+                    SET recurrence_next_at = %s,
+                        updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                    WHERE id = %s
+                """, (latest_next_at, root_id))
+
+        return created_task_ids
+
     def get_tasks_for_requester(
             self,
             requester_id,
@@ -26470,6 +26904,7 @@ class Database:
             search=None,
             status=None,
             tag=None,
+            priority=None,
             limit=None,
             offset=0,
             only_my=False,
@@ -26481,6 +26916,7 @@ class Database:
         search_text = (search or '').strip()
         status_norm = (status or '').strip().lower() or None
         tag_norm = (tag or '').strip().lower() or None
+        priority_norm = (priority or '').strip().lower() or None
         only_my_flag = bool(only_my)
         person_scope_norm = (person_scope or '').strip().lower() or None
 
@@ -26495,6 +26931,8 @@ class Database:
             raise ValueError("INVALID_TASK_STATUS_FILTER")
         if tag_norm and tag_norm not in {'task', 'problem', 'suggestion'}:
             raise ValueError("INVALID_TASK_TAG_FILTER")
+        if priority_norm and priority_norm not in {'normal', 'urgent', 'critical'}:
+            raise ValueError("INVALID_TASK_PRIORITY_FILTER")
         if person_scope_norm and person_scope_norm not in {'incoming', 'outgoing', 'any'}:
             raise ValueError("INVALID_TASK_PERSON_SCOPE_FILTER")
 
@@ -26558,6 +26996,10 @@ class Database:
             filtered_conditions.append("t.tag = %s")
             filtered_params.append(tag_norm)
 
+        if priority_norm:
+            filtered_conditions.append("t.priority = %s")
+            filtered_params.append(priority_norm)
+
         if person_id_norm is not None:
             if person_scope_norm == 'incoming':
                 filtered_conditions.append("t.assigned_to = %s")
@@ -26610,6 +27052,9 @@ class Database:
                 SELECT
                     t.id, t.subject, t.description, t.tag, t.status, t.created_at, t.updated_at,
                     t.completion_summary, t.completed_at, t.completed_by, completed_user.name,
+                    t.priority, t.deadline_duration_minutes, t.due_at, t.is_regulation,
+                    t.recurrence_type, t.recurrence_interval, t.recurrence_next_at,
+                    t.regulation_parent_id, t.regulation_iteration,
                     assignee.id, assignee.name, assignee.role, assignee.supervisor_id,
                     assignee.avatar_bucket, assignee.avatar_blob_path,
                     creator.id, creator.name, creator.role,
@@ -26634,6 +27079,7 @@ class Database:
 
             history_rows = []
             attachment_rows = []
+            checklist_rows = []
             if task_rows:
                 task_ids = [row[0] for row in task_rows]
 
@@ -26658,6 +27104,17 @@ class Database:
                     ORDER BY a.id ASC
                 """, (task_ids,))
                 attachment_rows = cursor.fetchall()
+
+                cursor.execute("""
+                    SELECT
+                        ci.id, ci.task_id, ci.title, ci.position, ci.is_required, ci.is_done,
+                        ci.completed_by, completed_user.name, ci.completed_at, ci.updated_at
+                    FROM task_checklist_items ci
+                    LEFT JOIN users completed_user ON completed_user.id = ci.completed_by
+                    WHERE ci.task_id = ANY(%s)
+                    ORDER BY ci.task_id ASC, ci.position ASC, ci.id ASC
+                """, (task_ids,))
+                checklist_rows = cursor.fetchall()
 
         history_map = defaultdict(list)
         for row in history_rows:
@@ -26684,6 +27141,21 @@ class Database:
                 "attachment_kind": row[9]
             })
 
+        checklist_map = defaultdict(list)
+        for row in checklist_rows:
+            checklist_map[row[1]].append({
+                "id": row[0],
+                "task_id": row[1],
+                "title": row[2],
+                "position": row[3],
+                "is_required": bool(row[4]),
+                "is_done": bool(row[5]),
+                "completed_by": row[6],
+                "completed_by_name": row[7],
+                "completed_at": self._task_dt_to_iso(row[8]),
+                "updated_at": self._task_dt_to_iso(row[9])
+            })
+
         result = []
         for row in task_rows:
             task_id = row[0]
@@ -26696,30 +27168,41 @@ class Database:
                 "description": row[2],
                 "tag": row[3],
                 "status": row[4],
-                "created_at": row[5].isoformat() if hasattr(row[5], 'isoformat') else row[5],
-                "updated_at": row[6].isoformat() if hasattr(row[6], 'isoformat') else row[6],
+                "created_at": self._task_dt_to_iso(row[5]),
+                "updated_at": self._task_dt_to_iso(row[6]),
                 "completion_summary": row[7],
-                "completed_at": row[8].isoformat() if hasattr(row[8], 'isoformat') else row[8],
+                "completed_at": self._task_dt_to_iso(row[8]),
                 "completed_by": row[9],
                 "completed_by_name": row[10],
+                "priority": row[11] or 'normal',
+                "deadline_duration_minutes": row[12],
+                "deadline": self._split_task_deadline(row[12]),
+                "due_at": self._task_dt_to_iso(row[13]),
+                "is_regulation": bool(row[14]),
+                "recurrence_type": row[15],
+                "recurrence_interval": row[16],
+                "recurrence_next_at": self._task_dt_to_iso(row[17]),
+                "regulation_parent_id": row[18],
+                "regulation_iteration": row[19],
                 "assignee": {
-                    "id": row[11],
-                    "name": row[12],
-                    "role": row[13],
-                    "supervisor_id": row[14],
-                    "avatar_bucket": row[15],
-                    "avatar_blob_path": row[16]
-                } if row[11] else None,
+                    "id": row[20],
+                    "name": row[21],
+                    "role": row[22],
+                    "supervisor_id": row[23],
+                    "avatar_bucket": row[24],
+                    "avatar_blob_path": row[25]
+                } if row[20] else None,
                 "creator": {
-                    "id": row[17],
-                    "name": row[18],
-                    "role": row[19],
-                    "avatar_bucket": row[20],
-                    "avatar_blob_path": row[21]
-                } if row[17] else None,
+                    "id": row[26],
+                    "name": row[27],
+                    "role": row[28],
+                    "avatar_bucket": row[29],
+                    "avatar_blob_path": row[30]
+                } if row[26] else None,
                 "history": history_map.get(task_id, []),
                 "attachments": initial_attachments,
-                "completion_attachments": result_attachments
+                "completion_attachments": result_attachments,
+                "checklist": checklist_map.get(task_id, [])
             })
 
         return {
@@ -26787,6 +27270,16 @@ class Database:
                     raise PermissionError("ONLY_ASSIGNEE")
                 if current_status not in ('in_progress', 'returned'):
                     raise ValueError("INVALID_TRANSITION")
+                cursor.execute("""
+                    SELECT COUNT(*)::INT
+                    FROM task_checklist_items
+                    WHERE task_id = %s
+                      AND is_required = TRUE
+                      AND is_done = FALSE
+                """, (task_id,))
+                checklist_row = cursor.fetchone()
+                if int((checklist_row or [0])[0] or 0) > 0:
+                    raise ValueError("CHECKLIST_INCOMPLETE")
                 target_status = 'completed'
                 history_status = 'completed'
             elif action_norm == 'accepted':
@@ -26870,6 +27363,71 @@ class Database:
                 "updated_at": updated_at.isoformat() if hasattr(updated_at, 'isoformat') else updated_at,
                 "history_id": history_row[0] if history_row else None,
                 "history_changed_at": (history_row[1].isoformat() if history_row and hasattr(history_row[1], 'isoformat') else (history_row[1] if history_row else None))
+            }
+
+    def update_task_checklist_item(self, task_id, checklist_item_id, requester_id, requester_role, is_done):
+        task_id = int(task_id)
+        checklist_item_id = int(checklist_item_id)
+        requester_id = int(requester_id)
+        role = normalize_role_value(requester_role)
+        is_done_norm = bool(is_done)
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    ci.id, ci.task_id, ci.title, ci.position, ci.is_required,
+                    t.created_by, t.assigned_to, assignee.role, assignee.supervisor_id
+                FROM task_checklist_items ci
+                JOIN tasks t ON t.id = ci.task_id
+                LEFT JOIN users assignee ON assignee.id = t.assigned_to
+                WHERE ci.id = %s AND ci.task_id = %s
+            """, (checklist_item_id, task_id))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("CHECKLIST_ITEM_NOT_FOUND")
+
+            created_by = row[5]
+            assigned_to = row[6]
+            assignee_role = row[7]
+            assignee_supervisor_id = row[8]
+            if not self._task_visible_for_requester(role, requester_id, created_by, assigned_to, assignee_role, assignee_supervisor_id):
+                raise PermissionError("TASK_FORBIDDEN")
+
+            if is_done_norm:
+                cursor.execute("""
+                    UPDATE task_checklist_items
+                    SET is_done = TRUE,
+                        completed_by = %s,
+                        completed_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                        updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                    WHERE id = %s
+                    RETURNING id, task_id, title, position, is_required, is_done, completed_by, completed_at, updated_at
+                """, (requester_id, checklist_item_id))
+            else:
+                cursor.execute("""
+                    UPDATE task_checklist_items
+                    SET is_done = FALSE,
+                        completed_by = NULL,
+                        completed_at = NULL,
+                        updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                    WHERE id = %s
+                    RETURNING id, task_id, title, position, is_required, is_done, completed_by, completed_at, updated_at
+                """, (checklist_item_id,))
+
+            updated = cursor.fetchone()
+            if not updated:
+                raise ValueError("CHECKLIST_ITEM_NOT_FOUND")
+
+            return {
+                "id": updated[0],
+                "task_id": updated[1],
+                "title": updated[2],
+                "position": updated[3],
+                "is_required": bool(updated[4]),
+                "is_done": bool(updated[5]),
+                "completed_by": updated[6],
+                "completed_at": self._task_dt_to_iso(updated[7]),
+                "updated_at": self._task_dt_to_iso(updated[8])
             }
 
     def get_task_attachment_for_requester(self, attachment_id, requester_id, requester_role):
