@@ -8,11 +8,13 @@ import {
   LoaderCircle,
   Maximize2,
   Minimize2,
+  Palette,
   PanelRightOpen,
   PictureInPicture2,
   Pin,
   PinOff,
   RefreshCw,
+  StickyNote,
 } from 'lucide-react';
 import { normalizeRole, isAdminLikeRole, isSupervisorRole } from '../../utils/roles';
 import FaIcon from '../common/FaIcon';
@@ -304,7 +306,7 @@ styleTag.textContent = `
   }
   .tv-task-row-meta {
     display: grid;
-    grid-template-columns: auto auto 196px 112px 28px 12px;
+    grid-template-columns: auto auto auto 196px 112px 28px 12px;
     align-items: center;
     column-gap: 8px;
     flex-shrink: 0;
@@ -658,6 +660,74 @@ styleTag.textContent = `
   }
   .tv-file-btn:hover { background: var(--border); color: var(--ink); }
 
+  .tv-deadline-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--ink-2);
+    white-space: nowrap;
+  }
+  .tv-deadline-chip.is-overdue { color: var(--rose); }
+  .tv-soft-block {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    padding: 12px;
+  }
+  .tv-checklist { display: flex; flex-direction: column; gap: 7px; }
+  .tv-checklist-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 9px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    background: var(--surface);
+  }
+  .tv-checklist-row.is-done {
+    background: #f0fdf4;
+    border-color: #bbf7d0;
+  }
+  .tv-checklist-checkbox {
+    margin-top: 2px;
+    width: 16px;
+    height: 16px;
+    accent-color: var(--emerald);
+    flex-shrink: 0;
+  }
+  .tv-checklist-title {
+    flex: 1;
+    min-width: 0;
+    color: var(--ink);
+    font-size: 13px;
+    line-height: 1.4;
+    word-break: break-word;
+  }
+  .tv-checklist-row.is-done .tv-checklist-title {
+    color: var(--ink-3);
+    text-decoration: line-through;
+  }
+  .tv-note-textarea {
+    min-height: 112px;
+    background: #fffdf5;
+    border-color: #fde68a;
+  }
+  .tv-form-inline-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+  }
+  .tv-form-switch {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12.5px;
+    color: var(--ink-2);
+  }
+  .tv-form-switch input { accent-color: var(--ink); }
+
   .tv-completion-block {
     background: #f0f4ff; border: 1px solid #c7d2fe;
     border-radius: var(--radius-sm); padding: 14px;
@@ -924,6 +994,11 @@ styleTag.textContent = `
     color: var(--ink);
     border-color: var(--border-strong);
   }
+  .tv-pin-header-btn.is-active {
+    background: var(--accent);
+    color: var(--accent-fg);
+    border-color: var(--accent);
+  }
   .tv-pin-header-btn-danger {
     color: #e11d48;
   }
@@ -967,6 +1042,55 @@ styleTag.textContent = `
     display: flex;
     flex-direction: column;
     gap: 10px;
+  }
+  .tv-pin-note-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    padding: 10px;
+    border-radius: 10px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+  }
+  .tv-pin-note-panel textarea {
+    width: 100%;
+    min-height: 104px;
+    resize: vertical;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--ink);
+    font-size: 12px;
+    line-height: 1.45;
+    padding: 8px;
+    outline: none;
+    user-select: text;
+  }
+  .tv-pin-palette-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .tv-pin-palette-btn {
+    width: 30px;
+    height: 24px;
+    border-radius: 8px;
+    border: 2px solid var(--border);
+    cursor: pointer;
+    display: inline-flex;
+    overflow: hidden;
+    padding: 0;
+    background: var(--surface);
+  }
+  .tv-pin-palette-btn.is-active { border-color: var(--accent); }
+  .tv-pin-palette-swatch { flex: 1; }
+  .tv-pin-mini-checklist {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .tv-pin-mini-checklist .tv-checklist-row {
+    padding: 7px 8px;
   }
   .tv-pin-file-section .tv-block-label {
     margin: 0 0 6px;
@@ -1222,6 +1346,7 @@ styleTag.textContent = `
     .tv-info-grid { grid-template-columns: 1fr; }
     .tv-task-row-meta { grid-template-columns: auto auto 28px 12px; column-gap: 6px; padding-left: 6px; }
     .tv-task-row-assignee-chip, .tv-task-row-flow, .tv-task-row-date { display: none; }
+    .tv-task-row-meta .tv-badge:nth-of-type(3), .tv-deadline-chip { display: none; }
     .tv-pagination { flex-wrap: wrap; justify-content: center; }
     .tv-person-row { flex-wrap: wrap; }
     .tv-person-stats { white-space: normal; gap: 8px; }
@@ -1287,6 +1412,93 @@ const TAG_META = {
   suggestion: { label: 'Предложение', badge: 'tv-badge-teal' },
 };
 
+const PRIORITY_OPTIONS = [
+  { value: 'normal',   label: 'Обычная' },
+  { value: 'urgent',   label: 'Срочная' },
+  { value: 'critical', label: 'Критичная' },
+];
+
+const PRIORITY_META = {
+  normal:   { label: 'Обычная',   badge: 'tv-badge-gray',   chipCls: 'is-active' },
+  urgent:   { label: 'Срочная',   badge: 'tv-badge-amber',  chipCls: 'is-active-amber' },
+  critical: { label: 'Критичная', badge: 'tv-badge-rose',   chipCls: 'is-active-rose' },
+};
+
+const RECURRENCE_OPTIONS = [
+  { value: 'daily',   label: 'Ежедневно' },
+  { value: 'weekly',  label: 'Еженедельно' },
+  { value: 'monthly', label: 'Ежемесячно' },
+];
+
+const PIN_PALETTES = [
+  {
+    id: 'paper',
+    label: 'Светлая',
+    vars: {
+      '--bg': '#f4f3f0',
+      '--surface': '#ffffff',
+      '--surface-2': '#fafaf8',
+      '--border': '#e8e5df',
+      '--border-strong': '#ccc9c0',
+      '--ink': '#1a1916',
+      '--ink-2': '#5c5852',
+      '--ink-3': '#9e9a93',
+      '--accent': '#1a1916',
+      '--accent-fg': '#ffffff',
+    }
+  },
+  {
+    id: 'midnight',
+    label: 'Тёмная',
+    vars: {
+      '--bg': '#101318',
+      '--surface': '#171b22',
+      '--surface-2': '#1f2530',
+      '--border': '#303846',
+      '--border-strong': '#485365',
+      '--ink': '#f8fafc',
+      '--ink-2': '#cbd5e1',
+      '--ink-3': '#94a3b8',
+      '--accent': '#93c5fd',
+      '--accent-fg': '#0f172a',
+    }
+  },
+  {
+    id: 'mint',
+    label: 'Мята',
+    vars: {
+      '--bg': '#ecfdf5',
+      '--surface': '#ffffff',
+      '--surface-2': '#d1fae5',
+      '--border': '#a7f3d0',
+      '--border-strong': '#34d399',
+      '--ink': '#064e3b',
+      '--ink-2': '#047857',
+      '--ink-3': '#10b981',
+      '--accent': '#047857',
+      '--accent-fg': '#ffffff',
+    }
+  },
+  {
+    id: 'focus',
+    label: 'Контраст',
+    vars: {
+      '--bg': '#fff7ed',
+      '--surface': '#fffbeb',
+      '--surface-2': '#fed7aa',
+      '--border': '#fdba74',
+      '--border-strong': '#fb923c',
+      '--ink': '#431407',
+      '--ink-2': '#9a3412',
+      '--ink-3': '#c2410c',
+      '--accent': '#ea580c',
+      '--accent-fg': '#ffffff',
+    }
+  },
+];
+
+const PIN_PALETTE_STORAGE_KEY = 'otp:pinned-task-palette';
+
 const STATUS_META = {
   assigned:    { label: 'Выставлен',  badge: 'tv-badge-indigo',  dot: '#a5b4fc', chipCls: 'is-active-indigo' },
   in_progress: { label: 'В работе',   badge: 'tv-badge-amber',   dot: '#fcd34d', chipCls: 'is-active-amber' },
@@ -1341,6 +1553,140 @@ const fmt = (v) => {
   if (!v) return '—';
   const d = new Date(v);
   return isNaN(d) ? String(v) : d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' });
+};
+
+const fmtShortDateTime = (v) => {
+  if (!v) return '';
+  const d = new Date(v);
+  return isNaN(d) ? String(v) : d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+};
+
+const isTaskOverdue = (task) => {
+  if (!task?.due_at || DONE_STATUSES.has(task?.status)) return false;
+  const due = new Date(task.due_at).getTime();
+  return Number.isFinite(due) && due < Date.now();
+};
+
+const taskDeadlineLabel = (task) => {
+  if (!task?.due_at) return '';
+  return `${isTaskOverdue(task) ? 'Просрочено' : 'Дедлайн'}: ${fmtShortDateTime(task.due_at)}`;
+};
+
+const splitDeadlineMinutes = (totalMinutes) => {
+  const total = Math.max(0, Number(totalMinutes || 0));
+  const days = Math.floor(total / (24 * 60));
+  const remainder = total % (24 * 60);
+  const hours = Math.floor(remainder / 60);
+  const minutes = remainder % 60;
+  return { days: String(days || ''), hours: String(hours || ''), minutes: String(minutes || '') };
+};
+
+const normalizeChecklistText = (value) => (
+  String(value || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join('\n')
+);
+
+const checklistToText = (items) => (
+  Array.isArray(items)
+    ? items.map((item) => item?.title || '').filter(Boolean).join('\n')
+    : ''
+);
+
+const checklistProgress = (items) => {
+  const list = Array.isArray(items) ? items : [];
+  const done = list.filter((item) => item?.is_done).length;
+  return { done, total: list.length };
+};
+
+const taskLocalNoteKey = (userId, taskId) => `otp:task-note:${Number(userId || 0)}:${Number(taskId || 0)}`;
+
+const readTaskLocalNote = (userId, taskId) => {
+  if (typeof window === 'undefined' || !userId || !taskId) return '';
+  try {
+    return window.localStorage.getItem(taskLocalNoteKey(userId, taskId)) || '';
+  } catch (error) {
+    return '';
+  }
+};
+
+const writeTaskLocalNote = (userId, taskId, note) => {
+  if (typeof window === 'undefined' || !userId || !taskId) return;
+  try {
+    const key = taskLocalNoteKey(userId, taskId);
+    const value = String(note || '');
+    if (value.trim()) window.localStorage.setItem(key, value);
+    else window.localStorage.removeItem(key);
+  } catch (error) {
+    // Local notes are best-effort browser state.
+  }
+};
+
+const attachLocalNotes = (list, userId) => (
+  Array.isArray(list)
+    ? list.map((task) => ({ ...task, local_note: readTaskLocalNote(userId, task?.id) }))
+    : []
+);
+
+const EMPTY_TASK_FORM = {
+  subject: '',
+  description: '',
+  tag: 'task',
+  priority: 'normal',
+  assignedTo: '',
+  deadlineDays: '',
+  deadlineHours: '',
+  deadlineMinutes: '',
+  isRegulation: false,
+  recurrenceType: '',
+  recurrenceInterval: '1',
+  checklistText: '',
+};
+
+const formChecklistItems = (text) => (
+  normalizeChecklistText(text)
+    .split('\n')
+    .map((title) => title.trim())
+    .filter(Boolean)
+    .map((title) => ({ title, is_required: true }))
+);
+
+const numberFieldValue = (value) => {
+  const num = Number(value);
+  return Number.isFinite(num) && num > 0 ? String(Math.floor(num)) : '0';
+};
+
+const buildTaskJsonPayload = (values) => ({
+  subject: String(values.subject || '').trim(),
+  description: String(values.description || '').trim(),
+  tag: values.tag || 'task',
+  priority: values.priority || 'normal',
+  assigned_to: Number(values.assignedTo || 0),
+  deadline_days: numberFieldValue(values.deadlineDays),
+  deadline_hours: numberFieldValue(values.deadlineHours),
+  deadline_minutes: numberFieldValue(values.deadlineMinutes),
+  is_regulation: Boolean(values.isRegulation),
+  recurrence_type: values.isRegulation ? (values.recurrenceType || 'daily') : '',
+  recurrence_interval: values.isRegulation ? numberFieldValue(values.recurrenceInterval || '1') : '1',
+  checklist_items: formChecklistItems(values.checklistText),
+});
+
+const appendTaskFormData = (body, values) => {
+  const payload = buildTaskJsonPayload(values);
+  body.append('subject', payload.subject);
+  body.append('description', payload.description);
+  body.append('tag', payload.tag);
+  body.append('priority', payload.priority);
+  body.append('assigned_to', String(payload.assigned_to || ''));
+  body.append('deadline_days', payload.deadline_days);
+  body.append('deadline_hours', payload.deadline_hours);
+  body.append('deadline_minutes', payload.deadline_minutes);
+  body.append('is_regulation', payload.is_regulation ? '1' : '0');
+  body.append('recurrence_type', payload.recurrence_type);
+  body.append('recurrence_interval', payload.recurrence_interval);
+  body.append('checklist_items', JSON.stringify(payload.checklist_items));
 };
 
 const pluralRu = (n, one, few, many) => {
@@ -1500,6 +1846,8 @@ const AvatarCircle = ({ className, name, avatarUrl }) => (
 const TaskRow = React.memo(({ task, onClick, onPin, isPinned }) => {
   const sm = STATUS_META[task.status] || { label: task.status, badge: 'tv-badge-gray', dot: '#ccc' };
   const tm = TAG_META[task.tag]       || { label: task.tag || '—', badge: 'tv-badge-gray' };
+  const pm = PRIORITY_META[task.priority] || PRIORITY_META.normal;
+  const deadlineLabel = taskDeadlineLabel(task);
   const creatorName = task?.creator?.name || '—';
   const assigneeName = task?.assignee?.name || '—';
   return (
@@ -1515,7 +1863,9 @@ const TaskRow = React.memo(({ task, onClick, onPin, isPinned }) => {
       </span>
       <span className="tv-task-row-meta">
         <span className={`tv-badge ${tm.badge}`}>{tm.label}</span>
+        {task?.priority && task.priority !== 'normal' && <span className={`tv-badge ${pm.badge}`}>{pm.label}</span>}
         <span className={`tv-badge ${sm.badge}`}>{sm.label}</span>
+        {deadlineLabel && <span className={`tv-deadline-chip ${isTaskOverdue(task) ? 'is-overdue' : ''}`}>{deadlineLabel}</span>}
         <span className="tv-task-row-assignee-chip">
           <AvatarCircle className="tv-avatar-xs" name={assigneeName} avatarUrl={task?.assignee?.avatar_url || ''} />
           <span className="tv-task-row-assignee-name">{assigneeName}</span>
@@ -1545,13 +1895,18 @@ const TaskRow = React.memo(({ task, onClick, onPin, isPinned }) => {
 const TaskDrawer = React.memo(({
   task, onClose, actionLoadingKey,
   getActionButtons, openCompleteModal, openStatusModal, updateStatus, downloadAttachment,
-  onEditTask, onDeleteTask, onTogglePinTask, onCopyTaskLink, isPinned,
+  onEditTask, onDeleteTask, onTogglePinTask, onCopyTaskLink, onToggleChecklistItem,
+  onLocalNoteChange, isPinned,
 }) => {
   const sm = STATUS_META[task.status] || { label: task.status, badge: 'tv-badge-gray' };
   const tm = TAG_META[task.tag]       || { label: task.tag || '—', badge: 'tv-badge-gray' };
+  const pm = PRIORITY_META[task.priority] || PRIORITY_META.normal;
   const attachments     = Array.isArray(task.attachments)            ? task.attachments            : [];
   const compAttachments = Array.isArray(task.completion_attachments) ? task.completion_attachments : [];
   const history         = Array.isArray(task.history)                ? task.history                : [];
+  const checklist       = Array.isArray(task.checklist)              ? task.checklist              : [];
+  const progress        = checklistProgress(checklist);
+  const deadlineLabel   = taskDeadlineLabel(task);
   const btns            = getActionButtons(task);
   const editBtn         = btns.find((btn) => btn.action === 'edit');
   const deleteBtn       = btns.find((btn) => btn.action === 'delete');
@@ -1589,6 +1944,8 @@ const TaskDrawer = React.memo(({
             <div className="tv-drawer-badges">
               <span className={`tv-badge ${sm.badge}`}>{sm.label}</span>
               <span className={`tv-badge ${tm.badge}`}>{tm.label}</span>
+              {task?.priority && <span className={`tv-badge ${pm.badge}`}>{pm.label}</span>}
+              {task?.is_regulation && <span className="tv-badge tv-badge-teal">Регламент</span>}
             </div>
           </div>
           <div className="tv-drawer-header-actions">
@@ -1679,6 +2036,8 @@ const TaskDrawer = React.memo(({
           <div className="tv-info-grid">
             <div className="tv-info-item"><label>Создано</label><span>{fmt(task.created_at)}</span></div>
             <div className="tv-info-item"><label>Статус</label><span>{sm.label}</span></div>
+            <div className="tv-info-item"><label>Дедлайн</label><span className={isTaskOverdue(task) ? 'tv-deadline-chip is-overdue' : ''}>{deadlineLabel || '—'}</span></div>
+            <div className="tv-info-item"><label>Повторение</label><span>{task?.recurrence_type ? `${RECURRENCE_OPTIONS.find(item => item.value === task.recurrence_type)?.label || task.recurrence_type}${Number(task?.recurrence_interval || 1) > 1 ? ` · раз в ${task.recurrence_interval}` : ''}` : (task?.is_regulation ? 'Разовый регламент' : '—')}</span></div>
           </div>
 
           {task.description && (
@@ -1706,6 +2065,43 @@ const TaskDrawer = React.memo(({
               </div>
             </>
           )}
+
+          {checklist.length > 0 && (
+            <>
+              <hr className="tv-divider" />
+              <div className="tv-soft-block">
+                <p className="tv-block-label">Чек-лист · {progress.done}/{progress.total}</p>
+                <div className="tv-checklist">
+                  {checklist.map(item => {
+                    const loading = actionLoadingKey === `${task.id}:checklist:${item.id}`;
+                    return (
+                      <label key={item.id} className={`tv-checklist-row ${item.is_done ? 'is-done' : ''}`}>
+                        <input
+                          type="checkbox"
+                          className="tv-checklist-checkbox"
+                          checked={!!item.is_done}
+                          disabled={!!loading}
+                          onChange={() => onToggleChecklistItem?.(task, item, !item.is_done)}
+                        />
+                        <span className="tv-checklist-title">{item.title}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            </>
+          )}
+
+          <hr className="tv-divider" />
+          <div>
+            <p className="tv-block-label">Локальные заметки</p>
+            <textarea
+              className="tv-textarea tv-note-textarea"
+              value={task?.local_note || ''}
+              placeholder="Личная заметка только в этом браузере"
+              onChange={(event) => onLocalNoteChange?.(task, event.target.value)}
+            />
+          </div>
 
           {(task.completion_summary || compAttachments.length > 0) && (
             <>
@@ -1795,6 +2191,8 @@ export const PinnedTaskWidget = React.memo(({
   onOpenDetails,
   onRunAction,
   onDownloadAttachment,
+  onToggleChecklistItem,
+  onLocalNoteChange,
   onSelectTask,
   onStateChange,
 }) => {
@@ -1805,6 +2203,17 @@ export const PinnedTaskWidget = React.memo(({
     return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
   });
   const [taskMenuOpen, setTaskMenuOpen] = useState(false);
+  const [noteOpen, setNoteOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [localNote, setLocalNote] = useState('');
+  const [paletteId, setPaletteId] = useState(() => {
+    if (typeof window === 'undefined') return PIN_PALETTES[0].id;
+    try {
+      return window.localStorage.getItem(PIN_PALETTE_STORAGE_KEY) || PIN_PALETTES[0].id;
+    } catch (error) {
+      return PIN_PALETTES[0].id;
+    }
+  });
   const [selectedCreatorKey, setSelectedCreatorKey] = useState(null);
   const [pipContainer, setPipContainer] = useState(null);
   const [pipWindow, setPipWindow] = useState(null);
@@ -1816,8 +2225,12 @@ export const PinnedTaskWidget = React.memo(({
   const currentUserId = Number(user?.id || 0);
   const sm = STATUS_META[task?.status] || { label: task?.status || '—', badge: 'tv-badge-gray' };
   const tm = TAG_META[task?.tag] || { label: task?.tag || '—', badge: 'tv-badge-gray' };
+  const pm = PRIORITY_META[task?.priority] || PRIORITY_META.normal;
   const attachments = Array.isArray(task?.attachments) ? task.attachments : [];
   const compAttachments = Array.isArray(task?.completion_attachments) ? task.completion_attachments : [];
+  const checklist = Array.isArray(task?.checklist) ? task.checklist : [];
+  const progress = checklistProgress(checklist);
+  const activePalette = PIN_PALETTES.find((item) => item.id === paletteId) || PIN_PALETTES[0];
   const actionButtons = useMemo(
     () => buildTaskActionButtons(task, currentUserId, currentUserRole)
       .filter((btn) => !['edit', 'delete'].includes(btn.action)),
@@ -1946,6 +2359,30 @@ export const PinnedTaskWidget = React.memo(({
   }, [position]);
 
   useEffect(() => {
+    setLocalNote(task?.local_note ?? readTaskLocalNote(user?.id, task?.id));
+  }, [task?.id, task?.local_note, user?.id]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      window.localStorage.setItem(PIN_PALETTE_STORAGE_KEY, activePalette.id);
+    } catch (error) {
+      // Palette preference is best-effort browser state.
+    }
+  }, [activePalette.id]);
+
+  useEffect(() => {
+    if (!pipWindow) return;
+    pipWindow.document.body.style.background = activePalette.vars['--bg'] || '#f4f3f0';
+  }, [pipWindow, activePalette]);
+
+  const handleLocalNoteChange = useCallback((value) => {
+    setLocalNote(value);
+    writeTaskLocalNote(user?.id, task?.id, value);
+    onLocalNoteChange?.(task, value);
+  }, [onLocalNoteChange, task, user?.id]);
+
+  useEffect(() => {
     if (!creatorGroups.length) {
       setSelectedCreatorKey(null);
       return;
@@ -2005,7 +2442,10 @@ export const PinnedTaskWidget = React.memo(({
     <section
       ref={widgetRef}
       className={`tv-pin-widget ${isDragging ? 'is-dragging' : ''} ${pipWindow ? 'is-detached' : ''}`}
-      style={pipWindow ? undefined : (position ? { left: position.x, top: position.y } : { right: 18, bottom: 18 })}
+      style={{
+        ...activePalette.vars,
+        ...(pipWindow ? {} : (position ? { left: position.x, top: position.y } : { right: 18, bottom: 18 }))
+      }}
       aria-label="Закрепленная задача"
     >
       <header className="tv-pin-header">
@@ -2028,6 +2468,32 @@ export const PinnedTaskWidget = React.memo(({
           <h2 className="tv-pin-title">{task.subject || 'Без темы'}</h2>
         </div>
         <div className="tv-pin-header-actions">
+          <button
+            type="button"
+            className={`tv-pin-header-btn ${noteOpen ? 'is-active' : ''}`}
+            title={noteOpen ? 'Скрыть заметки' : 'Открыть заметки'}
+            aria-label={noteOpen ? 'Скрыть заметки' : 'Открыть заметки'}
+            onClick={() => {
+              setNoteOpen((prev) => !prev);
+              setPaletteOpen(false);
+              setTaskMenuOpen(false);
+            }}
+          >
+            <StickyNote size={15} strokeWidth={2} />
+          </button>
+          <button
+            type="button"
+            className={`tv-pin-header-btn ${paletteOpen ? 'is-active' : ''}`}
+            title="Палитра закрепленной задачи"
+            aria-label="Палитра закрепленной задачи"
+            onClick={() => {
+              setPaletteOpen((prev) => !prev);
+              setNoteOpen(false);
+              setTaskMenuOpen(false);
+            }}
+          >
+            <Palette size={15} strokeWidth={2} />
+          </button>
           {!pipWindow && typeof window !== 'undefined' && window.documentPictureInPicture?.requestWindow && (
             <button
               type="button"
@@ -2084,10 +2550,32 @@ export const PinnedTaskWidget = React.memo(({
           <div className="tv-pin-badges">
             <span className={`tv-badge ${sm.badge}`}>{sm.label}</span>
             <span className={`tv-badge ${tm.badge}`}>{tm.label}</span>
+            {task?.priority && <span className={`tv-badge ${pm.badge}`}>{pm.label}</span>}
+            {task?.is_regulation && <span className="tv-badge tv-badge-teal">Регламент</span>}
           </div>
         </div>
 
-        {taskMenuOpen ? (
+        {paletteOpen ? (
+          <div className="tv-pin-note-panel">
+            <p className="tv-block-label" style={{ margin: 0 }}>Палитра PiP</p>
+            <div className="tv-pin-palette-row">
+              {PIN_PALETTES.map((palette) => (
+                <button
+                  key={palette.id}
+                  type="button"
+                  className={`tv-pin-palette-btn ${palette.id === activePalette.id ? 'is-active' : ''}`}
+                  title={palette.label}
+                  aria-label={palette.label}
+                  onClick={() => setPaletteId(palette.id)}
+                >
+                  <span className="tv-pin-palette-swatch" style={{ background: palette.vars['--surface-2'] }} />
+                  <span className="tv-pin-palette-swatch" style={{ background: palette.vars['--surface'] }} />
+                  <span className="tv-pin-palette-swatch" style={{ background: palette.vars['--accent'] }} />
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : taskMenuOpen ? (
           <div className="tv-pin-task-menu">
             <div className="tv-pin-people-rail">
               {creatorGroups.map((group) => (
@@ -2162,6 +2650,16 @@ export const PinnedTaskWidget = React.memo(({
           </div>
         ) : (
           <>
+            {noteOpen && (
+              <div className="tv-pin-note-panel">
+                <p className="tv-block-label" style={{ margin: 0 }}>Локальные заметки</p>
+                <textarea
+                  value={localNote}
+                  placeholder="Личная заметка только в этом браузере"
+                  onChange={(event) => handleLocalNoteChange(event.target.value)}
+                />
+              </div>
+            )}
             {expanded && (
               <div className="tv-pin-summary">
                 <p className="tv-pin-description">
@@ -2176,7 +2674,34 @@ export const PinnedTaskWidget = React.memo(({
                     <span className="tv-pin-meta-label">Постановщик</span>
                     <span className="tv-pin-meta-value">{task?.creator?.name || '—'}</span>
                   </div>
+                  <div className="tv-pin-meta-item">
+                    <span className="tv-pin-meta-label">Дедлайн</span>
+                    <span className="tv-pin-meta-value">{taskDeadlineLabel(task) || '—'}</span>
+                  </div>
+                  <div className="tv-pin-meta-item">
+                    <span className="tv-pin-meta-label">Чек-лист</span>
+                    <span className="tv-pin-meta-value">{progress.total ? `${progress.done}/${progress.total}` : '—'}</span>
+                  </div>
                 </div>
+                {checklist.length > 0 && (
+                  <div className="tv-pin-mini-checklist">
+                    {checklist.slice(0, 5).map((item) => (
+                      <label key={item.id} className={`tv-checklist-row ${item.is_done ? 'is-done' : ''}`}>
+                        <input
+                          type="checkbox"
+                          className="tv-checklist-checkbox"
+                          checked={!!item.is_done}
+                          disabled={actionLoadingKey === `${task.id}:checklist:${item.id}`}
+                          onChange={() => onToggleChecklistItem?.(task, item, !item.is_done)}
+                        />
+                        <span className="tv-checklist-title">{item.title}</span>
+                      </label>
+                    ))}
+                    {checklist.length > 5 && (
+                      <span className="tv-pin-empty-actions">Ещё пунктов: {checklist.length - 5}</span>
+                    )}
+                  </div>
+                )}
                 {(attachments.length > 0 || compAttachments.length > 0) && (
                   <div className="tv-pin-files">
                     {attachments.length > 0 && (
@@ -2285,6 +2810,7 @@ const TasksView = ({
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
   const [filterStatus,        setFilterStatus]        = useState('');
   const [filterTag,           setFilterTag]           = useState('');
+  const [filterPriority,      setFilterPriority]      = useState('');
   const [allTasksPage,        setAllTasksPage]        = useState(1);
   const [allTasksTotal,       setAllTasksTotal]       = useState(0);
   const [filteredTasksTotal,  setFilteredTasksTotal]  = useState(0);
@@ -2296,7 +2822,7 @@ const TasksView = ({
   const [createOpen,        setCreateOpen]        = useState(false);
   const [editModal,         setEditModal]         = useState({ open: false, taskId: null, taskSubject: '' });
   const [deleteModal,       setDeleteModal]       = useState({ open: false, taskId: null, taskSubject: '' });
-  const [editForm,          setEditForm]          = useState({ subject: '', description: '', tag: 'task', assignedTo: '' });
+  const [editForm,          setEditForm]          = useState(EMPTY_TASK_FORM);
   const [drawerTask,        setDrawerTask]        = useState(null);
   const [completeModal,     setCompleteModal]     = useState({ open: false, taskId: null, taskSubject: '' });
   const [statusModal,       setStatusModal]       = useState({ open: false, taskId: null, action: '', taskSubject: '' });
@@ -2316,7 +2842,7 @@ const TasksView = ({
   const personTasksRequestIdRef = useRef(0);
   const handledFocusRequestRef = useRef(0);
   const hasSyncedDrawerUrlRef   = useRef(false);
-  const [form, setForm] = useState({ subject: '', description: '', tag: 'task', assignedTo: '' });
+  const [form, setForm] = useState(EMPTY_TASK_FORM);
 
   const showToastRef = useRef(showToast);
   useEffect(() => { showToastRef.current = showToast; }, [showToast]);
@@ -2359,13 +2885,13 @@ const TasksView = ({
     setIsTasksLoading(true);
     try {
       const res  = await axios.get(`${apiBaseUrl}/api/tasks`, { headers: buildHeaders() });
-      const list = Array.isArray(res?.data?.tasks) ? res.data.tasks : [];
+      const list = attachLocalNotes(Array.isArray(res?.data?.tasks) ? res.data.tasks : [], user?.id);
       setTasks(list);
       setDrawerTask(prev => prev ? (list.find(t => t.id === prev.id) ?? prev) : null);
     } catch (e) {
       notify(e?.response?.data?.error || 'Не удалось загрузить задачи', 'error');
     } finally { setIsTasksLoading(false); }
-  }, [apiBaseUrl, buildHeaders, notify]);
+  }, [apiBaseUrl, buildHeaders, notify, user?.id]);
 
   useEffect(() => {
     if (!pinnedTaskId || typeof onPinnedTaskSync !== 'function') return;
@@ -2399,6 +2925,7 @@ const TasksView = ({
       if (debouncedSearchQuery) params.q = debouncedSearchQuery;
       if (filterStatus) params.status = filterStatus;
       if (filterTag) params.tag = filterTag;
+      if (filterPriority) params.priority = filterPriority;
 
       const res = await axios.get(`${apiBaseUrl}/api/tasks`, {
         headers: buildHeaders(),
@@ -2407,7 +2934,7 @@ const TasksView = ({
       if (requestId !== pagedRequestIdRef.current) return;
 
       const data = res?.data || {};
-      const list = Array.isArray(data?.tasks) ? data.tasks : [];
+      const list = attachLocalNotes(Array.isArray(data?.tasks) ? data.tasks : [], user?.id);
       const totals = data?.totals || {};
       const totalAll = Number(totals?.all);
       const totalFiltered = Number(totals?.filtered);
@@ -2430,7 +2957,9 @@ const TasksView = ({
     allTasksPage,
     debouncedSearchQuery,
     filterStatus,
-    filterTag
+    filterTag,
+    filterPriority,
+    user?.id
   ]);
 
   useEffect(() => {
@@ -2518,7 +3047,7 @@ const TasksView = ({
       if (requestId !== personTasksRequestIdRef.current) return;
 
       const data = res?.data || {};
-      const list = Array.isArray(data?.tasks) ? data.tasks : [];
+      const list = attachLocalNotes(Array.isArray(data?.tasks) ? data.tasks : [], user?.id);
       const totalFiltered = Number(data?.totals?.filtered);
       setPersonTasks(list);
       setPersonTasksTotal(Number.isFinite(totalFiltered) ? totalFiltered : list.length);
@@ -2536,7 +3065,8 @@ const TasksView = ({
     apiBaseUrl,
     buildHeaders,
     notify,
-    personTasksPage
+    personTasksPage,
+    user?.id
   ]);
 
   const refreshTasksData = useCallback(async () => {
@@ -2544,6 +3074,56 @@ const TasksView = ({
     if (isPersonDrilldown) jobs.push(fetchPersonTasks());
     await Promise.all(jobs);
   }, [fetchTasks, fetchPagedTasks, fetchPersonTasks, isPersonDrilldown]);
+
+  const patchTaskEverywhere = useCallback((taskId, updater) => {
+    const normalizedTaskId = Number(taskId || 0);
+    if (!normalizedTaskId || typeof updater !== 'function') return;
+    const current = [drawerTask, ...tasks, ...pagedTasks, ...personTasks]
+      .filter(Boolean)
+      .find((item) => Number(item?.id || 0) === normalizedTaskId) || { id: normalizedTaskId };
+    const nextTask = updater(current);
+    if (!nextTask) return;
+    const replace = (item) => (Number(item?.id || 0) === normalizedTaskId ? nextTask : item);
+    setTasks(prev => prev.map(replace));
+    setPagedTasks(prev => prev.map(replace));
+    setPersonTasks(prev => prev.map(replace));
+    setDrawerTask(prev => (Number(prev?.id || 0) === normalizedTaskId ? nextTask : prev));
+    if (Number(pinnedTaskId || 0) === normalizedTaskId) onPinnedTaskSync?.(nextTask);
+  }, [drawerTask, tasks, pagedTasks, personTasks, pinnedTaskId, onPinnedTaskSync]);
+
+  const updateLocalNote = useCallback((task, note) => {
+    const taskId = Number(task?.id || 0);
+    if (!taskId) return;
+    writeTaskLocalNote(user?.id, taskId, note);
+    patchTaskEverywhere(taskId, (current) => ({ ...current, local_note: note }));
+  }, [patchTaskEverywhere, user?.id]);
+
+  const toggleChecklistItem = useCallback(async (task, item, isDone) => {
+    const taskId = Number(task?.id || 0);
+    const itemId = Number(item?.id || 0);
+    if (!taskId || !itemId) return;
+    const key = `${taskId}:checklist:${itemId}`;
+    setActionLoadingKey(key);
+    try {
+      const res = await axios.patch(
+        `${apiBaseUrl}/api/tasks/${taskId}/checklist/${itemId}`,
+        { is_done: Boolean(isDone) },
+        { headers: buildHeaders() }
+      );
+      const updatedItem = res?.data?.item || { ...item, is_done: Boolean(isDone) };
+      patchTaskEverywhere(taskId, (current) => ({
+        ...current,
+        checklist: (Array.isArray(current?.checklist) ? current.checklist : [])
+          .map((row) => Number(row?.id || 0) === itemId ? { ...row, ...updatedItem } : row)
+      }));
+      notify(isDone ? 'Пункт чек-листа выполнен' : 'Пункт чек-листа открыт');
+      if (res?.data?.warning) notify(res.data.warning, 'error');
+    } catch (e) {
+      notify(e?.response?.data?.error || 'Не удалось обновить чек-лист', 'error');
+    } finally {
+      setActionLoadingKey('');
+    }
+  }, [apiBaseUrl, buildHeaders, notify, patchTaskEverywhere]);
 
   useEffect(() => {
     if (!externalRefreshToken || !user || !canAccessTasks) return;
@@ -2620,10 +3200,7 @@ const TasksView = ({
     if (!form.assignedTo)     { notify('Выберите сотрудника', 'error'); return; }
 
     const body = new FormData();
-    body.append('subject',     form.subject.trim());
-    body.append('description', form.description.trim());
-    body.append('tag',         form.tag);
-    body.append('assigned_to', String(form.assignedTo));
+    appendTaskFormData(body, form);
     selectedFiles.forEach(f => body.append('files', f));
 
     setIsCreateLoading(true);
@@ -2631,7 +3208,7 @@ const TasksView = ({
       const res = await axios.post(`${apiBaseUrl}/api/tasks`, body, { headers: buildHeaders() });
       notify(res?.data?.message || 'Задача создана');
       if (res?.data?.warning) notify(res.data.warning, 'error');
-      setForm({ subject: '', description: '', tag: 'task', assignedTo: '' });
+      setForm(EMPTY_TASK_FORM);
       setSelectedFiles([]);
       setCreateOpen(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -2644,11 +3221,20 @@ const TasksView = ({
   /* ── Edit / Delete ── */
   const openEditModal = useCallback((task) => {
     if (!task?.id) return;
+    const deadline = splitDeadlineMinutes(task?.deadline_duration_minutes);
     setEditForm({
       subject: task?.subject || '',
       description: task?.description || '',
       tag: task?.tag || 'task',
-      assignedTo: String(task?.assignee?.id || '')
+      priority: task?.priority || 'normal',
+      assignedTo: String(task?.assignee?.id || ''),
+      deadlineDays: deadline.days,
+      deadlineHours: deadline.hours,
+      deadlineMinutes: deadline.minutes,
+      isRegulation: Boolean(task?.is_regulation || task?.recurrence_type),
+      recurrenceType: task?.recurrence_type || '',
+      recurrenceInterval: String(task?.recurrence_interval || '1'),
+      checklistText: checklistToText(task?.checklist)
     });
     setEditModal({
       open: true,
@@ -2659,7 +3245,7 @@ const TasksView = ({
 
   const closeEditModal = useCallback(() => {
     setEditModal({ open: false, taskId: null, taskSubject: '' });
-    setEditForm({ subject: '', description: '', tag: 'task', assignedTo: '' });
+    setEditForm(EMPTY_TASK_FORM);
   }, []);
 
   const submitEditTask = useCallback(async (e) => {
@@ -2671,12 +3257,7 @@ const TasksView = ({
     const key = `${editModal.taskId}:edit`;
     setActionLoadingKey(key);
     try {
-      const payload = {
-        subject: editForm.subject.trim(),
-        description: editForm.description.trim(),
-        tag: editForm.tag,
-        assigned_to: Number(editForm.assignedTo)
-      };
+      const payload = buildTaskJsonPayload(editForm);
       const res = await axios.patch(
         `${apiBaseUrl}/api/tasks/${editModal.taskId}`,
         payload,
@@ -2990,7 +3571,7 @@ const TasksView = ({
 
   if (!user || !canAccessTasks) return null;
 
-  const hasActiveFilters = Boolean(searchQuery.trim() || filterStatus || filterTag);
+  const hasActiveFilters = Boolean(searchQuery.trim() || filterStatus || filterTag || filterPriority);
   const isAnyTasksLoading = isTasksLoading || isPagedTasksLoading || isPersonTasksLoading;
 
   return (
@@ -3119,6 +3700,19 @@ const TasksView = ({
                   {meta.label}
                 </button>
               ))}
+              {Object.entries(PRIORITY_META).filter(([key]) => key !== 'normal').map(([key, meta]) => (
+                <button
+                  key={key}
+                  type="button"
+                  className={`tv-chip ${filterPriority === key ? meta.chipCls : ''}`}
+                  onClick={() => {
+                    setFilterPriority(v => v === key ? '' : key);
+                    setAllTasksPage(1);
+                  }}
+                >
+                  {meta.label}
+                </button>
+              ))}
               {hasActiveFilters && (
                 <button
                   type="button"
@@ -3128,6 +3722,7 @@ const TasksView = ({
                     setSearchQuery('');
                     setFilterStatus('');
                     setFilterTag('');
+                    setFilterPriority('');
                     setAllTasksPage(1);
                   }}
                 >
@@ -3190,6 +3785,8 @@ const TasksView = ({
           onEditTask={openEditModal}
           onDeleteTask={openDeleteModal}
           onCopyTaskLink={copyTaskLink}
+          onToggleChecklistItem={toggleChecklistItem}
+          onLocalNoteChange={updateLocalNote}
           onTogglePinTask={(task) => {
             if (Number(task?.id || 0) === Number(pinnedTaskId)) {
               onUnpinTask?.();
@@ -3246,6 +3843,59 @@ const TasksView = ({
                         ))}
                       </select>
                     </div>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr', gap: 12 }}>
+                    <div className="tv-form-field">
+                      <label>Срочность</label>
+                      <select className="tv-select" value={form.priority} disabled={isCreateLoading}
+                        onChange={e => setForm(p => ({ ...p, priority: e.target.value }))}>
+                        {PRIORITY_OPTIONS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                      </select>
+                    </div>
+                    <div className="tv-form-field">
+                      <label>Дедлайн через</label>
+                      <div className="tv-form-inline-grid">
+                        <input className="tv-input" type="number" min="0" placeholder="Дней" value={form.deadlineDays} disabled={isCreateLoading}
+                          onChange={e => setForm(p => ({ ...p, deadlineDays: e.target.value }))} />
+                        <input className="tv-input" type="number" min="0" max="23" placeholder="Часов" value={form.deadlineHours} disabled={isCreateLoading}
+                          onChange={e => setForm(p => ({ ...p, deadlineHours: e.target.value }))} />
+                        <input className="tv-input" type="number" min="0" max="59" placeholder="Минут" value={form.deadlineMinutes} disabled={isCreateLoading}
+                          onChange={e => setForm(p => ({ ...p, deadlineMinutes: e.target.value }))} />
+                      </div>
+                    </div>
+                  </div>
+                  <div className="tv-soft-block">
+                    <label className="tv-form-switch">
+                      <input type="checkbox" checked={form.isRegulation} disabled={isCreateLoading}
+                        onChange={e => setForm(p => ({
+                          ...p,
+                          isRegulation: e.target.checked,
+                          recurrenceType: e.target.checked ? (p.recurrenceType || 'daily') : ''
+                        }))} />
+                      Повторяемая регламентная задача
+                    </label>
+                    {form.isRegulation && (
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 120px', gap: 10, marginTop: 10 }}>
+                        <div className="tv-form-field" style={{ margin: 0 }}>
+                          <label>Период</label>
+                          <select className="tv-select" value={form.recurrenceType || 'daily'} disabled={isCreateLoading}
+                            onChange={e => setForm(p => ({ ...p, recurrenceType: e.target.value }))}>
+                            {RECURRENCE_OPTIONS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                          </select>
+                        </div>
+                        <div className="tv-form-field" style={{ margin: 0 }}>
+                          <label>Интервал</label>
+                          <input className="tv-input" type="number" min="1" max="365" value={form.recurrenceInterval} disabled={isCreateLoading}
+                            onChange={e => setForm(p => ({ ...p, recurrenceInterval: e.target.value }))} />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  <div className="tv-form-field">
+                    <label>Чек-лист</label>
+                    <textarea className="tv-textarea" value={form.checklistText} disabled={isCreateLoading}
+                      placeholder="Каждый пункт с новой строки"
+                      onChange={e => setForm(p => ({ ...p, checklistText: e.target.value }))} />
                   </div>
                   <div className="tv-form-field">
                     <label>Прикрепить файлы</label>
@@ -3342,6 +3992,82 @@ const TasksView = ({
                         ))}
                       </select>
                     </div>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr', gap: 12 }}>
+                    <div className="tv-form-field">
+                      <label>Срочность</label>
+                      <select
+                        className="tv-select"
+                        value={editForm.priority}
+                        disabled={!!actionLoadingKey}
+                        onChange={e => setEditForm(p => ({ ...p, priority: e.target.value }))}
+                      >
+                        {PRIORITY_OPTIONS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                      </select>
+                    </div>
+                    <div className="tv-form-field">
+                      <label>Дедлайн через</label>
+                      <div className="tv-form-inline-grid">
+                        <input className="tv-input" type="number" min="0" placeholder="Дней" value={editForm.deadlineDays} disabled={!!actionLoadingKey}
+                          onChange={e => setEditForm(p => ({ ...p, deadlineDays: e.target.value }))} />
+                        <input className="tv-input" type="number" min="0" max="23" placeholder="Часов" value={editForm.deadlineHours} disabled={!!actionLoadingKey}
+                          onChange={e => setEditForm(p => ({ ...p, deadlineHours: e.target.value }))} />
+                        <input className="tv-input" type="number" min="0" max="59" placeholder="Минут" value={editForm.deadlineMinutes} disabled={!!actionLoadingKey}
+                          onChange={e => setEditForm(p => ({ ...p, deadlineMinutes: e.target.value }))} />
+                      </div>
+                    </div>
+                  </div>
+                  <div className="tv-soft-block">
+                    <label className="tv-form-switch">
+                      <input
+                        type="checkbox"
+                        checked={!!editForm.isRegulation}
+                        disabled={!!actionLoadingKey}
+                        onChange={e => setEditForm(p => ({
+                          ...p,
+                          isRegulation: e.target.checked,
+                          recurrenceType: e.target.checked ? (p.recurrenceType || 'daily') : ''
+                        }))}
+                      />
+                      Повторяемая регламентная задача
+                    </label>
+                    {editForm.isRegulation && (
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 120px', gap: 10, marginTop: 10 }}>
+                        <div className="tv-form-field" style={{ margin: 0 }}>
+                          <label>Период</label>
+                          <select
+                            className="tv-select"
+                            value={editForm.recurrenceType || 'daily'}
+                            disabled={!!actionLoadingKey}
+                            onChange={e => setEditForm(p => ({ ...p, recurrenceType: e.target.value }))}
+                          >
+                            {RECURRENCE_OPTIONS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                          </select>
+                        </div>
+                        <div className="tv-form-field" style={{ margin: 0 }}>
+                          <label>Интервал</label>
+                          <input
+                            className="tv-input"
+                            type="number"
+                            min="1"
+                            max="365"
+                            value={editForm.recurrenceInterval}
+                            disabled={!!actionLoadingKey}
+                            onChange={e => setEditForm(p => ({ ...p, recurrenceInterval: e.target.value }))}
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  <div className="tv-form-field">
+                    <label>Чек-лист</label>
+                    <textarea
+                      className="tv-textarea"
+                      value={editForm.checklistText}
+                      disabled={!!actionLoadingKey}
+                      placeholder="Каждый пункт с новой строки"
+                      onChange={e => setEditForm(p => ({ ...p, checklistText: e.target.value }))}
+                    />
                   </div>
                 </div>
               </div>
