@@ -9355,21 +9355,31 @@ class Database:
                                     talk_time=0.0, calls=0, efficiency=0.0,
                                     fine_amount=0.0, fine_reason=None, fine_comment=None,
                                     fines: List[Dict[str, Any]] = None,
-                                    bonuses: List[Dict[str, Any]] = None):
+                                    bonuses: List[Dict[str, Any]] = None,
+                                    group_id=None):
         """
         Вставляет/обновляет запись daily_hours (operator_id + day).
         efficiency и fine_amount ожидаются в часах/суммах соответственно.
+
+        group_id — группа, к которой относится этот день оператора. Уникальность
+        остаётся по (operator_id, day): правило «один оператор = одна группа в день»
+        делает её совместимой, group_id просто меняется по дням. Если group_id не
+        передан, существующее значение сохраняется (COALESCE), а при отсутствии —
+        проставляется активная группа оператора на эту дату.
         """
         if isinstance(day, str):
             day = datetime.strptime(day, "%Y-%m-%d").date()
         with self._get_cursor() as cursor:
+            # Если group_id не задан явно — резолвим активную группу оператора на дату.
+            if group_id is None:
+                group_id = self._get_operator_group_id_tx(cursor, operator_id, day)
             # Insert or update daily_hours and return its id for managing daily_fines
             cursor.execute("""
                 INSERT INTO daily_hours (
                     operator_id, day, work_time, break_time, talk_time, calls, efficiency,
-                    fine_amount, fine_reason, fine_comment
+                    fine_amount, fine_reason, fine_comment, group_id
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (operator_id, day)
                 DO UPDATE SET
                     work_time = EXCLUDED.work_time,
@@ -9380,11 +9390,12 @@ class Database:
                     fine_amount = EXCLUDED.fine_amount,
                     fine_reason = EXCLUDED.fine_reason,
                     fine_comment = EXCLUDED.fine_comment,
+                    group_id = COALESCE(EXCLUDED.group_id, daily_hours.group_id),
                     created_at = CURRENT_TIMESTAMP
                 RETURNING id
             """, (operator_id, day, work_time, break_time, talk_time, calls, efficiency,
                 float(fine_amount) if fine_amount is not None else 0.0,
-                fine_reason, fine_comment))
+                fine_reason, fine_comment, group_id))
             res = cursor.fetchone()
             daily_id = res[0] if res else None
 
@@ -10150,9 +10161,19 @@ class Database:
 
         return {"month": month, "days_in_month": days_in_month, "operator": operator_obj}
 
-    def get_daily_hours_by_supervisor_month(self, supervisor_id, month):
+    def get_daily_hours_by_group_month(self, group_id, month):
+        """Group-aware: часы операторов ГРУППЫ за месяц (членство пересекает месяц);
+        модель и фильтр daily — по этой группе. Тонкая обёртка над
+        get_daily_hours_by_supervisor_month."""
+        return self.get_daily_hours_by_supervisor_month(None, month, group_id=group_id)
+
+    def get_daily_hours_by_supervisor_month(self, supervisor_id, month, group_id=None):
         """
-        Возвращает все daily_hours и агрегаты work_hours для всех операторов указанного супервайзера за месяц YYYY-MM.
+        Возвращает daily_hours и агрегаты work_hours для операторов за месяц YYYY-MM.
+        Если задан group_id — операторы выбираются по членству в группе, пересекающему
+        месяц; модель берётся из ГРУППЫ, а daily фильтруется по этой группе (поддержка
+        раздельных дней при переводе посреди месяца). Иначе — legacy-выборка по
+        users.supervisor_id (поведение сохранено 1:1).
         Включает также ставку (rate) из users, norm_hours и fines из work_hours.
         """
         import calendar as _py_calendar
@@ -10168,8 +10189,10 @@ class Database:
             raise ValueError("Invalid month format, expected YYYY-MM") from e
 
         with self._get_cursor() as cursor:
-            # Получаем операторов + ставка + norm_hours + агрегаты work_hours (включая fines)
-            cursor.execute("""
+            # Получаем операторов + ставка + norm_hours + агрегаты work_hours (включая fines).
+            # Колонка модели и источник операторов различаются: group-aware vs legacy,
+            # но СПИСОК и ПОРЯДОК колонок идентичны (downstream-распаковка одна).
+            _sel_prefix = """
                 SELECT u.id, u.name,
                     COALESCE(
                         (SELECT wr.rate FROM work_hours wr
@@ -10179,7 +10202,8 @@ class Database:
                     ) AS rate,
                     u.status, u.supervisor_id,
                     d.name as direction_name,
-                    d.calculation_model_code,
+            """
+            _sel_suffix = """
                     COALESCE(w.norm_hours, 0) as norm_hours,
                     COALESCE(w.regular_hours, 0) as regular_hours,
                     COALESCE(w.total_break_time, 0) as total_break_time,
@@ -10188,13 +10212,39 @@ class Database:
                     COALESCE(w.total_efficiency_hours, 0) as total_efficiency_hours,
                     COALESCE(w.calls_per_hour, 0) as calls_per_hour,
                     COALESCE(w.fines, 0) as fines
-                FROM users u
-                LEFT JOIN work_hours w
-                ON w.operator_id = u.id AND w.month = %s
-                LEFT JOIN directions d ON u.direction_id = d.id
-                WHERE u.role = 'operator' AND u.supervisor_id = %s
-                ORDER BY u.name
-            """, (month, month, supervisor_id))
+            """
+            if group_id is not None:
+                cursor.execute(
+                    _sel_prefix
+                    + "                    g.calculation_model_code as calculation_model_code,\n"
+                    + _sel_suffix
+                    + """
+                    FROM group_operator_memberships gom
+                    JOIN groups g ON g.id = gom.group_id
+                    JOIN users u ON u.id = gom.operator_id AND u.role = 'operator'
+                    LEFT JOIN work_hours w ON w.operator_id = u.id AND w.month = %s
+                    LEFT JOIN directions d ON u.direction_id = d.id
+                    WHERE gom.group_id = %s
+                      AND gom.start_date <= %s
+                      AND (gom.end_date IS NULL OR gom.end_date >= %s)
+                    ORDER BY u.name
+                    """,
+                    (month, month, int(group_id), end, start),
+                )
+            else:
+                cursor.execute(
+                    _sel_prefix
+                    + "                    d.calculation_model_code as calculation_model_code,\n"
+                    + _sel_suffix
+                    + """
+                    FROM users u
+                    LEFT JOIN work_hours w ON w.operator_id = u.id AND w.month = %s
+                    LEFT JOIN directions d ON u.direction_id = d.id
+                    WHERE u.role = 'operator' AND u.supervisor_id = %s
+                    ORDER BY u.name
+                    """,
+                    (month, month, supervisor_id),
+                )
             operator_rows = cursor.fetchall()  # list of tuples
 
             if not operator_rows:
@@ -10202,16 +10252,29 @@ class Database:
 
             op_ids = [row[0] for row in operator_rows]
 
-            # Получаем daily_hours для этих операторов за месяц (с информацией о штрафах)
-            cursor.execute("""
+            # Получаем daily_hours для этих операторов за месяц (с информацией о штрафах).
+            # В group-aware режиме фильтруем по группе: дни этого оператора, отнесённые
+            # именно к этой группе (поддержка раздельных дней при переводе).
+            _daily_sql = """
                 SELECT d.operator_id, d.day, d.work_time, d.break_time, d.talk_time, d.calls, d.efficiency,
                     d.fine_amount, d.fine_reason, d.fine_comment,
                     COALESCE(d.no_phone_minutes, 0), COALESCE(d.no_phone_seconds, 0)
                 FROM daily_hours d
                 WHERE d.operator_id = ANY(%s)
                 AND d.day >= %s AND d.day <= %s
+                {group_filter}
                 ORDER BY d.operator_id, d.day
-            """, (op_ids, start, end))
+            """
+            if group_id is not None:
+                cursor.execute(
+                    _daily_sql.format(group_filter="AND d.group_id = %s"),
+                    (op_ids, start, end, int(group_id)),
+                )
+            else:
+                cursor.execute(
+                    _daily_sql.format(group_filter=""),
+                    (op_ids, start, end),
+                )
             daily_rows = cursor.fetchall()
 
             # Готовим словарь daily: operator_id -> {day_number: {...}}
@@ -17798,6 +17861,263 @@ class Database:
             'ignored': set(),
         }
 
+    def _get_operator_group_id_tx(self, cursor, operator_id, as_of):
+        """group_id активной (основной) группы оператора на дату as_of, или None."""
+        if operator_id is None or as_of is None:
+            return None
+        cursor.execute(
+            """
+            SELECT gom.group_id
+            FROM group_operator_memberships gom
+            JOIN groups gr ON gr.id = gom.group_id
+            WHERE gom.operator_id = %s
+              AND gom.start_date <= %s
+              AND (gom.end_date IS NULL OR gom.end_date >= %s)
+            ORDER BY gom.start_date DESC
+            LIMIT 1
+            """,
+            (int(operator_id), as_of, as_of),
+        )
+        row = cursor.fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+
+    def _get_supervisor_group_ids_tx(self, cursor, supervisor_id, as_of):
+        """Список group_id, которые ведёт СВ на дату as_of (обычно один)."""
+        if supervisor_id is None or as_of is None:
+            return []
+        cursor.execute(
+            """
+            SELECT DISTINCT gsm.group_id
+            FROM group_supervisor_memberships gsm
+            WHERE gsm.supervisor_id = %s
+              AND gsm.start_date <= %s
+              AND (gsm.end_date IS NULL OR gsm.end_date >= %s)
+            """,
+            (int(supervisor_id), as_of, as_of),
+        )
+        return [int(r[0]) for r in (cursor.fetchall() or []) if r[0] is not None]
+
+    def get_supervisor_group_ids(self, supervisor_id, month=None):
+        """Публичный: id групп, которые ведёт СВ на конец месяца YYYY-MM (или сегодня)."""
+        if month:
+            try:
+                y, m = map(int, str(month).split('-'))
+                as_of = date(y, m, calendar.monthrange(y, m)[1])
+            except Exception:
+                as_of = date.today()
+        else:
+            as_of = date.today()
+        with self._get_cursor() as cursor:
+            return self._get_supervisor_group_ids_tx(cursor, supervisor_id, as_of)
+
+    # ──────────────────────────── ГРУППЫ: CRUD и членство ────────────────────────────
+    # Модель расчёта группы задаётся ТОЛЬКО при создании и не меняется (смена модели =
+    # архив + создание/переиспользование). Принадлежность операторов/СВ — историческая
+    # по датам; один оператор не может иметь две активные основные группы на одну дату.
+
+    _GROUP_SELECT = """
+        SELECT g.id, g.name, g.department_id, g.direction_id, g.calculation_model_code,
+               g.table_url, g.status, g.archived_at, g.reused_from_group_id,
+               g.created_at, g.updated_at, d.name AS direction_name,
+               (SELECT COUNT(*) FROM group_operator_memberships gom
+                 WHERE gom.group_id = g.id AND gom.end_date IS NULL) AS active_operators,
+               (SELECT COALESCE(json_agg(json_build_object('id', su.id, 'name', su.name)
+                        ORDER BY su.name), '[]'::json)
+                  FROM group_supervisor_memberships gsm
+                  JOIN users su ON su.id = gsm.supervisor_id
+                 WHERE gsm.group_id = g.id AND gsm.end_date IS NULL) AS supervisors
+        FROM groups g
+        LEFT JOIN directions d ON d.id = g.direction_id
+    """
+
+    def _group_row_to_dict(self, row):
+        model_code = normalize_calculation_model_code(row[4], row[11])
+        model_desc = CALCULATION_MODEL_DESCRIPTIONS.get(model_code, {})
+        return {
+            'id': int(row[0]),
+            'name': row[1],
+            'department_id': row[2],
+            'direction_id': row[3],
+            'calculation_model_code': model_code,
+            'calculation_model_name': model_desc.get('name'),
+            'table_url': row[5],
+            'status': row[6],
+            'archived_at': row[7].isoformat() if row[7] else None,
+            'reused_from_group_id': row[8],
+            'created_at': row[9].isoformat() if row[9] else None,
+            'updated_at': row[10].isoformat() if row[10] else None,
+            'direction_name': row[11],
+            'active_operators': int(row[12] or 0),
+            'supervisors': row[13] or [],
+        }
+
+    def list_groups(self, include_archived=False, department_id=None):
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                self._GROUP_SELECT + """
+                WHERE (%s OR g.status = 'active')
+                  AND (%s::int IS NULL OR g.department_id = %s::int)
+                ORDER BY (g.status = 'archived'), g.name
+                """,
+                (bool(include_archived), department_id, department_id),
+            )
+            return [self._group_row_to_dict(r) for r in cursor.fetchall() or []]
+
+    def get_group(self, group_id):
+        with self._get_cursor() as cursor:
+            cursor.execute(self._GROUP_SELECT + " WHERE g.id = %s", (int(group_id),))
+            row = cursor.fetchone()
+            return self._group_row_to_dict(row) if row else None
+
+    def get_group_suggestions(self, department_id=None, direction_id=None):
+        """Архивные группы того же отдела/направления — кандидаты на переиспользование."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                self._GROUP_SELECT + """
+                WHERE g.status = 'archived'
+                  AND (%s::int IS NULL OR g.department_id = %s::int)
+                  AND (%s::int IS NULL OR g.direction_id = %s::int)
+                ORDER BY g.archived_at DESC NULLS LAST, g.name
+                """,
+                (department_id, department_id, direction_id, direction_id),
+            )
+            return [self._group_row_to_dict(r) for r in cursor.fetchall() or []]
+
+    def create_group(self, name, calculation_model_code=None, direction_id=None,
+                     department_id=None, table_url=None, created_by=None):
+        """Создаёт активную группу. Модель валидируется и далее не меняется. Если модель
+        не задана, но задано направление — берётся модель направления."""
+        with self._get_cursor() as cursor:
+            dir_name = None
+            if calculation_model_code is None and direction_id is not None:
+                cursor.execute(
+                    "SELECT name, calculation_model_code FROM directions WHERE id = %s",
+                    (int(direction_id),),
+                )
+                drow = cursor.fetchone()
+                if drow:
+                    dir_name = drow[0]
+                    calculation_model_code = drow[1]
+            model_code = normalize_calculation_model_code(calculation_model_code, dir_name)
+            cursor.execute(
+                """
+                INSERT INTO groups
+                    (name, department_id, direction_id, calculation_model_code,
+                     table_url, status, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                RETURNING id
+                """,
+                (name, department_id, direction_id, model_code, table_url),
+            )
+            new_id = cursor.fetchone()[0]
+        return self.get_group(new_id)
+
+    def archive_group(self, group_id, end_date=None, changed_by=None):
+        """Архивирует группу: status='archived' + закрывает открытые членства на дату.
+        Историю и закрытые членства не трогает."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE groups SET status = 'archived', archived_at = CURRENT_TIMESTAMP,
+                       updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s AND status <> 'archived'
+                """,
+                (int(group_id),),
+            )
+            for table in ('group_operator_memberships', 'group_supervisor_memberships'):
+                cursor.execute(
+                    "UPDATE " + table + """
+                    SET end_date = COALESCE(%s::date, CURRENT_DATE)
+                    WHERE group_id = %s AND end_date IS NULL
+                    """,
+                    (end_date, int(group_id)),
+                )
+        return self.get_group(group_id)
+
+    def reuse_archived_group(self, group_id):
+        """Возвращает архивную группу в активные (история сохраняется)."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE groups SET status = 'active', archived_at = NULL,
+                       updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                """,
+                (int(group_id),),
+            )
+        return self.get_group(group_id)
+
+    def add_operator_to_group(self, group_id, operator_id, start_date=None, assigned_by=None):
+        """Добавляет оператора в группу с effective date, закрывая прошлую основную
+        группу (один активный основной membership на оператора)."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE group_operator_memberships
+                SET end_date = (COALESCE(%s::date, CURRENT_DATE) - INTERVAL '1 day')
+                WHERE operator_id = %s AND end_date IS NULL AND group_id <> %s
+                """,
+                (start_date, int(operator_id), int(group_id)),
+            )
+            # Если уже есть открытый membership в этой группе — не дублируем.
+            cursor.execute(
+                """
+                SELECT 1 FROM group_operator_memberships
+                WHERE operator_id = %s AND group_id = %s AND end_date IS NULL
+                """,
+                (int(operator_id), int(group_id)),
+            )
+            if cursor.fetchone() is None:
+                cursor.execute(
+                    """
+                    INSERT INTO group_operator_memberships
+                        (group_id, operator_id, start_date, assigned_by, created_at)
+                    VALUES (%s, %s, COALESCE(%s::date, CURRENT_DATE), %s, CURRENT_TIMESTAMP)
+                    """,
+                    (int(group_id), int(operator_id), start_date, assigned_by),
+                )
+
+    def remove_operator_from_group(self, group_id, operator_id, end_date=None):
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE group_operator_memberships
+                SET end_date = COALESCE(%s::date, CURRENT_DATE)
+                WHERE group_id = %s AND operator_id = %s AND end_date IS NULL
+                """,
+                (end_date, int(group_id), int(operator_id)),
+            )
+
+    def add_supervisor_to_group(self, group_id, supervisor_id, start_date=None, assigned_by=None):
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 1 FROM group_supervisor_memberships
+                WHERE supervisor_id = %s AND group_id = %s AND end_date IS NULL
+                """,
+                (int(supervisor_id), int(group_id)),
+            )
+            if cursor.fetchone() is None:
+                cursor.execute(
+                    """
+                    INSERT INTO group_supervisor_memberships
+                        (group_id, supervisor_id, start_date, assigned_by, created_at)
+                    VALUES (%s, %s, COALESCE(%s::date, CURRENT_DATE), %s, CURRENT_TIMESTAMP)
+                    """,
+                    (int(group_id), int(supervisor_id), start_date, assigned_by),
+                )
+
+    def remove_supervisor_from_group(self, group_id, supervisor_id, end_date=None):
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE group_supervisor_memberships
+                SET end_date = COALESCE(%s::date, CURRENT_DATE)
+                WHERE group_id = %s AND supervisor_id = %s AND end_date IS NULL
+                """,
+                (end_date, int(group_id), int(supervisor_id)),
+            )
+
     def _load_operator_calculation_models_tx(self, cursor, operator_ids, as_of=None):
         """
         Модель расчёта по операторам.
@@ -19324,9 +19644,9 @@ class Database:
         cursor.execute("""
             INSERT INTO work_hours (
                 operator_id, month, regular_hours, training_hours, fines, total_break_time,
-                total_talk_time, total_calls, total_efficiency_hours, calls_per_hour
+                total_talk_time, total_calls, total_efficiency_hours, calls_per_hour, group_id
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (operator_id, month)
             DO UPDATE SET
                 regular_hours = EXCLUDED.regular_hours,
@@ -19337,6 +19657,7 @@ class Database:
                 total_calls = EXCLUDED.total_calls,
                 total_efficiency_hours = EXCLUDED.total_efficiency_hours,
                 calls_per_hour = EXCLUDED.calls_per_hour,
+                group_id = COALESCE(EXCLUDED.group_id, work_hours.group_id),
                 created_at = CURRENT_TIMESTAMP
         """, (
             operator_id,
@@ -19348,7 +19669,11 @@ class Database:
             float(total_talk_time or 0.0),
             int(total_calls or 0),
             float(total_efficiency_hours or 0.0),
-            float(calls_per_hour or 0.0)
+            float(calls_per_hour or 0.0),
+            # group_id: активная группа оператора на конец месяца. Уникальность пока
+            # (operator_id, month) — раздельные месячные итоги по группам появятся
+            # после свопа constraint на (group_id, operator_id, month).
+            self._get_operator_group_id_tx(cursor, operator_id, end)
         ))
 
         return {

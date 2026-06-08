@@ -5912,6 +5912,9 @@ def sv_daily_hours():
     """
     try:
         month = request.args.get('month') or datetime.now().strftime('%Y-%m')
+        # group_id (опц.) — group-aware режим: операторы и метрики по группе за месяц.
+        group_param = request.args.get('group_id')
+        group_id = int(group_param) if group_param and str(group_param).isdigit() else None
         requester_id, requester, auth_error = _get_authenticated_requester()
         if auth_error:
             message, status_code = auth_error
@@ -5925,7 +5928,13 @@ def sv_daily_hours():
             else:
                 supervisor_id = requester_id
 
-            result = db.get_daily_hours_by_supervisor_month(supervisor_id, month)
+            if group_id is not None:
+                # СВ может смотреть только свои группы (на этот месяц).
+                if group_id not in db.get_supervisor_group_ids(supervisor_id, month):
+                    return jsonify({"error": "Forbidden: not your group"}), 403
+                result = db.get_daily_hours_by_group_month(group_id, month)
+            else:
+                result = db.get_daily_hours_by_supervisor_month(supervisor_id, month)
             return jsonify({
                 "status": "success",
                 "month": result.get("month", month),
@@ -5944,12 +5953,15 @@ def sv_daily_hours():
             }), 200
 
         if _is_admin_role(role):
-            user_id = request.args.get('id')
-            if not user_id or not str(user_id).isdigit():
-                return jsonify({"error": "Missing or invalid 'id' parameter (supervisor id)"}), 400
-
-            supervisor_id = int(user_id)
-            result = db.get_daily_hours_by_supervisor_month(supervisor_id, month)
+            if group_id is not None:
+                # Админ может смотреть любую группу; id супервайзера не требуется.
+                result = db.get_daily_hours_by_group_month(group_id, month)
+            else:
+                user_id = request.args.get('id')
+                if not user_id or not str(user_id).isdigit():
+                    return jsonify({"error": "Missing or invalid 'id' parameter (supervisor id)"}), 400
+                supervisor_id = int(user_id)
+                result = db.get_daily_hours_by_supervisor_month(supervisor_id, month)
             operators = result.get("operators") if isinstance(result, dict) else None
             if operators is None:
                 single = result.get("operator") if isinstance(result, dict) else None
@@ -10046,6 +10058,173 @@ def get_calculation_models():
     except Exception as e:
         logging.error(f"Error fetching calculation models: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
+
+
+# ──────────────────────────────── ГРУППЫ: API ────────────────────────────────
+def _ensure_group_manager():
+    """Авторизация управления группами: админ или глава отдела.
+    Возвращает (requester_id, role, None) или (None, None, (resp, code))."""
+    requester_id, requester, auth_error = _get_authenticated_requester()
+    if auth_error:
+        message, status_code = auth_error
+        return None, None, (jsonify({"error": message}), status_code)
+    role = _normalize_user_role(requester[3])
+    headed_dept = db.headed_department_id_for_user(requester_id)
+    if not (_is_admin_role(role) or headed_dept is not None):
+        return None, None, (jsonify({"error": "Only admins or department heads can manage groups"}), 403)
+    return requester_id, role, None
+
+
+@app.route('/api/groups', methods=['GET'])
+@require_api_key
+def list_groups_endpoint():
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        role = _normalize_user_role(requester[3])
+        include_archived = str(request.args.get('include_archived', '')).lower() in ('1', 'true', 'yes')
+        if _is_admin_role(role):
+            dep = request.args.get('department_id')
+            department_id = int(dep) if dep and str(dep).isdigit() else None
+            groups = db.list_groups(include_archived=include_archived, department_id=department_id)
+        elif _is_supervisor_role(role):
+            my_ids = set(db.get_supervisor_group_ids(requester_id))
+            groups = [g for g in db.list_groups(include_archived=include_archived) if g['id'] in my_ids]
+        else:
+            return jsonify({"error": "Forbidden"}), 403
+        return jsonify({
+            "status": "success",
+            "groups": groups,
+            "calculation_models": get_calculation_model_catalog(),
+        }), 200
+    except Exception as e:
+        logging.error(f"Error listing groups: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/admin/groups', methods=['POST'])
+@require_api_key
+def create_group_endpoint():
+    try:
+        requester_id, role, guard_err = _ensure_group_manager()
+        if guard_err:
+            resp, code = guard_err
+            return resp, code
+        data = request.get_json() or {}
+        # Переиспользование архивной группы вместо создания новой.
+        reuse_id = data.get('reuse_group_id')
+        if reuse_id:
+            group = db.reuse_archived_group(int(reuse_id))
+            return jsonify({"status": "success", "group": group, "reused": True}), 200
+        name = (data.get('name') or '').strip()
+        if not name:
+            return jsonify({"error": "name is required"}), 400
+        direction_id = data.get('direction_id')
+        headed_dept = db.headed_department_id_for_user(requester_id)
+        department_id = data.get('department_id') if _is_admin_role(role) else headed_dept
+        # Подсказки: архивные группы того же отдела/направления (если не force).
+        if not data.get('force'):
+            suggestions = db.get_group_suggestions(department_id=department_id, direction_id=direction_id)
+            if suggestions:
+                return jsonify({
+                    "status": "suggestions",
+                    "suggestions": suggestions,
+                    "message": "Есть архивные группы — переиспользуйте (reuse_group_id) или создайте новую (force=true)",
+                }), 200
+        group = db.create_group(
+            name=name,
+            calculation_model_code=data.get('calculation_model_code'),
+            direction_id=direction_id,
+            department_id=department_id,
+            table_url=data.get('table_url'),
+            created_by=requester_id,
+        )
+        return jsonify({"status": "success", "group": group}), 201
+    except Exception as e:
+        logging.error(f"Error creating group: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/admin/groups/<int:group_id>/archive', methods=['POST'])
+@require_api_key
+def archive_group_endpoint(group_id):
+    try:
+        _rid, _role, guard_err = _ensure_group_manager()
+        if guard_err:
+            resp, code = guard_err
+            return resp, code
+        data = request.get_json(silent=True) or {}
+        group = db.archive_group(group_id, end_date=data.get('end_date'))
+        return jsonify({"status": "success", "group": group}), 200
+    except Exception as e:
+        logging.error(f"Error archiving group: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/admin/groups/<int:group_id>/reuse', methods=['POST'])
+@require_api_key
+def reuse_group_endpoint(group_id):
+    try:
+        _rid, _role, guard_err = _ensure_group_manager()
+        if guard_err:
+            resp, code = guard_err
+            return resp, code
+        group = db.reuse_archived_group(group_id)
+        return jsonify({"status": "success", "group": group}), 200
+    except Exception as e:
+        logging.error(f"Error reusing group: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/admin/groups/<int:group_id>/operators', methods=['POST'])
+@require_api_key
+def add_group_operator_endpoint(group_id):
+    try:
+        rid, _role, guard_err = _ensure_group_manager()
+        if guard_err:
+            resp, code = guard_err
+            return resp, code
+        data = request.get_json() or {}
+        operator_id = data.get('operator_id')
+        if not operator_id:
+            return jsonify({"error": "operator_id is required"}), 400
+        remove = bool(data.get('remove'))
+        if remove:
+            db.remove_operator_from_group(group_id, int(operator_id), end_date=data.get('end_date'))
+        else:
+            db.add_operator_to_group(group_id, int(operator_id),
+                                     start_date=data.get('start_date'), assigned_by=rid)
+        return jsonify({"status": "success", "group": db.get_group(group_id)}), 200
+    except Exception as e:
+        logging.error(f"Error updating group operator: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/admin/groups/<int:group_id>/supervisors', methods=['POST'])
+@require_api_key
+def add_group_supervisor_endpoint(group_id):
+    try:
+        rid, _role, guard_err = _ensure_group_manager()
+        if guard_err:
+            resp, code = guard_err
+            return resp, code
+        data = request.get_json() or {}
+        supervisor_id = data.get('supervisor_id')
+        if not supervisor_id:
+            return jsonify({"error": "supervisor_id is required"}), 400
+        remove = bool(data.get('remove'))
+        if remove:
+            db.remove_supervisor_from_group(group_id, int(supervisor_id), end_date=data.get('end_date'))
+        else:
+            db.add_supervisor_to_group(group_id, int(supervisor_id),
+                                       start_date=data.get('start_date'), assigned_by=rid)
+        return jsonify({"status": "success", "group": db.get_group(group_id)}), 200
+    except Exception as e:
+        logging.error(f"Error updating group supervisor: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
 
 @app.route('/api/admin/save_directions', methods=['POST'])
 @require_api_key
