@@ -1643,6 +1643,7 @@ class Database:
                     UNIQUE (task_id, position)
                 );
             """)
+            cursor.execute("ALTER TABLE task_checklist_items ADD COLUMN IF NOT EXISTS result_note TEXT;")
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS raw_resource_uploads (
@@ -27113,7 +27114,8 @@ class Database:
                 cursor.execute("""
                     SELECT
                         ci.id, ci.task_id, ci.title, ci.position, ci.is_required, ci.is_done,
-                        ci.completed_by, completed_user.name, ci.completed_at, ci.updated_at
+                        ci.completed_by, completed_user.name, ci.completed_at, ci.updated_at,
+                        ci.result_note
                     FROM task_checklist_items ci
                     LEFT JOIN users completed_user ON completed_user.id = ci.completed_by
                     WHERE ci.task_id = ANY(%s)
@@ -27158,7 +27160,8 @@ class Database:
                 "completed_by": row[6],
                 "completed_by_name": row[7],
                 "completed_at": self._task_dt_to_iso(row[8]),
-                "updated_at": self._task_dt_to_iso(row[9])
+                "updated_at": self._task_dt_to_iso(row[9]),
+                "result_note": row[10]
             })
 
         result = []
@@ -27370,7 +27373,8 @@ class Database:
                 "history_changed_at": (history_row[1].isoformat() if history_row and hasattr(history_row[1], 'isoformat') else (history_row[1] if history_row else None))
             }
 
-    def update_task_checklist_item(self, task_id, checklist_item_id, requester_id, requester_role, is_done):
+    def update_task_checklist_item(self, task_id, checklist_item_id, requester_id, requester_role, is_done,
+                                   result_note=None, update_note=False):
         task_id = int(task_id)
         checklist_item_id = int(checklist_item_id)
         requester_id = int(requester_id)
@@ -27381,7 +27385,8 @@ class Database:
             cursor.execute("""
                 SELECT
                     ci.id, ci.task_id, ci.title, ci.position, ci.is_required,
-                    t.created_by, t.assigned_to, assignee.role, assignee.supervisor_id
+                    t.created_by, t.assigned_to, assignee.role, assignee.supervisor_id,
+                    ci.is_done, ci.result_note
                 FROM task_checklist_items ci
                 JOIN tasks t ON t.id = ci.task_id
                 LEFT JOIN users assignee ON assignee.id = t.assigned_to
@@ -27398,30 +27403,64 @@ class Database:
             if not self._task_visible_for_requester(role, requester_id, created_by, assigned_to, assignee_role, assignee_supervisor_id):
                 raise PermissionError("TASK_FORBIDDEN")
 
-            if is_done_norm:
-                cursor.execute("""
+            was_done = bool(row[9])
+            current_note = row[10]
+            # Determine the note value: only change it when explicitly provided.
+            if update_note:
+                cleaned_note = (result_note or '').strip()
+                note_value = cleaned_note or None
+            else:
+                note_value = current_note
+
+            common_returning = (
+                "RETURNING id, task_id, title, position, is_required, is_done, "
+                "completed_by, completed_at, updated_at, result_note"
+            )
+
+            if is_done_norm and was_done:
+                # Item already done — preserve original completion metadata, update note only.
+                cursor.execute(f"""
+                    UPDATE task_checklist_items
+                    SET is_done = TRUE,
+                        result_note = %s,
+                        updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                    WHERE id = %s
+                    {common_returning}
+                """, (note_value, checklist_item_id))
+            elif is_done_norm:
+                # Transition to done — stamp completer and time.
+                cursor.execute(f"""
                     UPDATE task_checklist_items
                     SET is_done = TRUE,
                         completed_by = %s,
                         completed_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                        result_note = %s,
                         updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                     WHERE id = %s
-                    RETURNING id, task_id, title, position, is_required, is_done, completed_by, completed_at, updated_at
-                """, (requester_id, checklist_item_id))
+                    {common_returning}
+                """, (requester_id, note_value, checklist_item_id))
             else:
-                cursor.execute("""
+                # Re-opened — clear completion metadata and the result note.
+                cursor.execute(f"""
                     UPDATE task_checklist_items
                     SET is_done = FALSE,
                         completed_by = NULL,
                         completed_at = NULL,
+                        result_note = NULL,
                         updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                     WHERE id = %s
-                    RETURNING id, task_id, title, position, is_required, is_done, completed_by, completed_at, updated_at
+                    {common_returning}
                 """, (checklist_item_id,))
 
             updated = cursor.fetchone()
             if not updated:
                 raise ValueError("CHECKLIST_ITEM_NOT_FOUND")
+
+            completed_by_name = None
+            if updated[6]:
+                cursor.execute("SELECT name FROM users WHERE id = %s", (updated[6],))
+                name_row = cursor.fetchone()
+                completed_by_name = name_row[0] if name_row else None
 
             return {
                 "id": updated[0],
@@ -27431,8 +27470,10 @@ class Database:
                 "is_required": bool(updated[4]),
                 "is_done": bool(updated[5]),
                 "completed_by": updated[6],
+                "completed_by_name": completed_by_name,
                 "completed_at": self._task_dt_to_iso(updated[7]),
-                "updated_at": self._task_dt_to_iso(updated[8])
+                "updated_at": self._task_dt_to_iso(updated[8]),
+                "result_note": updated[9]
             }
 
     def get_task_attachment_for_requester(self, attachment_id, requester_id, requester_role):
