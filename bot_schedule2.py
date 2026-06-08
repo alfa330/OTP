@@ -1533,6 +1533,36 @@ def _build_call_feedback_training_comment(call_id, feedback_comment, delivery_co
     )
 
 
+def _rebuild_call_feedback_training_comment(cursor, training_id):
+    """Rebuild a training's comment from every feedback linked to it.
+
+    A solo training (one feedback) keeps the legacy single-call format; a
+    shared training (batch feedback covering several evaluations of the same
+    operator in one session) gets an aggregated per-call breakdown. Returns
+    the comment string, or None if no feedback references the training.
+    """
+    cursor.execute("""
+        SELECT call_id, feedback_comment, delivery_comment
+        FROM call_feedbacks
+        WHERE training_id = %s
+        ORDER BY call_id
+    """, (training_id,))
+    rows = cursor.fetchall()
+    if not rows:
+        return None
+    if len(rows) == 1:
+        call_id, feedback_comment, delivery_comment = rows[0]
+        return _build_call_feedback_training_comment(
+            int(call_id), feedback_comment or '', delivery_comment or ''
+        )
+    delivery_comment = next((r[2] for r in rows if r[2]), '') or ''
+    call_ids = ", ".join(f"#{int(r[0])}" for r in rows)
+    lines = [f"ОС по оценкам {call_ids}"]
+    lines.extend(f"- #{int(r[0])}: {r[1] or ''}" for r in rows)
+    lines.append(f"Как проведена: {delivery_comment}")
+    return "\n".join(lines)
+
+
 def _is_supervisor_role(role: str) -> bool:
     return _normalize_user_role(role) == 'sv'
 
@@ -6806,6 +6836,18 @@ def upsert_call_feedback(call_id):
             feedback_id = int(existing_feedback[0]) if existing_feedback and existing_feedback[0] is not None else None
             linked_training_id = int(existing_feedback[1]) if existing_feedback and existing_feedback[1] is not None else None
 
+            # Is the linked training shared by several feedbacks (batch feedback)?
+            # If so, a single-feedback edit must NOT move/rewrite the shared session
+            # for the other evaluations.
+            shared_count = 0
+            if linked_training_id is not None:
+                cursor.execute(
+                    "SELECT COUNT(*) FROM call_feedbacks WHERE training_id = %s",
+                    (linked_training_id,)
+                )
+                shared_count = int((cursor.fetchone() or [0])[0] or 0)
+            is_shared_training = linked_training_id is not None and shared_count > 1
+
             cursor.execute("""
                 SELECT id
                 FROM trainings
@@ -6821,31 +6863,48 @@ def upsert_call_feedback(call_id):
                 if linked_training_id is None or occupied_training_id != linked_training_id:
                     return jsonify({"error": "Selected date/time already has another training"}), 409
 
-            training_id = linked_training_id
-            if training_id is not None:
-                cursor.execute("""
-                    UPDATE trainings
-                    SET
-                        training_date = %s,
-                        start_time = %s,
-                        end_time = %s,
-                        reason = %s,
-                        comment = %s,
-                        count_in_hours = TRUE
-                    WHERE id = %s AND operator_id = %s
-                    RETURNING id
-                """, (
-                    feedback_date,
-                    start_time_value,
-                    end_time_value,
-                    CALL_FEEDBACK_TRAINING_REASON,
-                    training_comment,
-                    training_id,
-                    operator_id
-                ))
-                updated_training = cursor.fetchone()
-                if not updated_training:
-                    training_id = None
+            # keep_shared: requested slot is exactly the shared session's slot → keep the
+            #   link and rebuild its aggregate comment after the upsert (don't move it).
+            # detach: the linked training is shared but the slot changed → this feedback
+            #   leaves into its own personal training; the shared session is left intact.
+            keep_shared = (
+                is_shared_training
+                and occupied_slot is not None
+                and int(occupied_slot[0]) == linked_training_id
+            )
+            detached_from_training_id = None
+
+            if keep_shared:
+                training_id = linked_training_id
+            elif is_shared_training:
+                detached_from_training_id = linked_training_id
+                training_id = None
+            else:
+                training_id = linked_training_id
+                if training_id is not None:
+                    cursor.execute("""
+                        UPDATE trainings
+                        SET
+                            training_date = %s,
+                            start_time = %s,
+                            end_time = %s,
+                            reason = %s,
+                            comment = %s,
+                            count_in_hours = TRUE
+                        WHERE id = %s AND operator_id = %s
+                        RETURNING id
+                    """, (
+                        feedback_date,
+                        start_time_value,
+                        end_time_value,
+                        CALL_FEEDBACK_TRAINING_REASON,
+                        training_comment,
+                        training_id,
+                        operator_id
+                    ))
+                    updated_training = cursor.fetchone()
+                    if not updated_training:
+                        training_id = None
 
             if training_id is None:
                 cursor.execute("""
@@ -6931,6 +6990,22 @@ def upsert_call_feedback(call_id):
                 ))
                 feedback_id = int(cursor.fetchone()[0])
 
+            # Keep shared-training comments accurate after share-aware edits.
+            if keep_shared:
+                rebuilt = _rebuild_call_feedback_training_comment(cursor, training_id)
+                if rebuilt is not None:
+                    cursor.execute(
+                        "UPDATE trainings SET comment = %s WHERE id = %s",
+                        (rebuilt, training_id)
+                    )
+            if detached_from_training_id is not None:
+                rebuilt_old = _rebuild_call_feedback_training_comment(cursor, detached_from_training_id)
+                if rebuilt_old is not None:
+                    cursor.execute(
+                        "UPDATE trainings SET comment = %s WHERE id = %s",
+                        (rebuilt_old, detached_from_training_id)
+                    )
+
             cursor.execute("""
                 SELECT
                     cf.id,
@@ -6970,6 +7045,201 @@ def upsert_call_feedback(call_id):
     except Exception as e:
         logging.exception("Error saving call feedback")
         return jsonify({"error": f"Internal server error"}), 500
+
+
+@app.route('/api/call_evaluations/feedback/batch', methods=['POST'])
+@require_api_key
+def create_call_feedback_batch():
+    """Batch feedback: create ONE shared training session covering several
+    evaluations of the SAME operator, with an individual feedback comment per
+    evaluation but a single delivery method, date and time for all of them.
+    Only evaluations that do NOT yet have feedback may be included."""
+    try:
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify({"error": "Invalid JSON body"}), 400
+
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        requester_role = _normalize_user_role(requester[3])
+        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role)):
+            return jsonify({"error": "Only admins and supervisors can submit feedback"}), 403
+
+        delivery_comment = str(data.get('delivery_comment') or '').strip()
+        feedback_date_raw = str(data.get('date') or '').strip()
+        start_time_raw = str(data.get('start_time') or '').strip()
+        end_time_raw = str(data.get('end_time') or '').strip()
+        items_raw = data.get('items')
+
+        if not delivery_comment:
+            return jsonify({"error": "delivery_comment is required"}), 400
+        if len(delivery_comment) > 4000:
+            return jsonify({"error": "delivery_comment is too long (max 4000 chars)"}), 400
+        if not feedback_date_raw or not start_time_raw or not end_time_raw:
+            return jsonify({"error": "date, start_time and end_time are required"}), 400
+        if not isinstance(items_raw, list) or not items_raw:
+            return jsonify({"error": "items must be a non-empty list"}), 400
+
+        try:
+            feedback_date = datetime.strptime(feedback_date_raw, '%Y-%m-%d').date()
+        except ValueError:
+            return jsonify({"error": "Invalid date format. Use YYYY-MM-DD"}), 400
+
+        try:
+            start_time_value = datetime.strptime(start_time_raw, '%H:%M').time()
+            end_time_value = datetime.strptime(end_time_raw, '%H:%M').time()
+        except ValueError:
+            return jsonify({"error": "Invalid time format. Use HH:MM"}), 400
+
+        if end_time_value <= start_time_value:
+            return jsonify({"error": "end_time must be later than start_time"}), 400
+
+        normalized_items = []
+        seen_call_ids = set()
+        for raw in items_raw:
+            if not isinstance(raw, dict):
+                return jsonify({"error": "Each item must be an object"}), 400
+            try:
+                item_call_id = int(raw.get('call_id'))
+            except (TypeError, ValueError):
+                return jsonify({"error": "Each item requires a valid call_id"}), 400
+            item_feedback = str(raw.get('feedback_comment') or '').strip()
+            if not item_feedback:
+                return jsonify({"error": f"feedback_comment is required for call {item_call_id}"}), 400
+            if len(item_feedback) > 4000:
+                return jsonify({"error": f"feedback_comment is too long for call {item_call_id} (max 4000 chars)"}), 400
+            if item_call_id in seen_call_ids:
+                return jsonify({"error": f"Duplicate call_id {item_call_id}"}), 400
+            seen_call_ids.add(item_call_id)
+            normalized_items.append({"call_id": item_call_id, "feedback_comment": item_feedback})
+
+        call_ids = [it["call_id"] for it in normalized_items]
+
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, operator_id, is_draft
+                FROM calls
+                WHERE id = ANY(%s)
+            """, (call_ids,))
+            calls_by_id = {int(r[0]): r for r in cursor.fetchall()}
+
+            missing = [cid for cid in call_ids if cid not in calls_by_id]
+            if missing:
+                return jsonify({"error": f"Calls not found: {missing}"}), 404
+
+            operator_ids = set()
+            for cid in call_ids:
+                _, op_id, is_draft = calls_by_id[cid]
+                if op_id is None:
+                    return jsonify({"error": f"Operator not found for call {cid}"}), 404
+                if bool(is_draft):
+                    return jsonify({"error": f"Call {cid} is a draft; feedback is available only for submitted evaluations"}), 400
+                operator_ids.add(int(op_id))
+
+            if len(operator_ids) != 1:
+                return jsonify({"error": "All evaluations in a batch must belong to the same operator"}), 400
+            operator_id = next(iter(operator_ids))
+
+            if not _ensure_call_access_for_requester(operator_id, requester, requester_id):
+                return jsonify({"error": "Forbidden for this operator"}), 403
+
+            cursor.execute("""
+                SELECT call_id
+                FROM call_feedbacks
+                WHERE call_id = ANY(%s)
+            """, (call_ids,))
+            already = [int(r[0]) for r in cursor.fetchall()]
+            if already:
+                return jsonify({"error": f"Feedback already exists for calls: {already}"}), 409
+
+            cursor.execute("""
+                SELECT id
+                FROM trainings
+                WHERE operator_id = %s
+                  AND training_date = %s
+                  AND start_time = %s
+                  AND end_time = %s
+                LIMIT 1
+            """, (operator_id, feedback_date, start_time_value, end_time_value))
+            if cursor.fetchone():
+                return jsonify({"error": "Selected date/time already has another training"}), 409
+
+            # ONE shared training for the whole batch (counts toward hours once).
+            cursor.execute("""
+                INSERT INTO trainings (
+                    operator_id,
+                    training_date,
+                    start_time,
+                    end_time,
+                    reason,
+                    comment,
+                    created_by,
+                    count_in_hours
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE)
+                RETURNING id
+            """, (
+                operator_id,
+                feedback_date,
+                start_time_value,
+                end_time_value,
+                CALL_FEEDBACK_TRAINING_REASON,
+                '',
+                requester_id
+            ))
+            shared_training_id = int(cursor.fetchone()[0])
+
+            created_ids = []
+            for it in normalized_items:
+                cursor.execute("""
+                    INSERT INTO call_feedbacks (
+                        call_id,
+                        operator_id,
+                        supervisor_id,
+                        training_id,
+                        feedback_comment,
+                        delivery_comment,
+                        feedback_date,
+                        start_time,
+                        end_time,
+                        created_by,
+                        updated_by
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                """, (
+                    it["call_id"],
+                    operator_id,
+                    requester_id,
+                    shared_training_id,
+                    it["feedback_comment"],
+                    delivery_comment,
+                    feedback_date,
+                    start_time_value,
+                    end_time_value,
+                    requester_id,
+                    requester_id
+                ))
+                created_ids.append(int(cursor.fetchone()[0]))
+
+            rebuilt = _rebuild_call_feedback_training_comment(cursor, shared_training_id)
+            if rebuilt is not None:
+                cursor.execute(
+                    "UPDATE trainings SET comment = %s WHERE id = %s",
+                    (rebuilt, shared_training_id)
+                )
+
+        return jsonify({
+            "status": "success",
+            "created": len(created_ids),
+            "training_id": shared_training_id
+        }), 201
+    except Exception as e:
+        logging.exception("Error saving batch call feedback")
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/call_calibration/rooms', methods=['GET'])

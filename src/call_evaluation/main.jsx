@@ -1310,6 +1310,162 @@ const FeedbackModal = ({
     );
 };
 
+// ─── Batch Feedback Modal ──────────────────────────────
+// Дать ОС сразу по нескольким оценкам одного оператора: единое время/способ
+// проведения тренинга на всех + индивидуальная ОС по каждой оценке.
+const BatchFeedbackModal = ({
+    isOpen,
+    onClose,
+    calls,
+    userId,
+    onSaved
+}) => {
+    const [deliveryComment, setDeliveryComment] = useState('');
+    const [feedbackDate, setFeedbackDate] = useState('');
+    const [startTime, setStartTime] = useState('');
+    const [endTime, setEndTime] = useState('');
+    const [comments, setComments] = useState({});
+    const [isSubmitting, setIsSubmitting] = useState(false);
+
+    useEffect(() => {
+        if (!isOpen) return;
+        const now = new Date();
+        setDeliveryComment('');
+        setFeedbackDate(now.toISOString().slice(0, 10));
+        setStartTime('');
+        setEndTime('');
+        const initial = {};
+        (calls || []).forEach(c => { initial[c.id] = ''; });
+        setComments(initial);
+    }, [isOpen, calls]);
+
+    if (!isOpen || !Array.isArray(calls) || calls.length === 0) return null;
+
+    const allCommentsFilled = calls.every(c => String(comments[c.id] || '').trim());
+    const isDisabled =
+        isSubmitting ||
+        !deliveryComment.trim() ||
+        !feedbackDate ||
+        !startTime ||
+        !endTime ||
+        !allCommentsFilled;
+
+    const submit = async () => {
+        if (isDisabled) return;
+        if (endTime <= startTime) {
+            emitCallEvaluationToast('Время окончания должно быть позже времени начала', 'error');
+            return;
+        }
+
+        const payload = {
+            delivery_comment: deliveryComment.trim(),
+            date: feedbackDate,
+            start_time: startTime,
+            end_time: endTime,
+            items: calls.map(c => ({
+                call_id: c.id,
+                feedback_comment: String(comments[c.id] || '').trim()
+            }))
+        };
+
+        setIsSubmitting(true);
+        try {
+            const r = await authFetch(`${API_BASE_URL}/api/call_evaluations/feedback/batch`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-User-Id': userId
+                },
+                body: JSON.stringify(payload)
+            });
+            const d = await readJsonSafe(r);
+            if (!r.ok || d?.status !== 'success') {
+                throw new Error(d?.error || 'Не удалось сохранить обратную связь');
+            }
+            emitCallEvaluationToast(`Обратная связь добавлена для ${d.created ?? calls.length} оц.`, 'success');
+            if (typeof onSaved === 'function') onSaved();
+            onClose?.();
+        } catch (e) {
+            emitCallEvaluationToast(`Ошибка: ${e.message}`, 'error');
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+
+    return (
+        <div className="modal-backdrop" onClick={onClose}>
+            <div className="modal request-modal" style={{maxWidth: 640}} onClick={e => e.stopPropagation()}>
+                <div className="modal-header">
+                    <div>
+                        <h2>Пакетная обратная связь</h2>
+                        <div className="modal-header-sub">Выбрано оценок: {calls.length} · единый тренинг на всех</div>
+                    </div>
+                    <button className="close-btn" onClick={onClose}><FaIcon className="fas fa-times" /></button>
+                </div>
+                <div className="modal-body">
+                    <div className="field">
+                        <label className="label">Как проведена обратная связь</label>
+                        <textarea
+                            className="textarea"
+                            rows={2}
+                            placeholder="Например: индивидуальный разбор, прослушивание звонков, чек-лист ошибок"
+                            value={deliveryComment}
+                            onChange={e => setDeliveryComment(e.target.value)}
+                        />
+                    </div>
+                    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10}}>
+                        <div className="field" style={{marginBottom: 0}}>
+                            <label className="label">Дата</label>
+                            <input className="input" type="date" value={feedbackDate} onChange={e => setFeedbackDate(e.target.value)} />
+                        </div>
+                        <div className="field" style={{marginBottom: 0}}>
+                            <label className="label">Начало</label>
+                            <input className="input" type="time" value={startTime} onChange={e => setStartTime(e.target.value)} />
+                        </div>
+                        <div className="field" style={{marginBottom: 0}}>
+                            <label className="label">Окончание</label>
+                            <input className="input" type="time" value={endTime} onChange={e => setEndTime(e.target.value)} />
+                        </div>
+                    </div>
+                    <div style={{marginTop:14, marginBottom:8, fontWeight:600, color:'var(--text)'}}>Обратная связь по каждой оценке</div>
+                    <div style={{display:'flex',flexDirection:'column',gap:12,maxHeight:'40vh',overflowY:'auto',paddingRight:4}}>
+                        {calls.map((c, i) => (
+                            <div key={c.id} style={{border:'1px solid var(--border)',borderRadius:'var(--radius)',padding:'10px 12px',background:'var(--surface-2)'}}>
+                                <div style={{display:'flex',flexWrap:'wrap',alignItems:'center',gap:'4px 12px',marginBottom:8,fontSize:12,color:'var(--text-2)'}}>
+                                    <strong style={{color:'var(--text)'}}>#{i+1}</strong>
+                                    <span style={{fontFamily:'var(--font-mono)'}}>{c.phoneNumber || '—'}</span>
+                                    <span>{c.selectedDirection || '—'}</span>
+                                    {c.totalScore != null && <span>Балл: {Math.round(c.totalScore)}</span>}
+                                    <span>Call ID: {c.id}</span>
+                                </div>
+                                <textarea
+                                    className="textarea"
+                                    rows={2}
+                                    placeholder="Что было донесено оператору по этой оценке"
+                                    value={comments[c.id] || ''}
+                                    onChange={e => setComments(prev => ({...prev, [c.id]: e.target.value}))}
+                                />
+                            </div>
+                        ))}
+                    </div>
+                    <div style={{marginTop: 10, fontSize: 12, color:'var(--text-2)'}}>
+                        При сохранении будет создан один общий тренинг
+                        <strong style={{color:'var(--text)'}}> «Тренинг по качеству. Разбор ошибок»</strong> на всё выбранное.
+                    </div>
+                </div>
+                <div className="modal-footer">
+                    <button className="btn btn-secondary" onClick={onClose}>Отмена</button>
+                    <button className="btn btn-primary" onClick={submit} disabled={isDisabled}>
+                        {isSubmitting
+                            ? <><span className="spinner" /> Сохранение...</>
+                            : `Сохранить ОС (${calls.length})`}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
 // ─── Date Range Picker ─────────────────────────────────
 const DateRangePicker = ({ minDate, maxDate, setFromDate, setToDate }) => {
     const ref = useRef(null);
@@ -2267,6 +2423,10 @@ const App = ({ user, initialSelection }) => {
     const [showEvalModal, setShowEvalModal] = useState(false);
     const [showFeedbackModal, setShowFeedbackModal] = useState(false);
     const [feedbackTargetCall, setFeedbackTargetCall] = useState(null);
+    const [batchMode, setBatchMode] = useState(false);
+    const [selectedBatchIds, setSelectedBatchIds] = useState(() => new Set());
+    const [showBatchFeedbackModal, setShowBatchFeedbackModal] = useState(false);
+    const [batchModalCalls, setBatchModalCalls] = useState([]);
     const [evalModalMode, setEvalModalMode] = useState('journal');
     const [evaluationTarget, setEvaluationTarget] = useState(null);
     const [isLoading, setIsLoading] = useState(false);
@@ -3121,6 +3281,38 @@ const App = ({ user, initialSelection }) => {
         await fetchEvaluations({ force: true });
     }, [fetchEvaluations]);
 
+    // Оценка доступна для пакетной ОС: отправленная (не черновик/не импорт) и ещё без ОС.
+    const isBatchEligible = useCallback((call) => (
+        (isAdminRole || isSupervisorRole) && !!call && !call.is_imported && !call.isDraft && !call.feedback
+    ), [isAdminRole, isSupervisorRole]);
+
+    const exitBatchMode = useCallback(() => {
+        setBatchMode(false);
+        setSelectedBatchIds(new Set());
+    }, []);
+
+    const toggleBatchSelection = useCallback((callId) => {
+        setSelectedBatchIds(prev => {
+            const next = new Set(prev);
+            if (next.has(callId)) next.delete(callId); else next.add(callId);
+            return next;
+        });
+    }, []);
+
+    const handleBatchFeedbackSaved = useCallback(async () => {
+        setShowBatchFeedbackModal(false);
+        setBatchMode(false);
+        setSelectedBatchIds(new Set());
+        await fetchEvaluations({ force: true });
+    }, [fetchEvaluations]);
+
+    // Сбрасываем пакетный выбор при смене контекста журнала, чтобы не остались
+    // выбранными оценки другого оператора/месяца/раздела.
+    useEffect(() => {
+        setBatchMode(false);
+        setSelectedBatchIds(new Set());
+    }, [selectedOperator, selectedMonth, activeSection]);
+
     const handleSelectCall = async (callId) => {
         const call = calls.find(c => c.id === callId);
         if (!call) return;
@@ -3288,6 +3480,22 @@ const App = ({ user, initialSelection }) => {
     let displayedCalls = callsByMonth;
     if (viewMode === 'normal') displayedCalls = displayedCalls.filter(c => (!fromDate||c.date>=fromDate) && (!toDate||c.date<=toDate));
     else displayedCalls = displayedCalls.filter(c => c.date.slice(0,7) !== selectedMonth);
+
+    // Пакетная ОС: какие из показанных оценок можно отметить и что сейчас выбрано.
+    const batchEligibleCalls = displayedCalls.filter(isBatchEligible);
+    const allBatchSelected = batchEligibleCalls.length > 0 && batchEligibleCalls.every(c => selectedBatchIds.has(c.id));
+    const selectedBatchCalls = displayedCalls.filter(c => selectedBatchIds.has(c.id) && isBatchEligible(c));
+    const toggleSelectAllBatch = () => {
+        setSelectedBatchIds(prev => {
+            const next = new Set(prev);
+            if (batchEligibleCalls.every(c => next.has(c.id))) {
+                batchEligibleCalls.forEach(c => next.delete(c.id));
+            } else {
+                batchEligibleCalls.forEach(c => next.add(c.id));
+            }
+            return next;
+        });
+    };
 
     const hasExtra = callsByMonth.filter(c => c.date.slice(0,7) !== selectedMonth).length > 0;
     const evalCount = displayedCalls.filter(c => !c.isDraft && !c.is_imported).length;
@@ -3847,6 +4055,18 @@ const App = ({ user, initialSelection }) => {
                             const lastDay = new Date(parseInt(selectedMonth.slice(0,4)), parseInt(selectedMonth.slice(5,7)), 0).getDate();
                             return <DateRangePicker minDate={`${selectedMonth}-01`} maxDate={`${selectedMonth}-${String(lastDay).padStart(2,'0')}`} setFromDate={setFromDate} setToDate={setToDate} />;
                         })()}
+                        {activeSection === 'journal' && (isAdminRole || isSupervisorRole) && selectedOperator && (
+                            <div className="filter-group" style={{justifyContent:'flex-end'}}>
+                                <label className="label">&nbsp;</label>
+                                <button
+                                    className={`btn btn-sm ${batchMode ? 'btn-primary' : 'btn-secondary'}`}
+                                    onClick={() => { if (batchMode) { exitBatchMode(); } else { setBatchMode(true); } }}
+                                    title="Дать обратную связь сразу по нескольким оценкам"
+                                >
+                                    <FaIcon className={`fas fa-${batchMode ? 'times' : 'list-check'}`} /> {batchMode ? 'Отмена выбора' : 'Несколько ОС'}
+                                </button>
+                            </div>
+                        )}
                     </div>
                 </div>
 
@@ -3908,6 +4128,17 @@ const App = ({ user, initialSelection }) => {
                         <table>
                             <thead>
                                 <tr>
+                                    {batchMode && (
+                                        <th style={{width:36}}>
+                                            <input
+                                                type="checkbox"
+                                                checked={allBatchSelected}
+                                                disabled={batchEligibleCalls.length === 0}
+                                                onChange={toggleSelectAllBatch}
+                                                title="Выбрать все доступные"
+                                            />
+                                        </th>
+                                    )}
                                     <th>#</th>
                                     <th>Статус</th>
                                     <th>Направление</th>
@@ -3925,6 +4156,17 @@ const App = ({ user, initialSelection }) => {
                                             className={`${!call.is_imported ? 'clickable' : ''} ${call.is_imported ? 'imported' : ''} ${expandedId===call.id ? 'expanded' : ''}`}
                                             onClick={!call.is_imported ? () => handleSelectCall(call.id) : undefined}
                                         >
+                                            {batchMode && (
+                                                <td onClick={e => e.stopPropagation()} style={{textAlign:'center'}}>
+                                                    {isBatchEligible(call) ? (
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={selectedBatchIds.has(call.id)}
+                                                            onChange={() => toggleBatchSelection(call.id)}
+                                                        />
+                                                    ) : null}
+                                                </td>
+                                            )}
                                             <td>{idx+1}</td>
                                             <td>
                                                 {loadingCallId === call.id ? (
@@ -4013,7 +4255,7 @@ const App = ({ user, initialSelection }) => {
                                         {/* Expanded row */}
                                         {expandedId === call.id && (
                                             <tr className="expanded-row">
-                                                <td colSpan={8}>
+                                                <td colSpan={batchMode ? 9 : 8}>
                                                     <div className="expanded-content">
                                                         <h4>Детали оценки</h4>
                                                         <div className="expanded-meta">
@@ -4883,6 +5125,31 @@ const App = ({ user, initialSelection }) => {
                 userId={userId}
                 onSaved={handleFeedbackSaved}
             />
+            <BatchFeedbackModal
+                isOpen={showBatchFeedbackModal}
+                onClose={() => setShowBatchFeedbackModal(false)}
+                calls={batchModalCalls}
+                userId={userId}
+                onSaved={handleBatchFeedbackSaved}
+            />
+            {batchMode && selectedBatchCalls.length > 0 && !showBatchFeedbackModal && (
+                <div style={{
+                    position:'fixed', left:'50%', bottom:24, transform:'translateX(-50%)',
+                    zIndex:50, display:'flex', alignItems:'center', gap:12,
+                    padding:'10px 16px', borderRadius:'var(--radius)',
+                    background:'var(--surface)', border:'1px solid var(--border-strong)',
+                    boxShadow:'0 8px 24px rgba(0,0,0,0.18)'
+                }}>
+                    <span style={{fontSize:13, color:'var(--text)'}}>Выбрано оценок: <strong>{selectedBatchCalls.length}</strong></span>
+                    <button className="btn btn-sm btn-secondary" onClick={() => setSelectedBatchIds(new Set())}>Очистить</button>
+                    <button
+                        className="btn btn-sm btn-primary"
+                        onClick={() => { setBatchModalCalls(selectedBatchCalls); setShowBatchFeedbackModal(true); }}
+                    >
+                        <FaIcon className="fas fa-comments" /> Дать ОС
+                    </button>
+                </div>
+            )}
             <CalibrationRoomCreateModal
                 isOpen={showCalibrationCreateModal}
                 onClose={() => setShowCalibrationCreateModal(false)}

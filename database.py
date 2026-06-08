@@ -941,7 +941,7 @@ class Database:
                     call_id INTEGER NOT NULL UNIQUE REFERENCES calls(id) ON DELETE CASCADE,
                     operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                     supervisor_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                    training_id INTEGER UNIQUE REFERENCES trainings(id) ON DELETE SET NULL,
+                    training_id INTEGER REFERENCES trainings(id) ON DELETE SET NULL,
                     feedback_comment TEXT NOT NULL,
                     delivery_comment TEXT NOT NULL,
                     feedback_date DATE NOT NULL,
@@ -953,7 +953,12 @@ class Database:
                     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
             """)
-            
+
+            # Allow several call feedbacks to share ONE training (batch feedback:
+            # multiple evaluations of the same operator reviewed in a single training
+            # session). Drop the legacy 1:1 UNIQUE constraint on training_id.
+            cursor.execute("ALTER TABLE call_feedbacks DROP CONSTRAINT IF EXISTS call_feedbacks_training_id_key;")
+
             # Work hours table with fines column
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS work_hours (
