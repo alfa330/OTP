@@ -1913,6 +1913,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         // NEW: filter active/fired + counters
         const [operatorsViewTab, setOperatorsViewTab] = useState('active'); // 'active' | 'fired'
         const [selectedDirections, setSelectedDirections] = useState(['all']); // multi-select directions for filtering
+        // Группы: выбор группы для учёта часов + локальный реестр групп/метрик моделей.
+        const [selectedGroupId, setSelectedGroupId] = useState(''); // '' = legacy-режим по СВ
+        const [groupsList, setGroupsList] = useState([]);
+        const [calcModelMetrics, setCalcModelMetrics] = useState(null); // null = реестр не загружен → legacy
 
         // cell modal
         const [selectedCell, setSelectedCell] = useState(null);
@@ -1962,11 +1966,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             if (!user) return;
             fetchDailyHoursAndTrainings();
             // eslint-disable-next-line
-        }, [user, selectedSvId, month]);
+        }, [user, selectedSvId, selectedGroupId, month]);
 
         useEffect(() => {
             setSelectedHourCells([]);
         }, [month, selectedSvId]);
+
+        // Загрузка списка групп + реестра метрик моделей (для селектора группы и
+        // моделе-зависимых столбцов). Сбой не критичен — остаёмся в legacy-режиме (по СВ).
+        useEffect(() => {
+            if (!user) return;
+            let cancelled = false;
+            (async () => {
+                try {
+                    const [groupsResp, modelsResp] = await Promise.all([
+                        axios.get(`${API_BASE_URL}/api/groups`, { headers: { 'X-User-Id': user.id } }),
+                        axios.get(`${API_BASE_URL}/api/admin/calculation_models`, { headers: { 'X-User-Id': user.id } }),
+                    ]);
+                    if (cancelled) return;
+                    if (groupsResp.data?.status === 'success') setGroupsList(groupsResp.data.groups || []);
+                    if (modelsResp.data?.status === 'success') setCalcModelMetrics(modelsResp.data.calculation_model_metrics || {});
+                } catch (e) {
+                    console.warn('group registry load failed (legacy mode):', e);
+                }
+            })();
+            return () => { cancelled = true; };
+        }, [user]);
 
         function fallbackToast(msg, type = 'success') {
             try {
@@ -1991,6 +2016,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 hoursParams.append('id', selectedSvId);
             } else if (user.role === 'sv') {
                 hoursParams.append('id', String(user.id));
+            }
+            // group-aware: при выбранной группе daily_hours грузим строго по группе
+            // (бэкенд при наличии group_id игнорирует id). Аддитивно: без группы строка
+            // запроса идентична прежней.
+            if (selectedGroupId) {
+                hoursParams.append('group_id', selectedGroupId);
             }
 
             const trainingsParams = new URLSearchParams();
@@ -3013,6 +3044,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return map;
         }, [filteredOperators]);
 
+        // Модель расчёта текущего вида: из выбранной группы (приоритет), иначе из
+        // загруженных операторов (их модель приходит с бэка по группе). Пусто → legacy
+        // (операторская модель), т.е. поведение как раньше.
+        const activeCalcModelCode = useMemo(() => {
+            if (selectedGroupId && Array.isArray(groupsList)) {
+                const g = groupsList.find(x => String(x.id) === String(selectedGroupId));
+                const code = String(g?.calculation_model_code || g?.calculationModelCode || '').trim();
+                if (code) return code;
+            }
+            const op0 = Array.isArray(operators) && operators.length ? operators[0] : null;
+            return String(op0?.calculation_model_code || op0?.calculationModelCode || '').trim();
+        }, [selectedGroupId, groupsList, operators]);
+        const isChatModel = activeCalcModelCode === 'chat_manager';
+
+        // Метки вкладок по модели. НЕ мутируем общий const TABS — строим производный массив.
+        const VIEW_TABS = useMemo(() => {
+            if (!isChatModel) return TABS;
+            return TABS.map(t => (t.key === 'calls' ? { ...t, label: 'Чаты' } : t));
+        }, [isChatModel]);
+
         const selectedHourCellKeySet = useMemo(() => {
             return new Set((selectedHourCells || []).map(cell => makeSelectedHourCellKey(cell.operator_id, cell.day)));
         }, [selectedHourCells]);
@@ -3883,9 +3934,37 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         className="min-w-[140px]"
                     />
 
+                    {(groupsList || []).length > 0 && (
+                    <HoursCustomSelect
+                        value={selectedGroupId || ''}
+                        onChange={(v) => {
+                            setSelectedGroupId(v);
+                            if (v) {
+                                // Выставляем СВ группы — чтобы вспомогательные данные
+                                // (тренинги/офлайн) и загрузка часов работали как обычно.
+                                const g = (groupsList || []).find(x => String(x.id) === String(v));
+                                const svId = (g && Array.isArray(g.supervisors) && g.supervisors.length) ? g.supervisors[0].id : '';
+                                setSelectedSvId(svId ? String(svId) : '');
+                            }
+                        }}
+                        options={[
+                            { value: '', label: 'Без группы (по СВ)' },
+                            ...(groupsList || [])
+                                .filter(g => g.status !== 'archived')
+                                .map(g => ({ value: String(g.id), label: g.name })),
+                        ]}
+                        placeholder="Выберите группу"
+                        leadIcon="fa-layer-group"
+                        searchable
+                        disabled={reportScope === 'all'}
+                        ariaLabel="Группа"
+                        className="min-w-[240px]"
+                    />
+                    )}
+
                     <HoursCustomSelect
                         value={selectedSvId || ''}
-                        onChange={(v) => setSelectedSvId(v)}
+                        onChange={(v) => { setSelectedSvId(v); setSelectedGroupId(''); }}
                         options={(svList || [])
                             .filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status)
                             .map(sv => ({ value: String(sv.id), label: sv.name }))}
@@ -3978,7 +4057,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 {/* === Метрика === */}
                 <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-slate-50/70 p-2">
                     <span className="px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Метрика</span>
-                    {TABS.map(tab => (
+                    {VIEW_TABS.map(tab => (
                         <button
                             key={tab.key}
                             onClick={() => setSelectedTab(tab.key)}
@@ -4053,7 +4132,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </>
                     )}
                     {selectedTab === 'calls' && (
-                    <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">КВЗ</div>
+                    <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">{isChatModel ? 'Кол-во чатов' : 'КВЗ'}</div>
                     )}
                     {selectedTab === 'efficiency' && (
                     <>
