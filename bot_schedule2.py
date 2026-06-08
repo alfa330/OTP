@@ -10202,6 +10202,26 @@ def add_group_operator_endpoint(group_id):
         return jsonify({"error": "Internal server error"}), 500
 
 
+@app.route('/api/admin/groups/<int:group_id>/members', methods=['GET'])
+@require_api_key
+def group_members_endpoint(group_id):
+    try:
+        _rid, _role, guard_err = _ensure_group_manager()
+        if guard_err:
+            resp, code = guard_err
+            return resp, code
+        members = db.get_group_members(group_id)
+        return jsonify({
+            "status": "success",
+            "group": db.get_group(group_id),
+            "operators": members.get("operators", []),
+            "supervisors": members.get("supervisors", []),
+        }), 200
+    except Exception as e:
+        logging.error(f"Error fetching group members: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/admin/groups/<int:group_id>/supervisors', methods=['POST'])
 @require_api_key
 def add_group_supervisor_endpoint(group_id):

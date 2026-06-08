@@ -17969,6 +17969,29 @@ class Database:
             row = cursor.fetchone()
             return self._group_row_to_dict(row) if row else None
 
+    def get_group_members(self, group_id):
+        """Текущий состав группы: активные (end_date IS NULL) операторы и супервайзеры."""
+        def _rows(cursor, table, col):
+            cursor.execute(
+                "SELECT u.id, u.name, m.start_date, m.end_date FROM " + table + """ m
+                 JOIN users u ON u.id = m.""" + col + """
+                 WHERE m.group_id = %s AND m.end_date IS NULL
+                 ORDER BY u.name""",
+                (int(group_id),),
+            )
+            return [
+                {
+                    'id': r[0], 'name': r[1],
+                    'start_date': r[2].isoformat() if r[2] else None,
+                    'end_date': r[3].isoformat() if r[3] else None,
+                }
+                for r in (cursor.fetchall() or [])
+            ]
+        with self._get_cursor() as cursor:
+            operators = _rows(cursor, 'group_operator_memberships', 'operator_id')
+            supervisors = _rows(cursor, 'group_supervisor_memberships', 'supervisor_id')
+            return {'operators': operators, 'supervisors': supervisors}
+
     def get_group_suggestions(self, department_id=None, direction_id=None):
         """Архивные группы того же отдела/направления — кандидаты на переиспользование."""
         with self._get_cursor() as cursor:
