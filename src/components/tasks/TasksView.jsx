@@ -267,8 +267,22 @@ styleTag.textContent = `
     box-shadow: var(--shadow-sm);
     transform: translateY(-1px);
   }
+  .tv-task-row.is-urgent {
+    border-color: #fcd34d;
+    background: #fffdf6;
+  }
+  .tv-task-row.is-urgent:hover { border-color: #f59e0b; }
+  .tv-task-row.is-critical {
+    border-color: #fecdd3;
+    background: #fff6f7;
+  }
+  .tv-task-row.is-critical:hover { border-color: #fb7185; }
   .tv-task-row-indicator {
     width: 3px; height: 28px; border-radius: 99px; flex-shrink: 0;
+  }
+  .tv-task-row.is-urgent .tv-task-row-indicator,
+  .tv-task-row.is-critical .tv-task-row-indicator {
+    width: 4px; height: 32px;
   }
   .tv-task-row-main {
     flex: 1;
@@ -305,21 +319,19 @@ styleTag.textContent = `
     font-weight: 700;
   }
   .tv-task-row-meta {
-    display: grid;
-    grid-template-columns: auto auto auto 196px 112px 28px 12px;
+    display: flex;
     align-items: center;
-    column-gap: 8px;
+    gap: 8px;
     flex-shrink: 0;
     padding-left: 8px;
   }
-  .tv-task-row-meta .tv-badge { justify-self: start; }
-  .tv-task-row-meta > * { min-width: 0; }
+  .tv-task-row-meta > * { flex-shrink: 0; }
   .tv-task-row-assignee-chip {
     display: inline-flex; align-items: center; gap: 5px;
     font-size: 12px; color: var(--ink-2);
     min-width: 0;
+    max-width: 150px;
     overflow: hidden;
-    text-overflow: ellipsis;
     white-space: nowrap;
   }
   .tv-task-row-assignee-name {
@@ -348,7 +360,8 @@ styleTag.textContent = `
     font-size: 11.5px;
     color: var(--ink-3);
     white-space: nowrap;
-    text-align: left;
+    text-align: right;
+    min-width: 92px;
   }
   .tv-row-pin-btn {
     width: 28px;
@@ -708,6 +721,47 @@ styleTag.textContent = `
   .tv-checklist-row.is-done .tv-checklist-title {
     color: var(--ink-3);
     text-decoration: line-through;
+  }
+  .tv-checklist > .tv-checklist-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 7px;
+  }
+  .tv-checklist-line {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    cursor: pointer;
+  }
+  .tv-checklist-result {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding-left: 24px;
+  }
+  .tv-checklist-result-input {
+    width: 100%;
+    resize: vertical;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--surface);
+    padding: 6px 8px;
+    font-size: 12.5px;
+    line-height: 1.4;
+    color: var(--ink);
+    font-family: inherit;
+    outline: none;
+    transition: border .15s, box-shadow .15s;
+  }
+  .tv-checklist-result-input:focus {
+    border-color: var(--emerald);
+    box-shadow: 0 0 0 3px rgba(5,150,105,.10);
+  }
+  .tv-checklist-result-input::placeholder { color: var(--ink-3); }
+  .tv-checklist-result-input:disabled { opacity: .6; cursor: not-allowed; }
+  .tv-checklist-result-meta {
+    font-size: 11px;
+    color: var(--ink-3);
   }
   .tv-note-textarea {
     min-height: 112px;
@@ -1812,7 +1866,7 @@ styleTag.textContent = `
     .tv-stats-strip { grid-template-columns: repeat(2, 1fr); }
     .tv-drawer { width: 100vw; }
     .tv-info-grid { grid-template-columns: 1fr; }
-    .tv-task-row-meta { grid-template-columns: auto auto 28px 12px; column-gap: 6px; padding-left: 6px; }
+    .tv-task-row-meta { gap: 6px; padding-left: 6px; }
     .tv-task-row-assignee-chip, .tv-task-row-flow, .tv-task-row-date { display: none; }
     .tv-task-row-meta .tv-badge:nth-of-type(3), .tv-deadline-chip { display: none; }
     .tv-pagination { flex-wrap: wrap; justify-content: center; }
@@ -2778,9 +2832,11 @@ const TaskRow = React.memo(({ task, onClick, onPin, isPinned }) => {
   const deadlineLabel = taskDeadlineLabel(task);
   const creatorName = task?.creator?.name || '—';
   const assigneeName = task?.assignee?.name || '—';
+  const priorityCls = task.priority === 'critical' ? 'is-critical' : task.priority === 'urgent' ? 'is-urgent' : '';
+  const indicatorColor = task.priority === 'critical' ? 'var(--rose)' : task.priority === 'urgent' ? 'var(--amber)' : sm.dot;
   return (
-    <div className="tv-task-row" onClick={() => onClick(task)}>
-      <span className="tv-task-row-indicator" style={{ background: sm.dot }} />
+    <div className={`tv-task-row ${priorityCls}`} onClick={() => onClick(task)}>
+      <span className="tv-task-row-indicator" style={{ background: indicatorColor }} />
       <span className="tv-task-row-main">
         <span className="tv-task-row-subject">{task.subject || 'Без темы'}</span>
         <span className="tv-task-row-flow">
@@ -2823,7 +2879,7 @@ const TaskRow = React.memo(({ task, onClick, onPin, isPinned }) => {
 const TaskDrawer = React.memo(({
   task, onClose, actionLoadingKey,
   getActionButtons, openCompleteModal, openStatusModal, updateStatus, downloadAttachment,
-  onEditTask, onDeleteTask, onTogglePinTask, onCopyTaskLink, onToggleChecklistItem,
+  onEditTask, onDeleteTask, onTogglePinTask, onCopyTaskLink, onToggleChecklistItem, onSaveChecklistNote,
   isPinned,
 }) => {
   const sm = STATUS_META[task.status] || { label: task.status, badge: 'tv-badge-gray' };
@@ -3005,16 +3061,36 @@ const TaskDrawer = React.memo(({
                   {checklist.map(item => {
                     const loading = actionLoadingKey === `${task.id}:checklist:${item.id}`;
                     return (
-                      <label key={item.id} className={`tv-checklist-row ${item.is_done ? 'is-done' : ''}`}>
-                        <input
-                          type="checkbox"
-                          className="tv-checklist-checkbox"
-                          checked={!!item.is_done}
-                          disabled={!!loading}
-                          onChange={() => onToggleChecklistItem?.(task, item, !item.is_done)}
-                        />
-                        <span className="tv-checklist-title">{item.title}</span>
-                      </label>
+                      <div key={item.id} className={`tv-checklist-row ${item.is_done ? 'is-done' : ''}`}>
+                        <label className="tv-checklist-line">
+                          <input
+                            type="checkbox"
+                            className="tv-checklist-checkbox"
+                            checked={!!item.is_done}
+                            disabled={!!loading}
+                            onChange={() => onToggleChecklistItem?.(task, item, !item.is_done)}
+                          />
+                          <span className="tv-checklist-title">{item.title}</span>
+                        </label>
+                        {item.is_done && (
+                          <div className="tv-checklist-result">
+                            <textarea
+                              className="tv-checklist-result-input"
+                              defaultValue={item.result_note || ''}
+                              placeholder="Итог по пункту…"
+                              rows={2}
+                              disabled={!!loading}
+                              onClick={(event) => event.stopPropagation()}
+                              onBlur={(event) => onSaveChecklistNote?.(task, item, event.target.value)}
+                            />
+                            {item.completed_by_name && (
+                              <span className="tv-checklist-result-meta">
+                                {item.completed_by_name}{item.completed_at ? ` · ${fmtShortDateTime(item.completed_at)}` : ''}
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
                     );
                   })}
                 </div>
@@ -4417,6 +4493,35 @@ const TasksView = ({
     }
   }, [apiBaseUrl, buildHeaders, notify, patchTaskEverywhere]);
 
+  const saveChecklistNote = useCallback(async (task, item, note) => {
+    const taskId = Number(task?.id || 0);
+    const itemId = Number(item?.id || 0);
+    if (!taskId || !itemId) return;
+    const nextNote = String(note || '').trim();
+    if (nextNote === String(item?.result_note || '').trim()) return;
+    const key = `${taskId}:checklist:${itemId}`;
+    setActionLoadingKey(key);
+    try {
+      const res = await axios.patch(
+        `${apiBaseUrl}/api/tasks/${taskId}/checklist/${itemId}`,
+        { is_done: true, result_note: nextNote },
+        { headers: buildHeaders() }
+      );
+      const updatedItem = res?.data?.item || { ...item, result_note: nextNote };
+      patchTaskEverywhere(taskId, (current) => ({
+        ...current,
+        checklist: (Array.isArray(current?.checklist) ? current.checklist : [])
+          .map((row) => Number(row?.id || 0) === itemId ? { ...row, ...updatedItem } : row)
+      }));
+      notify('Итог по пункту сохранён');
+      if (res?.data?.warning) notify(res.data.warning, 'error');
+    } catch (e) {
+      notify(e?.response?.data?.error || 'Не удалось сохранить итог', 'error');
+    } finally {
+      setActionLoadingKey('');
+    }
+  }, [apiBaseUrl, buildHeaders, notify, patchTaskEverywhere]);
+
   useEffect(() => {
     if (!externalRefreshToken || !user || !canAccessTasks) return;
     refreshTasksData();
@@ -5081,6 +5186,7 @@ const TasksView = ({
           onDeleteTask={openDeleteModal}
           onCopyTaskLink={copyTaskLink}
           onToggleChecklistItem={toggleChecklistItem}
+          onSaveChecklistNote={saveChecklistNote}
           onTogglePinTask={(task) => {
             if (Number(task?.id || 0) === Number(pinnedTaskId)) {
               onUnpinTask?.();

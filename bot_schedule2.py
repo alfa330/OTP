@@ -12121,13 +12121,22 @@ def update_task_checklist_item(task_id, item_id):
             return jsonify({"error": "is_done is required"}), 400
         is_done = _parse_task_bool(data.get('is_done'))
 
+        update_note = 'result_note' in data
+        result_note = data.get('result_note') if update_note else None
+        if result_note is not None and not isinstance(result_note, str):
+            result_note = str(result_note)
+        if isinstance(result_note, str) and len(result_note) > 2000:
+            result_note = result_note[:2000]
+
         try:
             item = db.update_task_checklist_item(
                 task_id=task_id,
                 checklist_item_id=item_id,
                 requester_id=requester_id,
                 requester_role=requester[3],
-                is_done=is_done
+                is_done=is_done,
+                result_note=result_note,
+                update_note=update_note
             )
         except ValueError as value_error:
             code = str(value_error)
