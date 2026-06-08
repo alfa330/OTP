@@ -42,6 +42,7 @@ from database import (
     normalize_proxy_status_value,
     normalize_role_value,
     get_calculation_model_catalog,
+    get_calculation_model_metrics,
 )
 from resource_fte_service import (
     build_resource_schedule_preview,
@@ -10031,9 +10032,16 @@ def get_calculation_models():
         role = _normalize_user_role(requester[3])
         if not (_is_admin_role(role) or _is_supervisor_role(role) or role == 'operator'):
             return jsonify({"error": "Forbidden"}), 403
+        catalog = get_calculation_model_catalog()
         return jsonify({
             "status": "success",
-            "calculation_models": get_calculation_model_catalog()
+            "calculation_models": catalog,
+            # Реестр метрик на модель: {model_code: [metrics]} — фронт строит
+            # столбцы/вкладки учёта часов и отчётов из него (а не из зашитых веток).
+            "calculation_model_metrics": {
+                item['code']: get_calculation_model_metrics(item['code'])
+                for item in catalog
+            }
         }), 200
     except Exception as e:
         logging.error(f"Error fetching calculation models: {e}", exc_info=True)
