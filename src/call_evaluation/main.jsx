@@ -1325,6 +1325,7 @@ const BatchFeedbackModal = ({
     const [startTime, setStartTime] = useState('');
     const [endTime, setEndTime] = useState('');
     const [comments, setComments] = useState({});
+    const [audioUrls, setAudioUrls] = useState({});
     const [isSubmitting, setIsSubmitting] = useState(false);
 
     useEffect(() => {
@@ -1338,6 +1339,24 @@ const BatchFeedbackModal = ({
         (calls || []).forEach(c => { initial[c.id] = ''; });
         setComments(initial);
     }, [isOpen, calls]);
+
+    // Подгружаем аудиозаписи выбранных оценок, чтобы прослушать их при разборе.
+    useEffect(() => {
+        if (!isOpen) { setAudioUrls({}); return; }
+        let cancelled = false;
+        setAudioUrls({});
+        (calls || []).forEach(c => {
+            if (!c?.directions?.[0]?.hasFileUpload) return;
+            if (c.audioUrl) {
+                setAudioUrls(prev => ({ ...prev, [c.id]: c.audioUrl }));
+                return;
+            }
+            getAudioUrl(c.id, userId).then(url => {
+                if (!cancelled && url) setAudioUrls(prev => ({ ...prev, [c.id]: url }));
+            });
+        });
+        return () => { cancelled = true; };
+    }, [isOpen, calls, userId]);
 
     if (!isOpen || !Array.isArray(calls) || calls.length === 0) return null;
 
@@ -1438,6 +1457,11 @@ const BatchFeedbackModal = ({
                                     {c.totalScore != null && <span>Балл: {Math.round(c.totalScore)}</span>}
                                     <span>Call ID: {c.id}</span>
                                 </div>
+                                {audioUrls[c.id] && (
+                                    <div style={{marginBottom:8}}>
+                                        <audio controls style={{width:'100%'}}><source src={audioUrls[c.id]} type="audio/mpeg" /></audio>
+                                    </div>
+                                )}
                                 <textarea
                                     className="textarea"
                                     rows={2}
@@ -4055,18 +4079,6 @@ const App = ({ user, initialSelection }) => {
                             const lastDay = new Date(parseInt(selectedMonth.slice(0,4)), parseInt(selectedMonth.slice(5,7)), 0).getDate();
                             return <DateRangePicker minDate={`${selectedMonth}-01`} maxDate={`${selectedMonth}-${String(lastDay).padStart(2,'0')}`} setFromDate={setFromDate} setToDate={setToDate} />;
                         })()}
-                        {activeSection === 'journal' && (isAdminRole || isSupervisorRole) && selectedOperator && (
-                            <div className="filter-group" style={{justifyContent:'flex-end'}}>
-                                <label className="label">&nbsp;</label>
-                                <button
-                                    className={`btn btn-sm ${batchMode ? 'btn-primary' : 'btn-secondary'}`}
-                                    onClick={() => { if (batchMode) { exitBatchMode(); } else { setBatchMode(true); } }}
-                                    title="Дать обратную связь сразу по нескольким оценкам"
-                                >
-                                    <FaIcon className={`fas fa-${batchMode ? 'times' : 'list-check'}`} /> {batchMode ? 'Отмена выбора' : 'Несколько ОС'}
-                                </button>
-                            </div>
-                        )}
                     </div>
                 </div>
 
@@ -4216,8 +4228,19 @@ const App = ({ user, initialSelection }) => {
                                                                     <button
                                                                         className={`btn btn-sm ${call.feedback ? 'btn-secondary' : 'btn-primary'}`}
                                                                         onClick={() => {
-                                                                            setFeedbackTargetCall(call);
-                                                                            setShowFeedbackModal(true);
+                                                                            if (call.feedback) {
+                                                                                setFeedbackTargetCall(call);
+                                                                                setShowFeedbackModal(true);
+                                                                            } else {
+                                                                                // Клик по «ОС» включает режим выбора нескольких оценок
+                                                                                // и сразу отмечает текущую.
+                                                                                setBatchMode(true);
+                                                                                setSelectedBatchIds(prev => {
+                                                                                    const next = new Set(prev);
+                                                                                    next.add(call.id);
+                                                                                    return next;
+                                                                                });
+                                                                            }
                                                                         }}
                                                                     >
                                                                         <FaIcon className={`fas fa-${call.feedback ? 'pen' : 'comments'}`} />
@@ -5132,7 +5155,7 @@ const App = ({ user, initialSelection }) => {
                 userId={userId}
                 onSaved={handleBatchFeedbackSaved}
             />
-            {batchMode && selectedBatchCalls.length > 0 && !showBatchFeedbackModal && (
+            {batchMode && !showBatchFeedbackModal && (
                 <div style={{
                     position:'fixed', left:'50%', bottom:24, transform:'translateX(-50%)',
                     zIndex:50, display:'flex', alignItems:'center', gap:12,
@@ -5140,13 +5163,14 @@ const App = ({ user, initialSelection }) => {
                     background:'var(--surface)', border:'1px solid var(--border-strong)',
                     boxShadow:'0 8px 24px rgba(0,0,0,0.18)'
                 }}>
-                    <span style={{fontSize:13, color:'var(--text)'}}>Выбрано оценок: <strong>{selectedBatchCalls.length}</strong></span>
-                    <button className="btn btn-sm btn-secondary" onClick={() => setSelectedBatchIds(new Set())}>Очистить</button>
+                    <span style={{fontSize:13, color:'var(--text)'}}>Выбор ОС · выбрано: <strong>{selectedBatchCalls.length}</strong></span>
+                    <button className="btn btn-sm btn-secondary" onClick={exitBatchMode}>Отмена</button>
                     <button
                         className="btn btn-sm btn-primary"
+                        disabled={selectedBatchCalls.length === 0}
                         onClick={() => { setBatchModalCalls(selectedBatchCalls); setShowBatchFeedbackModal(true); }}
                     >
-                        <FaIcon className="fas fa-comments" /> Дать ОС
+                        <FaIcon className="fas fa-comments" /> Дать ОС{selectedBatchCalls.length > 0 ? ` (${selectedBatchCalls.length})` : ''}
                     </button>
                 </div>
             )}
