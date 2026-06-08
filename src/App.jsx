@@ -109,6 +109,7 @@ const SalaryCalculatorChat = lazyWithRetry(() => import('./components/salary/Sal
 const ResourceFteView = lazyWithRetry(() => import('./components/resources/ResourceFteView'));
 const ShiftAuctionView = lazyWithRetry(() => import('./components/resources/ShiftAuctionView'));
 const DepartmentsView = lazyWithRetry(() => import('./components/departments/DepartmentsView'));
+const GroupsView = lazyWithRetry(() => import('./components/groups/GroupsView'));
 
 
 if (typeof window !== 'undefined') {
@@ -36840,6 +36841,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             <FaIcon className="fas fa-layer-group"></FaIcon> <span className="sidebar-text">Отделы</span>
                                                         </button>
                                                     </li>
+                                                    <li>
+                                                        <button onClick={(e) => handleSidebarViewNavigation(e, 'groups')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'groups' ? 'bg-blue-700' : ''}`}>
+                                                            <FaIcon className="fas fa-object-group"></FaIcon> <span className="sidebar-text">Группы</span>
+                                                        </button>
+                                                    </li>
                                                 </>
                                             )}
                                         </>
@@ -39103,6 +39109,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {( view === "departments" && isAdminLikeRole && (
                                     <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                         <DepartmentsView
+                                            user={user}
+                                            showToast={showToast}
+                                            apiBaseUrl={API_BASE_URL}
+                                            withAccessTokenHeader={withAccessTokenHeader}
+                                        />
+                                    </Suspense>
+                                ))}
+                                {( view === "groups" && isAdminLikeRole && (
+                                    <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
+                                        <GroupsView
                                             user={user}
                                             showToast={showToast}
                                             apiBaseUrl={API_BASE_URL}
