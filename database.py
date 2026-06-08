@@ -202,6 +202,68 @@ def get_calculation_model_catalog() -> List[Dict[str, str]]:
         dict(CALCULATION_MODEL_DESCRIPTIONS[CALCULATION_MODEL_CHAT_MANAGER]),
     ]
 
+
+# ──────────────────────────────────────────────────────────────────────────
+# РЕЕСТР МЕТРИК НА МОДЕЛЬ РАСЧЁТА.
+# Декларативное описание метрик каждой модели: что показывать в учёте часов и
+# отчётах и как метрика заполняется. Добавление новой модели/метрики = запись
+# здесь, без правок веток рендера в коде.
+#   fill='manual'   — заполняется руками в учёте часов (редактируемая ячейка);
+#   fill='import'   — подтягивается импортом/из источника (только чтение);
+#   fill='computed' — считается формулой (только чтение).
+#   store           — куда сохраняется значение: колонка таблицы
+#                     ('daily_hours.work_time'), отдельная таблица
+#                     ('daily_bonuses') или ключ в daily_hours.extra_metrics
+#                     ('daily_hours.extra_metrics.<key>') для новых метрик без
+#                     выделенной колонки.
+#   tab             — ключ группировки/вкладки на экране учёта часов.
+# ──────────────────────────────────────────────────────────────────────────
+def _calc_metric(key, label, unit='', fill='manual', store=None, tab=None):
+    return {
+        'key': key,
+        'label': label,
+        'unit': unit,
+        'fill': fill,
+        'store': store,
+        'tab': tab or key,
+    }
+
+
+# Общие метрики, одинаковые для всех моделей (часы/тренинги/штрафы/бонусы).
+_CALC_METRICS_HEAD = [
+    _calc_metric('work_time', 'Отработанные часы', 'ч', 'manual', 'daily_hours.work_time'),
+    _calc_metric('break_time', 'Перерыв', 'ч', 'manual', 'daily_hours.break_time'),
+]
+_CALC_METRICS_TAIL = [
+    _calc_metric('trainings', 'Тренинги', '', 'manual', 'daily_hours.training_time'),
+    _calc_metric('technical_issues', 'Тех причины', 'ч', 'manual', 'daily_hours.technical_reason_minutes'),
+    _calc_metric('offline_activity', 'Офлайн активность', 'ч', 'manual', 'operator_offline_activities'),
+    _calc_metric('no_phone', 'Без телефона', 'ч', 'manual', 'daily_hours.no_phone_minutes'),
+    _calc_metric('bonuses', 'Бонусы', '₸', 'manual', 'daily_bonuses'),
+    _calc_metric('fines', 'Штрафы', '₸', 'manual', 'daily_fines'),
+]
+
+CALCULATION_MODEL_METRICS = {
+    CALCULATION_MODEL_OPERATOR: _CALC_METRICS_HEAD + [
+        _calc_metric('calls', 'Звонки', '', 'import', 'daily_hours.calls'),
+        _calc_metric('efficiency', 'Эффективность', 'ч', 'computed', 'daily_hours.efficiency'),
+        _calc_metric('talk_time', 'Время в разговоре', 'ч', 'import', 'daily_hours.talk_time'),
+    ] + _CALC_METRICS_TAIL,
+    CALCULATION_MODEL_CHAT_MANAGER: _CALC_METRICS_HEAD + [
+        _calc_metric('chats', 'Чаты', '', 'import', 'chat_manager_daily_metrics.chats_count'),
+        _calc_metric('avg_score', 'Средняя оценка', 'балл', 'import', 'chat_manager_daily_metrics.avg_score'),
+        _calc_metric('response_time', 'Время ответа', 'сек', 'import', 'chat_manager_daily_metrics.avg_response_time_seconds'),
+        _calc_metric('transfers', 'Переводы чатов', '', 'import', 'chat_manager_daily_metrics.transfer_chat_count'),
+    ] + _CALC_METRICS_TAIL,
+}
+
+
+def get_calculation_model_metrics(model_code: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Список метрик для модели расчёта (копии, безопасно мутировать у вызывающего)."""
+    code = normalize_calculation_model_code(model_code)
+    metrics = CALCULATION_MODEL_METRICS.get(code, CALCULATION_MODEL_METRICS[CALCULATION_MODEL_OPERATOR])
+    return [dict(m) for m in metrics]
+
 # Вставьте/адаптируйте этот helper в ваш модуль
 def _normalize_phone(phone: Optional[str]) -> Optional[str]:
     if not phone:
@@ -758,6 +820,128 @@ class Database:
                 ALTER TABLE users
                 ADD COLUMN IF NOT EXISTS rate_change_report_enabled BOOLEAN NOT NULL DEFAULT FALSE;
             """)
+            # ──────────────────────────────────────────────────────────────
+            # ГРУППЫ: историческая принадлежность операторов и СВ по датам +
+            # модель расчёта на уровне группы. Это источник истины принадлежности
+            # вместо текущего users.supervisor_id/direction_id (те остаются как
+            # legacy/cache). Одна группа = одна модель расчёта: задаётся при
+            # создании группы и далее НЕ меняется (смена модели = архив группы и
+            # создание/переиспользование другой). Создаём ДО work_hours/daily_hours,
+            # т.к. ниже на них вешается FK group_id -> groups(id).
+            # ──────────────────────────────────────────────────────────────
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS groups (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(255) NOT NULL,
+                    department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL,
+                    direction_id INTEGER REFERENCES directions(id) ON DELETE SET NULL,
+                    calculation_model_code VARCHAR(32) NOT NULL DEFAULT 'operator',
+                    table_url TEXT,
+                    status VARCHAR(16) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+                    archived_at TIMESTAMP,
+                    reused_from_group_id INTEGER REFERENCES groups(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_groups_status ON groups(status);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_groups_department ON groups(department_id);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_groups_direction ON groups(direction_id);")
+            # Историческое членство супервайзеров в группе (0..1 активный СВ на дату).
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS group_supervisor_memberships (
+                    id SERIAL PRIMARY KEY,
+                    group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+                    supervisor_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    start_date DATE NOT NULL,
+                    end_date DATE,
+                    assigned_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_group_sv_memberships_group
+                ON group_supervisor_memberships(group_id);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_group_sv_memberships_sv
+                ON group_supervisor_memberships(supervisor_id, start_date);
+            """)
+            # Историческое членство операторов в группе по датам. Один оператор не
+            # должен иметь две активные основные группы на один день (enforce —
+            # частичный UNIQUE-индекс добавляется в фазе backfill, когда данные
+            # гарантированно непротиворечивы).
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS group_operator_memberships (
+                    id SERIAL PRIMARY KEY,
+                    group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    start_date DATE NOT NULL,
+                    end_date DATE,
+                    assigned_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_group_op_memberships_group
+                ON group_operator_memberships(group_id);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_group_op_memberships_operator
+                ON group_operator_memberships(operator_id, start_date);
+            """)
+            # Помесячный снимок группы (заморозка состояния за месяц).
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS group_month_snapshots (
+                    id SERIAL PRIMARY KEY,
+                    group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+                    month VARCHAR(7) NOT NULL,
+                    name VARCHAR(255),
+                    status VARCHAR(16),
+                    direction_id INTEGER REFERENCES directions(id) ON DELETE SET NULL,
+                    calculation_model_code VARCHAR(32) NOT NULL DEFAULT 'operator',
+                    table_url TEXT,
+                    archived BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(group_id, month)
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_group_month_snapshots_month
+                ON group_month_snapshots(month);
+            """)
+            # Помесячный снимок оператора в группе (замороженные расчётные поля:
+            # role, status, rate, direction, модель, СВ). Поддерживает нахождение
+            # оператора в двух группах в одном месяце с разными моделями.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS group_operator_month_snapshots (
+                    id SERIAL PRIMARY KEY,
+                    group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+                    month VARCHAR(7) NOT NULL,
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    name VARCHAR(255),
+                    role VARCHAR(20),
+                    status VARCHAR(20),
+                    direction_id INTEGER REFERENCES directions(id) ON DELETE SET NULL,
+                    direction_name VARCHAR(255),
+                    calculation_model_code VARCHAR(32) NOT NULL DEFAULT 'operator',
+                    rate DECIMAL(3,2),
+                    supervisor_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    supervisor_names JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    first_day DATE,
+                    last_day DATE,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(group_id, month, operator_id)
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_group_op_month_snapshots_op_month
+                ON group_operator_month_snapshots(operator_id, month);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_group_op_month_snapshots_group_month
+                ON group_operator_month_snapshots(group_id, month);
+            """)
             # Calls table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operator_activity_logs (
@@ -992,6 +1176,17 @@ class Database:
                 ADD CONSTRAINT work_hours_rate_check
                     CHECK (rate IS NULL OR rate IN (1.00, 0.75, 0.50));
             """)
+            # group_id: историческая привязка месячных часов к группе. Совместимая
+            # миграция — пока nullable + backfill; смена UNIQUE(operator_id, month)
+            # на (group_id, operator_id, month) делается в фазе обновления upsert-кода.
+            cursor.execute("""
+                ALTER TABLE work_hours
+                ADD COLUMN IF NOT EXISTS group_id INTEGER REFERENCES groups(id) ON DELETE SET NULL;
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_work_hours_group_month
+                ON work_hours(group_id, operator_id, month);
+            """)
 
             cursor.execute("""
                 CREATE EXTENSION IF NOT EXISTS pgcrypto;
@@ -1045,6 +1240,24 @@ class Database:
             cursor.execute("""
                 ALTER TABLE daily_hours
                 ADD COLUMN IF NOT EXISTS no_phone_seconds INTEGER NOT NULL DEFAULT 0;
+            """)
+            # group_id: историческая привязка дневных часов к группе. Совместимая
+            # миграция — пока nullable + backfill; смена UNIQUE(operator_id, day) на
+            # (group_id, operator_id, day) делается в фазе обновления upsert-кода
+            # (иначе сломается существующий ON CONFLICT (operator_id, day)).
+            # extra_metrics: мешок значений для новых декларативных метрик модели,
+            # чтобы добавление метрики не требовало новой колонки.
+            cursor.execute("""
+                ALTER TABLE daily_hours
+                ADD COLUMN IF NOT EXISTS group_id INTEGER REFERENCES groups(id) ON DELETE SET NULL;
+            """)
+            cursor.execute("""
+                ALTER TABLE daily_hours
+                ADD COLUMN IF NOT EXISTS extra_metrics JSONB NOT NULL DEFAULT '{}'::jsonb;
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_daily_hours_group_day
+                ON daily_hours(group_id, operator_id, day);
             """)
 
             # Table for multiple fines per day (new schema)
@@ -2468,6 +2681,15 @@ class Database:
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
             self._backfill_work_hours_rate_from_history_tx(cursor)
+            # Сидинг групп из текущих супервайзеров (одноразово, идемпотентно).
+            # Под SAVEPOINT — сбой сидинга не должен ронять инициализацию БД.
+            try:
+                cursor.execute("SAVEPOINT sp_groups_backfill")
+                self._backfill_groups_from_supervisors_tx(cursor)
+                cursor.execute("RELEASE SAVEPOINT sp_groups_backfill")
+            except Exception as exc:
+                cursor.execute("ROLLBACK TO SAVEPOINT sp_groups_backfill")
+                logging.error("groups backfill skipped due to error: %s", exc, exc_info=True)
 
     def _backfill_work_hours_rate_from_history_tx(self, cursor):
         """
@@ -2583,6 +2805,154 @@ class Database:
         logging.info(
             "work_hours.rate backfill: проставлено %s помесячных ставок для %s операторов",
             len(updates), len({u[1] for u in updates}),
+        )
+
+    def _backfill_groups_from_supervisors_tx(self, cursor):
+        """
+        Одноразовый идемпотентный сидинг групп из текущих супервайзеров.
+
+        Для каждого СВ создаётся группа "<имя СВ> группа <основное направление>",
+        к ней привязывается сам СВ и его текущие операторы (по users.supervisor_id),
+        а модель расчёта группы берётся из основного (самого частого) направления
+        его операторов. Затем на существующих daily_hours/work_hours проставляется
+        group_id по членству — best-effort: вся история оператора относится к его
+        текущей группе, т.к. историю переводов между СВ мы достоверно не знаем.
+
+        Идемпотентность: если группы уже существуют — выходим (сидинг выполнен).
+        Дальнейшее создание групп/членств идёт через API групп, не через сидинг.
+        Членства открываются с даты найма (или эпохи), чтобы as-of резолвер
+        покрывал всю прошлую историю часов оператора в его текущей группе.
+        """
+        cursor.execute("SELECT 1 FROM groups LIMIT 1")
+        if cursor.fetchone() is not None:
+            return  # уже засидено
+
+        EPOCH = '2000-01-01'
+
+        # Справочник направлений: id -> (name, model_code, department_id)
+        cursor.execute(
+            "SELECT id, name, calculation_model_code, department_id FROM directions"
+        )
+        dir_map = {}
+        for did, dname, dmodel, ddept in cursor.fetchall() or []:
+            dir_map[int(did)] = (
+                dname,
+                normalize_calculation_model_code(dmodel, dname),
+                ddept,
+            )
+
+        # Текущие супервайзеры.
+        cursor.execute(
+            """
+            SELECT id, name, department_id, hire_date
+            FROM users
+            WHERE LOWER(COALESCE(role, '')) IN ('sv', 'supervisor')
+            ORDER BY id
+            """
+        )
+        supervisors = cursor.fetchall() or []
+
+        groups_created = 0
+        sv_memberships = 0
+        op_memberships = 0
+
+        for sv_id, sv_name, sv_dept, sv_hire in supervisors:
+            # Операторы этого СВ (по текущему supervisor_id).
+            cursor.execute(
+                """
+                SELECT id, direction_id, hire_date
+                FROM users
+                WHERE supervisor_id = %s AND LOWER(COALESCE(role, '')) = 'operator'
+                ORDER BY id
+                """,
+                (sv_id,),
+            )
+            operators = cursor.fetchall() or []
+
+            # Основное направление = самое частое среди операторов (без NULL).
+            dir_counts = defaultdict(int)
+            for _oid, d, _h in operators:
+                if d is not None:
+                    dir_counts[int(d)] += 1
+            main_dir_id = max(dir_counts, key=dir_counts.get) if dir_counts else None
+
+            if main_dir_id is not None and main_dir_id in dir_map:
+                dir_name, model_code, dir_dept = dir_map[main_dir_id]
+            else:
+                dir_name, model_code, dir_dept = None, CALCULATION_MODEL_OPERATOR, None
+
+            dept_id = sv_dept or dir_dept
+            group_name = (
+                "{} группа {}".format(sv_name, dir_name)
+                if dir_name else "{} группа".format(sv_name)
+            )
+
+            cursor.execute(
+                """
+                INSERT INTO groups
+                    (name, department_id, direction_id, calculation_model_code,
+                     status, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                RETURNING id
+                """,
+                (group_name, dept_id, main_dir_id, model_code),
+            )
+            group_id = cursor.fetchone()[0]
+            groups_created += 1
+
+            cursor.execute(
+                """
+                INSERT INTO group_supervisor_memberships
+                    (group_id, supervisor_id, start_date, created_at)
+                VALUES (%s, %s, COALESCE(%s::date, %s::date), CURRENT_TIMESTAMP)
+                """,
+                (group_id, sv_id, sv_hire, EPOCH),
+            )
+            sv_memberships += 1
+
+            if operators:
+                cursor.executemany(
+                    """
+                    INSERT INTO group_operator_memberships
+                        (group_id, operator_id, start_date, created_at)
+                    VALUES (%s, %s, COALESCE(%s::date, %s::date), CURRENT_TIMESTAMP)
+                    """,
+                    [(group_id, int(oid), ohire, EPOCH) for oid, _d, ohire in operators],
+                )
+                op_memberships += len(operators)
+
+        # Проставляем group_id на исторических часах по членству (best-effort:
+        # вся история оператора уходит в его текущую группу).
+        cursor.execute(
+            """
+            UPDATE daily_hours d
+            SET group_id = gom.group_id
+            FROM group_operator_memberships gom
+            WHERE d.operator_id = gom.operator_id
+              AND d.group_id IS NULL
+              AND d.day >= gom.start_date
+              AND (gom.end_date IS NULL OR d.day <= gom.end_date)
+            """
+        )
+        daily_stamped = cursor.rowcount
+
+        cursor.execute(
+            """
+            UPDATE work_hours w
+            SET group_id = gom.group_id
+            FROM group_operator_memberships gom
+            WHERE w.operator_id = gom.operator_id
+              AND w.group_id IS NULL
+              AND w.month >= TO_CHAR(gom.start_date, 'YYYY-MM')
+              AND (gom.end_date IS NULL OR w.month <= TO_CHAR(gom.end_date, 'YYYY-MM'))
+            """
+        )
+        work_stamped = cursor.rowcount
+
+        logging.info(
+            "groups backfill: создано групп=%s, СВ-членств=%s, операторских членств=%s; "
+            "проставлен group_id: daily_hours=%s, work_hours=%s",
+            groups_created, sv_memberships, op_memberships, daily_stamped, work_stamped,
         )
 
     def _backfill_user_profiles_tx(self, cursor):
@@ -11371,7 +11741,10 @@ class Database:
         with self._get_cursor() as cursor:
             # Текущий месяц в формате YYYY-MM
             current_month = datetime.now().strftime('%Y-%m')
-            calculation_model_code = self._get_operator_calculation_model_tx(cursor, operator_id)
+            # Модель — по группе оператора на конец текущего месяца (fallback — направление).
+            _cm_y, _cm_m = map(int, current_month.split('-'))
+            _cm_end = date(_cm_y, _cm_m, calendar.monthrange(_cm_y, _cm_m)[1])
+            calculation_model_code = self._get_operator_calculation_model_tx(cursor, operator_id, as_of=_cm_end)
 
             # 1) Берём агрегаты из work_hours (regular_hours, total_calls, fines, norm_hours)
             cursor.execute("""
@@ -17425,26 +17798,66 @@ class Database:
             'ignored': set(),
         }
 
-    def _load_operator_calculation_models_tx(self, cursor, operator_ids):
+    def _load_operator_calculation_models_tx(self, cursor, operator_ids, as_of=None):
+        """
+        Модель расчёта по операторам.
+
+        as_of=None — legacy-поведение: модель берётся из ТЕКУЩЕГО направления
+        оператора (users.direction_id -> directions.calculation_model_code). Так
+        работают не привязанные к периоду вызовы (классификация статусов на
+        пересчёте), чтобы их поведение не менялось.
+
+        as_of=<date> — group-aware: модель берётся из группы оператора, активной
+        на эту дату (group_operator_memberships -> groups.calculation_model_code).
+        Если членства за период нет (например, прошлые месяцы до сидинга групп) —
+        fallback на текущее направление. Это то, что делает прошлые месяцы
+        устойчивыми к смене направления/роли оператора.
+        """
         op_ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
         result = {op_id: CALCULATION_MODEL_OPERATOR for op_id in op_ids}
         if not op_ids:
             return result
+        if as_of is None:
+            cursor.execute(
+                """
+                SELECT u.id, d.name, d.calculation_model_code
+                FROM users u
+                LEFT JOIN directions d ON d.id = u.direction_id
+                WHERE u.id = ANY(%s)
+                """,
+                (op_ids,)
+            )
+            for op_id, direction_name, model_code in cursor.fetchall() or []:
+                result[int(op_id)] = self._normalize_calculation_model_code(model_code, direction_name)
+            return result
+        # Group-aware: модель из активной на as_of группы; fallback — направление.
         cursor.execute(
             """
-            SELECT u.id, d.name, d.calculation_model_code
+            SELECT u.id, g.calculation_model_code AS group_model,
+                   d.name AS direction_name, d.calculation_model_code AS direction_model
             FROM users u
+            LEFT JOIN LATERAL (
+                SELECT gr.calculation_model_code
+                FROM group_operator_memberships gom
+                JOIN groups gr ON gr.id = gom.group_id
+                WHERE gom.operator_id = u.id
+                  AND gom.start_date <= %s
+                  AND (gom.end_date IS NULL OR gom.end_date >= %s)
+                ORDER BY gom.start_date DESC
+                LIMIT 1
+            ) g ON TRUE
             LEFT JOIN directions d ON d.id = u.direction_id
             WHERE u.id = ANY(%s)
             """,
-            (op_ids,)
+            (as_of, as_of, op_ids)
         )
-        for op_id, direction_name, model_code in cursor.fetchall() or []:
-            result[int(op_id)] = self._normalize_calculation_model_code(model_code, direction_name)
+        for op_id, group_model, direction_name, direction_model in cursor.fetchall() or []:
+            chosen = group_model if group_model is not None else direction_model
+            result[int(op_id)] = self._normalize_calculation_model_code(chosen, direction_name)
         return result
 
-    def _get_operator_calculation_model_tx(self, cursor, operator_id):
-        model_map = self._load_operator_calculation_models_tx(cursor, [operator_id])
+    def _get_operator_calculation_model_tx(self, cursor, operator_id, as_of=None):
+        model_map = self._load_operator_calculation_models_tx(cursor, [operator_id], as_of=as_of)
         return model_map.get(int(operator_id), CALCULATION_MODEL_OPERATOR)
 
     def _is_smz_direction(self, direction_name):
@@ -18822,7 +19235,9 @@ class Database:
         year, mon = map(int, str(month).split('-'))
         start = date(year, mon, 1)
         end = date(year, mon, calendar.monthrange(year, mon)[1])
-        calculation_model_code = self._get_operator_calculation_model_tx(cursor, operator_id)
+        # Модель за месяц — по группе оператора на конец месяца (fallback — направление),
+        # чтобы агрегат прошлого месяца не «съезжал» при смене направления/роли.
+        calculation_model_code = self._get_operator_calculation_model_tx(cursor, operator_id, as_of=end)
 
         cursor.execute("""
             SELECT
