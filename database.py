@@ -17973,7 +17973,7 @@ class Database:
         """Текущий состав группы: активные (end_date IS NULL) операторы и супервайзеры."""
         def _rows(cursor, table, col):
             cursor.execute(
-                "SELECT u.id, u.name, m.start_date, m.end_date FROM " + table + """ m
+                "SELECT u.id, u.name, m.start_date, m.end_date, u.status FROM " + table + """ m
                  JOIN users u ON u.id = m.""" + col + """
                  WHERE m.group_id = %s AND m.end_date IS NULL
                  ORDER BY u.name""",
@@ -17984,6 +17984,7 @@ class Database:
                     'id': r[0], 'name': r[1],
                     'start_date': r[2].isoformat() if r[2] else None,
                     'end_date': r[3].isoformat() if r[3] else None,
+                    'status': r[4],
                 }
                 for r in (cursor.fetchall() or [])
             ]

@@ -254,6 +254,29 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     const memberOpIds = new Set((members.operators || []).map((o) => o.id));
     const memberSvIds = new Set((members.supervisors || []).map((s) => s.id));
 
+    // Деление состава по статусу: уволенные отдельно от активных.
+    const FIRED_STATUSES = new Set(['fired', 'dismissal']);
+    const isFiredMember = (o) => FIRED_STATUSES.has(String(o.status || '').toLowerCase());
+    const opsActive = (members.operators || []).filter((o) => !isFiredMember(o));
+    const opsFired = (members.operators || []).filter((o) => isFiredMember(o));
+
+    const renderOpRow = (o, idx) => (
+        <div key={o.id} className="flex items-center justify-between gap-2 px-3 py-2 hover:bg-slate-50">
+            <span className="flex min-w-0 items-center gap-2 text-[13.5px] text-slate-700">
+                <span className="w-5 shrink-0 text-right text-[12px] text-slate-300">{idx + 1}</span>
+                <span className="truncate">{o.name}</span>
+            </span>
+            <button
+                className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 disabled:opacity-50"
+                onClick={() => removeOperator(o.id)}
+                disabled={memberBusy}
+                title="Исключить"
+            >
+                <FaIcon className="fas fa-xmark" />
+            </button>
+        </div>
+    );
+
     return (
         <div className="p-4 sm:p-6" style={{ fontFamily: APPLE_FONT }}>
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -459,20 +482,23 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
 
                             <section className="space-y-2">
                                 <div className={iosGroupLabel}>Операторы ({(members.operators || []).length})</div>
-                                <div className="rounded-xl ring-1 ring-slate-200 bg-white divide-y divide-slate-100 overflow-hidden max-h-72 overflow-y-auto">
-                                    {(members.operators || []).length === 0 ? (
-                                        <div className="px-3 py-2 text-[13px] text-slate-400">нет</div>
-                                    ) : (members.operators || []).map((o, idx) => (
-                                        <div key={o.id} className="flex items-center justify-between gap-2 px-3 py-2 hover:bg-slate-50">
-                                            <span className="flex min-w-0 items-center gap-2 text-[13.5px] text-slate-700">
-                                                <span className="w-5 shrink-0 text-right text-[12px] text-slate-300">{idx + 1}</span>
-                                                <span className="truncate">{o.name}</span>
-                                            </span>
-                                            <button className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 disabled:opacity-50" onClick={() => removeOperator(o.id)} disabled={memberBusy} title="Исключить">
-                                                <FaIcon className="fas fa-xmark" />
-                                            </button>
+                                <div className="space-y-3 max-h-80 overflow-y-auto pr-0.5">
+                                    <div>
+                                        <div className="px-1 pb-1 text-[11.5px] font-semibold text-emerald-600">Активные · {opsActive.length}</div>
+                                        <div className="rounded-xl ring-1 ring-slate-200 bg-white divide-y divide-slate-100 overflow-hidden">
+                                            {opsActive.length === 0 ? (
+                                                <div className="px-3 py-2 text-[13px] text-slate-400">нет</div>
+                                            ) : opsActive.map((o, idx) => renderOpRow(o, idx))}
                                         </div>
-                                    ))}
+                                    </div>
+                                    {opsFired.length > 0 && (
+                                        <div>
+                                            <div className="px-1 pb-1 text-[11.5px] font-semibold text-rose-500">Уволенные · {opsFired.length}</div>
+                                            <div className="rounded-xl ring-1 ring-rose-100 bg-rose-50/30 divide-y divide-rose-100/70 overflow-hidden">
+                                                {opsFired.map((o, idx) => renderOpRow(o, idx))}
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
                                 <div className="flex items-center gap-2">
                                     <CustomSelect
