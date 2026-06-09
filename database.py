@@ -18142,6 +18142,88 @@ class Database:
                 (end_date, int(group_id), int(supervisor_id)),
             )
 
+    def reassign_operator_history(self, operator_id, before_group_id, from_date):
+        """Историческая коррекция перевода: оператор был в before_group_id ДО from_date,
+        затем — в своей текущей (открытой) группе. Чинит членства по датам,
+        перестамповывает daily_hours по границе и переагрегирует все затронутые
+        месяцы. Модель/группа каждого месяца резолвятся по членству на конец месяца
+        (_aggregate_month_from_daily_tx), поэтому полные месяцы до from_date уходят в
+        операторскую группу с операторской моделью, а месяц-граница и далее остаются
+        в текущей группе. Уникальность work_hours (operator_id, month) не трогаем —
+        граничный месяц считается одной строкой по группе на конец месяца.
+        daily_hours сохраняются (меняется только group_id) — потери данных нет.
+        """
+        operator_id = int(operator_id)
+        before_group_id = int(before_group_id)
+        if isinstance(from_date, str):
+            from_date = datetime.strptime(from_date, '%Y-%m-%d').date()
+        with self._get_cursor() as cursor:
+            # Текущая открытая (целевая) группа оператора.
+            cursor.execute(
+                """
+                SELECT group_id FROM group_operator_memberships
+                WHERE operator_id = %s AND end_date IS NULL
+                ORDER BY start_date DESC LIMIT 1
+                """,
+                (operator_id,),
+            )
+            row = cursor.fetchone()
+            to_group_id = int(row[0]) if row and row[0] is not None else None
+            # Самый ранний день оператора — старт прежней группы.
+            cursor.execute("SELECT MIN(day) FROM daily_hours WHERE operator_id = %s", (operator_id,))
+            r = cursor.fetchone()
+            earliest = r[0] if r and r[0] else from_date
+            # 1) Целевую открытую группу двигаем на from_date.
+            cursor.execute(
+                """
+                UPDATE group_operator_memberships SET start_date = %s
+                WHERE operator_id = %s AND end_date IS NULL
+                """,
+                (from_date, operator_id),
+            )
+            # 2) Членство в прежней группе [earliest, from_date-1] (идемпотентно).
+            cursor.execute(
+                """
+                SELECT 1 FROM group_operator_memberships
+                WHERE operator_id = %s AND group_id = %s AND start_date = %s
+                """,
+                (operator_id, before_group_id, earliest),
+            )
+            if cursor.fetchone() is None:
+                cursor.execute(
+                    """
+                    INSERT INTO group_operator_memberships
+                        (group_id, operator_id, start_date, end_date, created_at)
+                    VALUES (%s, %s, %s, (%s::date - INTERVAL '1 day'), CURRENT_TIMESTAMP)
+                    """,
+                    (before_group_id, operator_id, earliest, from_date),
+                )
+            # 3) Перестамповать daily по границе.
+            cursor.execute(
+                "UPDATE daily_hours SET group_id = %s WHERE operator_id = %s AND day < %s",
+                (before_group_id, operator_id, from_date),
+            )
+            if to_group_id is not None:
+                cursor.execute(
+                    "UPDATE daily_hours SET group_id = %s WHERE operator_id = %s AND day >= %s",
+                    (to_group_id, operator_id, from_date),
+                )
+            # 4) Переагрегировать все затронутые месяцы (группа+модель — по членству).
+            cursor.execute(
+                "SELECT DISTINCT TO_CHAR(day, 'YYYY-MM') FROM daily_hours WHERE operator_id = %s ORDER BY 1",
+                (operator_id,),
+            )
+            months = [m[0] for m in (cursor.fetchall() or [])]
+            for m in months:
+                self._aggregate_month_from_daily_tx(cursor, operator_id, m)
+        return {
+            'operator_id': operator_id,
+            'before_group_id': before_group_id,
+            'to_group_id': to_group_id,
+            'from_date': str(from_date),
+            'reaggregated_months': months,
+        }
+
     def _load_operator_calculation_models_tx(self, cursor, operator_ids, as_of=None):
         """
         Модель расчёта по операторам.
