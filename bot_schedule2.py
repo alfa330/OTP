@@ -10222,6 +10222,26 @@ def group_members_endpoint(group_id):
         return jsonify({"error": "Internal server error"}), 500
 
 
+@app.route('/api/admin/operators/<int:operator_id>/reassign_history', methods=['POST'])
+@require_api_key
+def reassign_operator_history_endpoint(operator_id):
+    try:
+        _rid, _role, guard_err = _ensure_group_manager()
+        if guard_err:
+            resp, code = guard_err
+            return resp, code
+        data = request.get_json() or {}
+        before_group_id = data.get('before_group_id')
+        from_date = data.get('from_date')
+        if not before_group_id or not from_date:
+            return jsonify({"error": "before_group_id and from_date are required"}), 400
+        result = db.reassign_operator_history(operator_id, int(before_group_id), from_date)
+        return jsonify({"status": "success", **result}), 200
+    except Exception as e:
+        logging.error(f"Error reassigning operator history: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/admin/groups/<int:group_id>/supervisors', methods=['POST'])
 @require_api_key
 def add_group_supervisor_endpoint(group_id):
