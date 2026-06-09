@@ -6,6 +6,7 @@ import {
     iosBtnPrimary, iosBtnSecondary, iosBtnGhost,
     IosBadge, IosModal,
 } from '../ui/ios';
+import CustomSelect from '../ui/CustomSelect';
 
 // Модель → тон бейджа. Источник истины моделей — каталог с бэка (calculation_models).
 const MODEL_TONE = { operator: 'blue', chat_manager: 'green' };
@@ -113,6 +114,30 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
             .filter((g) => showArchived || g.status !== 'archived')
             .filter((g) => !q || (g.name || '').toLowerCase().includes(q));
     }, [groups, showArchived, search]);
+
+    const deptName = (id) => {
+        if (id == null || id === '__none__') return 'Без отдела';
+        const d = (departments || []).find((x) => String(x.id) === String(id));
+        return d ? d.name : `Отдел #${id}`;
+    };
+
+    // Группы, сгруппированные по отделам (для секций списка).
+    const groupedByDept = useMemo(() => {
+        const map = new Map();
+        for (const g of visibleGroups) {
+            const key = g.department_id == null ? '__none__' : String(g.department_id);
+            if (!map.has(key)) map.set(key, []);
+            map.get(key).push(g);
+        }
+        const entries = Array.from(map.entries());
+        entries.sort((a, b) => {
+            if (a[0] === '__none__') return 1;
+            if (b[0] === '__none__') return -1;
+            return deptName(a[0]).localeCompare(deptName(b[0]), 'ru');
+        });
+        return entries;
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [visibleGroups, departments]);
 
     /* ─── create ─── */
     const openCreate = () => { setForm({ ...EMPTY_FORM }); setSuggestions([]); setCreateOpen(true); };
@@ -259,8 +284,16 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
             ) : visibleGroups.length === 0 ? (
                 <div className={`${iosCard} p-6 text-sm text-slate-500`}>Групп нет.</div>
             ) : (
-                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                    {visibleGroups.map((g) => (
+                <div className="space-y-6">
+                {groupedByDept.map(([deptKey, list]) => (
+                    <section key={deptKey}>
+                        <div className="mb-2 flex items-center gap-2">
+                            <FaIcon className="fas fa-layer-group text-slate-400" />
+                            <h3 className="text-[12px] font-semibold uppercase tracking-wide text-slate-500">{deptKey === '__none__' ? 'Без отдела' : deptName(deptKey)}</h3>
+                            <span className="text-[12px] text-slate-400">· {list.length}</span>
+                        </div>
+                        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                    {list.map((g) => (
                         <div key={g.id} className={`${iosCard} p-4 flex flex-col gap-3 ${g.status === 'archived' ? 'opacity-70' : ''}`}>
                             <div className="flex items-start justify-between gap-2">
                                 <div className="min-w-0">
@@ -298,6 +331,9 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                             </div>
                         </div>
                     ))}
+                        </div>
+                    </section>
+                ))}
                 </div>
             )}
 
@@ -323,36 +359,37 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                     </div>
                     <div>
                         <div className={iosGroupLabel}>Отдел</div>
-                        <select className={iosInput} value={form.department_id} onChange={(e) => setForm({ ...form, department_id: e.target.value })}>
-                            <option value="">— не задан —</option>
-                            {departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-                        </select>
+                        <CustomSelect
+                            value={form.department_id}
+                            onChange={(v) => setForm({ ...form, department_id: v })}
+                            placeholder="— не задан —"
+                            options={[{ value: '', label: '— не задан —' }, ...departments.map((d) => ({ value: String(d.id), label: d.name }))]}
+                        />
                     </div>
                     <div>
                         <div className={iosGroupLabel}>Направление (опционально)</div>
-                        <select
-                            className={iosInput}
+                        <CustomSelect
                             value={form.direction_id}
-                            onChange={(e) => {
-                                const dirId = e.target.value;
-                                const dir = directions.find((x) => String(x.id) === String(dirId));
+                            placeholder="— без направления —"
+                            onChange={(v) => {
+                                const dir = directions.find((x) => String(x.id) === String(v));
                                 setForm({
                                     ...form,
-                                    direction_id: dirId,
+                                    direction_id: v,
                                     calculation_model_code: dir ? dirModelOf(dir) : form.calculation_model_code,
                                     department_id: form.department_id || (dir ? String(dir.department_id ?? dir.departmentId ?? '') : form.department_id),
                                 });
                             }}
-                        >
-                            <option value="">— без направления —</option>
-                            {directions.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-                        </select>
+                            options={[{ value: '', label: '— без направления —' }, ...directions.map((d) => ({ value: String(d.id), label: d.name }))]}
+                        />
                     </div>
                     <div>
                         <div className={iosGroupLabel}>Модель расчёта</div>
-                        <select className={iosInput} value={form.calculation_model_code} onChange={(e) => setForm({ ...form, calculation_model_code: e.target.value })}>
-                            {calcModels.map((m) => <option key={m.code} value={m.code}>{m.name}</option>)}
-                        </select>
+                        <CustomSelect
+                            value={form.calculation_model_code}
+                            onChange={(v) => setForm({ ...form, calculation_model_code: v })}
+                            options={calcModels.map((m) => ({ value: m.code, label: m.name }))}
+                        />
                     </div>
 
                     {suggestions.length > 0 && (
@@ -393,40 +430,58 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                         <>
                             <section className="space-y-2">
                                 <div className={iosGroupLabel}>Супервайзеры</div>
-                                <div className="flex flex-wrap gap-1.5">
-                                    {(members.supervisors || []).length === 0 && <span className="text-[13px] text-slate-400">нет</span>}
-                                    {(members.supervisors || []).map((s) => (
-                                        <IosBadge key={s.id} tone="blue">
-                                            {s.name}
-                                            <button className="ml-1 text-blue-500 hover:text-rose-600" onClick={() => removeSupervisor(s.id)} disabled={memberBusy} title="Открепить">×</button>
-                                        </IosBadge>
+                                <div className="rounded-xl ring-1 ring-slate-200 bg-white divide-y divide-slate-100 overflow-hidden">
+                                    {(members.supervisors || []).length === 0 ? (
+                                        <div className="px-3 py-2 text-[13px] text-slate-400">нет</div>
+                                    ) : (members.supervisors || []).map((s) => (
+                                        <div key={s.id} className="flex items-center justify-between gap-2 px-3 py-2 hover:bg-slate-50">
+                                            <span className="flex min-w-0 items-center gap-2 text-[13.5px] text-slate-700">
+                                                <FaIcon className="fas fa-user-tie text-slate-400" />
+                                                <span className="truncate">{s.name}</span>
+                                            </span>
+                                            <button className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 disabled:opacity-50" onClick={() => removeSupervisor(s.id)} disabled={memberBusy} title="Открепить">
+                                                <FaIcon className="fas fa-xmark" />
+                                            </button>
+                                        </div>
                                     ))}
                                 </div>
-                                <div className="flex gap-2">
-                                    <select className={iosInput} value={addSvId} onChange={(e) => setAddSvId(e.target.value)}>
-                                        <option value="">+ добавить супервайзера…</option>
-                                        {supervisorsList.filter((s) => !memberSvIds.has(s.id)).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                                    </select>
+                                <div className="flex items-center gap-2">
+                                    <CustomSelect
+                                        className="flex-1"
+                                        value={addSvId}
+                                        onChange={(v) => setAddSvId(v)}
+                                        placeholder="+ добавить супервайзера…"
+                                        options={supervisorsList.filter((s) => !memberSvIds.has(s.id)).map((s) => ({ value: String(s.id), label: s.name }))}
+                                    />
                                     <button className={iosBtnSecondary} onClick={addSupervisor} disabled={!addSvId || memberBusy}>Добавить</button>
                                 </div>
                             </section>
 
                             <section className="space-y-2">
                                 <div className={iosGroupLabel}>Операторы ({(members.operators || []).length})</div>
-                                <div className="flex flex-wrap gap-1.5 max-h-48 overflow-y-auto">
-                                    {(members.operators || []).length === 0 && <span className="text-[13px] text-slate-400">нет</span>}
-                                    {(members.operators || []).map((o) => (
-                                        <IosBadge key={o.id} tone="slate">
-                                            {o.name}
-                                            <button className="ml-1 text-slate-400 hover:text-rose-600" onClick={() => removeOperator(o.id)} disabled={memberBusy} title="Исключить">×</button>
-                                        </IosBadge>
+                                <div className="rounded-xl ring-1 ring-slate-200 bg-white divide-y divide-slate-100 overflow-hidden max-h-72 overflow-y-auto">
+                                    {(members.operators || []).length === 0 ? (
+                                        <div className="px-3 py-2 text-[13px] text-slate-400">нет</div>
+                                    ) : (members.operators || []).map((o, idx) => (
+                                        <div key={o.id} className="flex items-center justify-between gap-2 px-3 py-2 hover:bg-slate-50">
+                                            <span className="flex min-w-0 items-center gap-2 text-[13.5px] text-slate-700">
+                                                <span className="w-5 shrink-0 text-right text-[12px] text-slate-300">{idx + 1}</span>
+                                                <span className="truncate">{o.name}</span>
+                                            </span>
+                                            <button className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 disabled:opacity-50" onClick={() => removeOperator(o.id)} disabled={memberBusy} title="Исключить">
+                                                <FaIcon className="fas fa-xmark" />
+                                            </button>
+                                        </div>
                                     ))}
                                 </div>
-                                <div className="flex gap-2">
-                                    <select className={iosInput} value={addOpId} onChange={(e) => setAddOpId(e.target.value)}>
-                                        <option value="">+ добавить оператора…</option>
-                                        {operatorsList.filter((o) => !memberOpIds.has(o.id)).map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
-                                    </select>
+                                <div className="flex items-center gap-2">
+                                    <CustomSelect
+                                        className="flex-1"
+                                        value={addOpId}
+                                        onChange={(v) => setAddOpId(v)}
+                                        placeholder="+ добавить оператора…"
+                                        options={operatorsList.filter((o) => !memberOpIds.has(o.id)).map((o) => ({ value: String(o.id), label: o.name }))}
+                                    />
                                     <button className={iosBtnSecondary} onClick={addOperator} disabled={!addOpId || memberBusy}>Добавить</button>
                                 </div>
                                 <p className="text-[11.5px] text-slate-400">
