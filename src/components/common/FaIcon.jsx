@@ -120,7 +120,10 @@ import {
     Workflow,
     Wrench,
     X,
-    XCircle
+    XCircle,
+    Archive,
+    Boxes,
+    RotateCcw
 } from 'lucide-react';
 
 const TOKEN_TO_ICON = {
@@ -218,6 +221,11 @@ const TOKEN_TO_ICON = {
     'fa-key': 'Key',
     'fa-laptop-house': 'Laptop',
     'fa-layer-group': 'Layers3',
+    'fa-object-group': 'Boxes',
+    'fa-box-archive': 'Archive',
+    'fa-rotate-left': 'RotateCcw',
+    'fa-sitemap': 'Workflow',
+    'fa-user-gear': 'UserCog',
     'fa-magnifying-glass': 'Search',
     'fa-lightbulb': 'Lightbulb',
     'fa-list': 'List',
@@ -432,7 +440,10 @@ const ICON_COMPONENTS = {
     Workflow,
     Wrench,
     X,
-    XCircle
+    XCircle,
+    Archive,
+    Boxes,
+    RotateCcw
 };
 
 const FA_META_TOKENS = new Set([
