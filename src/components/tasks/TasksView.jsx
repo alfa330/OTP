@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom';
 import axios from 'axios';
 import {
+  CalendarClock,
+  CheckCircle2,
   ChevronLeft as LucideChevronLeft,
   GripHorizontal,
   Link2,
@@ -769,8 +771,8 @@ styleTag.textContent = `
     border-color: #fde68a;
   }
   .tv-notes-panel {
-    display: grid;
-    grid-template-columns: minmax(160px, .45fr) minmax(0, 1fr);
+    display: flex;
+    flex-direction: column;
     gap: 12px;
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
@@ -779,91 +781,229 @@ styleTag.textContent = `
     box-shadow: var(--shadow-sm);
   }
   .tv-notes-panel.is-compact {
-    grid-template-columns: minmax(120px, .42fr) minmax(0, 1fr);
     padding: 10px;
     gap: 9px;
   }
   .tv-notes-panel.is-fullscreen {
-    display: flex;
-    flex-direction: column;
     flex: 1;
     min-height: 0;
     height: 100%;
     box-shadow: none;
   }
-  .tv-notes-panel.is-fullscreen .tv-notes-list {
-    flex: 0 0 auto;
-    border-right: 0;
-    border-bottom: 1px solid var(--border);
-    padding-right: 0;
-    padding-bottom: 10px;
-    max-height: min(180px, 34vh);
-    overflow-y: auto;
-  }
-  .tv-notes-panel.is-fullscreen .tv-notes-editor {
-    flex: 1;
-    min-height: 0;
-  }
-  .tv-notes-list {
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    border-right: 1px solid var(--border);
-    padding-right: 10px;
-    overflow: hidden;
-  }
+  .tv-notes-toolbar,
+  .tv-notes-toolbar-actions,
   .tv-notes-list-head,
   .tv-notes-editor-footer,
-  .tv-notes-editor-actions {
+  .tv-notes-editor-actions,
+  .tv-note-card-head,
+  .tv-note-card-meta,
+  .tv-note-switches,
+  .tv-notes-editor-head,
+  .tv-note-due-pill {
     display: flex;
     align-items: center;
     gap: 8px;
   }
-  .tv-notes-list-head,
+  .tv-notes-toolbar,
   .tv-notes-editor-footer {
     justify-content: space-between;
+  }
+  .tv-notes-toolbar p {
+    margin: 2px 0 0;
+    color: var(--ink-3);
+    font-size: 11px;
+  }
+  .tv-notes-content {
+    display: grid;
+    grid-template-columns: minmax(0, 1.15fr) minmax(260px, .85fr);
+    gap: 12px;
+    min-height: 0;
+  }
+  .tv-notes-board {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    min-width: 0;
+  }
+  .tv-note-column {
+    min-width: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .tv-note-column-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .tv-note-column-head strong {
+    display: block;
+    font-size: 12.5px;
+    color: var(--ink);
+  }
+  .tv-note-column-head small {
+    display: block;
+    margin-top: 2px;
+    font-size: 10.5px;
+    color: var(--ink-3);
+  }
+  .tv-note-column-count {
+    min-width: 24px;
+    height: 22px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 7px;
+    background: var(--surface);
+    color: var(--ink-2);
+    border: 1px solid var(--border);
+    font-size: 11px;
+    font-weight: 800;
+  }
+  .tv-note-column-list {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    overflow-y: auto;
+    max-height: 320px;
+    padding-right: 2px;
   }
   .tv-note-topic-btn {
     border: 1px solid var(--border);
     border-radius: 8px;
-    background: var(--surface-2);
+    background: var(--surface);
     color: var(--ink);
-    padding: 8px 9px;
+    padding: 9px;
     cursor: pointer;
     text-align: left;
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 6px;
+    min-width: 0;
+    transition: border .15s, background .15s, transform .15s, box-shadow .15s;
   }
   .tv-note-topic-btn:hover,
   .tv-note-topic-btn.is-active {
     border-color: var(--accent);
     background: var(--bg);
   }
+  .tv-note-topic-btn:hover { transform: translateY(-1px); }
+  .tv-note-topic-btn.is-active { box-shadow: 0 0 0 3px rgba(26,25,22,.06); }
+  .tv-note-topic-btn.is-done {
+    border-color: #a7f3d0;
+    background: #ecfdf5;
+  }
+  .tv-note-topic-btn.is-done .tv-note-topic-title {
+    color: #047857;
+    text-decoration: line-through;
+  }
+  .tv-note-topic-btn.is-done .tv-note-topic-date { color: #059669; }
+  .tv-note-card-head { min-width: 0; width: 100%; }
   .tv-note-topic-title {
     font-size: 12.5px;
     font-weight: 800;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    flex: 1;
+    min-width: 0;
   }
   .tv-note-topic-date {
     color: var(--ink-3);
     font-size: 10.5px;
+  }
+  .tv-note-card-meta {
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+  .tv-note-task-mark,
+  .tv-note-due-pill {
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--ink-2);
+    border-radius: 999px;
+    padding: 2px 7px;
+    font-size: 10.5px;
+    font-weight: 800;
+  }
+  .tv-note-due-pill {
+    background: #fffbeb;
+    border-color: #fde68a;
+    color: #92400e;
+    max-width: 100%;
+  }
+  .tv-note-done-toggle {
+    width: 20px;
+    height: 20px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--emerald);
+    background: #ecfdf5;
+    border: 1px solid #a7f3d0;
+    flex: 0 0 auto;
   }
   .tv-notes-editor {
     min-width: 0;
     display: flex;
     flex-direction: column;
     gap: 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    padding: 12px;
+    box-shadow: var(--shadow-sm);
+  }
+  .tv-notes-editor.is-done {
+    border-color: #a7f3d0;
+    background: #f0fdf4;
   }
   .tv-notes-editor .tv-note-textarea {
     flex: 1;
     min-height: 150px;
   }
+  .tv-notes-editor-head {
+    justify-content: space-between;
+    min-width: 0;
+  }
+  .tv-note-controls-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(130px, .5fr);
+    gap: 8px;
+  }
+  .tv-note-switches {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
   .tv-pin-widget.is-detached .tv-notes-editor .tv-note-textarea {
     min-height: 0;
+  }
+  .tv-notes-panel.is-compact .tv-notes-content,
+  .tv-notes-panel.is-fullscreen .tv-notes-content {
+    grid-template-columns: 1fr;
+  }
+  .tv-notes-panel.is-compact .tv-notes-board,
+  .tv-notes-panel.is-fullscreen .tv-notes-board {
+    grid-template-columns: 1fr 1fr;
+  }
+  .tv-notes-panel.is-compact .tv-note-column-list,
+  .tv-notes-panel.is-fullscreen .tv-note-column-list {
+    max-height: min(210px, 34vh);
+  }
+  .tv-notes-panel.is-fullscreen .tv-notes-editor {
+    flex: 1;
+    min-height: 0;
+  }
+  .tv-notes-panel.is-fullscreen .tv-notes-editor .tv-note-textarea {
+    min-height: 96px;
   }
   .tv-form-inline-grid {
     display: grid;
@@ -1888,15 +2028,26 @@ styleTag.textContent = `
     }
     .tv-notes-panel,
     .tv-notes-panel.is-compact {
+      padding: 10px;
+    }
+    .tv-notes-content,
+    .tv-notes-board,
+    .tv-note-controls-grid {
       grid-template-columns: 1fr;
     }
-    .tv-notes-list {
-      border-right: 0;
-      border-bottom: 1px solid var(--border);
-      padding-right: 0;
-      padding-bottom: 10px;
-      max-height: 180px;
-      overflow-y: auto;
+    .tv-notes-toolbar,
+    .tv-notes-editor-footer {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+    .tv-notes-toolbar-actions,
+    .tv-notes-editor-actions {
+      width: 100%;
+    }
+    .tv-notes-toolbar-actions .tv-btn,
+    .tv-notes-editor-actions .tv-btn {
+      justify-content: center;
+      flex: 1;
     }
     .tv-pin-meta {
       grid-template-columns: 1fr;
@@ -2175,41 +2326,94 @@ const checklistProgress = (items) => {
 
 const LOCAL_NOTES_EVENT = 'otp:task-notes-changed';
 const localNotesKey = (userId) => `otp:task-notes:${Number(userId || 0)}`;
-const EMPTY_LOCAL_NOTE = { id: '', title: '', body: '', saved_at: null, created_at: null };
+const EMPTY_TASK_NOTE = {
+  id: '',
+  title: '',
+  body: '',
+  priority: 'normal',
+  due_at: null,
+  is_task: false,
+  is_done: false,
+  saved_at: null,
+  created_at: null,
+  completed_at: null,
+  is_local: false,
+};
 
-const createLocalNoteId = () => (
-  `note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+const createDraftNoteId = () => (
+  `draft-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 );
 
-const normalizeLocalNote = (value) => {
+const isPersistedNoteId = (noteId) => /^\d+$/.test(String(noteId || '').trim());
+
+const normalizeTaskNotePriority = (value) => {
+  const priority = String(value || 'normal').trim().toLowerCase();
+  return PRIORITY_META[priority] ? priority : 'normal';
+};
+
+const normalizeTaskNote = (value) => {
   const source = value && typeof value === 'object' ? value : {};
+  const id = String(source.id || createDraftNoteId());
+  const isTask = Boolean(source.is_task);
   return {
-    id: String(source.id || createLocalNoteId()),
-    title: String(source.title || '').slice(0, 120),
+    ...EMPTY_TASK_NOTE,
+    id,
+    title: String(source.title || '').slice(0, 160),
     body: String(source.body || source.text || ''),
+    priority: normalizeTaskNotePriority(source.priority),
+    due_at: source.due_at || source.deadline || null,
+    is_task: isTask,
+    is_done: isTask && Boolean(source.is_done),
     saved_at: source.saved_at || source.updated_at || null,
     created_at: source.created_at || source.saved_at || source.updated_at || new Date().toISOString(),
+    completed_at: source.completed_at || null,
+    is_local: Boolean(source.is_local || !isPersistedNoteId(id)),
   };
 };
 
-const createEmptyLocalNote = () => ({
-  ...EMPTY_LOCAL_NOTE,
-  id: createLocalNoteId(),
-  title: 'Новая тема',
+const createEmptyTaskNote = () => ({
+  ...EMPTY_TASK_NOTE,
+  id: createDraftNoteId(),
+  title: 'Новая заметка',
   created_at: new Date().toISOString(),
+  is_local: true,
 });
 
-const normalizeLocalNotesList = (value) => {
+const compareNotesByUpdatedDesc = (a, b) => (
+  (new Date(b?.saved_at || b?.updated_at || b?.created_at || 0).getTime() || 0) -
+  (new Date(a?.saved_at || a?.updated_at || a?.created_at || 0).getTime() || 0)
+);
+
+const NOTE_PRIORITY_MINUTES = { normal: 0, urgent: 12 * 60, critical: 24 * 60 };
+
+const noteRelevanceScore = (note) => {
+  if (!note?.due_at) return Number.POSITIVE_INFINITY;
+  const dueMs = new Date(note.due_at).getTime();
+  if (!Number.isFinite(dueMs)) return Number.POSITIVE_INFINITY;
+  const minutesUntilDue = (dueMs - Date.now()) / 60000;
+  const boundedDeadline = Math.max(-7 * 24 * 60, minutesUntilDue);
+  const priorityBoost = NOTE_PRIORITY_MINUTES[normalizeTaskNotePriority(note.priority)] || 0;
+  const donePenalty = note.is_done ? 365 * 24 * 60 : 0;
+  return boundedDeadline - priorityBoost + donePenalty;
+};
+
+const compareNotesByRelevance = (a, b) => {
+  const byScore = noteRelevanceScore(a) - noteRelevanceScore(b);
+  if (byScore !== 0) return byScore;
+  return compareNotesByUpdatedDesc(a, b);
+};
+
+const normalizeTaskNotesList = (value) => {
   const raw = Array.isArray(value) ? value : (Array.isArray(value?.notes) ? value.notes : []);
   const seen = new Set();
   return raw
-    .map(normalizeLocalNote)
+    .map(normalizeTaskNote)
     .filter((note) => {
       if (!note.id || seen.has(note.id)) return false;
       seen.add(note.id);
       return true;
     })
-    .sort((a, b) => new Date(b.saved_at || b.created_at || 0) - new Date(a.saved_at || a.created_at || 0));
+    .sort(compareNotesByUpdatedDesc);
 };
 
 const readLocalNotes = (userId) => {
@@ -2217,7 +2421,7 @@ const readLocalNotes = (userId) => {
   try {
     const raw = window.localStorage.getItem(localNotesKey(userId));
     if (!raw) return [];
-    return normalizeLocalNotesList(JSON.parse(raw));
+    return normalizeTaskNotesList(JSON.parse(raw));
   } catch (error) {
     return [];
   }
@@ -2225,7 +2429,7 @@ const readLocalNotes = (userId) => {
 
 const writeLocalNotes = (userId, notes) => {
   if (typeof window === 'undefined' || !userId) return;
-  const normalized = normalizeLocalNotesList(notes);
+  const normalized = normalizeTaskNotesList(notes);
   try {
     window.localStorage.setItem(localNotesKey(userId), JSON.stringify({ version: 1, notes: normalized }));
     window.dispatchEvent(new CustomEvent(LOCAL_NOTES_EVENT, {
@@ -2234,6 +2438,50 @@ const writeLocalNotes = (userId, notes) => {
   } catch (error) {
     // Local notes are best-effort browser state.
   }
+};
+
+const toDatetimeLocalValue = (value) => {
+  if (!value) return '';
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return '';
+  const pad = (part) => String(part).padStart(2, '0');
+  return [
+    date.getFullYear(),
+    '-',
+    pad(date.getMonth() + 1),
+    '-',
+    pad(date.getDate()),
+    'T',
+    pad(date.getHours()),
+    ':',
+    pad(date.getMinutes()),
+  ].join('');
+};
+
+const noteDeadlineLabel = (note) => {
+  if (!note?.due_at) return '';
+  const dueMs = new Date(note.due_at).getTime();
+  if (!Number.isFinite(dueMs)) return fmtShortDateTime(note.due_at);
+  const diffMinutes = Math.round((dueMs - Date.now()) / 60000);
+  const absoluteLabel = fmtShortDateTime(note.due_at);
+  if (diffMinutes < 0) return `Просрочено: ${absoluteLabel}`;
+  if (diffMinutes < 60) return `Осталось ${Math.max(1, diffMinutes)} мин`;
+  if (diffMinutes < 24 * 60) return `Сегодня: ${absoluteLabel}`;
+  if (diffMinutes < 48 * 60) return `Завтра: ${absoluteLabel}`;
+  return `Дедлайн: ${absoluteLabel}`;
+};
+
+const buildNotePayload = (note) => {
+  const normalized = normalizeTaskNote(note);
+  const isTask = Boolean(normalized.is_task);
+  return {
+    title: String(normalized.title || '').trim() || 'Без темы',
+    body: normalized.body || '',
+    priority: normalizeTaskNotePriority(normalized.priority),
+    due_at: normalized.due_at || null,
+    is_task: isTask,
+    is_done: isTask && Boolean(normalized.is_done),
+  };
 };
 
 const EMPTY_TASK_FORM = {
@@ -2607,29 +2855,62 @@ const TaskFileDropzone = React.memo(({
 });
 
 /* ─── TaskRow — defined outside to avoid remount ─── */
-const useLocalNotes = (userId) => {
+const useTaskNotes = ({ userId, apiBaseUrl = '', buildHeaders, notify } = {}) => {
   const normalizedUserId = Number(userId || 0);
   const [notes, setNotes] = useState(() => readLocalNotes(normalizedUserId));
   const [activeNoteId, setActiveNoteId] = useState('');
-  const [draft, setDraft] = useState(EMPTY_LOCAL_NOTE);
+  const [draft, setDraft] = useState(EMPTY_TASK_NOTE);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [backendReady, setBackendReady] = useState(true);
 
   const applyNotes = useCallback((nextNotes, preferredId = '') => {
-    const normalized = normalizeLocalNotesList(nextNotes);
+    const normalized = normalizeTaskNotesList(nextNotes);
     setNotes(normalized);
     setActiveNoteId((prev) => {
       const preferred = preferredId || prev;
-      if (preferred && normalized.some((note) => note.id === preferred)) return preferred;
+      if (preferred && normalized.some((note) => String(note.id) === String(preferred))) return String(preferred);
       return normalized[0]?.id || '';
     });
   }, []);
 
-  useEffect(() => {
-    applyNotes(readLocalNotes(normalizedUserId));
+  const resolveHeaders = useCallback(() => {
+    const base = normalizedUserId ? { 'X-User-Id': String(normalizedUserId) } : {};
+    return typeof buildHeaders === 'function' ? buildHeaders(base) : base;
+  }, [buildHeaders, normalizedUserId]);
+
+  const syncNotes = useCallback((nextNotes, preferredId = '') => {
+    const normalized = normalizeTaskNotesList(nextNotes);
+    writeLocalNotes(normalizedUserId, normalized);
+    applyNotes(normalized, preferredId);
   }, [applyNotes, normalizedUserId]);
 
+  const fetchNotes = useCallback(async () => {
+    if (!normalizedUserId) {
+      applyNotes([]);
+      return;
+    }
+    setIsLoading(true);
+    try {
+      const res = await axios.get(`${apiBaseUrl}/api/tasks/notes`, { headers: resolveHeaders() });
+      const list = Array.isArray(res?.data?.notes) ? res.data.notes : [];
+      setBackendReady(true);
+      syncNotes(list);
+    } catch (error) {
+      setBackendReady(false);
+      applyNotes(readLocalNotes(normalizedUserId));
+    } finally {
+      setIsLoading(false);
+    }
+  }, [apiBaseUrl, applyNotes, normalizedUserId, resolveHeaders, syncNotes]);
+
   useEffect(() => {
-    const active = notes.find((note) => note.id === activeNoteId) || null;
-    setDraft(active || EMPTY_LOCAL_NOTE);
+    fetchNotes();
+  }, [fetchNotes]);
+
+  useEffect(() => {
+    const active = notes.find((note) => String(note.id) === String(activeNoteId)) || null;
+    setDraft(active || EMPTY_TASK_NOTE);
   }, [activeNoteId, notes]);
 
   useEffect(() => {
@@ -2651,37 +2932,108 @@ const useLocalNotes = (userId) => {
     };
   }, [activeNoteId, applyNotes, normalizedUserId]);
 
-  const createNote = useCallback(() => {
-    const nextNote = createEmptyLocalNote();
-    const nextNotes = [nextNote, ...notes];
-    writeLocalNotes(normalizedUserId, nextNotes);
-    applyNotes(nextNotes, nextNote.id);
-  }, [applyNotes, normalizedUserId, notes]);
-
-  const saveNote = useCallback(() => {
-    const base = draft?.id ? draft : createEmptyLocalNote();
-    const now = new Date().toISOString();
-    const nextNote = normalizeLocalNote({
-      ...base,
-      title: String(draft?.title || '').trim() || 'Без темы',
-      body: draft?.body || '',
-      saved_at: now,
-      created_at: base.created_at || now,
+  const createNote = useCallback((overrides = {}) => {
+    const nextNote = normalizeTaskNote({
+      ...createEmptyTaskNote(),
+      ...overrides,
+      id: createDraftNoteId(),
+      is_local: true,
     });
-    const exists = notes.some((note) => note.id === nextNote.id);
-    const nextNotes = exists
-      ? notes.map((note) => note.id === nextNote.id ? nextNote : note)
-      : [nextNote, ...notes];
-    writeLocalNotes(normalizedUserId, nextNotes);
-    applyNotes(nextNotes, nextNote.id);
-  }, [applyNotes, draft, normalizedUserId, notes]);
+    const nextNotes = [nextNote, ...notes];
+    syncNotes(nextNotes, nextNote.id);
+  }, [notes, syncNotes]);
 
-  const deleteNote = useCallback((noteId = activeNoteId) => {
-    if (!noteId) return;
-    const nextNotes = notes.filter((note) => note.id !== noteId);
-    writeLocalNotes(normalizedUserId, nextNotes);
-    applyNotes(nextNotes);
-  }, [activeNoteId, applyNotes, normalizedUserId, notes]);
+  const saveNote = useCallback(async () => {
+    if (!normalizedUserId) return;
+    const base = draft?.id ? normalizeTaskNote(draft) : createEmptyTaskNote();
+    const payload = buildNotePayload(base);
+    const localSavedAt = new Date().toISOString();
+    const localNote = normalizeTaskNote({
+      ...base,
+      ...payload,
+      saved_at: localSavedAt,
+      updated_at: localSavedAt,
+      is_local: !isPersistedNoteId(base.id),
+    });
+    const upsertLocal = (saved) => {
+      const savedId = String(saved.id);
+      const nextNotes = notes.some((note) => String(note.id) === String(base.id))
+        ? notes.map((note) => String(note.id) === String(base.id) ? saved : note)
+        : [saved, ...notes];
+      syncNotes(nextNotes, savedId);
+    };
+
+    setIsSaving(true);
+    try {
+      const res = isPersistedNoteId(base.id)
+        ? await axios.patch(`${apiBaseUrl}/api/tasks/notes/${base.id}`, payload, { headers: resolveHeaders() })
+        : await axios.post(`${apiBaseUrl}/api/tasks/notes`, payload, { headers: resolveHeaders() });
+      const saved = normalizeTaskNote(res?.data?.note || localNote);
+      upsertLocal({ ...saved, is_local: false });
+      setBackendReady(true);
+      notify?.('Заметка сохранена');
+    } catch (error) {
+      upsertLocal(localNote);
+      setBackendReady(false);
+      notify?.(error?.response?.data?.error || 'Не удалось сохранить заметку в БД, сохранено локально', 'error');
+    } finally {
+      setIsSaving(false);
+    }
+  }, [apiBaseUrl, draft, normalizedUserId, notes, notify, resolveHeaders, syncNotes]);
+
+  const deleteNote = useCallback(async (noteId = activeNoteId) => {
+    const normalizedNoteId = String(noteId || '');
+    if (!normalizedNoteId) return;
+    const removeLocal = () => {
+      const nextNotes = notes.filter((note) => String(note.id) !== normalizedNoteId);
+      syncNotes(nextNotes);
+    };
+
+    if (!isPersistedNoteId(normalizedNoteId)) {
+      removeLocal();
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      await axios.delete(`${apiBaseUrl}/api/tasks/notes/${normalizedNoteId}`, { headers: resolveHeaders() });
+      removeLocal();
+      setBackendReady(true);
+      notify?.('Заметка удалена');
+    } catch (error) {
+      setBackendReady(false);
+      notify?.(error?.response?.data?.error || 'Не удалось удалить заметку', 'error');
+    } finally {
+      setIsSaving(false);
+    }
+  }, [activeNoteId, apiBaseUrl, notes, notify, resolveHeaders, syncNotes]);
+
+  const toggleNoteDone = useCallback(async (note, isDone) => {
+    const base = normalizeTaskNote({ ...note, is_task: true, is_done: Boolean(isDone) });
+    const payload = { is_task: true, is_done: Boolean(isDone) };
+    const localSavedAt = new Date().toISOString();
+    const localNote = normalizeTaskNote({
+      ...base,
+      ...payload,
+      saved_at: localSavedAt,
+      updated_at: localSavedAt,
+      completed_at: isDone ? (base.completed_at || localSavedAt) : null,
+    });
+    const nextNotes = notes.map((item) => String(item.id) === String(base.id) ? localNote : item);
+    syncNotes(nextNotes, base.id);
+
+    if (!isPersistedNoteId(base.id)) return;
+
+    try {
+      const res = await axios.patch(`${apiBaseUrl}/api/tasks/notes/${base.id}`, payload, { headers: resolveHeaders() });
+      const saved = normalizeTaskNote(res?.data?.note || localNote);
+      syncNotes(notes.map((item) => String(item.id) === String(base.id) ? saved : item), saved.id);
+      setBackendReady(true);
+    } catch (error) {
+      setBackendReady(false);
+      notify?.(error?.response?.data?.error || 'Не удалось обновить отметку выполнения', 'error');
+    }
+  }, [apiBaseUrl, notes, notify, resolveHeaders, syncNotes]);
 
   return {
     notes,
@@ -2692,8 +3044,75 @@ const useLocalNotes = (userId) => {
     createNote,
     saveNote,
     deleteNote,
+    toggleNoteDone,
+    refreshNotes: fetchNotes,
+    isLoading,
+    isSaving,
+    backendReady,
   };
 };
+
+const TaskNoteCard = React.memo(({ note, active = false, onSelect, onToggleDone }) => {
+  const priorityMeta = PRIORITY_META[note?.priority] || PRIORITY_META.normal;
+  const dueLabel = noteDeadlineLabel(note);
+  return (
+    <button
+      type="button"
+      className={`tv-note-topic-btn ${active ? 'is-active' : ''} ${note?.is_done ? 'is-done' : ''}`}
+      onClick={() => onSelect?.(note.id)}
+    >
+      <span className="tv-note-card-head">
+        {note?.is_task ? (
+          <span
+            className="tv-note-done-toggle"
+            role="checkbox"
+            aria-checked={Boolean(note.is_done)}
+            title={note.is_done ? 'Вернуть в работу' : 'Отметить выполненной'}
+            onClick={(event) => {
+              event.stopPropagation();
+              onToggleDone?.(note, !note.is_done);
+            }}
+          >
+            <CheckCircle2 size={14} strokeWidth={2.2} />
+          </span>
+        ) : (
+          <StickyNote size={14} strokeWidth={2} />
+        )}
+        <span className="tv-note-topic-title">{note?.title || 'Без темы'}</span>
+      </span>
+      <span className="tv-note-topic-date">{dueLabel || (note?.saved_at ? fmtShortDateTime(note.saved_at) : 'Черновик')}</span>
+      <span className="tv-note-card-meta">
+        <span className={`tv-badge ${priorityMeta.badge}`}>{priorityMeta.label}</span>
+        {note?.is_task && <span className="tv-note-task-mark">Задача</span>}
+      </span>
+    </button>
+  );
+});
+
+const TaskNoteColumn = React.memo(({ title, subtitle, notes, activeNoteId, emptyText, onSelect, onToggleDone }) => (
+  <section className="tv-note-column">
+    <div className="tv-note-column-head">
+      <span>
+        <strong>{title}</strong>
+        <small>{subtitle}</small>
+      </span>
+      <span className="tv-note-column-count">{notes.length}</span>
+    </div>
+    <div className="tv-note-column-list">
+      {notes.length > 0 ? notes.map((note) => (
+        <TaskNoteCard
+          key={note.id}
+          note={note}
+          active={String(note.id) === String(activeNoteId)}
+          onSelect={onSelect}
+          onToggleDone={onToggleDone}
+        />
+      )) : (
+        <span className="tv-pin-empty-actions">{emptyText}</span>
+      )}
+    </div>
+  </section>
+));
 
 const TaskNotesPanel = React.memo(({ notesState, compact = false, fullScreen = false }) => {
   const {
@@ -2705,63 +3124,156 @@ const TaskNotesPanel = React.memo(({ notesState, compact = false, fullScreen = f
     createNote,
     saveNote,
     deleteNote,
+    toggleNoteDone,
+    refreshNotes,
+    isLoading,
+    isSaving,
+    backendReady,
   } = notesState;
-  const hasActiveDraft = Boolean(draft?.id);
+  const ordinaryNotes = useMemo(
+    () => notes.filter((note) => !note?.due_at).sort(compareNotesByUpdatedDesc),
+    [notes]
+  );
+  const deadlineNotes = useMemo(
+    () => notes.filter((note) => note?.due_at).sort(compareNotesByRelevance),
+    [notes]
+  );
+  const normalizedDraft = draft?.id ? normalizeTaskNote(draft) : EMPTY_TASK_NOTE;
+  const hasActiveDraft = Boolean(normalizedDraft?.id);
+  const draftDueValue = toDatetimeLocalValue(normalizedDraft.due_at);
+
+  const updateDraft = useCallback((patch) => {
+    setDraft((prev) => normalizeTaskNote({ ...normalizeTaskNote(prev), ...patch }));
+  }, [setDraft]);
 
   return (
     <div className={`tv-notes-panel ${compact ? 'is-compact' : ''} ${fullScreen ? 'is-fullscreen' : ''}`}>
-      <aside className="tv-notes-list">
-        <div className="tv-notes-list-head">
-          <span className="tv-block-label" style={{ margin: 0 }}>Темы</span>
-          <button type="button" className="tv-btn tv-btn-primary" onClick={createNote}>
+      <div className="tv-notes-toolbar">
+        <div>
+          <span className="tv-block-label" style={{ margin: 0 }}>Заметки</span>
+          <p>{backendReady ? 'Сохраняются в базе данных' : 'Сервер недоступен, включён локальный режим'}</p>
+        </div>
+        <div className="tv-notes-toolbar-actions">
+          <button type="button" className="tv-btn tv-btn-ghost" onClick={refreshNotes} disabled={isLoading || isSaving}>
+            <RefreshCw size={13} strokeWidth={2} />
+          </button>
+          <button type="button" className="tv-btn tv-btn-primary" onClick={() => createNote()} disabled={isSaving}>
             <PlusIcon /> Новая
           </button>
         </div>
-        {notes.length > 0 ? notes.map((note) => (
-          <button
-            key={note.id}
-            type="button"
-            className={`tv-note-topic-btn ${note.id === activeNoteId ? 'is-active' : ''}`}
-            onClick={() => selectNote(note.id)}
-          >
-            <span className="tv-note-topic-title">{note.title || 'Без темы'}</span>
-            <span className="tv-note-topic-date">{note.saved_at ? fmtShortDateTime(note.saved_at) : 'Черновик'}</span>
-          </button>
-        )) : (
-          <span className="tv-pin-empty-actions">Тем пока нет. Создайте первую заметку.</span>
-        )}
-      </aside>
+      </div>
 
-      <section className="tv-notes-editor">
-        <input
-          className="tv-input"
-          value={draft?.title || ''}
-          maxLength={120}
-          placeholder="Тема заметки"
-          onChange={(event) => setDraft((prev) => ({ ...normalizeLocalNote(prev), title: event.target.value }))}
-        />
-        <textarea
-          className="tv-textarea tv-note-textarea"
-          value={draft?.body || ''}
-          placeholder="Текст заметки"
-          onChange={(event) => setDraft((prev) => ({ ...normalizeLocalNote(prev), body: event.target.value }))}
-        />
-        <div className="tv-notes-editor-footer">
-          <span className="tv-pin-empty-actions">
-            {draft?.saved_at ? `Сохранено: ${fmtShortDateTime(draft.saved_at)}` : 'Пока не сохранено'}
-          </span>
-          <div className="tv-notes-editor-actions">
-            {hasActiveDraft && (
-              <button type="button" className="tv-btn tv-btn-rose" onClick={() => deleteNote(draft.id)}>
-                Удалить
-              </button>
-            )}
-            <button type="button" className="tv-btn tv-btn-amber" onClick={saveNote}>
-              Сохранить
-            </button>
-          </div>
+      <div className="tv-notes-content">
+        <div className="tv-notes-board">
+          <TaskNoteColumn
+            title="Обычные заметки"
+            subtitle="Без дедлайна"
+            notes={ordinaryNotes}
+            activeNoteId={activeNoteId}
+            emptyText="Пока пусто. Добавьте обычную заметку."
+            onSelect={selectNote}
+            onToggleDone={toggleNoteDone}
+          />
+          <TaskNoteColumn
+            title="С дедлайном"
+            subtitle="Сортировка по срочности"
+            notes={deadlineNotes}
+            activeNoteId={activeNoteId}
+            emptyText="Заметки с дедлайном появятся здесь."
+            onSelect={selectNote}
+            onToggleDone={toggleNoteDone}
+          />
         </div>
-      </section>
+
+        <section className={`tv-notes-editor ${normalizedDraft.is_done ? 'is-done' : ''}`}>
+          <div className="tv-notes-editor-head">
+            <span className="tv-block-label" style={{ margin: 0 }}>Карточка заметки</span>
+            {normalizedDraft.due_at && (
+              <span className="tv-note-due-pill"><CalendarClock size={13} strokeWidth={2} />{noteDeadlineLabel(normalizedDraft)}</span>
+            )}
+          </div>
+          <input
+            className="tv-input"
+            value={normalizedDraft.title || ''}
+            maxLength={160}
+            placeholder="Тема заметки"
+            disabled={isSaving}
+            onChange={(event) => updateDraft({ title: event.target.value })}
+          />
+          <textarea
+            className="tv-textarea tv-note-textarea"
+            value={normalizedDraft.body || ''}
+            placeholder="Текст заметки"
+            disabled={isSaving}
+            onChange={(event) => updateDraft({ body: event.target.value })}
+          />
+          <div className="tv-note-controls-grid">
+            <label className="tv-form-field">
+              <span>Дедлайн</span>
+              <input
+                className="tv-input"
+                type="datetime-local"
+                value={draftDueValue}
+                disabled={isSaving}
+                onChange={(event) => updateDraft({ due_at: event.target.value || null })}
+              />
+            </label>
+            <label className="tv-form-field">
+              <span>Приоритет</span>
+              <select
+                className="tv-select"
+                value={normalizedDraft.priority || 'normal'}
+                disabled={isSaving}
+                onChange={(event) => updateDraft({ priority: event.target.value })}
+              >
+                {PRIORITY_OPTIONS.map((item) => (
+                  <option key={item.value} value={item.value}>{item.label}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div className="tv-note-switches">
+            <label className="tv-form-switch">
+              <input
+                type="checkbox"
+                checked={Boolean(normalizedDraft.is_task)}
+                disabled={isSaving}
+                onChange={(event) => updateDraft({
+                  is_task: event.target.checked,
+                  is_done: event.target.checked ? normalizedDraft.is_done : false,
+                })}
+              />
+              Отметить как задачу
+            </label>
+            {normalizedDraft.is_task && (
+              <label className="tv-form-switch">
+                <input
+                  type="checkbox"
+                  checked={Boolean(normalizedDraft.is_done)}
+                  disabled={isSaving}
+                  onChange={(event) => updateDraft({ is_done: event.target.checked })}
+                />
+                Выполнено
+              </label>
+            )}
+          </div>
+          <div className="tv-notes-editor-footer">
+            <span className="tv-pin-empty-actions">
+              {isLoading ? 'Загружаю...' : normalizedDraft.saved_at ? `Сохранено: ${fmtShortDateTime(normalizedDraft.saved_at)}` : 'Пока не сохранено'}
+            </span>
+            <div className="tv-notes-editor-actions">
+              {hasActiveDraft && (
+                <button type="button" className="tv-btn tv-btn-rose" disabled={isSaving} onClick={() => deleteNote(normalizedDraft.id)}>
+                  Удалить
+                </button>
+              )}
+              <button type="button" className="tv-btn tv-btn-amber" disabled={isSaving} onClick={saveNote}>
+                {isSaving ? 'Сохраняю...' : 'Сохранить'}
+              </button>
+            </div>
+          </div>
+        </section>
+      </div>
     </div>
   );
 });
@@ -3177,6 +3689,9 @@ const TaskDrawer = React.memo(({
 export const PinnedTaskWidget = React.memo(({
   task,
   user,
+  showToast,
+  apiBaseUrl,
+  withAccessTokenHeader,
   availableTasks = [],
   isTasksLoading = false,
   taskRecipients = [],
@@ -3211,7 +3726,20 @@ export const PinnedTaskWidget = React.memo(({
   const [quickFormLoading, setQuickFormLoading] = useState(false);
   const [quickFormError, setQuickFormError] = useState('');
   const [taskMenuScope, setTaskMenuScope] = useState('incoming');
-  const notesState = useLocalNotes(user?.id);
+  const notifyNote = useCallback((message, type = 'success') => {
+    if (typeof showToast === 'function') showToast(message, type);
+  }, [showToast]);
+  const buildNoteHeaders = useCallback((extra = {}) => {
+    const headers = { ...extra };
+    if (user?.id) headers['X-User-Id'] = String(user.id);
+    return typeof withAccessTokenHeader === 'function' ? withAccessTokenHeader(headers) : headers;
+  }, [user?.id, withAccessTokenHeader]);
+  const notesState = useTaskNotes({
+    userId: user?.id,
+    apiBaseUrl,
+    buildHeaders: buildNoteHeaders,
+    notify: notifyNote,
+  });
   const [paletteId, setPaletteId] = useState(() => {
     if (typeof window === 'undefined') return PIN_PALETTES[0].id;
     try {
@@ -4218,7 +4746,6 @@ const TasksView = ({
   const hasSyncedDrawerUrlRef   = useRef(false);
   const [form, setForm] = useState(() => buildEmptyTaskForm());
   const [notesOpen, setNotesOpen] = useState(false);
-  const notesState = useLocalNotes(user?.id);
 
   const showToastRef = useRef(showToast);
   useEffect(() => { showToastRef.current = showToast; }, [showToast]);
@@ -4241,11 +4768,17 @@ const TasksView = ({
     }
   }, [notify]);
 
-  const buildHeaders = useCallback(() => {
-    const h = {};
+  const buildHeaders = useCallback((extra = {}) => {
+    const h = { ...(extra || {}) };
     if (user?.id)     h['X-User-Id'] = String(user.id);
     return typeof withAccessTokenHeader === 'function' ? withAccessTokenHeader(h) : h;
   }, [user?.id, withAccessTokenHeader]);
+  const notesState = useTaskNotes({
+    userId: user?.id,
+    apiBaseUrl,
+    buildHeaders,
+    notify,
+  });
 
   const fetchRecipients = useCallback(async () => {
     setIsRecipientsLoading(true);

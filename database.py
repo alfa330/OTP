@@ -1858,6 +1858,26 @@ class Database:
             """)
             cursor.execute("ALTER TABLE task_checklist_items ADD COLUMN IF NOT EXISTS result_note TEXT;")
 
+            # Personal notes inside the Tasks section
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS task_notes (
+                    id SERIAL PRIMARY KEY,
+                    owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    title VARCHAR(160) NOT NULL DEFAULT '',
+                    body TEXT NOT NULL DEFAULT '',
+                    priority VARCHAR(16) NOT NULL DEFAULT 'normal'
+                        CHECK (priority IN ('normal', 'urgent', 'critical')),
+                    due_at TIMESTAMP,
+                    is_task BOOLEAN NOT NULL DEFAULT FALSE,
+                    is_done BOOLEAN NOT NULL DEFAULT FALSE,
+                    completed_at TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_task_notes_owner_updated ON task_notes(owner_id, updated_at DESC);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_task_notes_owner_due ON task_notes(owner_id, due_at);")
+
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS raw_resource_uploads (
                     id SERIAL PRIMARY KEY,
@@ -27781,6 +27801,203 @@ class Database:
             "deleted": True,
             "attachments": attachments
         }
+
+    def _normalize_task_note_priority(self, priority):
+        priority_norm = (priority or 'normal').strip().lower() or 'normal'
+        if priority_norm not in ('normal', 'urgent', 'critical'):
+            raise ValueError("INVALID_PRIORITY")
+        return priority_norm
+
+    def _normalize_task_note_due_at(self, value):
+        if value is _UNSET:
+            return _UNSET
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            parsed = value
+        else:
+            text = str(value or '').strip()
+            if not text:
+                return None
+            try:
+                parsed = datetime.fromisoformat(text.replace('Z', '+00:00'))
+            except Exception:
+                raise ValueError("INVALID_DUE_AT")
+
+        if getattr(parsed, 'tzinfo', None) is not None:
+            parsed = parsed.astimezone().replace(tzinfo=None)
+        return parsed
+
+    def _serialize_task_note(self, row):
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "owner_id": row[1],
+            "title": row[2] or '',
+            "body": row[3] or '',
+            "priority": row[4] or 'normal',
+            "due_at": self._task_dt_to_iso(row[5]),
+            "is_task": bool(row[6]),
+            "is_done": bool(row[7]),
+            "completed_at": self._task_dt_to_iso(row[8]),
+            "created_at": self._task_dt_to_iso(row[9]),
+            "updated_at": self._task_dt_to_iso(row[10]),
+            "saved_at": self._task_dt_to_iso(row[10])
+        }
+
+    def get_task_notes(self, owner_id):
+        owner_id = int(owner_id)
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    id, owner_id, title, body, priority, due_at,
+                    is_task, is_done, completed_at, created_at, updated_at
+                FROM task_notes
+                WHERE owner_id = %s
+                ORDER BY
+                    CASE WHEN due_at IS NULL THEN 1 ELSE 0 END ASC,
+                    is_done ASC,
+                    due_at ASC NULLS LAST,
+                    CASE priority WHEN 'critical' THEN 0 WHEN 'urgent' THEN 1 ELSE 2 END ASC,
+                    updated_at DESC,
+                    id DESC
+            """, (owner_id,))
+            rows = cursor.fetchall()
+        return [self._serialize_task_note(row) for row in rows]
+
+    def create_task_note(
+            self,
+            owner_id,
+            title='',
+            body='',
+            priority='normal',
+            due_at=None,
+            is_task=False,
+            is_done=False
+    ):
+        owner_id = int(owner_id)
+        title_norm = str(title or '').strip()[:160] or 'Без темы'
+        body_norm = str(body or '')
+        priority_norm = self._normalize_task_note_priority(priority)
+        due_at_norm = self._normalize_task_note_due_at(due_at)
+        is_task_norm = bool(is_task)
+        is_done_norm = bool(is_done) if is_task_norm else False
+        completed_at = self._task_now() if is_done_norm else None
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO task_notes (
+                    owner_id, title, body, priority, due_at,
+                    is_task, is_done, completed_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING
+                    id, owner_id, title, body, priority, due_at,
+                    is_task, is_done, completed_at, created_at, updated_at
+            """, (
+                owner_id,
+                title_norm,
+                body_norm,
+                priority_norm,
+                due_at_norm,
+                is_task_norm,
+                is_done_norm,
+                completed_at
+            ))
+            row = cursor.fetchone()
+        return self._serialize_task_note(row)
+
+    def update_task_note(
+            self,
+            note_id,
+            owner_id,
+            title=_UNSET,
+            body=_UNSET,
+            priority=_UNSET,
+            due_at=_UNSET,
+            is_task=_UNSET,
+            is_done=_UNSET
+    ):
+        note_id = int(note_id)
+        owner_id = int(owner_id)
+
+        if not any(value is not _UNSET for value in (title, body, priority, due_at, is_task, is_done)):
+            raise ValueError("NOTHING_TO_UPDATE")
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    id, owner_id, title, body, priority, due_at,
+                    is_task, is_done, completed_at, created_at, updated_at
+                FROM task_notes
+                WHERE id = %s
+            """, (note_id,))
+            current = cursor.fetchone()
+            if not current:
+                raise ValueError("NOTE_NOT_FOUND")
+            if int(current[1]) != owner_id:
+                raise PermissionError("NOTE_FORBIDDEN")
+
+            title_new = current[2] if title is _UNSET else (str(title or '').strip()[:160] or 'Без темы')
+            body_new = current[3] if body is _UNSET else str(body or '')
+            priority_new = current[4] if priority is _UNSET else self._normalize_task_note_priority(priority)
+            due_at_new = current[5] if due_at is _UNSET else self._normalize_task_note_due_at(due_at)
+            is_task_new = bool(current[6]) if is_task is _UNSET else bool(is_task)
+            is_done_new = bool(current[7]) if is_done is _UNSET else bool(is_done)
+            if not is_task_new:
+                is_done_new = False
+
+            completed_at_new = current[8]
+            if is_done_new and not bool(current[7]):
+                completed_at_new = self._task_now()
+            elif not is_done_new:
+                completed_at_new = None
+
+            cursor.execute("""
+                UPDATE task_notes
+                SET
+                    title = %s,
+                    body = %s,
+                    priority = %s,
+                    due_at = %s,
+                    is_task = %s,
+                    is_done = %s,
+                    completed_at = %s,
+                    updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                WHERE id = %s AND owner_id = %s
+                RETURNING
+                    id, owner_id, title, body, priority, due_at,
+                    is_task, is_done, completed_at, created_at, updated_at
+            """, (
+                title_new,
+                body_new,
+                priority_new,
+                due_at_new,
+                is_task_new,
+                is_done_new,
+                completed_at_new,
+                note_id,
+                owner_id
+            ))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("NOTE_NOT_FOUND")
+        return self._serialize_task_note(row)
+
+    def delete_task_note(self, note_id, owner_id):
+        note_id = int(note_id)
+        owner_id = int(owner_id)
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                DELETE FROM task_notes
+                WHERE id = %s AND owner_id = %s
+                RETURNING id
+            """, (note_id, owner_id))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("NOTE_NOT_FOUND")
+        return {"note_id": note_id, "deleted": True}
 
     def materialize_due_regulation_tasks(self, max_templates=25, max_occurrences_per_template=3):
         created_task_ids = []
