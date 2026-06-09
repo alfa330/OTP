@@ -5929,9 +5929,15 @@ def sv_daily_hours():
                 supervisor_id = requester_id
 
             if group_id is not None:
-                # СВ может смотреть только свои группы (на этот месяц).
-                if group_id not in db.get_supervisor_group_ids(supervisor_id, month):
-                    return jsonify({"error": "Forbidden: not your group"}), 403
+                # СВ может смотреть группы своего отдела (или те, что ведёт).
+                _grp = db.get_group(group_id)
+                _sv_dept = db.get_user_department_id(supervisor_id)
+                _allowed = (
+                    (_grp and _sv_dept is not None and _grp.get('department_id') == _sv_dept)
+                    or group_id in db.get_supervisor_group_ids(supervisor_id, month)
+                )
+                if not _allowed:
+                    return jsonify({"error": "Forbidden: not your department's group"}), 403
                 result = db.get_daily_hours_by_group_month(group_id, month)
             else:
                 result = db.get_daily_hours_by_supervisor_month(supervisor_id, month)
@@ -10090,8 +10096,13 @@ def list_groups_endpoint():
             department_id = int(dep) if dep and str(dep).isdigit() else None
             groups = db.list_groups(include_archived=include_archived, department_id=department_id)
         elif _is_supervisor_role(role):
-            my_ids = set(db.get_supervisor_group_ids(requester_id))
-            groups = [g for g in db.list_groups(include_archived=include_archived) if g['id'] in my_ids]
+            # СВ видит группы СВОЕГО ОТДЕЛА (а не только те, что ведёт сам).
+            sv_dept = db.get_user_department_id(requester_id)
+            if sv_dept is not None:
+                groups = db.list_groups(include_archived=include_archived, department_id=sv_dept)
+            else:
+                my_ids = set(db.get_supervisor_group_ids(requester_id))
+                groups = [g for g in db.list_groups(include_archived=include_archived) if g['id'] in my_ids]
         else:
             return jsonify({"error": "Forbidden"}), 403
         return jsonify({
@@ -10175,6 +10186,25 @@ def reuse_group_endpoint(group_id):
         return jsonify({"status": "success", "group": group}), 200
     except Exception as e:
         logging.error(f"Error reusing group: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/admin/groups/<int:group_id>/rename', methods=['POST'])
+@require_api_key
+def rename_group_endpoint(group_id):
+    try:
+        _rid, _role, guard_err = _ensure_group_manager()
+        if guard_err:
+            resp, code = guard_err
+            return resp, code
+        data = request.get_json(silent=True) or {}
+        name = (data.get('name') or '').strip()
+        if not name:
+            return jsonify({"error": "Name is required"}), 400
+        group = db.update_group_name(group_id, name)
+        return jsonify({"status": "success", "group": group}), 200
+    except Exception as e:
+        logging.error(f"Error renaming group: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 

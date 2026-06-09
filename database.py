@@ -10126,6 +10126,40 @@ class Database:
             + float(technical_issue_hours or 0.0)
             + float(offline_activity_hours or 0.0)
         )
+
+        # Сегменты членства оператора за месяц — для уведомления «несколько направлений»
+        # и селектора в «Мои часы». daily здесь НЕ разбиты по группам; сегменты дают
+        # информативную раскладку по дням/направлениям (членства непересекающиеся).
+        group_segments = []
+        with self._get_cursor() as _seg_cursor:
+            _seg_cursor.execute(
+                """
+                SELECT gom.group_id, gr.name, gr.direction_id, d.name,
+                       gr.calculation_model_code, gom.start_date, gom.end_date
+                FROM group_operator_memberships gom
+                JOIN groups gr ON gr.id = gom.group_id
+                LEFT JOIN directions d ON d.id = gr.direction_id
+                WHERE gom.operator_id = %s
+                  AND gom.start_date <= %s
+                  AND (gom.end_date IS NULL OR gom.end_date >= %s)
+                ORDER BY gom.start_date
+                """,
+                (operator_id, end, start),
+            )
+            for g_id, g_name, dir_id, dir_name, model_code, seg_start, seg_end in _seg_cursor.fetchall() or []:
+                clipped_start = seg_start if (seg_start and seg_start > start) else start
+                clipped_end = seg_end if (seg_end and seg_end < end) else end
+                group_segments.append({
+                    "group_id": int(g_id),
+                    "group_name": g_name,
+                    "direction_id": dir_id,
+                    "direction_name": dir_name,
+                    "calculation_model_code": normalize_calculation_model_code(model_code, dir_name),
+                    "start_day": int(clipped_start.day),
+                    "end_day": int(clipped_end.day),
+                    "is_current": seg_end is None,
+                })
+
         operator_obj = {
             "operator_id": operator_id,
             "name": name,
@@ -10140,6 +10174,7 @@ class Database:
             "accounted_hours": round(float(accounted_hours), 2),
             "worked_hours_used": round(float(accounted_hours), 2),
             "daily": daily_map,
+            "group_segments": group_segments,
             "chat_metrics_by_day": chat_metrics_by_day,
             "chat_metrics": chat_metric_totals,
             "technical_issues_by_day": technical_issues_by_day,
@@ -18159,6 +18194,22 @@ class Database:
                 WHERE id = %s
                 """,
                 (int(group_id),),
+            )
+        return self.get_group(group_id)
+
+    def update_group_name(self, group_id, name):
+        """Переименование группы. Меняется только название; модель/отдел/направление
+        остаются неизменными."""
+        new_name = (name or '').strip()
+        if not new_name:
+            raise ValueError("Group name cannot be empty")
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE groups SET name = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                """,
+                (new_name, int(group_id)),
             )
         return self.get_group(group_id)
 

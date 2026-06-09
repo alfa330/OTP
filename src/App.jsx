@@ -40439,6 +40439,33 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         <span className="text-blue-600">Ваши рабочие часы</span>
                                         </h2>
 
+                                        {/* Уведомление: показатели за месяц по нескольким направлениям (перевод) */}
+                                        {(() => {
+                                            const _op = (hoursData && Array.isArray(hoursData.operators))
+                                                ? (hoursData.operators.find(o => Number(o.operator_id) === Number(user.id)) || hoursData.operators[0])
+                                                : null;
+                                            const _segs = (_op && Array.isArray(_op.group_segments)) ? _op.group_segments : [];
+                                            const _multi = new Set(_segs.map(s => (s.direction_id != null ? `d${s.direction_id}` : `g${s.group_id}`))).size > 1;
+                                            if (!_multi) return null;
+                                            return (
+                                                <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-[13px] text-amber-800">
+                                                    <div className="flex items-center gap-2 font-semibold">
+                                                        <FaIcon className="fas fa-triangle-exclamation" />
+                                                        В этом месяце ваши показатели считаются по нескольким направлениям
+                                                    </div>
+                                                    <div className="mt-2 flex flex-wrap gap-2">
+                                                        {_segs.map((s) => (
+                                                            <span key={s.group_id} className="inline-flex items-center gap-1.5 rounded-full bg-white/70 px-3 py-1 ring-1 ring-amber-200">
+                                                                <FaIcon className={`fas ${s.calculation_model_code === 'chat_manager' ? 'fa-comments' : 'fa-headset'} text-amber-500`} />
+                                                                <span className="font-medium">{s.direction_name || s.group_name}</span>
+                                                                <span className="text-amber-600">· дни {s.start_day}–{s.end_day}</span>
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })()}
+
                                         {isLoading ? (
                                         <HoursPageSkeleton />
                                         ) : hoursData && Array.isArray(hoursData.operators) && hoursData.operators.length > 0 ? (
