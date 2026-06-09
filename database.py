@@ -10252,6 +10252,65 @@ class Database:
 
             op_ids = [row[0] for row in operator_rows]
 
+            # --- transfer-aware: членства всех операторов, пересекающие месяц ---
+            # Только в group-aware режиме (group_id задан). В legacy сегменты пустые,
+            # фронт остаётся в прежнем поведении 1:1.
+            segments_by_operator = {}
+            if group_id is not None:
+                cursor.execute(
+                    """
+                    SELECT gom.operator_id, gom.group_id, gr.name, gom.start_date, gom.end_date
+                    FROM group_operator_memberships gom
+                    JOIN groups gr ON gr.id = gom.group_id
+                    WHERE gom.operator_id = ANY(%s)
+                      AND gom.start_date <= %s
+                      AND (gom.end_date IS NULL OR gom.end_date >= %s)
+                    ORDER BY gom.operator_id, gom.start_date
+                    """,
+                    (op_ids, end, start),
+                )
+                for seg_op_id, seg_group_id, seg_group_name, seg_start, seg_end in cursor.fetchall() or []:
+                    clipped_start = seg_start if (seg_start and seg_start > start) else start
+                    clipped_end = seg_end if (seg_end and seg_end < end) else end
+                    segments_by_operator.setdefault(int(seg_op_id), []).append({
+                        "group_id": int(seg_group_id),
+                        "group_name": seg_group_name,
+                        "start_day": int(clipped_start.day),
+                        "end_day": int(clipped_end.day),
+                        "is_current": int(seg_group_id) == int(group_id),
+                    })
+
+            # --- статус оператора на конец месяца (из user_history; fallback — текущий) ---
+            # Прошлый месяц должен показывать статус, который был тогда, а не нынешний.
+            status_as_of = {}
+            cursor.execute(
+                """
+                SELECT user_id, old_value, new_value, changed_at
+                FROM user_history
+                WHERE field_changed = 'status' AND user_id = ANY(%s)
+                ORDER BY user_id, changed_at
+                """,
+                (op_ids,),
+            )
+            _st_changes, _st_first_old = {}, {}
+            for _uid, _oldv, _newv, _at in cursor.fetchall() or []:
+                if _uid not in _st_changes:
+                    _st_changes[_uid] = []
+                    _st_first_old[_uid] = _oldv
+                _st_changes[_uid].append((_at, _newv))
+            _st_ref = datetime(year + 1, 1, 1) if mon == 12 else datetime(year, mon + 1, 1)
+            for _uid, _changes in _st_changes.items():
+                _eff = None
+                for _at, _newv in _changes:
+                    if _at is not None and _at < _st_ref:
+                        _eff = _newv
+                    else:
+                        break
+                if _eff is None:
+                    _eff = _st_first_old.get(_uid)
+                if _eff:
+                    status_as_of[int(_uid)] = _eff
+
             # Получаем daily_hours для этих операторов за месяц (с информацией о штрафах).
             # В group-aware режиме фильтруем по группе: дни этого оператора, отнесённые
             # именно к этой группе (поддержка раздельных дней при переводе).
@@ -10380,6 +10439,21 @@ class Database:
                 total_calls, total_efficiency_hours, calls_per_hour, fines) = row
                 calculation_model_code = self._normalize_calculation_model_code(calculation_model_raw, direction_name)
                 op_daily = daily_map.get(op_id, {})
+                # transfer-aware: в group-aware режиме месячные агрегаты пересобираем из
+                # group-filtered daily_map (work_hours хранит ОБЩИЙ итог оператора без
+                # разбивки по группам). Формулы — как в _aggregate_month_from_daily_tx;
+                # fines — из daily_fines (список fines[]).
+                grp_regular = grp_break = grp_talk = grp_eff = grp_fines = 0.0
+                grp_calls = 0
+                if group_id is not None:
+                    for _dnum, _dd in op_daily.items():
+                        grp_regular += float(_dd.get("work_time") or 0.0)
+                        grp_break += float(_dd.get("break_time") or 0.0)
+                        grp_talk += float(_dd.get("talk_time") or 0.0)
+                        grp_eff += float(_dd.get("efficiency") or 0.0)
+                        grp_calls += int(_dd.get("calls") or 0)
+                        for _f in (_dd.get("fines") or []):
+                            grp_fines += float(_f.get("amount") or 0.0)
                 training_hours = float(training_totals_by_operator.get(op_id, 0.0)) if isinstance(training_totals_by_operator, dict) else 0.0
                 technical_issue_hours = float(technical_totals_by_operator.get(op_id, 0.0)) if isinstance(technical_totals_by_operator, dict) else 0.0
                 offline_activity_hours = float(offline_totals_by_operator.get(op_id, 0.0)) if isinstance(offline_totals_by_operator, dict) else 0.0
@@ -10415,20 +10489,37 @@ class Database:
                     "calculationModelCode": calculation_model_code,
                     "supervisor_id": sup_id,
                     "rate": float(rate) if rate is not None else 0.0,
-                    "status": status,
+                    "status": status_as_of.get(op_id, status),
                     "norm_hours": float(norm_hours) if norm_hours is not None else 0.0,
                     "training_hours": round(float(training_hours), 2),
                     "no_phone_hours": round(float(no_phone_hours), 2),
                     "accounted_hours": round(float(accounted_hours), 2),
                     "worked_hours_used": round(float(accounted_hours), 2),
                     "daily": op_daily,
+                    "group_segments": segments_by_operator.get(op_id, []),
                     "chat_metrics_by_day": chat_metrics_by_day,
                     "chat_metrics": chat_metric_totals,
                     "technical_issues_by_day": technical_map_by_operator.get(op_id, {}) if isinstance(technical_map_by_operator, dict) else {},
                     "technical_issue_hours": round(float(technical_issue_hours), 2),
                     "offline_activities_by_day": offline_map_by_operator.get(op_id, {}) if isinstance(offline_map_by_operator, dict) else {},
                     "offline_activity_hours": round(float(offline_activity_hours), 2),
-                    "aggregates": {
+                    "aggregates": ({
+                        # group-aware: суммы из group-filtered daily_map (раздельно по группам)
+                        "regular_hours": float(grp_regular),
+                        "total_break_time": float(grp_break),
+                        "total_talk_time": float(grp_talk),
+                        "total_calls": int(total_calls if calculation_model_code == CALCULATION_MODEL_CHAT_MANAGER else grp_calls),
+                        "total_efficiency_hours": float(grp_eff),
+                        "calls_per_hour": (
+                            (float(total_calls if calculation_model_code == CALCULATION_MODEL_CHAT_MANAGER else grp_calls) / grp_regular)
+                            if grp_regular > 0 else 0.0
+                        ),
+                        "fines": float(grp_fines),
+                        "chat_avg_score": chat_metric_totals.get("avg_score"),
+                        "chat_avg_response_time_seconds": chat_metric_totals.get("avg_response_time_seconds"),
+                        "chat_transfer_count": int(chat_metric_totals.get("transfer_chat_count") or 0),
+                    } if group_id is not None else {
+                        # legacy (по СВ / без группы): агрегаты из work_hours — поведение 1:1
                         "regular_hours": float(regular_hours),
                         "total_break_time": float(total_break_time),
                         "total_talk_time": float(total_talk_time),
@@ -10439,7 +10530,7 @@ class Database:
                         "chat_avg_score": chat_metric_totals.get("avg_score"),
                         "chat_avg_response_time_seconds": chat_metric_totals.get("avg_response_time_seconds"),
                         "chat_transfer_count": int(chat_metric_totals.get("transfer_chat_count") or 0),
-                    }
+                    })
                 })
 
         return {"month": month, "days_in_month": days, "operators": operators}
