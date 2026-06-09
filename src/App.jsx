@@ -1914,6 +1914,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         // NEW: filter active/fired + counters
         const [operatorsViewTab, setOperatorsViewTab] = useState('active'); // 'active' | 'fired'
         const [selectedDirections, setSelectedDirections] = useState(['all']); // multi-select directions for filtering
+
         // Группы: выбор группы для учёта часов + локальный реестр групп/метрик моделей.
         const [selectedGroupId, setSelectedGroupId] = useState(''); // '' = legacy-режим по СВ
         const [groupsList, setGroupsList] = useState([]);
@@ -2238,6 +2239,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             e.preventDefault();
             e.stopPropagation();
             return;
+            }
+            // transfer-aware: клик по чужому дню (оператор был в другой группе)
+            // переключает выбранную группу вместо открытия редактирования.
+            const segs = Array.isArray(operator?.group_segments) ? operator.group_segments : [];
+            const clickedSeg = segs.find(s => day >= s.start_day && day <= s.end_day);
+            if (selectedGroupId && clickedSeg && !clickedSeg.is_current) {
+                e?.preventDefault?.();
+                e?.stopPropagation?.();
+                setSelectedGroupId(String(clickedSeg.group_id));
+                return;
             }
             openCellDetail(operator, day);
         }
@@ -3138,6 +3149,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         function startHourSelectionDrag(e, operator, day) {
             if (!(e?.ctrlKey || e?.metaKey) || e?.button !== 0) return;
+            // transfer-aware: чужие дни (вне выбранной группы) не выделяем для массового
+            // редактирования — их можно менять только переключившись на нужную группу.
+            const _segs = Array.isArray(operator?.group_segments) ? operator.group_segments : [];
+            const _seg = _segs.find(s => day >= s.start_day && day <= s.end_day);
+            if (selectedGroupId && _seg && !_seg.is_current) return;
             e.preventDefault();
             e.stopPropagation();
             ignoreNextHourCellClickRef.current = true;
@@ -3363,6 +3379,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             ) : null;
 
             const workTimeCellClass = `relative w-full h-8 rounded-md flex flex-col items-center px-1 ${workTimeMarkerDots.length > 0 ? 'justify-between py-1' : 'justify-center'}`;
+
+            // transfer-aware: к какому сегменту членства относится этот день; чужой день
+            // (вне выбранной группы) — заблокирован, клик переключает на ту группу.
+            const segs = Array.isArray(op.group_segments) ? op.group_segments : [];
+            const daySeg = segs.find(s => day >= s.start_day && day <= s.end_day) || null;
+            const isForeignDay = !!(selectedGroupId && daySeg && !daySeg.is_current);
+            if (isForeignDay) {
+                return (
+                    <div
+                        className={`${workTimeCellClass} bg-gray-200 text-gray-500 opacity-70 cursor-pointer`}
+                        title={`Переведён → ${daySeg.group_name}. Клик: открыть эту группу`}
+                    >
+                        <FaIcon className="fas fa-lock" style={{ fontSize: '10px' }} />
+                        <span className="text-[9px] leading-none truncate" style={{ maxWidth: '64px' }}>{daySeg.group_name}</span>
+                    </div>
+                );
+            }
 
             if (selectedTab === 'work_time') {
             const baseWork = d ? Number(d.work_time || 0) : 0;
@@ -4256,7 +4289,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <div key={op.operator_id} className="flex items-center border-b hover:bg-gray-50 relative">
                                 {/* Name */}
                                 <div className="w-48 p-2 text-sm font-medium border-r sticky left-0 z-20 bg-white">
-                                {op.name}
+                                <div className="flex items-center gap-1">
+                                    <span className="truncate">{op.name}</span>
+                                    {Array.isArray(op.group_segments) && op.group_segments.length > 1 && (
+                                    <span
+                                        className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-amber-100 text-amber-700"
+                                        title={op.group_segments.map(s => `${s.group_name}: дни ${s.start_day}–${s.end_day}`).join('; ')}
+                                    >
+                                        <FaIcon className="fas fa-right-left" style={{ fontSize: '9px' }} />переведён
+                                    </span>
+                                    )}
+                                </div>
                                 </div>
 
                                 {/* Rate */}
