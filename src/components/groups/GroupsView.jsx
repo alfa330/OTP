@@ -32,6 +32,10 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     const [suggestions, setSuggestions] = useState([]);
     const [saving, setSaving] = useState(false);
 
+    // rename modal
+    const [renameGroup, setRenameGroup] = useState(null);
+    const [renameName, setRenameName] = useState('');
+
     // members modal
     const [membersGroup, setMembersGroup] = useState(null);
     const [members, setMembers] = useState({ operators: [], supervisors: [] });
@@ -202,6 +206,28 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
         }
     };
 
+    /* ─── rename ─── */
+    const openRename = (g) => { setRenameGroup(g); setRenameName(g.name || ''); };
+    const closeRename = () => { setRenameGroup(null); setRenameName(''); };
+    const submitRename = async () => {
+        const name = renameName.trim();
+        if (!name) { showToastRef.current?.('Укажите название группы', 'error'); return; }
+        if (name === renameGroup.name) { closeRename(); return; }
+        setSaving(true);
+        try {
+            const { ok, data } = await api(`/api/admin/groups/${renameGroup.id}/rename`, { method: 'POST', body: { name } });
+            if (ok && data.group) {
+                setGroups((prev) => prev.map((g) => (g.id === renameGroup.id ? data.group : g)));
+                showToastRef.current?.('Группа переименована', 'success');
+                closeRename();
+            } else {
+                showToastRef.current?.(data.error || 'Не удалось переименовать группу', 'error');
+            }
+        } catch {
+            showToastRef.current?.('Ошибка сети', 'error');
+        } finally { setSaving(false); }
+    };
+
     /* ─── members ─── */
     const openMembers = async (group) => {
         setMembersGroup(group);
@@ -342,6 +368,9 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                                 <button className={iosBtnSecondary} onClick={() => openMembers(g)}>
                                     <FaIcon className="fas fa-user-gear" /> Состав
                                 </button>
+                                <button className={iosBtnGhost} onClick={() => openRename(g)}>
+                                    <FaIcon className="fas fa-pen" /> Переименовать
+                                </button>
                                 {g.status === 'archived' ? (
                                     <button className={iosBtnGhost} onClick={() => setGroupArchived(g, false)}>
                                         <FaIcon className="fas fa-rotate-left" /> Вернуть
@@ -430,6 +459,27 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                             </div>
                         </div>
                     )}
+                </div>
+            </IosModal>
+
+            {/* ─── Rename modal ─── */}
+            <IosModal
+                open={!!renameGroup}
+                onClose={closeRename}
+                title="Переименовать группу"
+                subtitle="Меняется только название. Модель, отдел и направление неизменны."
+                footer={(
+                    <>
+                        <button className={iosBtnSecondary} onClick={closeRename} disabled={saving}>Отмена</button>
+                        <button className={iosBtnPrimary} onClick={submitRename} disabled={saving}>Сохранить</button>
+                    </>
+                )}
+            >
+                <div className="space-y-3">
+                    <div>
+                        <div className={iosGroupLabel}>Название</div>
+                        <input className={iosInput} value={renameName} onChange={(e) => setRenameName(e.target.value)} autoFocus />
+                    </div>
                 </div>
             </IosModal>
 
