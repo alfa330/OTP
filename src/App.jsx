@@ -3386,13 +3386,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const daySeg = segs.find(s => day >= s.start_day && day <= s.end_day) || null;
             const isForeignDay = !!(selectedGroupId && daySeg && !daySeg.is_current);
             if (isForeignDay) {
+                // Только иконка-замок — чтобы ячейка не растягивалась и сетка не ломалась.
+                // Имя группы перевода — в тултипе; клик переключает на эту группу.
                 return (
                     <div
-                        className={`${workTimeCellClass} bg-gray-200 text-gray-500 opacity-70 cursor-pointer`}
+                        className={`${workTimeCellClass} bg-gray-200 text-gray-400 cursor-pointer`}
                         title={`Переведён → ${daySeg.group_name}. Клик: открыть эту группу`}
                     >
-                        <FaIcon className="fas fa-lock" style={{ fontSize: '10px' }} />
-                        <span className="text-[9px] leading-none truncate" style={{ maxWidth: '64px' }}>{daySeg.group_name}</span>
+                        <FaIcon className="fas fa-lock" style={{ fontSize: '11px' }} />
                     </div>
                 );
             }
@@ -4289,14 +4290,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <div key={op.operator_id} className="flex items-center border-b hover:bg-gray-50 relative">
                                 {/* Name */}
                                 <div className="w-48 p-2 text-sm font-medium border-r sticky left-0 z-20 bg-white">
-                                <div className="flex items-center gap-1">
+                                <div className="flex items-center gap-1.5 min-w-0">
                                     <span className="truncate">{op.name}</span>
                                     {Array.isArray(op.group_segments) && op.group_segments.length > 1 && (
                                     <span
-                                        className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-amber-100 text-amber-700"
-                                        title={op.group_segments.map(s => `${s.group_name}: дни ${s.start_day}–${s.end_day}`).join('; ')}
+                                        className="shrink-0 inline-flex items-center justify-center w-4 h-4 rounded-full bg-amber-100 text-amber-600"
+                                        title={`Переведён. ${op.group_segments.map(s => `${s.group_name}: дни ${s.start_day}–${s.end_day}`).join('; ')}`}
                                     >
-                                        <FaIcon className="fas fa-right-left" style={{ fontSize: '9px' }} />переведён
+                                        <FaIcon className="fas fa-right-left" style={{ fontSize: '9px' }} />
                                     </span>
                                     )}
                                 </div>
