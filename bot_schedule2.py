@@ -11688,6 +11688,143 @@ def get_task_recipients():
         return jsonify({"error": f"Internal server error"}), 500
 
 
+@app.route('/api/tasks/notes', methods=['GET', 'POST', 'OPTIONS'])
+@require_api_key
+def handle_task_notes():
+    try:
+        requester_id, requester, guard_response, guard_status = _task_route_guard()
+        if guard_response is not None:
+            return guard_response, guard_status
+
+        if request.method == 'GET':
+            notes = db.get_task_notes(requester_id)
+            return jsonify({
+                "status": "success",
+                "notes": notes
+            }), 200
+
+        data = request.get_json() or {}
+        title = str(data.get('title') or '').strip()
+        body = str(data.get('body') or data.get('text') or '')
+        priority = (str(data.get('priority') or 'normal').strip().lower() or 'normal')
+        due_at = data.get('due_at') if 'due_at' in data else None
+        is_task = _parse_task_bool(data.get('is_task'))
+        is_done = _parse_task_bool(data.get('is_done')) if is_task else False
+
+        if priority not in TASK_ALLOWED_PRIORITIES:
+            return jsonify({"error": "Invalid priority"}), 400
+
+        try:
+            note = db.create_task_note(
+                owner_id=requester_id,
+                title=title,
+                body=body,
+                priority=priority,
+                due_at=due_at,
+                is_task=is_task,
+                is_done=is_done
+            )
+        except ValueError as create_error:
+            code = str(create_error)
+            if code == 'INVALID_PRIORITY':
+                return jsonify({"error": "Invalid priority"}), 400
+            if code == 'INVALID_DUE_AT':
+                return jsonify({"error": "Invalid due_at"}), 400
+            return jsonify({"error": code}), 400
+
+        return jsonify({
+            "status": "success",
+            "message": "Note saved successfully",
+            "note": note
+        }), 201
+
+    except Exception as e:
+        logging.error(f"Error in handle_task_notes: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/tasks/notes/<int:note_id>', methods=['PATCH', 'DELETE', 'OPTIONS'])
+@require_api_key
+def handle_single_task_note(note_id):
+    try:
+        requester_id, requester, guard_response, guard_status = _task_route_guard()
+        if guard_response is not None:
+            return guard_response, guard_status
+
+        if request.method == 'PATCH':
+            data = request.get_json() or {}
+            has_title = 'title' in data
+            has_body = 'body' in data or 'text' in data
+            has_priority = 'priority' in data
+            has_due_at = 'due_at' in data
+            has_is_task = 'is_task' in data
+            has_is_done = 'is_done' in data
+
+            if not any([has_title, has_body, has_priority, has_due_at, has_is_task, has_is_done]):
+                return jsonify({"error": "No fields to update"}), 400
+
+            priority = (str(data.get('priority') or '').strip().lower() or 'normal') if has_priority else None
+            if has_priority and priority not in TASK_ALLOWED_PRIORITIES:
+                return jsonify({"error": "Invalid priority"}), 400
+
+            edit_kwargs = {
+                "note_id": note_id,
+                "owner_id": requester_id
+            }
+            if has_title:
+                edit_kwargs["title"] = data.get('title')
+            if has_body:
+                edit_kwargs["body"] = data.get('body') if 'body' in data else data.get('text')
+            if has_priority:
+                edit_kwargs["priority"] = priority
+            if has_due_at:
+                edit_kwargs["due_at"] = data.get('due_at')
+            if has_is_task:
+                edit_kwargs["is_task"] = _parse_task_bool(data.get('is_task'))
+            if has_is_done:
+                edit_kwargs["is_done"] = _parse_task_bool(data.get('is_done'))
+
+            try:
+                note = db.update_task_note(**edit_kwargs)
+            except ValueError as update_error:
+                code = str(update_error)
+                if code == 'NOTE_NOT_FOUND':
+                    return jsonify({"error": "Note not found"}), 404
+                if code == 'NOTHING_TO_UPDATE':
+                    return jsonify({"error": "No fields to update"}), 400
+                if code == 'INVALID_PRIORITY':
+                    return jsonify({"error": "Invalid priority"}), 400
+                if code == 'INVALID_DUE_AT':
+                    return jsonify({"error": "Invalid due_at"}), 400
+                return jsonify({"error": code}), 400
+            except PermissionError:
+                return jsonify({"error": "You do not have access to this note"}), 403
+
+            return jsonify({
+                "status": "success",
+                "message": "Note updated successfully",
+                "note": note
+            }), 200
+
+        try:
+            result = db.delete_task_note(note_id=note_id, owner_id=requester_id)
+        except ValueError as delete_error:
+            code = str(delete_error)
+            if code == 'NOTE_NOT_FOUND':
+                return jsonify({"error": "Note not found"}), 404
+            return jsonify({"error": code}), 400
+
+        return jsonify({
+            "status": "success",
+            "message": "Note deleted successfully",
+            **result
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Error in handle_single_task_note: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/tasks', methods=['GET', 'POST', 'OPTIONS'])
 @require_api_key
 def handle_tasks():

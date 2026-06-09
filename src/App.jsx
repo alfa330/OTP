@@ -42651,6 +42651,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         <PinnedTaskWidget
                             task={pinnedTask}
                             user={user}
+                            showToast={showToast}
+                            apiBaseUrl={API_BASE_URL}
+                            withAccessTokenHeader={withAccessTokenHeader}
                             availableTasks={pinnedTaskPool}
                             isTasksLoading={isPinnedTaskPoolLoading}
                             taskRecipients={pinnedTaskRecipients}
