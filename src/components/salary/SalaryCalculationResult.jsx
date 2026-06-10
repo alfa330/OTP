@@ -1,7 +1,7 @@
 ﻿import React, { useState } from 'react';
 import FaIcon from '../common/FaIcon';
 
-    const SalaryCalculationResult = ({ salaryResult }) => {
+    const SalaryCalculationResult = ({ salaryResult, label }) => {
         const [copyMsg, setCopyMsg] = useState("");
 
         if (!salaryResult) return null;
@@ -101,7 +101,7 @@ import FaIcon from '../common/FaIcon';
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     <div>
                     <div className="text-sm text-gray-600">Направление</div>
-                    <div className="font-medium text-gray-800 mt-1">Оператор</div>
+                    <div className="font-medium text-gray-800 mt-1">{label || (salaryResult.model === 'chat' ? 'Чат' : 'Оператор')}</div>
                     </div>
                     <div>
                     <div className="text-sm text-gray-600">Баллы KPI</div>

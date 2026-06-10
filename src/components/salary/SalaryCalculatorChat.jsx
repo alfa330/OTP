@@ -1,8 +1,9 @@
-﻿import React, { useState } from 'react';
+﻿import React, { useState, useEffect } from 'react';
 import SalaryCalculationResult from './SalaryCalculationResult';
 import FaIcon from '../common/FaIcon';
+import { calculateChatSalary } from '../../utils/salaryFormula';
 
-const SalaryCalculatorChat = () => {
+const SalaryCalculatorChat = ({ prefill = null, prefillNonce = 0 } = {}) => {
   const [experience, setExperience] = useState('');
   const [quality, setQuality] = useState('');
   const [avgScore, setAvgScore] = useState('');
@@ -17,6 +18,22 @@ const SalaryCalculatorChat = () => {
   const [bonusFilmingQuantity, setBonusFilmingQuantity] = useState('');
   const [result, setResult] = useState(null);
   const [showTable, setShowTable] = useState(false);
+
+  // Предзаполнение из «Мои часы»/«Открыть в калькуляторе» (по nonce, чтобы повторное открытие перезаполняло).
+  // Бонусы намеренно не трогаем. Метрики — отдельно (оценка/время ответа из chat_metrics).
+  useEffect(() => {
+    if (!prefill) return;
+    if (prefill.experience !== undefined) setExperience(prefill.experience ?? '');
+    if (prefill.quality !== undefined) setQuality(prefill.quality ?? '');
+    if (prefill.avgScore !== undefined) setAvgScore(prefill.avgScore ?? '');
+    if (prefill.responseTime !== undefined) setResponseTime(prefill.responseTime ?? '');
+    if (prefill.chatsPerHour !== undefined) setChatsPerHour(prefill.chatsPerHour ?? '');
+    if (prefill.hoursNorm !== undefined) setHoursNorm(prefill.hoursNorm ?? '');
+    if (prefill.totalHours !== undefined) setTotalHours(prefill.totalHours ?? '');
+    setResult(null);
+    setShowTable(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefillNonce]);
 
   const validateForm = () => {
     // Проверяем, что все обязательные поля не пустые
@@ -63,49 +80,10 @@ const SalaryCalculatorChat = () => {
   };
 
   const calculateSalary = () => {
-    let points = 0;
     let bonuses = 0;
     let bonusDetails = [];
 
-    // Experience points
-    if (experience === '18+') points += 50;
-    else if (experience === '13-17') points += 35;
-    else if (experience === '10-12') points += 25;
-    else if (experience === '6-9') points += 15;
-    else if (experience === '3-5') points += 10;
-    else if (experience === '0-2') points += 5;
-
-    // Quality points
-    const qual = parseFloat(quality);
-    if (qual >= 97 && qual <= 100) points += 25;
-    else if (qual >= 94 && qual < 97) points += 20;
-    else if (qual >= 90 && qual < 94) points += 15;
-    else if (qual >= 86 && qual < 90) points += 10;
-    else if (qual >= 80 && qual < 86) points += 5;
-
-    // Avg score points
-    const score = parseFloat(avgScore);
-    if (score >= 4.9) points += 30;
-    else if (score >= 4.8) points += 25;
-    else if (score >= 4.7) points += 20;
-    else if (score >= 4.6) points += 10;
-    else if (score >= 4.5) points += 5;
-
-    // Response time points
-    const respTime = parseFloat(responseTime);
-    if (respTime <= 2) points += 20;
-    else if (respTime <= 3) points += 15;
-    else if (respTime <= 4) points += 10;
-    else if (respTime <= 4.5) points += 5;
-
-    // Chats per hour points
-    const cph = parseFloat(chatsPerHour);
-    if (cph >= 25) points += 25;
-    else if (cph >= 20) points += 15;
-    else if (cph >= 15) points += 10;
-    else if (cph >= 10) points += 5;
-
-    // Bonuses
+    // Bonuses (UI-детали строятся в компоненте; формула в utils/salaryFormula)
     if (bonusTraining) {
       bonuses += 6000;
       bonusDetails.push('Обучение: 6000 тг');
@@ -123,26 +101,28 @@ const SalaryCalculatorChat = () => {
       bonusDetails.push(`Съемки: ${filmingBonus} тг (${qty} съемок)`);
     }
 
-    const hn = parseFloat(hoursNorm);
-    const th = parseFloat(totalHours);
-    const hoursPercentage = hn > 0 ? (th / hn * 100) : 0;
-    const premiumCoefficient = hoursPercentage >= 90 ? 1 : 0.75;
-    const pointsCoefficient = points / 100;
-    const baseSalary = 700 * th;
-    const premiumPart = baseSalary * pointsCoefficient * premiumCoefficient;
-    const finalSalary = baseSalary + premiumPart + bonuses;
+    const r = calculateChatSalary({
+      hoursNorm,
+      totalHours,
+      quality,
+      avgScore,
+      responseTime,
+      chatsPerHour,
+      experience,
+      bonuses,
+    });
 
     setResult({
-      points,
-      premiumCoefficient,
-      hoursNorm: hn.toFixed(2),
-      hoursPercentage: hoursPercentage.toFixed(2),
-      baseSalary: baseSalary.toFixed(2),
-      premiumPart: premiumPart.toFixed(2),
+      points: r.points,
+      premiumCoefficient: r.premiumCoefficient,
+      hoursNorm: r.hoursNorm.toFixed(2),
+      hoursPercentage: r.hoursPercentage.toFixed(2),
+      baseSalary: r.baseSalary.toFixed(2),
+      premiumPart: r.premiumPart.toFixed(2),
       bonuses,
       bonusDetails: bonusDetails.join(', '),
-      finalSalary: finalSalary.toFixed(2),
-      tableData: { experience, quality: qual, avgScore: score, responseTime: respTime, chatsPerHour: cph }
+      finalSalary: r.finalSalary.toFixed(2),
+      tableData: r.tableData
     });
   };
 

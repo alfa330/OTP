@@ -17,6 +17,7 @@ import AuthEntranceSplash from './components/common/AuthEntranceSplash';
 import OrazAitSplash from './components/common/OrazAitSplash';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead } from './utils/roles';
 import { departmentAllowsView, departmentRestrictsViews, firstAllowedView } from './utils/departmentViews';
+import { calculateOperatorSalary, calculateChatSalary } from './utils/salaryFormula';
 
 const CHUNK_RELOAD_STORAGE_KEY = 'otp_chunk_reload_attempted';
 const PINNED_TASK_STORAGE_KEY_PREFIX = 'otp_pinned_task';
@@ -2422,6 +2423,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 comment: b?.comment || ''
                 };
             }) : [],
+            // Чат-метрики дня (для чат-модели): оценка (avg_score) здесь НЕ редактируется
+            chat_metrics: (dayData.chat_metrics && typeof dayData.chat_metrics === 'object') ? {
+                chats_count: Number(dayData.chat_metrics.chats_count || 0),
+                avg_response_time_seconds: (dayData.chat_metrics.avg_response_time_seconds === null || dayData.chat_metrics.avg_response_time_seconds === undefined)
+                    ? '' : Number(dayData.chat_metrics.avg_response_time_seconds),
+                transfer_chat_count: Number(dayData.chat_metrics.transfer_chat_count || 0),
+            } : { chats_count: 0, avg_response_time_seconds: '', transfer_chat_count: 0 },
             month
             });
         }
@@ -2440,6 +2448,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             else if (field === 'calls') next[field] = value === '' ? '' : parseInt(value, 10) || 0;
             else next[field] = value;
             return next;
+            });
+        }
+
+        // Чат-метрики дня: chats_count и transfer_chat_count — целые, время ответа — секунды (float)
+        function updateChatMetricField(field, value) {
+            setCellModel(prev => {
+            if (!prev) return prev;
+            const cm = { ...(prev.chat_metrics || { chats_count: 0, avg_response_time_seconds: '', transfer_chat_count: 0 }) };
+            if (field === 'avg_response_time_seconds') cm[field] = value === '' ? '' : Number(value);
+            else cm[field] = value === '' ? '' : (parseInt(value, 10) || 0);
+            return { ...prev, chat_metrics: cm };
             });
         }
 
@@ -2636,6 +2655,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     comment: String(b?.comment || '').trim() || null
                 };
                 }).filter((b) => Boolean(b.type)) : [],
+                // Чат-метрики (для чат-модели): оценка (avg_score) НЕ отправляется — управляется отдельно.
+                // chats_count зеркалит поле «Чаты» (calls), чтобы метрики и daily были согласованы.
+                ...(isChatModel ? {
+                    chat_metrics: {
+                        chats_count: parseInt(cellModel.calls, 10) || 0,
+                        avg_response_time_seconds: (cellModel.chat_metrics?.avg_response_time_seconds === '' || cellModel.chat_metrics?.avg_response_time_seconds == null)
+                            ? null : Number(cellModel.chat_metrics.avg_response_time_seconds),
+                        transfer_chat_count: Number(cellModel.chat_metrics?.transfer_chat_count) || 0,
+                    }
+                } : {}),
                 month: cellModel.month
                 }]
             };
@@ -4649,7 +4678,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                         <label className="flex flex-col text-xs text-gray-700">
                         <span className="flex items-center gap-2 mb-1">
-                            <FaIcon className="fas fa-phone" aria-hidden="true" /> Calls
+                            <FaIcon className={isChatModel ? 'fas fa-comments' : 'fas fa-phone'} aria-hidden="true" /> {isChatModel ? 'Чаты' : 'Calls'}
                         </span>
                         <input
                             className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
@@ -4658,6 +4687,37 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             onChange={e => updateCellField('calls', e.target.value)}
                         />
                         </label>
+
+                        {isChatModel && (
+                        <label className="flex flex-col text-xs text-gray-700">
+                        <span className="flex items-center gap-2 mb-1">
+                            <FaIcon className="fas fa-clock" aria-hidden="true" /> Время ответа (сек)
+                        </span>
+                        <input
+                            className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            value={cellModel.chat_metrics?.avg_response_time_seconds ?? ''}
+                            onChange={e => updateChatMetricField('avg_response_time_seconds', e.target.value)}
+                        />
+                        </label>
+                        )}
+
+                        {isChatModel && (
+                        <label className="flex flex-col text-xs text-gray-700">
+                        <span className="flex items-center gap-2 mb-1">
+                            <FaIcon className="fas fa-right-left" aria-hidden="true" /> Переводы чатов
+                        </span>
+                        <input
+                            className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
+                            type="number"
+                            min="0"
+                            value={cellModel.chat_metrics?.transfer_chat_count ?? ''}
+                            onChange={e => updateChatMetricField('transfer_chat_count', e.target.value)}
+                        />
+                        </label>
+                        )}
 
                         <label className="col-span-1 md:col-span-2 flex flex-col text-xs text-gray-700">
                         <span className="flex items-center gap-2 mb-1">
@@ -28512,6 +28572,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 bonusFilmingQuantity: ''
             });
             const [salaryResult, setSalaryResult] = useState(null);
+            // Раздельный расчёт при переводе посреди месяца: [operatorPart, chatPart] | null
+            const [salaryDualResult, setSalaryDualResult] = useState(null);
+            // Предзаполнение чат-калькулятора (по nonce — повторное открытие перезаполняет)
+            const [salaryChatPrefill, setSalaryChatPrefill] = useState(null);
+            const [salaryChatPrefillNonce, setSalaryChatPrefillNonce] = useState(0);
             const [showPointsTable, setShowPointsTable] = useState(false);
             const [passwordData, setPasswordData] = useState({
                 user_id: '',
@@ -34527,55 +34592,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return '16+';
             };
 
-            const calculateSalaryByFormula = ({
-                hoursNorm = 0,
-                totalHours = 0,
-                quality = 0,
-                callsPerHour = 0,
-                experience = '',
-                bonuses = 0,
-            } = {}) => {
-                const normalizedHoursNorm = parseFloat(hoursNorm) || 0;
-                const normalizedTotalHours = parseFloat(totalHours) || 0;
-                const normalizedQuality = parseFloat(quality) || 0;
-                const normalizedCallsPerHour = parseFloat(callsPerHour) || 0;
-                const normalizedBonuses = parseFloat(bonuses) || 0;
+            // Стаж для чат-модели — другие корзины (см. SalaryCalculatorChat)
+            const resolveChatExperienceRange = (hireDateValue) => {
+                const hireDate = parseSalaryHireDate(hireDateValue);
+                if (!hireDate) return '';
 
-                let points = 0;
+                const now = new Date();
+                let months = (now.getFullYear() - hireDate.getFullYear()) * 12 + (now.getMonth() - hireDate.getMonth());
+                if (now.getDate() < hireDate.getDate()) months -= 1;
+                months = Math.max(0, months);
 
-                if (experience === '16+') points += 50;
-                else if (experience === '10-15') points += 35;
-                else if (experience === '4-9') points += 25;
-                else if (experience === '0-3') points += 15;
-
-                if (normalizedQuality >= 99 && normalizedQuality <= 100) points += 50;
-                else if (normalizedQuality >= 95 && normalizedQuality < 99) points += 30;
-                else if (normalizedQuality >= 90 && normalizedQuality < 95) points += 25;
-                else if (normalizedQuality >= 85 && normalizedQuality < 90) points += 20;
-
-                if (normalizedCallsPerHour >= 20) points += 50;
-                else if (normalizedCallsPerHour >= 15) points += 30;
-                else if (normalizedCallsPerHour >= 10) points += 25;
-                else if (normalizedCallsPerHour >= 5) points += 20;
-
-                const hoursPercentage = normalizedHoursNorm > 0 ? (normalizedTotalHours / normalizedHoursNorm) * 100 : 0;
-                const premiumCoefficient = hoursPercentage >= 90 ? 1 : 0.75;
-                const baseSalary = 700 * normalizedTotalHours;
-                const premiumPart = baseSalary * (points / 100) * premiumCoefficient;
-                const finalSalary = baseSalary + premiumPart + normalizedBonuses;
-
-                return {
-                    points,
-                    premiumCoefficient,
-                    hoursNorm: normalizedHoursNorm,
-                    hoursWorked: normalizedTotalHours,
-                    hoursPercentage,
-                    baseSalary,
-                    premiumPart,
-                    bonuses: normalizedBonuses,
-                    finalSalary,
-                };
+                if (months <= 2) return '0-2';
+                if (months <= 5) return '3-5';
+                if (months <= 9) return '6-9';
+                if (months <= 12) return '10-12';
+                if (months <= 17) return '13-17';
+                return '18+';
             };
+
+            // Формула вынесена в utils/salaryFormula (та же логика 1:1, переиспользуется для раздельного расчёта при переводе)
+            const calculateSalaryByFormula = calculateOperatorSalary;
 
             const calculateSalary = () => {
                 const hoursNorm = parseFloat(salaryData.hoursNorm) || 0;
@@ -34604,7 +34640,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     experience,
                     bonuses,
                 }));
-                
+                setSalaryDualResult(null);
+
                 // Сбрасываем таблицу очков
                 setShowPointsTable(false);
             };
@@ -40637,6 +40674,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const salaryQuality = salaryEvaluations.length > 0
                                                 ? salaryEvaluations.reduce((sum, ev) => sum + safeNum(ev?.score), 0) / salaryEvaluations.length
                                                 : 0;
+                                            // Стаж и метрики для чат-модели (оценка/время ответа — из chat_metrics за месяц)
+                                            const salaryChatExperience = resolveChatExperienceRange(
+                                                profileData?.hire_date ||
+                                                user?.hire_date ||
+                                                user?.hireDate ||
+                                                operatorUserRowForSalary?.hire_date ||
+                                                operatorUserRowForSalary?.hireDate
+                                            );
+                                            const chatAvgScore = safeNum(op.aggregates?.chat_avg_score);
+                                            const chatRespMinutes = safeNum(op.aggregates?.chat_avg_response_time_seconds) / 60;
                                             const estimatedSalary = calculateSalaryByFormula({
                                                 hoursNorm: norm,
                                                 totalHours: regular,
@@ -40658,8 +40705,108 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 salaryEvaluations.length === 0 ? 'качество' : null,
                                                 safeNum(norm) <= 0 ? 'норма' : null,
                                             ].filter(Boolean);
+
+                                            // Раздельный расчёт ЗП при переводе посреди месяца (≥2 разных моделей по сегментам).
+                                            // Часы части = база (work_time её дней) + доля общих часов (тренинг/тех/офлайн) по доле базы;
+                                            // норма — пропорционально дням сегмента; метрики/баллы — по модели сегмента. Итог = сумма частей.
+                                            const dualSalaryResults = (() => {
+                                                const segs = Array.isArray(op.group_segments) ? op.group_segments : [];
+                                                const parts = segs.map((s) => ({
+                                                    model: String(s.calculation_model_code || '').trim() === 'chat_manager' ? 'chat' : 'call',
+                                                    startDay: Number(s.start_day),
+                                                    endDay: Number(s.end_day),
+                                                    name: s.direction_name || s.group_name,
+                                                })).filter((p) => Number.isFinite(p.startDay) && Number.isFinite(p.endDay) && p.endDay >= p.startDay);
+                                                const distinctModels = new Set(parts.map((p) => p.model));
+                                                if (parts.length < 2 || distinctModels.size < 2) return null;
+
+                                                const dailyMap = (op && typeof op.daily === 'object' && !Array.isArray(op.daily)) ? op.daily : {};
+                                                const chatByDay = (op && typeof op.chat_metrics_by_day === 'object' && !Array.isArray(op.chat_metrics_by_day)) ? op.chat_metrics_by_day : {};
+                                                const totalDays = parts.reduce((a, p) => a + (p.endDay - p.startDay + 1), 0);
+                                                const commonExtraHours = safeNum(trainingHours) + safeNum(technicalIssueHours) + safeNum(offlineActivityHours);
+                                                const monthNorm = safeNum(norm);
+
+                                                const aggregated = parts.map((p) => {
+                                                    let baseHours = 0, interactions = 0, scoreSum = 0, scoreN = 0, respSum = 0, respN = 0, partBonuses = 0, workedDays = 0;
+                                                    for (let day = p.startDay; day <= p.endDay; day++) {
+                                                        const d = dailyMap[String(day)];
+                                                        if (d) {
+                                                            const wt = safeNum(d.work_time);
+                                                            baseHours += wt;
+                                                            if (wt > 0) workedDays += 1; // норму делим по ОТРАБОТАННЫМ дням, не календарным
+                                                            interactions += safeNum(d.calls);
+                                                            if (Array.isArray(d.bonuses)) for (const b of d.bonuses) partBonuses += safeNum(b?.amount);
+                                                        }
+                                                        const cm = chatByDay[String(day)] || (d && d.chat_metrics) || null;
+                                                        if (cm) {
+                                                            const sc = safeNum(cm.avg_score);
+                                                            if (sc > 0) { scoreSum += sc; scoreN += 1; }
+                                                            const rt = safeNum(cm.avg_response_time_seconds);
+                                                            if (rt > 0) { respSum += rt; respN += 1; }
+                                                            if (safeNum(cm.chats_count) > 0 && !(d && safeNum(d.calls) > 0)) interactions += safeNum(cm.chats_count);
+                                                        }
+                                                    }
+                                                    return {
+                                                        ...p,
+                                                        dayCount: p.endDay - p.startDay + 1,
+                                                        workedDays,
+                                                        baseHours, interactions, partBonuses,
+                                                        avgScore: scoreN ? scoreSum / scoreN : 0,
+                                                        respMinutes: respN ? (respSum / respN) / 60 : 0,
+                                                    };
+                                                });
+
+                                                const totalBase = aggregated.reduce((a, p) => a + p.baseHours, 0);
+                                                const totalWorked = aggregated.reduce((a, p) => a + p.workedDays, 0);
+                                                return aggregated.map((p) => {
+                                                    // Распределяем общие часы (тренинг/тех/офлайн) по доле базы, иначе по отработанным/календарным дням
+                                                    const extraShare = totalBase > 0
+                                                        ? (p.baseHours / totalBase)
+                                                        : (totalWorked > 0 ? (p.workedDays / totalWorked) : (totalDays > 0 ? (p.dayCount / totalDays) : 0));
+                                                    const partHours = p.baseHours + commonExtraHours * extraShare;
+                                                    // Норма ПО ОТДЕЛЬНОСТИ: пропорционально отработанным дням (та же база, что и часы) —
+                                                    // иначе календарные дни-выходные занижали бы % и срезали премию 1.0→0.75
+                                                    const partNorm = totalWorked > 0 ? monthNorm * (p.workedDays / totalWorked) : 0;
+                                                    const perHour = p.baseHours > 0 ? (p.interactions / p.baseHours) : 0;
+                                                    const common = {
+                                                        hoursNorm: partNorm,
+                                                        totalHours: partHours,
+                                                        experience: p.model === 'chat' ? salaryChatExperience : salaryExperience,
+                                                        quality: salaryQuality,
+                                                        bonuses: p.partBonuses,
+                                                    };
+                                                    const res = p.model === 'chat'
+                                                        ? calculateChatSalary({ ...common, avgScore: p.avgScore, responseTime: p.respMinutes, chatsPerHour: perHour })
+                                                        : calculateOperatorSalary({ ...common, callsPerHour: perHour });
+                                                    return {
+                                                        ...res,
+                                                        partLabel: `${p.model === 'chat' ? 'Чат' : 'Оператор'} · дни ${p.startDay}–${p.endDay}`,
+                                                        directionName: p.name,
+                                                    };
+                                                });
+                                            })();
+
                                             const openSalaryCalculatorWithHours = () => {
+                                                if (dualSalaryResults && dualSalaryResults.length >= 2) {
+                                                    setSalaryDualResult(dualSalaryResults);
+                                                    setShowPointsTable(false);
+                                                    setCalculatorType('call');
+                                                    navigateToView('salary');
+                                                    return;
+                                                }
                                                 if (isChatModel) {
+                                                    // Предзаполняем чат-калькулятор метриками месяца (оценка/время ответа/чаты в час)
+                                                    setSalaryChatPrefill({
+                                                        experience: salaryChatExperience,
+                                                        quality: salaryEvaluations.length > 0 ? salaryQuality.toFixed(2) : '',
+                                                        avgScore: chatAvgScore > 0 ? chatAvgScore.toFixed(2) : '',
+                                                        responseTime: chatRespMinutes > 0 ? chatRespMinutes.toFixed(2) : '',
+                                                        chatsPerHour: safeNum(callsPerHour).toFixed(2),
+                                                        hoursNorm: safeNum(norm).toFixed(2),
+                                                        totalHours: safeNum(regular).toFixed(2),
+                                                    });
+                                                    setSalaryChatPrefillNonce((n) => n + 1);
+                                                    setSalaryDualResult(null);
                                                     setCalculatorType('chat');
                                                     navigateToView('salary');
                                                     return;
@@ -40678,6 +40825,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 };
                                                 setSalaryData(nextSalaryData);
                                                 setSalaryResult(estimatedSalary);
+                                                setSalaryDualResult(null);
                                                 setShowPointsTable(false);
                                                 setCalculatorType('call');
                                                 navigateToView('salary');
@@ -41759,6 +41907,42 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <FaIcon className="fas fa-calculator text-blue-600"></FaIcon>
                                                     <span className="text-blue-600">Калькулятор зарплаты</span>
                                                 </h2>
+                                                {salaryDualResult && salaryDualResult.length >= 2 && (
+                                                    <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50/60 p-4 sm:p-5">
+                                                        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-2">
+                                                            <div className="flex items-center gap-2 text-amber-800">
+                                                                <FaIcon className="fas fa-right-left" />
+                                                                <span className="font-semibold">Перевод посреди месяца — расчёт по обеим частям</span>
+                                                            </div>
+                                                            <button
+                                                                onClick={() => setSalaryDualResult(null)}
+                                                                className="text-sm text-amber-700 hover:text-amber-900 underline self-start"
+                                                            >
+                                                                Скрыть
+                                                            </button>
+                                                        </div>
+                                                        <p className="text-xs text-amber-700 mb-4">
+                                                            Часы — по своему периоду, норма — пропорционально дням, метрики и баллы — по модели каждого направления. Итог — сумма частей.
+                                                        </p>
+                                                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                                            {salaryDualResult.map((part, i) => (
+                                                                <div key={i}>
+                                                                    {part.directionName && (
+                                                                        <div className="text-sm font-medium text-gray-700 mb-1">{part.directionName}</div>
+                                                                    )}
+                                                                    <SalaryCalculationResult salaryResult={part} label={part.partLabel} />
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                        <div className="mt-4 rounded-lg border-l-4 border-l-green-500 bg-white p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                                                            <div className="text-sm text-gray-600">Итого за месяц (обе части)</div>
+                                                            <div className="text-xl sm:text-2xl font-bold text-green-600">
+                                                                {salaryDualResult.reduce((a, p) => a + Number(p.finalSalary || 0), 0)
+                                                                    .toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ТГ
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                )}
                                                 <div className="grid grid-cols-3 gap-2 mb-4 sm:flex sm:flex-wrap">
                                                     <button
                                                         className={`w-full sm:w-auto px-3 sm:px-4 py-2 rounded text-sm font-medium ${calculatorType === 'call' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
@@ -42002,7 +42186,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </>
                                                 ) : calculatorType === 'chat' ?(
                                                     <Suspense fallback={null}>
-                                                        <SalaryCalculatorChat />
+                                                        <SalaryCalculatorChat prefill={salaryChatPrefill} prefillNonce={salaryChatPrefillNonce} />
                                                     </Suspense>
                                                 ):(
                                                     <div className="grid grid-cols-1 gap-4 sm:gap-6">
