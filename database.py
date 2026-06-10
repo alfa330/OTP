@@ -11027,16 +11027,21 @@ class Database:
             
             # 6. Оптимизированное обновление direction_id в users
             cursor.execute("""
-                -- Обновляем direction_id на последнюю активную версию с тем же именем
+                -- Обновляем direction_id на последнюю активную версию в том же отделе
                 UPDATE users u
                 SET direction_id = latest.id
                 FROM directions current
                 JOIN (
-                    SELECT name, id,
-                        ROW_NUMBER() OVER (PARTITION BY name ORDER BY version DESC) as rn
+                    SELECT name, department_id, id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY name, department_id
+                            ORDER BY version DESC
+                        ) as rn
                     FROM directions
                     WHERE is_active = TRUE
-                ) latest ON current.name = latest.name AND latest.rn = 1
+                ) latest ON current.name = latest.name
+                    AND current.department_id IS NOT DISTINCT FROM latest.department_id
+                    AND latest.rn = 1
                 WHERE u.direction_id = current.id AND current.is_active = FALSE;
                 
                 -- Обнуляем direction_id где нет активных направлений
