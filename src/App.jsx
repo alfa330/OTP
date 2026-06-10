@@ -2423,13 +2423,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 comment: b?.comment || ''
                 };
             }) : [],
-            // Чат-метрики дня (для чат-модели): оценка (avg_score) здесь НЕ редактируется
+            // Чат-метрики дня (для чат-модели): чаты/время ответа/переводы/средняя оценка (от водителей)
             chat_metrics: (dayData.chat_metrics && typeof dayData.chat_metrics === 'object') ? {
                 chats_count: Number(dayData.chat_metrics.chats_count || 0),
                 avg_response_time_seconds: (dayData.chat_metrics.avg_response_time_seconds === null || dayData.chat_metrics.avg_response_time_seconds === undefined)
                     ? '' : Number(dayData.chat_metrics.avg_response_time_seconds),
                 transfer_chat_count: Number(dayData.chat_metrics.transfer_chat_count || 0),
-            } : { chats_count: 0, avg_response_time_seconds: '', transfer_chat_count: 0 },
+                avg_score: (dayData.chat_metrics.avg_score === null || dayData.chat_metrics.avg_score === undefined)
+                    ? '' : Number(dayData.chat_metrics.avg_score),
+            } : { chats_count: 0, avg_response_time_seconds: '', transfer_chat_count: 0, avg_score: '' },
             month
             });
         }
@@ -2455,8 +2457,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         function updateChatMetricField(field, value) {
             setCellModel(prev => {
             if (!prev) return prev;
-            const cm = { ...(prev.chat_metrics || { chats_count: 0, avg_response_time_seconds: '', transfer_chat_count: 0 }) };
-            if (field === 'avg_response_time_seconds') cm[field] = value === '' ? '' : Number(value);
+            const cm = { ...(prev.chat_metrics || { chats_count: 0, avg_response_time_seconds: '', transfer_chat_count: 0, avg_score: '' }) };
+            if (field === 'avg_response_time_seconds' || field === 'avg_score') cm[field] = value === '' ? '' : Number(value);
             else cm[field] = value === '' ? '' : (parseInt(value, 10) || 0);
             return { ...prev, chat_metrics: cm };
             });
@@ -2655,14 +2657,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     comment: String(b?.comment || '').trim() || null
                 };
                 }).filter((b) => Boolean(b.type)) : [],
-                // Чат-метрики (для чат-модели): оценка (avg_score) НЕ отправляется — управляется отдельно.
-                // chats_count зеркалит поле «Чаты» (calls), чтобы метрики и daily были согласованы.
+                // Чат-метрики (для чат-модели). chats_count зеркалит поле «Чаты» (calls), чтобы метрики и daily были согласованы.
+                // Пустые avg_score/время ответа -> null: на бэке preserve_missing сохраняет прежнее (импорт не затирается).
                 ...(isChatModel ? {
                     chat_metrics: {
                         chats_count: parseInt(cellModel.calls, 10) || 0,
                         avg_response_time_seconds: (cellModel.chat_metrics?.avg_response_time_seconds === '' || cellModel.chat_metrics?.avg_response_time_seconds == null)
                             ? null : Number(cellModel.chat_metrics.avg_response_time_seconds),
                         transfer_chat_count: Number(cellModel.chat_metrics?.transfer_chat_count) || 0,
+                        avg_score: (cellModel.chat_metrics?.avg_score === '' || cellModel.chat_metrics?.avg_score == null)
+                            ? null : Number(cellModel.chat_metrics.avg_score),
                     }
                 } : {}),
                 month: cellModel.month
@@ -4715,6 +4719,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             min="0"
                             value={cellModel.chat_metrics?.transfer_chat_count ?? ''}
                             onChange={e => updateChatMetricField('transfer_chat_count', e.target.value)}
+                        />
+                        </label>
+                        )}
+
+                        {isChatModel && (
+                        <label className="flex flex-col text-xs text-gray-700">
+                        <span className="flex items-center gap-2 mb-1">
+                            <FaIcon className="fas fa-star" aria-hidden="true" /> Средняя оценка (1–5)
+                        </span>
+                        <input
+                            className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            max="5"
+                            value={cellModel.chat_metrics?.avg_score ?? ''}
+                            onChange={e => updateChatMetricField('avg_score', e.target.value)}
                         />
                         </label>
                         )}

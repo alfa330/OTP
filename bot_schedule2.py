@@ -6238,8 +6238,8 @@ def upload_group_day():
                                                     fines=fines_arr,
                                                     bonuses=bonuses_arr)
 
-                    # Ручной ввод чат-метрик (если переданы). Оценка (avg_score) управляется
-                    # ОТДЕЛЬНО (импорт) — здесь её не трогаем (preserve_missing=True).
+                    # Ручной ввод чат-метрик (если переданы): чаты/время ответа/переводы/средняя оценка.
+                    # preserve_missing=True: пустые значения НЕ затирают импортированные (COALESCE).
                     chat_metrics_obj = row.get('chat_metrics')
                     if isinstance(chat_metrics_obj, dict):
                         def _cm_int(raw, default=None):
@@ -6271,7 +6271,7 @@ def upload_group_day():
                                 'chats_count': metrics_chats,
                                 'avg_response_time_seconds': _cm_float(chat_metrics_obj.get('avg_response_time_seconds')),
                                 'transfer_chat_count': _cm_int(chat_metrics_obj.get('transfer_chat_count'), default=0),
-                                'avg_score': None,
+                                'avg_score': _cm_float(chat_metrics_obj.get('avg_score')),
                             }], imported_by=requester_id, preserve_missing=True)
                         except Exception as _cm_err:
                             logging.warning("upload_group_day: failed to save chat metrics for op %s: %s", resolved_operator_id, _cm_err)
