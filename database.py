@@ -19986,6 +19986,165 @@ class Database:
             "chat_transfer_count": int(chat_transfer_count or 0)
         }
 
+    def _aggregate_segment_from_daily_tx(self, cursor, operator_id, month, start_day, end_day,
+                                         group_id, calculation_model_code):
+        """
+        READ-ONLY. Месячные агрегаты ОДНОГО оператора за ОДИН сегмент группы
+        (диапазон дней внутри месяца, отфильтрованный по group_id). Формулы 1:1 с
+        _aggregate_month_from_daily_tx, но БЕЗ INSERT в work_hours и с фильтром по
+        group_id + диапазону дней. Основа для group-aware ридеров и снимков:
+        раздельные per-group итоги при переводе оператора посреди месяца.
+
+        start_day/end_day — день месяца (клиппнутые к границам месяца).
+        group_id — группа сегмента (None = без фильтра по группе).
+        calculation_model_code — модель ГРУППЫ сегмента (передаётся, не резолвится).
+        """
+        operator_id = int(operator_id)
+        year, mon = map(int, str(month).split('-'))
+        last_day = calendar.monthrange(year, mon)[1]
+        sd = max(1, int(start_day))
+        ed = min(last_day, int(end_day))
+        seg_start = date(year, mon, sd)
+        seg_end = date(year, mon, ed)
+        gid = int(group_id) if group_id is not None else None
+
+        cursor.execute("""
+            SELECT
+                COALESCE(SUM(work_time),0),
+                COALESCE(SUM(training_time),0),
+                COALESCE(SUM(break_time),0),
+                COALESCE(SUM(talk_time),0),
+                COALESCE(SUM(calls),0),
+                COALESCE(SUM(efficiency),0),
+                COALESCE(SUM(no_phone_seconds),0)
+            FROM daily_hours
+            WHERE operator_id = %s AND day >= %s AND day <= %s
+              AND (%s IS NULL OR group_id = %s)
+        """, (operator_id, seg_start, seg_end, gid, gid))
+        row = cursor.fetchone()
+        total_work_time, total_training_time, total_break_time, total_talk_time, total_calls, total_efficiency_hours, total_no_phone_seconds = row
+
+        chat_avg_score = None
+        chat_avg_response_time_seconds = None
+        chat_transfer_count = 0
+        if calculation_model_code == CALCULATION_MODEL_CHAT_MANAGER:
+            cursor.execute("""
+                SELECT
+                    COALESCE(SUM(chats_count), 0),
+                    AVG(avg_score) FILTER (WHERE avg_score IS NOT NULL),
+                    AVG(avg_response_time_seconds) FILTER (WHERE avg_response_time_seconds IS NOT NULL),
+                    COALESCE(SUM(transfer_chat_count), 0)
+                FROM chat_manager_daily_metrics
+                WHERE operator_id = %s AND day >= %s AND day <= %s
+            """, (operator_id, seg_start, seg_end))
+            chat_row = cursor.fetchone() or (0, None, None, 0)
+            total_calls = int(chat_row[0] or 0)
+            chat_avg_score = float(chat_row[1]) if chat_row[1] is not None else None
+            chat_avg_response_time_seconds = float(chat_row[2]) if chat_row[2] is not None else None
+            chat_transfer_count = int(chat_row[3] or 0)
+
+        cursor.execute("""
+            SELECT COALESCE(SUM(df.amount), 0)
+            FROM daily_fines df
+            JOIN daily_hours dh ON df.daily_hours_id = dh.id
+            WHERE dh.operator_id = %s AND dh.day >= %s AND dh.day <= %s
+              AND (%s IS NULL OR dh.group_id = %s)
+        """, (operator_id, seg_start, seg_end, gid, gid))
+        total_fines = cursor.fetchone()[0] or 0.0
+
+        cursor.execute("""
+            SELECT COALESCE(SUM(
+                CASE
+                    WHEN oa.end_time <= oa.start_time
+                        THEN EXTRACT(EPOCH FROM (oa.end_time + INTERVAL '24 hours' - oa.start_time))
+                    ELSE EXTRACT(EPOCH FROM (oa.end_time - oa.start_time))
+                END
+            ) / 3600.0, 0)
+            FROM operator_offline_activities oa
+            WHERE oa.operator_id = %s AND oa.activity_date >= %s AND oa.activity_date <= %s
+        """, (operator_id, seg_start, seg_end))
+        total_offline_hours = float(cursor.fetchone()[0] or 0.0)
+
+        cursor.execute("""
+            SELECT COALESCE(SUM(
+                CASE
+                    WHEN ws.end_time <= ws.start_time
+                        THEN EXTRACT(EPOCH FROM (ws.end_time + INTERVAL '24 hours' - ws.start_time))
+                    ELSE EXTRACT(EPOCH FROM (ws.end_time - ws.start_time))
+                END
+            ) / 3600.0, 0)
+            FROM work_shifts ws
+            WHERE ws.operator_id = %s
+              AND COALESCE(ws.shift_type, 'regular') = 'office_practice'
+              AND ws.shift_date >= %s AND ws.shift_date <= %s
+        """, (operator_id, seg_start, seg_end))
+        total_offline_hours += float(cursor.fetchone()[0] or 0.0)
+
+        effective_hours_for_calls = max(0.0, float(total_work_time or 0.0))
+        calls_per_hour = (float(total_calls) / effective_hours_for_calls) if effective_hours_for_calls > 0 else 0.0
+
+        return {
+            "group_id": gid,
+            "calculation_model_code": calculation_model_code,
+            "start_day": sd,
+            "end_day": ed,
+            "regular_hours": float(total_work_time or 0.0),
+            "training_hours": float(total_training_time or 0.0),
+            "total_break_time": float(total_break_time or 0.0),
+            "total_talk_time": float(total_talk_time or 0.0),
+            "total_calls": int(total_calls or 0),
+            "total_efficiency_hours": float(total_efficiency_hours or 0.0),
+            "calls_per_hour": float(calls_per_hour or 0.0),
+            "fines": float(total_fines or 0.0),
+            "offline_activity_hours": float(total_offline_hours or 0.0),
+            "no_phone_hours": float(total_no_phone_seconds or 0.0) / 3600.0,
+            "chat_avg_score": chat_avg_score,
+            "chat_avg_response_time_seconds": chat_avg_response_time_seconds,
+            "chat_transfer_count": int(chat_transfer_count or 0),
+        }
+
+    def _get_operator_month_segments_tx(self, cursor, operator_id, month):
+        """Сегменты членства оператора за месяц (клиппнутые к месяцу) + per-segment агрегаты
+        через _aggregate_segment_from_daily_tx. [] если оператор за месяц не был ни в одной
+        группе (тогда вызывающий использует общий месячный итог из work_hours).
+        Используется ридерами для раздельных данных при переводе посреди месяца."""
+        operator_id = int(operator_id)
+        year, mon = map(int, str(month).split('-'))
+        last_day = calendar.monthrange(year, mon)[1]
+        start = date(year, mon, 1)
+        end = date(year, mon, last_day)
+        cursor.execute("""
+            SELECT gom.group_id, gr.name, gr.direction_id, d.name, gr.calculation_model_code,
+                   gom.start_date, gom.end_date
+            FROM group_operator_memberships gom
+            JOIN groups gr ON gr.id = gom.group_id
+            LEFT JOIN directions d ON d.id = gr.direction_id
+            WHERE gom.operator_id = %s AND gom.start_date <= %s
+              AND (gom.end_date IS NULL OR gom.end_date >= %s)
+            ORDER BY gom.start_date
+        """, (operator_id, end, start))
+        segments = []
+        for g_id, g_name, dir_id, dir_name, model_code, seg_start, seg_end in cursor.fetchall() or []:
+            clipped_start = seg_start if (seg_start and seg_start > start) else start
+            clipped_end = seg_end if (seg_end and seg_end < end) else end
+            model = normalize_calculation_model_code(model_code, dir_name)
+            aggr = self._aggregate_segment_from_daily_tx(
+                cursor, operator_id, month,
+                int(clipped_start.day), int(clipped_end.day), int(g_id), model
+            )
+            segments.append({
+                "group_id": int(g_id),
+                "group_name": g_name,
+                "direction_id": dir_id,
+                "direction_name": dir_name,
+                "calculation_model_code": model,
+                "start_day": int(clipped_start.day),
+                "end_day": int(clipped_end.day),
+                "is_current": seg_end is None,
+                "aggregates": aggr,
+            })
+        return segments
+
     def _recalculate_auto_daily_hours_tx(self, cursor, operator_ids, start_date, end_date):
         op_ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
         if not op_ids:
