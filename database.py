@@ -10284,7 +10284,10 @@ class Database:
                     + """
                     FROM group_operator_memberships gom
                     JOIN groups g ON g.id = gom.group_id
-                    JOIN users u ON u.id = gom.operator_id AND u.role = 'operator'
+                    -- Историческая видимость: состав месяца определяется ЧЛЕНСТВОМ в группе,
+                    -- а не текущей ролью. Иначе оператор, ставший СВ/уволенный, пропадает из
+                    -- прошлых месяцев. Роль/статус на конец месяца резолвятся отдельно (status_as_of).
+                    JOIN users u ON u.id = gom.operator_id
                     LEFT JOIN work_hours w ON w.operator_id = u.id AND w.month = %s
                     LEFT JOIN directions d ON u.direction_id = d.id
                     WHERE gom.group_id = %s
@@ -10638,9 +10641,18 @@ class Database:
                 LEFT JOIN work_hours w
                 ON w.operator_id = u.id AND w.month = %s
                 LEFT JOIN directions d ON u.direction_id = d.id
-                WHERE u.role = 'operator'
+                -- Историческая видимость: берём не только текущих операторов, но и всех,
+                -- кто был оператором В ЭТОМ МЕСЯЦЕ (есть daily_hours или членство в группе),
+                -- даже если сейчас стал СВ/уволен. Иначе прошлый отчёт «теряет» людей.
+                WHERE (
+                    u.role = 'operator'
+                    OR EXISTS (SELECT 1 FROM daily_hours dh WHERE dh.operator_id = u.id AND dh.day >= %s AND dh.day <= %s)
+                    OR EXISTS (SELECT 1 FROM group_operator_memberships gom
+                               WHERE gom.operator_id = u.id AND gom.start_date <= %s
+                                 AND (gom.end_date IS NULL OR gom.end_date >= %s))
+                )
                 ORDER BY u.name
-            """, (month, month))
+            """, (month, month, start, end, end, start))
             operator_rows = cursor.fetchall()
 
             if not operator_rows:
