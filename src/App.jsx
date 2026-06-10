@@ -34524,6 +34524,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     evaluation.sv_request_at ? `Создан: ${formatDate(evaluation.sv_request_at)}` : null,
                     evaluation.sv_request_comment ? `Комментарий: ${evaluation.sv_request_comment}` : null,
                     evaluation.sv_request_approved_by_name ? `Одобрил: ${evaluation.sv_request_approved_by_name}` : null,
+                    (evaluation.sv_request_approved && evaluation.sv_request_approve_comment) ? `Комментарий: ${evaluation.sv_request_approve_comment}` : null,
                     evaluation.sv_request_rejected_by_name ? `Отклонил: ${evaluation.sv_request_rejected_by_name}` : null,
                     evaluation.sv_request_reject_comment ? `Причина: ${evaluation.sv_request_reject_comment}` : null
                 ].filter(Boolean);
@@ -41581,6 +41582,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                     {ev.sv_request_comment}
                                                                                 </div>
                                                                             )}
+                                                                            {ev.sv_request_approved && ev.sv_request_approve_comment && (
+                                                                                <div className="text-sm text-green-700 whitespace-pre-wrap">
+                                                                                    Комментарий при одобрении: {ev.sv_request_approve_comment}
+                                                                                </div>
+                                                                            )}
                                                                             {ev.sv_request_reject_comment && (
                                                                                 <div className="text-sm text-red-700 whitespace-pre-wrap">
                                                                                     Причина отклонения: {ev.sv_request_reject_comment}
@@ -41788,6 +41794,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         {ev.sv_request_comment && (
                                                                             <div className="text-sm text-gray-700 mb-1 whitespace-pre-wrap">
                                                                                 {ev.sv_request_comment}
+                                                                            </div>
+                                                                        )}
+                                                                        {ev.sv_request_approved && ev.sv_request_approve_comment && (
+                                                                            <div className="text-sm text-green-700 whitespace-pre-wrap">
+                                                                                Комментарий при одобрении: {ev.sv_request_approve_comment}
                                                                             </div>
                                                                         )}
                                                                         {ev.sv_request_reject_comment && (

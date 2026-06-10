@@ -9248,6 +9248,7 @@ def _create_reevaluation_request(call_id, requester, requester_id, comment):
                 sv_request_approved = FALSE,
                 sv_request_approved_by = NULL,
                 sv_request_approved_at = NULL,
+                sv_request_approve_comment = NULL,
                 sv_request_rejected = FALSE,
                 sv_request_rejected_by = NULL,
                 sv_request_rejected_at = NULL,
@@ -9289,18 +9290,20 @@ def _resolve_reevaluation_request(call_id, approver_user_id, decision, comment=N
                 SET sv_request_approved = TRUE,
                     sv_request_approved_by = %s,
                     sv_request_approved_at = %s,
+                    sv_request_approve_comment = %s,
                     sv_request_rejected = FALSE,
                     sv_request_rejected_by = NULL,
                     sv_request_rejected_at = NULL,
                     sv_request_reject_comment = NULL
                 WHERE id = %s
-            """, (approver_user_id, datetime.utcnow(), call_id))
+            """, (approver_user_id, datetime.utcnow(), decision_comment, call_id))
         else:
             cursor.execute("""
                 UPDATE calls
                 SET sv_request_approved = FALSE,
                     sv_request_approved_by = NULL,
                     sv_request_approved_at = NULL,
+                    sv_request_approve_comment = NULL,
                     sv_request_rejected = TRUE,
                     sv_request_rejected_by = %s,
                     sv_request_rejected_at = %s,
@@ -9320,8 +9323,10 @@ def _resolve_reevaluation_request(call_id, approver_user_id, decision, comment=N
                 requester_message = (
                     "✅ <b>Ваш запрос на переоценку одобрен</b>\n\n"
                     f"👤 <b>Решение принял:</b> {_escape_telegram_html(approver_name, 120)}\n"
-                    "🔔 <b>Что дальше:</b> супервайзер уже получил уведомление и сможет перейти к переоценке звонка."
                 )
+                if decision_comment:
+                    requester_message += f"💬 <b>Комментарий:</b> {_escape_telegram_html(decision_comment, 700)}\n"
+                requester_message += "🔔 <b>Что дальше:</b> супервайзер уже получил уведомление и сможет перейти к переоценке звонка."
             else:
                 performer_name = (
                     resolved_ctx.get('supervisor_name') if requester_role == 'operator' else resolved_ctx.get('requester_name')
@@ -9332,6 +9337,8 @@ def _resolve_reevaluation_request(call_id, approver_user_id, decision, comment=N
                     f"👤 <b>Одобрил:</b> {_escape_telegram_html(approver_name, 120)}\n"
                     f"📝 <b>Переоценит:</b> {_escape_telegram_html(performer_name, 120)}"
                 )
+                if decision_comment:
+                    requester_message += f"\n💬 <b>Комментарий:</b> {_escape_telegram_html(decision_comment, 700)}"
         else:
             if requester_role == 'operator':
                 requester_message = (
@@ -9407,6 +9414,11 @@ def _resolve_reevaluation_request(call_id, approver_user_id, decision, comment=N
             supervisor_message += (
                 f"\n💬 <b>Комментарий к запросу:</b> "
                 f"{_escape_telegram_html(resolved_ctx.get('sv_request_comment'), 700)}"
+            )
+        if decision_comment:
+            supervisor_message += (
+                f"\n💬 <b>Комментарий администратора:</b> "
+                f"{_escape_telegram_html(decision_comment, 700)}"
             )
         supervisor_message += (
             "\n\n👉 <b>Что дальше:</b> откройте журнал оценок, найдите этот звонок и выполните переоценку."
@@ -19054,6 +19066,11 @@ class operator_edit(StatesGroup):
     edit_password = State()
     change_sv = State()
 
+class ReevalDecision(StatesGroup):
+    # Админ нажал «Одобрить ✅»/«Отклонить ❌» и теперь вводит необязательный
+    # комментарий к своему решению по запросу на переоценку.
+    waiting_comment = State()
+
 MAX_LOGIN_ATTEMPTS = 3
 
 def get_access_keyboard():
@@ -20249,15 +20266,103 @@ async def _is_admin_user(tg_id):
         return False
 
 
-async def _resolve_call_reevaluation_request_for_telegram(call_id, approver_tg_id, decision):
+async def _resolve_call_reevaluation_request_for_telegram(call_id, approver_tg_id, decision, comment=None):
     loop = asyncio.get_event_loop()
 
     def _resolve():
         approver = db.get_user(telegram_id=approver_tg_id)
         approver_user_id = approver[0] if approver else None
-        return _resolve_reevaluation_request(call_id, approver_user_id, decision)
+        return _resolve_reevaluation_request(call_id, approver_user_id, decision, comment=comment)
 
     return await loop.run_in_executor(None, _resolve)
+
+
+async def _get_call_reevaluation_status_for_telegram(call_id):
+    """Вернуть текущий статус запроса на переоценку для проверки перед вводом комментария."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _get_call_reevaluation_context, call_id)
+
+
+async def _prompt_reevaluation_decision_comment(cq, call_id, decision, state):
+    """
+    Общий первый шаг для approve/reject: проверить, что запрос ещё открыт,
+    сохранить решение в FSM и попросить администратора ввести необязательный комментарий.
+    """
+    # Проверяем, что запрос ещё не обработан (и существует).
+    try:
+        ctx = await _get_call_reevaluation_status_for_telegram(call_id)
+    except Exception as e:
+        logging.exception("Ошибка получения статуса запроса на переоценку: %s", e)
+        await cq.answer("Ошибка сервера", show_alert=True)
+        return
+    if not ctx or not ctx.get('sv_request'):
+        await cq.answer("Запрос не найден", show_alert=True)
+        return
+    if ctx.get('sv_request_approved') or ctx.get('sv_request_rejected'):
+        await cq.answer("Запрос уже обработан", show_alert=True)
+        return
+
+    await state.set_state(ReevalDecision.waiting_comment.state)
+    await state.update_data(reval_call_id=call_id, reval_decision=decision)
+
+    try:
+        await cq.answer()
+    except Exception as e:
+        logging.debug("Не удалось ответить на callback: %s", e)
+
+    # Убираем inline-кнопки исходного сообщения, чтобы не нажали повторно.
+    try:
+        if cq.message:
+            await cq.bot.edit_message_reply_markup(
+                chat_id=cq.message.chat.id, message_id=cq.message.message_id, reply_markup=None
+            )
+    except Exception as e:
+        logging.debug("Не удалось убрать reply_markup: %s", e)
+
+    decision_label = "одобрению" if decision == 'approved' else "отклонению"
+    skip_markup = InlineKeyboardMarkup().add(
+        InlineKeyboardButton("Пропустить ➡️", callback_data="reval_skip_comment")
+    )
+    try:
+        await cq.bot.send_message(
+            cq.from_user.id,
+            f"💬 Напишите комментарий к <b>{decision_label}</b> запроса на переоценку "
+            f"(Call ID {call_id}) или нажмите «Пропустить».",
+            parse_mode='HTML',
+            reply_markup=skip_markup
+        )
+    except Exception as e:
+        logging.exception("Не удалось запросить комментарий к решению: %s", e)
+        # Фолбэк: если не смогли спросить комментарий — фиксируем решение без него.
+        await state.finish()
+        await _finalize_reevaluation_decision(cq.from_user.id, call_id, decision, None, cq.bot)
+
+
+async def _finalize_reevaluation_decision(approver_tg_id, call_id, decision, comment, bot_instance):
+    """Зафиксировать решение по запросу на переоценку и уведомить администратора о результате."""
+    try:
+        await _resolve_call_reevaluation_request_for_telegram(call_id, approver_tg_id, decision, comment=comment)
+    except ValueError:
+        await bot_instance.send_message(approver_tg_id, "❗️ Запрос не найден.")
+        return
+    except RuntimeError:
+        await bot_instance.send_message(approver_tg_id, "ℹ️ Запрос уже был обработан.")
+        return
+    except Exception as e:
+        logging.exception("Ошибка при фиксации решения по переоценке: %s", e)
+        await bot_instance.send_message(approver_tg_id, "❗️ Ошибка сервера при сохранении решения.")
+        return
+
+    if decision == 'approved':
+        text = f"✅ Запрос на переоценку (Call ID {call_id}) одобрен."
+    else:
+        text = f"❌ Запрос на переоценку (Call ID {call_id}) отклонён."
+    if comment:
+        text += f"\n💬 Комментарий: {comment}"
+    try:
+        await bot_instance.send_message(approver_tg_id, text)
+    except Exception as e:
+        logging.debug("Не удалось отправить подтверждение администратору: %s", e)
 
 async def _approve_call_and_get_notify_row(call_id, approver_tg_id):
     """
@@ -20299,12 +20404,12 @@ async def _approve_call_and_get_notify_row(call_id, approver_tg_id):
 
 
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('approve_reval:'))
-async def handle_approve_reval(callback_query: types.CallbackQuery):
+async def handle_approve_reval(callback_query: types.CallbackQuery, state: FSMContext):
     """
     Обработка approve_reval:{call_id}.
-    Требования:
-      - admin (telegram id) доступен в переменной `admin`.
-      - db доступен и синхронен (используем run_in_executor).
+    Первый шаг двухшагового сценария: проверяем админа и просим необязательный
+    комментарий к одобрению (см. _prompt_reevaluation_decision_comment). Само решение
+    фиксируется после ввода комментария или нажатия «Пропустить».
     """
     cq = callback_query
     user = cq.from_user
@@ -20329,48 +20434,7 @@ async def handle_approve_reval(callback_query: types.CallbackQuery):
         await cq.answer("Только администратор может одобрять переоценку", show_alert=True)
         return
 
-    # пометим звонок как одобренный и получим данные для уведомлений
-    try:
-        notify_row = await _approve_call_and_get_notify_row(call_id, user.id)
-    except Exception as e:
-        logging.exception("Ошибка при пометке звонка: %s", e)
-        await cq.answer("Ошибка сервера при одобрении", show_alert=True)
-        return
-
-    # ответ на callback (чтобы кнопка показала результат)
-    try:
-        await cq.answer("Переоценка одобрена администратором", show_alert=False)
-    except Exception as e:
-        logging.debug("Не удалось послать answerCallbackQuery: %s", e)
-
-    # убрать inline-кнопку (если возможно)
-    try:
-        if cq.message:
-            await cq.bot.edit_message_reply_markup(chat_id=cq.message.chat.id, message_id=cq.message.message_id, reply_markup=None)
-    except Exception as e:
-        logging.debug("Не удалось удалить reply_markup: %s", e)
-
-    # уведомить супервайзера и оценивающего (если есть tg id)
-    if notify_row:
-        try:
-            sv_request_by, sv_tg, evaluator_id, eval_tg = notify_row
-            if sv_tg:
-                try:
-                    await cq.bot.send_message(int(sv_tg),
-                        f"✅ Ваша заявка на переоценку для Call ID {call_id} одобрена администратором. Можете инициировать переоценку.")
-                except Exception as e:
-                    logging.debug("Не удалось уведомить супервайзера: %s", e)
-            if eval_tg:
-                try:
-                    await cq.bot.send_message(int(eval_tg),
-                        f"ℹ️ Админ одобрил запрос на переоценку для Call ID {call_id}. Для переоценки создайте новую оценку с is_correction=true и previous_version_id={call_id}.")
-                except Exception as e:
-                    logging.debug("Не удалось уведомить оценивающего: %s", e)
-        except Exception as e:
-            logging.exception("Ошибка при отправке уведомлений после approve: %s", e)
-
-    # (опционально) логирование
-    logging.info("Call %s approved by tg_user %s", call_id, user.id)
+    await _prompt_reevaluation_decision_comment(cq, call_id, 'approved', state)
 
 
 # === Супервайзерам =============================================================================================
@@ -28910,7 +28974,7 @@ async def run_recruiting_resumes_job_async(triggered_by='scheduler'):
 
 # === Главный запуск =============================================================================================
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('reject_reval:'))
-async def handle_reject_reval(callback_query: types.CallbackQuery):
+async def handle_reject_reval(callback_query: types.CallbackQuery, state: FSMContext):
     cq = callback_query
     user = cq.from_user
     data = cq.data
@@ -28932,31 +28996,49 @@ async def handle_reject_reval(callback_query: types.CallbackQuery):
         await cq.answer("Только администратор может отклонять переоценку", show_alert=True)
         return
 
-    try:
-        await _resolve_call_reevaluation_request_for_telegram(call_id, user.id, 'rejected')
-    except ValueError:
-        await cq.answer("Запрос не найден", show_alert=True)
-        return
-    except RuntimeError:
-        await cq.answer("Запрос уже обработан", show_alert=True)
-        return
-    except Exception as e:
-        logging.exception("Ошибка при отклонении запроса на переоценку: %s", e)
-        await cq.answer("Ошибка сервера при отклонении", show_alert=True)
-        return
+    await _prompt_reevaluation_decision_comment(cq, call_id, 'rejected', state)
+
+
+@dp.callback_query_handler(lambda c: c.data == 'reval_skip_comment', state=ReevalDecision.waiting_comment)
+async def handle_reval_skip_comment(callback_query: types.CallbackQuery, state: FSMContext):
+    """Админ решил не добавлять комментарий к решению — фиксируем без него."""
+    cq = callback_query
+    fsm_data = await state.get_data()
+    call_id = fsm_data.get('reval_call_id')
+    decision = fsm_data.get('reval_decision')
+    await state.finish()
 
     try:
-        await cq.answer("Запрос на переоценку отклонён", show_alert=False)
-    except Exception as e:
-        logging.debug("Не удалось отправить answer для reject_reval: %s", e)
-
+        await cq.answer()
+    except Exception:
+        pass
     try:
         if cq.message:
-            await cq.bot.edit_message_reply_markup(chat_id=cq.message.chat.id, message_id=cq.message.message_id, reply_markup=None)
+            await cq.bot.edit_message_reply_markup(
+                chat_id=cq.message.chat.id, message_id=cq.message.message_id, reply_markup=None
+            )
     except Exception as e:
-        logging.debug("Не удалось убрать reply_markup для reject_reval: %s", e)
+        logging.debug("Не удалось убрать reply_markup у запроса комментария: %s", e)
 
-    logging.info("Call %s rejected by tg_user %s", call_id, user.id)
+    if not call_id or not decision:
+        return
+    await _finalize_reevaluation_decision(cq.from_user.id, int(call_id), decision, None, cq.bot)
+    logging.info("Call %s %s by tg_user %s (no comment)", call_id, decision, cq.from_user.id)
+
+
+@dp.message_handler(state=ReevalDecision.waiting_comment, content_types=types.ContentTypes.TEXT)
+async def handle_reval_decision_comment(message: types.Message, state: FSMContext):
+    """Админ ввёл комментарий к решению по запросу на переоценку — фиксируем с комментарием."""
+    fsm_data = await state.get_data()
+    call_id = fsm_data.get('reval_call_id')
+    decision = fsm_data.get('reval_decision')
+    await state.finish()
+
+    if not call_id or not decision:
+        return
+    comment = (message.text or '').strip() or None
+    await _finalize_reevaluation_decision(message.from_user.id, int(call_id), decision, comment, message.bot)
+    logging.info("Call %s %s by tg_user %s (with comment=%s)", call_id, decision, message.from_user.id, bool(comment))
 
 
 if __name__ == '__main__':
