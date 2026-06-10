@@ -6237,6 +6237,45 @@ def upload_group_day():
                                                     fine_comment=fine_comment,
                                                     fines=fines_arr,
                                                     bonuses=bonuses_arr)
+
+                    # Ручной ввод чат-метрик (если переданы). Оценка (avg_score) управляется
+                    # ОТДЕЛЬНО (импорт) — здесь её не трогаем (preserve_missing=True).
+                    chat_metrics_obj = row.get('chat_metrics')
+                    if isinstance(chat_metrics_obj, dict):
+                        def _cm_int(raw, default=None):
+                            if raw in (None, ''):
+                                return default
+                            try:
+                                return max(0, int(round(float(str(raw).replace(',', '.')))))
+                            except Exception:
+                                return default
+
+                        def _cm_float(raw):
+                            if raw in (None, ''):
+                                return None
+                            try:
+                                v = float(str(raw).replace(',', '.'))
+                                return v if v >= 0 else None
+                            except Exception:
+                                return None
+
+                        # chats_count синхронизируем с daily.calls, чтобы перезагрузка чат-модели
+                        # не обнулила чаты (бэк перетирает daily.calls значением из метрик).
+                        metrics_chats = _cm_int(chat_metrics_obj.get('chats_count'), default=None)
+                        if metrics_chats is None:
+                            metrics_chats = calls
+                        try:
+                            db.save_chat_manager_daily_metrics([{
+                                'operator_id': resolved_operator_id,
+                                'day': row_date_str,
+                                'chats_count': metrics_chats,
+                                'avg_response_time_seconds': _cm_float(chat_metrics_obj.get('avg_response_time_seconds')),
+                                'transfer_chat_count': _cm_int(chat_metrics_obj.get('transfer_chat_count'), default=0),
+                                'avg_score': None,
+                            }], imported_by=requester_id, preserve_missing=True)
+                        except Exception as _cm_err:
+                            logging.warning("upload_group_day: failed to save chat metrics for op %s: %s", resolved_operator_id, _cm_err)
+
                     processed.append({"row": idx, "operator_id": resolved_operator_id, "name": name, "date": row_date_str})
                     processed_operator_ids.add(resolved_operator_id)
                     processed_months_by_operator.setdefault(resolved_operator_id, set()).add(row_month)
