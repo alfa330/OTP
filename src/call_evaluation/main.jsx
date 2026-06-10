@@ -854,6 +854,9 @@ const buildReevaluationRequestTooltip = (call) => {
         call.sv_request_approved && call.sv_request_approved_by_name
             ? `Одобрил: ${call.sv_request_approved_by_name}${call.sv_request_approved_at ? ` (${call.sv_request_approved_at})` : ''}`
             : null,
+        call.sv_request_approved && call.sv_request_approve_comment
+            ? `Комментарий: ${call.sv_request_approve_comment}`
+            : null,
         call.sv_request_rejected && call.sv_request_rejected_by_name
             ? `Отклонил: ${call.sv_request_rejected_by_name}${call.sv_request_rejected_at ? ` (${call.sv_request_rejected_at})` : ''}`
             : null,
@@ -888,6 +891,7 @@ const getReevaluationRequestOutcomeMeta = (call) => {
 const SvRequestButton = ({ call, userId, userRole, isAdminRole = false, fetchEvaluations, onReevaluate, onUpdated, pendingAdminMode = 'default' }) => {
     const [showModal, setShowModal] = useState(false);
     const [showRejectModal, setShowRejectModal] = useState(false);
+    const [showApproveModal, setShowApproveModal] = useState(false);
     const [comment, setComment] = useState('');
     const [decisionComment, setDecisionComment] = useState('');
     const [loading, setLoading] = useState(false);
@@ -926,13 +930,14 @@ const SvRequestButton = ({ call, userId, userRole, isAdminRole = false, fetchEva
             const r = await authFetch(`${API_BASE_URL}/api/call_evaluation/request_decision`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'X-User-Id': userId },
-                body: JSON.stringify({ call_id: call.id, decision, comment: decision === 'rejected' ? decisionComment : '' })
+                body: JSON.stringify({ call_id: call.id, decision, comment: decisionComment })
             });
             const d = await r.json();
             if (!r.ok) throw new Error(d.error || 'Не удалось обновить заявку');
             await fetchEvaluations?.({ force: true });
             await onUpdated?.();
             setShowRejectModal(false);
+            setShowApproveModal(false);
             setDecisionComment('');
             emitCallEvaluationToast(decision === 'approved' ? 'Заявка одобрена' : 'Заявка отклонена', 'success');
         } catch (e) {
@@ -991,10 +996,10 @@ const SvRequestButton = ({ call, userId, userRole, isAdminRole = false, fetchEva
                                 </span>
                             </HoverTooltip>
                         ) : null}
-                        <button className="btn btn-green btn-sm" onClick={e => { e.stopPropagation(); void decideRequest('approved'); }} disabled={loading}>
+                        <button className="btn btn-green btn-sm" onClick={e => { e.stopPropagation(); setDecisionComment(''); setShowApproveModal(true); }} disabled={loading}>
                             Принять
                         </button>
-                        <button className="btn btn-danger btn-sm" onClick={e => { e.stopPropagation(); setShowRejectModal(true); }} disabled={loading}>
+                        <button className="btn btn-danger btn-sm" onClick={e => { e.stopPropagation(); setDecisionComment(''); setShowRejectModal(true); }} disabled={loading}>
                             Отклонить
                         </button>
                         {pendingAdminMode === 'buttons_only' && tooltipText ? (
@@ -1005,6 +1010,28 @@ const SvRequestButton = ({ call, userId, userRole, isAdminRole = false, fetchEva
                             </HoverTooltip>
                         ) : null}
                     </div>
+                    {showApproveModal && (
+                        <div className="modal-backdrop" onClick={e => { e.stopPropagation(); setShowApproveModal(false); }}>
+                            <div className="modal request-modal" onClick={e => e.stopPropagation()}>
+                                <div className="modal-header">
+                                    <div><h2>Одобрить запрос</h2><div className="modal-header-sub">Call ID: {call.id}</div></div>
+                                    <button className="close-btn" onClick={() => setShowApproveModal(false)}><FaIcon className="fas fa-times" /></button>
+                                </div>
+                                <div className="modal-body">
+                                    <div className="field">
+                                        <label className="label">Комментарий</label>
+                                        <textarea className="textarea" value={decisionComment} onChange={e => setDecisionComment(e.target.value)} placeholder="При необходимости добавьте комментарий..." />
+                                    </div>
+                                </div>
+                                <div className="modal-footer">
+                                    <button className="btn btn-secondary" onClick={() => setShowApproveModal(false)}>Отмена</button>
+                                    <button className="btn btn-green" onClick={() => void decideRequest('approved')} disabled={loading}>
+                                        {loading ? <><span className="spinner" style={{ borderTopColor: 'var(--green)' }} /> Одобрение...</> : 'Одобрить'}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
                     {showRejectModal && (
                         <div className="modal-backdrop" onClick={e => { e.stopPropagation(); setShowRejectModal(false); }}>
                             <div className="modal request-modal" onClick={e => e.stopPropagation()}>
@@ -4608,13 +4635,18 @@ const App = ({ user, initialSelection }) => {
                                                                             <strong style={{ color: 'var(--text)' }}>Статус запроса:</strong>{' '}
                                                                             <span style={{ color: statusMeta.color, fontWeight: 600 }}>{statusMeta.label}</span>
                                                                         </div>
-                                                                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 14px', marginBottom: (requestItem.sv_request_comment || requestItem.sv_request_reject_comment) ? 6 : 0 }}>
+                                                                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 14px', marginBottom: (requestItem.sv_request_comment || requestItem.sv_request_reject_comment || requestItem.sv_request_approve_comment) ? 6 : 0 }}>
                                                                             {requestItem.sv_request_approved_by_name ? <span><strong style={{ color: 'var(--text)' }}>Одобрил:</strong> {requestItem.sv_request_approved_by_name}{requestItem.sv_request_approved_at ? ` · ${requestItem.sv_request_approved_at}` : ''}</span> : null}
                                                                             {requestItem.sv_request_rejected_by_name ? <span><strong style={{ color: 'var(--text)' }}>Отклонил:</strong> {requestItem.sv_request_rejected_by_name}{requestItem.sv_request_rejected_at ? ` · ${requestItem.sv_request_rejected_at}` : ''}</span> : null}
                                                                         </div>
                                                                         {requestItem.sv_request_comment ? (
-                                                                            <div style={{ marginBottom: requestItem.sv_request_reject_comment ? 4 : 0 }}>
+                                                                            <div style={{ marginBottom: (requestItem.sv_request_reject_comment || requestItem.sv_request_approve_comment) ? 4 : 0 }}>
                                                                                 <strong style={{ color: 'var(--text)' }}>Комментарий к запросу:</strong> {requestItem.sv_request_comment}
+                                                                            </div>
+                                                                        ) : null}
+                                                                        {requestItem.sv_request_approved && requestItem.sv_request_approve_comment ? (
+                                                                            <div>
+                                                                                <strong style={{ color: 'var(--text)' }}>Комментарий при одобрении:</strong> {requestItem.sv_request_approve_comment}
                                                                             </div>
                                                                         ) : null}
                                                                         {requestItem.sv_request_reject_comment ? (

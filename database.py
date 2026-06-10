@@ -984,8 +984,16 @@ class Database:
                     sv_request_rejected_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
                     sv_request_rejected_at TIMESTAMP,
                     sv_request_reject_comment TEXT,
+                    sv_request_approve_comment TEXT,
                     UNIQUE(evaluator_id, operator_id, month, phone_number, score, comment, is_draft)
                 );
+            """)
+
+            # Идемпотентная миграция для существующих БД (таблица создаётся через
+            # CREATE TABLE IF NOT EXISTS, поэтому новые колонки нужно добавлять отдельно).
+            cursor.execute("""
+                ALTER TABLE calls
+                ADD COLUMN IF NOT EXISTS sv_request_approve_comment TEXT;
             """)
 
             cursor.execute("""
@@ -13067,7 +13075,8 @@ class Database:
                 cf_creator.name AS feedback_created_by_name,
                 cf_updater.name AS feedback_updated_by_name,
                 COALESCE(c.question_resolved, FALSE) AS question_resolved,
-                c.resolved_first_contact
+                c.resolved_first_contact,
+                c.sv_request_approve_comment
             FROM calls c
             JOIN latest_calls lc ON c.id::text = lc.id_text
             LEFT JOIN directions d ON c.direction_id = d.id  
@@ -13136,7 +13145,8 @@ class Database:
                 NULL::text AS feedback_created_by_name,
                 NULL::text AS feedback_updated_by_name,
                 FALSE::boolean AS question_resolved,
-                NULL::boolean AS resolved_first_contact
+                NULL::boolean AS resolved_first_contact,
+                NULL::text AS sv_request_approve_comment
             FROM imported_calls ic
             WHERE ic.operator_id = %s AND ic.status = 'not_evaluated'
         """
@@ -13260,6 +13270,7 @@ class Database:
                         "comment_visible_to_operator": bool(row[35]) if row[35] is not None else True,
                         "question_resolved": bool(row[46]) if row[46] is not None else False,
                         "resolved_first_contact": bool(row[47]) if row[47] is not None else None,
+                        "sv_request_approve_comment": row[48],
                         "feedback": feedback_payload,
                         "feedback_sla": feedback_sla_payload
                     }
@@ -13307,7 +13318,8 @@ class Database:
                 corr.id AS correction_call_id,
                 corr.score AS correction_score,
                 corr.evaluator_name AS correction_evaluator_name,
-                TO_CHAR(corr.created_at, 'YYYY-MM-DD HH24:MI') AS correction_created_at
+                TO_CHAR(corr.created_at, 'YYYY-MM-DD HH24:MI') AS correction_created_at,
+                c.sv_request_approve_comment
             FROM calls c
             JOIN users op ON op.id = c.operator_id
             LEFT JOIN users sv ON sv.id = op.supervisor_id
@@ -13396,7 +13408,8 @@ class Database:
                     "correction_call_id": row[28],
                     "correction_score": float(row[29]) if row[29] is not None else None,
                     "correction_evaluator_name": row[30],
-                    "correction_created_at": row[31]
+                    "correction_created_at": row[31],
+                    "sv_request_approve_comment": row[32]
                 }
             )
 
