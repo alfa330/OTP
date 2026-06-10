@@ -942,6 +942,32 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_group_op_month_snapshots_group_month
                 ON group_operator_month_snapshots(group_id, month);
             """)
+            # Этап 4 (снимок месяца): числовые агрегаты по сегменту группы + метка заморозки.
+            # Аддитивно (ADD COLUMN IF NOT EXISTS) — старые строки получают NULL, новые пишет
+            # _freeze_month_to_snapshots_tx. Наличие frozen_at у строк месяца = месяц заморожен.
+            for _snap_col, _snap_type in (
+                ("norm_hours", "DOUBLE PRECISION"),
+                ("regular_hours", "DOUBLE PRECISION"),
+                ("training_hours", "DOUBLE PRECISION"),
+                ("total_break_time", "DOUBLE PRECISION"),
+                ("total_talk_time", "DOUBLE PRECISION"),
+                ("total_calls", "INTEGER"),
+                ("total_efficiency_hours", "DOUBLE PRECISION"),
+                ("calls_per_hour", "DOUBLE PRECISION"),
+                ("fines", "DOUBLE PRECISION"),
+                ("offline_activity_hours", "DOUBLE PRECISION"),
+                ("no_phone_hours", "DOUBLE PRECISION"),
+                ("chat_avg_score", "DOUBLE PRECISION"),
+                ("chat_avg_response_time_seconds", "DOUBLE PRECISION"),
+                ("chat_transfer_count", "INTEGER"),
+                ("frozen_at", "TIMESTAMP"),
+            ):
+                cursor.execute(
+                    "ALTER TABLE group_operator_month_snapshots ADD COLUMN IF NOT EXISTS %s %s" % (_snap_col, _snap_type)
+                )
+            cursor.execute(
+                "ALTER TABLE group_month_snapshots ADD COLUMN IF NOT EXISTS frozen_at TIMESTAMP"
+            )
             # Calls table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operator_activity_logs (
@@ -20144,6 +20170,19 @@ class Database:
                 "aggregates": aggr,
             })
         return segments
+
+    def _is_month_closed(self, month, today=None):
+        """Окно правок: месяц открыт (правится, считается на лету) до 10-го числа
+        СЛЕДУЮЩЕГО месяца включительно; с 11-го — закрыт и подлежит заморозке в снимок.
+        today передаётся в тестах; иначе текущая дата."""
+        try:
+            year, mon = map(int, str(month).split('-'))
+        except Exception:
+            return False
+        ny, nm = (year + 1, 1) if mon == 12 else (year, mon + 1)
+        deadline = date(ny, nm, 10)  # последний день окна правок прошлого месяца
+        ref = today or date.today()
+        return ref > deadline
 
     def _recalculate_auto_daily_hours_tx(self, cursor, operator_ids, start_date, end_date):
         op_ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
