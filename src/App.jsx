@@ -40662,6 +40662,35 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const callsPerHour = effectiveCallHours > 0
                                                 ? (safeNum(totalCalls) / effectiveCallHours)
                                                 : 0;
+                                            // При переводе посреди месяца между РАЗНЫМИ моделями интенсивность нельзя
+                                            // показывать одним числом (звонки и чаты не суммируются). Считаем раскладку
+                                            // по направлениям из daily по диапазону дней каждого сегмента (часы/штрафы — общие).
+                                            const interactionSegments = (() => {
+                                                const segs = Array.isArray(op.group_segments) ? op.group_segments : [];
+                                                const models = new Set(segs.map((s) => String(s.calculation_model_code || '').trim() === 'chat_manager' ? 'chat' : 'call'));
+                                                if (segs.length < 2 || models.size < 2) return null;
+                                                const dmap = (op && typeof op.daily === 'object' && !Array.isArray(op.daily)) ? op.daily : {};
+                                                return segs.map((s) => {
+                                                    const model = String(s.calculation_model_code || '').trim() === 'chat_manager' ? 'chat' : 'call';
+                                                    const sd = Number(s.start_day), ed = Number(s.end_day);
+                                                    let segHours = 0, segInter = 0;
+                                                    for (let d = sd; d <= ed; d++) {
+                                                        const dd = dmap[String(d)];
+                                                        if (!dd) continue;
+                                                        segHours += safeNum(dd.work_time);
+                                                        segInter += safeNum(dd.calls);
+                                                    }
+                                                    return {
+                                                        name: s.direction_name || s.group_name,
+                                                        startDay: sd, endDay: ed,
+                                                        label: model === 'chat' ? 'Чаты' : 'Звонки',
+                                                        perHourLabel: model === 'chat' ? 'Чаты в час' : 'Звонки в час',
+                                                        icon: model === 'chat' ? 'fas fa-comments' : 'fas fa-phone',
+                                                        total: segInter,
+                                                        perHour: segHours > 0 ? (segInter / segHours) : 0,
+                                                    };
+                                                });
+                                            })();
                                             const completionPct = safeNum(norm) > 0 ? (safeNum(regular) / safeNum(norm)) * 100 : 0;
                                             const clampedCompletionPct = Math.max(0, Math.min(100, completionPct));
                                             const hoursDelta = safeNum(regular) - safeNum(norm);
@@ -40940,22 +40969,49 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         Интенсивность и корректировки
                                                     </h3>
                                                     <div className="space-y-3">
-                                                        <div className="flex items-center justify-between rounded-lg bg-white border border-gray-200 px-3 py-2.5">
-                                                        <span className="text-sm text-gray-600 flex items-center gap-2">
-                                                            <FaIcon className={`${interactionIcon} text-gray-400`}></FaIcon>
-                                                            {interactionPerHourLabel}
-                                                        </span>
-                                                        <span className={`text-lg font-bold ${getCallsPerHourColor(callsPerHour)}`}>
-                                                            {safeNum(callsPerHour).toFixed(2)}
-                                                        </span>
-                                                        </div>
-                                                        <div className="flex items-center justify-between rounded-lg bg-white border border-gray-200 px-3 py-2.5">
-                                                        <span className="text-sm text-gray-600 flex items-center gap-2">
-                                                            <FaIcon className={`${interactionIcon} text-gray-400`}></FaIcon>
-                                                            Всего: {interactionLabel.toLowerCase()}
-                                                        </span>
-                                                        <span className="text-lg font-bold text-gray-900">{safeNum(totalCalls).toFixed(0)}</span>
-                                                        </div>
+                                                        {interactionSegments ? (
+                                                            <>
+                                                            <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">
+                                                                Перевод посреди месяца — интенсивность по направлениям раздельно (звонки и чаты не суммируются)
+                                                            </div>
+                                                            {interactionSegments.map((s, i) => (
+                                                                <div key={i} className="rounded-lg bg-white border border-gray-200 px-3 py-2.5">
+                                                                    <div className="text-sm font-medium text-gray-700 flex items-center gap-2 mb-1.5">
+                                                                        <FaIcon className={`${s.icon} text-gray-400`}></FaIcon>
+                                                                        {s.name}
+                                                                        <span className="text-xs text-gray-400">· дни {s.startDay}–{s.endDay}</span>
+                                                                    </div>
+                                                                    <div className="flex items-center justify-between text-sm">
+                                                                        <span className="text-gray-600">{s.perHourLabel}</span>
+                                                                        <span className={`font-bold ${getCallsPerHourColor(s.perHour)}`}>{safeNum(s.perHour).toFixed(2)}</span>
+                                                                    </div>
+                                                                    <div className="flex items-center justify-between text-sm mt-0.5">
+                                                                        <span className="text-gray-600">Всего: {s.label.toLowerCase()}</span>
+                                                                        <span className="font-bold text-gray-900">{safeNum(s.total).toFixed(0)}</span>
+                                                                    </div>
+                                                                </div>
+                                                            ))}
+                                                            </>
+                                                        ) : (
+                                                            <>
+                                                            <div className="flex items-center justify-between rounded-lg bg-white border border-gray-200 px-3 py-2.5">
+                                                            <span className="text-sm text-gray-600 flex items-center gap-2">
+                                                                <FaIcon className={`${interactionIcon} text-gray-400`}></FaIcon>
+                                                                {interactionPerHourLabel}
+                                                            </span>
+                                                            <span className={`text-lg font-bold ${getCallsPerHourColor(callsPerHour)}`}>
+                                                                {safeNum(callsPerHour).toFixed(2)}
+                                                            </span>
+                                                            </div>
+                                                            <div className="flex items-center justify-between rounded-lg bg-white border border-gray-200 px-3 py-2.5">
+                                                            <span className="text-sm text-gray-600 flex items-center gap-2">
+                                                                <FaIcon className={`${interactionIcon} text-gray-400`}></FaIcon>
+                                                                Всего: {interactionLabel.toLowerCase()}
+                                                            </span>
+                                                            <span className="text-lg font-bold text-gray-900">{safeNum(totalCalls).toFixed(0)}</span>
+                                                            </div>
+                                                            </>
+                                                        )}
                                                         <div className="grid grid-cols-2 gap-3">
                                                         <div className="rounded-lg bg-white border border-gray-200 p-3">
                                                             <div className="text-xs text-gray-500 flex items-center gap-2 mb-1">
