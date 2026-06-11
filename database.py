@@ -20234,6 +20234,50 @@ class Database:
             })
         return segments
 
+    def _load_segments_by_operator_tx(self, cursor, op_ids, start, end):
+        """Батч: {operator_id: [сегменты членства за месяц]} (клиппнутые к месяцу, с моделью
+        группы) — БЕЗ агрегатов. Для отчётов: разбивка строки оператора по группам/моделям.
+        start/end — date границы месяца."""
+        out = {}
+        if not op_ids:
+            return out
+        cursor.execute("""
+            SELECT gom.operator_id, gom.group_id, gr.name, gr.calculation_model_code, d.name,
+                   gom.start_date, gom.end_date
+            FROM group_operator_memberships gom
+            JOIN groups gr ON gr.id = gom.group_id
+            LEFT JOIN directions d ON d.id = gr.direction_id
+            WHERE gom.operator_id = ANY(%s) AND gom.start_date <= %s
+              AND (gom.end_date IS NULL OR gom.end_date >= %s)
+            ORDER BY gom.operator_id, gom.start_date
+        """, (list(op_ids), end, start))
+        for op_id, g_id, g_name, model_code, dir_name, seg_start, seg_end in cursor.fetchall() or []:
+            cs = seg_start if (seg_start and seg_start > start) else start
+            ce = seg_end if (seg_end and seg_end < end) else end
+            out.setdefault(int(op_id), []).append({
+                "group_id": int(g_id),
+                "group_name": g_name,
+                "direction_name": dir_name,
+                "calculation_model_code": normalize_calculation_model_code(model_code, dir_name),
+                "start_day": int(cs.day),
+                "end_day": int(ce.day),
+                "is_current": seg_end is None,
+            })
+        return out
+
+    def get_operator_segments_for_month(self, month, operator_ids):
+        """Публичный батч для отчётов: {operator_id: [сегменты группы за месяц с моделью]}.
+        Пусто для операторов без членств. Используется для разбивки строки отчёта по группам."""
+        year, mon = map(int, str(month).split('-'))
+        last = calendar.monthrange(year, mon)[1]
+        start = date(year, mon, 1)
+        end = date(year, mon, last)
+        ids = [int(x) for x in (operator_ids or []) if x is not None]
+        if not ids:
+            return {}
+        with self._get_cursor() as cursor:
+            return self._load_segments_by_operator_tx(cursor, ids, start, end)
+
     def _is_month_closed(self, month, today=None):
         """Окно правок: месяц открыт (правится, считается на лету) до 10-го числа
         СЛЕДУЮЩЕГО месяца включительно; с 11-го — закрыт и подлежит заморозке в снимок.
