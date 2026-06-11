@@ -19914,7 +19914,9 @@ class Database:
                   AND day <= %s
             """, (operator_id, start, end))
             chat_row = cursor.fetchone() or (0, None, None, 0)
-            total_calls = int(chat_row[0] or 0)
+            _chat_sum = int(chat_row[0] or 0)
+            if _chat_sum > 0:
+                total_calls = _chat_sum  # иначе оставляем SUM(daily.calls): чаты исторически писались в daily.calls, а chat_manager_daily_metrics часто пуст
             chat_avg_score = float(chat_row[1]) if chat_row[1] is not None else None
             chat_avg_response_time_seconds = float(chat_row[2]) if chat_row[2] is not None else None
             chat_transfer_count = int(chat_row[3] or 0)
@@ -20069,7 +20071,9 @@ class Database:
                 WHERE operator_id = %s AND day >= %s AND day <= %s
             """, (operator_id, seg_start, seg_end))
             chat_row = cursor.fetchone() or (0, None, None, 0)
-            total_calls = int(chat_row[0] or 0)
+            _chat_sum = int(chat_row[0] or 0)
+            if _chat_sum > 0:
+                total_calls = _chat_sum  # иначе оставляем SUM(daily.calls): чаты исторически писались в daily.calls, а chat_manager_daily_metrics часто пуст
             chat_avg_score = float(chat_row[1]) if chat_row[1] is not None else None
             chat_avg_response_time_seconds = float(chat_row[2]) if chat_row[2] is not None else None
             chat_transfer_count = int(chat_row[3] or 0)
