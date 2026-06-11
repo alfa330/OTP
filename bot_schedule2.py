@@ -10166,6 +10166,49 @@ def list_groups_endpoint():
         return jsonify({"error": "Internal server error"}), 500
 
 
+@app.route('/api/admin/snapshots/recompute', methods=['POST'])
+@require_api_key
+def recompute_month_snapshot_endpoint():
+    """Админ/глава отдела: (пере)заморозить месяц в снимок. Идемпотентно."""
+    try:
+        requester_id, role, guard_err = _ensure_group_manager()
+        if guard_err:
+            resp, code = guard_err
+            return resp, code
+        data = request.get_json(silent=True) or {}
+        month = str(data.get('month') or '').strip()
+        if not re.match(r'^\d{4}-\d{2}$', month):
+            return jsonify({"error": "Field 'month' (YYYY-MM) is required"}), 400
+        result = db.recompute_month_snapshot(month)
+        logging.info("Snapshot recompute by user %s for %s: %s", requester_id, month, result)
+        return jsonify({"status": "success", "result": result}), 200
+    except Exception as e:
+        logging.error(f"Error recomputing month snapshot: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/admin/snapshots', methods=['GET'])
+@require_api_key
+def get_month_snapshot_endpoint():
+    """Замороженный снимок месяца (для селектора месяца в GroupsView / проверки)."""
+    try:
+        requester_id, role, guard_err = _ensure_group_manager()
+        if guard_err:
+            resp, code = guard_err
+            return resp, code
+        month = str(request.args.get('month') or '').strip()
+        if not re.match(r'^\d{4}-\d{2}$', month):
+            return jsonify({"error": "Query param 'month' (YYYY-MM) is required"}), 400
+        gid = request.args.get('group_id')
+        group_id = int(gid) if gid and str(gid).isdigit() else None
+        snap = db.get_month_snapshot(month, group_id=group_id)
+        snap["closed"] = db._is_month_closed(month)
+        return jsonify({"status": "success", **snap}), 200
+    except Exception as e:
+        logging.error(f"Error reading month snapshot: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/admin/groups', methods=['POST'])
 @require_api_key
 def create_group_endpoint():

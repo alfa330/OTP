@@ -20189,6 +20189,243 @@ class Database:
         ref = today or date.today()
         return ref > deadline
 
+    def _resolve_user_field_as_of_tx(self, cursor, op_ids, field_changed, ref_dt):
+        """Значение поля пользователя (status/role/...) на момент ref_dt из user_history.
+        Возвращает {user_id: value}. Если изменений до ref_dt не было — самое первое old_value.
+        Та же логика, что для статуса в get_daily_hours_by_supervisor_month."""
+        out = {}
+        if not op_ids:
+            return out
+        cursor.execute("""
+            SELECT user_id, old_value, new_value, changed_at
+            FROM user_history
+            WHERE field_changed = %s AND user_id = ANY(%s)
+            ORDER BY user_id, changed_at
+        """, (field_changed, op_ids))
+        changes, first_old = {}, {}
+        for uid, oldv, newv, at in cursor.fetchall() or []:
+            if uid not in changes:
+                changes[uid] = []
+                first_old[uid] = oldv
+            changes[uid].append((at, newv))
+        for uid, chs in changes.items():
+            eff = None
+            for at, newv in chs:
+                if at is not None and at < ref_dt:
+                    eff = newv
+                else:
+                    break
+            if eff is None:
+                eff = first_old.get(uid)
+            if eff is not None:
+                out[int(uid)] = eff
+        return out
+
+    def _group_supervisors_for_month_tx(self, cursor, group_id, start, end):
+        """СВ группы, чьё членство пересекает месяц (id + имена). Группа может быть без СВ."""
+        cursor.execute("""
+            SELECT gsm.supervisor_id, u.name
+            FROM group_supervisor_memberships gsm
+            JOIN users u ON u.id = gsm.supervisor_id
+            WHERE gsm.group_id = %s AND gsm.start_date <= %s
+              AND (gsm.end_date IS NULL OR gsm.end_date >= %s)
+            ORDER BY gsm.start_date
+        """, (int(group_id), end, start))
+        ids, names = [], []
+        for sv_id, sv_name in cursor.fetchall() or []:
+            ids.append(int(sv_id))
+            names.append(sv_name)
+        return ids, names
+
+    def _freeze_month_to_snapshots_tx(self, cursor, month):
+        """Заморозить месяц в snapshot-таблицы (идемпотентный upsert). По каждой группе ×
+        оператору-сегменту: per-segment агрегаты (_aggregate_segment_from_daily_tx) + замороженная
+        мета (роль/статус на конец месяца из user_history, ставка, модель/направление группы, СВ
+        группы за месяц). Плюс групповой снимок group_month_snapshots. Вызывается лениво при первом
+        обращении к закрытому месяцу и админским «пересчитать месяц». Без потери данных в daily_hours."""
+        year, mon = map(int, str(month).split('-'))
+        last_day = calendar.monthrange(year, mon)[1]
+        start = date(year, mon, 1)
+        end = date(year, mon, last_day)
+        ref_dt = datetime(year + 1, 1, 1) if mon == 12 else datetime(year, mon + 1, 1)
+        frozen_at = datetime.utcnow()
+
+        cursor.execute("""
+            SELECT DISTINCT gom.operator_id
+            FROM group_operator_memberships gom
+            WHERE gom.start_date <= %s AND (gom.end_date IS NULL OR gom.end_date >= %s)
+        """, (end, start))
+        op_ids = [int(r[0]) for r in cursor.fetchall() or []]
+        rows_written = 0
+
+        if op_ids:
+            role_as_of = self._resolve_user_field_as_of_tx(cursor, op_ids, 'role', ref_dt)
+            status_as_of = self._resolve_user_field_as_of_tx(cursor, op_ids, 'status', ref_dt)
+            cursor.execute("""
+                SELECT u.id, u.name, u.role, u.status, u.direction_id, d.name,
+                    COALESCE(
+                        (SELECT wr.rate FROM work_hours wr
+                         WHERE wr.operator_id = u.id AND wr.rate IS NOT NULL AND wr.month <= %s
+                         ORDER BY wr.month DESC LIMIT 1),
+                        u.rate
+                    ),
+                    COALESCE((SELECT w.norm_hours FROM work_hours w WHERE w.operator_id = u.id AND w.month = %s), 0)
+                FROM users u
+                LEFT JOIN directions d ON d.id = u.direction_id
+                WHERE u.id = ANY(%s)
+            """, (month, month, op_ids))
+            meta = {}
+            for uid, name, role, status, dir_id, dir_name, rate, norm in cursor.fetchall() or []:
+                meta[int(uid)] = {
+                    "name": name, "role": role, "status": status,
+                    "direction_id": dir_id, "direction_name": dir_name,
+                    "rate": rate, "norm_hours": norm,
+                }
+            sv_cache = {}
+            for op in op_ids:
+                segs = self._get_operator_month_segments_tx(cursor, op, month)
+                m = meta.get(op, {})
+                eff_role = role_as_of.get(op) or m.get("role")
+                eff_status = status_as_of.get(op) or m.get("status")
+                for seg in segs:
+                    a = seg["aggregates"]
+                    g_id = seg["group_id"]
+                    if g_id not in sv_cache:
+                        sv_cache[g_id] = self._group_supervisors_for_month_tx(cursor, g_id, start, end)
+                    sv_ids, sv_names = sv_cache[g_id]
+                    cursor.execute("""
+                        INSERT INTO group_operator_month_snapshots (
+                            group_id, month, operator_id, name, role, status, direction_id, direction_name,
+                            calculation_model_code, rate, supervisor_ids, supervisor_names, first_day, last_day,
+                            norm_hours, regular_hours, training_hours, total_break_time, total_talk_time,
+                            total_calls, total_efficiency_hours, calls_per_hour, fines, offline_activity_hours,
+                            no_phone_hours, chat_avg_score, chat_avg_response_time_seconds, chat_transfer_count, frozen_at
+                        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT (group_id, month, operator_id) DO UPDATE SET
+                            name=EXCLUDED.name, role=EXCLUDED.role, status=EXCLUDED.status,
+                            direction_id=EXCLUDED.direction_id, direction_name=EXCLUDED.direction_name,
+                            calculation_model_code=EXCLUDED.calculation_model_code, rate=EXCLUDED.rate,
+                            supervisor_ids=EXCLUDED.supervisor_ids, supervisor_names=EXCLUDED.supervisor_names,
+                            first_day=EXCLUDED.first_day, last_day=EXCLUDED.last_day,
+                            norm_hours=EXCLUDED.norm_hours, regular_hours=EXCLUDED.regular_hours,
+                            training_hours=EXCLUDED.training_hours, total_break_time=EXCLUDED.total_break_time,
+                            total_talk_time=EXCLUDED.total_talk_time, total_calls=EXCLUDED.total_calls,
+                            total_efficiency_hours=EXCLUDED.total_efficiency_hours, calls_per_hour=EXCLUDED.calls_per_hour,
+                            fines=EXCLUDED.fines, offline_activity_hours=EXCLUDED.offline_activity_hours,
+                            no_phone_hours=EXCLUDED.no_phone_hours, chat_avg_score=EXCLUDED.chat_avg_score,
+                            chat_avg_response_time_seconds=EXCLUDED.chat_avg_response_time_seconds,
+                            chat_transfer_count=EXCLUDED.chat_transfer_count, frozen_at=EXCLUDED.frozen_at
+                    """, (
+                        g_id, month, op, m.get("name"), eff_role, eff_status,
+                        seg.get("direction_id"), seg.get("direction_name"),
+                        seg.get("calculation_model_code"), m.get("rate"),
+                        Json(sv_ids), Json(sv_names),
+                        date(year, mon, seg["start_day"]), date(year, mon, seg["end_day"]),
+                        m.get("norm_hours"),
+                        a["regular_hours"], a["training_hours"], a["total_break_time"], a["total_talk_time"],
+                        a["total_calls"], a["total_efficiency_hours"], a["calls_per_hour"], a["fines"],
+                        a["offline_activity_hours"], a["no_phone_hours"],
+                        a["chat_avg_score"], a["chat_avg_response_time_seconds"], a["chat_transfer_count"],
+                        frozen_at,
+                    ))
+                    rows_written += 1
+
+        # Групповой снимок: мета каждой группы, у которой были операторы в этом месяце.
+        cursor.execute("""
+            SELECT g.id, g.name, g.status, g.direction_id, g.calculation_model_code, g.table_url, g.archived_at
+            FROM groups g
+            WHERE EXISTS (
+                SELECT 1 FROM group_operator_memberships gom
+                WHERE gom.group_id = g.id AND gom.start_date <= %s
+                  AND (gom.end_date IS NULL OR gom.end_date >= %s)
+            )
+        """, (end, start))
+        for g_id, g_name, g_status, g_dir, g_model, g_url, g_arch in cursor.fetchall() or []:
+            cursor.execute("""
+                INSERT INTO group_month_snapshots (group_id, month, name, status, direction_id,
+                    calculation_model_code, table_url, archived, frozen_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (group_id, month) DO UPDATE SET
+                    name=EXCLUDED.name, status=EXCLUDED.status, direction_id=EXCLUDED.direction_id,
+                    calculation_model_code=EXCLUDED.calculation_model_code, table_url=EXCLUDED.table_url,
+                    archived=EXCLUDED.archived, frozen_at=EXCLUDED.frozen_at
+            """, (g_id, month, g_name, g_status, g_dir, g_model, g_url, bool(g_arch), frozen_at))
+
+        return {"month": month, "operators": len(op_ids), "rows": rows_written, "frozen_at": frozen_at.isoformat()}
+
+    def recompute_month_snapshot(self, month):
+        """Публичный: (пере)заморозить месяц в снимок (идемпотентно, upsert). Для админского
+        «Пересчитать месяц» и ленивой авто-заморозки закрытых месяцев."""
+        if not re.match(r'^\d{4}-\d{2}$', str(month or '')):
+            raise ValueError("month must be YYYY-MM")
+        with self._get_cursor() as cursor:
+            return self._freeze_month_to_snapshots_tx(cursor, month)
+
+    def _month_snapshot_exists_tx(self, cursor, month):
+        """Есть ли уже замороженный снимок за месяц (хотя бы одна строка с frozen_at)."""
+        cursor.execute(
+            "SELECT 1 FROM group_operator_month_snapshots WHERE month = %s AND frozen_at IS NOT NULL LIMIT 1",
+            (month,)
+        )
+        return cursor.fetchone() is not None
+
+    def get_month_snapshot(self, month, group_id=None):
+        """Читает замороженный снимок месяца (group_operator_month_snapshots), сгруппированный
+        по группам. {month, frozen, groups: [{group_id, name, model, supervisors, operators:[...]}]}.
+        Используется селектором месяца в GroupsView и (далее) ридерами закрытых месяцев."""
+        with self._get_cursor() as cursor:
+            params = [month]
+            where = "WHERE s.month = %s"
+            if group_id is not None:
+                where += " AND s.group_id = %s"
+                params.append(int(group_id))
+            cursor.execute("""
+                SELECT s.group_id, s.operator_id, s.name, s.role, s.status, s.direction_id, s.direction_name,
+                       s.calculation_model_code, s.rate, s.supervisor_ids, s.supervisor_names,
+                       s.first_day, s.last_day, s.norm_hours, s.regular_hours, s.training_hours,
+                       s.total_break_time, s.total_talk_time, s.total_calls, s.total_efficiency_hours,
+                       s.calls_per_hour, s.fines, s.offline_activity_hours, s.no_phone_hours,
+                       s.chat_avg_score, s.chat_avg_response_time_seconds, s.chat_transfer_count, s.frozen_at,
+                       gms.name AS group_name
+                FROM group_operator_month_snapshots s
+                LEFT JOIN group_month_snapshots gms ON gms.group_id = s.group_id AND gms.month = s.month
+                """ + where + """
+                ORDER BY s.group_id, s.name
+            """, tuple(params))
+            groups = {}
+            frozen = False
+            for r in cursor.fetchall() or []:
+                (g_id, op_id, name, role, status, dir_id, dir_name, model, rate, sv_ids, sv_names,
+                 first_day, last_day, norm, regular, training, brk, talk, calls, eff, cph, fines,
+                 offline, no_phone, c_score, c_resp, c_transfer, frozen_at, group_name) = r
+                if frozen_at is not None:
+                    frozen = True
+                g = groups.setdefault(int(g_id), {
+                    "group_id": int(g_id),
+                    "group_name": group_name,
+                    "calculation_model_code": model,
+                    "supervisor_ids": sv_ids or [],
+                    "supervisor_names": sv_names or [],
+                    "operators": [],
+                })
+                g["operators"].append({
+                    "operator_id": int(op_id), "name": name, "role": role, "status": status,
+                    "direction_id": dir_id, "direction_name": dir_name,
+                    "calculation_model_code": model, "rate": float(rate) if rate is not None else None,
+                    "first_day": first_day.isoformat() if first_day else None,
+                    "last_day": last_day.isoformat() if last_day else None,
+                    "aggregates": {
+                        "norm_hours": norm, "regular_hours": regular, "training_hours": training,
+                        "total_break_time": brk, "total_talk_time": talk, "total_calls": calls,
+                        "total_efficiency_hours": eff, "calls_per_hour": cph, "fines": fines,
+                        "offline_activity_hours": offline, "no_phone_hours": no_phone,
+                        "chat_avg_score": c_score, "chat_avg_response_time_seconds": c_resp,
+                        "chat_transfer_count": c_transfer,
+                    },
+                    "frozen_at": frozen_at.isoformat() if frozen_at else None,
+                })
+            return {"month": month, "frozen": frozen, "groups": list(groups.values())}
+
     def _recalculate_auto_daily_hours_tx(self, cursor, operator_ids, start_date, end_date):
         op_ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
         if not op_ids:
