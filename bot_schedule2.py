@@ -10169,15 +10169,18 @@ def list_groups_endpoint():
 @app.route('/api/admin/snapshots/recompute', methods=['POST'])
 @require_api_key
 def recompute_month_snapshot_endpoint():
-    """Админ/глава отдела: (пере)заморозить месяц в снимок. Идемпотентно."""
+    """Только АДМИН: (пере)заморозить месяц в снимок (тяжёлая операция по ВСЕМ группам всех
+    отделов). Идемпотентно. Главам отделов запрещено (эскалация привилегий + нагрузка)."""
     try:
         requester_id, role, guard_err = _ensure_group_manager()
         if guard_err:
             resp, code = guard_err
             return resp, code
+        if not _is_admin_role(role):
+            return jsonify({"error": "Only admins can recompute month snapshots"}), 403
         data = request.get_json(silent=True) or {}
         month = str(data.get('month') or '').strip()
-        if not re.match(r'^\d{4}-\d{2}$', month):
+        if not re.match(r'^\d{4}-(0[1-9]|1[0-2])$', month):
             return jsonify({"error": "Field 'month' (YYYY-MM) is required"}), 400
         result = db.recompute_month_snapshot(month)
         logging.info("Snapshot recompute by user %s for %s: %s", requester_id, month, result)
@@ -10197,10 +10200,18 @@ def get_month_snapshot_endpoint():
             resp, code = guard_err
             return resp, code
         month = str(request.args.get('month') or '').strip()
-        if not re.match(r'^\d{4}-\d{2}$', month):
+        if not re.match(r'^\d{4}-(0[1-9]|1[0-2])$', month):
             return jsonify({"error": "Query param 'month' (YYYY-MM) is required"}), 400
         gid = request.args.get('group_id')
-        group_id = int(gid) if gid and str(gid).isdigit() else None
+        group_id = int(gid) if gid and str(gid).isdigit() and int(gid) > 0 else None
+        # Изоляция отделов: не-админ (глава отдела) видит только группы СВОЕГО отдела.
+        if not _is_admin_role(role):
+            headed_dept = db.headed_department_id_for_user(requester_id)
+            if group_id is None:
+                return jsonify({"error": "group_id is required"}), 400
+            grp = db.get_group(group_id)
+            if not grp or headed_dept is None or grp.get('department_id') != headed_dept:
+                return jsonify({"error": "Forbidden: group is not in your department"}), 403
         snap = db.get_month_snapshot(month, group_id=group_id)
         snap["closed"] = db._is_month_closed(month)
         return jsonify({"status": "success", **snap}), 200

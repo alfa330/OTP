@@ -10287,7 +10287,7 @@ class Database:
                     if not self._month_snapshot_exists_tx(cursor, month):
                         self._freeze_month_to_snapshots_tx(cursor, month)
                 except Exception as _freeze_err:
-                    logging.warning("lazy snapshot freeze failed for %s: %s", month, _freeze_err)
+                    logging.error("lazy snapshot freeze failed for %s: %s", month, _freeze_err, exc_info=True)
             # Получаем операторов + ставка + norm_hours + агрегаты work_hours (включая fines).
             # Колонка модели и источник операторов различаются: group-aware vs legacy,
             # но СПИСОК и ПОРЯДОК колонок идентичны (downstream-распаковка одна).
@@ -10675,7 +10675,7 @@ class Database:
                     }
                     _op["frozen"] = True
             except Exception as _ov_err:
-                logging.warning("snapshot overlay failed for %s g%s: %s", month, group_id, _ov_err)
+                logging.error("snapshot overlay failed for %s g%s: %s", month, group_id, _ov_err, exc_info=True)
 
         return {"month": month, "days_in_month": days, "operators": operators}
 
