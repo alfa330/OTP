@@ -44,6 +44,10 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     const [addSvId, setAddSvId] = useState('');
     const [effDate, setEffDate] = useState('');
     const [memberBusy, setMemberBusy] = useState(false);
+    // Исторический состав: '' = текущий (живой), 'YYYY-MM' = замороженный снимок месяца
+    const [membersMonth, setMembersMonth] = useState('');
+    const [snap, setSnap] = useState(null);
+    const [snapLoading, setSnapLoading] = useState(false);
 
     const showToastRef = useRef(showToast);
     showToastRef.current = showToast;
@@ -232,6 +236,7 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     const openMembers = async (group) => {
         setMembersGroup(group);
         setAddOpId(''); setAddSvId(''); setEffDate('');
+        setMembersMonth(''); setSnap(null);
         setMembersLoading(true);
         try {
             const { ok, data } = await api(`/api/admin/groups/${group.id}/members`);
@@ -241,7 +246,29 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
             setMembersLoading(false);
         }
     };
-    const closeMembers = () => { setMembersGroup(null); setMembers({ operators: [], supervisors: [] }); };
+    const closeMembers = () => { setMembersGroup(null); setMembers({ operators: [], supervisors: [] }); setMembersMonth(''); setSnap(null); };
+
+    // Последние 12 месяцев + «текущий» для исторического состава за выбранный месяц
+    const monthOptions = useMemo(() => {
+        const opts = [{ value: '', label: 'Текущий состав' }];
+        const now = new Date();
+        for (let i = 0; i < 12; i++) {
+            const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+            opts.push({ value: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`, label: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` });
+        }
+        return opts;
+    }, []);
+
+    const selectMembersMonth = async (month) => {
+        setMembersMonth(month);
+        if (!month || !membersGroup) { setSnap(null); return; }
+        setSnapLoading(true);
+        try {
+            const { ok, data } = await api(`/api/admin/snapshots?month=${month}&group_id=${membersGroup.id}`);
+            if (ok) setSnap({ ...(data.groups?.[0] || { operators: [], supervisor_names: [] }), frozen: !!data.frozen, closed: !!data.closed });
+            else { setSnap(null); showToastRef.current?.(data.error || 'Не удалось загрузить снимок', 'error'); }
+        } finally { setSnapLoading(false); }
+    };
 
     const refreshMembers = async (groupId) => {
         const { ok, data } = await api(`/api/admin/groups/${groupId}/members`);
@@ -493,6 +520,52 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
             >
                 <div className="space-y-4">
                     <div>
+                        <div className={iosGroupLabel}>Месяц состава</div>
+                        <CustomSelect className="max-w-xs" value={membersMonth} onChange={selectMembersMonth} options={monthOptions} />
+                        {membersMonth ? (
+                            <div className="mt-1 text-[12px] text-amber-700">Исторический состав за {membersMonth} — только просмотр (как было тогда).</div>
+                        ) : null}
+                    </div>
+
+                    {membersMonth ? (
+                        snapLoading ? (
+                            <div className="p-4 text-sm text-slate-500">Загрузка снимка…</div>
+                        ) : (!snap || (snap.operators || []).length === 0) ? (
+                            <div className="p-4 text-sm text-slate-500">{snap && snap.frozen ? 'В этом месяце в группе никого не было.' : 'Снимок за этот месяц ещё не создан (месяц не закрыт или ещё не открывался в учёте часов).'}</div>
+                        ) : (
+                            <>
+                                <section className="space-y-2">
+                                    <div className={iosGroupLabel}>Супервайзеры (на тот месяц)</div>
+                                    <div className="rounded-xl ring-1 ring-slate-200 bg-white px-3 py-2 text-[13.5px] text-slate-700">
+                                        {(snap.supervisor_names || []).length ? (snap.supervisor_names || []).join(', ') : 'нет'}
+                                    </div>
+                                </section>
+                                <section className="space-y-2">
+                                    <div className={iosGroupLabel}>Операторы ({(snap.operators || []).length}) — состав на {membersMonth}</div>
+                                    <div className="rounded-xl ring-1 ring-slate-200 bg-white divide-y divide-slate-100 overflow-hidden max-h-80 overflow-y-auto">
+                                        {(snap.operators || []).map((o, idx) => (
+                                            <div key={o.operator_id} className="flex items-center justify-between gap-2 px-3 py-2">
+                                                <span className="flex min-w-0 items-center gap-2 text-[13.5px] text-slate-700">
+                                                    <span className="text-slate-400 tabular-nums">{idx + 1}.</span>
+                                                    <span className="truncate">{o.name}</span>
+                                                    {(o.first_day || o.last_day) ? (
+                                                        <span className="text-[11px] text-slate-400 shrink-0">дни {String(o.first_day || '').slice(8)}–{String(o.last_day || '').slice(8)}</span>
+                                                    ) : null}
+                                                </span>
+                                                <span className="flex items-center gap-1.5 shrink-0 text-[11px]">
+                                                    {FIRED_STATUSES.has(String(o.status)) ? (<span className="rounded-full bg-rose-50 px-2 py-0.5 text-rose-600">уволен</span>) : null}
+                                                    {o.role && o.role !== 'operator' ? (<span className="rounded-full bg-violet-50 px-2 py-0.5 text-violet-600">{o.role}</span>) : null}
+                                                    <span className={`rounded-full px-2 py-0.5 ${o.calculation_model_code === 'chat_manager' ? 'bg-emerald-50 text-emerald-600' : 'bg-blue-50 text-blue-600'}`}>{o.calculation_model_code === 'chat_manager' ? 'чат' : 'оператор'}</span>
+                                                </span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </section>
+                            </>
+                        )
+                    ) : (
+                    <>
+                    <div>
                         <div className={iosGroupLabel}>Дата изменения (необязательно, по умолчанию сегодня)</div>
                         <input type="date" className={`${iosInput} max-w-xs`} value={effDate} onChange={(e) => setEffDate(e.target.value)} />
                     </div>
@@ -565,6 +638,8 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                                 </p>
                             </section>
                         </>
+                    )}
+                    </>
                     )}
                 </div>
             </IosModal>
