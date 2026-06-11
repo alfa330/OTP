@@ -16,6 +16,14 @@ const FALLBACK_MODELS = [
 ];
 const EMPTY_FORM = { name: '', department_id: '', direction_id: '', calculation_model_code: 'operator' };
 
+// Человекочитаемая подпись месяца: "2026-05" -> "Май 2026"
+const MONTHS_RU_NOM = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
+const monthLabelRu = (ym) => {
+    const m = /^(\d{4})-(\d{2})$/.exec(String(ym || ''));
+    if (!m) return ym || '';
+    return `${MONTHS_RU_NOM[Number(m[2]) - 1] || m[2]} ${m[1]}`;
+};
+
 const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     const [groups, setGroups] = useState([]);
     const [directions, setDirections] = useState([]);
@@ -254,7 +262,8 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
         const now = new Date();
         for (let i = 0; i < 12; i++) {
             const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-            opts.push({ value: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`, label: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` });
+            const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+            opts.push({ value: ym, label: monthLabelRu(ym) });
         }
         return opts;
     }, []);
@@ -523,7 +532,7 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                         <div className={iosGroupLabel}>Месяц состава</div>
                         <CustomSelect className="max-w-xs" value={membersMonth} onChange={selectMembersMonth} options={monthOptions} />
                         {membersMonth ? (
-                            <div className="mt-1 text-[12px] text-amber-700">Исторический состав за {membersMonth} — только просмотр (как было тогда).</div>
+                            <div className="mt-1 text-[12px] text-amber-700">Исторический состав за {monthLabelRu(membersMonth)} — только просмотр (как было тогда).</div>
                         ) : null}
                     </div>
 
@@ -541,7 +550,7 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                                     </div>
                                 </section>
                                 <section className="space-y-2">
-                                    <div className={iosGroupLabel}>Операторы ({(snap.operators || []).length}) — состав на {membersMonth}</div>
+                                    <div className={iosGroupLabel}>Операторы ({(snap.operators || []).length}) — состав на {monthLabelRu(membersMonth)}</div>
                                     <div className="rounded-xl ring-1 ring-slate-200 bg-white divide-y divide-slate-100 overflow-hidden max-h-80 overflow-y-auto">
                                         {(snap.operators || []).map((o, idx) => (
                                             <div key={o.operator_id} className="flex items-center justify-between gap-2 px-3 py-2">
