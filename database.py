@@ -10155,7 +10155,9 @@ class Database:
             total_efficiency_hours = calls_per_hour = fines = 0.0
         calculation_model_code = self._normalize_calculation_model_code(calculation_model_raw, direction_name)
         if calculation_model_code == CALCULATION_MODEL_CHAT_MANAGER:
-            total_calls = int(chat_metric_totals.get("chats_count") or 0)
+            _chat_chats = int(chat_metric_totals.get("chats_count") or 0)
+            # фоллбэк: чаты исторически писались в daily.calls, chat_manager_daily_metrics часто пуст
+            total_calls = _chat_chats if _chat_chats > 0 else sum(int(_d.get("calls") or 0) for _d in daily_map.values())
             regular_hours_for_rate = max(0.0, float(regular_hours or 0.0))
             calls_per_hour = (float(total_calls) / regular_hours_for_rate) if regular_hours_for_rate > 0 else 0.0
             for day_key, metrics in (chat_metrics_by_day or {}).items():
@@ -10278,6 +10280,14 @@ class Database:
             raise ValueError("Invalid month format, expected YYYY-MM") from e
 
         with self._get_cursor() as cursor:
+            # Ленивая заморозка: при первом обращении к ЗАКРЫТОМУ месяцу (после 10-го числа
+            # следующего) создаём снимок, если его ещё нет. Защищено try/except — не ломает чтение.
+            if group_id is not None and self._is_month_closed(month):
+                try:
+                    if not self._month_snapshot_exists_tx(cursor, month):
+                        self._freeze_month_to_snapshots_tx(cursor, month)
+                except Exception as _freeze_err:
+                    logging.warning("lazy snapshot freeze failed for %s: %s", month, _freeze_err)
             # Получаем операторов + ставка + norm_hours + агрегаты work_hours (включая fines).
             # Колонка модели и источник операторов различаются: group-aware vs legacy,
             # но СПИСОК и ПОРЯДОК колонок идентичны (downstream-распаковка одна).
@@ -10554,7 +10564,9 @@ class Database:
                 chat_metrics_by_day = chat_metrics_by_operator.get(op_id, {}) if isinstance(chat_metrics_by_operator, dict) else {}
                 chat_metric_totals = chat_totals_by_operator.get(op_id, {}) if isinstance(chat_totals_by_operator, dict) else {}
                 if calculation_model_code == CALCULATION_MODEL_CHAT_MANAGER:
-                    total_calls = int(chat_metric_totals.get("chats_count") or 0)
+                    _chat_chats = int(chat_metric_totals.get("chats_count") or 0)
+                    # фоллбэк: чаты исторически писались в daily.calls (op_daily), chat_manager_daily_metrics часто пуст
+                    total_calls = _chat_chats if _chat_chats > 0 else sum(int(_d.get("calls") or 0) for _d in op_daily.values())
                     regular_hours_for_rate = max(0.0, float(regular_hours or 0.0))
                     calls_per_hour = (float(total_calls) / regular_hours_for_rate) if regular_hours_for_rate > 0 else 0.0
                     for day_key, metrics in (chat_metrics_by_day or {}).items():
@@ -10624,6 +10636,46 @@ class Database:
                         "chat_transfer_count": int(chat_metric_totals.get("transfer_chat_count") or 0),
                     })
                 })
+
+        # Закрытый месяц (после 10-го числа следующего): накладываем ЗАМОРОЖЕННЫЕ агрегаты/мету
+        # из снимка — числа стабильны и не «плывут» от пост-правок daily/смены формул. Композиция
+        # и daily-календарь остаются (исторический след). Защищено try/except — фолбэк на live.
+        if group_id is not None and operators and self._is_month_closed(month):
+            try:
+                with self._get_cursor() as _sc:
+                    _sc.execute("""
+                        SELECT operator_id, status, rate, norm_hours, regular_hours, total_break_time,
+                               total_talk_time, total_calls, total_efficiency_hours, calls_per_hour, fines,
+                               chat_avg_score, chat_avg_response_time_seconds, chat_transfer_count
+                        FROM group_operator_month_snapshots
+                        WHERE group_id = %s AND month = %s AND frozen_at IS NOT NULL
+                    """, (int(group_id), month))
+                    snap = {int(r[0]): r for r in _sc.fetchall() or []}
+                for _op in operators:
+                    r = snap.get(int(_op.get("operator_id")))
+                    if not r:
+                        continue
+                    if r[1] is not None:
+                        _op["status"] = r[1]
+                    if r[2] is not None:
+                        _op["rate"] = float(r[2])
+                    if r[3] is not None:
+                        _op["norm_hours"] = float(r[3])
+                    _op["aggregates"] = {
+                        "regular_hours": float(r[4] or 0.0),
+                        "total_break_time": float(r[5] or 0.0),
+                        "total_talk_time": float(r[6] or 0.0),
+                        "total_calls": int(r[7] or 0),
+                        "total_efficiency_hours": float(r[8] or 0.0),
+                        "calls_per_hour": float(r[9] or 0.0),
+                        "fines": float(r[10] or 0.0),
+                        "chat_avg_score": r[11],
+                        "chat_avg_response_time_seconds": r[12],
+                        "chat_transfer_count": int(r[13] or 0),
+                    }
+                    _op["frozen"] = True
+            except Exception as _ov_err:
+                logging.warning("snapshot overlay failed for %s g%s: %s", month, group_id, _ov_err)
 
         return {"month": month, "days_in_month": days, "operators": operators}
 
@@ -10805,7 +10857,9 @@ class Database:
                 chat_metrics_by_day = chat_metrics_by_operator.get(op_id, {}) if isinstance(chat_metrics_by_operator, dict) else {}
                 chat_metric_totals = chat_totals_by_operator.get(op_id, {}) if isinstance(chat_totals_by_operator, dict) else {}
                 if calculation_model_code == CALCULATION_MODEL_CHAT_MANAGER:
-                    total_calls = int(chat_metric_totals.get("chats_count") or 0)
+                    _chat_chats = int(chat_metric_totals.get("chats_count") or 0)
+                    # фоллбэк: чаты исторически писались в daily.calls (op_daily), chat_manager_daily_metrics часто пуст
+                    total_calls = _chat_chats if _chat_chats > 0 else sum(int(_d.get("calls") or 0) for _d in op_daily.values())
                     regular_hours_for_rate = max(0.0, float(regular_hours or 0.0))
                     calls_per_hour = (float(total_calls) / regular_hours_for_rate) if regular_hours_for_rate > 0 else 0.0
                     for day_key, metrics in (chat_metrics_by_day or {}).items():
