@@ -1372,6 +1372,14 @@ class Database:
                 ADD COLUMN IF NOT EXISTS score_count INTEGER;
             """)
             cursor.execute("""
+                ALTER TABLE chat_manager_daily_metrics
+                ADD COLUMN IF NOT EXISTS whatsapp_chats_count INTEGER NOT NULL DEFAULT 0;
+            """)
+            cursor.execute("""
+                ALTER TABLE chat_manager_daily_metrics
+                ADD COLUMN IF NOT EXISTS name_requests_chats_count INTEGER NOT NULL DEFAULT 0;
+            """)
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operator_technical_issues (
                     id SERIAL PRIMARY KEY,
                     batch_id UUID NOT NULL,
@@ -9937,6 +9945,8 @@ class Database:
         totals = {
             op_id: {
                 'chats_count': 0,
+                'whatsapp_chats_count': 0,
+                'name_requests_chats_count': 0,
                 'transfer_chat_count': 0,
                 'avg_score': None,
                 'avg_response_time_seconds': None
@@ -9956,7 +9966,9 @@ class Database:
                 avg_response_time_seconds,
                 COALESCE(transfer_chat_count, 0),
                 score_sum,
-                score_count
+                score_count,
+                COALESCE(whatsapp_chats_count, 0),
+                COALESCE(name_requests_chats_count, 0)
             FROM chat_manager_daily_metrics
             WHERE operator_id = ANY(%s)
               AND day >= %s
@@ -9971,11 +9983,13 @@ class Database:
         score_acc = {op_id: {'sum': 0.0, 'count': 0} for op_id in op_ids}
         # Время ответа храним как готовое дневное среднее — период считаем как среднее дневных.
         response_acc = {op_id: {'sum': 0.0, 'count': 0} for op_id in op_ids}
-        for op_id, day_obj, chats_count, avg_score, avg_response_time_seconds, transfer_chat_count, score_sum, score_count in cursor.fetchall() or []:
+        for op_id, day_obj, chats_count, avg_score, avg_response_time_seconds, transfer_chat_count, score_sum, score_count, whatsapp_chats_count, name_requests_chats_count in cursor.fetchall() or []:
             op_id_int = int(op_id)
             if op_id_int not in result or day_obj is None:
                 continue
             chats_int = max(0, int(chats_count or 0))
+            whatsapp_chats_int = max(0, int(whatsapp_chats_count or 0))
+            name_requests_chats_int = max(0, int(name_requests_chats_count or 0))
             transfer_int = max(0, int(transfer_chat_count or 0))
             s_sum = float(score_sum) if score_sum is not None else None
             s_cnt = int(score_count) if score_count is not None else None
@@ -9989,6 +10003,8 @@ class Database:
             payload = {
                 "date": day_obj.strftime('%Y-%m-%d'),
                 "chats_count": chats_int,
+                "whatsapp_chats_count": whatsapp_chats_int,
+                "name_requests_chats_count": name_requests_chats_int,
                 "avg_score": day_avg_score,
                 "score_sum": s_sum,
                 "score_count": s_cnt,
@@ -9999,6 +10015,8 @@ class Database:
             day_key = str(int(day_obj.day))
             result.setdefault(op_id_int, {})[day_key] = payload
             totals[op_id_int]['chats_count'] += chats_int
+            totals[op_id_int]['whatsapp_chats_count'] += whatsapp_chats_int
+            totals[op_id_int]['name_requests_chats_count'] += name_requests_chats_int
             totals[op_id_int]['transfer_chat_count'] += transfer_int
             if s_cnt and s_cnt > 0 and s_sum is not None:
                 score_acc[op_id_int]['sum'] += s_sum
@@ -10023,10 +10041,13 @@ class Database:
     def save_chat_manager_daily_metrics(self, metrics, imported_by=None, preserve_missing=False, update_fields=None):
         """Сохраняет дневные метрики чат-менеджеров (upsert по (operator_id, day)).
 
-        update_fields: если задан (множество имён колонок из {chats_count, avg_score,
+        update_fields: если задан (множество имён колонок из {chats_count,
+        whatsapp_chats_count, name_requests_chats_count, avg_score,
         avg_response_time_seconds, transfer_chat_count, score_sum, score_count}) — на конфликте
         ПЕРЕЗАПИСЫВАЮТСЯ только эти колонки (остальные метрики дня сохраняются нетронутыми).
         Это нужно для пер-форматного импорта: отчёт по оценкам не должен обнулять чаты и т.п.
+        Для двух отчётов количества чатов обновляется только своя составляющая, а chats_count
+        пересчитывается как whatsapp_chats_count + name_requests_chats_count.
         Если None — прежнее поведение (обновляются все метрики; preserve_missing влияет на
         avg_score/avg_response_time_seconds; score_sum/score_count сохраняются при отсутствии)."""
         if not isinstance(metrics, list):
@@ -10035,7 +10056,9 @@ class Database:
         _ALLOWED_UPDATE_FIELDS = {
             'chats_count', 'avg_score', 'avg_response_time_seconds',
             'transfer_chat_count', 'score_sum', 'score_count',
+            'whatsapp_chats_count', 'name_requests_chats_count',
         }
+        _CHAT_COUNT_COMPONENT_FIELDS = {'whatsapp_chats_count', 'name_requests_chats_count'}
         update_set = None
         if update_fields is not None:
             update_set = {str(f) for f in update_fields if str(f) in _ALLOWED_UPDATE_FIELDS}
@@ -10108,6 +10131,9 @@ class Database:
             if avg_score_val is None and score_sum_val is not None and score_count_val:
                 avg_score_val = round(score_sum_val / score_count_val, 4)
 
+            whatsapp_chats_val = _optional_int(item.get('whatsapp_chats_count'))
+            name_requests_chats_val = _optional_int(item.get('name_requests_chats_count'))
+
             rows.append((
                 operator_id,
                 day_obj,
@@ -10120,6 +10146,8 @@ class Database:
                 Json(item),
                 score_sum_val,
                 score_count_val,
+                whatsapp_chats_val,
+                name_requests_chats_val,
             ))
 
         if not rows:
@@ -10128,7 +10156,27 @@ class Database:
         if update_set is not None:
             # Пер-форматный импорт: перезаписываем ТОЛЬКО указанные колонки (replace),
             # остальные метрики дня остаются нетронутыми (другой отчёт их не обнуляет).
-            set_clauses = [f"{col} = EXCLUDED.{col}" for col in sorted(update_set)]
+            component_updates = update_set & _CHAT_COUNT_COMPONENT_FIELDS
+            set_clauses = [
+                f"{col} = EXCLUDED.{col}"
+                for col in sorted(update_set)
+                if col not in _CHAT_COUNT_COMPONENT_FIELDS and not (component_updates and col == 'chats_count')
+            ]
+            set_clauses.extend([f"{col} = EXCLUDED.{col}" for col in sorted(component_updates)])
+            if component_updates:
+                whatsapp_expr = (
+                    "EXCLUDED.whatsapp_chats_count"
+                    if 'whatsapp_chats_count' in component_updates
+                    else "chat_manager_daily_metrics.whatsapp_chats_count"
+                )
+                name_requests_expr = (
+                    "EXCLUDED.name_requests_chats_count"
+                    if 'name_requests_chats_count' in component_updates
+                    else "chat_manager_daily_metrics.name_requests_chats_count"
+                )
+                set_clauses.append(
+                    f"chats_count = COALESCE({whatsapp_expr}, 0) + COALESCE({name_requests_expr}, 0)"
+                )
         else:
             # Прежнее поведение: обновляем все метрики. preserve_missing защищает оценку/время
             # ответа от затирания NULL-ом; score_sum/score_count сохраняем при отсутствии (модалка
@@ -10172,7 +10220,9 @@ class Database:
                     source_batch_id,
                     raw_payload,
                     score_sum,
-                    score_count
+                    score_count,
+                    whatsapp_chats_count,
+                    name_requests_chats_count
                 )
                 VALUES %s
                 ON CONFLICT (operator_id, day)
@@ -10402,8 +10452,7 @@ class Database:
         calculation_model_code = self._normalize_calculation_model_code(calculation_model_raw, direction_name)
         if calculation_model_code == CALCULATION_MODEL_CHAT_MANAGER:
             _chat_chats = int(chat_metric_totals.get("chats_count") or 0)
-            # фоллбэк: чаты исторически писались в daily.calls, chat_manager_daily_metrics часто пуст
-            total_calls = _chat_chats if _chat_chats > 0 else sum(int(_d.get("calls") or 0) for _d in daily_map.values())
+            total_calls = _chat_chats
             regular_hours_for_rate = max(0.0, float(regular_hours or 0.0))
             calls_per_hour = (float(total_calls) / regular_hours_for_rate) if regular_hours_for_rate > 0 else 0.0
             for day_key, metrics in (chat_metrics_by_day or {}).items():
@@ -10811,8 +10860,7 @@ class Database:
                 chat_metric_totals = chat_totals_by_operator.get(op_id, {}) if isinstance(chat_totals_by_operator, dict) else {}
                 if calculation_model_code == CALCULATION_MODEL_CHAT_MANAGER:
                     _chat_chats = int(chat_metric_totals.get("chats_count") or 0)
-                    # фоллбэк: чаты исторически писались в daily.calls (op_daily), chat_manager_daily_metrics часто пуст
-                    total_calls = _chat_chats if _chat_chats > 0 else sum(int(_d.get("calls") or 0) for _d in op_daily.values())
+                    total_calls = _chat_chats
                     regular_hours_for_rate = max(0.0, float(regular_hours or 0.0))
                     calls_per_hour = (float(total_calls) / regular_hours_for_rate) if regular_hours_for_rate > 0 else 0.0
                     for day_key, metrics in (chat_metrics_by_day or {}).items():
@@ -11104,8 +11152,7 @@ class Database:
                 chat_metric_totals = chat_totals_by_operator.get(op_id, {}) if isinstance(chat_totals_by_operator, dict) else {}
                 if calculation_model_code == CALCULATION_MODEL_CHAT_MANAGER:
                     _chat_chats = int(chat_metric_totals.get("chats_count") or 0)
-                    # фоллбэк: чаты исторически писались в daily.calls (op_daily), chat_manager_daily_metrics часто пуст
-                    total_calls = _chat_chats if _chat_chats > 0 else sum(int(_d.get("calls") or 0) for _d in op_daily.values())
+                    total_calls = _chat_chats
                     regular_hours_for_rate = max(0.0, float(regular_hours or 0.0))
                     calls_per_hour = (float(total_calls) / regular_hours_for_rate) if regular_hours_for_rate > 0 else 0.0
                     for day_key, metrics in (chat_metrics_by_day or {}).items():
@@ -20362,8 +20409,7 @@ class Database:
             """, (operator_id, start, end))
             chat_row = cursor.fetchone() or (0, None, None, 0)
             _chat_sum = int(chat_row[0] or 0)
-            if _chat_sum > 0:
-                total_calls = _chat_sum  # иначе оставляем SUM(daily.calls): чаты исторически писались в daily.calls, а chat_manager_daily_metrics часто пуст
+            total_calls = _chat_sum
             chat_avg_score = float(chat_row[1]) if chat_row[1] is not None else None
             chat_avg_response_time_seconds = float(chat_row[2]) if chat_row[2] is not None else None
             chat_transfer_count = int(chat_row[3] or 0)
@@ -20519,8 +20565,7 @@ class Database:
             """, (operator_id, seg_start, seg_end))
             chat_row = cursor.fetchone() or (0, None, None, 0)
             _chat_sum = int(chat_row[0] or 0)
-            if _chat_sum > 0:
-                total_calls = _chat_sum  # иначе оставляем SUM(daily.calls): чаты исторически писались в daily.calls, а chat_manager_daily_metrics часто пуст
+            total_calls = _chat_sum
             chat_avg_score = float(chat_row[1]) if chat_row[1] is not None else None
             chat_avg_response_time_seconds = float(chat_row[2]) if chat_row[2] is not None else None
             chat_transfer_count = int(chat_row[3] or 0)

@@ -2453,7 +2453,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             });
         }
 
-        // Чат-метрики дня: chats_count и transfer_chat_count — целые, время ответа — секунды (float)
+        // Чат-метрики дня: transfer_chat_count — целое, время ответа — секунды (float).
+        // Количество чатов приходит из отдельных импортов метрик чатов.
         function updateChatMetricField(field, value) {
             setCellModel(prev => {
             if (!prev) return prev;
@@ -2657,11 +2658,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     comment: String(b?.comment || '').trim() || null
                 };
                 }).filter((b) => Boolean(b.type)) : [],
-                // Чат-метрики (для чат-модели). chats_count зеркалит поле «Чаты» (calls), чтобы метрики и daily были согласованы.
+                // Чат-метрики (для чат-модели). Количество чатов не берём из daily.calls:
+                // его ведут отдельные импорты метрик чатов (Whatsapp A + Name/Requests B).
                 // Пустые avg_score/время ответа -> null: на бэке preserve_missing сохраняет прежнее (импорт не затирается).
                 ...(isChatModel ? {
                     chat_metrics: {
-                        chats_count: parseInt(cellModel.calls, 10) || 0,
                         avg_response_time_seconds: (cellModel.chat_metrics?.avg_response_time_seconds === '' || cellModel.chat_metrics?.avg_response_time_seconds == null)
                             ? null : Number(cellModel.chat_metrics.avg_response_time_seconds),
                         transfer_chat_count: Number(cellModel.chat_metrics?.transfer_chat_count) || 0,
@@ -20197,14 +20198,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <FaIcon className="fas fa-paperclip mr-1"></FaIcon>{chatMetricsUpload.fileName}
                                 </div>
                                 <div className="mb-3 p-2 rounded border bg-slate-50 text-sm">
-                                    Тип отчёта:&nbsp;
+                                    <div className="font-medium text-gray-700">Формат будет определен автоматически.</div>
                                     {chatMetricsUpload.detectedType ? (
-                                        <b className="text-cyan-700">{CHAT_REPORT_LABELS[chatMetricsUpload.detectedType] || chatMetricsUpload.detectedType}</b>
-                                    ) : chatMetricsUpload.isCsv ? (
-                                        <span className="text-amber-700">не распознан по колонкам — будет обработан универсальным парсером</span>
-                                    ) : (
-                                        <span className="text-gray-600">определится на сервере (XLSX)</span>
-                                    )}
+                                        <div className="mt-1 text-xs text-gray-600">
+                                            Предварительно распознан: <b className="text-cyan-700">{CHAT_REPORT_LABELS[chatMetricsUpload.detectedType] || chatMetricsUpload.detectedType}</b>
+                                        </div>
+                                    ) : null}
                                 </div>
 
                                 {(chatMetricsUpload.detectedType === 'name_requests' || !chatMetricsUpload.isCsv || chatMetricsUpload.detectedType === null) && (
@@ -32976,7 +32975,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     key: "total_chats",
                                     label: "Чаты",
                                     icon: "fas fa-comments",
-                                    value: fmtNumber(chatMetrics.chats_count ?? normalize("calls"), 0),
+                                    value: fmtNumber(chatMetrics.chats_count, 0),
                                     hint: "Всего чатов",
                                     },
                                     {
@@ -41051,7 +41050,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             const wt = safeNum(d.work_time);
                                                             baseHours += wt;
                                                             if (wt > 0) workedDays += 1; // норму делим по ОТРАБОТАННЫМ дням, не календарным
-                                                            interactions += safeNum(d.calls);
+                                                            if (!isChatModel) interactions += safeNum(d.calls);
                                                             if (Array.isArray(d.bonuses)) for (const b of d.bonuses) partBonuses += safeNum(b?.amount);
                                                         }
                                                         const cm = chatByDay[String(day)] || (d && d.chat_metrics) || null;
@@ -41060,7 +41059,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             if (sc > 0) { scoreSum += sc; scoreN += 1; }
                                                             const rt = safeNum(cm.avg_response_time_seconds);
                                                             if (rt > 0) { respSum += rt; respN += 1; }
-                                                            if (safeNum(cm.chats_count) > 0 && !(d && safeNum(d.calls) > 0)) interactions += safeNum(cm.chats_count);
+                                                            if (isChatModel) interactions += safeNum(cm.chats_count);
                                                         }
                                                     }
                                                     return {
