@@ -4029,6 +4029,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         // ======= RENDER =======
         const isAdminWithoutSupervisorSelected = isAdminLikeRoleFn(user?.role) && !selectedSvId;
+        const isDayUploadDisabled = isChatModel || isAdminWithoutSupervisorSelected;
         return (
             <div className="bg-white p-5 rounded-xl shadow-md">
             <div className="mb-4 flex flex-wrap items-stretch justify-between gap-3">
@@ -4349,10 +4350,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     {daysArray.map(day => (
                     <div key={day} className="p-2 min-w-[72px] text-center border-l">
                         <button
-                        onClick={() => openUploadForDay(day)}
-                        disabled={isAdminWithoutSupervisorSelected}
-                        className={`text-xs font-semibold px-2 py-1 rounded ${isAdminWithoutSupervisorSelected ? 'text-gray-400 cursor-not-allowed' : 'hover:bg-gray-100'}`}
-                        title={isAdminWithoutSupervisorSelected ? 'Сначала выберите супервайзера' : 'Загрузить файл на выбранный день'}
+                        onClick={() => {
+                            if (isDayUploadDisabled) return;
+                            openUploadForDay(day);
+                        }}
+                        disabled={isDayUploadDisabled}
+                        className={`text-xs font-semibold px-2 py-1 rounded ${isDayUploadDisabled ? 'text-gray-400 cursor-not-allowed' : 'hover:bg-gray-100'}`}
+                        title={isChatModel ? 'Для чат-группы отчёты загружаются через Метрики → Отчёты' : (isAdminWithoutSupervisorSelected ? 'Сначала выберите супервайзера' : 'Загрузить файл на выбранный день')}
                         >
                         {formatHeaderLabel(day)}
                         </button>
