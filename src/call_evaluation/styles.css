@@ -192,6 +192,20 @@
             accent-color: var(--accent);
             cursor: pointer;
         }
+        .evaluation-notify-control {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+        .evaluation-notify-select {
+            width: auto;
+            min-width: 170px;
+            max-width: 240px;
+            padding-top: 5px;
+            padding-bottom: 5px;
+            font-size: 12px;
+        }
         .error-text { font-size: 12px; color: var(--red); margin-top: 4px; }
 
         /* ── Card ── */

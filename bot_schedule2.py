@@ -6682,6 +6682,132 @@ def admin_call_feedback_report_setting():
         logging.exception("Error in /api/admin/call_feedback_report_setting")
         return jsonify({"error": "Internal server error"}), 500
 
+def _parse_boolean_setting(raw_value, field_name='enabled'):
+    if isinstance(raw_value, bool):
+        return raw_value, None
+    if isinstance(raw_value, (int, float)):
+        return bool(raw_value), None
+    if isinstance(raw_value, str):
+        norm = raw_value.strip().lower()
+        if norm in ('1', 'true', 'yes', 'on'):
+            return True, None
+        if norm in ('0', 'false', 'no', 'off', ''):
+            return False, None
+    return None, f"Invalid {field_name} value"
+
+
+def _build_call_evaluation_notification_settings_payload(requester_id, requester, is_admin, headed_dept_id):
+    setting = db.get_call_evaluation_notify_setting(requester_id)
+    if setting is None:
+        return None
+
+    if is_admin:
+        departments = [
+            dept for dept in (db.get_departments() or [])
+            if isinstance(dept, dict) and dept.get('is_active') is not False
+        ]
+        department_id = setting.get('department_id')
+        department_name = setting.get('department_name')
+        if department_id and not department_name:
+            dept = db.get_department_by_id(department_id)
+            department_name = (dept or {}).get('name') if isinstance(dept, dict) else None
+        enabled = bool(setting.get('enabled') and department_id is not None)
+        scope = 'admin'
+    else:
+        dept = db.get_department_by_id(headed_dept_id) if headed_dept_id else None
+        departments = [dept] if isinstance(dept, dict) else []
+        department_id = int(headed_dept_id) if headed_dept_id is not None else None
+        department_name = (dept or {}).get('name') if isinstance(dept, dict) else None
+        enabled = bool(setting.get('enabled') and setting.get('department_id') == department_id)
+        scope = 'department'
+
+    return {
+        "status": "success",
+        "enabled": enabled,
+        "telegram_connected": bool(requester[1]) if requester else False,
+        "scope": scope,
+        "department_id": department_id,
+        "department_name": department_name,
+        "departments": departments,
+    }
+
+
+@app.route('/api/call_evaluation/notification_settings', methods=['GET', 'PUT', 'OPTIONS'])
+@require_api_key
+def call_evaluation_notification_settings():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        requester_role = _normalize_user_role(requester[3]) if requester else ''
+        is_admin = _is_admin_role(requester_role)
+        headed_dept_id = db.headed_department_id_for_user(requester_id)
+        if not is_admin and headed_dept_id is None:
+            return jsonify({"error": "Only admins and department heads can manage evaluation notifications"}), 403
+
+        if request.method == 'GET':
+            payload = _build_call_evaluation_notification_settings_payload(
+                requester_id, requester, is_admin, headed_dept_id
+            )
+            if payload is None:
+                return jsonify({"error": "User not found"}), 404
+            return jsonify(payload), 200
+
+        data = request.get_json(silent=True) or {}
+        raw_enabled = data.get('enabled', data.get('call_evaluation_notify_enabled'))
+        if raw_enabled is None:
+            return jsonify({"error": "enabled is required"}), 400
+        enabled, parse_error = _parse_boolean_setting(raw_enabled, 'enabled')
+        if parse_error:
+            return jsonify({"error": parse_error}), 400
+
+        if is_admin:
+            raw_department_id = data.get('department_id', data.get('call_evaluation_notify_department_id'))
+            if raw_department_id in (None, '') and enabled:
+                current = db.get_call_evaluation_notify_setting(requester_id) or {}
+                raw_department_id = current.get('department_id')
+            department_id = None
+            if raw_department_id not in (None, ''):
+                try:
+                    department_id = int(raw_department_id)
+                except (TypeError, ValueError):
+                    return jsonify({"error": "Invalid department_id"}), 400
+            if enabled and department_id is None:
+                return jsonify({"error": "department_id is required"}), 400
+            if department_id is not None:
+                department = db.get_department_by_id(department_id)
+                if not department or department.get('is_active') is False:
+                    return jsonify({"error": "Department not found"}), 404
+        else:
+            department_id = int(headed_dept_id)
+            department = db.get_department_by_id(department_id)
+            if not department or department.get('is_active') is False:
+                return jsonify({"error": "Department not found"}), 404
+
+        updated = db.set_call_evaluation_notify_setting(
+            requester_id,
+            bool(enabled),
+            department_id
+        )
+        if updated is None:
+            return jsonify({"error": "User not found"}), 404
+
+        payload = _build_call_evaluation_notification_settings_payload(
+            requester_id, requester, is_admin, headed_dept_id
+        )
+        if payload is None:
+            return jsonify({"error": "User not found"}), 404
+        return jsonify(payload), 200
+
+    except Exception:
+        logging.exception("Error in /api/call_evaluation/notification_settings")
+        return jsonify({"error": "Internal server error"}), 500
+
 @app.route('/api/reports/rate_change_setting', methods=['GET', 'POST'])
 @require_api_key
 def rate_change_report_setting():
@@ -9170,8 +9296,16 @@ def _notify_telegram_about_new_reevaluation_request(call_ctx, requester_name, re
     if not API_TOKEN:
         return
 
-    admin_chat_id = os.getenv('ADMIN_ID')
-    if admin_chat_id:
+    try:
+        recipients = db.get_call_evaluation_notify_recipients(call_ctx.get('operator_id')) or []
+    except Exception as exc:
+        logging.error("Failed to load reevaluation notification recipients: %s", exc, exc_info=True)
+        recipients = []
+
+    for recipient in recipients:
+        admin_chat_id = recipient.get('telegram_id') if isinstance(recipient, dict) else None
+        if not admin_chat_id:
+            continue
         reply_markup = {
             "inline_keyboard": [[
                 {"text": "Одобрить ✅", "callback_data": f"approve_reval:{call_ctx['call_id']}"},
@@ -9282,6 +9416,16 @@ def _resolve_reevaluation_request(call_id, approver_user_id, decision, comment=N
     if call_ctx.get('sv_request_approved') or call_ctx.get('sv_request_rejected'):
         raise RuntimeError("Reevaluation request is already resolved")
 
+    approver = db.get_user(id=approver_user_id) if approver_user_id else None
+    if not approver:
+        raise PermissionError("Approver not found")
+    approver_role = _normalize_user_role(approver[3])
+    if not _is_admin_role(approver_role):
+        headed_dept_id = db.headed_department_id_for_user(approver_user_id)
+        operator_dept_id = db.get_user_department_id(call_ctx.get('operator_id'))
+        if headed_dept_id is None or operator_dept_id != headed_dept_id:
+            raise PermissionError("Only admins or this department head can decide reevaluation requests")
+
     decision_comment = str(comment or '').strip() or None
     with db._get_cursor() as cursor:
         if decision_norm == 'approved':
@@ -9312,7 +9456,6 @@ def _resolve_reevaluation_request(call_id, approver_user_id, decision, comment=N
             """, (approver_user_id, datetime.utcnow(), decision_comment, call_id))
 
     resolved_ctx = _get_call_reevaluation_context(call_id) or call_ctx
-    approver = db.get_user(id=approver_user_id) if approver_user_id else None
     approver_name = approver[2] if approver and len(approver) > 2 else 'Администратор'
     requester_role = _normalize_reevaluation_request_role(resolved_ctx.get('sv_request_by_role'))
 
@@ -13180,8 +13323,10 @@ def decide_call_reevaluation_request():
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
-        if not _is_admin_role(requester[3]):
-            return jsonify({"error": "Only admins can decide reevaluation requests"}), 403
+        requester_role = _normalize_user_role(requester[3])
+        headed_dept_id = db.headed_department_id_for_user(requester_id)
+        if not _is_admin_role(requester_role) and headed_dept_id is None:
+            return jsonify({"error": "Only admins or department heads can decide reevaluation requests"}), 403
 
         data = request.get_json(silent=True) or {}
         if 'call_id' not in data or 'decision' not in data:
@@ -13219,8 +13364,10 @@ def get_call_reevaluation_requests():
             return jsonify({"error": message}), status_code
 
         requester_role = _normalize_user_role(requester[3]) if requester else ''
-        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role)):
-            return jsonify({"error": "Only admins or supervisors can view reevaluation requests"}), 403
+        headed_dept_id = db.headed_department_id_for_user(requester_id)
+        is_department_head = headed_dept_id is not None and not _is_admin_role(requester_role)
+        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role) or is_department_head):
+            return jsonify({"error": "Only admins, supervisors or department heads can view reevaluation requests"}), 403
 
         month = request.args.get('month') or None
 
@@ -13233,7 +13380,12 @@ def get_call_reevaluation_requests():
                 return jsonify({"error": "Invalid operator_id"}), 400
 
         supervisor_id = None
-        if _is_supervisor_role(requester_role):
+        department_id = None
+        if is_department_head:
+            department_id = int(headed_dept_id)
+            if operator_id is not None and not _authorize_operator_scope(requester, requester_id, operator_id):
+                return jsonify({"error": "Unauthorized to view this operator reevaluation requests"}), 403
+        elif _is_supervisor_role(requester_role):
             supervisor_id = requester_id
             if operator_id is not None and not _authorize_operator_scope(requester, requester_id, operator_id):
                 return jsonify({"error": "Unauthorized to view this operator reevaluation requests"}), 403
@@ -13248,7 +13400,8 @@ def get_call_reevaluation_requests():
         requests_payload = db.get_call_reevaluation_requests(
             month=month,
             operator_id=operator_id,
-            supervisor_id=supervisor_id
+            supervisor_id=supervisor_id,
+            department_id=department_id
         )
 
         return jsonify({
@@ -13664,12 +13817,12 @@ def receive_call_evaluation():
                 audio_data, bucket_name, blob_path, evaluation_id, is_draft,
                 evaluator[2], operator[2], month, phone_number, score, comment,
                 is_correction, previous_version_id, audio_path if not has_new_audio else None,
-                appeal_date
+                appeal_date, operator[0]
             )).start()
         elif not is_draft:
             threading.Thread(target=send_telegram_notification, args=(
                 evaluator[2], operator[2], month, phone_number, score, comment,
-                is_correction, previous_version_id, None, appeal_date
+                is_correction, previous_version_id, None, appeal_date, operator[0]
             )).start()
 
         return jsonify({"status": "success", "evaluation_id": evaluation_id}), 200
@@ -13679,7 +13832,8 @@ def receive_call_evaluation():
 
 def background_upload_and_notify(audio_data, bucket_name, blob_path, evaluation_id, is_draft,
                                  evaluator_name, operator_name, month, phone_number, score, comment,
-                                 is_correction, previous_version_id, existing_audio_path, appeal_date):
+                                 is_correction, previous_version_id, existing_audio_path, appeal_date,
+                                 operator_id=None):
     audio_path = existing_audio_path or ("my-app-audio-uploads/" + blob_path if blob_path else None)
     upload_success = False
     if audio_data:
@@ -13701,13 +13855,20 @@ def background_upload_and_notify(audio_data, bucket_name, blob_path, evaluation_
             audio_path = None
     if not is_draft:
         send_telegram_notification(evaluator_name, operator_name, month, phone_number, score, comment,
-                                   is_correction, previous_version_id, audio_path if (upload_success or existing_audio_path) else None, appeal_date)
+                                   is_correction, previous_version_id, audio_path if (upload_success or existing_audio_path) else None, appeal_date,
+                                   operator_id)
 
-def send_telegram_notification(evaluator_name, operator_name, month, phone_number, score, comment, is_correction, previous_version_id, audio_path, appeal_date):
+def send_telegram_notification(evaluator_name, operator_name, month, phone_number, score, comment, is_correction, previous_version_id, audio_path, appeal_date, operator_id=None):
     try:
         API_TOKEN = os.getenv('BOT_TOKEN')
-        admin = os.getenv('ADMIN_ID')
-        if not admin:
+        if not API_TOKEN:
+            return
+        try:
+            recipients = db.get_call_evaluation_notify_recipients(operator_id) or []
+        except Exception as recipient_error:
+            logging.error(f"Failed to load call evaluation notification recipients: {recipient_error}", exc_info=True)
+            recipients = []
+        if not recipients:
             return
 
         message = (
@@ -13744,7 +13905,6 @@ def send_telegram_notification(evaluator_name, operator_name, month, phone_numbe
 
         telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendAudio" if audio_signed_url else f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
         payload = {
-            "chat_id": admin,
             "parse_mode": "HTML"
         }
         if audio_signed_url:
@@ -13753,10 +13913,19 @@ def send_telegram_notification(evaluator_name, operator_name, month, phone_numbe
         else:
             payload["text"] = f"💬 <b>{'Переоценка чата' if is_correction else 'Оценка чата'}</b>\n" + message
 
-        response = requests.post(telegram_url, json=payload, timeout=10)
-        if response.status_code != 200:
-            error_detail = response.json().get('description', 'Unknown error')
-            logging.error(f"Telegram API error: {error_detail}")
+        for recipient in recipients:
+            chat_id = recipient.get('telegram_id') if isinstance(recipient, dict) else None
+            if not chat_id:
+                continue
+            recipient_payload = dict(payload)
+            recipient_payload["chat_id"] = chat_id
+            response = requests.post(telegram_url, json=recipient_payload, timeout=10)
+            if response.status_code != 200:
+                try:
+                    error_detail = response.json().get('description', 'Unknown error')
+                except Exception:
+                    error_detail = response.text or 'Unknown error'
+                logging.error(f"Telegram API error for {chat_id}: {error_detail}")
     except Exception as e:
         logging.error(f"Error sending Telegram notification: {e}")
 
@@ -20363,9 +20532,17 @@ async def _is_admin_user(tg_id):
         loop = asyncio.get_event_loop()
         def _check():
             with db._get_cursor() as cur:
-                cur.execute("SELECT role FROM users WHERE telegram_id = %s LIMIT 1", (tg_id,))
+                cur.execute("""
+                    SELECT u.role, d.id
+                    FROM users u
+                    LEFT JOIN departments d ON d.head_user_id = u.id
+                    WHERE u.telegram_id = %s
+                    LIMIT 1
+                """, (tg_id,))
                 row = cur.fetchone()
-                return bool(row and row[0] == 'admin')
+                if not row:
+                    return False
+                return bool(_is_admin_role(row[0]) or row[1] is not None)
         return await loop.run_in_executor(None, _check)
     except Exception as e:
         logging.exception("Error checking admin: %s", e)
@@ -20453,6 +20630,9 @@ async def _finalize_reevaluation_decision(approver_tg_id, call_id, decision, com
         return
     except RuntimeError:
         await bot_instance.send_message(approver_tg_id, "ℹ️ Запрос уже был обработан.")
+        return
+    except PermissionError as e:
+        await bot_instance.send_message(approver_tg_id, f"Access denied: {str(e)}")
         return
     except Exception as e:
         logging.exception("Ошибка при фиксации решения по переоценке: %s", e)
