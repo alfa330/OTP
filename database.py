@@ -27027,6 +27027,7 @@ class Database:
         assignments_by_survey = defaultdict(list)
         for row in assignments_rows:
             operator_status = row[7] if len(row) > 7 else None
+            operator_department_id = row[8] if len(row) > 8 else None
             assignments_by_survey[int(row[1])].append({
                 'id': int(row[0]),
                 'operator_id': int(row[2]),
@@ -27034,6 +27035,7 @@ class Database:
                 'status': row[4],
                 'operator_status': operator_status or '',
                 'is_operator_dismissed': self._is_survey_operator_dismissed_status(operator_status),
+                'department_id': int(operator_department_id) if operator_department_id is not None else None,
                 'assigned_at': self._survey_dt_to_iso(row[5]),
                 'completed_at': self._survey_dt_to_iso(row[6])
             })
@@ -27209,6 +27211,7 @@ class Database:
                     'operator_name': assignment.get('operator_name') or f"#{operator_id}",
                     'operator_status': assignment.get('operator_status') or '',
                     'is_operator_dismissed': bool(assignment.get('is_operator_dismissed')),
+                    'department_id': assignment.get('department_id'),
                     'status': assignment.get('status') or 'assigned',
                     'assigned_at': assignment.get('assigned_at'),
                     'completed_at': assignment.get('completed_at'),
@@ -27387,7 +27390,8 @@ class Database:
                     sa.status,
                     sa.assigned_at,
                     sa.completed_at,
-                    u.status
+                    u.status,
+                    u.department_id
                 FROM survey_assignments sa
                 LEFT JOIN users u ON u.id = sa.operator_id
                 WHERE sa.survey_id = ANY(%s)
