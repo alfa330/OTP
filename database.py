@@ -17096,8 +17096,19 @@ class Database:
             logging.exception("Error filtering fired operators for report; proceeding without filter")
 
         FILL_POS = PatternFill(fill_type='solid', start_color='b3b3b3')  # чуть темнее серый
+        FILL_FOREIGN = PatternFill(fill_type='solid', start_color='dfe7ef')  # день в ДРУГОЙ группе (перевод)
         THIN = Side(style='thin')
         BORDER_ALL = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+
+        # Разбивка перешедшего оператора: строка соответствует ОДНОЙ группе (op['_segment']).
+        # Дни вне диапазона сегмента — «чужие» (оператор был в другой группе): помечаем заливкой,
+        # не считаем в итоги/тренинги/тех/офлайн. Для не-перевёрнутых op['_segment'] нет → seg=None.
+        def _op_seg(op):
+            s = op.get('_segment') if isinstance(op, dict) else None
+            return s if (isinstance(s, dict) and 'start_day' in s and 'end_day' in s) else None
+
+        def _seg_has_day(seg, day):
+            return seg is None or (int(seg['start_day']) <= int(day) <= int(seg['end_day']))
 
         def _make_header(ws, headers: List[str]):
             thin = Side(style='thin')
@@ -17316,8 +17327,12 @@ class Database:
                 set_cell(ws, row, norm_col, float(op.get('norm_hours') or 0), align_center=False)
                 total = 0.0
                 totals = { 'work_time': 0.0, 'calls': 0, 'efficiency': 0.0 }
+                seg = _op_seg(op)
                 for c_idx, day in enumerate(days, start=day_start_col):
                     dkey = str(day)
+                    if seg is not None and not _seg_has_day(seg, day):
+                        set_cell(ws, row, c_idx, "", fill=FILL_FOREIGN)
+                        continue
                     if metric_key == 'trainings':
                         set_cell(ws, row, c_idx, "")
                     else:
@@ -17403,8 +17418,12 @@ class Database:
                 total_offline_activities = 0.0
 
                 day_start = norm_col + 1
+                seg = _op_seg(op)
                 for c_idx, day in enumerate(days, start=day_start):
                     dkey = str(day)
+                    if seg is not None and not _seg_has_day(seg, day):
+                        set_cell(ws, row, c_idx, "", fill=FILL_FOREIGN)
+                        continue
                     work_val = 0.0
                     d = daily.get(dkey)
                     if d:
@@ -17456,9 +17475,15 @@ class Database:
 
         def build_calls_sheet():
             def kvz_fn(op, totals):
+                seg = _op_seg(op)
                 work_hours = 0.0
-                daily = op.get('daily', {})
-                for dnum in daily.values():
+                for _dk, dnum in (op.get('daily', {}) or {}).items():
+                    if seg is not None:
+                        try:
+                            if not _seg_has_day(seg, int(_dk)):
+                                continue
+                        except Exception:
+                            pass
                     work_hours += float(dnum.get('work_time') or 0.0)
                 calls = totals.get('calls', 0)
                 effective_hours = max(0.0, float(work_hours))
@@ -17470,10 +17495,16 @@ class Database:
 
         def build_efficiency_sheet():
             def otn_fn(op, totals):
+                seg = _op_seg(op)
                 sum_work = 0.0
                 sum_eff = totals.get('efficiency', 0.0)
-                daily = op.get('daily', {})
-                for dnum in daily.values():
+                for _dk, dnum in (op.get('daily', {}) or {}).items():
+                    if seg is not None:
+                        try:
+                            if not _seg_has_day(seg, int(_dk)):
+                                continue
+                        except Exception:
+                            pass
                     sum_work += float(dnum.get('work_time') or 0.0)
                 if sum_work and sum_work != 0:
                     return (sum_eff / sum_work) * 100
@@ -17522,6 +17553,7 @@ class Database:
                 col_idx += 1
 
                 fines_map = op.get('daily', {})
+                seg = _op_seg(op)
 
                 count_late = 0
                 minutes_late = 0
@@ -17532,7 +17564,13 @@ class Database:
                 sum_proxy = 0.0
                 sum_other = 0.0
 
-                for day_entry in fines_map.values():
+                for _dkey, day_entry in fines_map.items():
+                    if seg is not None:
+                        try:
+                            if not _seg_has_day(seg, int(_dkey)):
+                                continue
+                        except Exception:
+                            pass
                     fines_list = day_entry.get('fines', []) if isinstance(day_entry, dict) else []
                     for f in fines_list:
                         reason = (f.get('reason') or '').strip()
@@ -17612,12 +17650,15 @@ class Database:
 
             # Берём все тренинги оператора (словарь day -> list)
             op_trainings = trainings_map.get(op_id_int) or {}
+            seg = _op_seg(op)
 
             # Инициализация итогов
             total_all = 0.0
 
-            # Сначала пройдем все дни, чтобы посчитать общие итоги
+            # Сначала пройдем все дни, чтобы посчитать общие итоги (только дни своего сегмента)
             for day in days:
+                if seg is not None and not _seg_has_day(seg, day):
+                    continue
                 arr = op_trainings.get(day, []) if isinstance(op_trainings, dict) else []
                 total_all += compute_unique_training_duration_hours(arr)
 
@@ -17628,6 +17669,9 @@ class Database:
                 set_cell(ws_t, row_counted, 2, sup_name, align_center=False)
             day_start = 2 + (1 if include_supervisor else 0)
             for c_idx, day in enumerate(days, start=day_start):
+                if seg is not None and not _seg_has_day(seg, day):
+                    set_cell(ws_t, row_counted, c_idx, "", fill=FILL_FOREIGN)
+                    continue
                 arr = op_trainings.get(day, []) if isinstance(op_trainings, dict) else []
                 counted = compute_unique_training_duration_hours(arr, counted_only=True)
                 if counted == 0:
@@ -17662,9 +17706,12 @@ class Database:
             except Exception:
                 op_id_int = None
             op_issues = technical_issues_map.get(op_id_int) or {}
+            seg = _op_seg(op)
 
             total_issue_hours = 0.0
             for day in days:
+                if seg is not None and not _seg_has_day(seg, day):
+                    continue
                 arr = op_issues.get(day, []) if isinstance(op_issues, dict) else []
                 for item in arr:
                     total_issue_hours += compute_technical_issue_duration_hours(item)
@@ -17676,6 +17723,9 @@ class Database:
 
             day_start = 2 + (1 if include_supervisor else 0)
             for c_idx, day in enumerate(days, start=day_start):
+                if seg is not None and not _seg_has_day(seg, day):
+                    set_cell(ws_tech, row_tech, c_idx, "", fill=FILL_FOREIGN)
+                    continue
                 arr = op_issues.get(day, []) if isinstance(op_issues, dict) else []
                 day_sum = 0.0
                 for item in arr:
@@ -17710,9 +17760,12 @@ class Database:
             except Exception:
                 op_id_int = None
             op_activities = offline_activities_map.get(op_id_int) or {}
+            seg = _op_seg(op)
 
             total_activity_hours = 0.0
             for day in days:
+                if seg is not None and not _seg_has_day(seg, day):
+                    continue
                 arr = op_activities.get(day, []) if isinstance(op_activities, dict) else []
                 for item in arr:
                     total_activity_hours += compute_offline_activity_duration_hours(item)
@@ -17724,6 +17777,9 @@ class Database:
 
             day_start = 2 + (1 if include_supervisor else 0)
             for c_idx, day in enumerate(days, start=day_start):
+                if seg is not None and not _seg_has_day(seg, day):
+                    set_cell(ws_offline, row_offline, c_idx, "", fill=FILL_FOREIGN)
+                    continue
                 arr = op_activities.get(day, []) if isinstance(op_activities, dict) else []
                 day_sum = 0.0
                 for item in arr:
