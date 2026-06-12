@@ -1360,6 +1360,17 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_chat_manager_daily_metrics_operator_day
                 ON chat_manager_daily_metrics(operator_id, day);
             """)
+            # Сумма баллов и количество оценок за день: чтобы среднюю оценку считать ВЗВЕШЕННО
+            # (сумма/количество за период), а не «среднее средних». avg_score продолжаем хранить
+            # как удобное кэш-значение (= sum/count при импорте, либо ручной ввод из модалки).
+            cursor.execute("""
+                ALTER TABLE chat_manager_daily_metrics
+                ADD COLUMN IF NOT EXISTS score_sum FLOAT;
+            """)
+            cursor.execute("""
+                ALTER TABLE chat_manager_daily_metrics
+                ADD COLUMN IF NOT EXISTS score_count INTEGER;
+            """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operator_technical_issues (
                     id SERIAL PRIMARY KEY,
@@ -9943,7 +9954,9 @@ class Database:
                 COALESCE(chats_count, 0),
                 avg_score,
                 avg_response_time_seconds,
-                COALESCE(transfer_chat_count, 0)
+                COALESCE(transfer_chat_count, 0),
+                score_sum,
+                score_count
             FROM chat_manager_daily_metrics
             WHERE operator_id = ANY(%s)
               AND day >= %s
@@ -9953,18 +9966,32 @@ class Database:
             (op_ids, start_date, end_date)
         )
 
+        # Средняя оценка считается ВЗВЕШЕННО: суммируем score_sum и score_count по дням.
+        # Для дней без счётчика (ручной ввод в модалке — только avg_score) берём avg_score с весом 1.
         score_acc = {op_id: {'sum': 0.0, 'count': 0} for op_id in op_ids}
+        # Время ответа храним как готовое дневное среднее — период считаем как среднее дневных.
         response_acc = {op_id: {'sum': 0.0, 'count': 0} for op_id in op_ids}
-        for op_id, day_obj, chats_count, avg_score, avg_response_time_seconds, transfer_chat_count in cursor.fetchall() or []:
+        for op_id, day_obj, chats_count, avg_score, avg_response_time_seconds, transfer_chat_count, score_sum, score_count in cursor.fetchall() or []:
             op_id_int = int(op_id)
             if op_id_int not in result or day_obj is None:
                 continue
             chats_int = max(0, int(chats_count or 0))
             transfer_int = max(0, int(transfer_chat_count or 0))
+            s_sum = float(score_sum) if score_sum is not None else None
+            s_cnt = int(score_count) if score_count is not None else None
+            # Дневная средняя оценка: взвешенная (sum/count), иначе сохранённое avg_score.
+            if s_cnt and s_cnt > 0 and s_sum is not None:
+                day_avg_score = round(s_sum / s_cnt, 2)
+            elif avg_score is not None:
+                day_avg_score = float(avg_score)
+            else:
+                day_avg_score = None
             payload = {
                 "date": day_obj.strftime('%Y-%m-%d'),
                 "chats_count": chats_int,
-                "avg_score": float(avg_score) if avg_score is not None else None,
+                "avg_score": day_avg_score,
+                "score_sum": s_sum,
+                "score_count": s_cnt,
                 "avg_response_time_seconds": float(avg_response_time_seconds) if avg_response_time_seconds is not None else None,
                 "avg_response_time_minutes": round(float(avg_response_time_seconds) / 60.0, 2) if avg_response_time_seconds is not None else None,
                 "transfer_chat_count": transfer_int
@@ -9973,7 +10000,10 @@ class Database:
             result.setdefault(op_id_int, {})[day_key] = payload
             totals[op_id_int]['chats_count'] += chats_int
             totals[op_id_int]['transfer_chat_count'] += transfer_int
-            if avg_score is not None:
+            if s_cnt and s_cnt > 0 and s_sum is not None:
+                score_acc[op_id_int]['sum'] += s_sum
+                score_acc[op_id_int]['count'] += s_cnt
+            elif avg_score is not None:
                 score_acc[op_id_int]['sum'] += float(avg_score)
                 score_acc[op_id_int]['count'] += 1
             if avg_response_time_seconds is not None:
@@ -9990,9 +10020,27 @@ class Database:
 
         return result, totals
 
-    def save_chat_manager_daily_metrics(self, metrics, imported_by=None, preserve_missing=False):
+    def save_chat_manager_daily_metrics(self, metrics, imported_by=None, preserve_missing=False, update_fields=None):
+        """Сохраняет дневные метрики чат-менеджеров (upsert по (operator_id, day)).
+
+        update_fields: если задан (множество имён колонок из {chats_count, avg_score,
+        avg_response_time_seconds, transfer_chat_count, score_sum, score_count}) — на конфликте
+        ПЕРЕЗАПИСЫВАЮТСЯ только эти колонки (остальные метрики дня сохраняются нетронутыми).
+        Это нужно для пер-форматного импорта: отчёт по оценкам не должен обнулять чаты и т.п.
+        Если None — прежнее поведение (обновляются все метрики; preserve_missing влияет на
+        avg_score/avg_response_time_seconds; score_sum/score_count сохраняются при отсутствии)."""
         if not isinstance(metrics, list):
             raise ValueError("metrics must be a list")
+
+        _ALLOWED_UPDATE_FIELDS = {
+            'chats_count', 'avg_score', 'avg_response_time_seconds',
+            'transfer_chat_count', 'score_sum', 'score_count',
+        }
+        update_set = None
+        if update_fields is not None:
+            update_set = {str(f) for f in update_fields if str(f) in _ALLOWED_UPDATE_FIELDS}
+            if not update_set:
+                raise ValueError("update_fields must contain at least one valid metric column")
 
         rows = []
         batch_id = uuid.uuid4()
@@ -10032,6 +10080,14 @@ class Database:
                 except Exception:
                     return 0
 
+            def _optional_int_or_none(raw):
+                if raw in (None, ''):
+                    return None
+                try:
+                    return max(0, int(round(float(str(raw).replace(',', '.')))))
+                except Exception:
+                    return None
+
             avg_response_seconds = _optional_float(
                 item.get('avg_response_time_seconds')
                 if item.get('avg_response_time_seconds') not in (None, '')
@@ -10045,31 +10101,61 @@ class Database:
             if avg_response_seconds is None and avg_response_minutes is not None:
                 avg_response_seconds = avg_response_minutes * 60.0
 
+            score_sum_val = _optional_float(item.get('score_sum'))
+            score_count_val = _optional_int_or_none(item.get('score_count'))
+            avg_score_val = _optional_float(item.get('avg_score') if item.get('avg_score') not in (None, '') else item.get('score'))
+            # Если оценка пришла как сумма+количество (импорт отчёта), avg = sum/count.
+            if avg_score_val is None and score_sum_val is not None and score_count_val:
+                avg_score_val = round(score_sum_val / score_count_val, 4)
+
             rows.append((
                 operator_id,
                 day_obj,
                 _optional_int(item.get('chats_count') if item.get('chats_count') not in (None, '') else item.get('chats')),
-                _optional_float(item.get('avg_score') if item.get('avg_score') not in (None, '') else item.get('score')),
+                avg_score_val,
                 avg_response_seconds,
                 _optional_int(item.get('transfer_chat_count') if item.get('transfer_chat_count') not in (None, '') else item.get('transfers')),
                 imported_by_id,
                 str(batch_id),
-                Json(item)
+                Json(item),
+                score_sum_val,
+                score_count_val,
             ))
 
         if not rows:
             return {'batch_id': str(batch_id), 'processed': 0}
 
-        avg_score_update_sql = (
-            "COALESCE(EXCLUDED.avg_score, chat_manager_daily_metrics.avg_score)"
-            if preserve_missing else
-            "EXCLUDED.avg_score"
-        )
-        avg_response_update_sql = (
-            "COALESCE(EXCLUDED.avg_response_time_seconds, chat_manager_daily_metrics.avg_response_time_seconds)"
-            if preserve_missing else
-            "EXCLUDED.avg_response_time_seconds"
-        )
+        if update_set is not None:
+            # Пер-форматный импорт: перезаписываем ТОЛЬКО указанные колонки (replace),
+            # остальные метрики дня остаются нетронутыми (другой отчёт их не обнуляет).
+            set_clauses = [f"{col} = EXCLUDED.{col}" for col in sorted(update_set)]
+        else:
+            # Прежнее поведение: обновляем все метрики. preserve_missing защищает оценку/время
+            # ответа от затирания NULL-ом; score_sum/score_count сохраняем при отсутствии (модалка
+            # их не присылает), чтобы не терять взвешенную оценку из импорта.
+            avg_score_expr = (
+                "COALESCE(EXCLUDED.avg_score, chat_manager_daily_metrics.avg_score)"
+                if preserve_missing else "EXCLUDED.avg_score"
+            )
+            avg_response_expr = (
+                "COALESCE(EXCLUDED.avg_response_time_seconds, chat_manager_daily_metrics.avg_response_time_seconds)"
+                if preserve_missing else "EXCLUDED.avg_response_time_seconds"
+            )
+            set_clauses = [
+                "chats_count = EXCLUDED.chats_count",
+                f"avg_score = {avg_score_expr}",
+                f"avg_response_time_seconds = {avg_response_expr}",
+                "transfer_chat_count = EXCLUDED.transfer_chat_count",
+                "score_sum = COALESCE(EXCLUDED.score_sum, chat_manager_daily_metrics.score_sum)",
+                "score_count = COALESCE(EXCLUDED.score_count, chat_manager_daily_metrics.score_count)",
+            ]
+        set_clauses += [
+            "imported_by = EXCLUDED.imported_by",
+            "source_batch_id = EXCLUDED.source_batch_id",
+            "raw_payload = EXCLUDED.raw_payload",
+            "updated_at = CURRENT_TIMESTAMP",
+        ]
+        do_update_sql = ",\n                    ".join(set_clauses)
 
         with self._get_cursor() as cursor:
             execute_values(
@@ -10084,19 +10170,14 @@ class Database:
                     transfer_chat_count,
                     imported_by,
                     source_batch_id,
-                    raw_payload
+                    raw_payload,
+                    score_sum,
+                    score_count
                 )
                 VALUES %s
                 ON CONFLICT (operator_id, day)
                 DO UPDATE SET
-                    chats_count = EXCLUDED.chats_count,
-                    avg_score = {avg_score_update_sql},
-                    avg_response_time_seconds = {avg_response_update_sql},
-                    transfer_chat_count = EXCLUDED.transfer_chat_count,
-                    imported_by = EXCLUDED.imported_by,
-                    source_batch_id = EXCLUDED.source_batch_id,
-                    raw_payload = EXCLUDED.raw_payload,
-                    updated_at = CURRENT_TIMESTAMP
+                    {do_update_sql}
                 """,
                 rows,
                 page_size=2000
