@@ -17338,7 +17338,7 @@ class Database:
                 cell.fill = fill
             return cell
 
-        def build_generic_sheet(key: str, label: str, metric_key: str, is_hour=True, format_fn=None, extra_cols=None):
+        def build_generic_sheet(key: str, label: str, metric_key: str, is_hour=True, format_fn=None, extra_cols=None, value_getter=None, aggregate='sum'):
             ws = wb.create_sheet(title=label[:31])
             # Build headers with optional supervisor column
             headers = ["Оператор"]
@@ -17375,11 +17375,12 @@ class Database:
                 set_cell(ws, row, norm_col, float(op.get('norm_hours') or 0), align_center=False)
                 total = 0.0
                 totals = { 'work_time': 0.0, 'calls': 0, 'efficiency': 0.0 }
+                avg_vals = []  # для aggregate='avg' (оценка/время ответа): среднее по непустым дням
                 seg = _op_seg(op)
                 for c_idx, day in enumerate(days, start=day_start_col):
                     dkey = str(day)
                     if seg is not None and not _seg_has_day(seg, day):
-                        set_cell(ws, row, c_idx, "", fill=FILL_FOREIGN)
+                        set_cell(ws, row, c_idx, "др.", fill=FILL_FOREIGN)
                         continue
                     if metric_key == 'trainings':
                         set_cell(ws, row, c_idx, "")
@@ -17387,24 +17388,40 @@ class Database:
                         d = daily.get(dkey)
                         raw_v = None
                         if d:
-                            raw_v = d.get(metric_key, 0)
-                        cell_val = fmt_day_value(metric_key, raw_v)
-                        # apply fill if >0
-                        fill = FILL_POS if (isinstance(cell_val, (int, float)) and cell_val > 0) else None
-                        set_cell(ws, row, c_idx, cell_val, fill=fill)
-                        if metric_key == 'calls':
-                            totals['calls'] += int(cell_val or 0)
-                            total += int(cell_val or 0)
+                            raw_v = value_getter(d) if value_getter else d.get(metric_key, 0)
+                        if aggregate == 'avg':
+                            # средние метрики (оценка/время ответа): пустой день — пусто, не 0
+                            try:
+                                fv = float(raw_v) if (raw_v is not None and raw_v != '') else None
+                            except Exception:
+                                fv = None
+                            if fv is None or fv <= 0:
+                                set_cell(ws, row, c_idx, "")
+                            else:
+                                set_cell(ws, row, c_idx, fmt_day_value(metric_key, fv), fill=FILL_POS)
+                                avg_vals.append(fv)
                         else:
-                            num_for_tot = float(raw_v or 0)
-                            total += num_for_tot
-                            if metric_key == 'work_time':
-                                totals['work_time'] += num_for_tot
-                            if metric_key == 'efficiency':
-                                totals['efficiency'] += num_for_tot
+                            cell_val = fmt_day_value(metric_key, raw_v)
+                            # apply fill if >0
+                            fill = FILL_POS if (isinstance(cell_val, (int, float)) and cell_val > 0) else None
+                            set_cell(ws, row, c_idx, cell_val, fill=fill)
+                            if metric_key == 'calls':
+                                totals['calls'] += int(cell_val or 0)
+                                total += int(cell_val or 0)
+                            else:
+                                num_for_tot = float(raw_v or 0)
+                                total += num_for_tot
+                                if metric_key == 'work_time':
+                                    totals['work_time'] += num_for_tot
+                                if metric_key == 'efficiency':
+                                    totals['efficiency'] += num_for_tot
                 # total cell
                 total_col = day_start_col + len(days)
-                set_cell(ws, row, total_col, fmt_total_value(metric_key, total))
+                if aggregate == 'avg':
+                    avg_total = (sum(avg_vals) / len(avg_vals)) if avg_vals else None
+                    set_cell(ws, row, total_col, (fmt_total_value(metric_key, avg_total) if avg_total is not None else ""))
+                else:
+                    set_cell(ws, row, total_col, fmt_total_value(metric_key, total))
 
                 # extra cols
                 if extra_cols:
@@ -17470,7 +17487,7 @@ class Database:
                 for c_idx, day in enumerate(days, start=day_start):
                     dkey = str(day)
                     if seg is not None and not _seg_has_day(seg, day):
-                        set_cell(ws, row, c_idx, "", fill=FILL_FOREIGN)
+                        set_cell(ws, row, c_idx, "др.", fill=FILL_FOREIGN)
                         continue
                     work_val = 0.0
                     d = daily.get(dkey)
@@ -17663,10 +17680,25 @@ class Database:
                 col = ws_f.cell(1, i).column_letter
                 ws_f.column_dimensions[col].width = 14
 
+        # Модель отчёта: листы model-aware, только если ВСЯ выгрузка — чисто чат-модели
+        # (per-group экспорт чат-группы). Смешанные/операторские — прежняя раскладка.
+        _report_models = {str((o or {}).get('calculation_model_code') or '').strip() for o in operators}
+        is_chat_report = (_report_models == {CALCULATION_MODEL_CHAT_MANAGER})
+
         build_work_time_sheet()
         build_generic_sheet('break_time', 'Перерыв', 'break_time', is_hour=True)
-        build_calls_sheet()
-        build_efficiency_sheet()
+        if is_chat_report:
+            # У чата нет звонков/эффективности: «Чаты» + «Средняя оценка» + «Среднее время ответа».
+            build_generic_sheet('calls', 'Чаты', 'calls', is_hour=False)
+            build_generic_sheet('avg_score', 'Средняя оценка', 'avg_score', is_hour=False,
+                                value_getter=lambda d: (d.get('chat_metrics') or {}).get('avg_score'),
+                                aggregate='avg')
+            build_generic_sheet('response_time', 'Среднее время ответа', 'response_time', is_hour=False,
+                                value_getter=lambda d: (d.get('chat_metrics') or {}).get('avg_response_time_seconds'),
+                                aggregate='avg')
+        else:
+            build_calls_sheet()
+            build_efficiency_sheet()
         build_generic_sheet('no_phone', 'Без телефона', 'no_phone_hours', is_hour=True)
         build_fines_sheet()
 
@@ -17718,7 +17750,7 @@ class Database:
             day_start = 2 + (1 if include_supervisor else 0)
             for c_idx, day in enumerate(days, start=day_start):
                 if seg is not None and not _seg_has_day(seg, day):
-                    set_cell(ws_t, row_counted, c_idx, "", fill=FILL_FOREIGN)
+                    set_cell(ws_t, row_counted, c_idx, "др.", fill=FILL_FOREIGN)
                     continue
                 arr = op_trainings.get(day, []) if isinstance(op_trainings, dict) else []
                 counted = compute_unique_training_duration_hours(arr, counted_only=True)
@@ -17772,7 +17804,7 @@ class Database:
             day_start = 2 + (1 if include_supervisor else 0)
             for c_idx, day in enumerate(days, start=day_start):
                 if seg is not None and not _seg_has_day(seg, day):
-                    set_cell(ws_tech, row_tech, c_idx, "", fill=FILL_FOREIGN)
+                    set_cell(ws_tech, row_tech, c_idx, "др.", fill=FILL_FOREIGN)
                     continue
                 arr = op_issues.get(day, []) if isinstance(op_issues, dict) else []
                 day_sum = 0.0
@@ -17826,7 +17858,7 @@ class Database:
             day_start = 2 + (1 if include_supervisor else 0)
             for c_idx, day in enumerate(days, start=day_start):
                 if seg is not None and not _seg_has_day(seg, day):
-                    set_cell(ws_offline, row_offline, c_idx, "", fill=FILL_FOREIGN)
+                    set_cell(ws_offline, row_offline, c_idx, "др.", fill=FILL_FOREIGN)
                     continue
                 arr = op_activities.get(day, []) if isinstance(op_activities, dict) else []
                 day_sum = 0.0
