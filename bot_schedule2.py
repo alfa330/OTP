@@ -13994,6 +13994,8 @@ def build_offline_activities_map(activities_list):
 def get_monthly_report_hours():
     try:
         supervisor_id = request.args.get('supervisor_id')
+        group_param = request.args.get('group_id')
+        group_id = int(group_param) if group_param and str(group_param).isdigit() else None
         month = request.args.get('month')
         if not month or not MONTH_RE.match(month):
             return jsonify({"error": "month required in format YYYY-MM"}), 400
@@ -14008,7 +14010,21 @@ def get_monthly_report_hours():
             return jsonify({"error": "Unauthorized to access this report"}), 403
         generate_all = False
 
-        if not supervisor_id:
+        if group_id is not None:
+            # Отчёт строго в рамках группы за месяц: все операторы — одной модели расчёта,
+            # поэтому листы выбираются корректно (чат-группа → без «Звонки»/«Эффективность»).
+            # СВ может выгружать только группы своего отдела (или те, что ведёт); админ — любые.
+            if not _is_admin_role(role):
+                _grp = db.get_group(group_id)
+                _sv_dept = db.get_user_department_id(requester_id)
+                _allowed = (
+                    (_grp and _sv_dept is not None and _grp.get('department_id') == _sv_dept)
+                    or group_id in db.get_supervisor_group_ids(requester_id, month)
+                )
+                if not _allowed:
+                    return jsonify({"error": "Forbidden: not your department's group"}), 403
+            supervisor_id = None
+        elif not supervisor_id:
             generate_all = True
         else:
             try:
@@ -14016,11 +14032,13 @@ def get_monthly_report_hours():
             except ValueError:
                 return jsonify({"error": "supervisor_id must be integer"}), 400
 
-        logging.info("Начало генерации отчета: supervisor_id=%s month=%s generate_all=%s", supervisor_id, month, generate_all)
+        logging.info("Начало генерации отчета: supervisor_id=%s group_id=%s month=%s generate_all=%s", supervisor_id, group_id, month, generate_all)
 
         try:
             if generate_all:
                 operators = db.get_daily_hours_for_all_month(month)
+            elif group_id is not None:
+                operators = db.get_daily_hours_by_group_month(group_id, month)
             else:
                 operators = db.get_daily_hours_by_supervisor_month(supervisor_id, month)
         except Exception as e:
@@ -14034,7 +14052,8 @@ def get_monthly_report_hours():
         try:
             _ops_list = operators.get("operators", []) if isinstance(operators, dict) else (operators or [])
             _op_ids = [int(o.get("operator_id")) for o in _ops_list if o.get("operator_id") is not None]
-            _seg_by_op = db.get_operator_segments_for_month(month, _op_ids) if _op_ids else {}
+            # Групповой отчёт уже в рамках одной группы — операторов на под-строки не дробим.
+            _seg_by_op = db.get_operator_segments_for_month(month, _op_ids) if (_op_ids and group_id is None) else {}
             _expanded = []
             for o in _ops_list:
                 _oid = o.get("operator_id")
