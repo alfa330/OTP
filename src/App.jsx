@@ -3123,6 +3123,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return out;
         }, [isChatModel]);
 
+        const WORKHOURS_METRIC_GROUPS = useMemo(() => {
+            const byKey = new Map((VIEW_TABS || []).map(tab => [tab.key, tab]));
+            const buildGroup = (label, icon, tone, keys) => ({
+                label,
+                icon,
+                tone,
+                tabs: keys.map(key => byKey.get(key)).filter(Boolean)
+            });
+            return [
+                buildGroup('Работа', 'fa-clock', 'blue', ['work_time', 'break_time', 'calls', 'efficiency']),
+                buildGroup('Метрики', 'fa-chart-line', 'cyan', ['avg_score', 'response_time']),
+                buildGroup('Активности', 'fa-layer-group', 'emerald', ['trainings', 'technical_issues', 'offline_activity', 'no_phone']),
+                buildGroup('Деньги', 'fa-coins', 'slate', ['bonuses', 'fines'])
+            ].filter(group => group.tabs.length > 0);
+        }, [VIEW_TABS]);
+
         const selectedHourCellKeySet = useMemo(() => {
             return new Set((selectedHourCells || []).map(cell => makeSelectedHourCellKey(cell.operator_id, cell.day)));
         }, [selectedHourCells]);
@@ -4153,18 +4169,114 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 </div>
 
                 {/* === Метрика === */}
-                <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-slate-50/70 p-2">
-                    <span className="px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Метрика</span>
-                    {VIEW_TABS.map(tab => (
-                        <button
-                            key={tab.key}
-                            onClick={() => setSelectedTab(tab.key)}
-                            className={`px-3 py-2 rounded-lg text-sm font-medium transition ${selectedTab === tab.key ? 'bg-blue-600 text-white shadow' : 'bg-white border border-slate-200 text-gray-700 hover:bg-gray-50'}`}
-                            title={tab.unit ? `${tab.label} (${tab.unit})` : tab.label}
-                        >
-                            {tab.label}
-                        </button>
-                    ))}
+                <div className="rounded-2xl border border-slate-200 bg-slate-50/80 p-2">
+                    <div className="flex flex-wrap items-stretch gap-2">
+                        {WORKHOURS_METRIC_GROUPS.map(group => {
+                            const isMetricsGroup = group.label === 'Метрики';
+                            const activeInGroup = group.tabs.some(tab => tab.key === selectedTab);
+                            const validSurgeCount = cloneChatMetricsSurgeWindows(chatMetricsSurgeWindows).filter(w => w.start && w.end).length;
+                            const groupIconClass = group.tone === 'cyan'
+                                ? 'text-cyan-600'
+                                : group.tone === 'emerald'
+                                    ? 'text-emerald-600'
+                                    : group.tone === 'slate'
+                                        ? 'text-slate-600'
+                                        : 'text-blue-600';
+                            return (
+                                <div
+                                    key={group.label}
+                                    className={`rounded-full border bg-white p-1 shadow-sm flex items-center gap-1 ${activeInGroup ? 'border-blue-200 ring-1 ring-blue-100' : 'border-slate-200'}`}
+                                >
+                                    <span className="hidden lg:inline-flex items-center gap-1 px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                                        <FaIcon className={`fas ${group.icon} ${groupIconClass}`}></FaIcon>
+                                        {group.label}
+                                    </span>
+                                    {group.tabs.map(tab => (
+                                        <button
+                                            key={tab.key}
+                                            type="button"
+                                            onClick={() => setSelectedTab(tab.key)}
+                                            className={`h-8 rounded-full px-3 text-xs sm:text-sm font-medium transition whitespace-nowrap ${selectedTab === tab.key ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-700 hover:bg-slate-100'}`}
+                                            title={tab.unit ? `${tab.label} (${tab.unit})` : tab.label}
+                                        >
+                                            {tab.label}
+                                        </button>
+                                    ))}
+                                    {isChatModel && isMetricsGroup && (
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setShowChatMetricsSurgeEditor(v => !v);
+                                                setChatMetricsSurgeWindows(prev => prev.length ? prev : [{ start: '', end: '' }]);
+                                            }}
+                                            className={`h-8 rounded-full px-3 text-xs sm:text-sm font-semibold transition whitespace-nowrap border ${showChatMetricsSurgeEditor ? 'bg-amber-600 border-amber-600 text-white shadow-sm' : 'bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100'}`}
+                                            title="Окна наплыва для импорта среднего времени ответа"
+                                        >
+                                            <FaIcon className="fas fa-wave-square mr-1"></FaIcon>
+                                            Наплывы{validSurgeCount ? ` ${validSurgeCount}` : ''}
+                                        </button>
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </div>
+                    {isChatModel && showChatMetricsSurgeEditor && (
+                        <div className="mt-2 rounded-2xl border border-amber-200 bg-amber-50/80 p-3">
+                            <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                                <div className="text-xs font-medium text-amber-900">
+                                    Наплывы исключаются из отчёта <b>Среднее время ответа</b> по `request_start`.
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <button
+                                        type="button"
+                                        className="rounded-full bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-700"
+                                        onClick={addChatMetricsSurgeWindow}
+                                    >
+                                        <FaIcon className="fas fa-plus mr-1"></FaIcon>Добавить
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="rounded-full border border-amber-200 bg-white px-3 py-1.5 text-xs font-semibold text-amber-800 hover:bg-amber-100"
+                                        onClick={() => setChatMetricsSurgeWindows([])}
+                                    >
+                                        Очистить
+                                    </button>
+                                </div>
+                            </div>
+                            {chatMetricsSurgeWindows.length === 0 && (
+                                <div className="rounded-xl border border-dashed border-amber-200 bg-white/70 p-3 text-xs text-amber-700">
+                                    Окон нет — при импорте времени ответа будут учитываться все строки.
+                                </div>
+                            )}
+                            <div className="space-y-2">
+                                {chatMetricsSurgeWindows.map((w, i) => (
+                                    <div key={i} className="flex flex-col sm:flex-row sm:items-center gap-2">
+                                        <input
+                                            type="datetime-local"
+                                            className="w-full sm:flex-1 min-w-0 p-2 rounded-lg border border-amber-200 bg-white text-xs"
+                                            value={w.start || ''}
+                                            onChange={(e) => updateChatMetricsSurgeWindow(i, { start: e.target.value })}
+                                        />
+                                        <span className="hidden sm:inline text-amber-600 text-xs">—</span>
+                                        <input
+                                            type="datetime-local"
+                                            className="w-full sm:flex-1 min-w-0 p-2 rounded-lg border border-amber-200 bg-white text-xs"
+                                            value={w.end || ''}
+                                            onChange={(e) => updateChatMetricsSurgeWindow(i, { end: e.target.value })}
+                                        />
+                                        <button
+                                            type="button"
+                                            className="h-9 w-full sm:w-9 rounded-lg text-red-500 hover:bg-red-50"
+                                            onClick={() => removeChatMetricsSurgeWindow(i)}
+                                            title="Удалить окно"
+                                        >
+                                            <FaIcon className="fas fa-trash"></FaIcon>
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
                 </div>
             </div>
 
@@ -9267,6 +9379,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // Подтверждение загрузки отчёта чат-метрик: показываем определённый тип ДО отправки,
             // даём задать дату (для Name/Requests) и окна «наплыва» (для отчёта времени ответа).
             const [chatMetricsUpload, setChatMetricsUpload] = useState(null);
+            const [chatMetricsSurgeWindows, setChatMetricsSurgeWindows] = useState([]);
+            const [showChatMetricsSurgeEditor, setShowChatMetricsSurgeEditor] = useState(false);
             const [plannerStatusAnomalyAnalysis, setPlannerStatusAnomalyAnalysis] = useState(null);
             const [plannerStatusAnomalyExpandedDays, setPlannerStatusAnomalyExpandedDays] = useState({});
             const [plannerStatusAnomalyOnly, setPlannerStatusAnomalyOnly] = useState(false);
@@ -12988,6 +13102,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 plannerChatMetricsInputRef.current?.click?.();
             };
 
+            const cloneChatMetricsSurgeWindows = (windows) => (
+                Array.isArray(windows)
+                    ? windows.map(w => ({ start: String(w?.start || ''), end: String(w?.end || '') }))
+                    : []
+            );
+
+            const addChatMetricsSurgeWindow = () => {
+                setChatMetricsSurgeWindows(prev => [...cloneChatMetricsSurgeWindows(prev), { start: '', end: '' }]);
+            };
+
+            const updateChatMetricsSurgeWindow = (index, patch) => {
+                setChatMetricsSurgeWindows(prev => cloneChatMetricsSurgeWindows(prev).map((w, i) => (i === index ? { ...w, ...patch } : w)));
+            };
+
+            const removeChatMetricsSurgeWindow = (index) => {
+                setChatMetricsSurgeWindows(prev => cloneChatMetricsSurgeWindows(prev).filter((_, i) => i !== index));
+            };
+
             const changePlannerStatusTimelineZoom = (delta) => {
                 setPlannerStatusTimelineZoom(prev => {
                     const next = Math.max(0.5, Math.min(4, Math.round((Number(prev || 1) + delta) * 100) / 100));
@@ -13209,7 +13341,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     isCsv,
                     detectedType,
                     date: todayDateStr(currentDate instanceof Date ? currentDate : new Date()),
-                    surgeWindows: [],
+                    surgeWindows: cloneChatMetricsSurgeWindows(chatMetricsSurgeWindows),
                 });
             };
 
@@ -13223,6 +13355,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
                 const showSurge = ctx.detectedType === 'response_time' || (!ctx.isCsv) || ctx.detectedType === null;
                 const cleanWindows = (ctx.surgeWindows || []).filter((w) => w && w.start && w.end);
+                if (showSurge) {
+                    setChatMetricsSurgeWindows(cloneChatMetricsSurgeWindows(cleanWindows));
+                }
                 setPlannerChatMetricsImportState({ loading: true, summary: null, error: '' });
                 setChatMetricsUpload(null);
                 try {
