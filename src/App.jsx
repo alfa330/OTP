@@ -1939,6 +1939,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const [isSavingPreview, setIsSavingPreview] = useState(false);
         const [uploadProgress, setUploadProgress] = useState(0);
         const [isDownloadingReport, setIsDownloadingReport] = useState(false);
+        const [chatMetricsImportState, setChatMetricsImportState] = useState({
+            loading: false,
+            summary: null,
+            error: ''
+        });
+        const [chatMetricsUpload, setChatMetricsUpload] = useState(null);
+        const [chatMetricsSurgeWindows, setChatMetricsSurgeWindows] = useState([]);
+        const [showChatMetricsSurgeEditor, setShowChatMetricsSurgeEditor] = useState(false);
+        const chatMetricsInputRef = useRef(null);
 
         const [selectedTab, setSelectedTab] = useState('work_time');
 
@@ -2005,6 +2014,139 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             emitAppToast(msg, type);
             }
         }
+
+        const CHAT_REPORT_LABELS = {
+            score: 'Средняя оценка',
+            response_time: 'Среднее время ответа',
+            whatsapp_chats: 'Количество чатов (Whatsapp)',
+            name_requests: 'Количество чатов (Name/Requests)',
+        };
+
+        const normChatHeader = (h) => String(h || '').replace(/п»ї/g, '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+
+        const detectChatReportType = (headers) => {
+            const nh = (headers || []).map(normChatHeader);
+            const has = (sub) => nh.some((h) => h.includes(sub));
+            if (has('ratingscalescore') || (has('rating') && has('scale') && has('score'))) return 'score';
+            if (has('reactiontime') && (has('requeststart') || has('requestend'))) return 'response_time';
+            if (nh.some((h) => h.includes('звонок') && h.includes('чат'))) return 'whatsapp_chats';
+            if (has('requests') && has('name')) return 'name_requests';
+            return null;
+        };
+
+        const parseCsvHeaderLine = (text) => {
+            const firstLine = (String(text || '').split(/\r?\n/).find((l) => l.trim().length > 0)) || '';
+            let best = ';', bestCount = -1;
+            for (const d of [';', ',', '\t']) {
+            const c = firstLine.split(d).length;
+            if (c > bestCount) { bestCount = c; best = d; }
+            }
+            return firstLine.split(best).map((s) => s.replace(/^"|"$/g, '').trim());
+        };
+
+        const cloneChatMetricsSurgeWindows = (windows) => (
+            Array.isArray(windows)
+            ? windows.map(w => ({ start: String(w?.start || ''), end: String(w?.end || '') }))
+            : []
+        );
+
+        const addChatMetricsSurgeWindow = () => {
+            setChatMetricsSurgeWindows(prev => [...cloneChatMetricsSurgeWindows(prev), { start: '', end: '' }]);
+        };
+
+        const updateChatMetricsSurgeWindow = (index, patch) => {
+            setChatMetricsSurgeWindows(prev => cloneChatMetricsSurgeWindows(prev).map((w, i) => (i === index ? { ...w, ...patch } : w)));
+        };
+
+        const removeChatMetricsSurgeWindow = (index) => {
+            setChatMetricsSurgeWindows(prev => cloneChatMetricsSurgeWindows(prev).filter((_, i) => i !== index));
+        };
+
+        const triggerChatMetricsImportSelect = () => {
+            if (chatMetricsImportState.loading) return;
+            chatMetricsInputRef.current?.click?.();
+        };
+
+        const chatMetricsDefaultDate = () => {
+            const d = new Date();
+            return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        };
+
+        const handleChatMetricsFileChange = async (event) => {
+            const file = event?.target?.files?.[0];
+            if (!file) return;
+            if (event?.target) event.target.value = '';
+            const fileName = file.name || 'report.csv';
+            const lower = fileName.toLowerCase();
+            const isCsv = lower.endsWith('.csv');
+            let detectedType = null;
+            if (isCsv) {
+            try {
+                const text = await file.text();
+                detectedType = detectChatReportType(parseCsvHeaderLine(text));
+            } catch (e) {
+                detectedType = null;
+            }
+            }
+            setChatMetricsUpload({
+            file,
+            fileName,
+            isCsv,
+            detectedType,
+            date: chatMetricsDefaultDate(),
+            surgeWindows: cloneChatMetricsSurgeWindows(chatMetricsSurgeWindows),
+            });
+        };
+
+        const submitChatMetricsImport = async () => {
+            const ctx = chatMetricsUpload;
+            if (!ctx || !ctx.file) return;
+            const needsDate = ctx.detectedType === 'name_requests';
+            if (needsDate && !ctx.date) {
+            fallbackToast('Укажите дату загрузки для отчёта Name/Requests', 'error');
+            return;
+            }
+            const showSurge = ctx.detectedType === 'response_time' || (!ctx.isCsv) || ctx.detectedType === null;
+            const cleanWindows = (ctx.surgeWindows || []).filter((w) => w && w.start && w.end);
+            if (showSurge) {
+            setChatMetricsSurgeWindows(cloneChatMetricsSurgeWindows(cleanWindows));
+            }
+            setChatMetricsImportState({ loading: true, summary: null, error: '' });
+            setChatMetricsUpload(null);
+            try {
+            const formData = new FormData();
+            formData.append('file', ctx.file);
+            formData.append('source', 'chat2desk_metrics');
+            if (ctx.date) formData.append('date', ctx.date);
+            if (showSurge && cleanWindows.length) {
+                formData.append('surge_windows', JSON.stringify(cleanWindows));
+            }
+            const response = await fetch(`${API_BASE_URL}/api/chat_manager/metrics/import_csv`, {
+                method: 'POST',
+                credentials: 'include',
+                headers: withAccessTokenHeader(),
+                body: formData
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(payload?.error || `HTTP ${response.status}`);
+            }
+            const summary = {
+                ...(payload?.import || {}),
+                message: payload?.message || '',
+                unmatched_operators: payload?.warnings?.unmatched_operators || []
+            };
+            setChatMetricsImportState({ loading: false, summary, error: '' });
+            fallbackToast(payload?.message || 'Метрики чат-менеджеров загружены', 'success');
+            await fetchDailyHoursAndTrainings();
+            if (onUploaded) onUploaded();
+            } catch (error) {
+            console.error('Error importing chat manager metrics csv:', error);
+            const message = error?.message || 'Не удалось импортировать метрики чат-менеджеров';
+            setChatMetricsImportState({ loading: false, summary: null, error: message });
+            fallbackToast(message, 'error');
+            }
+        };
 
         // ---- fetch daily hours + trainings + technical issues ----
         async function fetchDailyHoursAndTrainings() {
@@ -4032,6 +4174,136 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const isDayUploadDisabled = isChatModel || isAdminWithoutSupervisorSelected;
         return (
             <div className="bg-white p-5 rounded-xl shadow-md">
+            <input
+                ref={chatMetricsInputRef}
+                type="file"
+                accept=".csv,.xlsx,.xlsm,text/csv"
+                className="hidden"
+                onChange={handleChatMetricsFileChange}
+            />
+            {(chatMetricsImportState.summary || chatMetricsImportState.error) && (
+                <div className={`mb-3 p-3 rounded-lg text-xs border ${chatMetricsImportState.error ? 'bg-rose-50 border-rose-200 text-rose-700' : 'bg-cyan-50 border-cyan-200 text-cyan-800'}`}>
+                    {chatMetricsImportState.error ? (
+                        <>
+                            <FaIcon className="fas fa-triangle-exclamation mr-1"></FaIcon>
+                            Ошибка метрик чатов: {chatMetricsImportState.error}
+                        </>
+                    ) : (
+                        <>
+                            <FaIcon className="fas fa-comments mr-1"></FaIcon>
+                            {chatMetricsImportState.summary?.detected_label
+                                ? <>Импортирован отчёт: <b>{chatMetricsImportState.summary.detected_label}</b></>
+                                : 'Метрики чатов сохранены'}
+                            <span className="ml-2">— {Number(chatMetricsImportState.summary?.processed || 0)} дней</span>
+                            <span className="ml-2">из {Number(chatMetricsImportState.summary?.source_rows || 0)} строк</span>
+                            {chatMetricsImportState.summary?.excluded_surge_rows ? (
+                                <span className="ml-2">• исключено по наплыву: {Number(chatMetricsImportState.summary.excluded_surge_rows)}</span>
+                            ) : null}
+                            {Number(chatMetricsImportState.summary?.unmatched_count || 0) > 0 && (
+                                <div className="mt-1 text-amber-700">
+                                    <FaIcon className="fas fa-user-slash mr-1"></FaIcon>
+                                    Не сопоставлено имён: {Number(chatMetricsImportState.summary.unmatched_count)}
+                                    {Array.isArray(chatMetricsImportState.summary?.unmatched_operators) && chatMetricsImportState.summary.unmatched_operators.length > 0 && (
+                                        <span className="ml-1">
+                                            ({chatMetricsImportState.summary.unmatched_operators.slice(0, 8).map(u => `${u.name}${u.rows > 1 ? ` ×${u.rows}` : ''}`).join(', ')}{chatMetricsImportState.summary.unmatched_operators.length > 8 ? '…' : ''})
+                                        </span>
+                                    )}
+                                </div>
+                            )}
+                        </>
+                    )}
+                </div>
+            )}
+            {chatMetricsUpload && (
+                <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/40 p-4" onClick={() => setChatMetricsUpload(null)}>
+                    <div className="bg-white rounded-lg shadow-xl w-full max-w-lg p-4" onClick={(e) => e.stopPropagation()}>
+                        <div className="flex items-center justify-between mb-3">
+                            <h3 className="text-base font-semibold text-gray-800">
+                                <FaIcon className="fas fa-file-import mr-2 text-cyan-600"></FaIcon>Загрузка отчёта чат-метрик
+                            </h3>
+                            <button className="text-gray-400 hover:text-gray-600" onClick={() => setChatMetricsUpload(null)}>
+                                <FaIcon className="fas fa-xmark"></FaIcon>
+                            </button>
+                        </div>
+                        <div className="text-xs text-gray-500 mb-2 truncate" title={chatMetricsUpload.fileName}>
+                            <FaIcon className="fas fa-paperclip mr-1"></FaIcon>{chatMetricsUpload.fileName}
+                        </div>
+                        <div className="mb-3 p-2 rounded border bg-slate-50 text-sm">
+                            <div className="font-medium text-gray-700">Формат будет определен автоматически.</div>
+                            {chatMetricsUpload.detectedType ? (
+                                <div className="mt-1 text-xs text-gray-600">
+                                    Предварительно распознан: <b className="text-cyan-700">{CHAT_REPORT_LABELS[chatMetricsUpload.detectedType] || chatMetricsUpload.detectedType}</b>
+                                </div>
+                            ) : null}
+                        </div>
+
+                        {(chatMetricsUpload.detectedType === 'name_requests' || !chatMetricsUpload.isCsv || chatMetricsUpload.detectedType === null) && (
+                            <label className="flex flex-col text-xs text-gray-700 mb-3">
+                                <span className="mb-1 font-medium">
+                                    Дата загрузки{chatMetricsUpload.detectedType === 'name_requests' ? ' (обязательно — в файле Name/Requests даты нет)' : ' (для форматов без даты)'}
+                                </span>
+                                <input
+                                    type="date"
+                                    className="w-full p-2 rounded-md border focus:ring-2 focus:ring-cyan-200"
+                                    value={chatMetricsUpload.date || ''}
+                                    onChange={(e) => setChatMetricsUpload(prev => ({ ...prev, date: e.target.value }))}
+                                />
+                            </label>
+                        )}
+
+                        {(chatMetricsUpload.detectedType === 'response_time' || !chatMetricsUpload.isCsv || chatMetricsUpload.detectedType === null) && (
+                            <div className="mb-3">
+                                <div className="flex items-center justify-between mb-1">
+                                    <span className="text-xs font-medium text-gray-700">Окна наплыва (исключаются из времени ответа по request_start)</span>
+                                    <button
+                                        type="button"
+                                        className="text-xs text-cyan-700 hover:underline"
+                                        onClick={() => setChatMetricsUpload(prev => ({ ...prev, surgeWindows: [...(prev.surgeWindows || []), { start: '', end: '' }] }))}
+                                    >
+                                        <FaIcon className="fas fa-plus mr-1"></FaIcon>Добавить интервал
+                                    </button>
+                                </div>
+                                {(chatMetricsUpload.surgeWindows || []).length === 0 && (
+                                    <div className="text-[11px] text-gray-400">Нет окон — учитываются все строки.</div>
+                                )}
+                                {(chatMetricsUpload.surgeWindows || []).map((w, i) => (
+                                    <div key={i} className="flex items-center gap-2 mb-1">
+                                        <input
+                                            type="datetime-local"
+                                            className="flex-1 p-1.5 rounded-md border text-xs"
+                                            value={w.start || ''}
+                                            onChange={(e) => setChatMetricsUpload(prev => { const ws = [...(prev.surgeWindows || [])]; ws[i] = { ...ws[i], start: e.target.value }; return { ...prev, surgeWindows: ws }; })}
+                                        />
+                                        <span className="text-gray-400 text-xs">—</span>
+                                        <input
+                                            type="datetime-local"
+                                            className="flex-1 p-1.5 rounded-md border text-xs"
+                                            value={w.end || ''}
+                                            onChange={(e) => setChatMetricsUpload(prev => { const ws = [...(prev.surgeWindows || [])]; ws[i] = { ...ws[i], end: e.target.value }; return { ...prev, surgeWindows: ws }; })}
+                                        />
+                                        <button
+                                            type="button"
+                                            className="text-red-500 hover:text-red-700"
+                                            onClick={() => setChatMetricsUpload(prev => ({ ...prev, surgeWindows: (prev.surgeWindows || []).filter((_, j) => j !== i) }))}
+                                        >
+                                            <FaIcon className="fas fa-trash"></FaIcon>
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        <div className="flex justify-end gap-2 mt-4">
+                            <button className="px-3 py-2 rounded-md border text-sm text-gray-600 hover:bg-gray-50" onClick={() => setChatMetricsUpload(null)}>
+                                Отмена
+                            </button>
+                            <button className="px-3 py-2 rounded-md bg-cyan-600 text-white text-sm font-medium hover:bg-cyan-700" onClick={submitChatMetricsImport}>
+                                <FaIcon className="fas fa-upload mr-1"></FaIcon>Импортировать
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
             <div className="mb-4 flex flex-wrap items-stretch justify-between gap-3">
                 {/* === Параметры (+ переключатель отчёта в той же линии) === */}
                 <div className="flex flex-wrap items-stretch gap-3">
@@ -4221,14 +4493,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 type="button"
                                                 onClick={() => {
                                                     setShowChatMetricsSurgeEditor(false);
-                                                    triggerPlannerChatMetricsImportSelect();
+                                                    triggerChatMetricsImportSelect();
                                                 }}
-                                                disabled={plannerChatMetricsImportState.loading}
-                                                className={`h-8 rounded-full px-3 text-xs sm:text-sm font-semibold transition whitespace-nowrap border ${plannerChatMetricsImportState.loading ? 'bg-cyan-100 border-cyan-200 text-cyan-500 cursor-not-allowed' : 'bg-cyan-50 border-cyan-200 text-cyan-800 hover:bg-cyan-100'}`}
+                                                disabled={chatMetricsImportState.loading}
+                                                className={`h-8 rounded-full px-3 text-xs sm:text-sm font-semibold transition whitespace-nowrap border ${chatMetricsImportState.loading ? 'bg-cyan-100 border-cyan-200 text-cyan-500 cursor-not-allowed' : 'bg-cyan-50 border-cyan-200 text-cyan-800 hover:bg-cyan-100'}`}
                                                 title="Загрузить отчёт метрик чатов"
                                             >
-                                                <FaIcon className={`fas ${plannerChatMetricsImportState.loading ? 'fa-spinner fa-spin' : 'fa-file-import'} mr-1`}></FaIcon>
-                                                {plannerChatMetricsImportState.loading ? 'Загрузка' : 'Отчёты'}
+                                                <FaIcon className={`fas ${chatMetricsImportState.loading ? 'fa-spinner fa-spin' : 'fa-file-import'} mr-1`}></FaIcon>
+                                                {chatMetricsImportState.loading ? 'Загрузка' : 'Отчёты'}
                                             </button>
                                             <button
                                                 type="button"
