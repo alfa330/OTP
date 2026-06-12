@@ -190,7 +190,7 @@ const IosSection = ({ title, hint, children, right = null }) => (
 
 /* ─── main component ─── */
 
-const SurveysView = ({ user, operators = [], directions = [], showToast, apiBaseUrl, onSurveyProgressChanged }) => {
+const SurveysView = ({ user, operators = [], directions = [], departments = [], showToast, apiBaseUrl, onSurveyProgressChanged }) => {
     const [surveys, setSurveys] = useState([]);
     const [selectedSurveyId, setSelectedSurveyId] = useState('');
     const [showBuilder, setShowBuilder] = useState(false);
@@ -206,6 +206,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
     const [activeTab, setActiveTab] = useState('questions'); // 'questions' | 'stats'
     const [statsViewMode, setStatsViewMode] = useState('answers'); // 'scores' | 'answers'
     const [statsOperatorQuery, setStatsOperatorQuery] = useState('');
+    const [departmentFilter, setDepartmentFilter] = useState('');
     const showToastRef = useRef(showToast);
     const onSurveyProgressChangedRef = useRef(onSurveyProgressChanged);
 
@@ -213,6 +214,15 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
     const isOperator = normalizeRole(user?.role) === 'operator';
     const isRepeatMode = repeatSourceSurveyId != null;
     const isEditMode = editingSurveyId != null;
+    const departmentOptions = useMemo(
+        () => (Array.isArray(departments) ? departments : []).filter((department) => department?.id != null && department?.is_active !== false),
+        [departments]
+    );
+    const selectedDepartmentId = useMemo(() => {
+        const parsed = Number(departmentFilter);
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+    }, [departmentFilter]);
+    const canFilterByDepartment = canManage && departmentOptions.length > 0;
 
     useEffect(() => { showToastRef.current = showToast; }, [showToast]);
     useEffect(() => { onSurveyProgressChangedRef.current = onSurveyProgressChanged; }, [onSurveyProgressChanged]);
@@ -225,6 +235,12 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
         () => ({ 'X-User-Id': user?.id }),
         [user?.id]
     );
+
+    useEffect(() => {
+        if (!departmentFilter) return;
+        const exists = departmentOptions.some((department) => String(department?.id) === String(departmentFilter));
+        if (!exists) setDepartmentFilter('');
+    }, [departmentFilter, departmentOptions]);
 
     const directionNameById = useMemo(() => {
         const map = new Map();
@@ -251,7 +267,8 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                     name: assignmentOperator?.operator_name || `#${id}`,
                     status: assignmentOperator?.operator_status || '',
                     direction: assignmentOperator?.direction || '',
-                    direction_id: assignmentOperator?.direction_id
+                    direction_id: assignmentOperator?.direction_id,
+                    department_id: assignmentOperator?.department_id ?? assignmentOperator?.departmentId
                 });
             });
         });
@@ -267,11 +284,14 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                 const statusPeriodCode = String(operator?.status_period_status_code || '').trim().toLowerCase();
                 const isDismissed = isDismissedOperatorStatus(status) || isDismissedOperatorStatus(statusPeriodCode) || operator?.is_operator_dismissed === true;
                 const directionId = operator?.direction_id != null ? String(operator.direction_id) : 'none';
+                const departmentIdRaw = operator?.department_id ?? operator?.departmentId;
+                const departmentIdNumber = Number(departmentIdRaw);
                 const weeks = getTenureWeeks(operator?.hire_date);
                 return {
                     id,
                     name: String(operator?.name || `#${id}`),
                     directionId,
+                    departmentId: Number.isFinite(departmentIdNumber) ? departmentIdNumber : null,
                     directionName: operator?.direction || directionNameById.get(directionId) || 'Без направления',
                     tenureWeeks: weeks,
                     tenureLabel: tenureLabel(weeks),
@@ -286,6 +306,17 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
         () => new Set(normalizedOperators.map((operator) => Number(operator.id)).filter(Number.isFinite)),
         [normalizedOperators]
     );
+    const operatorDepartmentIdById = useMemo(() => {
+        const map = new Map();
+        normalizedOperators.forEach((operator) => {
+            const id = Number(operator?.id);
+            const departmentId = Number(operator?.departmentId);
+            if (Number.isFinite(id) && Number.isFinite(departmentId)) {
+                map.set(id, departmentId);
+            }
+        });
+        return map;
+    }, [normalizedOperators]);
     const dismissedOperatorIdSet = useMemo(
         () => new Set(normalizedOperators.filter((operator) => operator.isDismissed).map((operator) => Number(operator.id))),
         [normalizedOperators]
@@ -325,6 +356,8 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
             const isAlreadySelected = selectedOperatorIds.has(Number(operator.id));
             const byQuery = !query || operator.name.toLowerCase().includes(query) || operator.directionName.toLowerCase().includes(query);
             if (!byQuery) return false;
+            const byDepartment = selectedDepartmentId == null || Number(operator.departmentId) === selectedDepartmentId;
+            if (!byDepartment && !isAlreadySelected) return false;
             // Уже выбранные операторы всегда видны, а в режиме повтора/редактирования
             // можно добрать других действующих сотрудников вне старых фильтров.
             if (isAlreadySelected) return true;
@@ -336,7 +369,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
             const byMax = maxWeeks == null || (hasTenure && operator.tenureWeeks <= maxWeeks);
             return byDirection && byQuery && byMin && byMax;
         });
-    }, [draft.directionIds, draft.operatorIds, draft.tenureWeeksMax, draft.tenureWeeksMin, isEditMode, isRepeatMode, normalizedOperators, operatorQuery]);
+    }, [draft.directionIds, draft.operatorIds, draft.tenureWeeksMax, draft.tenureWeeksMin, isEditMode, isRepeatMode, normalizedOperators, operatorQuery, selectedDepartmentId]);
 
     const filteredOperatorIds = useMemo(
         () => filteredOperators.map((operator) => Number(operator.id)).filter(Number.isFinite),
@@ -393,24 +426,70 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
         }
     }, [apiBaseUrl, headers, notify, user?.id]);
 
+    const assignmentMatchesSelectedDepartment = useCallback((assignment) => {
+        if (selectedDepartmentId == null) return true;
+        const directDepartmentId = Number(assignment?.department_id ?? assignment?.departmentId);
+        if (Number.isFinite(directDepartmentId)) return directDepartmentId === selectedDepartmentId;
+        const operatorId = Number(assignment?.operator_id ?? assignment?.id);
+        const mappedDepartmentId = operatorDepartmentIdById.get(operatorId);
+        return Number(mappedDepartmentId) === selectedDepartmentId;
+    }, [operatorDepartmentIdById, selectedDepartmentId]);
+
+    const getSurveyDisplayMetrics = useCallback((survey) => {
+        const statistics = survey?.statistics || {};
+        const fallbackAssigned = Number(statistics.assigned_count || 0);
+        const fallbackCompleted = Number(statistics.completed_count || 0);
+        const fallbackPending = Number(statistics.pending_count || Math.max(0, fallbackAssigned - fallbackCompleted));
+        const fallbackRate = Number(statistics.completion_rate || 0);
+        const assignments = Array.isArray(survey?.assignment?.operators) ? survey.assignment.operators : [];
+
+        if (selectedDepartmentId == null || assignments.length === 0) {
+            return {
+                assignedCount: fallbackAssigned,
+                completedCount: fallbackCompleted,
+                pendingCount: fallbackPending,
+                completionRate: Number.isFinite(fallbackRate) ? fallbackRate : 0
+            };
+        }
+
+        const departmentAssignments = assignments.filter(assignmentMatchesSelectedDepartment);
+        const assignedCount = departmentAssignments.length;
+        const completedCount = departmentAssignments.filter(
+            (assignment) => String(assignment?.status || '').trim().toLowerCase() === 'completed'
+        ).length;
+        const pendingCount = Math.max(0, assignedCount - completedCount);
+        const completionRate = assignedCount > 0 ? Math.round((completedCount / assignedCount) * 1000) / 10 : 0;
+
+        return { assignedCount, completedCount, pendingCount, completionRate };
+    }, [assignmentMatchesSelectedDepartment, selectedDepartmentId]);
+
+    const visibleSurveys = useMemo(() => {
+        if (!canManage || selectedDepartmentId == null) return surveys;
+        return (surveys || []).filter((survey) => getSurveyDisplayMetrics(survey).assignedCount > 0);
+    }, [canManage, getSurveyDisplayMetrics, selectedDepartmentId, surveys]);
+
     useEffect(() => { loadSurveys(); }, [loadSurveys]);
 
     useEffect(() => {
-        if (!selectedSurveyId && surveys[0]?.id) setSelectedSurveyId(surveys[0].id);
-        if (selectedSurveyId && !surveys.some((item) => String(item.id) === String(selectedSurveyId))) {
-            setSelectedSurveyId(surveys[0]?.id || '');
+        if (!selectedSurveyId && visibleSurveys[0]?.id) setSelectedSurveyId(visibleSurveys[0].id);
+        if (selectedSurveyId && !visibleSurveys.some((item) => String(item.id) === String(selectedSurveyId))) {
+            setSelectedSurveyId(visibleSurveys[0]?.id || '');
         }
-    }, [selectedSurveyId, surveys]);
+    }, [selectedSurveyId, visibleSurveys]);
 
     useEffect(() => {
         setStatsOperatorQuery('');
-        const currentSurvey = (surveys || []).find((item) => String(item.id) === String(selectedSurveyId));
+        const currentSurvey = (visibleSurveys || []).find((item) => String(item.id) === String(selectedSurveyId));
         setStatsViewMode(currentSurvey?.is_test ? 'scores' : 'answers');
-    }, [selectedSurveyId, surveys]);
+    }, [selectedSurveyId, visibleSurveys]);
 
     const selectedSurvey = useMemo(
-        () => surveys.find((item) => String(item.id) === String(selectedSurveyId)) || null,
-        [selectedSurveyId, surveys]
+        () => visibleSurveys.find((item) => String(item.id) === String(selectedSurveyId)) || null,
+        [selectedSurveyId, visibleSurveys]
+    );
+    const selectedSurveyDisplayMetrics = useMemo(
+        () => getSurveyDisplayMetrics(selectedSurvey),
+        [getSurveyDisplayMetrics, selectedSurvey]
     );
     const isTestStatsSurvey = !!selectedSurvey?.is_test;
     const selectedSurveyQuestionMetaById = useMemo(() => {
@@ -455,8 +534,13 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
             : [];
     }, [selectedSurvey?.statistics?.responses_detailed_all_repetitions, selectedSurvey?.statistics?.responses_detailed]);
 
+    const departmentFilteredDetailedStatsRows = useMemo(() => {
+        if (!canManage || selectedDepartmentId == null) return detailedStatsSourceRows;
+        return detailedStatsSourceRows.filter((row) => assignmentMatchesSelectedDepartment(row));
+    }, [assignmentMatchesSelectedDepartment, canManage, detailedStatsSourceRows, selectedDepartmentId]);
+
     const detailedStatsRows = useMemo(() => {
-        const rows = detailedStatsSourceRows;
+        const rows = departmentFilteredDetailedStatsRows;
         const query = String(statsOperatorQuery || '').trim().toLowerCase();
         if (!query) return rows;
         return rows.filter((row) => {
@@ -464,7 +548,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
             const idText = String(row?.operator_id || '');
             return name.includes(query) || idText.includes(query);
         });
-    }, [detailedStatsSourceRows, statsOperatorQuery]);
+    }, [departmentFilteredDetailedStatsRows, statsOperatorQuery]);
 
     const resolveStatsQuestionAndAnswer = useCallback((row, baseQuestion, questionIndex) => {
         const rowSurveyId = Number(row?.repeat_survey_id);
@@ -561,6 +645,106 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
         const answerText = String(answer?.answer_text || '').trim();
         return selectedOptions.length > 0 || answerText.length > 0;
     }, []);
+
+    const displayQuestionStats = useMemo(() => {
+        const serverStats = Array.isArray(selectedSurvey?.statistics?.question_stats)
+            ? selectedSurvey.statistics.question_stats
+            : [];
+        if (!canManage || selectedDepartmentId == null) return serverStats;
+
+        const questions = Array.isArray(selectedSurvey?.questions) ? selectedSurvey.questions : [];
+        const respondentsTotal = departmentFilteredDetailedStatsRows.length;
+
+        return questions.map((question, questionIndex) => {
+            const type = String(question?.type || 'single');
+            const optionCounts = new Map();
+            const ratingCounts = new Map();
+            const ratingValues = [];
+            let answeredCount = 0;
+            let selectionsTotal = 0;
+
+            departmentFilteredDetailedStatsRows.forEach((row) => {
+                const resolved = resolveStatsQuestionAndAnswer(row, question, questionIndex);
+                const resolvedQuestion = resolved.question || question;
+                const answer = resolved.answer;
+                if (!hasSurveyAnswer(resolvedQuestion, answer)) return;
+
+                answeredCount += 1;
+                if (String(resolvedQuestion?.type || type) === 'rating') {
+                    const rating = Number(answer?.rating_value);
+                    if (Number.isFinite(rating)) {
+                        ratingValues.push(rating);
+                        ratingCounts.set(rating, (ratingCounts.get(rating) || 0) + 1);
+                    }
+                    return;
+                }
+
+                const selectedOptions = toUniqueTrimmedList(answer?.selected_options);
+                selectedOptions.forEach((option) => {
+                    optionCounts.set(option, (optionCounts.get(option) || 0) + 1);
+                    selectionsTotal += 1;
+                });
+
+                const otherText = String(answer?.answer_text || '').trim();
+                if (otherText) {
+                    optionCounts.set('Другое', (optionCounts.get('Другое') || 0) + 1);
+                    selectionsTotal += 1;
+                }
+            });
+
+            const responseRate = respondentsTotal > 0 ? Math.round((answeredCount / respondentsTotal) * 1000) / 10 : 0;
+            const options = Array.from(optionCounts.entries())
+                .map(([option, count]) => ({
+                    option,
+                    count,
+                    percent_of_answers: answeredCount > 0 ? (count / answeredCount) * 100 : 0,
+                    percent_of_respondents: respondentsTotal > 0 ? (count / respondentsTotal) * 100 : 0
+                }))
+                .sort((a, b) => b.count - a.count || String(a.option).localeCompare(String(b.option), 'ru', { sensitivity: 'base' }));
+            const sortedRatings = [...ratingValues].sort((a, b) => a - b);
+            const medianRating = sortedRatings.length
+                ? sortedRatings[Math.floor((sortedRatings.length - 1) / 2)]
+                : null;
+            const ratingsDistributionDetailed = [1, 2, 3, 4, 5].map((value) => {
+                const count = ratingCounts.get(value) || 0;
+                return {
+                    value,
+                    count,
+                    percent_of_answers: answeredCount > 0 ? (count / answeredCount) * 100 : 0,
+                    percent_of_respondents: respondentsTotal > 0 ? (count / respondentsTotal) * 100 : 0
+                };
+            });
+
+            return {
+                question_id: question?.id,
+                text: question?.text || `Вопрос ${questionIndex + 1}`,
+                type,
+                correct_options: toUniqueTrimmedList(question?.correct_options),
+                respondents_total: respondentsTotal,
+                question_respondents_total: answeredCount,
+                survey_respondents_total: respondentsTotal,
+                responses_with_answer: answeredCount,
+                skipped_count: Math.max(0, respondentsTotal - answeredCount),
+                response_rate: responseRate,
+                selections_total: selectionsTotal,
+                options,
+                top_options: options.slice(0, 3),
+                ratings_distribution_detailed: ratingsDistributionDetailed,
+                average_rating: ratingValues.length ? (ratingValues.reduce((sum, value) => sum + value, 0) / ratingValues.length).toFixed(2) : null,
+                median_rating: medianRating,
+                min_rating: sortedRatings.length ? sortedRatings[0] : null,
+                max_rating: sortedRatings.length ? sortedRatings[sortedRatings.length - 1] : null
+            };
+        });
+    }, [
+        canManage,
+        departmentFilteredDetailedStatsRows,
+        hasSurveyAnswer,
+        resolveStatsQuestionAndAnswer,
+        selectedDepartmentId,
+        selectedSurvey?.questions,
+        selectedSurvey?.statistics?.question_stats
+    ]);
 
     const formatSurveyDateTime = useCallback((value) => {
         if (!value) return '—';
@@ -1182,6 +1366,23 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                         </div>
                     </div>
                     {canManage && (
+                        <div className="flex items-center justify-end gap-2 flex-wrap">
+                        {canFilterByDepartment && (
+                            <div className="flex items-center gap-2">
+                                <FaIcon className="fa-solid fa-layer-group text-gray-400" />
+                                <select
+                                    value={departmentFilter}
+                                    onChange={(event) => setDepartmentFilter(event.target.value)}
+                                    className="px-3 py-2 border border-gray-200 rounded-xl text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+                                    title="Фильтр по отделу"
+                                >
+                                    <option value="">Все отделы</option>
+                                    {departmentOptions.map((department) => (
+                                        <option key={department.id} value={department.id}>{department.name}</option>
+                                    ))}
+                                </select>
+                            </div>
+                        )}
                         <button
                             onClick={() => {
                                 if (showBuilder) {
@@ -1200,6 +1401,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                             <FaIcon className={`fas ${showBuilder ? 'fa-times' : 'fa-plus'} text-xs`} />
                             {showBuilder ? 'Отменить' : 'Создать опрос'}
                         </button>
+                        </div>
                     )}
                 </div>
             </div>
@@ -1321,6 +1523,22 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                         />
                                     </div>
                                 </div>
+
+                                {canFilterByDepartment && (
+                                    <div>
+                                        <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Отдел</label>
+                                        <select
+                                            value={departmentFilter}
+                                            onChange={(event) => setDepartmentFilter(event.target.value)}
+                                            className={iosInput}
+                                        >
+                                            <option value="">Все отделы</option>
+                                            {departmentOptions.map((department) => (
+                                                <option key={department.id} value={department.id}>{department.name}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                )}
 
                                 {directionNameById.size > 0 && (
                                     <div>
@@ -1651,12 +1869,12 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                 <div className="xl:col-span-2 bg-white rounded-2xl border border-gray-200 shadow-sm flex flex-col overflow-hidden">
                     <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
                         <span className="text-sm font-semibold text-gray-800">Список опросов</span>
-                        {surveys.length > 0 && <Badge color="gray">{surveys.length}</Badge>}
+                        {visibleSurveys.length > 0 && <Badge color="gray">{visibleSurveys.length}</Badge>}
                     </div>
 
                     <div className="flex-1 overflow-y-auto divide-y divide-gray-50">
                         {isLoading && <SurveysListSkeleton />}
-                        {!isLoading && surveys.length === 0 && (
+                        {!isLoading && visibleSurveys.length === 0 && (
                             <div className="p-8 text-center">
                                 <div className="w-12 h-12 rounded-2xl bg-gray-50 flex items-center justify-center mx-auto mb-3">
                                     <FaIcon className="fas fa-clipboard-list text-gray-300 text-xl" />
@@ -1666,10 +1884,11 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                 </p>
                             </div>
                         )}
-                        {!isLoading && surveys.map((survey) => {
+                        {!isLoading && visibleSurveys.map((survey) => {
                             const isSelected = String(survey.id) === String(selectedSurveyId);
                             const isCompleted = survey?.my_assignment?.status === 'completed';
-                            const completionRate = survey?.statistics?.completion_rate || 0;
+                            const displayMetrics = getSurveyDisplayMetrics(survey);
+                            const completionRate = displayMetrics.completionRate || 0;
                             const repeatIteration = Number(survey?.repeat?.iteration || 1);
                             return (
                                 <div
@@ -1699,7 +1918,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                 {canManage ? (
                                                     <div className="space-y-1">
                                                         <div className="flex items-center justify-between text-[11px] text-gray-500">
-                                                            <span>Пройдено: {survey?.statistics?.completed_count || 0} из {survey?.statistics?.assigned_count || 0}</span>
+                                                            <span>Пройдено: {displayMetrics.completedCount || 0} из {displayMetrics.assignedCount || 0}</span>
                                                             <span>{completionRate}%</span>
                                                         </div>
                                                         <ProgressBar value={completionRate} color={completionRate >= 80 ? 'emerald' : 'blue'} />
@@ -1792,7 +2011,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                     <div className="flex flex-wrap gap-2 mt-3">
                                         <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
                                             <FaIcon className="fas fa-users text-gray-400 text-[10px]" />
-                                            Операторов: <strong className="text-gray-700">{selectedSurvey?.assignment?.operator_ids?.length || 0}</strong>
+                                            Операторов: <strong className="text-gray-700">{selectedSurveyDisplayMetrics.assignedCount || 0}</strong>
                                         </div>
                                         <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
                                             <FaIcon className="fas fa-clock text-gray-400 text-[10px]" />
@@ -1807,11 +2026,11 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                             <>
                                                 <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
                                                     <FaIcon className="fas fa-check-circle text-gray-400 text-[10px]" />
-                                                    Пройдено: <strong className="text-gray-700">{selectedSurvey?.statistics?.completed_count || 0} / {selectedSurvey?.statistics?.assigned_count || 0}</strong>
+                                                    Пройдено: <strong className="text-gray-700">{selectedSurveyDisplayMetrics.completedCount || 0} / {selectedSurveyDisplayMetrics.assignedCount || 0}</strong>
                                                 </div>
                                                 <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
                                                     <FaIcon className="fas fa-hourglass-half text-gray-400 text-[10px]" />
-                                                    Ожидают: <strong className="text-gray-700">{selectedSurvey?.statistics?.pending_count || 0}</strong>
+                                                    Ожидают: <strong className="text-gray-700">{selectedSurveyDisplayMetrics.pendingCount || 0}</strong>
                                                 </div>
                                             </>
                                         )}
@@ -2115,13 +2334,13 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                 {/* Manager stats tab */}
                                 {canManage && activeTab === 'stats' && (
                                     <div className="space-y-3">
-                                        {(selectedSurvey?.statistics?.question_stats || []).length === 0 && (
+                                        {displayQuestionStats.length === 0 && (
                                             <div className="text-center py-8">
                                                 <FaIcon className="fas fa-chart-bar text-gray-200 text-3xl mb-2 block" />
                                                 <p className="text-sm text-gray-400">Данных для статистики пока нет</p>
                                             </div>
                                         )}
-                                        {(selectedSurvey?.statistics?.question_stats || []).map((stat, index) => renderDetailedQuestionStats(stat, index))}
+                                        {displayQuestionStats.map((stat, index) => renderDetailedQuestionStats(stat, index))}
 
                                         <div className="border border-gray-100 rounded-xl p-4 bg-white space-y-3">
                                             <div className="flex items-center justify-between gap-3 flex-wrap">
@@ -2173,7 +2392,7 @@ const SurveysView = ({ user, operators = [], directions = [], showToast, apiBase
                                                         {isStatsExporting ? 'Экспорт...' : 'Excel'}
                                                     </button>
                                                     <Badge color="blue">
-                                                        {detailedStatsRows.length}/{detailedStatsSourceRows.length}
+                                                        {detailedStatsRows.length}/{departmentFilteredDetailedStatsRows.length}
                                                     </Badge>
                                                 </div>
                                             </div>

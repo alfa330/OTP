@@ -28565,6 +28565,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const currentUserRole = normalizeRole(user?.role);
             const isSuperAdmin = currentUserRole === 'super_admin';
             const isAdminLikeRole = isAdminLikeRoleFn(currentUserRole);
+            const canFilterByDepartment = isAdminLikeRole || currentUserRole === 'trainer';
             const canUsePinnedTasks = isAdminLikeRole || isSupervisorRole(currentUserRole) || currentUserRole === 'trainer';
             const canAccessLmsSection = canAccessLmsSectionForUser(user);
             const canAccessResourceFteSection = canAccessResourceFteSectionForUser(user);
@@ -28665,6 +28666,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [directions, setDirections] = useState([]);
             const [departments, setDepartments] = useState([]);
             const [manageUsersDeptFilter, setManageUsersDeptFilter] = useState('');
+            const [manageOperatorsDeptFilter, setManageOperatorsDeptFilter] = useState('');
             const [svListDeptFilter, setSvListDeptFilter] = useState('');
             const [selectedMonth, setSelectedMonth] = useState(() => getStoredValue('selectedMonth', currentMonth));
             const [users, setUsers] = useState([]);
@@ -36585,6 +36587,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 } else if (user.role === 'trainer') {
                     fetchUsers();
                     fetchDirections();
+                    fetchDepartments();
                 }
 
                 if (user.role !== 'operator') {
@@ -36608,8 +36611,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
             useEffect(() => {
                 if (!user?.id) return;
-                if (!(isAdminLikeRoleFn(user?.role) || isSupervisorRole(user?.role))) return;
-                const managementViews = ['manage_users', 'employees', 'sv_list', 'manage_trainers', 'manage_admins', 'manage_operators', 'departments'];
+                if (!(isAdminLikeRoleFn(user?.role) || isSupervisorRole(user?.role) || normalizeRole(user?.role) === 'trainer')) return;
+                const managementViews = ['manage_users', 'employees', 'sv_list', 'manage_trainers', 'manage_admins', 'manage_operators', 'departments', 'surveys'];
                 if (showUserEditModal || managementViews.includes(view)) {
                     fetchDepartments();
                 }
@@ -38414,7 +38417,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <h2 className="text-2xl font-semibold text-gray-800">Операторы</h2>
 
                                     <div className="flex items-center gap-3">
-                                        {isAdminLikeRole && (departments || []).length > 0 && (
+                                        {canFilterByDepartment && (departments || []).length > 0 && (
                                         <div className="flex items-center gap-2">
                                             <FaIcon className="fa-solid fa-layer-group text-gray-400" />
                                             <select
@@ -39243,7 +39246,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         externalRefreshToken={taskRefreshToken}
                                     />
                                 ))}
-                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
+                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} departments={departments} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
                                 {( view === "recruiting" && (
                                     <RecruitingView
                                         user={user}
@@ -39525,6 +39528,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         <div className="flex justify-between items-center mb-6">
                                         <h2 className="text-2xl font-semibold text-gray-800">Операторы</h2>
 
+                                        <div className="flex items-center gap-3">
+                                        {canFilterByDepartment && (departments || []).length > 0 && (
+                                        <div className="flex items-center gap-2">
+                                            <FaIcon className="fa-solid fa-layer-group text-gray-400" />
+                                            <select
+                                                value={manageOperatorsDeptFilter}
+                                                onChange={(e) => setManageOperatorsDeptFilter(e.target.value)}
+                                                className="px-3 py-3 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+                                                title="Фильтр по отделу"
+                                            >
+                                                <option value="">Все отделы</option>
+                                                {(departments || []).map((dep) => (
+                                                    <option key={dep.id} value={dep.id}>{dep.name}</option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                        )}
+
                                         {!isManageOperatorsReadOnly && (
                                         <button
                                             onClick={() => {
@@ -39545,6 +39566,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </button>
                                         )}
                                         </div>
+                                        </div>
 
                                         {renderUpcomingBirthdaysCard(upcomingManageOperatorsBirthdays, manageOperatorsBirthdaysCaption)}
 
@@ -39554,8 +39576,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const allOps = (Array.isArray(users) && users.length > 0)
                                                 ? users
                                                 : (Array.isArray(svData?.operators) ? svData.operators : []);
+                                            const deptFilter = manageOperatorsDeptFilter ? Number(manageOperatorsDeptFilter) : null;
+                                            const filteredByDepartment = deptFilter == null
+                                                ? allOps
+                                                : allOps.filter((op) => Number(op?.department_id ?? op?.departmentId) === deptFilter);
                                             return USER_STATUS_FILTER_TABS.map((tab) => {
-                                                const count = allOps.filter((op) => isEmployeeVisibleByStatusTab(op?.status, tab.key)).length;
+                                                const count = filteredByDepartment.filter((op) => isEmployeeVisibleByStatusTab(op?.status, tab.key)).length;
                                                 const isActive = activeTab === tab.key;
                                                 return (
                                                     <button
@@ -39582,7 +39608,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const operators = (Array.isArray(users) && users.length > 0)
                                                 ? users
                                                 : (Array.isArray(svData?.operators) ? svData.operators : []);
-                                            const filteredByStatus = operators.filter((op) => isEmployeeVisibleByStatusTab(op?.status, activeTab));
+                                            const deptFilter = manageOperatorsDeptFilter ? Number(manageOperatorsDeptFilter) : null;
+                                            const filteredByStatus = operators
+                                                .filter((op) => isEmployeeVisibleByStatusTab(op?.status, activeTab))
+                                                .filter((op) => deptFilter == null || Number(op?.department_id ?? op?.departmentId) === deptFilter);
 
                                             if (!filteredByStatus || filteredByStatus.length === 0) {
                                             return <p className="text-center text-gray-600">Операторы не найдены.</p>;
@@ -40288,7 +40317,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         externalRefreshToken={taskRefreshToken}
                                     />
                                 ))}
-                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
+                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} departments={departments} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "resource_fte" && canAccessResourceFteSection && (
                                     <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
@@ -40307,7 +40336,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {user.role === 'operator' && (
                             <>
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
-                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
+                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} departments={departments} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
                                 {view === 'profile' && ( 
                                   <div className="bg-white p-4 sm:p-6 lg:p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                     <h2 className="text-xl sm:text-2xl lg:text-3xl font-bold mb-4 sm:mb-6 lg:mb-8 text-gray-900 flex items-center gap-2">

@@ -5582,7 +5582,7 @@ def api_admin_departments():
 
         if request.method == 'GET':
             # Список отделов доступен админам (для назначения главы и т.п.)
-            if not _is_admin_role(requester_role):
+            if not (_is_admin_role(requester_role) or requester_role == 'trainer'):
                 return jsonify({"error": "Forbidden"}), 403
             departments = db.get_departments()
             return jsonify({"status": "success", "departments": departments}), 200
