@@ -3928,16 +3928,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return;
             }
 
-            // If admin requested per-SV report, ensure a supervisor is selected
-            if (isAdminLikeRoleFn(user?.role) && reportScope === 'by_sv' && !selectedSvId) {
-            fallbackToast('Выберите супервайзера для отчёта', 'error');
+            // If admin requested per-SV report, ensure a supervisor or group is selected
+            if (isAdminLikeRoleFn(user?.role) && reportScope === 'by_sv' && !selectedSvId && !selectedGroupId) {
+            fallbackToast('Выберите супервайзера или группу для отчёта', 'error');
             return;
             }
 
             const params = new URLSearchParams();
             params.append('month', month);
 
-            if (reportScope === 'by_sv' && selectedSvId) {
+            // Если выбрана группа — выгружаем строго по группе (одна модель расчёта → корректные
+            // листы: чат-группа без «Звонки»/«Эффективность»). Иначе — по супервайзеру.
+            if (reportScope === 'by_sv' && selectedGroupId) {
+                params.append('group_id', selectedGroupId);
+            } else if (reportScope === 'by_sv' && selectedSvId) {
                 params.append('supervisor_id', selectedSvId);
             }
 
