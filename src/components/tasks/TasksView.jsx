@@ -4,6 +4,7 @@ import axios from 'axios';
 import {
   CalendarClock,
   CheckCircle2,
+  ChevronDown,
   ChevronLeft as LucideChevronLeft,
   GripHorizontal,
   Link2,
@@ -16,6 +17,7 @@ import {
   Pin,
   PinOff,
   RefreshCw,
+  SlidersHorizontal,
   StickyNote,
 } from 'lucide-react';
 import { normalizeRole, isAdminLikeRole, isSupervisorRole } from '../../utils/roles';
@@ -774,6 +776,7 @@ styleTag.textContent = `
     display: flex;
     flex-direction: column;
     gap: 12px;
+    min-height: 0;
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     background: var(--surface);
@@ -783,11 +786,14 @@ styleTag.textContent = `
   .tv-notes-panel.is-compact {
     padding: 10px;
     gap: 9px;
+    max-height: min(620px, calc(100vh - 112px));
+    overflow: hidden;
   }
   .tv-notes-panel.is-fullscreen {
     flex: 1;
     min-height: 0;
     height: 100%;
+    overflow: hidden;
     box-shadow: none;
   }
   .tv-notes-toolbar,
@@ -818,6 +824,17 @@ styleTag.textContent = `
     grid-template-columns: minmax(0, 1.15fr) minmax(260px, .85fr);
     gap: 12px;
     min-height: 0;
+    overflow: hidden;
+  }
+  .tv-notes-panel.is-compact .tv-notes-content {
+    max-height: min(500px, calc(100vh - 200px));
+    overflow-y: auto;
+    padding-right: 2px;
+  }
+  .tv-notes-panel.is-fullscreen .tv-notes-content {
+    flex: 1;
+    overflow-y: auto;
+    padding-right: 2px;
   }
   .tv-notes-board {
     display: grid;
@@ -978,6 +995,69 @@ styleTag.textContent = `
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(130px, .5fr);
     gap: 8px;
+  }
+  .tv-note-advanced-toggle {
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-2);
+    color: var(--ink-2);
+    padding: 7px 9px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 800;
+    transition: background .15s, border .15s, color .15s;
+  }
+  .tv-note-advanced-toggle:hover:not(:disabled),
+  .tv-note-advanced-toggle.is-open {
+    background: var(--bg);
+    border-color: var(--border-strong);
+    color: var(--ink);
+  }
+  .tv-note-advanced-toggle:disabled {
+    opacity: .65;
+    cursor: not-allowed;
+  }
+  .tv-note-advanced-toggle-main,
+  .tv-note-advanced-toggle-meta {
+    min-width: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .tv-note-advanced-toggle-meta {
+    color: var(--ink-3);
+    font-size: 11px;
+    font-weight: 700;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tv-note-advanced-caret {
+    transition: transform .15s ease;
+    flex: 0 0 auto;
+  }
+  .tv-note-advanced-toggle.is-open .tv-note-advanced-caret {
+    transform: rotate(180deg);
+  }
+  .tv-note-advanced-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+  }
+  .tv-notes-editor-status {
+    min-width: 0;
+    color: var(--ink-3);
+    font-size: 11px;
+    line-height: 1.35;
   }
   .tv-note-switches {
     flex-wrap: wrap;
@@ -1357,6 +1437,15 @@ styleTag.textContent = `
   }
   .tv-pin-widget.is-detached .tv-pin-body.is-notes-open,
   .tv-pin-widget.is-detached .tv-pin-body.is-task-form-open {
+    overflow: hidden;
+  }
+  .tv-pin-body.is-notes-open {
+    max-height: min(660px, calc(100vh - 88px));
+    min-height: 0;
+    overflow-y: auto;
+  }
+  .tv-pin-widget.is-detached .tv-pin-body.is-notes-open {
+    max-height: none;
     overflow: hidden;
   }
   .tv-pin-badges {
@@ -3141,6 +3230,27 @@ const TaskNotesPanel = React.memo(({ notesState, compact = false, fullScreen = f
   const normalizedDraft = draft?.id ? normalizeTaskNote(draft) : EMPTY_TASK_NOTE;
   const hasActiveDraft = Boolean(normalizedDraft?.id);
   const draftDueValue = toDatetimeLocalValue(normalizedDraft.due_at);
+  const draftPriority = normalizeTaskNotePriority(normalizedDraft.priority);
+  const draftPriorityMeta = PRIORITY_META[draftPriority] || PRIORITY_META.normal;
+  const hasDraftDetails = Boolean(
+    normalizedDraft.due_at ||
+    normalizedDraft.is_task ||
+    normalizedDraft.is_done ||
+    draftPriority !== 'normal'
+  );
+  const [noteDetailsOpen, setNoteDetailsOpen] = useState(false);
+
+  useEffect(() => {
+    setNoteDetailsOpen(hasDraftDetails);
+  }, [normalizedDraft.id, hasDraftDetails]);
+
+  const noteDetailsSummary = useMemo(() => {
+    const parts = [];
+    if (normalizedDraft.due_at) parts.push('дедлайн');
+    if (draftPriority !== 'normal') parts.push(draftPriorityMeta.label.toLowerCase());
+    if (normalizedDraft.is_task) parts.push(normalizedDraft.is_done ? 'выполнено' : 'как задача');
+    return parts.length ? parts.join(' · ') : 'не заданы';
+  }, [draftPriority, draftPriorityMeta.label, normalizedDraft.due_at, normalizedDraft.is_done, normalizedDraft.is_task]);
 
   const updateDraft = useCallback((patch) => {
     setDraft((prev) => normalizeTaskNote({ ...normalizeTaskNote(prev), ...patch }));
@@ -3207,7 +3317,22 @@ const TaskNotesPanel = React.memo(({ notesState, compact = false, fullScreen = f
             disabled={isSaving}
             onChange={(event) => updateDraft({ body: event.target.value })}
           />
-          <div className="tv-note-controls-grid">
+          <button
+            type="button"
+            className={`tv-note-advanced-toggle ${noteDetailsOpen ? 'is-open' : ''}`}
+            aria-expanded={noteDetailsOpen}
+            onClick={() => setNoteDetailsOpen((prev) => !prev)}
+          >
+            <span className="tv-note-advanced-toggle-main">
+              <SlidersHorizontal size={14} strokeWidth={2} />
+              Детали
+            </span>
+            <span className="tv-note-advanced-toggle-meta">{noteDetailsSummary}</span>
+            <ChevronDown className="tv-note-advanced-caret" size={14} strokeWidth={2} />
+          </button>
+          {noteDetailsOpen && (
+            <div className="tv-note-advanced-panel">
+              <div className="tv-note-controls-grid">
             <label className="tv-form-field">
               <span>Дедлайн</span>
               <input
@@ -3257,8 +3382,10 @@ const TaskNotesPanel = React.memo(({ notesState, compact = false, fullScreen = f
               </label>
             )}
           </div>
+            </div>
+          )}
           <div className="tv-notes-editor-footer">
-            <span className="tv-pin-empty-actions">
+            <span className="tv-notes-editor-status">
               {isLoading ? 'Загружаю...' : normalizedDraft.saved_at ? `Сохранено: ${fmtShortDateTime(normalizedDraft.saved_at)}` : 'Пока не сохранено'}
             </span>
             <div className="tv-notes-editor-actions">
