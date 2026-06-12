@@ -145,10 +145,11 @@ class ChatReportImportTests(unittest.TestCase):
         ]
         res = parse(header, rows, self.lookup, self.index)
         self.assertEqual(res["detected_type"], "whatsapp_chats")
-        self.assertEqual(res["update_fields"], ["chats_count"])
+        self.assertEqual(res["update_fields"], ["whatsapp_chats_count"])
         by_key = {(m["operator_id"], m["day"]): m for m in res["metrics"]}
         # 2 строки Whatsapp по дате обращения 2026-05-31, звонок не считается
         self.assertEqual(by_key[(2, "2026-05-31")]["chats_count"], 2)
+        self.assertEqual(by_key[(2, "2026-05-31")]["whatsapp_chats_count"], 2)
 
     def test_name_requests_uses_upload_date_and_abbrev_names(self):
         parse = self.ns["_chat_report_parse"]
@@ -156,9 +157,12 @@ class ChatReportImportTests(unittest.TestCase):
         rows = [["Омар Идр", "950"], ["Жанеля Н", "925"]]
         res = parse(header, rows, self.lookup, self.index, default_date="2026-06-01")
         self.assertEqual(res["detected_type"], "name_requests")
+        self.assertEqual(res["update_fields"], ["name_requests_chats_count"])
         by_key = {(m["operator_id"], m["day"]): m for m in res["metrics"]}
         self.assertEqual(by_key[(3, "2026-06-01")]["chats_count"], 950)
+        self.assertEqual(by_key[(3, "2026-06-01")]["name_requests_chats_count"], 950)
         self.assertEqual(by_key[(4, "2026-06-01")]["chats_count"], 925)
+        self.assertEqual(by_key[(4, "2026-06-01")]["name_requests_chats_count"], 925)
 
     def test_name_requests_requires_upload_date(self):
         parse = self.ns["_chat_report_parse"]

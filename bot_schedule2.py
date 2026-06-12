@@ -6238,7 +6238,9 @@ def upload_group_day():
                                                     fines=fines_arr,
                                                     bonuses=bonuses_arr)
 
-                    # Ручной ввод чат-метрик (если переданы): чаты/время ответа/переводы/средняя оценка.
+                    # Ручной ввод чат-метрик (если переданы): время ответа/переводы/средняя оценка.
+                    # Количество чатов приходит только из отдельных отчётов метрик чатов (A+B),
+                    # поэтому daily.calls больше не синхронизируем в chat_manager_daily_metrics.
                     # preserve_missing=True: пустые значения НЕ затирают импортированные (COALESCE).
                     chat_metrics_obj = row.get('chat_metrics')
                     if isinstance(chat_metrics_obj, dict):
@@ -6259,20 +6261,35 @@ def upload_group_day():
                             except Exception:
                                 return None
 
-                        # chats_count синхронизируем с daily.calls, чтобы перезагрузка чат-модели
-                        # не обнулила чаты (бэк перетирает daily.calls значением из метрик).
-                        metrics_chats = _cm_int(chat_metrics_obj.get('chats_count'), default=None)
-                        if metrics_chats is None:
-                            metrics_chats = calls
+                        metric_payload = {
+                            'operator_id': resolved_operator_id,
+                            'day': row_date_str,
+                        }
+                        metric_update_fields = []
+
+                        avg_response_seconds = _cm_float(chat_metrics_obj.get('avg_response_time_seconds'))
+                        if avg_response_seconds is not None:
+                            metric_payload['avg_response_time_seconds'] = avg_response_seconds
+                            metric_update_fields.append('avg_response_time_seconds')
+
+                        transfer_chat_count = _cm_int(chat_metrics_obj.get('transfer_chat_count'), default=None)
+                        if transfer_chat_count is not None:
+                            metric_payload['transfer_chat_count'] = transfer_chat_count
+                            metric_update_fields.append('transfer_chat_count')
+
+                        avg_score = _cm_float(chat_metrics_obj.get('avg_score'))
+                        if avg_score is not None:
+                            metric_payload['avg_score'] = avg_score
+                            metric_update_fields.append('avg_score')
+
                         try:
-                            db.save_chat_manager_daily_metrics([{
-                                'operator_id': resolved_operator_id,
-                                'day': row_date_str,
-                                'chats_count': metrics_chats,
-                                'avg_response_time_seconds': _cm_float(chat_metrics_obj.get('avg_response_time_seconds')),
-                                'transfer_chat_count': _cm_int(chat_metrics_obj.get('transfer_chat_count'), default=0),
-                                'avg_score': _cm_float(chat_metrics_obj.get('avg_score')),
-                            }], imported_by=requester_id, preserve_missing=True)
+                            if metric_update_fields:
+                                db.save_chat_manager_daily_metrics(
+                                    [metric_payload],
+                                    imported_by=requester_id,
+                                    preserve_missing=True,
+                                    update_fields=metric_update_fields
+                                )
                         except Exception as _cm_err:
                             logging.warning("upload_group_day: failed to save chat metrics for op %s: %s", resolved_operator_id, _cm_err)
 
@@ -16331,18 +16348,15 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
         status_key = resolved.get('key') or _status_import_normalize_key(source_state_name)
         if event_kind == 'action':
             action_events_count += 1
-            metric_key = (operator_id, ts.date().strftime('%Y-%m-%d'))
-            metric_row = chat_metrics_by_operator_day.setdefault(metric_key, {
-                'operator_id': operator_id,
-                'operator_name': operator_info.get('name') or operator_name,
-                'day': ts.date().strftime('%Y-%m-%d'),
-                'chats_count': 0,
-                'transfer_chat_count': 0,
-                'source': 'chat2desk_events'
-            })
-            if status_key == 'take chat':
-                metric_row['chats_count'] = int(metric_row.get('chats_count') or 0) + 1
-            elif status_key == 'transfer chat':
+            if status_key == 'transfer chat':
+                metric_key = (operator_id, ts.date().strftime('%Y-%m-%d'))
+                metric_row = chat_metrics_by_operator_day.setdefault(metric_key, {
+                    'operator_id': operator_id,
+                    'operator_name': operator_info.get('name') or operator_name,
+                    'day': ts.date().strftime('%Y-%m-%d'),
+                    'transfer_chat_count': 0,
+                    'source': 'chat2desk_events'
+                })
                 metric_row['transfer_chat_count'] = int(metric_row.get('transfer_chat_count') or 0) + 1
 
         order_stats = source_order_stats.setdefault(operator_id, {'asc': 0, 'desc': 0, 'last_ts': None})
@@ -16786,8 +16800,8 @@ CHAT_REPORT_TYPE_LABELS = {
 CHAT_REPORT_TYPE_FIELDS = {
     CHAT_REPORT_TYPE_SCORE: {'score_sum', 'score_count', 'avg_score'},
     CHAT_REPORT_TYPE_RESPONSE: {'avg_response_time_seconds'},
-    CHAT_REPORT_TYPE_WHATSAPP: {'chats_count'},
-    CHAT_REPORT_TYPE_NAME_REQUESTS: {'chats_count'},
+    CHAT_REPORT_TYPE_WHATSAPP: {'whatsapp_chats_count'},
+    CHAT_REPORT_TYPE_NAME_REQUESTS: {'name_requests_chats_count'},
 }
 
 
@@ -17111,6 +17125,8 @@ def _chat_report_parse(header, data_rows, operator_lookup, operator_token_index,
             'operator_id': op_id,
             'day': day_str,
             'chats_count': int(v['chats']),
+            'whatsapp_chats_count': int(v['chats']),
+            'source_report_type': CHAT_REPORT_TYPE_WHATSAPP,
         } for (op_id, day_str), v in agg.items()]
 
     else:  # CHAT_REPORT_TYPE_NAME_REQUESTS
@@ -17144,6 +17160,8 @@ def _chat_report_parse(header, data_rows, operator_lookup, operator_token_index,
             'operator_id': op_id,
             'day': day_key,
             'chats_count': int(v['chats']),
+            'name_requests_chats_count': int(v['chats']),
+            'source_report_type': CHAT_REPORT_TYPE_NAME_REQUESTS,
         } for (op_id, day_key), v in agg.items()]
 
     unmatched_sorted = sorted(unmatched_names.items(), key=lambda kv: (-kv[1], kv[0]))
@@ -19518,10 +19536,24 @@ def import_work_schedules_statuses_csv():
             }
         )
         if parsed.get('chat_metrics'):
+            # Статусный отчёт Chat2Desk раньше подмешивал количество чатов через action
+            # "take chat". Теперь количество чатов ведут только специализированные отчёты
+            # метрик (Whatsapp A + Name/Requests B); из статусов оставляем только передачи.
+            transfer_metrics = []
+            for metric in (parsed.get('chat_metrics') or []):
+                if not isinstance(metric, dict):
+                    continue
+                transfer_metrics.append({
+                    'operator_id': metric.get('operator_id'),
+                    'day': metric.get('day'),
+                    'transfer_chat_count': metric.get('transfer_chat_count'),
+                    'source': 'chat2desk_events'
+                })
             save_summary['chat_metrics'] = db.save_chat_manager_daily_metrics(
-                metrics=parsed.get('chat_metrics') or [],
+                metrics=transfer_metrics,
                 imported_by=requester_id,
-                preserve_missing=True
+                preserve_missing=True,
+                update_fields=['transfer_chat_count']
             )
 
         return jsonify({
