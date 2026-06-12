@@ -3106,7 +3106,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         // Метки вкладок по модели. НЕ мутируем общий const TABS — строим производный массив.
         const VIEW_TABS = useMemo(() => {
             if (!isChatModel) return TABS;
-            return TABS.map(t => (t.key === 'calls' ? { ...t, label: 'Чаты' } : t));
+            // Чат-модель: «Звонки»→«Чаты», убираем «Эффективность» (её у чата нет),
+            // добавляем «Средняя оценка» и «Среднее время ответа» (вводятся в модалке).
+            const out = [];
+            for (const t of TABS) {
+                if (t.key === 'efficiency') continue;
+                if (t.key === 'calls') {
+                    out.push({ ...t, label: 'Чаты' });
+                    out.push({ key: 'avg_score', label: 'Средняя оценка', unit: 'балл' });
+                    out.push({ key: 'response_time', label: 'Среднее время ответа', unit: 'сек' });
+                    continue;
+                }
+                out.push(t);
+            }
+            return out;
         }, [isChatModel]);
 
         const selectedHourCellKeySet = useMemo(() => {
@@ -3665,6 +3678,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 );
             }
 
+            // Чат-метрики живут вложенно в d.chat_metrics (не плоско), показываем по дню
+            if (selectedTab === 'avg_score') {
+                const v = d && d.chat_metrics ? d.chat_metrics.avg_score : null;
+                if (v == null || v === '' || Number(v) <= 0) return <div className="text-sm text-gray-400">—</div>;
+                return <div className="text-sm font-medium">{Number(v).toFixed(2)}</div>;
+            }
+            if (selectedTab === 'response_time') {
+                const v = d && d.chat_metrics ? d.chat_metrics.avg_response_time_seconds : null;
+                if (v == null || v === '' || Number(v) <= 0) return <div className="text-sm text-gray-400">—</div>;
+                return <div className="text-sm font-medium">{Math.round(Number(v))}<span className="text-gray-400 text-[10px]"> с</span></div>;
+            }
+
             if (!d) return <div className="text-sm text-gray-400">—</div>;
             const val = d[metricKey];
             if (metricKey === 'calls') return <div className="text-sm font-medium">{Number(val || 0)}</div>;
@@ -4202,6 +4227,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     {selectedTab === 'calls' && (
                     <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">{isChatModel ? 'Кол-во чатов' : 'КВЗ'}</div>
                     )}
+                    {selectedTab === 'avg_score' && (
+                    <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Средняя оценка</div>
+                    )}
+                    {selectedTab === 'response_time' && (
+                    <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Ср. время ответа (с)</div>
+                    )}
                     {selectedTab === 'efficiency' && (
                     <>
                         <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Итого (ч)</div>
@@ -4399,6 +4430,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     {effectiveCallHours > 0 ? formatNumber(callsTotal / effectiveCallHours, 1) : '—'}
                                 </div>
                                 )}
+
+                                {selectedTab === 'avg_score' && (() => {
+                                    // Итого = средняя оценка по дням, где она проставлена (не сумма)
+                                    const vals = daysArray
+                                        .map(dy => op.daily?.[String(dy)]?.chat_metrics?.avg_score)
+                                        .filter(v => v != null && v !== '' && Number(v) > 0)
+                                        .map(Number);
+                                    const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+                                    return <div className="w-36 p-2 text-sm text-center border-l">{avg == null ? '—' : avg.toFixed(2)}</div>;
+                                })()}
+
+                                {selectedTab === 'response_time' && (() => {
+                                    const vals = daysArray
+                                        .map(dy => op.daily?.[String(dy)]?.chat_metrics?.avg_response_time_seconds)
+                                        .filter(v => v != null && v !== '' && Number(v) > 0)
+                                        .map(Number);
+                                    const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+                                    return <div className="w-36 p-2 text-sm text-center border-l">{avg == null ? '—' : Math.round(avg)}</div>;
+                                })()}
 
                                 {selectedTab === 'efficiency' && (
                                 <>
@@ -4667,6 +4717,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         />
                         </label>
 
+                        {!isChatModel && (
                         <label className="flex flex-col text-xs text-gray-700">
                         <span className="flex items-center gap-2 mb-1">
                             <FaIcon className="fas fa-comments" aria-hidden="true" /> Talk time (ч)
@@ -4679,6 +4730,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             onChange={e => updateCellField('talk_time', e.target.value)}
                         />
                         </label>
+                        )}
 
                         <label className="flex flex-col text-xs text-gray-700">
                         <span className="flex items-center gap-2 mb-1">
@@ -4740,6 +4792,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </label>
                         )}
 
+                        {!isChatModel && (
                         <label className="col-span-1 md:col-span-2 flex flex-col text-xs text-gray-700">
                         <span className="flex items-center gap-2 mb-1">
                             <FaIcon className="fas fa-percent" aria-hidden="true" /> Efficiency (ч)
@@ -4752,6 +4805,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             onChange={e => updateCellField('efficiency', e.target.value)}
                         />
                         </label>
+                        )}
                     </div>
 
                     {(selectedTab === 'work_time' || selectedTab === 'trainings') && (
