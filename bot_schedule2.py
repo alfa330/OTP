@@ -14214,39 +14214,12 @@ def get_monthly_report_hours():
             logging.exception("Ошибка получения operators из db")
             return jsonify({"error": "Ошибка получения операторов"}), 500
 
-        # Этап 3: разбивка перешедшего оператора (был в ≥2 группах РАЗНЫХ моделей за месяц) на
-        # отдельные строки per (оператор×группа). Каждая псевдо-строка несёт _segment (диапазон
-        # дней своей группы) — билдер считает только эти дни, «чужие» помечает заливкой. Норма —
-        # пропорционально дням сегмента. Не-перешедшие операторы не меняются.
-        try:
-            _ops_list = operators.get("operators", []) if isinstance(operators, dict) else (operators or [])
-            _op_ids = [int(o.get("operator_id")) for o in _ops_list if o.get("operator_id") is not None]
-            # Групповой отчёт уже в рамках одной группы — операторов на под-строки не дробим.
-            _seg_by_op = db.get_operator_segments_for_month(month, _op_ids) if (_op_ids and group_id is None) else {}
-            _expanded = []
-            for o in _ops_list:
-                _oid = o.get("operator_id")
-                _segs = _seg_by_op.get(int(_oid), []) if _oid is not None else []
-                _models = {s.get("calculation_model_code") for s in _segs}
-                if len(_segs) >= 2 and len(_models) >= 2:
-                    _total_days = sum(max(0, int(s["end_day"]) - int(s["start_day"]) + 1) for s in _segs) or 1
-                    _base_norm = float(o.get("norm_hours") or 0)
-                    for s in _segs:
-                        _seg_days = max(0, int(s["end_day"]) - int(s["start_day"]) + 1)
-                        _grp = s.get("group_name") or s.get("direction_name") or "группа"
-                        _pseudo = dict(o)
-                        _pseudo["name"] = f"{o.get('name', '')} · {_grp}"
-                        _pseudo["norm_hours"] = round(_base_norm * _seg_days / _total_days, 2)
-                        _pseudo["_segment"] = {"start_day": int(s["start_day"]), "end_day": int(s["end_day"]), "group_name": _grp}
-                        _expanded.append(_pseudo)
-                else:
-                    _expanded.append(o)
-            if isinstance(operators, dict):
-                operators = {**operators, "operators": _expanded}
-            else:
-                operators = _expanded
-        except Exception:
-            logging.exception("report per-group expansion failed; using blended rows")
+        # Перешедший оператор показывается ОДНОЙ строкой (не дробим на под-строки «ФИО · Группа»).
+        # В отчёте ПО ГРУППЕ (group_id задан) билдер берёт дни оператора в ЭТОЙ группе из
+        # group_segments и показывает по ним данные, а дни, когда он был в ДРУГОЙ группе, помечает
+        # «др.» и не учитывает в итогах — поэтому метрики разных моделей не смешиваются и не
+        # пропадают (в каждой группе виден свой сегмент). В отчёте по СВ/общем (group_id нет) —
+        # одна строка с полным месяцем, как раньше (legacy).
 
         try:
             if generate_all:
@@ -14379,7 +14352,8 @@ def get_monthly_report_hours():
                 trainings_map,
                 technical_issues_map,
                 month,
-                offline_activities_map=offline_activities_map
+                offline_activities_map=offline_activities_map,
+                report_group_id=group_id
             )
             
         if not filename or not content:

@@ -17058,7 +17058,8 @@ class Database:
         month: str,  # 'YYYY-MM'
         offline_activities_map: Dict[int, Dict[int, List[Dict[str, Any]]]] = None,
         filename: str = None,
-        include_supervisor: bool = False
+        include_supervisor: bool = False,
+        report_group_id: int = None
     ) -> Tuple[str, bytes]:
         """
         Генерирует xlsx с листами: Отработанные часы, Перерыв, Звонки, Эффективность,
@@ -17268,15 +17269,70 @@ class Database:
         THIN = Side(style='thin')
         BORDER_ALL = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 
-        # Разбивка перешедшего оператора: строка соответствует ОДНОЙ группе (op['_segment']).
-        # Дни вне диапазона сегмента — «чужие» (оператор был в другой группе): помечаем заливкой,
-        # не считаем в итоги/тренинги/тех/офлайн. Для не-перевёрнутых op['_segment'] нет → seg=None.
+        # Перешедший оператор — ОДНА строка на группу. В отчёте ПО ГРУППЕ (report_group_id задан)
+        # дни, когда оператор был в ЭТОЙ группе, считаем и показываем; дни, когда он был в ДРУГОЙ
+        # группе, помечаем «др.» заливкой и НЕ учитываем (итоги/тренинги/тех/офлайн) — метрики
+        # разных моделей не смешиваются. Дни без членства (до прихода/после ухода) НЕ помечаем.
+        # В отчёте по СВ/общем (report_group_id=None) маркировки нет — поведение 1:1 (legacy).
+        # _op_seg(op) возвращает «маркер» (op, report_group_id) только если оператор за месяц был
+        # ещё и в другой группе (перевод); иначе None. _seg_has_day трактует «свой» день как True.
         def _op_seg(op):
-            s = op.get('_segment') if isinstance(op, dict) else None
-            return s if (isinstance(s, dict) and 'start_day' in s and 'end_day' in s) else None
+            if report_group_id is None or not isinstance(op, dict):
+                return None
+            segs = op.get('group_segments')
+            if not isinstance(segs, list) or not segs:
+                return None
+            has_foreign = False
+            for s in segs:
+                try:
+                    gid = int(s.get('group_id'))
+                except (TypeError, ValueError):
+                    continue
+                if gid != int(report_group_id):
+                    has_foreign = True
+                    break
+            return (op, int(report_group_id)) if has_foreign else None
 
         def _seg_has_day(seg, day):
-            return seg is None or (int(seg['start_day']) <= int(day) <= int(seg['end_day']))
+            # True = «свой» день этой группы ИЛИ день без членства (рендерим обычно);
+            # False = день, когда оператор был в ДРУГОЙ группе (помечаем «др.», не считаем).
+            if seg is None:
+                return True
+            op, rgid = seg
+            d = int(day)
+            for s in (op.get('group_segments') or []):
+                try:
+                    a, b = int(s['start_day']), int(s['end_day'])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if a <= d <= b:
+                    try:
+                        return int(s.get('group_id')) == rgid
+                    except (TypeError, ValueError):
+                        return True
+            return True  # день без членства в группах — не помечаем
+
+        def _op_norm(op):
+            # Норма для строки. В отчёте по группе у перешедшего оператора норма
+            # пропорциональна дням его сегмента в ЭТОЙ группе (как и раздельный расчёт ЗП),
+            # иначе «% выполнения» был бы занижен (норма месячная, а дни — только часть).
+            base = float(op.get('norm_hours') or 0)
+            seg = _op_seg(op)
+            if seg is None or base <= 0:
+                return base
+            _op, rgid = seg
+            own = total = 0
+            for s in (op.get('group_segments') or []):
+                try:
+                    a, b = int(s['start_day']), int(s['end_day'])
+                    gid = int(s.get('group_id'))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                span = max(0, b - a + 1)
+                total += span
+                if gid == rgid:
+                    own += span
+            return round(base * own / total, 2) if total > 0 else base
 
         def _make_header(ws, headers: List[str]):
             thin = Side(style='thin')
@@ -17492,7 +17548,7 @@ class Database:
                     set_cell(ws, row, 2, sup_name, align_center=False)
                 # Ставка и Норма оставляем без изменения/округления
                 set_cell(ws, row, rate_col, float(op.get('rate') or 0), align_center=False)
-                set_cell(ws, row, norm_col, float(op.get('norm_hours') or 0), align_center=False)
+                set_cell(ws, row, norm_col, _op_norm(op), align_center=False)
                 total = 0.0
                 totals = { 'work_time': 0.0, 'calls': 0, 'efficiency': 0.0 }
                 avg_vals = []  # для aggregate='avg' (оценка/время ответа): среднее по непустым дням
@@ -17594,7 +17650,7 @@ class Database:
                 rate_col = 2 + (1 if include_supervisor else 0)
                 norm_col = rate_col + 1
                 set_cell(ws, row, rate_col, float(op.get('rate') or 0), align_center=False)
-                norm = float(op.get('norm_hours') or 0)
+                norm = _op_norm(op)
                 set_cell(ws, row, norm_col, norm, align_center=False)
 
                 total_work = 0.0
