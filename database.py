@@ -2745,6 +2745,54 @@ class Database:
                 cursor.execute("ROLLBACK TO SAVEPOINT sp_groups_backfill")
                 logging.error("groups backfill skipped due to error: %s", exc, exc_info=True)
 
+            # Бэкфилл осиротевших group_id (NULL) из членства — идемпотентно, под SAVEPOINT.
+            try:
+                cursor.execute("SAVEPOINT sp_null_group_backfill")
+                self._backfill_null_group_id_tx(cursor)
+                cursor.execute("RELEASE SAVEPOINT sp_null_group_backfill")
+            except Exception as exc:
+                cursor.execute("ROLLBACK TO SAVEPOINT sp_null_group_backfill")
+                logging.error("null group_id backfill skipped: %s", exc, exc_info=True)
+
+    def _backfill_null_group_id_tx(self, cursor):
+        """Идемпотентно проставляет group_id строкам daily_hours/work_hours, где он NULL,
+        по членству оператора: для daily — группа на день строки; для work_hours — группа на
+        конец месяца. Трогает только NULL-строки, у которых есть подходящее членство."""
+        cursor.execute("""
+            UPDATE daily_hours dh
+            SET group_id = sub.group_id
+            FROM (
+                SELECT DISTINCT ON (d.id) d.id, gom.group_id
+                FROM daily_hours d
+                JOIN group_operator_memberships gom
+                  ON gom.operator_id = d.operator_id
+                 AND gom.start_date <= d.day
+                 AND (gom.end_date IS NULL OR gom.end_date >= d.day)
+                WHERE d.group_id IS NULL
+                ORDER BY d.id, gom.start_date DESC
+            ) sub
+            WHERE dh.id = sub.id
+        """)
+        daily_fixed = cursor.rowcount
+        cursor.execute("""
+            UPDATE work_hours w
+            SET group_id = sub.group_id
+            FROM (
+                SELECT DISTINCT ON (x.id) x.id, gom.group_id
+                FROM work_hours x
+                JOIN group_operator_memberships gom
+                  ON gom.operator_id = x.operator_id
+                 AND gom.start_date <= (to_date(x.month || '-01', 'YYYY-MM-DD') + interval '1 month - 1 day')::date
+                 AND (gom.end_date IS NULL OR gom.end_date >= (to_date(x.month || '-01', 'YYYY-MM-DD') + interval '1 month - 1 day')::date)
+                WHERE x.group_id IS NULL
+                ORDER BY x.id, gom.start_date DESC
+            ) sub
+            WHERE w.id = sub.id
+        """)
+        wh_fixed = cursor.rowcount
+        if daily_fixed or wh_fixed:
+            logging.info("backfill NULL group_id: daily=%s work_hours=%s", daily_fixed, wh_fixed)
+
     def _backfill_work_hours_rate_from_history_tx(self, cursor):
         """
         Идемпотентный одноразовый backfill помесячной ставки `work_hours.rate`.
