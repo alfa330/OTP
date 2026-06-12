@@ -2462,6 +2462,9 @@ const App = ({ user, initialSelection }) => {
     const canUseCalibration = isAdminRole || isSupervisorRole;
     const canManageCalibrationRooms = isAdminRole || isSupervisorRole;
     const canUseAnalytics = isAdminRole || isSupervisorRole;
+    const headedDepartmentId = user?.headed_department_id ?? user?.headedDepartmentId ?? null;
+    const isDepartmentHead = headedDepartmentId !== null && headedDepartmentId !== undefined && String(headedDepartmentId) !== '';
+    const canManageEvaluationNotifications = isAdminRole || isDepartmentHead;
     const [calls, setCalls] = useState([]);
     const [directions, setDirections] = useState([]);
     const [operators, setOperators] = useState([]);
@@ -2520,6 +2523,17 @@ const App = ({ user, initialSelection }) => {
         loaded: false,
         enabled: false,
         telegramConnected: false
+    });
+    const [evaluationNotifySetting, setEvaluationNotifySetting] = useState({
+        loading: false,
+        saving: false,
+        loaded: false,
+        enabled: false,
+        telegramConnected: false,
+        scope: 'none',
+        departmentId: '',
+        departmentName: '',
+        departments: []
     });
     const operatorsCacheRef = useRef(new Map());
     const callsCacheRef = useRef(new Map());
@@ -2748,6 +2762,93 @@ const App = ({ user, initialSelection }) => {
         }
     }, [isAdminRole, userId, feedbackReportSetting.enabled]);
 
+    const loadEvaluationNotifySetting = useCallback(async () => {
+        if (!canManageEvaluationNotifications || !userId) return;
+        setEvaluationNotifySetting(prev => ({ ...prev, loading: true }));
+        try {
+            const r = await authFetch(`${API_BASE_URL}/api/call_evaluation/notification_settings`, {
+                method: 'GET',
+                headers: { 'X-User-Id': userId }
+            });
+            const d = await r.json();
+            if (!r.ok || d?.status !== 'success') {
+                throw new Error(d?.error || 'Не удалось получить настройку уведомлений');
+            }
+            const departmentId = d.department_id == null ? '' : String(d.department_id);
+            setEvaluationNotifySetting(prev => ({
+                ...prev,
+                loading: false,
+                loaded: true,
+                enabled: !!d.enabled,
+                telegramConnected: !!d.telegram_connected,
+                scope: d.scope || 'none',
+                departmentId,
+                departmentName: d.department_name || '',
+                departments: Array.isArray(d.departments) ? d.departments : []
+            }));
+        } catch (e) {
+            setEvaluationNotifySetting(prev => ({
+                ...prev,
+                loading: false,
+                loaded: true
+            }));
+            emitCallEvaluationToast(`Ошибка загрузки уведомлений: ${e.message}`, 'error');
+        }
+    }, [canManageEvaluationNotifications, userId]);
+
+    const saveEvaluationNotifySetting = useCallback(async ({ enabled, departmentId }) => {
+        if (!canManageEvaluationNotifications || !userId) return;
+        const nextDepartmentId = departmentId == null ? evaluationNotifySetting.departmentId : String(departmentId || '');
+        if (enabled && !nextDepartmentId) {
+            emitCallEvaluationToast('Выберите отдел для уведомлений', 'error');
+            return;
+        }
+
+        const previousState = evaluationNotifySetting;
+        setEvaluationNotifySetting(prev => ({
+            ...prev,
+            enabled: !!enabled,
+            departmentId: nextDepartmentId,
+            saving: true
+        }));
+        try {
+            const r = await authFetch(`${API_BASE_URL}/api/call_evaluation/notification_settings`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-User-Id': userId
+                },
+                body: JSON.stringify({
+                    enabled: !!enabled,
+                    department_id: nextDepartmentId ? Number(nextDepartmentId) : null
+                })
+            });
+            const d = await r.json();
+            if (!r.ok || d?.status !== 'success') {
+                throw new Error(d?.error || 'Не удалось сохранить настройку уведомлений');
+            }
+            const savedDepartmentId = d.department_id == null ? '' : String(d.department_id);
+            setEvaluationNotifySetting(prev => ({
+                ...prev,
+                saving: false,
+                loaded: true,
+                enabled: !!d.enabled,
+                telegramConnected: !!d.telegram_connected,
+                scope: d.scope || prev.scope,
+                departmentId: savedDepartmentId,
+                departmentName: d.department_name || '',
+                departments: Array.isArray(d.departments) ? d.departments : prev.departments
+            }));
+            emitCallEvaluationToast(d.enabled ? 'Уведомления об оценках включены' : 'Уведомления об оценках выключены', 'success');
+        } catch (e) {
+            setEvaluationNotifySetting({
+                ...previousState,
+                saving: false
+            });
+            emitCallEvaluationToast(`Ошибка сохранения уведомлений: ${e.message}`, 'error');
+        }
+    }, [canManageEvaluationNotifications, userId, evaluationNotifySetting]);
+
     useEffect(() => {
         const sectionId = normalizeAnalyticsToken(activeSection) || 'journal';
         const roleId = normalizeAnalyticsToken(canonicalRole);
@@ -2880,6 +2981,25 @@ const App = ({ user, initialSelection }) => {
         if (activeSection !== 'journal') return;
         loadFeedbackReportSetting();
     }, [isAdminRole, userId, activeSection, loadFeedbackReportSetting]);
+
+    useEffect(() => {
+        if (!canManageEvaluationNotifications || !userId) {
+            setEvaluationNotifySetting({
+                loading: false,
+                saving: false,
+                loaded: false,
+                enabled: false,
+                telegramConnected: false,
+                scope: 'none',
+                departmentId: '',
+                departmentName: '',
+                departments: []
+            });
+            return;
+        }
+        if (activeSection !== 'journal') return;
+        loadEvaluationNotifySetting();
+    }, [canManageEvaluationNotifications, userId, activeSection, loadEvaluationNotifySetting]);
 
     // Directions
     useEffect(() => {
@@ -3977,6 +4097,19 @@ const App = ({ user, initialSelection }) => {
     }, [analyticsEffectiveSvId, analyticsMonth, activeSection, fetchAnalyticsSvData]);
 
     const analyticsScopedOperators = getAnalyticsScopedOperators(analyticsSelectedSvData?.operators ?? []);
+    const evaluationNotifyDepartments = Array.isArray(evaluationNotifySetting.departments)
+        ? evaluationNotifySetting.departments.filter(Boolean)
+        : [];
+    const selectedEvaluationNotifyDepartment = evaluationNotifyDepartments.find(
+        (dept) => String(dept?.id) === String(evaluationNotifySetting.departmentId)
+    );
+    const evaluationNotifyDepartmentName = evaluationNotifySetting.departmentName || selectedEvaluationNotifyDepartment?.name || '';
+    const evaluationNotifyDisabled = (
+        !!evaluationNotifySetting.loading ||
+        !!evaluationNotifySetting.saving ||
+        !evaluationNotifySetting.telegramConnected ||
+        !evaluationNotifySetting.departmentId
+    );
 
     return (
         <div className="app">
@@ -4018,6 +4151,55 @@ const App = ({ user, initialSelection }) => {
                         >
                             Калибровка
                         </button>
+                    )}
+                    {canManageEvaluationNotifications && activeSection === 'journal' && (
+                        <div
+                            className="evaluation-notify-control"
+                            title={evaluationNotifyDepartmentName ? `Отдел: ${evaluationNotifyDepartmentName}` : undefined}
+                        >
+                            {isAdminRole && (
+                                <select
+                                    className="select evaluation-notify-select"
+                                    value={evaluationNotifySetting.departmentId || ''}
+                                    disabled={
+                                        !!evaluationNotifySetting.loading ||
+                                        !!evaluationNotifySetting.saving ||
+                                        !evaluationNotifySetting.telegramConnected
+                                    }
+                                    onChange={(e) => {
+                                        const nextDepartmentId = e.target.value;
+                                        setEvaluationNotifySetting(prev => ({
+                                            ...prev,
+                                            departmentId: nextDepartmentId,
+                                            departmentName: evaluationNotifyDepartments.find((dept) => String(dept?.id) === String(nextDepartmentId))?.name || ''
+                                        }));
+                                        if (evaluationNotifySetting.enabled) {
+                                            saveEvaluationNotifySetting({ enabled: true, departmentId: nextDepartmentId });
+                                        }
+                                    }}
+                                >
+                                    <option value="">Отдел</option>
+                                    {evaluationNotifyDepartments.map((dept) => (
+                                        <option key={dept.id} value={dept.id}>{dept.name}</option>
+                                    ))}
+                                </select>
+                            )}
+                            <button
+                                className={`btn btn-sm ${evaluationNotifySetting.enabled ? 'btn-green' : 'btn-secondary'}`}
+                                disabled={evaluationNotifyDisabled}
+                                onClick={() => saveEvaluationNotifySetting({
+                                    enabled: !evaluationNotifySetting.enabled,
+                                    departmentId: evaluationNotifySetting.departmentId
+                                })}
+                            >
+                                <FaIcon className={`fas fa-${evaluationNotifySetting.enabled ? 'bell' : 'bell-slash'}`} />
+                                {evaluationNotifySetting.loading
+                                    ? 'Загрузка...'
+                                    : (evaluationNotifySetting.telegramConnected
+                                        ? (evaluationNotifySetting.enabled ? 'Уведомления включены' : 'Получать уведомления')
+                                        : 'Telegram не подключён')}
+                            </button>
+                        </div>
                     )}
                     {isAdminRole && activeSection === 'journal' && (
                         <label

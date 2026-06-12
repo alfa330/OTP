@@ -2657,9 +2657,13 @@ class Database:
                     id SERIAL PRIMARY KEY,
                     user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
                     feedback_telegram_report_enabled BOOLEAN NOT NULL DEFAULT FALSE,
-                    auction_post_claim_notify_enabled BOOLEAN NOT NULL DEFAULT FALSE
+                    auction_post_claim_notify_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+                    call_evaluation_notify_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+                    call_evaluation_notify_department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL
                 );
                 ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS auction_post_claim_notify_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+                ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS call_evaluation_notify_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+                ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS call_evaluation_notify_department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL;
 
                 -- Indexes for new tables
                 CREATE INDEX IF NOT EXISTS idx_departments_code ON departments(code);
@@ -2673,6 +2677,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_operator_profiles_is_active ON operator_profiles(is_active);
                 CREATE INDEX IF NOT EXISTS idx_user_hr_profiles_user_id ON user_hr_profiles(user_id);
                 CREATE INDEX IF NOT EXISTS idx_admin_profiles_user_id ON admin_profiles(user_id);
+                CREATE INDEX IF NOT EXISTS idx_admin_profiles_call_eval_notify_dept ON admin_profiles(call_evaluation_notify_department_id);
 
                 -- Seed default department (СЗоВ)
                 INSERT INTO departments (code, slug, name, description)
@@ -3746,6 +3751,118 @@ class Database:
                 "id": int(row[0]),
                 "name": row[1] or "",
                 "telegram_id": int(row[2]) if row[2] is not None else None
+            })
+        return result
+
+    def get_call_evaluation_notify_setting(self, user_id: int) -> Optional[Dict[str, Any]]:
+        try:
+            user_id_int = int(user_id)
+        except (TypeError, ValueError):
+            return None
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    COALESCE(ap.call_evaluation_notify_enabled, FALSE) AS enabled,
+                    ap.call_evaluation_notify_department_id,
+                    d.name AS department_name
+                FROM users u
+                LEFT JOIN admin_profiles ap ON ap.user_id = u.id
+                LEFT JOIN departments d ON d.id = ap.call_evaluation_notify_department_id
+                WHERE u.id = %s
+                LIMIT 1
+            """, (user_id_int,))
+            row = cursor.fetchone()
+
+        if not row:
+            return None
+        return {
+            "enabled": bool(row[0]),
+            "department_id": int(row[1]) if row[1] is not None else None,
+            "department_name": row[2] or None,
+        }
+
+    def set_call_evaluation_notify_setting(self, user_id: int, enabled: bool, department_id=None) -> Optional[Dict[str, Any]]:
+        try:
+            user_id_int = int(user_id)
+        except (TypeError, ValueError):
+            return None
+
+        department_id_int = None
+        if department_id not in (None, ''):
+            try:
+                department_id_int = int(department_id)
+            except (TypeError, ValueError):
+                return None
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO admin_profiles (
+                    user_id,
+                    call_evaluation_notify_enabled,
+                    call_evaluation_notify_department_id
+                )
+                SELECT u.id, %s, %s
+                FROM users u
+                WHERE u.id = %s
+                ON CONFLICT (user_id) DO UPDATE SET
+                    call_evaluation_notify_enabled = EXCLUDED.call_evaluation_notify_enabled,
+                    call_evaluation_notify_department_id = EXCLUDED.call_evaluation_notify_department_id
+                RETURNING call_evaluation_notify_enabled, call_evaluation_notify_department_id
+            """, (bool(enabled), department_id_int, user_id_int))
+            row = cursor.fetchone()
+
+        if not row:
+            return None
+        return {
+            "enabled": bool(row[0]),
+            "department_id": int(row[1]) if row[1] is not None else None,
+        }
+
+    def get_call_evaluation_notify_recipients(self, operator_id: int) -> List[Dict[str, Any]]:
+        try:
+            operator_id_int = int(operator_id)
+        except (TypeError, ValueError):
+            return []
+
+        with self._get_cursor() as cursor:
+            cursor.execute("SELECT department_id FROM users WHERE id = %s", (operator_id_int,))
+            operator_row = cursor.fetchone()
+            if not operator_row or operator_row[0] is None:
+                return []
+
+            department_id = int(operator_row[0])
+            cursor.execute("""
+                SELECT
+                    u.id,
+                    u.name,
+                    u.telegram_id,
+                    d.id AS department_id,
+                    d.name AS department_name
+                FROM admin_profiles ap
+                JOIN users u ON u.id = ap.user_id
+                JOIN departments d ON d.id = ap.call_evaluation_notify_department_id
+                WHERE COALESCE(ap.call_evaluation_notify_enabled, FALSE) = TRUE
+                  AND ap.call_evaluation_notify_department_id = %s
+                  AND u.telegram_id IS NOT NULL
+                  AND (
+                    LOWER(COALESCE(u.role, '')) IN ('admin', 'super_admin')
+                    OR d.head_user_id = u.id
+                  )
+                ORDER BY u.name
+            """, (department_id,))
+            rows = cursor.fetchall() or []
+
+        result = []
+        for row in rows:
+            if row[2] is None:
+                continue
+            result.append({
+                "id": int(row[0]),
+                "name": row[1] or "",
+                "telegram_id": int(row[2]),
+                "department_id": int(row[3]) if row[3] is not None else None,
+                "department_name": row[4] or "",
             })
         return result
 
@@ -13429,7 +13546,7 @@ class Database:
 
             return evaluations
 
-    def get_call_reevaluation_requests(self, month=None, operator_id=None, supervisor_id=None):
+    def get_call_reevaluation_requests(self, month=None, operator_id=None, supervisor_id=None, department_id=None):
         query = """
             SELECT
                 c.id,
@@ -13499,6 +13616,9 @@ class Database:
         if supervisor_id:
             query += " AND op.supervisor_id = %s"
             params.append(supervisor_id)
+        if department_id:
+            query += " AND op.department_id = %s"
+            params.append(department_id)
 
         query += """
             ORDER BY
