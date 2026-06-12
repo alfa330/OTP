@@ -2296,6 +2296,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             fallbackToast('Выберите супервайзера перед загрузкой файла', 'error');
             return;
             }
+            if (isChatModel && /\.csv$/i.test(String(uploadFile.name || ''))) {
+            try {
+                const text = await uploadFile.text();
+                if (detectChatReportType(parseCsvHeaderLine(text))) {
+                fallbackToast('Это отчёт «Метрики чатов». Загружайте его справа: Метрики → Отчёты.', 'error');
+                setUploadFile(null);
+                return;
+                }
+            } catch (error) {
+                console.warn('chat metrics report guard failed', error);
+            }
+            }
             setIsPreviewing(true);
             try {
             const form = new FormData();
@@ -4203,18 +4215,33 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </button>
                                     ))}
                                     {isChatModel && isMetricsGroup && (
-                                        <button
-                                            type="button"
-                                            onClick={() => {
-                                                setShowChatMetricsSurgeEditor(v => !v);
-                                                setChatMetricsSurgeWindows(prev => prev.length ? prev : [{ start: '', end: '' }]);
-                                            }}
-                                            className={`h-8 rounded-full px-3 text-xs sm:text-sm font-semibold transition whitespace-nowrap border ${showChatMetricsSurgeEditor ? 'bg-amber-600 border-amber-600 text-white shadow-sm' : 'bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100'}`}
-                                            title="Окна наплыва для импорта среднего времени ответа"
-                                        >
-                                            <FaIcon className="fas fa-wave-square mr-1"></FaIcon>
-                                            Наплывы{validSurgeCount ? ` ${validSurgeCount}` : ''}
-                                        </button>
+                                        <>
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    setShowChatMetricsSurgeEditor(false);
+                                                    triggerPlannerChatMetricsImportSelect();
+                                                }}
+                                                disabled={plannerChatMetricsImportState.loading}
+                                                className={`h-8 rounded-full px-3 text-xs sm:text-sm font-semibold transition whitespace-nowrap border ${plannerChatMetricsImportState.loading ? 'bg-cyan-100 border-cyan-200 text-cyan-500 cursor-not-allowed' : 'bg-cyan-50 border-cyan-200 text-cyan-800 hover:bg-cyan-100'}`}
+                                                title="Загрузить отчёт метрик чатов"
+                                            >
+                                                <FaIcon className={`fas ${plannerChatMetricsImportState.loading ? 'fa-spinner fa-spin' : 'fa-file-import'} mr-1`}></FaIcon>
+                                                {plannerChatMetricsImportState.loading ? 'Загрузка' : 'Отчёты'}
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    setShowChatMetricsSurgeEditor(v => !v);
+                                                    setChatMetricsSurgeWindows(prev => prev.length ? prev : [{ start: '', end: '' }]);
+                                                }}
+                                                className={`h-8 rounded-full px-3 text-xs sm:text-sm font-semibold transition whitespace-nowrap border ${showChatMetricsSurgeEditor ? 'bg-amber-600 border-amber-600 text-white shadow-sm' : 'bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100'}`}
+                                                title="Окна наплыва для импорта среднего времени ответа"
+                                            >
+                                                <FaIcon className="fas fa-wave-square mr-1"></FaIcon>
+                                                Наплывы{validSurgeCount ? ` ${validSurgeCount}` : ''}
+                                            </button>
+                                        </>
                                     )}
                                 </div>
                             );
@@ -4721,7 +4748,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
                 <form onSubmit={handlePreviewUpload} className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md" onClick={e => e.stopPropagation()}>
                     <h3 className="text-lg font-semibold mb-3">Загрузить файл учета</h3>
-                    <p className="text-sm text-gray-600 mb-3">Формат файла: <span className="font-medium">ФИО, Дата, Кол-во поступивших</span>. Будут обработаны и сохранены все даты из файла.</p>
+                    <p className="text-sm text-gray-600 mb-2">Формат файла: <span className="font-medium">ФИО, Дата, Кол-во поступивших</span>. Будут обработаны и сохранены все даты из файла.</p>
+                    {isChatModel && (
+                        <p className="text-xs text-cyan-700 bg-cyan-50 border border-cyan-100 rounded-md px-3 py-2 mb-3">
+                            Отчёты «Метрики чатов» загружайте справа: группа «Метрики» → кнопка «Отчёты».
+                        </p>
+                    )}
                     <input type="file" accept=".xlsx,.xls,.csv" onChange={e => setUploadFile(e.target.files?.[0] || null)} className="mb-3" />
                     <div className="flex justify-end gap-2">
                     <button type="button" onClick={() => setSelectedDayUpload(null)} className="px-3 py-2 rounded-md border">Отмена</button>
