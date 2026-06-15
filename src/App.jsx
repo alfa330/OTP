@@ -2261,6 +2261,42 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
         };
 
+        const syncChat2DeskMetrics = async () => {
+            if (!user?.id || chatMetricsImportState.loading) return;
+            setShowChatMetricsSurgeEditor(false);
+            setChatMetricsUpload(null);
+            setChatMetricsImportState({ loading: true, summary: null, error: '' });
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/chat_manager/metrics/sync_chat2desk`, {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: withAccessTokenHeader({
+                        'Content-Type': 'application/json',
+                        'X-User-Id': user.id
+                    }),
+                    body: JSON.stringify({})
+                });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(payload?.error || `HTTP ${response.status}`);
+                }
+                const summary = {
+                    ...(payload?.import || {}),
+                    message: payload?.message || '',
+                    unmatched_operators: payload?.warnings?.unmatched_operators || []
+                };
+                setChatMetricsImportState({ loading: false, summary, error: '' });
+                fallbackToast(payload?.message || 'Метрики Chat2Desk синхронизированы', 'success');
+                await fetchDailyHoursAndTrainings();
+                if (onUploaded) onUploaded();
+            } catch (error) {
+                console.error('Error syncing Chat2Desk chat manager metrics:', error);
+                const message = error?.message || 'Не удалось синхронизировать метрики Chat2Desk';
+                setChatMetricsImportState({ loading: false, summary: null, error: message });
+                fallbackToast(message, 'error');
+            }
+        };
+
         // ---- fetch daily hours + trainings + technical issues ----
         async function fetchDailyHoursAndTrainings() {
             if (!user || !selectedSvId) return;
@@ -4628,16 +4664,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         <>
                                             <button
                                                 type="button"
-                                                onClick={() => {
-                                                    setShowChatMetricsSurgeEditor(false);
-                                                    triggerChatMetricsImportSelect();
-                                                }}
+                                                onClick={syncChat2DeskMetrics}
                                                 disabled={chatMetricsImportState.loading}
                                                 className={`h-8 rounded-full px-3 text-xs sm:text-sm font-semibold transition whitespace-nowrap border ${chatMetricsImportState.loading ? 'bg-cyan-100 border-cyan-200 text-cyan-500 cursor-not-allowed' : 'bg-cyan-50 border-cyan-200 text-cyan-800 hover:bg-cyan-100'}`}
-                                                title="Загрузить отчёт метрик чатов"
+                                                title="Синхронизировать метрики Chat2Desk за прошедший день"
                                             >
-                                                <FaIcon className={`fas ${chatMetricsImportState.loading ? 'fa-spinner fa-spin' : 'fa-file-import'} mr-1`}></FaIcon>
-                                                {chatMetricsImportState.loading ? 'Загрузка' : 'Отчёты'}
+                                                <FaIcon className={`fas ${chatMetricsImportState.loading ? 'fa-spinner fa-spin' : 'fa-arrows-rotate'} mr-1`}></FaIcon>
+                                                Синхронизация
                                             </button>
                                             <button
                                                 type="button"
@@ -13971,6 +14004,40 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             };
 
+            const syncPlannerChat2DeskMetrics = async () => {
+                if (!user?.id || plannerChatMetricsImportState.loading) return;
+                setChatMetricsUpload(null);
+                setPlannerChatMetricsImportState({ loading: true, summary: null, error: '' });
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/chat_manager/metrics/sync_chat2desk`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: withAccessTokenHeader({
+                            'Content-Type': 'application/json',
+                            'X-User-Id': user?.id
+                        }),
+                        body: JSON.stringify({})
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+                    const summary = {
+                        ...(payload?.import || {}),
+                        message: payload?.message || '',
+                        unmatched_operators: payload?.warnings?.unmatched_operators || []
+                    };
+                    setPlannerChatMetricsImportState({ loading: false, summary, error: '' });
+                    emitAppToast(payload?.message || 'Метрики Chat2Desk синхронизированы', 'success');
+                    await reloadPlannerSchedulesFromServer();
+                } catch (error) {
+                    console.error('Error syncing Chat2Desk chat manager metrics:', error);
+                    const message = error?.message || 'Не удалось синхронизировать метрики Chat2Desk';
+                    setPlannerChatMetricsImportState({ loading: false, summary: null, error: message });
+                    emitAppToast(message, 'error');
+                }
+            };
+
             const handlePlannerExcelImportFileChange = async (event) => {
                 const file = event?.target?.files?.[0];
                 if (!file) return;
@@ -20657,14 +20724,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <button
                                                 onClick={() => {
                                                     setShowPlannerTopActionsMenu(false);
-                                                    triggerPlannerChatMetricsImportSelect();
+                                                    syncPlannerChat2DeskMetrics();
                                                 }}
                                                 disabled={plannerChatMetricsImportState.loading}
                                                 className="w-full px-3 py-2 rounded-xl border border-cyan-200 bg-cyan-50 hover:bg-cyan-100 text-cyan-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
-                                                title="Загрузить CSV дневных метрик чат-менеджеров: чаты, оценка, время ответа, передачи"
+                                                title="Синхронизировать метрики Chat2Desk за прошедший день"
                                             >
-                                                <FaIcon className={`fas ${plannerChatMetricsImportState.loading ? 'fa-spinner fa-spin' : 'fa-comments'}`}></FaIcon>
-                                                {plannerChatMetricsImportState.loading ? 'Загрузка...' : 'Метрики чатов'}
+                                                <FaIcon className={`fas ${plannerChatMetricsImportState.loading ? 'fa-spinner fa-spin' : 'fa-arrows-rotate'}`}></FaIcon>
+                                                {plannerChatMetricsImportState.loading ? 'Синхронизация...' : 'Синхронизация Chat2Desk'}
                                             </button>
 
                                             <button
