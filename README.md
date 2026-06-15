@@ -28,7 +28,7 @@ CHAT2DESK_API_TOKEN=your_api_token
 Optional:
 
 ```env
-CHAT2DESK_API_BASE_URL=https://api.chat2desk.com
+CHAT2DESK_API_BASE_URL=https://api-02.chat2desk.kz
 CHAT2DESK_AUTH_SCHEME=Bearer
 CHAT2DESK_SYNC_ENABLED=true
 CHAT2DESK_SYNC_TIMEZONE=Asia/Almaty
