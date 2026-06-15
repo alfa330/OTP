@@ -1380,6 +1380,23 @@ class Database:
                 ADD COLUMN IF NOT EXISTS name_requests_chats_count INTEGER NOT NULL DEFAULT 0;
             """)
             cursor.execute("""
+                CREATE TABLE IF NOT EXISTS chat_metric_surge_windows (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    month DATE NOT NULL,
+                    start_at TIMESTAMP NOT NULL,
+                    end_at TIMESTAMP NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_chat_metric_surge_windows_month
+                ON chat_metric_surge_windows(month, start_at);
+            """)
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operator_technical_issues (
                     id SERIAL PRIMARY KEY,
                     batch_id UUID NOT NULL,
@@ -10037,6 +10054,121 @@ class Database:
                 totals[op_id]['avg_response_time_seconds'] = round(response_acc[op_id]['sum'] / response_count, 2)
 
         return result, totals
+
+    @staticmethod
+    def _parse_chat_metric_surge_month(month):
+        text = str(month or '').strip()
+        if not re.fullmatch(r'\d{4}-\d{2}', text):
+            raise ValueError("month must be in YYYY-MM format")
+        try:
+            return datetime.strptime(text, '%Y-%m').date().replace(day=1)
+        except Exception:
+            raise ValueError("month must be in YYYY-MM format")
+
+    @staticmethod
+    def _parse_chat_metric_surge_dt(value, field_name='datetime'):
+        if isinstance(value, datetime):
+            return value.replace(tzinfo=None)
+        text = str(value or '').strip()
+        if not text:
+            raise ValueError(f"{field_name} is required")
+        text = text.replace('Z', '')
+        for fmt in ('%Y-%m-%dT%H:%M:%S', '%Y-%m-%dT%H:%M', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
+            try:
+                return datetime.strptime(text, fmt)
+            except Exception:
+                pass
+        try:
+            return datetime.fromisoformat(text).replace(tzinfo=None)
+        except Exception:
+            raise ValueError(f"{field_name} must be a valid datetime")
+
+    @staticmethod
+    def _format_chat_metric_surge_dt(value):
+        if isinstance(value, datetime):
+            return value.strftime('%Y-%m-%dT%H:%M')
+        return ''
+
+    def get_chat_metric_surge_windows(self, month):
+        month_start = self._parse_chat_metric_surge_month(month)
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    id,
+                    month,
+                    start_at,
+                    end_at,
+                    description,
+                    created_by,
+                    updated_by,
+                    created_at,
+                    updated_at
+                FROM chat_metric_surge_windows
+                WHERE month = %s
+                ORDER BY start_at ASC, end_at ASC, id ASC
+            """, (month_start,))
+            rows = cursor.fetchall() or []
+
+        windows = []
+        for row in rows:
+            windows.append({
+                'id': str(row[0]),
+                'month': row[1].strftime('%Y-%m') if row[1] else month_start.strftime('%Y-%m'),
+                'start': self._format_chat_metric_surge_dt(row[2]),
+                'end': self._format_chat_metric_surge_dt(row[3]),
+                'description': row[4] or '',
+                'created_by': row[5],
+                'updated_by': row[6],
+                'created_at': row[7].isoformat() if row[7] else None,
+                'updated_at': row[8].isoformat() if row[8] else None,
+            })
+        return {
+            'month': month_start.strftime('%Y-%m'),
+            'windows': windows,
+        }
+
+    def save_chat_metric_surge_windows(self, month, windows, updated_by=None):
+        month_start = self._parse_chat_metric_surge_month(month)
+        if not isinstance(windows, list):
+            raise ValueError("windows must be a list")
+
+        rows = []
+        updated_by_id = int(updated_by) if updated_by is not None else None
+        for item in windows:
+            if not isinstance(item, dict):
+                continue
+            start_dt = self._parse_chat_metric_surge_dt(item.get('start'), 'start')
+            end_dt = self._parse_chat_metric_surge_dt(item.get('end'), 'end')
+            if end_dt < start_dt:
+                start_dt, end_dt = end_dt, start_dt
+            description = str(
+                item.get('description')
+                if item.get('description') is not None
+                else item.get('comment') if item.get('comment') is not None else ''
+            ).strip()[:2000]
+            rows.append((month_start, start_dt, end_dt, description, updated_by_id, updated_by_id))
+
+        with self._get_cursor() as cursor:
+            cursor.execute("DELETE FROM chat_metric_surge_windows WHERE month = %s", (month_start,))
+            if rows:
+                execute_values(
+                    cursor,
+                    """
+                    INSERT INTO chat_metric_surge_windows (
+                        month,
+                        start_at,
+                        end_at,
+                        description,
+                        created_by,
+                        updated_by
+                    )
+                    VALUES %s
+                    """,
+                    rows,
+                    page_size=500
+                )
+
+        return self.get_chat_metric_surge_windows(month_start.strftime('%Y-%m'))
 
     def save_chat_manager_daily_metrics(self, metrics, imported_by=None, preserve_missing=False, update_fields=None):
         """Сохраняет дневные метрики чат-менеджеров (upsert по (operator_id, day)).

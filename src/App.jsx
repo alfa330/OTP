@@ -1946,6 +1946,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         });
         const [chatMetricsUpload, setChatMetricsUpload] = useState(null);
         const [chatMetricsSurgeWindows, setChatMetricsSurgeWindows] = useState([]);
+        const [chatMetricsSurgeMonth, setChatMetricsSurgeMonth] = useState(month);
+        const [chatMetricsSurgeLoading, setChatMetricsSurgeLoading] = useState(false);
+        const [chatMetricsSurgeSaving, setChatMetricsSurgeSaving] = useState(false);
+        const [chatMetricsSurgeError, setChatMetricsSurgeError] = useState('');
         const [showChatMetricsSurgeEditor, setShowChatMetricsSurgeEditor] = useState(false);
         const chatMetricsInputRef = useRef(null);
 
@@ -2044,14 +2048,37 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return firstLine.split(best).map((s) => s.replace(/^"|"$/g, '').trim());
         };
 
+        const normalizeMonthKey = (value) => {
+            const text = String(value || '').trim();
+            if (/^\d{4}-\d{2}$/.test(text)) return text;
+            return chatMetricsDefaultDate().slice(0, 7);
+        };
+
+        const shiftMonthKey = (value, delta) => {
+            const [year, monthNum] = normalizeMonthKey(value).split('-').map(Number);
+            const next = new Date(year, monthNum - 1 + Number(delta || 0), 1);
+            return `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, '0')}`;
+        };
+
+        const formatSurgeMonthLabel = (value) => {
+            const [year, monthNum] = normalizeMonthKey(value).split('-').map(Number);
+            const names = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
+            return `${names[monthNum - 1] || value} ${year}`;
+        };
+
         const cloneChatMetricsSurgeWindows = (windows) => (
             Array.isArray(windows)
-            ? windows.map(w => ({ start: String(w?.start || ''), end: String(w?.end || '') }))
+            ? windows.map(w => ({
+                id: w?.id ? String(w.id) : undefined,
+                start: String(w?.start || ''),
+                end: String(w?.end || ''),
+                description: String(w?.description || w?.comment || '')
+            }))
             : []
         );
 
         const addChatMetricsSurgeWindow = () => {
-            setChatMetricsSurgeWindows(prev => [...cloneChatMetricsSurgeWindows(prev), { start: '', end: '' }]);
+            setChatMetricsSurgeWindows(prev => [...cloneChatMetricsSurgeWindows(prev), { start: '', end: '', description: '' }]);
         };
 
         const updateChatMetricsSurgeWindow = (index, patch) => {
@@ -2070,6 +2097,86 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const chatMetricsDefaultDate = () => {
             const d = new Date();
             return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        };
+
+        const fetchChatMetricsSurgeWindows = async (targetMonth = chatMetricsSurgeMonth) => {
+            if (!user?.id) return;
+            const monthKey = normalizeMonthKey(targetMonth);
+            setChatMetricsSurgeLoading(true);
+            setChatMetricsSurgeError('');
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/chat_manager/surge_windows?month=${encodeURIComponent(monthKey)}`, {
+                    credentials: 'include',
+                    headers: withAccessTokenHeader({ 'X-User-Id': user.id })
+                });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(payload?.error || `HTTP ${response.status}`);
+                }
+                setChatMetricsSurgeWindows(cloneChatMetricsSurgeWindows(payload?.windows || []));
+            } catch (error) {
+                console.error('fetch chat metrics surge windows error:', error);
+                setChatMetricsSurgeWindows([]);
+                setChatMetricsSurgeError(error?.message || 'Не удалось загрузить окна наплыва');
+            } finally {
+                setChatMetricsSurgeLoading(false);
+            }
+        };
+
+        const closeChatMetricsSurgeEditor = () => {
+            setShowChatMetricsSurgeEditor(false);
+            setChatMetricsSurgeMonth(normalizeMonthKey(month));
+        };
+
+        const saveChatMetricsSurgeWindows = async ({ closeAfterSave = false } = {}) => {
+            if (!user?.id || chatMetricsSurgeSaving) return;
+            const windows = cloneChatMetricsSurgeWindows(chatMetricsSurgeWindows);
+            const hasPartial = windows.some(w => {
+                const hasAny = Boolean((w.start || '').trim() || (w.end || '').trim() || (w.description || '').trim());
+                return hasAny && !((w.start || '').trim() && (w.end || '').trim());
+            });
+            if (hasPartial) {
+                fallbackToast('Заполните начало и конец для каждого наплыва', 'error');
+                return;
+            }
+            const cleanWindows = windows
+                .filter(w => (w.start || '').trim() && (w.end || '').trim())
+                .map(w => ({
+                    start: (w.start || '').trim(),
+                    end: (w.end || '').trim(),
+                    description: (w.description || '').trim()
+                }));
+
+            setChatMetricsSurgeSaving(true);
+            setChatMetricsSurgeError('');
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/chat_manager/surge_windows`, {
+                    method: 'PUT',
+                    credentials: 'include',
+                    headers: withAccessTokenHeader({
+                        'Content-Type': 'application/json',
+                        'X-User-Id': user.id
+                    }),
+                    body: JSON.stringify({
+                        month: normalizeMonthKey(chatMetricsSurgeMonth),
+                        windows: cleanWindows
+                    })
+                });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(payload?.error || `HTTP ${response.status}`);
+                }
+                setChatMetricsSurgeWindows(cloneChatMetricsSurgeWindows(payload?.windows || []));
+                fallbackToast(payload?.message || 'Окна наплыва сохранены', 'success');
+                if (closeAfterSave) closeChatMetricsSurgeEditor();
+            } catch (error) {
+                console.error('save chat metrics surge windows error:', error);
+                const message = error?.message || 'Не удалось сохранить окна наплыва';
+                setChatMetricsSurgeError(message);
+                fallbackToast(message, 'error');
+            } finally {
+                setChatMetricsSurgeSaving(false);
+            }
         };
 
         const handleChatMetricsFileChange = async (event) => {
@@ -2094,6 +2201,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             isCsv,
             detectedType,
             date: chatMetricsDefaultDate(),
+            surgeMonth: normalizeMonthKey(chatMetricsSurgeMonth || month),
             surgeWindows: cloneChatMetricsSurgeWindows(chatMetricsSurgeWindows),
             });
         };
@@ -2118,6 +2226,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             formData.append('file', ctx.file);
             formData.append('source', 'chat2desk_metrics');
             if (ctx.date) formData.append('date', ctx.date);
+            formData.append('surge_month', normalizeMonthKey(ctx.surgeMonth || chatMetricsSurgeMonth || month));
             if (showSurge && cleanWindows.length) {
                 formData.append('surge_windows', JSON.stringify(cleanWindows));
             }
@@ -3258,6 +3367,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         }, [selectedGroupId, groupsList, operators]);
         const isChatModel = activeCalcModelCode === 'chat_manager';
 
+        useEffect(() => {
+            setChatMetricsSurgeMonth(normalizeMonthKey(month));
+        }, [month]);
+
+        useEffect(() => {
+            if (!isChatModel || !user?.id) return;
+            fetchChatMetricsSurgeWindows(chatMetricsSurgeMonth);
+            // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, [isChatModel, user?.id, chatMetricsSurgeMonth]);
+
         // Метки вкладок по модели. НЕ мутируем общий const TABS — строим производный массив.
         const VIEW_TABS = useMemo(() => {
             if (!isChatModel) return TABS;
@@ -4263,7 +4382,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <button
                                         type="button"
                                         className="text-xs text-cyan-700 hover:underline"
-                                        onClick={() => setChatMetricsUpload(prev => ({ ...prev, surgeWindows: [...(prev.surgeWindows || []), { start: '', end: '' }] }))}
+                                        onClick={() => setChatMetricsUpload(prev => ({ ...prev, surgeWindows: [...(prev.surgeWindows || []), { start: '', end: '', description: '' }] }))}
                                     >
                                         <FaIcon className="fas fa-plus mr-1"></FaIcon>Добавить интервал
                                     </button>
@@ -4272,27 +4391,36 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <div className="text-[11px] text-gray-400">Нет окон — учитываются все строки.</div>
                                 )}
                                 {(chatMetricsUpload.surgeWindows || []).map((w, i) => (
-                                    <div key={i} className="flex items-center gap-2 mb-1">
-                                        <input
-                                            type="datetime-local"
-                                            className="flex-1 p-1.5 rounded-md border text-xs"
-                                            value={w.start || ''}
-                                            onChange={(e) => setChatMetricsUpload(prev => { const ws = [...(prev.surgeWindows || [])]; ws[i] = { ...ws[i], start: e.target.value }; return { ...prev, surgeWindows: ws }; })}
+                                    <div key={i} className="mb-2 rounded-lg border border-slate-200 bg-white p-2">
+                                        <div className="flex items-center gap-2">
+                                            <input
+                                                type="datetime-local"
+                                                className="flex-1 p-1.5 rounded-md border text-xs"
+                                                value={w.start || ''}
+                                                onChange={(e) => setChatMetricsUpload(prev => { const ws = [...(prev.surgeWindows || [])]; ws[i] = { ...ws[i], start: e.target.value }; return { ...prev, surgeWindows: ws }; })}
+                                            />
+                                            <span className="text-gray-400 text-xs">—</span>
+                                            <input
+                                                type="datetime-local"
+                                                className="flex-1 p-1.5 rounded-md border text-xs"
+                                                value={w.end || ''}
+                                                onChange={(e) => setChatMetricsUpload(prev => { const ws = [...(prev.surgeWindows || [])]; ws[i] = { ...ws[i], end: e.target.value }; return { ...prev, surgeWindows: ws }; })}
+                                            />
+                                            <button
+                                                type="button"
+                                                className="text-red-500 hover:text-red-700"
+                                                onClick={() => setChatMetricsUpload(prev => ({ ...prev, surgeWindows: (prev.surgeWindows || []).filter((_, j) => j !== i) }))}
+                                            >
+                                                <FaIcon className="fas fa-trash"></FaIcon>
+                                            </button>
+                                        </div>
+                                        <textarea
+                                            className="mt-2 w-full resize-y rounded-md border border-slate-200 bg-slate-50 p-1.5 text-xs"
+                                            value={w.description || ''}
+                                            onChange={(e) => setChatMetricsUpload(prev => { const ws = [...(prev.surgeWindows || [])]; ws[i] = { ...ws[i], description: e.target.value }; return { ...prev, surgeWindows: ws }; })}
+                                            placeholder="Что случилось во время наплыва"
+                                            maxLength={2000}
                                         />
-                                        <span className="text-gray-400 text-xs">—</span>
-                                        <input
-                                            type="datetime-local"
-                                            className="flex-1 p-1.5 rounded-md border text-xs"
-                                            value={w.end || ''}
-                                            onChange={(e) => setChatMetricsUpload(prev => { const ws = [...(prev.surgeWindows || [])]; ws[i] = { ...ws[i], end: e.target.value }; return { ...prev, surgeWindows: ws }; })}
-                                        />
-                                        <button
-                                            type="button"
-                                            className="text-red-500 hover:text-red-700"
-                                            onClick={() => setChatMetricsUpload(prev => ({ ...prev, surgeWindows: (prev.surgeWindows || []).filter((_, j) => j !== i) }))}
-                                        >
-                                            <FaIcon className="fas fa-trash"></FaIcon>
-                                        </button>
                                     </div>
                                 ))}
                             </div>
@@ -4510,8 +4638,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <button
                                                 type="button"
                                                 onClick={() => {
+                                                    setChatMetricsSurgeMonth(normalizeMonthKey(month));
                                                     setShowChatMetricsSurgeEditor(true);
-                                                    setChatMetricsSurgeWindows(prev => prev.length ? prev : [{ start: '', end: '' }]);
                                                 }}
                                                 className={`h-8 rounded-full px-3 text-xs sm:text-sm font-semibold transition whitespace-nowrap border ${showChatMetricsSurgeEditor ? 'bg-amber-600 border-amber-600 text-white shadow-sm' : 'bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100'}`}
                                                 title="Окна наплыва для импорта среднего времени ответа"
@@ -4528,7 +4656,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     {isChatModel && showChatMetricsSurgeEditor && (
                         <div
                             className="fixed inset-0 z-[130] flex items-center justify-center bg-slate-950/30 p-3 backdrop-blur-sm sm:p-6"
-                            onClick={() => setShowChatMetricsSurgeEditor(false)}
+                            onClick={closeChatMetricsSurgeEditor}
                         >
                             <div
                                 className="flex max-h-[88vh] w-full max-w-xl flex-col overflow-hidden rounded-[28px] border border-white/70 bg-white/95 shadow-[0_24px_80px_rgba(15,23,42,0.22)] ring-1 ring-slate-900/5 backdrop-blur-xl"
@@ -4554,7 +4682,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <button
                                         type="button"
                                         className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200 hover:text-slate-700"
-                                        onClick={() => setShowChatMetricsSurgeEditor(false)}
+                                        onClick={closeChatMetricsSurgeEditor}
                                         aria-label="Закрыть окна наплыва"
                                     >
                                         <FaIcon className="fas fa-xmark" aria-hidden="true" />
@@ -4562,11 +4690,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </div>
 
                                 <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4 sm:px-6">
-                                    <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
-                                        <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-800 ring-1 ring-amber-200">
-                                            Активных: {chatMetricsSurgeWindows.filter(w => w && w.start && w.end).length}
-                                        </span>
-                                        <div className="flex items-center gap-2">
+                                    <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                                        <div className="flex items-center gap-2 rounded-full border border-slate-200 bg-white p-1 shadow-sm">
+                                            <button
+                                                type="button"
+                                                className="flex h-8 w-8 items-center justify-center rounded-full text-slate-500 transition hover:bg-slate-100"
+                                                onClick={() => setChatMetricsSurgeMonth(prev => shiftMonthKey(prev, -1))}
+                                                aria-label="Предыдущий месяц"
+                                            >
+                                                <FaIcon className="fas fa-chevron-left" aria-hidden="true" />
+                                            </button>
+                                            <div className="min-w-[132px] px-2 text-center text-sm font-semibold text-slate-800">
+                                                {formatSurgeMonthLabel(chatMetricsSurgeMonth)}
+                                            </div>
+                                            <button
+                                                type="button"
+                                                className="flex h-8 w-8 items-center justify-center rounded-full text-slate-500 transition hover:bg-slate-100"
+                                                onClick={() => setChatMetricsSurgeMonth(prev => shiftMonthKey(prev, 1))}
+                                                aria-label="Следующий месяц"
+                                            >
+                                                <FaIcon className="fas fa-chevron-right" aria-hidden="true" />
+                                            </button>
+                                        </div>
+                                        <div className="flex flex-wrap items-center gap-2">
+                                            <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-800 ring-1 ring-amber-200">
+                                                Активных: {chatMetricsSurgeWindows.filter(w => w && w.start && w.end).length}
+                                            </span>
                                             <button
                                                 type="button"
                                                 className="inline-flex h-9 items-center gap-2 rounded-full bg-amber-600 px-3.5 text-xs font-semibold text-white shadow-sm transition hover:bg-amber-700"
@@ -4586,7 +4735,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </div>
                                     </div>
 
-                                    {chatMetricsSurgeWindows.length === 0 && (
+                                    {chatMetricsSurgeError && (
+                                        <div className="mb-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-medium text-rose-700">
+                                            <FaIcon className="fas fa-triangle-exclamation mr-1" aria-hidden="true" />
+                                            {chatMetricsSurgeError}
+                                        </div>
+                                    )}
+
+                                    {chatMetricsSurgeLoading ? (
+                                        <div className="rounded-3xl border border-slate-200 bg-slate-50/80 px-4 py-8 text-center text-sm font-medium text-slate-500">
+                                            <FaIcon className="fas fa-spinner fa-spin mr-2" aria-hidden="true" />
+                                            Загружаем наплывы...
+                                        </div>
+                                    ) : chatMetricsSurgeWindows.length === 0 && (
                                         <div className="rounded-3xl border border-dashed border-slate-200 bg-slate-50/80 px-4 py-7 text-center">
                                             <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-2xl bg-white text-slate-400 shadow-sm ring-1 ring-slate-200">
                                                 <FaIcon className="fas fa-wave-square" aria-hidden="true" />
@@ -4596,6 +4757,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </div>
                                     )}
 
+                                    {!chatMetricsSurgeLoading && (
                                     <div className="space-y-3">
                                         {chatMetricsSurgeWindows.map((w, i) => (
                                             <div key={i} className="rounded-3xl border border-slate-200 bg-white p-3 shadow-sm">
@@ -4634,18 +4796,38 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         />
                                                     </label>
                                                 </div>
+                                                <label className="mt-3 block">
+                                                    <span className="mb-1 block text-[11px] font-medium text-slate-500">Что случилось во время наплыва</span>
+                                                    <textarea
+                                                        className="min-h-[72px] w-full resize-y rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-amber-300 focus:bg-white focus:ring-4 focus:ring-amber-100"
+                                                        value={w.description || ''}
+                                                        onChange={(e) => updateChatMetricsSurgeWindow(i, { description: e.target.value })}
+                                                        placeholder="Например: массовая рассылка, сбой интеграции, очередь после техработ..."
+                                                        maxLength={2000}
+                                                    />
+                                                </label>
                                             </div>
                                         ))}
                                     </div>
+                                    )}
                                 </div>
 
-                                <div className="flex items-center justify-end gap-2 border-t border-slate-200/70 bg-slate-50/80 px-5 py-4 sm:px-6">
+                                <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200/70 bg-slate-50/80 px-5 py-4 sm:px-6">
                                     <button
                                         type="button"
                                         className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50"
-                                        onClick={() => setShowChatMetricsSurgeEditor(false)}
+                                        onClick={closeChatMetricsSurgeEditor}
                                     >
-                                        Готово
+                                        Закрыть
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold text-white shadow-sm transition ${chatMetricsSurgeSaving ? 'cursor-wait bg-amber-400' : 'bg-amber-600 hover:bg-amber-700'}`}
+                                        onClick={() => saveChatMetricsSurgeWindows({ closeAfterSave: true })}
+                                        disabled={chatMetricsSurgeSaving || chatMetricsSurgeLoading}
+                                    >
+                                        <FaIcon className={`fas ${chatMetricsSurgeSaving ? 'fa-spinner fa-spin' : 'fa-save'}`} aria-hidden="true" />
+                                        {chatMetricsSurgeSaving ? 'Сохраняем...' : 'Сохранить'}
                                     </button>
                                 </div>
                             </div>
@@ -13486,12 +13668,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             const cloneChatMetricsSurgeWindows = (windows) => (
                 Array.isArray(windows)
-                    ? windows.map(w => ({ start: String(w?.start || ''), end: String(w?.end || '') }))
+                    ? windows.map(w => ({
+                        start: String(w?.start || ''),
+                        end: String(w?.end || ''),
+                        description: String(w?.description || w?.comment || '')
+                    }))
                     : []
             );
 
             const addChatMetricsSurgeWindow = () => {
-                setChatMetricsSurgeWindows(prev => [...cloneChatMetricsSurgeWindows(prev), { start: '', end: '' }]);
+                setChatMetricsSurgeWindows(prev => [...cloneChatMetricsSurgeWindows(prev), { start: '', end: '', description: '' }]);
             };
 
             const updateChatMetricsSurgeWindow = (index, patch) => {
@@ -13723,6 +13909,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     isCsv,
                     detectedType,
                     date: todayDateStr(currentDate instanceof Date ? currentDate : new Date()),
+                    surgeMonth: todayDateStr(currentDate instanceof Date ? currentDate : new Date()).slice(0, 7),
                     surgeWindows: cloneChatMetricsSurgeWindows(chatMetricsSurgeWindows),
                 });
             };
@@ -13747,6 +13934,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     formData.append('file', ctx.file);
                     formData.append('source', 'chat2desk_metrics');
                     if (ctx.date) formData.append('date', ctx.date);
+                    if (ctx.surgeMonth) formData.append('surge_month', ctx.surgeMonth);
                     if (showSurge && cleanWindows.length) {
                         formData.append('surge_windows', JSON.stringify(cleanWindows));
                     }
@@ -20744,7 +20932,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <button
                                                 type="button"
                                                 className="text-xs text-cyan-700 hover:underline"
-                                                onClick={() => setChatMetricsUpload(prev => ({ ...prev, surgeWindows: [...(prev.surgeWindows || []), { start: '', end: '' }] }))}
+                                                onClick={() => setChatMetricsUpload(prev => ({ ...prev, surgeWindows: [...(prev.surgeWindows || []), { start: '', end: '', description: '' }] }))}
                                             >
                                                 <FaIcon className="fas fa-plus mr-1"></FaIcon>Добавить интервал
                                             </button>
@@ -20753,27 +20941,36 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <div className="text-[11px] text-gray-400">Нет окон — учитываются все строки.</div>
                                         )}
                                         {(chatMetricsUpload.surgeWindows || []).map((w, i) => (
-                                            <div key={i} className="flex items-center gap-2 mb-1">
-                                                <input
-                                                    type="datetime-local"
-                                                    className="flex-1 p-1.5 rounded-md border text-xs"
-                                                    value={w.start || ''}
-                                                    onChange={(e) => setChatMetricsUpload(prev => { const ws = [...prev.surgeWindows]; ws[i] = { ...ws[i], start: e.target.value }; return { ...prev, surgeWindows: ws }; })}
+                                            <div key={i} className="mb-2 rounded-lg border border-slate-200 bg-white p-2">
+                                                <div className="flex items-center gap-2">
+                                                    <input
+                                                        type="datetime-local"
+                                                        className="flex-1 p-1.5 rounded-md border text-xs"
+                                                        value={w.start || ''}
+                                                        onChange={(e) => setChatMetricsUpload(prev => { const ws = [...prev.surgeWindows]; ws[i] = { ...ws[i], start: e.target.value }; return { ...prev, surgeWindows: ws }; })}
+                                                    />
+                                                    <span className="text-gray-400 text-xs">—</span>
+                                                    <input
+                                                        type="datetime-local"
+                                                        className="flex-1 p-1.5 rounded-md border text-xs"
+                                                        value={w.end || ''}
+                                                        onChange={(e) => setChatMetricsUpload(prev => { const ws = [...prev.surgeWindows]; ws[i] = { ...ws[i], end: e.target.value }; return { ...prev, surgeWindows: ws }; })}
+                                                    />
+                                                    <button
+                                                        type="button"
+                                                        className="text-red-500 hover:text-red-700"
+                                                        onClick={() => setChatMetricsUpload(prev => ({ ...prev, surgeWindows: prev.surgeWindows.filter((_, j) => j !== i) }))}
+                                                    >
+                                                        <FaIcon className="fas fa-trash"></FaIcon>
+                                                    </button>
+                                                </div>
+                                                <textarea
+                                                    className="mt-2 w-full resize-y rounded-md border border-slate-200 bg-slate-50 p-1.5 text-xs"
+                                                    value={w.description || ''}
+                                                    onChange={(e) => setChatMetricsUpload(prev => { const ws = [...prev.surgeWindows]; ws[i] = { ...ws[i], description: e.target.value }; return { ...prev, surgeWindows: ws }; })}
+                                                    placeholder="Что случилось во время наплыва"
+                                                    maxLength={2000}
                                                 />
-                                                <span className="text-gray-400 text-xs">—</span>
-                                                <input
-                                                    type="datetime-local"
-                                                    className="flex-1 p-1.5 rounded-md border text-xs"
-                                                    value={w.end || ''}
-                                                    onChange={(e) => setChatMetricsUpload(prev => { const ws = [...prev.surgeWindows]; ws[i] = { ...ws[i], end: e.target.value }; return { ...prev, surgeWindows: ws }; })}
-                                                />
-                                                <button
-                                                    type="button"
-                                                    className="text-red-500 hover:text-red-700"
-                                                    onClick={() => setChatMetricsUpload(prev => ({ ...prev, surgeWindows: prev.surgeWindows.filter((_, j) => j !== i) }))}
-                                                >
-                                                    <FaIcon className="fas fa-trash"></FaIcon>
-                                                </button>
                                             </div>
                                         ))}
                                     </div>
