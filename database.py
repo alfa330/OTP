@@ -10191,6 +10191,10 @@ class Database:
             'whatsapp_chats_count', 'name_requests_chats_count',
         }
         _CHAT_COUNT_COMPONENT_FIELDS = {'whatsapp_chats_count', 'name_requests_chats_count'}
+        _PRESERVE_WHEN_MISSING_FIELDS = {
+            'avg_score', 'avg_response_time_seconds', 'score_sum', 'score_count',
+            'whatsapp_chats_count', 'name_requests_chats_count',
+        }
         update_set = None
         if update_fields is not None:
             update_set = {str(f) for f in update_fields if str(f) in _ALLOWED_UPDATE_FIELDS}
@@ -10289,20 +10293,29 @@ class Database:
             # Пер-форматный импорт: перезаписываем ТОЛЬКО указанные колонки (replace),
             # остальные метрики дня остаются нетронутыми (другой отчёт их не обнуляет).
             component_updates = update_set & _CHAT_COUNT_COMPONENT_FIELDS
+
+            def _update_expr(col):
+                if col in _PRESERVE_WHEN_MISSING_FIELDS:
+                    return (
+                        f"CASE WHEN EXCLUDED.raw_payload ? '{col}' "
+                        f"THEN EXCLUDED.{col} ELSE chat_manager_daily_metrics.{col} END"
+                    )
+                return f"EXCLUDED.{col}"
+
             set_clauses = [
-                f"{col} = EXCLUDED.{col}"
+                f"{col} = {_update_expr(col)}"
                 for col in sorted(update_set)
                 if col not in _CHAT_COUNT_COMPONENT_FIELDS and not (component_updates and col == 'chats_count')
             ]
-            set_clauses.extend([f"{col} = EXCLUDED.{col}" for col in sorted(component_updates)])
+            set_clauses.extend([f"{col} = {_update_expr(col)}" for col in sorted(component_updates)])
             if component_updates:
                 whatsapp_expr = (
-                    "EXCLUDED.whatsapp_chats_count"
+                    _update_expr('whatsapp_chats_count')
                     if 'whatsapp_chats_count' in component_updates
                     else "chat_manager_daily_metrics.whatsapp_chats_count"
                 )
                 name_requests_expr = (
-                    "EXCLUDED.name_requests_chats_count"
+                    _update_expr('name_requests_chats_count')
                     if 'name_requests_chats_count' in component_updates
                     else "chat_manager_daily_metrics.name_requests_chats_count"
                 )
@@ -12591,7 +12604,20 @@ class Database:
                 cursor.execute("""
                     SELECT
                         COALESCE(SUM(chats_count), 0),
-                        AVG(avg_score) FILTER (WHERE avg_score IS NOT NULL),
+                        (
+                            COALESCE(SUM(score_sum) FILTER (WHERE score_count > 0 AND score_sum IS NOT NULL), 0)
+                            + COALESCE(SUM(avg_score) FILTER (
+                                WHERE NOT (COALESCE(score_count, 0) > 0 AND score_sum IS NOT NULL)
+                                  AND avg_score IS NOT NULL
+                            ), 0)
+                        ) / NULLIF(
+                            COALESCE(SUM(score_count) FILTER (WHERE score_count > 0 AND score_sum IS NOT NULL), 0)
+                            + COALESCE(COUNT(avg_score) FILTER (
+                                WHERE NOT (COALESCE(score_count, 0) > 0 AND score_sum IS NOT NULL)
+                                  AND avg_score IS NOT NULL
+                            ), 0),
+                            0
+                        ),
                         AVG(avg_response_time_seconds) FILTER (WHERE avg_response_time_seconds IS NOT NULL),
                         COALESCE(SUM(transfer_chat_count), 0)
                     FROM chat_manager_daily_metrics
@@ -12933,7 +12959,20 @@ class Database:
                 SELECT
                     operator_id,
                     COALESCE(SUM(chats_count), 0) AS chats_count,
-                    AVG(avg_score) FILTER (WHERE avg_score IS NOT NULL) AS avg_score,
+                    (
+                        COALESCE(SUM(score_sum) FILTER (WHERE score_count > 0 AND score_sum IS NOT NULL), 0)
+                        + COALESCE(SUM(avg_score) FILTER (
+                            WHERE NOT (COALESCE(score_count, 0) > 0 AND score_sum IS NOT NULL)
+                              AND avg_score IS NOT NULL
+                        ), 0)
+                    ) / NULLIF(
+                        COALESCE(SUM(score_count) FILTER (WHERE score_count > 0 AND score_sum IS NOT NULL), 0)
+                        + COALESCE(COUNT(avg_score) FILTER (
+                            WHERE NOT (COALESCE(score_count, 0) > 0 AND score_sum IS NOT NULL)
+                              AND avg_score IS NOT NULL
+                        ), 0),
+                        0
+                    ) AS avg_score,
                     AVG(avg_response_time_seconds) FILTER (WHERE avg_response_time_seconds IS NOT NULL) AS avg_response_time_seconds,
                     COALESCE(SUM(transfer_chat_count), 0) AS transfer_chat_count
                 FROM chat_manager_daily_metrics
@@ -20531,7 +20570,20 @@ class Database:
             cursor.execute("""
                 SELECT
                     COALESCE(SUM(chats_count), 0),
-                    AVG(avg_score) FILTER (WHERE avg_score IS NOT NULL),
+                    (
+                        COALESCE(SUM(score_sum) FILTER (WHERE score_count > 0 AND score_sum IS NOT NULL), 0)
+                        + COALESCE(SUM(avg_score) FILTER (
+                            WHERE NOT (COALESCE(score_count, 0) > 0 AND score_sum IS NOT NULL)
+                              AND avg_score IS NOT NULL
+                        ), 0)
+                    ) / NULLIF(
+                        COALESCE(SUM(score_count) FILTER (WHERE score_count > 0 AND score_sum IS NOT NULL), 0)
+                        + COALESCE(COUNT(avg_score) FILTER (
+                            WHERE NOT (COALESCE(score_count, 0) > 0 AND score_sum IS NOT NULL)
+                              AND avg_score IS NOT NULL
+                        ), 0),
+                        0
+                    ),
                     AVG(avg_response_time_seconds) FILTER (WHERE avg_response_time_seconds IS NOT NULL),
                     COALESCE(SUM(transfer_chat_count), 0)
                 FROM chat_manager_daily_metrics
@@ -20689,7 +20741,20 @@ class Database:
             cursor.execute("""
                 SELECT
                     COALESCE(SUM(chats_count), 0),
-                    AVG(avg_score) FILTER (WHERE avg_score IS NOT NULL),
+                    (
+                        COALESCE(SUM(score_sum) FILTER (WHERE score_count > 0 AND score_sum IS NOT NULL), 0)
+                        + COALESCE(SUM(avg_score) FILTER (
+                            WHERE NOT (COALESCE(score_count, 0) > 0 AND score_sum IS NOT NULL)
+                              AND avg_score IS NOT NULL
+                        ), 0)
+                    ) / NULLIF(
+                        COALESCE(SUM(score_count) FILTER (WHERE score_count > 0 AND score_sum IS NOT NULL), 0)
+                        + COALESCE(COUNT(avg_score) FILTER (
+                            WHERE NOT (COALESCE(score_count, 0) > 0 AND score_sum IS NOT NULL)
+                              AND avg_score IS NOT NULL
+                        ), 0),
+                        0
+                    ),
                     AVG(avg_response_time_seconds) FILTER (WHERE avg_response_time_seconds IS NOT NULL),
                     COALESCE(SUM(transfer_chat_count), 0)
                 FROM chat_manager_daily_metrics

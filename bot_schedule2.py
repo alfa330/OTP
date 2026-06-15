@@ -6280,7 +6280,10 @@ def upload_group_day():
                         avg_score = _cm_float(chat_metrics_obj.get('avg_score'))
                         if avg_score is not None:
                             metric_payload['avg_score'] = avg_score
-                            metric_update_fields.append('avg_score')
+                            # Ручной avg_score должен заменить импортную взвешенную оценку дня.
+                            metric_payload['score_sum'] = None
+                            metric_payload['score_count'] = None
+                            metric_update_fields.extend(['avg_score', 'score_sum', 'score_count'])
 
                         try:
                             if metric_update_fields:
@@ -16789,12 +16792,14 @@ CHAT_REPORT_TYPE_SCORE = 'score'
 CHAT_REPORT_TYPE_RESPONSE = 'response_time'
 CHAT_REPORT_TYPE_WHATSAPP = 'whatsapp_chats'
 CHAT_REPORT_TYPE_NAME_REQUESTS = 'name_requests'
+CHAT_REPORT_TYPE_COMBINED = 'combined'
 
 CHAT_REPORT_TYPE_LABELS = {
     CHAT_REPORT_TYPE_SCORE: 'Средняя оценка',
     CHAT_REPORT_TYPE_RESPONSE: 'Среднее время ответа',
     CHAT_REPORT_TYPE_WHATSAPP: 'Количество чатов (Whatsapp)',
     CHAT_REPORT_TYPE_NAME_REQUESTS: 'Количество чатов (Name/Requests)',
+    CHAT_REPORT_TYPE_COMBINED: 'Комбинированный отчёт',
 }
 
 CHAT_REPORT_TYPE_FIELDS = {
@@ -16872,21 +16877,29 @@ def _chat_report_resolve_operator(raw_name, operator_lookup, operator_token_inde
     return None, None
 
 
-def _chat_report_detect_type(normalized_header):
+def _chat_report_detect_types(normalized_header):
     nh = [str(h or '') for h in (normalized_header or [])]
 
     def has(sub):
         return any(sub in h for h in nh)
 
+    detected = []
     if has('ratingscalescore') or (has('rating') and has('scale') and has('score')):
-        return CHAT_REPORT_TYPE_SCORE
+        detected.append(CHAT_REPORT_TYPE_SCORE)
     if has('reactiontime') and (has('requeststart') or has('requestend')):
-        return CHAT_REPORT_TYPE_RESPONSE
+        detected.append(CHAT_REPORT_TYPE_RESPONSE)
     if any(('звонок' in h and 'чат' in h) for h in nh):
-        return CHAT_REPORT_TYPE_WHATSAPP
-    if has('requests') and has('name'):
-        return CHAT_REPORT_TYPE_NAME_REQUESTS
-    return None
+        detected.append(CHAT_REPORT_TYPE_WHATSAPP)
+    if not detected and has('requests') and has('name'):
+        detected.append(CHAT_REPORT_TYPE_NAME_REQUESTS)
+    return detected
+
+
+def _chat_report_detect_type(normalized_header):
+    report_types = _chat_report_detect_types(normalized_header)
+    if len(report_types) > 1:
+        return CHAT_REPORT_TYPE_COMBINED
+    return report_types[0] if report_types else None
 
 
 def _chat_report_parse_dt(value):
@@ -16968,9 +16981,10 @@ def _chat_report_parse(header, data_rows, operator_lookup, operator_token_index,
     """Определяет тип отчёта по колонкам и считает дневные метрики. Возвращает None,
     если формат не распознан (тогда вызывающий откатывается к универсальному парсеру)."""
     normalized_header = [_status_import_normalize_header(h) for h in (header or [])]
-    report_type = _chat_report_detect_type(normalized_header)
-    if report_type is None:
+    report_types = _chat_report_detect_types(normalized_header)
+    if not report_types:
         return None
+    report_type = report_types[0] if len(report_types) == 1 else CHAT_REPORT_TYPE_COMBINED
 
     def find_idx(*candidates):
         for cand in candidates:
@@ -17001,19 +17015,33 @@ def _chat_report_parse(header, data_rows, operator_lookup, operator_token_index,
         except Exception:
             preview_limit_value = STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
 
-    source_rows = 0
     unmatched_names = {}
+    unmatched_seen = set()
 
-    def note_unmatched(raw):
+    def note_unmatched(raw, row_index=None):
         key = str(raw or '').strip() or '(пусто)'
+        seen_key = (key, row_index) if row_index is not None else None
+        if seen_key is not None:
+            if seen_key in unmatched_seen:
+                return
+            unmatched_seen.add(seen_key)
         unmatched_names[key] = unmatched_names.get(key, 0) + 1
 
     def nonempty(cols):
         return any(str(c or '').strip() for c in cols)
 
-    agg = {}
+    source_rows = sum(1 for cols in (data_rows or []) if nonempty(cols))
+    metrics_by_key = {}
+    update_fields = set()
+    excluded_surge = None
 
-    if report_type == CHAT_REPORT_TYPE_SCORE:
+    def metric_for(op_id, day_str):
+        return metrics_by_key.setdefault((op_id, day_str), {
+            'operator_id': op_id,
+            'day': day_str,
+        })
+
+    if CHAT_REPORT_TYPE_SCORE in report_types:
         op_idx = find_idx('operatorname', 'operator', 'fio', 'фио', 'оператор', 'имя')
         date_idx = find_idx('createdat', 'дата', 'date', 'day')
         if date_idx is None:
@@ -17023,33 +17051,32 @@ def _chat_report_parse(header, data_rows, operator_lookup, operator_token_index,
             score_idx = find_contains_all(['scale', 'score'])
         if op_idx is None or score_idx is None:
             raise ValueError("Отчёт оценок: нужны колонки оператора и rating_scale_score")
-        for cols in data_rows:
+        score_agg = {}
+        for row_index, cols in enumerate(data_rows or []):
             if not nonempty(cols):
                 continue
-            source_rows += 1
             raw_name = cell(cols, op_idx)
             day = _chat_metrics_parse_date(cell(cols, date_idx), default_date=default_date)
             score = _chat_metrics_parse_number(cell(cols, score_idx))
             if not raw_name or day is None or score is None:
                 if raw_name:
-                    note_unmatched(raw_name)
+                    note_unmatched(raw_name, row_index)
                 continue
             op_id, _ = _chat_report_resolve_operator(raw_name, operator_lookup, operator_token_index)
             if op_id is None:
-                note_unmatched(raw_name)
+                note_unmatched(raw_name, row_index)
                 continue
-            bucket = agg.setdefault((op_id, day.strftime('%Y-%m-%d')), {'score_sum': 0.0, 'score_count': 0})
+            bucket = score_agg.setdefault((op_id, day.strftime('%Y-%m-%d')), {'score_sum': 0.0, 'score_count': 0})
             bucket['score_sum'] += float(score)
             bucket['score_count'] += 1
-        metrics = [{
-            'operator_id': op_id,
-            'day': day_str,
-            'score_sum': round(v['score_sum'], 4),
-            'score_count': int(v['score_count']),
-            'avg_score': round(v['score_sum'] / v['score_count'], 4) if v['score_count'] else None,
-        } for (op_id, day_str), v in agg.items()]
+        for (op_id, day_str), v in score_agg.items():
+            metric = metric_for(op_id, day_str)
+            metric['score_sum'] = round(v['score_sum'], 4)
+            metric['score_count'] = int(v['score_count'])
+            metric['avg_score'] = round(v['score_sum'] / v['score_count'], 4) if v['score_count'] else None
+        update_fields.update(CHAT_REPORT_TYPE_FIELDS[CHAT_REPORT_TYPE_SCORE])
 
-    elif report_type == CHAT_REPORT_TYPE_RESPONSE:
+    if CHAT_REPORT_TYPE_RESPONSE in report_types:
         op_idx = find_idx('operatorname', 'operator', 'fio', 'фио', 'оператор')
         start_idx = find_idx('requeststart')
         if start_idx is None:
@@ -17061,40 +17088,43 @@ def _chat_report_parse(header, data_rows, operator_lookup, operator_token_index,
             raise ValueError("Отчёт времени ответа: нужны operator_name, request_start, reaction_time")
         windows = _chat_report_parse_surge_windows(surge_windows)
         excluded_surge = 0
-        for cols in data_rows:
+        response_agg = {}
+        for row_index, cols in enumerate(data_rows or []):
             if not nonempty(cols):
                 continue
-            source_rows += 1
             raw_name = cell(cols, op_idx)
             start_dt = _chat_report_parse_dt(cell(cols, start_idx))
             reaction = _chat_metrics_parse_number(cell(cols, rt_idx))
             if not raw_name or start_dt is None or reaction is None:
                 if raw_name:
-                    note_unmatched(raw_name)
+                    note_unmatched(raw_name, row_index)
                 continue
             if _chat_report_in_surge(start_dt, windows):
                 excluded_surge += 1
                 continue
             op_id, _ = _chat_report_resolve_operator(raw_name, operator_lookup, operator_token_index)
             if op_id is None:
-                note_unmatched(raw_name)
+                note_unmatched(raw_name, row_index)
                 continue
-            bucket = agg.setdefault((op_id, start_dt.date().strftime('%Y-%m-%d')), {'sum': 0.0, 'count': 0})
+            bucket = response_agg.setdefault((op_id, start_dt.date().strftime('%Y-%m-%d')), {'sum': 0.0, 'count': 0})
             bucket['sum'] += float(reaction)
             bucket['count'] += 1
-        metrics = [{
-            'operator_id': op_id,
-            'day': day_str,
-            'avg_response_time_seconds': round(v['sum'] / v['count'], 2),
-        } for (op_id, day_str), v in agg.items() if v['count'] > 0]
+        for (op_id, day_str), v in response_agg.items():
+            if v['count'] <= 0:
+                continue
+            metric = metric_for(op_id, day_str)
+            metric['avg_response_time_seconds'] = round(v['sum'] / v['count'], 2)
+        update_fields.update(CHAT_REPORT_TYPE_FIELDS[CHAT_REPORT_TYPE_RESPONSE])
 
-    elif report_type == CHAT_REPORT_TYPE_WHATSAPP:
+    if CHAT_REPORT_TYPE_WHATSAPP in report_types:
         op_idx = find_contains_all(['создател'])
         if op_idx is None:
             op_idx = find_idx('фиосоздателя', 'operatorname', 'operator', 'fio', 'фио')
         date_idx = find_contains_all(['обращени'])
         if date_idx is None:
-            date_idx = find_idx('дата', 'date', 'day') or find_contains_all(['создан'])
+            date_idx = find_idx('дата', 'date', 'day')
+        if date_idx is None:
+            date_idx = find_contains_all(['создан'])
         chan_idx = None
         for i, h in enumerate(normalized_header):
             if 'звонок' in h and 'чат' in h:
@@ -17102,10 +17132,10 @@ def _chat_report_parse(header, data_rows, operator_lookup, operator_token_index,
                 break
         if op_idx is None or chan_idx is None:
             raise ValueError("Отчёт чатов: нужны «ФИО создателя» и «Звонок или Чат»")
-        for cols in data_rows:
+        whatsapp_agg = {}
+        for row_index, cols in enumerate(data_rows or []):
             if not nonempty(cols):
                 continue
-            source_rows += 1
             channel = _status_import_normalize_header(cell(cols, chan_idx))
             if 'whatsapp' not in channel:
                 continue  # считаем только Whatsapp
@@ -17113,23 +17143,23 @@ def _chat_report_parse(header, data_rows, operator_lookup, operator_token_index,
             day = _chat_metrics_parse_date(cell(cols, date_idx), default_date=default_date)
             if not raw_name or day is None:
                 if raw_name:
-                    note_unmatched(raw_name)
+                    note_unmatched(raw_name, row_index)
                 continue
             op_id, _ = _chat_report_resolve_operator(raw_name, operator_lookup, operator_token_index)
             if op_id is None:
-                note_unmatched(raw_name)
+                note_unmatched(raw_name, row_index)
                 continue
-            bucket = agg.setdefault((op_id, day.strftime('%Y-%m-%d')), {'chats': 0})
+            bucket = whatsapp_agg.setdefault((op_id, day.strftime('%Y-%m-%d')), {'chats': 0})
             bucket['chats'] += 1
-        metrics = [{
-            'operator_id': op_id,
-            'day': day_str,
-            'chats_count': int(v['chats']),
-            'whatsapp_chats_count': int(v['chats']),
-            'source_report_type': CHAT_REPORT_TYPE_WHATSAPP,
-        } for (op_id, day_str), v in agg.items()]
+        for (op_id, day_str), v in whatsapp_agg.items():
+            metric = metric_for(op_id, day_str)
+            metric['chats_count'] = int(v['chats'])
+            metric['whatsapp_chats_count'] = int(v['chats'])
+            if report_type == CHAT_REPORT_TYPE_WHATSAPP:
+                metric['source_report_type'] = CHAT_REPORT_TYPE_WHATSAPP
+        update_fields.update(CHAT_REPORT_TYPE_FIELDS[CHAT_REPORT_TYPE_WHATSAPP])
 
-    else:  # CHAT_REPORT_TYPE_NAME_REQUESTS
+    if CHAT_REPORT_TYPE_NAME_REQUESTS in report_types:
         day = _chat_metrics_parse_date(None, default_date=default_date)
         if day is None:
             raise ValueError("Для отчёта Name/Requests укажите дату загрузки (date=YYYY-MM-DD)")
@@ -17140,42 +17170,50 @@ def _chat_report_parse(header, data_rows, operator_lookup, operator_token_index,
         if name_idx is None or req_idx is None:
             raise ValueError("Отчёт Name/Requests: нужны колонки Name и Requests")
         day_str = day.strftime('%Y-%m-%d')
-        for cols in data_rows:
+        name_agg = {}
+        for row_index, cols in enumerate(data_rows or []):
             if not nonempty(cols):
                 continue
-            source_rows += 1
             raw_name = cell(cols, name_idx)
             requests_val = _chat_metrics_parse_number(cell(cols, req_idx))
             if not raw_name or requests_val is None:
                 if raw_name:
-                    note_unmatched(raw_name)
+                    note_unmatched(raw_name, row_index)
                 continue
             op_id, _ = _chat_report_resolve_operator(raw_name, operator_lookup, operator_token_index)
             if op_id is None:
-                note_unmatched(raw_name)
+                note_unmatched(raw_name, row_index)
                 continue
-            bucket = agg.setdefault((op_id, day_str), {'chats': 0})
+            bucket = name_agg.setdefault((op_id, day_str), {'chats': 0})
             bucket['chats'] += int(round(requests_val))
-        metrics = [{
-            'operator_id': op_id,
-            'day': day_key,
-            'chats_count': int(v['chats']),
-            'name_requests_chats_count': int(v['chats']),
-            'source_report_type': CHAT_REPORT_TYPE_NAME_REQUESTS,
-        } for (op_id, day_key), v in agg.items()]
+        for (op_id, day_key), v in name_agg.items():
+            metric = metric_for(op_id, day_key)
+            metric['chats_count'] = int(v['chats'])
+            metric['name_requests_chats_count'] = int(v['chats'])
+            if report_type == CHAT_REPORT_TYPE_NAME_REQUESTS:
+                metric['source_report_type'] = CHAT_REPORT_TYPE_NAME_REQUESTS
+        update_fields.update(CHAT_REPORT_TYPE_FIELDS[CHAT_REPORT_TYPE_NAME_REQUESTS])
 
+    metrics = sorted(metrics_by_key.values(), key=lambda item: (item.get('day') or '', int(item.get('operator_id') or 0)))
     unmatched_sorted = sorted(unmatched_names.items(), key=lambda kv: (-kv[1], kv[0]))
+    if report_type == CHAT_REPORT_TYPE_COMBINED:
+        detected_label = 'Комбинированный отчёт: ' + ', '.join(
+            CHAT_REPORT_TYPE_LABELS.get(t, t) for t in report_types
+        )
+    else:
+        detected_label = CHAT_REPORT_TYPE_LABELS.get(report_type, report_type)
     result = {
         'detected_type': report_type,
-        'detected_label': CHAT_REPORT_TYPE_LABELS.get(report_type, report_type),
-        'update_fields': sorted(CHAT_REPORT_TYPE_FIELDS[report_type]),
+        'detected_label': detected_label,
+        'detected_types': report_types,
+        'update_fields': sorted(update_fields),
         'metrics': metrics,
         'source_rows': int(source_rows),
         'matched_rows': len(metrics),
         'unmatched_count': int(sum(unmatched_names.values())),
         'unmatched_preview': [{'name': name, 'rows': count} for name, count in unmatched_sorted[:preview_limit_value]],
     }
-    if report_type == CHAT_REPORT_TYPE_RESPONSE:
+    if excluded_surge is not None:
         result['excluded_surge_rows'] = int(excluded_surge)
     return result
 
