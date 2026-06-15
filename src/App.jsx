@@ -4505,7 +4505,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <button
                                                 type="button"
                                                 onClick={() => {
-                                                    setShowChatMetricsSurgeEditor(v => !v);
+                                                    setShowChatMetricsSurgeEditor(true);
                                                     setChatMetricsSurgeWindows(prev => prev.length ? prev : [{ start: '', end: '' }]);
                                                 }}
                                                 className={`h-8 rounded-full px-3 text-xs sm:text-sm font-semibold transition whitespace-nowrap border ${showChatMetricsSurgeEditor ? 'bg-amber-600 border-amber-600 text-white shadow-sm' : 'bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100'}`}
@@ -4521,59 +4521,128 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         })}
                     </div>
                     {isChatModel && showChatMetricsSurgeEditor && (
-                        <div className="mt-2 rounded-2xl border border-amber-200 bg-amber-50/80 p-3">
-                            <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-                                <div className="text-xs font-medium text-amber-900">
-                                    Наплывы исключаются из отчёта <b>Среднее время ответа</b> по `request_start`.
-                                </div>
-                                <div className="flex items-center gap-2">
-                                    <button
-                                        type="button"
-                                        className="rounded-full bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-700"
-                                        onClick={addChatMetricsSurgeWindow}
-                                    >
-                                        <FaIcon className="fas fa-plus mr-1"></FaIcon>Добавить
-                                    </button>
-                                    <button
-                                        type="button"
-                                        className="rounded-full border border-amber-200 bg-white px-3 py-1.5 text-xs font-semibold text-amber-800 hover:bg-amber-100"
-                                        onClick={() => setChatMetricsSurgeWindows([])}
-                                    >
-                                        Очистить
-                                    </button>
-                                </div>
-                            </div>
-                            {chatMetricsSurgeWindows.length === 0 && (
-                                <div className="rounded-xl border border-dashed border-amber-200 bg-white/70 p-3 text-xs text-amber-700">
-                                    Окон нет — при импорте времени ответа будут учитываться все строки.
-                                </div>
-                            )}
-                            <div className="space-y-2">
-                                {chatMetricsSurgeWindows.map((w, i) => (
-                                    <div key={i} className="flex flex-col sm:flex-row sm:items-center gap-2">
-                                        <input
-                                            type="datetime-local"
-                                            className="w-full sm:flex-1 min-w-0 p-2 rounded-lg border border-amber-200 bg-white text-xs"
-                                            value={w.start || ''}
-                                            onChange={(e) => updateChatMetricsSurgeWindow(i, { start: e.target.value })}
-                                        />
-                                        <span className="hidden sm:inline text-amber-600 text-xs">—</span>
-                                        <input
-                                            type="datetime-local"
-                                            className="w-full sm:flex-1 min-w-0 p-2 rounded-lg border border-amber-200 bg-white text-xs"
-                                            value={w.end || ''}
-                                            onChange={(e) => updateChatMetricsSurgeWindow(i, { end: e.target.value })}
-                                        />
-                                        <button
-                                            type="button"
-                                            className="h-9 w-full sm:w-9 rounded-lg text-red-500 hover:bg-red-50"
-                                            onClick={() => removeChatMetricsSurgeWindow(i)}
-                                            title="Удалить окно"
-                                        >
-                                            <FaIcon className="fas fa-trash"></FaIcon>
-                                        </button>
+                        <div
+                            className="fixed inset-0 z-[130] flex items-center justify-center bg-slate-950/30 p-3 backdrop-blur-sm sm:p-6"
+                            onClick={() => setShowChatMetricsSurgeEditor(false)}
+                        >
+                            <div
+                                className="flex max-h-[88vh] w-full max-w-xl flex-col overflow-hidden rounded-[28px] border border-white/70 bg-white/95 shadow-[0_24px_80px_rgba(15,23,42,0.22)] ring-1 ring-slate-900/5 backdrop-blur-xl"
+                                onClick={(e) => e.stopPropagation()}
+                                role="dialog"
+                                aria-modal="true"
+                                aria-labelledby="chat-surge-modal-title"
+                            >
+                                <div className="flex items-start justify-between gap-4 border-b border-slate-200/70 px-5 py-4 sm:px-6">
+                                    <div className="flex min-w-0 items-start gap-3">
+                                        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-amber-100 text-amber-700 ring-1 ring-amber-200/80">
+                                            <FaIcon className="fas fa-wave-square" aria-hidden="true" />
+                                        </span>
+                                        <div className="min-w-0">
+                                            <h3 id="chat-surge-modal-title" className="text-base font-semibold text-slate-900">
+                                                Окна наплыва
+                                            </h3>
+                                            <p className="mt-1 text-xs leading-5 text-slate-500">
+                                                Интервалы исключаются из отчёта <b className="font-semibold text-slate-700">Среднее время ответа</b> по <code className="rounded-md bg-slate-100 px-1 py-0.5 text-[11px] text-slate-700">request_start</code>.
+                                            </p>
+                                        </div>
                                     </div>
-                                ))}
+                                    <button
+                                        type="button"
+                                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200 hover:text-slate-700"
+                                        onClick={() => setShowChatMetricsSurgeEditor(false)}
+                                        aria-label="Закрыть окна наплыва"
+                                    >
+                                        <FaIcon className="fas fa-xmark" aria-hidden="true" />
+                                    </button>
+                                </div>
+
+                                <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4 sm:px-6">
+                                    <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+                                        <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-800 ring-1 ring-amber-200">
+                                            Активных: {chatMetricsSurgeWindows.filter(w => w && w.start && w.end).length}
+                                        </span>
+                                        <div className="flex items-center gap-2">
+                                            <button
+                                                type="button"
+                                                className="inline-flex h-9 items-center gap-2 rounded-full bg-amber-600 px-3.5 text-xs font-semibold text-white shadow-sm transition hover:bg-amber-700"
+                                                onClick={addChatMetricsSurgeWindow}
+                                            >
+                                                <FaIcon className="fas fa-plus" aria-hidden="true" />
+                                                Добавить
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="inline-flex h-9 items-center gap-2 rounded-full border border-slate-200 bg-white px-3.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
+                                                onClick={() => setChatMetricsSurgeWindows([])}
+                                            >
+                                                <FaIcon className="fas fa-eraser" aria-hidden="true" />
+                                                Очистить
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {chatMetricsSurgeWindows.length === 0 && (
+                                        <div className="rounded-3xl border border-dashed border-slate-200 bg-slate-50/80 px-4 py-7 text-center">
+                                            <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-2xl bg-white text-slate-400 shadow-sm ring-1 ring-slate-200">
+                                                <FaIcon className="fas fa-wave-square" aria-hidden="true" />
+                                            </div>
+                                            <div className="text-sm font-semibold text-slate-700">Окон пока нет</div>
+                                            <div className="mt-1 text-xs text-slate-500">При импорте времени ответа будут учитываться все строки.</div>
+                                        </div>
+                                    )}
+
+                                    <div className="space-y-3">
+                                        {chatMetricsSurgeWindows.map((w, i) => (
+                                            <div key={i} className="rounded-3xl border border-slate-200 bg-white p-3 shadow-sm">
+                                                <div className="mb-2 flex items-center justify-between gap-2">
+                                                    <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                                                        Интервал {i + 1}
+                                                    </span>
+                                                    <button
+                                                        type="button"
+                                                        className="flex h-8 w-8 items-center justify-center rounded-full text-rose-500 transition hover:bg-rose-50 hover:text-rose-600"
+                                                        onClick={() => removeChatMetricsSurgeWindow(i)}
+                                                        title="Удалить окно"
+                                                        aria-label={`Удалить окно ${i + 1}`}
+                                                    >
+                                                        <FaIcon className="fas fa-trash" aria-hidden="true" />
+                                                    </button>
+                                                </div>
+                                                <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_auto_1fr] sm:items-end">
+                                                    <label className="min-w-0">
+                                                        <span className="mb-1 block text-[11px] font-medium text-slate-500">Начало</span>
+                                                        <input
+                                                            type="datetime-local"
+                                                            className="w-full min-w-0 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-800 outline-none transition focus:border-amber-300 focus:bg-white focus:ring-4 focus:ring-amber-100"
+                                                            value={w.start || ''}
+                                                            onChange={(e) => updateChatMetricsSurgeWindow(i, { start: e.target.value })}
+                                                        />
+                                                    </label>
+                                                    <span className="hidden pb-2 text-xs font-medium text-slate-300 sm:inline">—</span>
+                                                    <label className="min-w-0">
+                                                        <span className="mb-1 block text-[11px] font-medium text-slate-500">Конец</span>
+                                                        <input
+                                                            type="datetime-local"
+                                                            className="w-full min-w-0 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-800 outline-none transition focus:border-amber-300 focus:bg-white focus:ring-4 focus:ring-amber-100"
+                                                            value={w.end || ''}
+                                                            onChange={(e) => updateChatMetricsSurgeWindow(i, { end: e.target.value })}
+                                                        />
+                                                    </label>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                <div className="flex items-center justify-end gap-2 border-t border-slate-200/70 bg-slate-50/80 px-5 py-4 sm:px-6">
+                                    <button
+                                        type="button"
+                                        className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50"
+                                        onClick={() => setShowChatMetricsSurgeEditor(false)}
+                                    >
+                                        Готово
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     )}
