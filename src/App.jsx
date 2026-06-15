@@ -1958,6 +1958,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const [pinnedGroups, setPinnedGroups] = useState(['Работа']);
         const [hoveredGroup, setHoveredGroup] = useState(null);
 
+        const hoverTimeoutRef = useRef(null);
+
+        const handleMouseEnter = (groupLabel) => {
+            if (hoverTimeoutRef.current) {
+                clearTimeout(hoverTimeoutRef.current);
+                hoverTimeoutRef.current = null;
+            }
+            setHoveredGroup(groupLabel);
+        };
+
+        const handleMouseLeave = () => {
+            if (hoverTimeoutRef.current) {
+                clearTimeout(hoverTimeoutRef.current);
+            }
+            hoverTimeoutRef.current = setTimeout(() => {
+                setHoveredGroup(null);
+            }, 180);
+        };
+
         // Training modal component resolver: avoid direct identifier access to prevent TDZ in prod bundles
         const TrainingModalComponent = (typeof window !== 'undefined' ? window.TrainingModal : null);
 
@@ -4650,8 +4669,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 </div>
 
                 {/* === Метрика === */}
-                <div className="rounded-2xl border border-slate-200 bg-slate-50/80 p-2">
-                    <div className="flex flex-wrap items-stretch gap-2">
+                <div className="rounded-2xl border border-slate-200 bg-slate-50/80 p-2 overflow-x-auto scrollbar-hide">
+                    <div className="flex flex-nowrap items-center gap-2">
                         {WORKHOURS_METRIC_GROUPS.map(group => {
                             const isMetricsGroup = group.label === 'Метрики';
                             const activeInGroup = group.tabs.some(tab => tab.key === selectedTab);
@@ -4667,8 +4686,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             return (
                                 <div
                                     key={group.label}
-                                    onMouseEnter={() => setHoveredGroup(group.label)}
-                                    onMouseLeave={() => setHoveredGroup(null)}
+                                    onMouseEnter={() => handleMouseEnter(group.label)}
+                                    onMouseLeave={handleMouseLeave}
                                     className={`rounded-full border bg-white p-1 shadow-sm flex items-center transition-all duration-300 gap-1 ${
                                         activeInGroup
                                             ? 'border-blue-200 ring-1 ring-blue-100'
