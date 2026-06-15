@@ -1955,6 +1955,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const chatMetricsInputRef = useRef(null);
 
         const [selectedTab, setSelectedTab] = useState('work_time');
+        const [pinnedGroups, setPinnedGroups] = useState(['Работа']);
+        const [hoveredGroup, setHoveredGroup] = useState(null);
 
         // Training modal component resolver: avoid direct identifier access to prevent TDZ in prod bundles
         const TrainingModalComponent = (typeof window !== 'undefined' ? window.TrainingModal : null);
@@ -3453,6 +3455,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             ].filter(group => group.tabs.length > 0);
         }, [VIEW_TABS]);
 
+        const toggleGroupPin = (groupLabel) => {
+            setPinnedGroups(prev =>
+                prev.includes(groupLabel)
+                    ? prev.filter(l => l !== groupLabel)
+                    : [...prev, groupLabel]
+            );
+        };
+
+        useEffect(() => {
+            const activeGroup = WORKHOURS_METRIC_GROUPS.find(group =>
+                group.tabs.some(tab => tab.key === selectedTab)
+            );
+            if (activeGroup) {
+                setPinnedGroups(prev => {
+                    if (prev.includes(activeGroup.label)) return prev;
+                    return [...prev, activeGroup.label];
+                });
+            }
+        }, [selectedTab, WORKHOURS_METRIC_GROUPS]);
+
         const selectedHourCellKeySet = useMemo(() => {
             return new Set((selectedHourCells || []).map(cell => makeSelectedHourCellKey(cell.operator_id, cell.day)));
         }, [selectedHourCells]);
@@ -4641,51 +4663,85 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     : group.tone === 'slate'
                                         ? 'text-slate-600'
                                         : 'text-blue-600';
+                            const isOpen = pinnedGroups.includes(group.label) || hoveredGroup === group.label;
                             return (
                                 <div
                                     key={group.label}
-                                    className={`rounded-full border bg-white p-1 shadow-sm flex items-center gap-1 ${activeInGroup ? 'border-blue-200 ring-1 ring-blue-100' : 'border-slate-200'}`}
+                                    onMouseEnter={() => setHoveredGroup(group.label)}
+                                    onMouseLeave={() => setHoveredGroup(null)}
+                                    className={`rounded-full border bg-white p-1 shadow-sm flex items-center transition-all duration-300 gap-1 ${
+                                        activeInGroup
+                                            ? 'border-blue-200 ring-1 ring-blue-100'
+                                            : 'border-slate-200 hover:border-slate-300 hover:shadow-sm'
+                                    }`}
                                 >
-                                    <span className="hidden lg:inline-flex items-center gap-1 px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                                    <button
+                                        type="button"
+                                        onClick={() => toggleGroupPin(group.label)}
+                                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-bold uppercase tracking-wide transition-colors duration-200 focus:outline-none ${
+                                            isOpen
+                                                ? 'text-slate-700 bg-slate-50'
+                                                : activeInGroup
+                                                    ? 'text-blue-700 bg-blue-50/50'
+                                                    : 'text-slate-500 hover:text-slate-700 hover:bg-slate-50'
+                                        }`}
+                                    >
                                         <FaIcon className={`fas ${group.icon} ${groupIconClass}`}></FaIcon>
-                                        {group.label}
-                                    </span>
-                                    {group.tabs.map(tab => (
-                                        <button
-                                            key={tab.key}
-                                            type="button"
-                                            onClick={() => setSelectedTab(tab.key)}
-                                            className={`h-8 rounded-full px-3 text-xs sm:text-sm font-medium transition whitespace-nowrap ${selectedTab === tab.key ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-700 hover:bg-slate-100'}`}
-                                            title={tab.unit ? `${tab.label} (${tab.unit})` : tab.label}
-                                        >
-                                            {tab.label}
-                                        </button>
-                                    ))}
-                                    {isChatModel && isMetricsGroup && (
-                                        <>
-                                            <button
-                                                type="button"
-                                                onClick={syncChat2DeskMetrics}
-                                                disabled={chatMetricsImportState.loading}
-                                                className={`h-8 rounded-full px-3 text-xs sm:text-sm font-semibold transition whitespace-nowrap border ${chatMetricsImportState.loading ? 'bg-cyan-100 border-cyan-200 text-cyan-500 cursor-not-allowed' : 'bg-cyan-50 border-cyan-200 text-cyan-800 hover:bg-cyan-100'}`}
-                                                title="Синхронизировать метрики Chat2Desk за прошедший день"
-                                            >
-                                                <FaIcon className={`fas ${chatMetricsImportState.loading ? 'fa-spinner fa-spin' : 'fa-arrows-rotate'} mr-1`}></FaIcon>
-                                                Синхронизация
-                                            </button>
-                                            <button
-                                                type="button"
-                                                onClick={() => {
-                                                    setChatMetricsSurgeMonth(normalizeMonthKey(month));
-                                                    setShowChatMetricsSurgeEditor(true);
-                                                }}
-                                                className={`h-8 rounded-full px-3 text-xs sm:text-sm font-semibold transition whitespace-nowrap border ${showChatMetricsSurgeEditor ? 'bg-amber-600 border-amber-600 text-white shadow-sm' : 'bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100'}`}
-                                                title="Окна наплыва для импорта среднего времени ответа"
-                                            >
-                                                <FaIcon className="fas fa-wave-square mr-1"></FaIcon>
-                                                Наплывы{validSurgeCount ? ` ${validSurgeCount}` : ''}
-                                            </button>
-                                        </>
+                                        <span>{group.label}</span>
+                                        
+                                        {!isOpen && activeInGroup && (
+                                            <span className="ml-1.5 px-2 py-0.5 text-[9px] font-bold bg-blue-600 text-white rounded-full normal-case tracking-normal">
+                                                {group.tabs.find(t => t.key === selectedTab)?.label}
+                                            </span>
+                                        )}
+
+                                        <FaIcon
+                                            className={`fas fa-chevron-right ml-1 text-[9px] text-slate-400 transition-transform duration-300 ${
+                                                isOpen ? 'rotate-90 text-slate-600' : ''
+                                            }`}
+                                        />
+                                    </button>
+
+                                    {isOpen && (
+                                        <div className="flex items-center gap-1 animate-fade-in pr-1">
+                                            {group.tabs.map(tab => (
+                                                <button
+                                                    key={tab.key}
+                                                    type="button"
+                                                    onClick={() => setSelectedTab(tab.key)}
+                                                    className={`h-8 rounded-full px-3 text-xs sm:text-sm font-medium transition whitespace-nowrap ${selectedTab === tab.key ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-700 hover:bg-slate-100'}`}
+                                                    title={tab.unit ? `${tab.label} (${tab.unit})` : tab.label}
+                                                >
+                                                    {tab.label}
+                                                </button>
+                                            ))}
+                                            {isChatModel && isMetricsGroup && (
+                                                <>
+                                                    <button
+                                                        type="button"
+                                                        onClick={syncChat2DeskMetrics}
+                                                        disabled={chatMetricsImportState.loading}
+                                                        className={`h-8 rounded-full px-3 text-xs sm:text-sm font-semibold transition whitespace-nowrap border ${chatMetricsImportState.loading ? 'bg-cyan-100 border-cyan-200 text-cyan-500 cursor-not-allowed' : 'bg-cyan-50 border-cyan-200 text-cyan-800 hover:bg-cyan-100'}`}
+                                                        title="Синхронизировать метрики Chat2Desk за прошедший день"
+                                                    >
+                                                        <FaIcon className={`fas ${chatMetricsImportState.loading ? 'fa-spinner fa-spin' : 'fa-arrows-rotate'} mr-1`}></FaIcon>
+                                                        Синхронизация
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            setChatMetricsSurgeMonth(normalizeMonthKey(month));
+                                                            setShowChatMetricsSurgeEditor(true);
+                                                        }}
+                                                        className={`h-8 rounded-full px-3 text-xs sm:text-sm font-semibold transition whitespace-nowrap border ${showChatMetricsSurgeEditor ? 'bg-amber-600 border-amber-600 text-white shadow-sm' : 'bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100'}`}
+                                                        title="Окна наплыва для импорта среднего времени ответа"
+                                                    >
+                                                        <FaIcon className="fas fa-wave-square mr-1"></FaIcon>
+                                                        Наплывы{validSurgeCount ? ` ${validSurgeCount}` : ''}
+                                                    </button>
+                                                </>
+                                            )}
+                                        </div>
                                     )}
                                 </div>
                             );
