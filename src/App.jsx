@@ -4172,6 +4172,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         // ======= RENDER =======
         const isAdminWithoutSupervisorSelected = isAdminLikeRoleFn(user?.role) && !selectedSvId;
         const isDayUploadDisabled = isChatModel || isAdminWithoutSupervisorSelected;
+        const hoursDayColClass = 'w-[72px] shrink-0 p-2 text-center border-l';
+        const hoursOperatorColClass = 'w-48 shrink-0 p-2 border-r';
+        const hoursRateColClass = 'w-28 shrink-0 p-2 text-center border-r';
+        const hoursNormColClass = 'w-36 shrink-0 p-2 text-center border-r';
+        const hoursSummaryColClass = 'shrink-0 p-2 text-center border-l';
         return (
             <div className="bg-white p-5 rounded-xl shadow-md">
             <input
@@ -4682,14 +4687,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             <div className="overflow-auto border rounded-md">
                 <div className="min-w-max">
                 {/* Header row */}
-                <div className="flex sticky top-0 bg-gray-50 border-b z-30">
-                    <div className="w-48 p-2 border-r sticky left-0 z-40 bg-gray-50 text-sm font-medium">Операторы</div>
+                <div className="flex w-max sticky top-0 bg-gray-50 border-b z-30">
+                    <div className={`${hoursOperatorColClass} sticky left-0 z-40 bg-gray-50 text-sm font-medium`}>Операторы</div>
 
-                    <div className="w-28 p-2 text-center border-r bg-gray-50 text-sm">Ставка</div>
-                    <div className="w-36 p-2 text-center border-r bg-gray-50 text-sm">Норма часов</div>
+                    <div className={`${hoursRateColClass} bg-gray-50 text-sm`}>Ставка</div>
+                    <div className={`${hoursNormColClass} bg-gray-50 text-sm`}>Норма часов</div>
 
                     {daysArray.map(day => (
-                    <div key={day} className="p-2 min-w-[72px] text-center border-l">
+                    <div key={day} className={hoursDayColClass}>
                         <button
                         onClick={() => {
                             if (isDayUploadDisabled) return;
@@ -4707,59 +4712,59 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     {/* Right summary headers */}
                     {selectedTab === 'work_time' && (
                     <>
-                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Итого часов</div>
-                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">База часов</div>
-                        <div className="w-32 p-2 text-center border-l bg-gray-50 text-sm font-medium">Вып. нормы (%)</div>
-                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Выработка</div>
+                        <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Итого часов</div>
+                        <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>База часов</div>
+                        <div className={`${hoursSummaryColClass} w-32 bg-gray-50 text-sm font-medium`}>Вып. нормы (%)</div>
+                        <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Выработка</div>
                     </>
                     )}
                     {selectedTab === 'calls' && (
-                    <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">{isChatModel ? 'Кол-во чатов' : 'КВЗ'}</div>
+                    <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>{isChatModel ? 'Кол-во чатов' : 'КВЗ'}</div>
                     )}
                     {selectedTab === 'avg_score' && (
-                    <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Средняя оценка</div>
+                    <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Средняя оценка</div>
                     )}
                     {selectedTab === 'response_time' && (
-                    <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Ср. время ответа (с)</div>
+                    <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Ср. время ответа (с)</div>
                     )}
                     {selectedTab === 'efficiency' && (
                     <>
-                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Итого (ч)</div>
-                        <div className="w-32 p-2 text-center border-l bg-gray-50 text-sm font-medium">OCC (%)</div>
+                        <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Итого (ч)</div>
+                        <div className={`${hoursSummaryColClass} w-32 bg-gray-50 text-sm font-medium`}>OCC (%)</div>
                     </>
                     )}
                     {selectedTab === 'trainings' && (
                     <>
-                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Итого (ч)</div>
+                        <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Итого (ч)</div>
                         {/*
-                        <div className="w-32 p-2 text-center border-l bg-gray-50 text-sm font-medium">Засчитано (ч)</div>
-                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Не засчитано (ч)</div>
+                        <div className={`${hoursSummaryColClass} w-32 bg-gray-50 text-sm font-medium`}>Засчитано (ч)</div>
+                        <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Не засчитано (ч)</div>
                         */}
                     </>
                     )}
                     {selectedTab === 'technical_issues' && (
                     <>
-                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Тех. сбои (ч)</div>
+                        <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Тех. сбои (ч)</div>
                     </>
                     )}
                     {selectedTab === 'offline_activity' && (
                     <>
-                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Офлайн активность (ч)</div>
+                        <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Офлайн активность (ч)</div>
                     </>
                     )}
                     {selectedTab === 'no_phone' && (
                     <>
-                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Без телефона (ч)</div>
+                        <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Без телефона (ч)</div>
                     </>
                     )}
                     {selectedTab === 'bonuses' && (
                     <>
-                        <div className="w-44 p-2 text-center border-l bg-gray-50 text-sm font-medium">Бонусы (₸)</div>
+                        <div className={`${hoursSummaryColClass} w-44 bg-gray-50 text-sm font-medium`}>Бонусы (₸)</div>
                     </>
                     )}
                     {selectedTab === 'fines' && (
                     <>
-                        <div className="w-44 p-2 text-center border-l bg-gray-50 text-sm font-medium">Штрафы (₸)</div>
+                        <div className={`${hoursSummaryColClass} w-44 bg-gray-50 text-sm font-medium`}>Штрафы (₸)</div>
                     </>
                     )}
                 </div>
@@ -4840,9 +4845,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             }
 
                             return (
-                            <div key={op.operator_id} className="flex items-center border-b hover:bg-gray-50 relative">
+                            <div key={op.operator_id} className="flex w-max items-center border-b hover:bg-gray-50 relative">
                                 {/* Name */}
-                                <div className="w-48 p-2 text-sm font-medium border-r sticky left-0 z-20 bg-white">
+                                <div className={`${hoursOperatorColClass} text-sm font-medium sticky left-0 z-20 bg-white`}>
                                 <div className="flex items-center gap-1.5 min-w-0">
                                     <span className="truncate">{op.name}</span>
                                     {Array.isArray(op.group_segments) && op.group_segments.length > 1 && (
@@ -4857,12 +4862,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </div>
 
                                 {/* Rate */}
-                                <div className="w-28 p-2 text-sm text-center border-r">
+                                <div className={`${hoursRateColClass} text-sm`}>
                                 <div className="text-sm text-gray-700">{op.rate ?? '—'}</div>
                                 </div>
 
                                 {/* Norm (editable) */}
-                                <div className="w-36 p-2 text-sm text-center border-r">
+                                <div className={`${hoursNormColClass} text-sm`}>
                                 <input
                                     type="number"
                                     step="0.1"
@@ -4874,7 +4879,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                 {/* Days */}
                                 {daysArray.map(day => (
-                                <div key={day} className="p-2 min-w-[72px] text-center border-l">
+                                <div key={day} className={hoursDayColClass}>
                                     {(() => {
                                     const isSelected = selectedHourCellKeySet.has(makeSelectedHourCellKey(op.operator_id, day));
                                     return (
@@ -4900,12 +4905,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {/* Right summary values */}
                                 {selectedTab === 'work_time' && (
                                 <>
-                                    <div className="w-36 p-2 text-sm text-center border-l">{displayedTotal.toFixed(2)}</div>
-                                    <div className="w-36 p-2 text-sm text-center border-l">{formatNumber(regular, 2)}</div>
-                                    <div className="w-32 p-2 text-sm text-center border-l">
+                                    <div className={`${hoursSummaryColClass} w-36 text-sm`}>{displayedTotal.toFixed(2)}</div>
+                                    <div className={`${hoursSummaryColClass} w-36 text-sm`}>{formatNumber(regular, 2)}</div>
+                                    <div className={`${hoursSummaryColClass} w-32 text-sm`}>
                                     {norm > 0 ? `${((displayedTotal / norm) * 100).toFixed(2)}%` : '—'}
                                     </div>
-                                    <div className="w-36 p-2 text-sm text-center border-l">
+                                    <div className={`${hoursSummaryColClass} w-36 text-sm`}>
                                     <div className={`inline-flex items-center gap-2 px-3 py-1 rounded-md ${productionColorClass(prodDiff, norm)}`}>
                                         <span className="font-medium">{formatNumber(prodDiff, 2)}</span>
                                         <span className="text-xs text-gray-500">ч</span>
@@ -4915,7 +4920,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 )}
 
                                 {selectedTab === 'calls' && (
-                                <div className="w-36 p-2 text-sm text-center border-l">
+                                <div className={`${hoursSummaryColClass} w-36 text-sm`}>
                                     {effectiveCallHours > 0 ? formatNumber(callsTotal / effectiveCallHours, 1) : '—'}
                                 </div>
                                 )}
@@ -4927,7 +4932,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         .filter(v => v != null && v !== '' && Number(v) > 0)
                                         .map(Number);
                                     const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
-                                    return <div className="w-36 p-2 text-sm text-center border-l">{avg == null ? '—' : avg.toFixed(2)}</div>;
+                                    return <div className={`${hoursSummaryColClass} w-36 text-sm`}>{avg == null ? '—' : avg.toFixed(2)}</div>;
                                 })()}
 
                                 {selectedTab === 'response_time' && (() => {
@@ -4936,13 +4941,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         .filter(v => v != null && v !== '' && Number(v) > 0)
                                         .map(Number);
                                     const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
-                                    return <div className="w-36 p-2 text-sm text-center border-l">{avg == null ? '—' : Math.round(avg)}</div>;
+                                    return <div className={`${hoursSummaryColClass} w-36 text-sm`}>{avg == null ? '—' : Math.round(avg)}</div>;
                                 })()}
 
                                 {selectedTab === 'efficiency' && (
                                 <>
-                                    <div className="w-36 p-2 text-sm text-center border-l">{formatNumber(effTotal, 1)}</div>
-                                    <div className="w-32 p-2 text-sm text-center border-l">
+                                    <div className={`${hoursSummaryColClass} w-36 text-sm`}>{formatNumber(effTotal, 1)}</div>
+                                    <div className={`${hoursSummaryColClass} w-32 text-sm`}>
                                         {regular > 0 ? (() => {
                                             const occPct = Math.max(0, Math.min(100, (effTotal / regular) * 100));
                                             return (
@@ -4961,26 +4966,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                 {selectedTab === 'trainings' && (
                                 <>
-                                    <div className="w-36 p-2 text-sm text-center border-l">{totalHoursAll.toFixed(2)}</div>
+                                    <div className={`${hoursSummaryColClass} w-36 text-sm`}>{totalHoursAll.toFixed(2)}</div>
                                 </>
                                 )}
                                 {selectedTab === 'technical_issues' && (
                                 <>
-                                    <div className="w-36 p-2 text-sm text-center border-l">{totalTechnicalIssuesHours.toFixed(2)}</div>
+                                    <div className={`${hoursSummaryColClass} w-36 text-sm`}>{totalTechnicalIssuesHours.toFixed(2)}</div>
                                 </>
                                 )}
                                 {selectedTab === 'offline_activity' && (
                                 <>
-                                    <div className="w-36 p-2 text-sm text-center border-l">{totalOfflineActivityHours.toFixed(2)}</div>
+                                    <div className={`${hoursSummaryColClass} w-36 text-sm`}>{totalOfflineActivityHours.toFixed(2)}</div>
                                 </>
                                 )}
                                 {selectedTab === 'no_phone' && (
                                 <>
-                                    <div className="w-36 p-2 text-sm text-center border-l">{totalNoPhoneHours.toFixed(2)}</div>
+                                    <div className={`${hoursSummaryColClass} w-36 text-sm`}>{totalNoPhoneHours.toFixed(2)}</div>
                                 </>
                                 )}
                                 {selectedTab === 'bonuses' && (
-                                <div className="w-44 p-2 text-sm text-center border-l">
+                                <div className={`${hoursSummaryColClass} w-44 text-sm`}>
                                     {bonusesTotal ? (
                                     <div className="flex items-center justify-center">
                                         <span className="text-sm font-medium truncate" title={String(bonusesTotal ? formatMoney(bonusesTotal) : '')} style={{maxWidth: '140px', display: 'inline-block'}}>{formatMoney(bonusesTotal)}</span>
@@ -4989,7 +4994,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </div>
                                 )}
                                 {selectedTab === 'fines' && (
-                                <div className="w-44 p-2 text-sm text-center border-l">
+                                <div className={`${hoursSummaryColClass} w-44 text-sm`}>
                                     {finesTotal ? (
                                     <div className="flex items-center justify-center">
                                         <span className="text-sm font-medium truncate" title={String(finesTotal ? formatMoney(finesTotal) : '')} style={{maxWidth: '140px', display: 'inline-block'}}>{formatMoney(finesTotal)}</span>
@@ -5006,32 +5011,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                     {/* FOOTER: итоговые строки */}
                     {filteredOperators.length > 0 && (
-                    <div className="flex items-center border-t bg-gray-50 text-sm font-semibold">
-                        <div className="w-48 p-2 border-r sticky left-0 z-20 bg-gray-50">Итого</div>
-                        <div className="w-28 p-2 text-center border-r">—</div>
-                        <div className="w-36 p-2 text-center border-r">{footerTotals.sumNorm}</div>
+                    <div className="flex w-max items-center border-t bg-gray-50 text-sm font-semibold">
+                        <div className={`${hoursOperatorColClass} sticky left-0 z-20 bg-gray-50`}>Итого</div>
+                        <div className={hoursRateColClass}>—</div>
+                        <div className={hoursNormColClass}>{footerTotals.sumNorm}</div>
 
                         {daysArray.map(day => (
-                        <div key={`f-${day}`} className="p-2 min-w-[72px] text-center border-l">&nbsp;</div>
+                        <div key={`f-${day}`} className={hoursDayColClass}>&nbsp;</div>
                         ))}
 
                         {selectedTab === 'work_time' && (
                         <>
-                            <div className="w-36 p-2 text-sm text-center border-l">{footerTotals.sumDisplayedTotal.toFixed(2)}</div>
-                            <div className="w-36 p-2 text-sm text-center border-l">{footerTotals.sumRegular.toFixed(2)}</div>
-                            <div className="w-32 p-2 text-sm text-center border-l">{footerTotals.sumNorm > 0 ? `${((footerTotals.sumDisplayedTotal / footerTotals.sumNorm) * 100).toFixed(1)}%` : '—'}</div>
-                            <div className="w-36 p-2 text-sm text-center border-l">{footerTotals.sumProd.toFixed(2)}</div>
+                            <div className={`${hoursSummaryColClass} w-36 text-sm`}>{footerTotals.sumDisplayedTotal.toFixed(2)}</div>
+                            <div className={`${hoursSummaryColClass} w-36 text-sm`}>{footerTotals.sumRegular.toFixed(2)}</div>
+                            <div className={`${hoursSummaryColClass} w-32 text-sm`}>{footerTotals.sumNorm > 0 ? `${((footerTotals.sumDisplayedTotal / footerTotals.sumNorm) * 100).toFixed(1)}%` : '—'}</div>
+                            <div className={`${hoursSummaryColClass} w-36 text-sm`}>{footerTotals.sumProd.toFixed(2)}</div>
                         </>
                         )}
 
                         {selectedTab === 'calls' && (
-                        <div className="w-36 p-2 text-sm text-center border-l">—</div>
+                        <div className={`${hoursSummaryColClass} w-36 text-sm`}>—</div>
                         )}
 
                         {selectedTab === 'efficiency' && (
                         <>
-                            <div className="w-36 p-2 text-sm text-center border-l">{footerTotals.sumEff.toFixed(2)}</div>
-                            <div className="w-32 p-2 text-sm text-center border-l">
+                            <div className={`${hoursSummaryColClass} w-36 text-sm`}>{footerTotals.sumEff.toFixed(2)}</div>
+                            <div className={`${hoursSummaryColClass} w-32 text-sm`}>
                                 {footerTotals.avgOcc != null ? (() => {
                                     const occPct = Math.max(0, Math.min(100, footerTotals.avgOcc));
                                     return (
@@ -5049,36 +5054,36 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                         {selectedTab === 'trainings' && (
                         <>
-                            <div className="w-36 p-2 text-sm text-center border-l">{footerTotals.trainingsTotal.toFixed(2)}</div>
+                            <div className={`${hoursSummaryColClass} w-36 text-sm`}>{footerTotals.trainingsTotal.toFixed(2)}</div>
                             {/*
-                            <div className="w-32 p-2 text-sm text-center border-l">{footerTotals.trainingsCounted.toFixed(2)}</div>
-                            <div className="w-36 p-2 text-sm text-center border-l">{(footerTotals.trainingsTotal - footerTotals.trainingsCounted).toFixed(2)}</div>
+                            <div className={`${hoursSummaryColClass} w-32 text-sm`}>{footerTotals.trainingsCounted.toFixed(2)}</div>
+                            <div className={`${hoursSummaryColClass} w-36 text-sm`}>{(footerTotals.trainingsTotal - footerTotals.trainingsCounted).toFixed(2)}</div>
                             */}
                         </>
                         )}
                         {selectedTab === 'technical_issues' && (
                         <>
-                            <div className="w-36 p-2 text-sm text-center border-l">{footerTotals.technicalIssuesTotal.toFixed(2)}</div>
+                            <div className={`${hoursSummaryColClass} w-36 text-sm`}>{footerTotals.technicalIssuesTotal.toFixed(2)}</div>
                         </>
                         )}
                         {selectedTab === 'offline_activity' && (
                         <>
-                            <div className="w-36 p-2 text-sm text-center border-l">{footerTotals.offlineActivitiesTotal.toFixed(2)}</div>
+                            <div className={`${hoursSummaryColClass} w-36 text-sm`}>{footerTotals.offlineActivitiesTotal.toFixed(2)}</div>
                         </>
                         )}
                         {selectedTab === 'no_phone' && (
                         <>
-                            <div className="w-36 p-2 text-sm text-center border-l">{footerTotals.noPhoneTotal.toFixed(2)}</div>
+                            <div className={`${hoursSummaryColClass} w-36 text-sm`}>{footerTotals.noPhoneTotal.toFixed(2)}</div>
                         </>
                         )}
                         {selectedTab === 'bonuses' && (
                         <>
-                            <div className="w-44 p-2 text-sm text-center border-l"><span className="truncate" title={footerTotals ? formatMoney(footerTotals.sumBonuses) : ''} style={{display:'inline-block', maxWidth: '140px'}}>{formatMoney(footerTotals.sumBonuses)}</span></div>
+                            <div className={`${hoursSummaryColClass} w-44 text-sm`}><span className="truncate" title={footerTotals ? formatMoney(footerTotals.sumBonuses) : ''} style={{display:'inline-block', maxWidth: '140px'}}>{formatMoney(footerTotals.sumBonuses)}</span></div>
                         </>
                         )}
                         {selectedTab === 'fines' && (
                         <>
-                            <div className="w-44 p-2 text-sm text-center border-l"><span className="truncate" title={footerTotals ? formatMoney(footerTotals.sumFines) : ''} style={{display:'inline-block', maxWidth: '140px'}}>{formatMoney(footerTotals.sumFines)}</span></div>
+                            <div className={`${hoursSummaryColClass} w-44 text-sm`}><span className="truncate" title={footerTotals ? formatMoney(footerTotals.sumFines) : ''} style={{display:'inline-block', maxWidth: '140px'}}>{formatMoney(footerTotals.sumFines)}</span></div>
                         </>
                         )}
                     </div>
