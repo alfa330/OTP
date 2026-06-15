@@ -22,6 +22,7 @@ def _chat_report_namespace():
         "CHAT_REPORT_TYPE_LABELS",
         "CHAT_REPORT_TYPE_FIELDS",
         "CHAT2DESK_API_TOKEN",
+        "CHAT2DESK_AUTH_SCHEME",
         "CHAT2DESK_SYNC_TIMEZONE",
         "CHAT2DESK_STATISTICS_REPORT_REPLIES",
         "CHAT2DESK_STATISTICS_REPORT_RATING",
@@ -46,6 +47,7 @@ def _chat_report_namespace():
         "_chat_report_in_surge",
         "_chat_report_parse",
         "_chat2desk_api_token",
+        "_chat2desk_authorization_header",
         "_chat2desk_sync_timezone",
         "_chat2desk_parse_datetime",
         "_chat2desk_metric_day",
@@ -286,10 +288,16 @@ class ChatReportImportTests(unittest.TestCase):
 
     def test_chat2desk_api_token_normalizes_common_env_copies(self):
         parse_token = self.ns["_chat2desk_api_token"]
+        auth_header = self.ns["_chat2desk_authorization_header"]
         old_value = os.environ.get("CHAT2DESK_API_TOKEN")
+        old_scheme = os.environ.get("CHAT2DESK_AUTH_SCHEME")
         try:
             os.environ["CHAT2DESK_API_TOKEN"] = 'Authorization: Bearer "abc123"'
             self.assertEqual(parse_token(), "abc123")
+            os.environ.pop("CHAT2DESK_AUTH_SCHEME", None)
+            self.assertEqual(auth_header(), "Bearer abc123")
+            os.environ["CHAT2DESK_AUTH_SCHEME"] = "raw"
+            self.assertEqual(auth_header(), "abc123")
             os.environ["CHAT2DESK_API_TOKEN"] = "'xyz789'"
             self.assertEqual(parse_token(), "xyz789")
         finally:
@@ -297,6 +305,10 @@ class ChatReportImportTests(unittest.TestCase):
                 os.environ.pop("CHAT2DESK_API_TOKEN", None)
             else:
                 os.environ["CHAT2DESK_API_TOKEN"] = old_value
+            if old_scheme is None:
+                os.environ.pop("CHAT2DESK_AUTH_SCHEME", None)
+            else:
+                os.environ["CHAT2DESK_AUTH_SCHEME"] = old_scheme
 
     def test_response_time_average_and_surge_filter(self):
         parse = self.ns["_chat_report_parse"]
