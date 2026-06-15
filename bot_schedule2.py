@@ -19576,6 +19576,39 @@ def import_work_schedules_statuses_csv():
             STATUS_IMPORT_LOCK.release()
 
 
+@app.route('/api/chat_manager/surge_windows', methods=['GET', 'PUT'])
+@require_api_key
+def chat_manager_surge_windows():
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not (_is_admin_role(requester[3]) or _is_supervisor_role(requester[3])):
+            return jsonify({"error": "Forbidden"}), 403
+
+        if request.method == 'GET':
+            month = request.args.get('month') or datetime.now().strftime('%Y-%m')
+            result = db.get_chat_metric_surge_windows(month)
+            return jsonify({"status": "success", **result}), 200
+
+        payload = request.get_json(silent=True) or {}
+        month = payload.get('month') or request.args.get('month') or datetime.now().strftime('%Y-%m')
+        windows = payload.get('windows') or []
+        result = db.save_chat_metric_surge_windows(month, windows, updated_by=requester_id)
+        return jsonify({
+            "status": "success",
+            "message": "Окна наплыва сохранены",
+            **result
+        }), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error saving chat manager surge windows: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/chat_manager/metrics/import_csv', methods=['POST'])
 @require_api_key
 def import_chat_manager_metrics_csv():
@@ -19607,9 +19640,26 @@ def import_chat_manager_metrics_csv():
             if _chat_metrics_parse_date(default_date) is None:
                 return jsonify({"error": "date must be in YYYY-MM-DD format"}), 400
 
-        # Окна «наплыва» для отчёта времени ответа (JSON-массив {start,end}); по request_start
-        # такие строки исключаются из расчёта на этапе загрузки (в БД сырьё не сохраняется).
+        # Окна «наплыва» для отчёта времени ответа (JSON-массив {start,end,description});
+        # по request_start такие строки исключаются из расчёта. Сами окна хранятся
+        # отдельно в chat_metric_surge_windows и подтягиваются по surge_month, если
+        # форма не передала явный список.
         surge_windows_raw = request.form.get('surge_windows') or request.args.get('surge_windows')
+        surge_month = request.form.get('surge_month') or request.args.get('surge_month') or None
+        if not surge_month:
+            if default_date:
+                parsed_default_day = _chat_metrics_parse_date(default_date)
+                surge_month = parsed_default_day.strftime('%Y-%m') if parsed_default_day else None
+            if not surge_month:
+                surge_month = datetime.now().strftime('%Y-%m')
+        if not surge_windows_raw:
+            try:
+                saved_surge = db.get_chat_metric_surge_windows(surge_month)
+                saved_windows = saved_surge.get('windows') if isinstance(saved_surge, dict) else []
+                if saved_windows:
+                    surge_windows_raw = json.dumps(saved_windows, ensure_ascii=False)
+            except Exception:
+                logging.exception("failed to load saved chat metric surge windows for %s", surge_month)
 
         content_length = request.content_length
         if content_length is not None and int(content_length) > STATUS_IMPORT_MAX_FILE_SIZE_BYTES:
@@ -19656,17 +19706,21 @@ def import_chat_manager_metrics_csv():
         if report is not None:
             metrics = report.get('metrics') or []
             if not metrics:
+                empty_import_block = {
+                    "batch_id": None,
+                    "detected_type": report.get('detected_type'),
+                    "detected_label": report.get('detected_label'),
+                    "source_rows": int(report.get('source_rows') or 0),
+                    "matched_rows": 0,
+                    "processed": 0,
+                    "unmatched_count": int(report.get('unmatched_count') or 0),
+                    "surge_month": surge_month
+                }
+                if report.get('excluded_surge_rows') is not None:
+                    empty_import_block["excluded_surge_rows"] = int(report.get('excluded_surge_rows') or 0)
                 return jsonify({
                     "message": "Нет валидных метрик для сохранения",
-                    "import": {
-                        "batch_id": None,
-                        "detected_type": report.get('detected_type'),
-                        "detected_label": report.get('detected_label'),
-                        "source_rows": int(report.get('source_rows') or 0),
-                        "matched_rows": 0,
-                        "processed": 0,
-                        "unmatched_count": int(report.get('unmatched_count') or 0)
-                    },
+                    "import": empty_import_block,
                     "warnings": {"unmatched_operators": report.get('unmatched_preview') or []}
                 }), 200
 
@@ -19683,7 +19737,8 @@ def import_chat_manager_metrics_csv():
                 "matched_rows": int(report.get('matched_rows') or 0),
                 "unmatched_count": int(report.get('unmatched_count') or 0),
                 "file_name": file_name,
-                "file_size_bytes": len(raw_bytes or b'')
+                "file_size_bytes": len(raw_bytes or b''),
+                "surge_month": surge_month
             }
             if report.get('excluded_surge_rows') is not None:
                 import_block["excluded_surge_rows"] = int(report.get('excluded_surge_rows') or 0)
