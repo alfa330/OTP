@@ -209,6 +209,16 @@ API_TOKEN = os.getenv('BOT_TOKEN')
 super_admin_id = int(os.getenv('SUPER_ADMIN_ID', '0'))
 super_admin_login = os.getenv('SUPER_ADMIN_LOGIN', 'admin4')
 super_admin_password = os.getenv('SUPER_ADMIN_PASSWORD', 'admin1234')
+CHAT2DESK_API_BASE_URL = (os.getenv('CHAT2DESK_API_BASE_URL') or 'https://api.chat2desk.com').strip().rstrip('/')
+CHAT2DESK_API_TOKEN = (os.getenv('CHAT2DESK_API_TOKEN') or '').strip()
+CHAT2DESK_SYNC_ENABLED = _env_bool('CHAT2DESK_SYNC_ENABLED', True)
+CHAT2DESK_SYNC_TIMEZONE = (os.getenv('CHAT2DESK_SYNC_TIMEZONE') or 'Asia/Almaty').strip() or 'Asia/Almaty'
+CHAT2DESK_SYNC_HOUR = _env_int('CHAT2DESK_SYNC_HOUR', 4, minimum=0, maximum=23)
+CHAT2DESK_SYNC_MINUTE = _env_int('CHAT2DESK_SYNC_MINUTE', 10, minimum=0, maximum=59)
+CHAT2DESK_SYNC_DAYS_BACK = _env_int('CHAT2DESK_SYNC_DAYS_BACK', 1, minimum=1, maximum=31)
+CHAT2DESK_API_TIMEOUT_SECONDS = _env_int('CHAT2DESK_API_TIMEOUT_SECONDS', 45, minimum=5, maximum=300)
+CHAT2DESK_API_PAGE_LIMIT = _env_int('CHAT2DESK_API_PAGE_LIMIT', 200, minimum=1, maximum=200)
+CHAT2DESK_API_MAX_PAGES = _env_int('CHAT2DESK_API_MAX_PAGES', 100, minimum=1, maximum=1000)
 
 if not API_TOKEN:
     raise Exception("Переменная окружения BOT_TOKEN обязательна.")
@@ -17218,6 +17228,428 @@ def _chat_report_parse(header, data_rows, operator_lookup, operator_token_index,
     return result
 
 
+CHAT2DESK_STATISTICS_REPORT_REPLIES = 'operator_replies'
+CHAT2DESK_STATISTICS_REPORT_RATING = 'rating'
+
+
+def _chat2desk_api_token():
+    return (os.getenv('CHAT2DESK_API_TOKEN') or CHAT2DESK_API_TOKEN or '').strip()
+
+
+def _chat2desk_api_base_url():
+    return (os.getenv('CHAT2DESK_API_BASE_URL') or CHAT2DESK_API_BASE_URL or 'https://api.chat2desk.com').strip().rstrip('/')
+
+
+def _chat2desk_sync_enabled():
+    return _env_bool('CHAT2DESK_SYNC_ENABLED', CHAT2DESK_SYNC_ENABLED)
+
+
+def _chat2desk_sync_timezone():
+    tz_name = (os.getenv('CHAT2DESK_SYNC_TIMEZONE') or CHAT2DESK_SYNC_TIMEZONE or 'Asia/Almaty').strip() or 'Asia/Almaty'
+    try:
+        return ZoneInfo(tz_name)
+    except Exception:
+        logging.warning("Invalid CHAT2DESK_SYNC_TIMEZONE=%s, fallback to Asia/Almaty", tz_name)
+        return ZoneInfo('Asia/Almaty')
+
+
+def _chat2desk_parse_datetime(value, target_tz=None):
+    if value in (None, ''):
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, (int, float)):
+        try:
+            parsed = datetime.fromtimestamp(value, tz=target_tz or _chat2desk_sync_timezone())
+        except Exception:
+            return None
+    else:
+        text = str(value or '').strip()
+        if not text:
+            return None
+        parsed = None
+        try:
+            parsed = datetime.fromisoformat(text.replace('Z', '+00:00'))
+        except Exception:
+            parsed = _chat_report_parse_dt(text)
+        if parsed is None:
+            return None
+
+    if getattr(parsed, 'tzinfo', None) is not None:
+        try:
+            parsed = parsed.astimezone(target_tz or _chat2desk_sync_timezone())
+        except Exception:
+            pass
+        parsed = parsed.replace(tzinfo=None)
+    return parsed
+
+
+def _chat2desk_metric_day(value, default_day, target_tz=None):
+    parsed = _chat2desk_parse_datetime(value, target_tz=target_tz)
+    if isinstance(parsed, datetime):
+        return parsed.date().strftime('%Y-%m-%d')
+    day = _chat_metrics_parse_date(default_day)
+    return day.strftime('%Y-%m-%d') if day else None
+
+
+def _chat2desk_row_first(row, *keys):
+    if not isinstance(row, dict):
+        return None
+    for key in keys:
+        if key in row and row.get(key) not in (None, ''):
+            return row.get(key)
+    return None
+
+
+def _chat2desk_row_is_nonempty(row):
+    if isinstance(row, dict):
+        return any(str(value or '').strip() for value in row.values())
+    return bool(row)
+
+
+def _chat2desk_extract_response_rows(payload):
+    if isinstance(payload, list):
+        return payload
+    if not isinstance(payload, dict):
+        return []
+    for key in ('data', 'statistics', 'items', 'result', 'results'):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return value
+    return []
+
+
+def _chat2desk_extract_total(payload):
+    if not isinstance(payload, dict):
+        return None
+    candidates = []
+    for container_key in ('meta', 'pagination'):
+        container = payload.get(container_key)
+        if isinstance(container, dict):
+            candidates.extend([container.get('total'), container.get('total_count'), container.get('count')])
+    candidates.extend([payload.get('total'), payload.get('total_count')])
+    for raw in candidates:
+        try:
+            value = int(raw)
+            if value >= 0:
+                return value
+        except Exception:
+            continue
+    return None
+
+
+def _chat2desk_statistics_get(report, day_str):
+    token = _chat2desk_api_token()
+    if not token:
+        raise RuntimeError("CHAT2DESK_API_TOKEN is not set")
+
+    limit = _env_int('CHAT2DESK_API_PAGE_LIMIT', CHAT2DESK_API_PAGE_LIMIT, minimum=1, maximum=200)
+    timeout = _env_int('CHAT2DESK_API_TIMEOUT_SECONDS', CHAT2DESK_API_TIMEOUT_SECONDS, minimum=5, maximum=300)
+    url = f"{_chat2desk_api_base_url()}/v1/statistics"
+    headers = {
+        'Authorization': token,
+        'Accept': 'application/json',
+    }
+
+    rows = []
+    offset = 0
+    max_pages = _env_int('CHAT2DESK_API_MAX_PAGES', CHAT2DESK_API_MAX_PAGES, minimum=1, maximum=1000)
+    for _page_number in range(max_pages):
+        params = {
+            'report': report,
+            'date': day_str,
+            'limit': limit,
+            'offset': offset,
+        }
+        response = requests.get(url, headers=headers, params=params, timeout=timeout)
+        if response.status_code >= 400:
+            error_text = str(response.text or '').strip()
+            if len(error_text) > 500:
+                error_text = error_text[:500] + '...'
+            raise RuntimeError(f"Chat2Desk statistics {report} {day_str} failed: HTTP {response.status_code} {error_text}")
+        try:
+            payload = response.json()
+        except Exception as exc:
+            raise RuntimeError(f"Chat2Desk statistics {report} {day_str} returned invalid JSON") from exc
+
+        page_rows = _chat2desk_extract_response_rows(payload)
+        if not page_rows:
+            break
+        rows.extend(page_rows)
+
+        total = _chat2desk_extract_total(payload)
+        offset += len(page_rows)
+        if len(page_rows) < limit:
+            break
+        if total is not None and offset >= total:
+            break
+    else:
+        logging.warning(
+            "Chat2Desk statistics %s %s stopped after CHAT2DESK_API_MAX_PAGES=%s",
+            report,
+            day_str,
+            max_pages
+        )
+
+    return rows
+
+
+def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_rows,
+                                                  operator_lookup, operator_token_index,
+                                                  surge_windows=None, preview_limit=None):
+    preview_limit_value = STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
+    if preview_limit is not None:
+        try:
+            preview_limit_value = max(1, int(preview_limit))
+        except Exception:
+            preview_limit_value = STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
+
+    target_tz = _chat2desk_sync_timezone()
+    windows = _chat_report_parse_surge_windows(surge_windows)
+    metrics_by_key = {}
+    unmatched_names = {}
+    unmatched_seen = set()
+    excluded_surge = 0
+    source_rows = sum(1 for row in (reply_rows or []) if _chat2desk_row_is_nonempty(row))
+    source_rows += sum(1 for row in (rating_rows or []) if _chat2desk_row_is_nonempty(row))
+
+    def metric_for(op_id, metric_day):
+        return metrics_by_key.setdefault((int(op_id), metric_day), {
+            'operator_id': int(op_id),
+            'day': metric_day,
+        })
+
+    def note_unmatched(raw, row_key=None):
+        key = str(raw or '').strip() or '(empty)'
+        seen_key = (key, row_key) if row_key is not None else None
+        if seen_key is not None:
+            if seen_key in unmatched_seen:
+                return
+            unmatched_seen.add(seen_key)
+        unmatched_names[key] = unmatched_names.get(key, 0) + 1
+
+    response_agg = {}
+    for row_index, row in enumerate(reply_rows or []):
+        if not isinstance(row, dict) or not _chat2desk_row_is_nonempty(row):
+            continue
+        raw_name = _chat2desk_row_first(row, 'operator_name', 'operator', 'name')
+        start_value = _chat2desk_row_first(row, 'request_start', 'reply_start', 'created_at')
+        start_dt = _chat2desk_parse_datetime(start_value, target_tz=target_tz)
+        reaction = _chat_metrics_parse_number(_chat2desk_row_first(row, 'reaction_time'))
+        if reaction is None:
+            reaction = _chat_metrics_parse_number(_chat2desk_row_first(row, 'working_reaction_time'))
+        if not raw_name or start_dt is None or reaction is None:
+            if raw_name:
+                note_unmatched(raw_name, f"reply:{row_index}")
+            continue
+        if _chat_report_in_surge(start_dt, windows):
+            excluded_surge += 1
+            continue
+        op_id, _ = _chat_report_resolve_operator(raw_name, operator_lookup, operator_token_index)
+        if op_id is None:
+            note_unmatched(raw_name, f"reply:{row_index}")
+            continue
+        metric_day = start_dt.date().strftime('%Y-%m-%d')
+        bucket = response_agg.setdefault((op_id, metric_day), {'sum': 0.0, 'count': 0})
+        bucket['sum'] += float(reaction)
+        bucket['count'] += 1
+
+    score_agg = {}
+    for row_index, row in enumerate(rating_rows or []):
+        if not isinstance(row, dict) or not _chat2desk_row_is_nonempty(row):
+            continue
+        raw_name = _chat2desk_row_first(row, 'operator_name', 'score_operator_name', 'operator', 'name')
+        score = _chat_metrics_parse_number(_chat2desk_row_first(row, 'rating_scale_score', 'score', 'rating'))
+        metric_day = _chat2desk_metric_day(
+            _chat2desk_row_first(row, 'created_at', 'request_start', 'date'),
+            day_str,
+            target_tz=target_tz
+        )
+        if not raw_name or score is None or not metric_day:
+            if raw_name:
+                note_unmatched(raw_name, f"rating:{row_index}")
+            continue
+        op_id, _ = _chat_report_resolve_operator(raw_name, operator_lookup, operator_token_index)
+        if op_id is None:
+            note_unmatched(raw_name, f"rating:{row_index}")
+            continue
+        bucket = score_agg.setdefault((op_id, metric_day), {'score_sum': 0.0, 'score_count': 0})
+        bucket['score_sum'] += float(score)
+        bucket['score_count'] += 1
+
+    update_fields = set()
+    for (op_id, metric_day), bucket in response_agg.items():
+        if bucket['count'] <= 0:
+            continue
+        metric = metric_for(op_id, metric_day)
+        metric['avg_response_time_seconds'] = round(bucket['sum'] / bucket['count'], 2)
+    if response_agg:
+        update_fields.update(CHAT_REPORT_TYPE_FIELDS[CHAT_REPORT_TYPE_RESPONSE])
+
+    for (op_id, metric_day), bucket in score_agg.items():
+        if bucket['score_count'] <= 0:
+            continue
+        metric = metric_for(op_id, metric_day)
+        metric['score_sum'] = round(bucket['score_sum'], 4)
+        metric['score_count'] = int(bucket['score_count'])
+        metric['avg_score'] = round(bucket['score_sum'] / bucket['score_count'], 4)
+    if score_agg:
+        update_fields.update(CHAT_REPORT_TYPE_FIELDS[CHAT_REPORT_TYPE_SCORE])
+
+    if response_agg and score_agg:
+        detected_type = CHAT_REPORT_TYPE_COMBINED
+        detected_types = [CHAT_REPORT_TYPE_RESPONSE, CHAT_REPORT_TYPE_SCORE]
+        detected_label = 'Chat2Desk API: ' + ', '.join(CHAT_REPORT_TYPE_LABELS[t] for t in detected_types)
+    elif response_agg:
+        detected_type = CHAT_REPORT_TYPE_RESPONSE
+        detected_types = [CHAT_REPORT_TYPE_RESPONSE]
+        detected_label = f"Chat2Desk API: {CHAT_REPORT_TYPE_LABELS[CHAT_REPORT_TYPE_RESPONSE]}"
+    elif score_agg:
+        detected_type = CHAT_REPORT_TYPE_SCORE
+        detected_types = [CHAT_REPORT_TYPE_SCORE]
+        detected_label = f"Chat2Desk API: {CHAT_REPORT_TYPE_LABELS[CHAT_REPORT_TYPE_SCORE]}"
+    else:
+        detected_type = CHAT_REPORT_TYPE_COMBINED
+        detected_types = []
+        detected_label = 'Chat2Desk API'
+
+    metrics = sorted(metrics_by_key.values(), key=lambda item: (item.get('day') or '', int(item.get('operator_id') or 0)))
+    unmatched_sorted = sorted(unmatched_names.items(), key=lambda kv: (-kv[1], kv[0]))
+    return {
+        'detected_type': detected_type,
+        'detected_label': detected_label,
+        'detected_types': detected_types,
+        'update_fields': sorted(update_fields),
+        'metrics': metrics,
+        'source_rows': int(source_rows),
+        'matched_rows': len(metrics),
+        'unmatched_count': int(sum(unmatched_names.values())),
+        'unmatched_preview': [{'name': name, 'rows': count} for name, count in unmatched_sorted[:preview_limit_value]],
+        'excluded_surge_rows': int(excluded_surge),
+        'api_rows': {
+            CHAT2DESK_STATISTICS_REPORT_REPLIES: len(reply_rows or []),
+            CHAT2DESK_STATISTICS_REPORT_RATING: len(rating_rows or []),
+        },
+    }
+
+
+def _chat2desk_saved_surge_windows_for_day(day_obj):
+    try:
+        result = db.get_chat_metric_surge_windows(day_obj.strftime('%Y-%m'))
+        if isinstance(result, dict):
+            return result.get('windows') or []
+    except Exception:
+        logging.exception("Failed to load chat metric surge windows for %s", day_obj.strftime('%Y-%m'))
+    return []
+
+
+def _chat2desk_build_daily_metrics(day_str, operator_lookup, operator_token_index, surge_windows=None):
+    reply_rows = _chat2desk_statistics_get(CHAT2DESK_STATISTICS_REPORT_REPLIES, day_str)
+    rating_rows = _chat2desk_statistics_get(CHAT2DESK_STATISTICS_REPORT_RATING, day_str)
+    return _chat2desk_build_metrics_from_statistics_rows(
+        day_str,
+        reply_rows,
+        rating_rows,
+        operator_lookup,
+        operator_token_index,
+        surge_windows=surge_windows,
+        preview_limit=STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
+    )
+
+
+def _chat2desk_sync_target_days(day=None):
+    if day is not None:
+        parsed_day = _chat_metrics_parse_date(day)
+        if parsed_day is None:
+            raise ValueError("day must be in YYYY-MM-DD format")
+        return [parsed_day]
+
+    today = datetime.now(_chat2desk_sync_timezone()).date()
+    days_back = _env_int('CHAT2DESK_SYNC_DAYS_BACK', CHAT2DESK_SYNC_DAYS_BACK, minimum=1, maximum=31)
+    return [today - timedelta(days=offset) for offset in range(days_back, 0, -1)]
+
+
+def sync_chat2desk_daily_metrics(day=None, triggered_by='scheduler'):
+    if not _chat2desk_sync_enabled():
+        logging.info("Chat2Desk daily metrics sync skipped: disabled")
+        return {'status': 'skipped', 'reason': 'disabled'}
+    if not _chat2desk_api_token():
+        logging.warning("Chat2Desk daily metrics sync skipped: CHAT2DESK_API_TOKEN is not set")
+        return {'status': 'skipped', 'reason': 'missing_token'}
+
+    if not CHAT_MANAGER_METRICS_IMPORT_LOCK.acquire(blocking=False):
+        logging.warning("Chat2Desk daily metrics sync skipped: metrics import is already running")
+        return {'status': 'skipped', 'reason': 'locked'}
+
+    started = time.time()
+    day_results = []
+    try:
+        operator_lookup = _status_import_build_operator_lookup()
+        operator_token_index = _chat_report_build_operator_token_index()
+        target_days = _chat2desk_sync_target_days(day)
+
+        for day_obj in target_days:
+            day_str = day_obj.strftime('%Y-%m-%d')
+            try:
+                surge_windows = _chat2desk_saved_surge_windows_for_day(day_obj)
+                report = _chat2desk_build_daily_metrics(
+                    day_str,
+                    operator_lookup,
+                    operator_token_index,
+                    surge_windows=surge_windows
+                )
+                metrics = report.get('metrics') or []
+                update_fields = report.get('update_fields') or []
+                save_summary = {'batch_id': None, 'processed': 0}
+                if metrics and update_fields:
+                    save_summary = db.save_chat_manager_daily_metrics(
+                        metrics=metrics,
+                        imported_by=None,
+                        update_fields=update_fields
+                    )
+                day_results.append({
+                    'day': day_str,
+                    'status': 'success',
+                    'source_rows': int(report.get('source_rows') or 0),
+                    'matched_rows': int(report.get('matched_rows') or 0),
+                    'processed': int((save_summary or {}).get('processed') or 0),
+                    'unmatched_count': int(report.get('unmatched_count') or 0),
+                    'excluded_surge_rows': int(report.get('excluded_surge_rows') or 0),
+                    'update_fields': update_fields,
+                    'api_rows': report.get('api_rows') or {},
+                    'batch_id': (save_summary or {}).get('batch_id'),
+                })
+                logging.info(
+                    "Chat2Desk daily metrics sync %s: rows=%s matched=%s processed=%s fields=%s surge_excluded=%s",
+                    day_str,
+                    int(report.get('source_rows') or 0),
+                    int(report.get('matched_rows') or 0),
+                    int((save_summary or {}).get('processed') or 0),
+                    ','.join(update_fields),
+                    int(report.get('excluded_surge_rows') or 0)
+                )
+            except Exception as exc:
+                logging.exception("Chat2Desk daily metrics sync failed for %s", day_str)
+                day_results.append({
+                    'day': day_str,
+                    'status': 'failed',
+                    'error': str(exc)
+                })
+
+        has_failed = any(item.get('status') == 'failed' for item in day_results)
+        return {
+            'status': 'partial_failed' if has_failed else 'success',
+            'triggered_by': triggered_by,
+            'days': day_results,
+            'elapsed_seconds': round(time.time() - started, 2)
+        }
+    finally:
+        try:
+            CHAT_MANAGER_METRICS_IMPORT_LOCK.release()
+        except Exception:
+            pass
+
+
 def _ws_time_to_minutes(value):
     if value is None:
         return 0
@@ -29826,6 +30258,11 @@ async def run_recruiting_resumes_job_async(triggered_by='scheduler'):
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(executor_pool, sync_recruiting_resumes_job, triggered_by)
 
+
+async def run_chat2desk_daily_metrics_sync_async(triggered_by='scheduler'):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(executor_pool, sync_chat2desk_daily_metrics, None, triggered_by)
+
 # === Главный запуск =============================================================================================
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('reject_reval:'))
 async def handle_reject_reval(callback_query: types.CallbackQuery, state: FSMContext):
@@ -29953,6 +30390,22 @@ if __name__ == '__main__':
         max_instances=1,
         coalesce=True
     )
+
+    if _chat2desk_sync_enabled():
+        scheduler.add_job(
+            run_chat2desk_daily_metrics_sync_async,
+            CronTrigger(
+                hour=_env_int('CHAT2DESK_SYNC_HOUR', CHAT2DESK_SYNC_HOUR, minimum=0, maximum=23),
+                minute=_env_int('CHAT2DESK_SYNC_MINUTE', CHAT2DESK_SYNC_MINUTE, minimum=0, maximum=59),
+                timezone=_chat2desk_sync_timezone()
+            ),
+            id='chat2desk_metrics_daily',
+            misfire_grace_time=3600,
+            max_instances=1,
+            coalesce=True
+        )
+    else:
+        logging.info("Chat2Desk daily metrics sync is disabled by CHAT2DESK_SYNC_ENABLED")
 
     # Ретеншн сырых событий статусов: удаляем operator_status_events старше горизонта хранения
     # (STATUS_EVENTS_RETENTION_DAYS, по умолчанию 120 дней). Сегменты (источник отчётов) не трогаем;

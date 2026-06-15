@@ -1,11 +1,13 @@
 import ast
 import csv
 import json
+import os
 import re
 import unittest
 from datetime import datetime, timedelta
 from io import StringIO
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 BOT_PATH = Path(__file__).resolve().parents[1] / "bot_schedule2.py"
 
@@ -19,8 +21,13 @@ def _chat_report_namespace():
         "CHAT_REPORT_TYPE_COMBINED",
         "CHAT_REPORT_TYPE_LABELS",
         "CHAT_REPORT_TYPE_FIELDS",
+        "CHAT2DESK_SYNC_TIMEZONE",
+        "CHAT2DESK_STATISTICS_REPORT_REPLIES",
+        "CHAT2DESK_STATISTICS_REPORT_RATING",
     }
     wanted_functions = {
+        "_env_bool",
+        "_env_int",
         "_status_import_normalize_header",
         "_status_import_normalize_operator_name",
         "_status_import_operator_name_variants",
@@ -37,6 +44,12 @@ def _chat_report_namespace():
         "_chat_report_parse_surge_windows",
         "_chat_report_in_surge",
         "_chat_report_parse",
+        "_chat2desk_sync_timezone",
+        "_chat2desk_parse_datetime",
+        "_chat2desk_metric_day",
+        "_chat2desk_row_first",
+        "_chat2desk_row_is_nonempty",
+        "_chat2desk_build_metrics_from_statistics_rows",
     }
 
     module = ast.parse(BOT_PATH.read_text(encoding="utf-8"))
@@ -52,10 +65,12 @@ def _chat_report_namespace():
     namespace = {
         "csv": csv,
         "json": json,
+        "os": os,
         "re": re,
         "datetime": datetime,
         "timedelta": timedelta,
         "StringIO": StringIO,
+        "ZoneInfo": ZoneInfo,
         "STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT": 30,
     }
     exec(compile(ast.Module(body=selected, type_ignores=[]), str(BOT_PATH), "exec"), namespace)
@@ -211,6 +226,60 @@ class ChatReportImportTests(unittest.TestCase):
         self.assertEqual(d10_after_surge["score_count"], 2)
         self.assertEqual(d10_after_surge["avg_score"], 4.0)
         self.assertEqual(d10_after_surge["avg_response_time_seconds"], 10.0)
+        self.assertEqual(res2["excluded_surge_rows"], 1)
+
+    def test_chat2desk_statistics_rows_import_score_and_response(self):
+        build = self.ns["_chat2desk_build_metrics_from_statistics_rows"]
+        operator_name = OPERATORS[1][1]
+        replies = [
+            {
+                "operator_name": operator_name,
+                "request_start": "2026-06-10 10:00:00",
+                "reaction_time": "10",
+            },
+            {
+                "operator_name": operator_name,
+                "request_start": "2026-06-10 10:05:00",
+                "reaction_time": "20",
+            },
+        ]
+        ratings = [
+            {
+                "operator_name": operator_name,
+                "created_at": "2026-06-10 12:00:00",
+                "rating_scale_score": "5",
+            },
+            {
+                "operator_name": operator_name,
+                "created_at": "2026-06-10 13:00:00",
+                "rating_scale_score": "3",
+            },
+        ]
+
+        res = build("2026-06-10", replies, ratings, self.lookup, self.index)
+        self.assertEqual(res["detected_type"], "combined")
+        self.assertEqual(set(res["update_fields"]), {
+            "score_sum", "score_count", "avg_score", "avg_response_time_seconds"
+        })
+        self.assertEqual(res["source_rows"], 4)
+        self.assertEqual(res["api_rows"]["operator_replies"], 2)
+        self.assertEqual(res["api_rows"]["rating"], 2)
+
+        by_key = {(m["operator_id"], m["day"]): m for m in res["metrics"]}
+        d10 = by_key[(2, "2026-06-10")]
+        self.assertEqual(d10["avg_response_time_seconds"], 15.0)
+        self.assertEqual(d10["score_sum"], 8.0)
+        self.assertEqual(d10["score_count"], 2)
+        self.assertEqual(d10["avg_score"], 4.0)
+
+        surge = json.dumps([{"start": "2026-06-10T10:01", "end": "2026-06-10T10:10"}])
+        res2 = build("2026-06-10", replies, ratings, self.lookup, self.index, surge_windows=surge)
+        d10_after_surge = {
+            (m["operator_id"], m["day"]): m for m in res2["metrics"]
+        }[(2, "2026-06-10")]
+        self.assertEqual(d10_after_surge["avg_response_time_seconds"], 10.0)
+        self.assertEqual(d10_after_surge["score_count"], 2)
+        self.assertEqual(d10_after_surge["avg_score"], 4.0)
         self.assertEqual(res2["excluded_surge_rows"], 1)
 
     def test_response_time_average_and_surge_filter(self):
