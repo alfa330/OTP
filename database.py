@@ -11118,7 +11118,7 @@ class Database:
 
         return {"month": month, "days_in_month": days, "operators": operators}
 
-    def get_daily_hours_for_all_month(self, month):
+    def get_daily_hours_for_all_month(self, month, department_id=None):
         """
         Возвращает все daily_hours и агрегаты work_hours для всех операторов за месяц YYYY-MM.
         Аналогично get_daily_hours_by_supervisor_month, но без фильтра по супервайзеру.
@@ -11153,7 +11153,8 @@ class Database:
                     COALESCE(w.total_calls, 0) as total_calls,
                     COALESCE(w.total_efficiency_hours, 0) as total_efficiency_hours,
                     COALESCE(w.calls_per_hour, 0) as calls_per_hour,
-                    COALESCE(w.fines, 0) as fines
+                    COALESCE(w.fines, 0) as fines,
+                    u.department_id
                 FROM users u
                 LEFT JOIN work_hours w
                 ON w.operator_id = u.id AND w.month = %s
@@ -11168,8 +11169,9 @@ class Database:
                                WHERE gom.operator_id = u.id AND gom.start_date <= %s
                                  AND (gom.end_date IS NULL OR gom.end_date >= %s))
                 )
+                AND (%s::int IS NULL OR u.department_id = %s::int)
                 ORDER BY u.name
-            """, (month, month, start, end, end, start))
+            """, (month, month, start, end, end, start, department_id, department_id))
             operator_rows = cursor.fetchall()
 
             if not operator_rows:
@@ -11285,7 +11287,7 @@ class Database:
             for row in operator_rows:
                 (op_id, op_name, rate, status, sup_id, direction_name, calculation_model_raw, norm_hours,
                 regular_hours, total_break_time, total_talk_time,
-                total_calls, total_efficiency_hours, calls_per_hour, fines) = row
+                total_calls, total_efficiency_hours, calls_per_hour, fines, operator_department_id) = row
                 calculation_model_code = self._normalize_calculation_model_code(calculation_model_raw, direction_name)
                 op_daily = daily_map.get(op_id, {})
                 training_hours = float(training_totals_by_operator.get(op_id, 0.0)) if isinstance(training_totals_by_operator, dict) else 0.0
@@ -11320,6 +11322,7 @@ class Database:
                     "operator_id": op_id,
                     "name": op_name,
                     "direction": direction_name,
+                    "department_id": operator_department_id,
                     "calculation_model_code": calculation_model_code,
                     "calculationModelCode": calculation_model_code,
                     "supervisor_id": sup_id,
@@ -15996,7 +15999,8 @@ class Database:
         requester_role,
         operator_ids=None,
         direction_ids=None,
-        enforce_supervisor_scope=True
+        enforce_supervisor_scope=True,
+        scope_department_id=None
     ):
         role_norm = self._normalize_technical_issue_role(requester_role)
         if not (role_has_min(role_norm, 'admin') or role_norm == 'sv'):
@@ -16008,7 +16012,7 @@ class Database:
 
         if operator_ids_norm:
             cursor.execute("""
-                SELECT id, supervisor_id
+                SELECT id, supervisor_id, department_id
                 FROM users
                 WHERE role = 'operator' AND id = ANY(%s)
             """, (operator_ids_norm,))
@@ -16018,8 +16022,16 @@ class Database:
             if missing_ids:
                 raise ValueError(f"Operators not found: {', '.join(map(str, missing_ids))}")
 
-            if role_norm == 'sv' and enforce_supervisor_scope:
-                forbidden_ids = [int(op_id) for op_id, supervisor_id in rows if int(supervisor_id or 0) != int(requester_id)]
+            if role_norm == 'sv' and scope_department_id is not None:
+                forbidden_ids = [
+                    int(op_id)
+                    for op_id, _supervisor_id, department_id in rows
+                    if int(department_id or 0) != int(scope_department_id)
+                ]
+                if forbidden_ids:
+                    raise ValueError(f"Forbidden operators for sv: {', '.join(map(str, forbidden_ids))}")
+            elif role_norm == 'sv' and enforce_supervisor_scope:
+                forbidden_ids = [int(op_id) for op_id, supervisor_id, _department_id in rows if int(supervisor_id or 0) != int(requester_id)]
                 if forbidden_ids:
                     raise ValueError(f"Forbidden operators for sv: {', '.join(map(str, forbidden_ids))}")
             target_operator_ids.update(found_ids)
@@ -16035,7 +16047,16 @@ class Database:
             if missing_directions:
                 raise ValueError(f"Directions not found or inactive: {', '.join(map(str, missing_directions))}")
 
-            if role_norm == 'sv' and enforce_supervisor_scope:
+            if role_norm == 'sv' and scope_department_id is not None:
+                cursor.execute("""
+                    SELECT id
+                    FROM users
+                    WHERE role = 'operator'
+                      AND direction_id = ANY(%s)
+                      AND department_id = %s
+                      AND COALESCE(status, 'working') <> 'fired'
+                """, (direction_ids_norm, int(scope_department_id)))
+            elif role_norm == 'sv' and enforce_supervisor_scope:
                 cursor.execute("""
                     SELECT id
                     FROM users
@@ -16149,7 +16170,8 @@ class Database:
         comment=None,
         operator_ids=None,
         direction_ids=None,
-        workplace_number=None
+        workplace_number=None,
+        scope_department_id=None
     ):
         role_norm = self._normalize_technical_issue_role(requester_role)
         if not (role_has_min(role_norm, 'admin') or role_norm == 'sv'):
@@ -16179,7 +16201,8 @@ class Database:
                 requester_role=role_norm,
                 operator_ids=operator_ids,
                 direction_ids=direction_ids,
-                enforce_supervisor_scope=False
+                enforce_supervisor_scope=False,
+                scope_department_id=scope_department_id
             )
 
             overlaps_by_operator = self._find_shift_overlap_intervals_for_technical_issue_tx(
@@ -16273,7 +16296,8 @@ class Database:
         reason=None,
         workplace_number=None,
         limit=500,
-        offset=0
+        offset=0,
+        scope_department_id=None
     ):
         role_norm = self._normalize_technical_issue_role(requester_role)
         if not (role_has_min(role_norm, 'admin') or role_norm == 'sv'):
@@ -16287,7 +16311,7 @@ class Database:
         # Изоляция отделов: обычный супервайзер видит тех. причины только своего
         # отдела; админ/супер-админ — все. Без отдела СВ не видит ничего (а не всё).
         if not role_has_min(role_norm, 'admin'):
-            scope_dept = self.get_user_department_id(requester_id)
+            scope_dept = int(scope_department_id) if scope_department_id is not None else self.get_user_department_id(requester_id)
             if scope_dept is None:
                 return {'total': 0, 'items': []}
             where_parts.append("op.department_id = %s")
@@ -16417,7 +16441,7 @@ class Database:
                 'items': items
             }
 
-    def delete_operator_technical_issue(self, requester_id, requester_role, issue_id):
+    def delete_operator_technical_issue(self, requester_id, requester_role, issue_id, scope_department_id=None):
         role_norm = self._normalize_technical_issue_role(requester_role)
         if not (role_has_min(role_norm, 'admin') or role_norm == 'sv'):
             raise ValueError("Only admin and sv can delete technical issues")
@@ -16438,6 +16462,7 @@ class Database:
                     ti.batch_id::text,
                     ti.operator_id,
                     op.supervisor_id,
+                    op.department_id,
                     ti.created_by,
                     ti.issue_date,
                     ti.start_time,
@@ -16454,9 +16479,14 @@ class Database:
                 raise ValueError("Technical issue not found")
 
             supervisor_id = int(row[3]) if row[3] is not None else None
-            issue_created_by = int(row[4]) if row[4] is not None else None
+            operator_department_id = int(row[4]) if row[4] is not None else None
+            issue_created_by = int(row[5]) if row[5] is not None else None
             if role_norm == 'sv':
-                can_manage_by_scope = supervisor_id == requester_id_int
+                can_manage_by_scope = (
+                    operator_department_id == int(scope_department_id)
+                    if scope_department_id is not None
+                    else supervisor_id == requester_id_int
+                )
                 can_manage_by_creator = issue_created_by == requester_id_int
                 if not (can_manage_by_scope or can_manage_by_creator):
                     raise PermissionError("Forbidden")
@@ -16477,10 +16507,10 @@ class Database:
                 'id': int(row[0]),
                 'batch_id': row[1],
                 'operator_id': int(row[2]),
-                'date': row[5].strftime('%Y-%m-%d') if row[5] else None,
-                'start_time': row[6].strftime('%H:%M') if row[6] else None,
-                'end_time': row[7].strftime('%H:%M') if row[7] else None,
-                'reason': row[8]
+                'date': row[6].strftime('%Y-%m-%d') if row[6] else None,
+                'start_time': row[7].strftime('%H:%M') if row[7] else None,
+                'end_time': row[8].strftime('%H:%M') if row[8] else None,
+                'reason': row[9]
             }
 
     def create_operator_offline_activity(
@@ -16491,7 +16521,8 @@ class Database:
         start_time=None,
         end_time=None,
         comment=None,
-        operator_id=None
+        operator_id=None,
+        scope_department_id=None
     ):
         role_norm = self._normalize_technical_issue_role(requester_role)
         if not (role_has_min(role_norm, 'admin') or role_norm == 'sv'):
@@ -16516,7 +16547,8 @@ class Database:
                 requester_id=requester_id_int,
                 requester_role=role_norm,
                 operator_ids=operator_ids_norm,
-                direction_ids=None
+                direction_ids=None,
+                scope_department_id=scope_department_id
             )
             target_operator_id = int(target_operator_ids[0])
 
@@ -16590,7 +16622,8 @@ class Database:
         operator_id=None,
         supervisor_id=None,
         limit=500,
-        offset=0
+        offset=0,
+        scope_department_id=None
     ):
         role_norm = self._normalize_technical_issue_role(requester_role)
         if not (role_has_min(role_norm, 'admin') or role_norm == 'sv'):
@@ -16611,8 +16644,12 @@ class Database:
             if supervisor_id_int <= 0:
                 raise ValueError("Invalid supervisor_id")
 
-        if role_norm == 'sv' and supervisor_id_int is None:
+        if role_norm == 'sv' and scope_department_id is None and supervisor_id_int is None:
             supervisor_id_int = requester_id_int
+
+        if not role_has_min(role_norm, 'admin') and scope_department_id is not None:
+            where_parts.append("op.department_id = %s")
+            params.append(int(scope_department_id))
 
         if supervisor_id_int is not None:
             where_parts.append("op.supervisor_id = %s")
@@ -16718,7 +16755,7 @@ class Database:
                 'items': items
             }
 
-    def delete_operator_offline_activity(self, requester_id, requester_role, activity_id):
+    def delete_operator_offline_activity(self, requester_id, requester_role, activity_id, scope_department_id=None):
         role_norm = self._normalize_technical_issue_role(requester_role)
         if not (role_has_min(role_norm, 'admin') or role_norm == 'sv'):
             raise ValueError("Only admin and sv can delete offline activities")
@@ -16739,6 +16776,7 @@ class Database:
                     oa.batch_id::text,
                     oa.operator_id,
                     op.supervisor_id,
+                    op.department_id,
                     oa.activity_date,
                     oa.start_time,
                     oa.end_time,
@@ -16754,8 +16792,15 @@ class Database:
                 raise ValueError("Offline activity not found")
 
             supervisor_id = int(row[3]) if row[3] is not None else None
-            if role_norm == 'sv' and supervisor_id != requester_id_int:
-                raise PermissionError("Forbidden")
+            operator_department_id = int(row[4]) if row[4] is not None else None
+            if role_norm == 'sv':
+                can_manage_by_scope = (
+                    operator_department_id == int(scope_department_id)
+                    if scope_department_id is not None
+                    else supervisor_id == requester_id_int
+                )
+                if not can_manage_by_scope:
+                    raise PermissionError("Forbidden")
 
             cursor.execute(
                 """
@@ -16773,10 +16818,10 @@ class Database:
                 'id': int(row[0]),
                 'batch_id': row[1],
                 'operator_id': int(row[2]),
-                'date': row[4].strftime('%Y-%m-%d') if row[4] else None,
-                'start_time': row[5].strftime('%H:%M') if row[5] else None,
-                'end_time': row[6].strftime('%H:%M') if row[6] else None,
-                'comment': row[7]
+                'date': row[5].strftime('%Y-%m-%d') if row[5] else None,
+                'start_time': row[6].strftime('%H:%M') if row[6] else None,
+                'end_time': row[7].strftime('%H:%M') if row[7] else None,
+                'comment': row[8]
             }
 
     def update_operator_offline_activity(
@@ -16788,7 +16833,8 @@ class Database:
         start_time=None,
         end_time=None,
         comment=None,
-        operator_id=None
+        operator_id=None,
+        scope_department_id=None
     ):
         role_norm = self._normalize_technical_issue_role(requester_role)
         if not (role_has_min(role_norm, 'admin') or role_norm == 'sv'):
@@ -16810,6 +16856,7 @@ class Database:
                     oa.batch_id::text,
                     oa.operator_id,
                     op.supervisor_id,
+                    op.department_id,
                     oa.activity_date,
                     oa.start_time,
                     oa.end_time,
@@ -16829,8 +16876,15 @@ class Database:
 
             current_operator_id = int(row[2])
             current_supervisor_id = int(row[3]) if row[3] is not None else None
-            if role_norm == 'sv' and current_supervisor_id != requester_id_int:
-                raise PermissionError("Forbidden")
+            current_operator_department_id = int(row[4]) if row[4] is not None else None
+            if role_norm == 'sv':
+                can_manage_by_scope = (
+                    current_operator_department_id == int(scope_department_id)
+                    if scope_department_id is not None
+                    else current_supervisor_id == requester_id_int
+                )
+                if not can_manage_by_scope:
+                    raise PermissionError("Forbidden")
 
             target_operator_id = current_operator_id
             if operator_id is not None and str(operator_id).strip() != '':
@@ -16842,24 +16896,25 @@ class Database:
                     requester_id=requester_id_int,
                     requester_role=role_norm,
                     operator_ids=operator_ids_norm,
-                    direction_ids=None
+                    direction_ids=None,
+                    scope_department_id=scope_department_id
                 )
                 target_operator_id = int(target_operator_ids[0])
 
             next_date_obj = (
                 self._parse_technical_issue_date(activity_date, field_name='date')
                 if activity_date is not None and str(activity_date).strip() != ''
-                else row[4]
+                else row[5]
             )
             next_start_time_obj = (
                 self._parse_technical_issue_time(start_time, field_name='start_time')
                 if start_time is not None and str(start_time).strip() != ''
-                else row[5]
+                else row[6]
             )
             next_end_time_obj = (
                 self._parse_technical_issue_time(end_time, field_name='end_time')
                 if end_time is not None and str(end_time).strip() != ''
-                else row[6]
+                else row[7]
             )
             if next_start_time_obj == next_end_time_obj:
                 raise ValueError("start_time and end_time cannot be equal")
@@ -16874,7 +16929,7 @@ class Database:
             if int(target_operator_id) not in overlaps_by_operator:
                 raise ValueError("Selected operator has no shifts in the specified time range")
 
-            comment_text = str(comment).strip() if comment is not None else row[7]
+            comment_text = str(comment).strip() if comment is not None else row[8]
             if comment_text == '':
                 comment_text = None
 
@@ -16922,8 +16977,8 @@ class Database:
                 'end_time': end_time_text,
                 'time_range': f"{start_time_text} - {end_time_text}" if start_time_text and end_time_text else None,
                 'comment': updated[6],
-                'created_by_id': int(row[8]) if row[8] is not None else None,
-                'created_by_name': row[9],
+                'created_by_id': int(row[9]) if row[9] is not None else None,
+                'created_by_name': row[10],
                 'duration_minutes': int(duration_minutes),
                 'duration_hours': round(float(duration_minutes) / 60.0, 2)
             }
@@ -26752,7 +26807,7 @@ class Database:
 
         return [op_id for op_id in normalized_ids if op_id in active_ids]
 
-    def _get_visible_operator_ids_for_requester_tx(self, cursor, requester_id, requester_role):
+    def _get_visible_operator_ids_for_requester_tx(self, cursor, requester_id, requester_role, scope_department_id=None):
         role = self._normalize_survey_role(requester_role)
         requester_id = int(requester_id)
 
@@ -26766,12 +26821,18 @@ class Database:
             return [int(row[0]) for row in cursor.fetchall()]
 
         if role == 'sv':
-            cursor.execute("""
+            params = []
+            scope_filter = ""
+            if scope_department_id is not None:
+                scope_filter = "AND department_id = %s"
+                params.append(int(scope_department_id))
+            cursor.execute(f"""
                 SELECT id
                 FROM users
                 WHERE LOWER(TRIM(COALESCE(role, ''))) = 'operator'
                   AND COALESCE(NULLIF(LOWER(TRIM(COALESCE(status, 'working'))), ''), 'working') NOT IN ('fired', 'dismissal')
-            """)
+                  {scope_filter}
+            """, tuple(params))
             return [int(row[0]) for row in cursor.fetchall()]
 
         if role == 'operator':
@@ -26779,9 +26840,14 @@ class Database:
 
         return []
 
-    def get_visible_operator_ids_for_requester(self, requester_id, requester_role):
+    def get_visible_operator_ids_for_requester(self, requester_id, requester_role, scope_department_id=None):
         with self._get_cursor() as cursor:
-            return self._get_visible_operator_ids_for_requester_tx(cursor, requester_id, requester_role)
+            return self._get_visible_operator_ids_for_requester_tx(
+                cursor,
+                requester_id,
+                requester_role,
+                scope_department_id=scope_department_id
+            )
 
     def _get_visible_lms_learner_ids_for_requester_tx(self, cursor, requester_id, requester_role):
         role = self._normalize_survey_role(requester_role)
@@ -27798,7 +27864,7 @@ class Database:
 
         return serialized
 
-    def get_surveys_for_management(self, requester_id, requester_role):
+    def get_surveys_for_management(self, requester_id, requester_role, scope_department_id=None):
         requester_id = int(requester_id)
         role = self._normalize_survey_role(requester_role)
 
@@ -27829,7 +27895,33 @@ class Database:
                     ORDER BY s.created_at DESC, s.id DESC
                 """)
             else:
-                cursor.execute("""
+                if scope_department_id is not None:
+                    cursor.execute("""
+                    SELECT DISTINCT
+                        s.id,
+                        s.title,
+                        s.description,
+                        s.created_at,
+                        s.updated_at,
+                        s.created_by,
+                        s.direction_ids,
+                        s.tenure_weeks_min,
+                        s.tenure_weeks_max,
+                        creator.id,
+                        creator.name,
+                        creator.role,
+                        s.repeat_root_id,
+                        s.repeat_iteration,
+                        s.is_test
+                    FROM surveys s
+                    LEFT JOIN users creator ON creator.id = s.created_by
+                    LEFT JOIN survey_assignments sa ON sa.survey_id = s.id
+                    LEFT JOIN users op ON op.id = sa.operator_id
+                    WHERE s.created_by = %s OR op.department_id = %s
+                    ORDER BY s.created_at DESC, s.id DESC
+                """, (requester_id, int(scope_department_id)))
+                else:
+                    cursor.execute("""
                     SELECT DISTINCT
                         s.id,
                         s.title,
@@ -27861,7 +27953,12 @@ class Database:
             survey_ids = [int(row[0]) for row in surveys_rows]
             visible_operator_ids = None
             if role == 'sv':
-                visible_operator_ids = set(self._get_visible_operator_ids_for_requester_tx(cursor, requester_id, role))
+                visible_operator_ids = set(self._get_visible_operator_ids_for_requester_tx(
+                    cursor,
+                    requester_id,
+                    role,
+                    scope_department_id=scope_department_id
+                ))
 
             cursor.execute("""
                 SELECT
@@ -28465,18 +28562,24 @@ class Database:
             return True
         return False
 
-    def get_task_recipients(self, requester_id, requester_role):
+    def get_task_recipients(self, requester_id, requester_role, scope_department_id=None):
         requester_id = int(requester_id)
         role = normalize_role_value(requester_role)
         with self._get_cursor() as cursor:
             if role_has_min(role, 'admin') or role in ('sv', 'trainer'):
-                cursor.execute("""
+                scope_filter = ""
+                params = []
+                if scope_department_id is not None and not role_has_min(role, 'admin'):
+                    scope_filter = "AND (u.role IN ('super_admin', 'admin') OR u.department_id = %s)"
+                    params.append(int(scope_department_id))
+                cursor.execute(f"""
                     SELECT u.id, u.name, u.role, u.supervisor_id, COALESCE(u.status, 'working')
                     FROM users u
                     WHERE u.role IN ('super_admin', 'admin', 'sv')
                       AND COALESCE(u.status, 'working') <> 'fired'
+                      {scope_filter}
                     ORDER BY CASE WHEN u.role IN ('super_admin', 'admin') THEN 0 ELSE 1 END, u.name
-                """)
+                """, tuple(params))
             else:
                 return []
 

@@ -2459,11 +2459,13 @@ const App = ({ user, initialSelection }) => {
     const canonicalRole = normalizedRole === 'supervisor' ? 'sv' : normalizedRole;
     const isAdminRole = canonicalRole === 'admin' || canonicalRole === 'super_admin';
     const isSupervisorRole = canonicalRole === 'sv';
+    const headedDepartmentId = user?.headed_department_id ?? user?.headedDepartmentId ?? null;
+    const isDepartmentHead = headedDepartmentId !== null && headedDepartmentId !== undefined && String(headedDepartmentId) !== '';
+    const canUseRequests = isAdminRole || isSupervisorRole || isDepartmentHead;
+    const canDecideReevaluationRequests = isAdminRole || isDepartmentHead;
     const canUseCalibration = isAdminRole || isSupervisorRole;
     const canManageCalibrationRooms = isAdminRole || isSupervisorRole;
     const canUseAnalytics = isAdminRole || isSupervisorRole;
-    const headedDepartmentId = user?.headed_department_id ?? user?.headedDepartmentId ?? null;
-    const isDepartmentHead = headedDepartmentId !== null && headedDepartmentId !== undefined && String(headedDepartmentId) !== '';
     const canManageEvaluationNotifications = isAdminRole || isDepartmentHead;
     const [calls, setCalls] = useState([]);
     const [directions, setDirections] = useState([]);
@@ -2898,7 +2900,7 @@ const App = ({ user, initialSelection }) => {
         const requestedSection = String(initialSelection.section || '').trim().toLowerCase();
         if (
             requestedSection === 'journal' ||
-            requestedSection === 'requests' ||
+            (requestedSection === 'requests' && canUseRequests) ||
             (requestedSection === 'calibration' && canUseCalibration) ||
             (requestedSection === 'analytics' && canUseAnalytics)
         ) {
@@ -2920,7 +2922,7 @@ const App = ({ user, initialSelection }) => {
             setSelectedSupervisor(nextSupervisorId);
             if (nextSupervisorId) setAnalyticsSelectedSvId(String(nextSupervisorId));
         }
-    }, [initialSelection, canUseAnalytics, canUseCalibration]);
+    }, [initialSelection, canUseAnalytics, canUseCalibration, canUseRequests]);
 
     useEffect(() => {
         if (!isSupervisorRole || !userId || !Array.isArray(supervisors) || supervisors.length === 0) return;
@@ -3013,7 +3015,8 @@ const App = ({ user, initialSelection }) => {
     // Operators
     useEffect(() => {
         if (!userId) return;
-        const scopeId = (isAdminRole || isSupervisorRole) ? selectedSupervisor : userId;
+        const shouldFilterBySelectedSupervisor = isAdminRole || isSupervisorRole;
+        const scopeId = shouldFilterBySelectedSupervisor ? selectedSupervisor : userId;
         if (!scopeId) {
             setOperators([]);
             return;
@@ -3043,7 +3046,7 @@ const App = ({ user, initialSelection }) => {
                         const opSupervisorId = Number(op?.supervisor_id ?? op?.sv_id ?? op?.supervisorId);
                         return Number.isFinite(opSupervisorId) && opSupervisorId === scopedSupervisorId;
                     });
-                    const nextOperators = hasSupervisorMeta ? filteredOperators : rawOperators;
+                    const nextOperators = shouldFilterBySelectedSupervisor && hasSupervisorMeta ? filteredOperators : rawOperators;
                     operatorsCacheRef.current.set(cacheKey, nextOperators);
                     setOperators(nextOperators);
                 } else {
@@ -3098,7 +3101,7 @@ const App = ({ user, initialSelection }) => {
     useEffect(() => { fetchEvaluations(); }, [fetchEvaluations]);
 
     const fetchReevaluationRequests = useCallback(async ({ force = false } = {}) => {
-        if (!userId || !(isAdminRole || isSupervisorRole)) {
+        if (!userId || !canUseRequests) {
             setReevaluationRequests([]);
             return;
         }
@@ -3132,8 +3135,7 @@ const App = ({ user, initialSelection }) => {
         }
     }, [
         userId,
-        isAdminRole,
-        isSupervisorRole,
+        canUseRequests,
         selectedMonth,
         getReevaluationRequestsCacheKey
     ]);
@@ -3257,7 +3259,7 @@ const App = ({ user, initialSelection }) => {
             const normalizedSection = String(section || '').trim().toLowerCase();
             if (
                 normalizedSection === 'journal' ||
-                normalizedSection === 'requests' ||
+                (normalizedSection === 'requests' && canUseRequests) ||
                 (normalizedSection === 'calibration' && canUseCalibration) ||
                 (normalizedSection === 'analytics' && canUseAnalytics)
             ) {
@@ -3278,7 +3280,7 @@ const App = ({ user, initialSelection }) => {
             }
         };
         return () => { window.__callEvaluationFocus = null; window.__callEvaluationSetSection = null; };
-    }, [fetchEvaluations, fetchReevaluationRequests, fetchCalibrationRooms, activeSection, canUseAnalytics, canUseCalibration]);
+    }, [fetchEvaluations, fetchReevaluationRequests, fetchCalibrationRooms, activeSection, canUseAnalytics, canUseCalibration, canUseRequests]);
 
     const handleOpenCalibrationRoom = useCallback(async (room, callId = null) => {
         if (!room?.id || !userId) return;
@@ -4120,7 +4122,7 @@ const App = ({ user, initialSelection }) => {
                     <h1>Журнал Оценок</h1>
                 </div>
                 <div className="header-right">
-                    {canUseCalibration && (
+                    {(canUseAnalytics || canUseRequests || canUseCalibration) && (
                         <div className="section-switch">
                             {canUseAnalytics && (
                             <button
@@ -4775,12 +4777,12 @@ const App = ({ user, initialSelection }) => {
                                                                     {outcomeMeta.label}
                                                                 </span>
                                                                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
-                                                                    {isAdminRole && statusMeta.status === 'pending' ? (
+                                                                    {canDecideReevaluationRequests && statusMeta.status === 'pending' ? (
                                                                         <SvRequestButton
                                                                             call={requestItem}
                                                                             userId={userId}
                                                                             userRole={userRole}
-                                                                            isAdminRole={isAdminRole}
+                                                                            isAdminRole={canDecideReevaluationRequests}
                                                                             fetchEvaluations={selectedOperator?.id ? fetchEvaluations : undefined}
                                                                             onUpdated={handleRequestsUpdated}
                                                                         />

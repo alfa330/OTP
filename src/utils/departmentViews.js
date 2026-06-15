@@ -1,5 +1,18 @@
 import { isAdminLikeRole, isDepartmentHead, normalizeRole } from './roles';
 
+const TEZ_OPERATOR_VIEWS = ['profile', 'evaluation', 'hours', 'work_schedules', 'surveys', 'salary'];
+const TEZ_MANAGER_VIEWS = [
+    'manage_operators',
+    'call_evaluation',
+    'call_division',
+    'monitoring_scale',
+    'work_schedules',
+    'sv_hours',
+    'tasks',
+    'salary',
+    'surveys',
+];
+
 /*
  * Хардкод-карта «отдел → роль → разрешённые разделы» (view-ключи из App.jsx).
  *
@@ -13,6 +26,11 @@ import { isAdminLikeRole, isDepartmentHead, normalizeRole } from './roles';
  * Ключ верхнего уровня — departments.code (lowercase). Внутри — роль → [view-ключи].
  */
 export const DEPARTMENT_VIEW_ALLOWLIST = {
+    tez: {
+        operator: TEZ_OPERATOR_VIEWS,
+        trainee: TEZ_OPERATOR_VIEWS,
+        sv: TEZ_MANAGER_VIEWS,
+    },
     op: {
         // Операторы ОП: Профиль, Зарплата + Мои смены, Мои оценки, Опросы
         operator: ['salary', 'profile', 'work_schedules', 'evaluation', 'surveys'],
@@ -41,11 +59,11 @@ export const departmentCodeOf = (user) => {
 // Возвращает массив разрешённых разделов для пользователя, либо null (без ограничений).
 const allowlistFor = (user) => {
     // Управленцы (админы/главы) — без ограничений по отделу.
-    if (isAdminLikeRole(user?.role) || isDepartmentHead(user)) return null;
+    if (isAdminLikeRole(user?.role)) return null;
     const code = departmentCodeOf(user);
     const deptCfg = code ? DEPARTMENT_VIEW_ALLOWLIST[code] : null;
     if (!deptCfg) return null;
-    const role = normalizeRole(user?.role);
+    const role = isDepartmentHead(user) ? 'sv' : normalizeRole(user?.role);
     const allow = deptCfg[role];
     return Array.isArray(allow) ? allow : null;
 };
