@@ -1955,10 +1955,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const chatMetricsInputRef = useRef(null);
 
         const [selectedTab, setSelectedTab] = useState('work_time');
-        const [pinnedGroups, setPinnedGroups] = useState(['Работа']);
+        const [pinnedGroups, setPinnedGroups] = useState([]);
         const [hoveredGroup, setHoveredGroup] = useState(null);
+        const [directionsHovered, setDirectionsHovered] = useState(false);
+        const [directionsPinned, setDirectionsPinned] = useState(false);
 
         const hoverTimeoutRef = useRef(null);
+        const directionsHoverTimeoutRef = useRef(null);
 
         const handleMouseEnter = (groupLabel) => {
             if (hoverTimeoutRef.current) {
@@ -1974,6 +1977,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
             hoverTimeoutRef.current = setTimeout(() => {
                 setHoveredGroup(null);
+            }, 180);
+        };
+
+        const handleDirectionsMouseEnter = () => {
+            if (directionsHoverTimeoutRef.current) {
+                clearTimeout(directionsHoverTimeoutRef.current);
+                directionsHoverTimeoutRef.current = null;
+            }
+            setDirectionsHovered(true);
+        };
+
+        const handleDirectionsMouseLeave = () => {
+            if (directionsHoverTimeoutRef.current) {
+                clearTimeout(directionsHoverTimeoutRef.current);
+            }
+            directionsHoverTimeoutRef.current = setTimeout(() => {
+                setDirectionsHovered(false);
             }, 180);
         };
 
@@ -3482,17 +3502,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             );
         };
 
-        useEffect(() => {
-            const activeGroup = WORKHOURS_METRIC_GROUPS.find(group =>
-                group.tabs.some(tab => tab.key === selectedTab)
-            );
-            if (activeGroup) {
-                setPinnedGroups(prev => {
-                    if (prev.includes(activeGroup.label)) return prev;
-                    return [...prev, activeGroup.label];
-                });
-            }
-        }, [selectedTab, WORKHOURS_METRIC_GROUPS]);
+
 
         const selectedHourCellKeySet = useMemo(() => {
             return new Set((selectedHourCells || []).map(cell => makeSelectedHourCellKey(cell.operator_id, cell.day)));
@@ -4648,23 +4658,87 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                     <span className="mx-1 h-6 w-px bg-slate-300" aria-hidden="true" />
 
-                    <span className="px-1 text-xs font-medium text-slate-500">Направления</span>
-                    <div className="flex items-center gap-1 flex-wrap">
+                    <div
+                        onMouseEnter={handleDirectionsMouseEnter}
+                        onMouseLeave={handleDirectionsMouseLeave}
+                        className={`relative rounded-full border bg-white p-1 shadow-sm flex items-center transition-all duration-300 gap-1 ${
+                            !selectedDirections.includes('all')
+                                ? 'border-blue-200 ring-1 ring-blue-100'
+                                : 'border-slate-200 hover:border-slate-300 hover:shadow-sm'
+                        }`}
+                    >
                         <button
-                            onClick={()=>setSelectedDirections(['all'])}
-                            className={`px-2 py-1 text-xs rounded-md border transition ${selectedDirections.includes('all') ? 'bg-blue-600 border-blue-600 text-white' : 'bg-white border-slate-200 text-gray-700 hover:bg-blue-50'}`}
+                            type="button"
+                            onClick={() => setDirectionsPinned(prev => !prev)}
+                            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-bold uppercase tracking-wide transition-colors duration-200 focus:outline-none ${
+                                directionsHovered || directionsPinned
+                                    ? 'text-slate-700 bg-slate-50'
+                                    : !selectedDirections.includes('all')
+                                        ? 'text-blue-700 bg-blue-50/50'
+                                        : 'text-slate-500 hover:text-slate-700 hover:bg-slate-50'
+                            }`}
                         >
-                            Все
+                            <FaIcon className="fas fa-route text-blue-600" />
+                            <span className="text-slate-500">Направления</span>
+                            <span className="ml-1.5 px-2 py-0.5 text-[9px] font-bold bg-blue-600 text-white rounded-full normal-case tracking-normal">
+                                {selectedDirections.includes('all')
+                                    ? 'Все'
+                                    : selectedDirections.length === 0
+                                        ? 'Ничего'
+                                        : selectedDirections.length === 1
+                                            ? selectedDirections[0]
+                                            : `Выбрано (${selectedDirections.length})`}
+                            </span>
+                            <FaIcon
+                                className={`fas fa-chevron-down ml-1 text-[9px] text-slate-400 transition-transform duration-300 ${
+                                    directionsHovered || directionsPinned ? 'rotate-180 text-blue-600' : ''
+                                }`}
+                            />
                         </button>
-                        {directionOptions.map(d => (
-                            <button
-                                key={d}
-                                onClick={()=>toggleDirectionSelection(d)}
-                                className={`px-2 py-1 text-xs rounded-md border transition ${selectedDirections.includes(String(d)) ? 'bg-blue-600 border-blue-600 text-white' : 'bg-white border-slate-200 text-gray-700 hover:bg-blue-50'}`}
-                            >
-                                {d}
-                            </button>
-                        ))}
+
+                        <div className={`tab-dropdown ${(directionsHovered || directionsPinned) ? 'open' : ''}`}>
+                            <div className="flex flex-col min-w-[200px] max-h-[250px] overflow-y-auto workhours-modal-scroll">
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setSelectedDirections(['all']);
+                                    }}
+                                    className={`flex items-center justify-between w-full px-4 py-2 text-left text-xs sm:text-sm font-medium transition-colors hover:bg-slate-50 ${
+                                        selectedDirections.includes('all')
+                                            ? 'text-blue-600 bg-blue-50/50 font-semibold'
+                                            : 'text-slate-700'
+                                    }`}
+                                >
+                                    <span>Все направления</span>
+                                    {selectedDirections.includes('all') && (
+                                        <FaIcon className="fas fa-check text-blue-600 text-[10px] ml-2" />
+                                    )}
+                                </button>
+                                
+                                <div className="h-px bg-slate-100 my-1" />
+
+                                {directionOptions.map(d => {
+                                    const isSelected = selectedDirections.includes(String(d));
+                                    return (
+                                        <button
+                                            key={d}
+                                            type="button"
+                                            onClick={() => toggleDirectionSelection(d)}
+                                            className={`flex items-center justify-between w-full px-4 py-2 text-left text-xs sm:text-sm font-medium transition-colors hover:bg-slate-50 ${
+                                                isSelected
+                                                    ? 'text-blue-600 bg-blue-50/50 font-semibold'
+                                                    : 'text-slate-700'
+                                            }`}
+                                        >
+                                            <span>{d}</span>
+                                            {isSelected && (
+                                                <FaIcon className="fas fa-check text-blue-600 text-[10px] ml-2" />
+                                            )}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        </div>
                     </div>
                 </div>
 
