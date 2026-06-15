@@ -17233,7 +17233,15 @@ CHAT2DESK_STATISTICS_REPORT_RATING = 'rating'
 
 
 def _chat2desk_api_token():
-    return (os.getenv('CHAT2DESK_API_TOKEN') or CHAT2DESK_API_TOKEN or '').strip()
+    token = (os.getenv('CHAT2DESK_API_TOKEN') or CHAT2DESK_API_TOKEN or '').strip()
+    if not token:
+        return ''
+    token = token.strip().strip('"').strip("'").strip()
+    if token.lower().startswith('authorization:'):
+        token = token.split(':', 1)[1].strip()
+    if token.lower().startswith('bearer '):
+        token = token[7:].strip()
+    return token.strip().strip('"').strip("'").strip()
 
 
 def _chat2desk_api_base_url():
@@ -17338,6 +17346,38 @@ def _chat2desk_extract_total(payload):
     return None
 
 
+def _chat2desk_api_error_message(response, report, day_str):
+    status_code = getattr(response, 'status_code', None)
+    raw_text = str(getattr(response, 'text', '') or '').strip()
+    payload = None
+    try:
+        payload = response.json()
+    except Exception:
+        payload = None
+
+    detail_parts = []
+    if isinstance(payload, dict):
+        for key in ('message', 'errors', 'error'):
+            value = payload.get(key)
+            if value not in (None, ''):
+                detail_parts.append(str(value))
+    if not detail_parts and raw_text:
+        detail_parts.append(raw_text)
+    detail = '; '.join(detail_parts).strip()
+    detail_lower = detail.lower()
+
+    if int(status_code or 0) == 403 and 'token' in detail_lower:
+        return (
+            f"Chat2Desk отклонил CHAT2DESK_API_TOKEN для отчёта {report} за {day_str}. "
+            "Проверьте, что в env указан API Token из Chat2Desk без лишних символов и что токен активен."
+        )
+
+    if len(detail) > 500:
+        detail = detail[:500] + '...'
+    suffix = f": {detail}" if detail else ''
+    return f"Chat2Desk statistics {report} {day_str} failed: HTTP {status_code}{suffix}"
+
+
 def _chat2desk_statistics_get(report, day_str):
     token = _chat2desk_api_token()
     if not token:
@@ -17363,10 +17403,7 @@ def _chat2desk_statistics_get(report, day_str):
         }
         response = requests.get(url, headers=headers, params=params, timeout=timeout)
         if response.status_code >= 400:
-            error_text = str(response.text or '').strip()
-            if len(error_text) > 500:
-                error_text = error_text[:500] + '...'
-            raise RuntimeError(f"Chat2Desk statistics {report} {day_str} failed: HTTP {response.status_code} {error_text}")
+            raise RuntimeError(_chat2desk_api_error_message(response, report, day_str))
         try:
             payload = response.json()
         except Exception as exc:
