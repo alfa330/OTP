@@ -16,6 +16,7 @@ def _chat_report_namespace():
         "CHAT_REPORT_TYPE_RESPONSE",
         "CHAT_REPORT_TYPE_WHATSAPP",
         "CHAT_REPORT_TYPE_NAME_REQUESTS",
+        "CHAT_REPORT_TYPE_COMBINED",
         "CHAT_REPORT_TYPE_LABELS",
         "CHAT_REPORT_TYPE_FIELDS",
     }
@@ -30,6 +31,7 @@ def _chat_report_namespace():
         "_chat_report_name_tokens",
         "_chat_report_tokens_match",
         "_chat_report_resolve_operator",
+        "_chat_report_detect_types",
         "_chat_report_detect_type",
         "_chat_report_parse_dt",
         "_chat_report_parse_surge_windows",
@@ -88,12 +90,19 @@ class ChatReportImportTests(unittest.TestCase):
         return [self.ns["_status_import_normalize_header"](h) for h in headers]
 
     def test_detect_type_by_columns(self):
+        detect_types = self.ns["_chat_report_detect_types"]
         detect = self.ns["_chat_report_detect_type"]
         self.assertEqual(detect(self._norm_headers(["operator_name", "created_at", "rating_scale_score"])), "score")
         self.assertEqual(detect(self._norm_headers(["operator_name", "request_start", "request_end", "reaction_time"])), "response_time")
         self.assertEqual(detect(self._norm_headers(["Дата и время создания", "Дата и время обращения", "ФИО создателя", "Звонок или Чат"])), "whatsapp_chats")
         self.assertEqual(detect(self._norm_headers(["Name", "Requests"])), "name_requests")
         self.assertIsNone(detect(self._norm_headers(["foo", "bar"])))
+        combined = self._norm_headers([
+            "operator_name", "created_at", "rating_scale_score",
+            "request_start", "request_end", "reaction_time",
+        ])
+        self.assertEqual(detect(combined), "combined")
+        self.assertEqual(detect_types(combined), ["score", "response_time"])
 
     def test_resolve_operator_reordered_and_abbreviated(self):
         resolve = self.ns["_chat_report_resolve_operator"]
@@ -168,6 +177,41 @@ class ChatReportImportTests(unittest.TestCase):
         parse = self.ns["_chat_report_parse"]
         with self.assertRaises(ValueError):
             parse(["Name", "Requests"], [["Омар Идр", "950"]], self.lookup, self.index)
+
+    def test_combined_score_and_response_report_imports_both_metrics(self):
+        parse = self.ns["_chat_report_parse"]
+        header = [
+            "operator_name", "created_at", "rating_scale_score",
+            "request_start", "request_end", "reaction_time",
+        ]
+        rows = [
+            ["Темирлан Ерланов", "2026-06-10 09:00:00", "5", "2026-06-10 10:00:00", "2026-06-10 10:00:10", "10"],
+            ["Темирлан Ерланов", "2026-06-10 09:05:00", "3", "2026-06-10 10:05:00", "2026-06-10 10:05:20", "20"],
+            ["Темирлан Ерланов", "2026-06-11 09:00:00", "4", "2026-06-11 10:00:00", "2026-06-11 10:00:30", "30"],
+        ]
+        res = parse(header, rows, self.lookup, self.index)
+        self.assertEqual(res["detected_type"], "combined")
+        self.assertEqual(res["detected_types"], ["score", "response_time"])
+        self.assertEqual(set(res["update_fields"]), {
+            "score_sum", "score_count", "avg_score", "avg_response_time_seconds"
+        })
+        by_key = {(m["operator_id"], m["day"]): m for m in res["metrics"]}
+        d10 = by_key[(2, "2026-06-10")]
+        self.assertEqual(d10["score_count"], 2)
+        self.assertEqual(d10["score_sum"], 8.0)
+        self.assertEqual(d10["avg_score"], 4.0)
+        self.assertEqual(d10["avg_response_time_seconds"], 15.0)
+        self.assertEqual(by_key[(2, "2026-06-11")]["avg_score"], 4.0)
+        self.assertEqual(by_key[(2, "2026-06-11")]["avg_response_time_seconds"], 30.0)
+
+        surge = json.dumps([{"start": "2026-06-10T10:01", "end": "2026-06-10T10:10"}])
+        res2 = parse(header, rows, self.lookup, self.index, surge_windows=surge)
+        by_key2 = {(m["operator_id"], m["day"]): m for m in res2["metrics"]}
+        d10_after_surge = by_key2[(2, "2026-06-10")]
+        self.assertEqual(d10_after_surge["score_count"], 2)
+        self.assertEqual(d10_after_surge["avg_score"], 4.0)
+        self.assertEqual(d10_after_surge["avg_response_time_seconds"], 10.0)
+        self.assertEqual(res2["excluded_surge_rows"], 1)
 
     def test_response_time_average_and_surge_filter(self):
         parse = self.ns["_chat_report_parse"]

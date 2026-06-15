@@ -2024,6 +2024,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             response_time: 'Среднее время ответа',
             whatsapp_chats: 'Количество чатов (Whatsapp)',
             name_requests: 'Количество чатов (Name/Requests)',
+            combined: 'Комбинированный отчёт',
         };
 
         const normChatHeader = (h) => String(h || '').replace(/п»ї/g, '').trim().toLowerCase().replace(/[\s_-]+/g, '');
@@ -2031,9 +2032,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const detectChatReportType = (headers) => {
             const nh = (headers || []).map(normChatHeader);
             const has = (sub) => nh.some((h) => h.includes(sub));
-            if (has('ratingscalescore') || (has('rating') && has('scale') && has('score'))) return 'score';
-            if (has('reactiontime') && (has('requeststart') || has('requestend'))) return 'response_time';
-            if (nh.some((h) => h.includes('звонок') && h.includes('чат'))) return 'whatsapp_chats';
+            const detected = [];
+            if (has('ratingscalescore') || (has('rating') && has('scale') && has('score'))) detected.push('score');
+            if (has('reactiontime') && (has('requeststart') || has('requestend'))) detected.push('response_time');
+            if (nh.some((h) => h.includes('звонок') && h.includes('чат'))) detected.push('whatsapp_chats');
+            if (detected.length > 1) return 'combined';
+            if (detected.length === 1) return detected[0];
             if (has('requests') && has('name')) return 'name_requests';
             return null;
         };
@@ -2214,7 +2218,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             fallbackToast('Укажите дату загрузки для отчёта Name/Requests', 'error');
             return;
             }
-            const showSurge = ctx.detectedType === 'response_time' || (!ctx.isCsv) || ctx.detectedType === null;
+            const showSurge = ctx.detectedType === 'response_time' || ctx.detectedType === 'combined' || (!ctx.isCsv) || ctx.detectedType === null;
             const cleanWindows = (ctx.surgeWindows || []).filter((w) => w && w.start && w.end);
             if (showSurge) {
             setChatMetricsSurgeWindows(cloneChatMetricsSurgeWindows(cleanWindows));
@@ -4375,7 +4379,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             </label>
                         )}
 
-                        {(chatMetricsUpload.detectedType === 'response_time' || !chatMetricsUpload.isCsv || chatMetricsUpload.detectedType === null) && (
+                        {(chatMetricsUpload.detectedType === 'response_time' || chatMetricsUpload.detectedType === 'combined' || !chatMetricsUpload.isCsv || chatMetricsUpload.detectedType === null) && (
                             <div className="mb-3">
                                 <div className="flex items-center justify-between mb-1">
                                     <span className="text-xs font-medium text-gray-700">Окна наплыва (исключаются из времени ответа по request_start)</span>
@@ -13861,6 +13865,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 response_time: 'Среднее время ответа',
                 whatsapp_chats: 'Количество чатов (Whatsapp)',
                 name_requests: 'Количество чатов (Name/Requests)',
+                combined: 'Комбинированный отчёт',
             };
 
             const normChatHeader = (h) => String(h || '').replace(/﻿/g, '').trim().toLowerCase().replace(/[\s_-]+/g, '');
@@ -13869,9 +13874,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const detectChatReportType = (headers) => {
                 const nh = (headers || []).map(normChatHeader);
                 const has = (sub) => nh.some((h) => h.includes(sub));
-                if (has('ratingscalescore') || (has('rating') && has('scale') && has('score'))) return 'score';
-                if (has('reactiontime') && (has('requeststart') || has('requestend'))) return 'response_time';
-                if (nh.some((h) => h.includes('звонок') && h.includes('чат'))) return 'whatsapp_chats';
+                const detected = [];
+                if (has('ratingscalescore') || (has('rating') && has('scale') && has('score'))) detected.push('score');
+                if (has('reactiontime') && (has('requeststart') || has('requestend'))) detected.push('response_time');
+                if (nh.some((h) => h.includes('звонок') && h.includes('чат'))) detected.push('whatsapp_chats');
+                if (detected.length > 1) return 'combined';
+                if (detected.length === 1) return detected[0];
                 if (has('requests') && has('name')) return 'name_requests';
                 return null;
             };
@@ -13922,7 +13930,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     emitAppToast('Укажите дату загрузки для отчёта Name/Requests', 'error');
                     return;
                 }
-                const showSurge = ctx.detectedType === 'response_time' || (!ctx.isCsv) || ctx.detectedType === null;
+                const showSurge = ctx.detectedType === 'response_time' || ctx.detectedType === 'combined' || (!ctx.isCsv) || ctx.detectedType === null;
                 const cleanWindows = (ctx.surgeWindows || []).filter((w) => w && w.start && w.end);
                 if (showSurge) {
                     setChatMetricsSurgeWindows(cloneChatMetricsSurgeWindows(cleanWindows));
@@ -20925,7 +20933,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </label>
                                 )}
 
-                                {(chatMetricsUpload.detectedType === 'response_time' || !chatMetricsUpload.isCsv || chatMetricsUpload.detectedType === null) && (
+                                {(chatMetricsUpload.detectedType === 'response_time' || chatMetricsUpload.detectedType === 'combined' || !chatMetricsUpload.isCsv || chatMetricsUpload.detectedType === null) && (
                                     <div className="mb-3">
                                         <div className="flex items-center justify-between mb-1">
                                             <span className="text-xs font-medium text-gray-700">Окна наплыва (исключаются из времени ответа по request_start)</span>
