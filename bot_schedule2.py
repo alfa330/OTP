@@ -211,6 +211,7 @@ super_admin_login = os.getenv('SUPER_ADMIN_LOGIN', 'admin4')
 super_admin_password = os.getenv('SUPER_ADMIN_PASSWORD', 'admin1234')
 CHAT2DESK_API_BASE_URL = (os.getenv('CHAT2DESK_API_BASE_URL') or 'https://api.chat2desk.com').strip().rstrip('/')
 CHAT2DESK_API_TOKEN = (os.getenv('CHAT2DESK_API_TOKEN') or '').strip()
+CHAT2DESK_AUTH_SCHEME = (os.getenv('CHAT2DESK_AUTH_SCHEME') or 'Bearer').strip()
 CHAT2DESK_SYNC_ENABLED = _env_bool('CHAT2DESK_SYNC_ENABLED', True)
 CHAT2DESK_SYNC_TIMEZONE = (os.getenv('CHAT2DESK_SYNC_TIMEZONE') or 'Asia/Almaty').strip() or 'Asia/Almaty'
 CHAT2DESK_SYNC_HOUR = _env_int('CHAT2DESK_SYNC_HOUR', 4, minimum=0, maximum=23)
@@ -17244,6 +17245,18 @@ def _chat2desk_api_token():
     return token.strip().strip('"').strip("'").strip()
 
 
+def _chat2desk_authorization_header():
+    token = _chat2desk_api_token()
+    if not token:
+        return ''
+    scheme = (os.getenv('CHAT2DESK_AUTH_SCHEME') or CHAT2DESK_AUTH_SCHEME or 'Bearer').strip()
+    if not scheme or scheme.lower() in {'raw', 'none', 'token'}:
+        return token
+    if scheme.lower() == 'bearer':
+        return f"Bearer {token}"
+    return f"{scheme} {token}".strip()
+
+
 def _chat2desk_api_base_url():
     return (os.getenv('CHAT2DESK_API_BASE_URL') or CHAT2DESK_API_BASE_URL or 'https://api.chat2desk.com').strip().rstrip('/')
 
@@ -17379,15 +17392,15 @@ def _chat2desk_api_error_message(response, report, day_str):
 
 
 def _chat2desk_statistics_get(report, day_str):
-    token = _chat2desk_api_token()
-    if not token:
+    authorization = _chat2desk_authorization_header()
+    if not authorization:
         raise RuntimeError("CHAT2DESK_API_TOKEN is not set")
 
     limit = _env_int('CHAT2DESK_API_PAGE_LIMIT', CHAT2DESK_API_PAGE_LIMIT, minimum=1, maximum=200)
     timeout = _env_int('CHAT2DESK_API_TIMEOUT_SECONDS', CHAT2DESK_API_TIMEOUT_SECONDS, minimum=5, maximum=300)
     url = f"{_chat2desk_api_base_url()}/v1/statistics"
     headers = {
-        'Authorization': token,
+        'Authorization': authorization,
         'Accept': 'application/json',
     }
 
