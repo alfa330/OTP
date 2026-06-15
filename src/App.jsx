@@ -4669,8 +4669,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 </div>
 
                 {/* === Метрика === */}
-                <div className="rounded-2xl border border-slate-200 bg-slate-50/80 p-2 overflow-x-auto scrollbar-hide">
-                    <div className="flex flex-nowrap items-center gap-2">
+                <div className="rounded-2xl border border-slate-200 bg-slate-50/80 p-2 relative">
+                    <div className="flex flex-wrap items-center gap-2">
                         {WORKHOURS_METRIC_GROUPS.map(group => {
                             const isMetricsGroup = group.label === 'Метрики';
                             const activeInGroup = group.tabs.some(tab => tab.key === selectedTab);
@@ -4688,7 +4688,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     key={group.label}
                                     onMouseEnter={() => handleMouseEnter(group.label)}
                                     onMouseLeave={handleMouseLeave}
-                                    className={`rounded-full border bg-white p-1 shadow-sm flex items-center transition-all duration-300 gap-1 ${
+                                    className={`relative rounded-full border bg-white p-1 shadow-sm flex items-center transition-all duration-300 gap-1 ${
                                         activeInGroup
                                             ? 'border-blue-200 ring-1 ring-blue-100'
                                             : 'border-slate-200 hover:border-slate-300 hover:shadow-sm'
@@ -4708,57 +4708,87 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         <FaIcon className={`fas ${group.icon} ${groupIconClass}`}></FaIcon>
                                         <span>{group.label}</span>
                                         
-                                        {!isOpen && activeInGroup && (
+                                        {activeInGroup && (
                                             <span className="ml-1.5 px-2 py-0.5 text-[9px] font-bold bg-blue-600 text-white rounded-full normal-case tracking-normal">
                                                 {group.tabs.find(t => t.key === selectedTab)?.label}
                                             </span>
                                         )}
 
                                         <FaIcon
-                                            className={`fas fa-chevron-right ml-1 text-[9px] text-slate-400 transition-transform duration-300 ${
-                                                isOpen ? 'rotate-90 text-slate-600' : ''
+                                            className={`fas fa-chevron-down ml-1 text-[9px] text-slate-400 transition-transform duration-300 ${
+                                                isOpen ? 'rotate-180 text-blue-600' : ''
                                             }`}
                                         />
                                     </button>
 
-                                    <div className={`tabs-expandable ${isOpen ? 'expanded' : ''} gap-1 pr-1`}>
-                                        {group.tabs.map(tab => (
-                                            <button
-                                                key={tab.key}
-                                                type="button"
-                                                onClick={() => setSelectedTab(tab.key)}
-                                                className={`h-8 rounded-full px-3 text-xs sm:text-sm font-medium transition whitespace-nowrap ${selectedTab === tab.key ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-700 hover:bg-slate-100'}`}
-                                                title={tab.unit ? `${tab.label} (${tab.unit})` : tab.label}
-                                            >
-                                                {tab.label}
-                                            </button>
-                                        ))}
-                                        {isChatModel && isMetricsGroup && (
-                                            <>
-                                                <button
-                                                    type="button"
-                                                    onClick={syncChat2DeskMetrics}
-                                                    disabled={chatMetricsImportState.loading}
-                                                    className={`h-8 rounded-full px-3 text-xs sm:text-sm font-semibold transition whitespace-nowrap border ${chatMetricsImportState.loading ? 'bg-cyan-100 border-cyan-200 text-cyan-500 cursor-not-allowed' : 'bg-cyan-50 border-cyan-200 text-cyan-800 hover:bg-cyan-100'}`}
-                                                    title="Синхронизировать метрики Chat2Desk за прошедший день"
-                                                >
-                                                    <FaIcon className={`fas ${chatMetricsImportState.loading ? 'fa-spinner fa-spin' : 'fa-arrows-rotate'} mr-1`}></FaIcon>
-                                                    Синхронизация
-                                                </button>
-                                                <button
-                                                    type="button"
-                                                    onClick={() => {
-                                                        setChatMetricsSurgeMonth(normalizeMonthKey(month));
-                                                        setShowChatMetricsSurgeEditor(true);
-                                                    }}
-                                                    className={`h-8 rounded-full px-3 text-xs sm:text-sm font-semibold transition whitespace-nowrap border ${showChatMetricsSurgeEditor ? 'bg-amber-600 border-amber-600 text-white shadow-sm' : 'bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100'}`}
-                                                    title="Окна наплыва для импорта среднего времени ответа"
-                                                >
-                                                    <FaIcon className="fas fa-wave-square mr-1"></FaIcon>
-                                                    Наплывы{validSurgeCount ? ` ${validSurgeCount}` : ''}
-                                                </button>
-                                            </>
-                                        )}
+                                    <div className={`tab-dropdown ${isOpen ? 'open' : ''}`}>
+                                        <div className="flex flex-col min-w-[200px]">
+                                            {group.tabs.map(tab => {
+                                                const isSelected = selectedTab === tab.key;
+                                                return (
+                                                    <button
+                                                        key={tab.key}
+                                                        type="button"
+                                                        onClick={() => {
+                                                            setSelectedTab(tab.key);
+                                                            setPinnedGroups([]);
+                                                            setHoveredGroup(null);
+                                                        }}
+                                                        className={`flex items-center justify-between w-full px-4 py-2 text-left text-xs sm:text-sm font-medium transition-colors hover:bg-slate-50 ${
+                                                            isSelected 
+                                                                ? 'text-blue-600 bg-blue-50/50 font-semibold' 
+                                                                : 'text-slate-700'
+                                                        }`}
+                                                        title={tab.unit ? `${tab.label} (${tab.unit})` : tab.label}
+                                                    >
+                                                        <span>{tab.label}</span>
+                                                        {isSelected && (
+                                                            <FaIcon className="fas fa-check text-blue-600 text-[10px] ml-2" />
+                                                        )}
+                                                    </button>
+                                                );
+                                            })}
+                                            {isChatModel && isMetricsGroup && (
+                                                <div className="border-t border-slate-100 mt-1 pt-1.5 px-2 flex flex-col gap-1">
+                                                    <button
+                                                        type="button"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            syncChat2DeskMetrics();
+                                                            setPinnedGroups([]);
+                                                            setHoveredGroup(null);
+                                                        }}
+                                                        disabled={chatMetricsImportState.loading}
+                                                        className={`flex items-center gap-1.5 px-3 py-1.5 text-left text-xs font-semibold rounded-lg transition border ${
+                                                            chatMetricsImportState.loading 
+                                                                ? 'bg-cyan-50 border-cyan-100 text-cyan-400 cursor-not-allowed' 
+                                                                : 'bg-cyan-50 border-cyan-200 text-cyan-800 hover:bg-cyan-100'
+                                                        }`}
+                                                    >
+                                                        <FaIcon className={`fas ${chatMetricsImportState.loading ? 'fa-spinner fa-spin' : 'fa-arrows-rotate'}`} />
+                                                        Синхронизация
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            setChatMetricsSurgeMonth(normalizeMonthKey(month));
+                                                            setShowChatMetricsSurgeEditor(true);
+                                                            setPinnedGroups([]);
+                                                            setHoveredGroup(null);
+                                                        }}
+                                                        className={`flex items-center gap-1.5 px-3 py-1.5 text-left text-xs font-semibold rounded-lg transition border ${
+                                                            showChatMetricsSurgeEditor 
+                                                                ? 'bg-amber-600 border-amber-600 text-white' 
+                                                                : 'bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100'
+                                                        }`}
+                                                    >
+                                                        <FaIcon className="fas fa-wave-square" />
+                                                        Наплывы{validSurgeCount ? ` (${validSurgeCount})` : ''}
+                                                    </button>
+                                                </div>
+                                            )}
+                                        </div>
                                     </div>
                                 </div>
                             );
