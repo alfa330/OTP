@@ -295,9 +295,9 @@ class ChatReportImportTests(unittest.TestCase):
             os.environ["CHAT2DESK_API_TOKEN"] = 'Authorization: Bearer "abc123"'
             self.assertEqual(parse_token(), "abc123")
             os.environ.pop("CHAT2DESK_AUTH_SCHEME", None)
-            self.assertEqual(auth_header(), "Bearer abc123")
-            os.environ["CHAT2DESK_AUTH_SCHEME"] = "raw"
             self.assertEqual(auth_header(), "abc123")
+            os.environ["CHAT2DESK_AUTH_SCHEME"] = "Bearer"
+            self.assertEqual(auth_header(), "Bearer abc123")
             os.environ["CHAT2DESK_API_TOKEN"] = "'xyz789'"
             self.assertEqual(parse_token(), "xyz789")
         finally:

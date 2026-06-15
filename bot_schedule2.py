@@ -211,7 +211,7 @@ super_admin_login = os.getenv('SUPER_ADMIN_LOGIN', 'admin4')
 super_admin_password = os.getenv('SUPER_ADMIN_PASSWORD', 'admin1234')
 CHAT2DESK_API_BASE_URL = (os.getenv('CHAT2DESK_API_BASE_URL') or 'https://api-02.chat2desk.kz').strip().rstrip('/')
 CHAT2DESK_API_TOKEN = (os.getenv('CHAT2DESK_API_TOKEN') or '').strip()
-CHAT2DESK_AUTH_SCHEME = (os.getenv('CHAT2DESK_AUTH_SCHEME') or 'Bearer').strip()
+CHAT2DESK_AUTH_SCHEME = (os.getenv('CHAT2DESK_AUTH_SCHEME') or 'raw').strip()
 CHAT2DESK_SYNC_ENABLED = _env_bool('CHAT2DESK_SYNC_ENABLED', True)
 CHAT2DESK_SYNC_TIMEZONE = (os.getenv('CHAT2DESK_SYNC_TIMEZONE') or 'Asia/Almaty').strip() or 'Asia/Almaty'
 CHAT2DESK_SYNC_HOUR = _env_int('CHAT2DESK_SYNC_HOUR', 4, minimum=0, maximum=23)
@@ -17249,7 +17249,7 @@ def _chat2desk_authorization_header():
     token = _chat2desk_api_token()
     if not token:
         return ''
-    scheme = (os.getenv('CHAT2DESK_AUTH_SCHEME') or CHAT2DESK_AUTH_SCHEME or 'Bearer').strip()
+    scheme = (os.getenv('CHAT2DESK_AUTH_SCHEME') or CHAT2DESK_AUTH_SCHEME or 'raw').strip()
     if not scheme or scheme.lower() in {'raw', 'none', 'token'}:
         return token
     if scheme.lower() == 'bearer':
