@@ -1908,6 +1908,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const [isOfflineActivityActionLoading, setIsOfflineActivityActionLoading] = useState(false);
         const [offlineActivityModalState, setOfflineActivityModalState] = useState({ open: false, operatorId: null, date: '', activity: null, start_time: '09:00', end_time: '10:00', comment: '' });
         const [offlineActivityModalError, setOfflineActivityModalError] = useState('');
+        const isHoursDepartmentHead = isDepartmentHead(user);
         const [selectedSvId, setSelectedSvId] = useState(user?.role === 'sv' ? user.id : '');
         const [reportScope, setReportScope] = useState('by_sv'); // 'by_sv' or 'all' (admin only)
         const [isLoading, setIsLoading] = useState(false);
@@ -2299,16 +2300,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         // ---- fetch daily hours + trainings + technical issues ----
         async function fetchDailyHoursAndTrainings() {
-            if (!user || !selectedSvId) return;
+            if (!user || (!selectedSvId && !isHoursDepartmentHead)) return;
             setIsLoading(true);
             try {
             const hoursParams = new URLSearchParams();
             hoursParams.append('month', month);
             // If a supervisor is selected, request data for that supervisor by id
             // (allow 'sv' users to request other supervisors the same as admin)
-            if (selectedSvId) {
+            if (selectedSvId && !isHoursDepartmentHead) {
                 hoursParams.append('id', selectedSvId);
-            } else if (user.role === 'sv') {
+            } else if (user.role === 'sv' && !isHoursDepartmentHead) {
                 hoursParams.append('id', String(user.id));
             }
             // group-aware: при выбранной группе daily_hours грузим строго по группе
@@ -2320,9 +2321,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             const trainingsParams = new URLSearchParams();
             trainingsParams.append('month', month);
-            if (selectedSvId) {
+            if (selectedSvId && !isHoursDepartmentHead) {
                 trainingsParams.append('id', selectedSvId);
-            } else if (user.role === 'sv') {
+            } else if (user.role === 'sv' && !isHoursDepartmentHead) {
                 trainingsParams.append('id', String(user.id));
             }
 
@@ -2337,7 +2338,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             offlineParams.append('date_from', `${month}-01`);
             offlineParams.append('date_to', `${month}-${String(daysInMonth).padStart(2, '0')}`);
             offlineParams.append('limit', '5000');
-            if (selectedSvId) {
+            if (selectedSvId && !isHoursDepartmentHead) {
                 offlineParams.append('supervisor_id', selectedSvId);
             }
             const offlineActivitiesUrl = `${API_BASE_URL}/api/offline_activities?${offlineParams.toString()}`;
@@ -29532,12 +29533,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const currentUserRole = normalizeRole(user?.role);
             const isSuperAdmin = currentUserRole === 'super_admin';
             const isAdminLikeRole = isAdminLikeRoleFn(currentUserRole);
+            const isDepartmentHeadUser = isDepartmentHead(user);
+            const isScopedDepartmentHead = isDepartmentHeadUser && !isAdminLikeRole && departmentRestrictsViews(user);
+            const isDepartmentManager = isSupervisorRole(currentUserRole) || isScopedDepartmentHead;
             const canFilterByDepartment = isAdminLikeRole || currentUserRole === 'trainer';
-            const canUsePinnedTasks = isAdminLikeRole || isSupervisorRole(currentUserRole) || currentUserRole === 'trainer';
+            const canUsePinnedTasks = isAdminLikeRole || isDepartmentManager || currentUserRole === 'trainer';
             const canAccessLmsSection = canAccessLmsSectionForUser(user);
             const canAccessResourceFteSection = canAccessResourceFteSectionForUser(user);
             const canAccessDevLetterSection = canAccessDevLetterForUser(user);
-            const canChangeAccountAvatar = isAdminLikeRole || isSupervisorRole(currentUserRole);
+            const canChangeAccountAvatar = isAdminLikeRole || isDepartmentManager;
             const [isAuthInitializing, setIsAuthInitializing] = useState(true);
             const [showAuthEntranceSplash, setShowAuthEntranceSplash] = useState(false);
             const [showOrazAitSplash, setShowOrazAitSplash] = useState(false);
@@ -32783,9 +32787,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
 
                 if (isAdminLikeRoleFn(user?.role)) setView('sv_list');
+                else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(firstAllowedView(user, ['manage_operators']) || 'salary');
                 else if (isSupervisorRole(user?.role)) setView('operators');
                 else setView('hours');
-            }, [user?.id, user?.role, canAccessLmsSection, canAccessResourceFteSection, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, canAccessLmsSection, canAccessResourceFteSection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks' || !requestedTaskIdFromLocation) return;
@@ -32808,17 +32813,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
                 if (view === 'lms' && !canAccessLmsSection) {
                     if (isAdminLikeRoleFn(user?.role)) setView('sv_list');
+                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(firstAllowedView(user, ['manage_operators']) || 'salary');
                     else if (isSupervisorRole(user?.role)) setView('operators');
                     else if (user?.role === 'trainer') setView('surveys');
                     else setView('hours');
                 }
                 if (view === 'resource_fte' && !canAccessResourceFteSection) {
                     if (isAdminLikeRoleFn(user?.role)) setView('sv_list');
+                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(firstAllowedView(user, ['manage_operators']) || 'salary');
                     else if (isSupervisorRole(user?.role)) setView('operators');
                     else if (user?.role === 'trainer') setView('surveys');
                     else setView('hours');
                 }
-            }, [isAuthInitializing, user?.role, view, canAccessLmsSection, canAccessResourceFteSection]);
+            }, [isAuthInitializing, user, user?.role, view, canAccessLmsSection, canAccessResourceFteSection]);
 
             useEffect(() => {
                 // Only mirror `view` into the URL after authentication has
@@ -32913,7 +32920,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 user: user ? {
                     id: user.id,
                     role: user.role,
-                    name: user.name
+                    name: user.name,
+                    department_id: user.department_id ?? user.departmentId ?? null,
+                    department_code: user.department_code ?? user.departmentCode ?? null,
+                    headed_department_id: user.headed_department_id ?? user.headedDepartmentId ?? null
                 } : null,
                 initialSelection: callEvaluationContext || null,
                 auth: getAuthSnapshotForEmbeddedFrame()
@@ -35945,7 +35955,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             user: user ? {
                                 id: user.id,
                                 role: user.role,
-                                name: user.name
+                                name: user.name,
+                                department_id: user.department_id ?? user.departmentId ?? null,
+                                department_code: user.department_code ?? user.departmentCode ?? null,
+                                headed_department_id: user.headed_department_id ?? user.headedDepartmentId ?? null
                             } : null,
                             initialSelection: nextSelection
                         };
@@ -37551,17 +37564,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     fetchUsers();
                     fetchDirections();
                     fetchDepartments();
+                } else if (isDepartmentHead(user)) {
+                    fetchUsers();
+                    fetchDirections();
                 } else if (user.role === 'trainer') {
                     fetchUsers();
                     fetchDirections();
                     fetchDepartments();
                 }
 
-                if (user.role !== 'operator') {
+                if (user.role !== 'operator' || isDepartmentHead(user)) {
                     fetchSensitiveAccessStatus();
                     fetchSurveysPendingBadgeCount();
                 }
-            }, [user?.id, user?.role]);
+            }, [user?.id, user?.role, user?.headed_department_id, user?.headedDepartmentId]);
 
             // Гард видимости разделов по отделу (Этап 10): если отдел ограничивает
             // набор разделов и текущий view недоступен — перенаправляем на разрешённый.
@@ -37572,7 +37588,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) setView(fallback);
-            }, [user?.id, user?.role, user?.department_code, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -37591,7 +37607,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [user?.id, user?.role, selectedMonth, selectedReportMonth]);
 
             useEffect(() => {
-                if (!user || !user.id || user.role !== 'operator') return;
+                if (!user || !user.id || !['operator', 'trainee'].includes(currentUserRole) || isScopedDepartmentHead) return;
 
                 if (view === 'profile') {
                     fetchProfileData();
@@ -37611,19 +37627,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     fetchOperatorData();
                     fetchSensitiveAccessStatus();
                 }
-            }, [user?.id, user?.role, selectedMonth, view]);
+            }, [user?.id, currentUserRole, isScopedDepartmentHead, selectedMonth, view]);
 
             useEffect(() => {
-                if (!user || !user.id || user.role !== 'operator') return;
+                if (!user || !user.id || !['operator', 'trainee'].includes(currentUserRole) || isScopedDepartmentHead) return;
                 if (!['surveys', 'trainings', 'contests'].includes(view)) return;
                 fetchDirections();
                 fetchUsers();
-            }, [user?.id, user?.role, view]);
+            }, [user?.id, currentUserRole, isScopedDepartmentHead, view]);
 
             useEffect(() => {
-                if (!user || !user.id || user.role !== 'operator' || view === 'shift_auction') return;
+                if (!user || !user.id || !['operator', 'trainee'].includes(currentUserRole) || isScopedDepartmentHead || view === 'shift_auction') return;
                 fetchSurveysPendingBadgeCount();
-            }, [user?.id, user?.role, view]);
+            }, [user?.id, currentUserRole, isScopedDepartmentHead, view]);
 
             useEffect(() => {
                 if (view !== 'surveys') return;
@@ -37981,7 +37997,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             )}
                                         </>
                                     )}
-                                    {isDepartmentHead(user) && !isAdminLikeRole && (
+                                    {isDepartmentHead(user) && !isAdminLikeRole && !isScopedDepartmentHead && (
                                         <>
                                             {renderSidebarDividerInner()}
                                             <li>
@@ -37991,7 +38007,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </li>
                                         </>
                                     )}
-                                    {currentUserRole === 'sv' && (
+                                    {isDepartmentManager && !isAdminLikeRole && (
                                         <>
                                             {canAccessLmsSection && !departmentRestrictsViews(user) && renderSidebarDividerInner()}
                                             {departmentAllowsView(user, 'manage_operators') && (
@@ -38029,6 +38045,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'call_division' ? 'bg-blue-700' : ''}`}
                                                 >
                                                     <FaIcon className="fas fa-random" /> <span className="sidebar-text">Деление звонков</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {departmentAllowsView(user, 'monitoring_scale') && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'monitoring_scale', { onNavigate: () => stableSidebarFetchDirections() })}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'monitoring_scale' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-chart-bar"></FaIcon> <span className="sidebar-text">Мониторинговая шкала</span>
                                                 </button>
                                             </li>
                                             )}
@@ -38145,7 +38171,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </li>
                                         </>
                                     )}
-                                    {currentUserRole === 'operator' && (
+                                    {(currentUserRole === 'operator' || currentUserRole === 'trainee') && !isScopedDepartmentHead && (
                                         <>
                                             {canAccessLmsSection && !departmentRestrictsViews(user) && renderSidebarDividerInner()}
                                             {departmentAllowsView(user, 'profile') && (
@@ -38217,7 +38243,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             )}
                                         </>
                                     )}
-                                    {!isAdminLikeRole && currentUserRole !== 'sv' && currentUserRole !== 'operator' && currentUserRole !== 'trainer' && currentUserRole !== 'trainee' && (
+                                    {!isAdminLikeRole && !isScopedDepartmentHead && currentUserRole !== 'sv' && currentUserRole !== 'operator' && currentUserRole !== 'trainer' && currentUserRole !== 'trainee' && (
                                         <>
                                             {renderSidebarDividerInner()}
                                             <li>
@@ -38513,8 +38539,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     : 0;
             const isManageOperatorsReadOnly = user?.role === 'trainer';
             const callEvaluationIframeUrl = `${APP_BASE_URL}call_evaluation.html`;
-            const isCallEvaluationView = view === 'call_evaluation' && (isAdminLikeRoleFn(user?.role) || isSupervisorRole(user?.role));
-            const canSeeCallEvaluation = isAdminLikeRoleFn(user?.role) || isSupervisorRole(user?.role);
+            const isCallEvaluationView = view === 'call_evaluation' && (isAdminLikeRoleFn(user?.role) || isDepartmentManager);
+            const canSeeCallEvaluation = isAdminLikeRoleFn(user?.role) || isDepartmentManager;
             const isBirthdayBannerSuppressedView = isCallEvaluationView || view === 'trainings';
             const birthdayBannerVisible = !isBirthdayBannerSuppressedView && !birthdayBannerDismissed && Array.isArray(birthdaysToday) && birthdaysToday.length > 0;
             const birthdayBannerNames = (birthdaysToday || []).map((b) => {
@@ -38524,7 +38550,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const birthdayBannerText = birthdaysToday.length === 1
                 ? `Сегодня день рождения у ${birthdayBannerNames[0]}!`
                 : `Сегодня день рождения у: ${birthdayBannerNames.join(', ')}.`;
-            const manageOperatorsBirthdaysCaption = isSupervisorRole(user?.role) ? 'Все операторы' : 'Мои сотрудники';
+            const manageOperatorsBirthdaysCaption = isDepartmentManager ? 'Все операторы' : 'Мои сотрудники';
 
             const renderUpcomingBirthdaysCard = (items, caption) => {
                 const list = Array.isArray(items) ? items : [];
@@ -40259,8 +40285,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 ))}
                             </>
                         )}
-                        {/* Глава отдела (не админ): Мониторинговая шкала, ограниченная своим отделом */}
-                        {( view === "monitoring_scale" && !isAdminLikeRole && isDepartmentHead(user) && (
+                        {/* Глава отдела / СВ: Мониторинговая шкала, ограниченная своим отделом */}
+                        {( view === "monitoring_scale" && !isAdminLikeRole && isDepartmentManager && (
                             <MonitoringScaleView
                                 user={user}
                                 directions={directions}
@@ -40268,10 +40294,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 onRefresh={fetchDirections}
                                 departments={departments}
                                 showToast={showToast}
-                                canEdit={true}
+                                canEdit={isDepartmentHeadUser}
                             />
                         ))}
-                        {(user.role === 'sv' || user.role === 'supervisor' || user.role === 'trainer') && (
+                        {(isDepartmentManager || user.role === 'trainer') && (
                             <>
                                 {view === 'qr_access' && (
                                 <>
@@ -41300,7 +41326,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
                             </>
                         )}
-                        {user.role === 'operator' && (
+                        {(currentUserRole === 'operator' || currentUserRole === 'trainee') && !isScopedDepartmentHead && (
                             <>
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
                                 {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} departments={departments} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
