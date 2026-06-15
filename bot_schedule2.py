@@ -17569,8 +17569,8 @@ def _chat2desk_sync_target_days(day=None):
     return [today - timedelta(days=offset) for offset in range(days_back, 0, -1)]
 
 
-def sync_chat2desk_daily_metrics(day=None, triggered_by='scheduler'):
-    if not _chat2desk_sync_enabled():
+def sync_chat2desk_daily_metrics(day=None, triggered_by='scheduler', force=False, imported_by=None):
+    if not force and not _chat2desk_sync_enabled():
         logging.info("Chat2Desk daily metrics sync skipped: disabled")
         return {'status': 'skipped', 'reason': 'disabled'}
     if not _chat2desk_api_token():
@@ -17604,7 +17604,7 @@ def sync_chat2desk_daily_metrics(day=None, triggered_by='scheduler'):
                 if metrics and update_fields:
                     save_summary = db.save_chat_manager_daily_metrics(
                         metrics=metrics,
-                        imported_by=None,
+                        imported_by=imported_by,
                         update_fields=update_fields
                     )
                 day_results.append({
@@ -17618,6 +17618,7 @@ def sync_chat2desk_daily_metrics(day=None, triggered_by='scheduler'):
                     'update_fields': update_fields,
                     'api_rows': report.get('api_rows') or {},
                     'batch_id': (save_summary or {}).get('batch_id'),
+                    'unmatched_operators': report.get('unmatched_preview') or [],
                 })
                 logging.info(
                     "Chat2Desk daily metrics sync %s: rows=%s matched=%s processed=%s fields=%s surge_excluded=%s",
@@ -20076,6 +20077,102 @@ def chat_manager_surge_windows():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error saving chat manager surge windows: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/chat_manager/metrics/sync_chat2desk', methods=['POST'])
+@require_api_key
+def sync_chat_manager_metrics_chat2desk():
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not (_is_admin_role(requester[3]) or _is_supervisor_role(requester[3])):
+            return jsonify({"error": "Forbidden"}), 403
+
+        payload = request.get_json(silent=True) or {}
+        target_day = payload.get('date') or request.args.get('date') or None
+        if target_day and _chat_metrics_parse_date(target_day) is None:
+            return jsonify({"error": "date must be in YYYY-MM-DD format"}), 400
+
+        result = sync_chat2desk_daily_metrics(
+            day=target_day,
+            triggered_by='manual',
+            force=True,
+            imported_by=requester_id
+        )
+        status = result.get('status')
+        if status == 'skipped':
+            reason = result.get('reason')
+            if reason == 'missing_token':
+                return jsonify({"error": "CHAT2DESK_API_TOKEN не задан", "sync": result}), 400
+            if reason == 'locked':
+                return jsonify({
+                    "error": "Синхронизация Chat2Desk уже выполняется. Повторите через несколько секунд.",
+                    "sync": result
+                }), 429
+            return jsonify({"error": f"Синхронизация Chat2Desk пропущена: {reason or 'unknown'}", "sync": result}), 400
+
+        days = [item for item in (result.get('days') or []) if isinstance(item, dict)]
+        failed_days = [item for item in days if item.get('status') == 'failed']
+        success_days = [item for item in days if item.get('status') == 'success']
+
+        if failed_days and not success_days:
+            return jsonify({
+                "error": failed_days[0].get('error') or "Синхронизация Chat2Desk не выполнена",
+                "sync": result
+            }), 502
+
+        update_fields = sorted({
+            field
+            for item in success_days
+            for field in (item.get('update_fields') or [])
+        })
+        unmatched_totals = {}
+        for item in success_days:
+            for row in (item.get('unmatched_operators') or []):
+                name = str(row.get('name') or '').strip()
+                if not name:
+                    continue
+                try:
+                    count = int(row.get('rows') or 0)
+                except Exception:
+                    count = 0
+                unmatched_totals[name] = unmatched_totals.get(name, 0) + max(1, count)
+        unmatched_preview = [
+            {'name': name, 'rows': count}
+            for name, count in sorted(unmatched_totals.items(), key=lambda kv: (-kv[1], kv[0]))[:STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT]
+        ]
+        import_block = {
+            'batch_id': next((item.get('batch_id') for item in success_days if item.get('batch_id')), None),
+            'detected_type': CHAT_REPORT_TYPE_COMBINED,
+            'detected_label': 'Синхронизация Chat2Desk',
+            'source_rows': sum(int(item.get('source_rows') or 0) for item in success_days),
+            'matched_rows': sum(int(item.get('matched_rows') or 0) for item in success_days),
+            'processed': sum(int(item.get('processed') or 0) for item in success_days),
+            'unmatched_count': sum(int(item.get('unmatched_count') or 0) for item in success_days),
+            'excluded_surge_rows': sum(int(item.get('excluded_surge_rows') or 0) for item in success_days),
+            'update_fields': update_fields,
+            'days': days,
+        }
+        message = "Метрики Chat2Desk синхронизированы"
+        if failed_days:
+            message = "Метрики Chat2Desk синхронизированы частично"
+        return jsonify({
+            "status": "success" if not failed_days else "partial_failed",
+            "message": message,
+            "import": import_block,
+            "sync": result,
+            "warnings": {
+                "unmatched_operators": unmatched_preview
+            }
+        }), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error syncing Chat2Desk chat manager metrics: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 
