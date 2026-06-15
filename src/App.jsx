@@ -4702,47 +4702,45 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         />
                                     </button>
 
-                                    {isOpen && (
-                                        <div className="flex items-center gap-1 animate-fade-in pr-1">
-                                            {group.tabs.map(tab => (
+                                    <div className={`tabs-expandable ${isOpen ? 'expanded' : ''} gap-1 pr-1`}>
+                                        {group.tabs.map(tab => (
+                                            <button
+                                                key={tab.key}
+                                                type="button"
+                                                onClick={() => setSelectedTab(tab.key)}
+                                                className={`h-8 rounded-full px-3 text-xs sm:text-sm font-medium transition whitespace-nowrap ${selectedTab === tab.key ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-700 hover:bg-slate-100'}`}
+                                                title={tab.unit ? `${tab.label} (${tab.unit})` : tab.label}
+                                            >
+                                                {tab.label}
+                                            </button>
+                                        ))}
+                                        {isChatModel && isMetricsGroup && (
+                                            <>
                                                 <button
-                                                    key={tab.key}
                                                     type="button"
-                                                    onClick={() => setSelectedTab(tab.key)}
-                                                    className={`h-8 rounded-full px-3 text-xs sm:text-sm font-medium transition whitespace-nowrap ${selectedTab === tab.key ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-700 hover:bg-slate-100'}`}
-                                                    title={tab.unit ? `${tab.label} (${tab.unit})` : tab.label}
+                                                    onClick={syncChat2DeskMetrics}
+                                                    disabled={chatMetricsImportState.loading}
+                                                    className={`h-8 rounded-full px-3 text-xs sm:text-sm font-semibold transition whitespace-nowrap border ${chatMetricsImportState.loading ? 'bg-cyan-100 border-cyan-200 text-cyan-500 cursor-not-allowed' : 'bg-cyan-50 border-cyan-200 text-cyan-800 hover:bg-cyan-100'}`}
+                                                    title="Синхронизировать метрики Chat2Desk за прошедший день"
                                                 >
-                                                    {tab.label}
+                                                    <FaIcon className={`fas ${chatMetricsImportState.loading ? 'fa-spinner fa-spin' : 'fa-arrows-rotate'} mr-1`}></FaIcon>
+                                                    Синхронизация
                                                 </button>
-                                            ))}
-                                            {isChatModel && isMetricsGroup && (
-                                                <>
-                                                    <button
-                                                        type="button"
-                                                        onClick={syncChat2DeskMetrics}
-                                                        disabled={chatMetricsImportState.loading}
-                                                        className={`h-8 rounded-full px-3 text-xs sm:text-sm font-semibold transition whitespace-nowrap border ${chatMetricsImportState.loading ? 'bg-cyan-100 border-cyan-200 text-cyan-500 cursor-not-allowed' : 'bg-cyan-50 border-cyan-200 text-cyan-800 hover:bg-cyan-100'}`}
-                                                        title="Синхронизировать метрики Chat2Desk за прошедший день"
-                                                    >
-                                                        <FaIcon className={`fas ${chatMetricsImportState.loading ? 'fa-spinner fa-spin' : 'fa-arrows-rotate'} mr-1`}></FaIcon>
-                                                        Синхронизация
-                                                    </button>
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => {
-                                                            setChatMetricsSurgeMonth(normalizeMonthKey(month));
-                                                            setShowChatMetricsSurgeEditor(true);
-                                                        }}
-                                                        className={`h-8 rounded-full px-3 text-xs sm:text-sm font-semibold transition whitespace-nowrap border ${showChatMetricsSurgeEditor ? 'bg-amber-600 border-amber-600 text-white shadow-sm' : 'bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100'}`}
-                                                        title="Окна наплыва для импорта среднего времени ответа"
-                                                    >
-                                                        <FaIcon className="fas fa-wave-square mr-1"></FaIcon>
-                                                        Наплывы{validSurgeCount ? ` ${validSurgeCount}` : ''}
-                                                    </button>
-                                                </>
-                                            )}
-                                        </div>
-                                    )}
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        setChatMetricsSurgeMonth(normalizeMonthKey(month));
+                                                        setShowChatMetricsSurgeEditor(true);
+                                                    }}
+                                                    className={`h-8 rounded-full px-3 text-xs sm:text-sm font-semibold transition whitespace-nowrap border ${showChatMetricsSurgeEditor ? 'bg-amber-600 border-amber-600 text-white shadow-sm' : 'bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100'}`}
+                                                    title="Окна наплыва для импорта среднего времени ответа"
+                                                >
+                                                    <FaIcon className="fas fa-wave-square mr-1"></FaIcon>
+                                                    Наплывы{validSurgeCount ? ` ${validSurgeCount}` : ''}
+                                                </button>
+                                            </>
+                                        )}
+                                    </div>
                                 </div>
                             );
                         })}
