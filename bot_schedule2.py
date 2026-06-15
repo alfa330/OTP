@@ -209,7 +209,7 @@ API_TOKEN = os.getenv('BOT_TOKEN')
 super_admin_id = int(os.getenv('SUPER_ADMIN_ID', '0'))
 super_admin_login = os.getenv('SUPER_ADMIN_LOGIN', 'admin4')
 super_admin_password = os.getenv('SUPER_ADMIN_PASSWORD', 'admin1234')
-CHAT2DESK_API_BASE_URL = (os.getenv('CHAT2DESK_API_BASE_URL') or 'https://api.chat2desk.com').strip().rstrip('/')
+CHAT2DESK_API_BASE_URL = (os.getenv('CHAT2DESK_API_BASE_URL') or 'https://api-02.chat2desk.kz').strip().rstrip('/')
 CHAT2DESK_API_TOKEN = (os.getenv('CHAT2DESK_API_TOKEN') or '').strip()
 CHAT2DESK_AUTH_SCHEME = (os.getenv('CHAT2DESK_AUTH_SCHEME') or 'Bearer').strip()
 CHAT2DESK_SYNC_ENABLED = _env_bool('CHAT2DESK_SYNC_ENABLED', True)
@@ -17258,7 +17258,7 @@ def _chat2desk_authorization_header():
 
 
 def _chat2desk_api_base_url():
-    return (os.getenv('CHAT2DESK_API_BASE_URL') or CHAT2DESK_API_BASE_URL or 'https://api.chat2desk.com').strip().rstrip('/')
+    return (os.getenv('CHAT2DESK_API_BASE_URL') or CHAT2DESK_API_BASE_URL or 'https://api-02.chat2desk.kz').strip().rstrip('/')
 
 
 def _chat2desk_sync_enabled():
