@@ -1447,6 +1447,57 @@ class Database:
                 ON chat_manager_low_rating_reviews(final_status);
             """)
             cursor.execute("""
+                ALTER TABLE chat_manager_low_rating_reviews
+                ADD COLUMN IF NOT EXISTS final_comment TEXT NOT NULL DEFAULT '';
+            """)
+            cursor.execute("""
+                UPDATE chat_manager_low_rating_reviews
+                SET final_comment = COALESCE(NULLIF(head_comment, ''), final_comment)
+                WHERE final_comment = '' AND head_comment <> '';
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS chat_manager_low_rating_review_entries (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    review_id UUID NOT NULL REFERENCES chat_manager_low_rating_reviews(id) ON DELETE CASCADE,
+                    reviewer_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    status TEXT,
+                    comment TEXT NOT NULL DEFAULT '',
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(review_id, reviewer_id)
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_chat_low_rating_review_entries_review
+                ON chat_manager_low_rating_review_entries(review_id);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_chat_low_rating_review_entries_reviewer
+                ON chat_manager_low_rating_review_entries(reviewer_id);
+            """)
+            cursor.execute("""
+                INSERT INTO chat_manager_low_rating_review_entries (
+                    review_id, reviewer_id, status, comment, created_at, updated_at
+                )
+                SELECT id, arai_updated_by, arai_status, arai_comment,
+                       COALESCE(arai_updated_at, updated_at, CURRENT_TIMESTAMP),
+                       COALESCE(arai_updated_at, updated_at, CURRENT_TIMESTAMP)
+                FROM chat_manager_low_rating_reviews
+                WHERE arai_updated_by IS NOT NULL AND arai_status IS NOT NULL
+                ON CONFLICT (review_id, reviewer_id) DO NOTHING;
+            """)
+            cursor.execute("""
+                INSERT INTO chat_manager_low_rating_review_entries (
+                    review_id, reviewer_id, status, comment, created_at, updated_at
+                )
+                SELECT id, zhanna_updated_by, zhanna_status, zhanna_comment,
+                       COALESCE(zhanna_updated_at, updated_at, CURRENT_TIMESTAMP),
+                       COALESCE(zhanna_updated_at, updated_at, CURRENT_TIMESTAMP)
+                FROM chat_manager_low_rating_reviews
+                WHERE zhanna_updated_by IS NOT NULL AND zhanna_status IS NOT NULL
+                ON CONFLICT (review_id, reviewer_id) DO NOTHING;
+            """)
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS chat_metric_surge_windows (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     month DATE NOT NULL,
@@ -10194,7 +10245,7 @@ class Database:
             'zhanna_status', 'zhanna_comment', 'zhanna_updated_by',
             'zhanna_updated_by_name', 'zhanna_updated_at', 'head_status',
             'head_comment', 'head_updated_by', 'head_updated_by_name',
-            'head_updated_at', 'final_status', 'final_source',
+            'head_updated_at', 'final_status', 'final_source', 'final_comment',
             'final_decided_by', 'final_decided_by_name', 'final_decided_at',
             'created_at', 'updated_at', 'direction_name', 'department_id', 'department_name'
         ]
@@ -10217,6 +10268,135 @@ class Database:
         item['review_state'] = Database._low_rating_review_state(item)
         item['needs_head_decision'] = bool(item['review_state'] == 'conflict')
         return item
+
+    @staticmethod
+    def _low_rating_extract_source_details(item):
+        raw = item.get('raw_payload') if isinstance(item.get('raw_payload'), dict) else {}
+        return {
+            'client_comment': str(raw.get('client_comment') or '').strip(),
+            'rating_text': str(raw.get('rating_text') or raw.get('rating_name') or '').strip(),
+            'request_id': raw.get('request_id'),
+            'rating_id': raw.get('rating_id'),
+            'valuation_request_id': raw.get('valuation_request_id'),
+            'channel_name': raw.get('channel_name'),
+        }
+
+    @staticmethod
+    def _low_rating_public_item(item, viewer_id=None, can_finalize=False):
+        public_item = {
+            'id': item.get('id'),
+            'operator_id': item.get('operator_id'),
+            'operator_name': item.get('operator_name') or '',
+            'phone_number': item.get('phone_number') or '',
+            'phone_normalized': item.get('phone_normalized') or '',
+            'taxi_park': item.get('taxi_park') or '',
+            'rated_at': item.get('rated_at'),
+            'day': item.get('day'),
+            'score': item.get('score'),
+            'direction_name': item.get('direction_name') or '',
+            'department_id': item.get('department_id'),
+            'department_name': item.get('department_name') or '',
+            'final_status': item.get('final_status'),
+            'final_source': item.get('final_source'),
+            'final_comment': item.get('final_comment') or '',
+            'final_decided_by_name': item.get('final_decided_by_name') or '',
+            'final_decided_at': item.get('final_decided_at'),
+            'review_count': int(item.get('review_count') or 0),
+            'review_state': item.get('review_state') or 'pending',
+            'needs_head_decision': bool(item.get('needs_head_decision')),
+            'can_finalize': bool(can_finalize),
+            'my_review_status': item.get('my_review_status'),
+            'my_review_comment': item.get('my_review_comment') or '',
+            'my_review_updated_at': item.get('my_review_updated_at'),
+        }
+        public_item.update(Database._low_rating_extract_source_details(item))
+        return public_item
+
+    def _attach_low_rating_review_entries_tx(self, cursor, items, viewer_id=None):
+        if not items:
+            return items
+        review_ids = [str(item.get('id')) for item in items if item.get('id')]
+        if not review_ids:
+            return items
+
+        cursor.execute(
+            """
+            SELECT review_id::text, status, COUNT(*)
+            FROM chat_manager_low_rating_review_entries
+            WHERE review_id::text = ANY(%s)
+              AND status IS NOT NULL
+            GROUP BY review_id, status
+            """,
+            (review_ids,)
+        )
+        by_review = {}
+        for review_id, status, count in cursor.fetchall() or []:
+            bucket = by_review.setdefault(str(review_id), {'review_count': 0, 'status_counts': {}})
+            normalized = self._normalize_low_rating_review_status(status)
+            bucket['status_counts'][normalized] = int(count or 0)
+            bucket['review_count'] += int(count or 0)
+
+        my_entries = {}
+        if viewer_id is not None:
+            cursor.execute(
+                """
+                SELECT review_id::text, status, comment, updated_at
+                FROM chat_manager_low_rating_review_entries
+                WHERE review_id::text = ANY(%s)
+                  AND reviewer_id = %s
+                """,
+                (review_ids, int(viewer_id))
+            )
+            for review_id, status, comment, updated_at in cursor.fetchall() or []:
+                my_entries[str(review_id)] = {
+                    'my_review_status': self._normalize_low_rating_review_status(status),
+                    'my_review_comment': comment or '',
+                    'my_review_updated_at': updated_at.isoformat() if isinstance(updated_at, datetime) else None,
+                }
+
+        for item in items:
+            review_id = str(item.get('id'))
+            counts = by_review.get(review_id, {'review_count': 0, 'status_counts': {}})
+            status_counts = counts.get('status_counts') or {}
+            item['review_count'] = int(counts.get('review_count') or 0)
+            item['review_status_counts'] = status_counts
+            item.update(my_entries.get(review_id, {
+                'my_review_status': None,
+                'my_review_comment': '',
+                'my_review_updated_at': None,
+            }))
+            if item.get('final_status'):
+                item['review_state'] = 'resolved'
+            elif status_counts.get('valid') and status_counts.get('invalid'):
+                item['review_state'] = 'conflict'
+            else:
+                item['review_state'] = 'pending'
+            item['needs_head_decision'] = bool(item.get('review_state') == 'conflict' and not item.get('final_status'))
+        return items
+
+    def _resolve_low_rating_final_status_from_entries_tx(self, cursor, review_id, manager_status=None):
+        cursor.execute(
+            """
+            SELECT status, COUNT(*)
+            FROM chat_manager_low_rating_review_entries
+            WHERE review_id = %s
+              AND status IS NOT NULL
+            GROUP BY status
+            """,
+            (review_id,)
+        )
+        counts = {}
+        for status, count in cursor.fetchall() or []:
+            normalized = self._normalize_low_rating_review_status(status)
+            if normalized:
+                counts[normalized] = counts.get(normalized, 0) + int(count or 0)
+        review_count = sum(counts.values())
+        if review_count >= 2 and len(counts) == 1:
+            return next(iter(counts.keys())), 'consensus'
+        manager = self._normalize_low_rating_review_status(manager_status)
+        if manager:
+            return manager, 'manager'
+        return None, None
 
     def _recalculate_chat_manager_score_adjustments_tx(self, cursor, operator_day_pairs):
         pairs = sorted({
@@ -10413,7 +10593,18 @@ class Database:
             'aggregations': (adjustment or {}).get('aggregations') or {},
         }
 
-    def list_chat_manager_low_rating_reviews(self, month, department_id=None, operator_id=None, status=None, limit=2000):
+    def list_chat_manager_low_rating_reviews(
+        self,
+        month,
+        department_id=None,
+        operator_id=None,
+        status=None,
+        limit=2000,
+        page=1,
+        per_page=12,
+        viewer_id=None,
+        can_finalize=False,
+    ):
         try:
             year, mon = map(int, str(month or '').split('-'))
             start = date(year, mon, 1)
@@ -10431,6 +10622,8 @@ class Database:
             params.append(int(operator_id))
 
         safe_limit = max(1, min(10000, int(limit or 2000)))
+        safe_page = max(1, int(page or 1))
+        safe_per_page = max(1, min(50, int(per_page or 12)))
         with self._get_cursor() as cursor:
             cursor.execute(
                 f"""
@@ -10443,7 +10636,7 @@ class Database:
                     lr.arai_status, lr.arai_comment, lr.arai_updated_by, au.name, lr.arai_updated_at,
                     lr.zhanna_status, lr.zhanna_comment, lr.zhanna_updated_by, zu.name, lr.zhanna_updated_at,
                     lr.head_status, lr.head_comment, lr.head_updated_by, hu.name, lr.head_updated_at,
-                    lr.final_status, lr.final_source, lr.final_decided_by, fu.name, lr.final_decided_at,
+                    lr.final_status, lr.final_source, lr.final_comment, lr.final_decided_by, fu.name, lr.final_decided_at,
                     lr.created_at, lr.updated_at,
                     d.name AS direction_name,
                     dep.id AS department_id,
@@ -10463,6 +10656,7 @@ class Database:
                 params + [safe_limit]
             )
             all_rows = [self._low_rating_row_to_dict(row) for row in cursor.fetchall() or []]
+            self._attach_low_rating_review_entries_tx(cursor, all_rows, viewer_id=viewer_id)
 
         summary = {
             'total': len(all_rows),
@@ -10488,6 +10682,8 @@ class Database:
             rows = all_rows
         elif status_key == 'attention':
             rows = [item for item in all_rows if not item.get('final_status')]
+        elif status_key == 'mine':
+            rows = [item for item in all_rows if item.get('my_review_status')]
         elif status_key in ('pending', 'conflict'):
             rows = [item for item in all_rows if item.get('review_state') == status_key]
         elif status_key in ('valid', 'invalid'):
@@ -10495,13 +10691,28 @@ class Database:
         else:
             rows = all_rows
 
+        total_filtered = len(rows)
+        total_pages = max(1, int(math.ceil(total_filtered / safe_per_page)))
+        safe_page = min(safe_page, total_pages)
+        start_idx = (safe_page - 1) * safe_per_page
+        page_rows = rows[start_idx:start_idx + safe_per_page]
+
         return {
             'month': f"{year:04d}-{mon:02d}",
-            'rows': rows,
+            'rows': [
+                self._low_rating_public_item(item, viewer_id=viewer_id, can_finalize=can_finalize)
+                for item in page_rows
+            ],
             'summary': summary,
+            'pagination': {
+                'page': safe_page,
+                'per_page': safe_per_page,
+                'total': total_filtered,
+                'total_pages': total_pages,
+            },
         }
 
-    def get_chat_manager_low_rating_review(self, review_id):
+    def get_chat_manager_low_rating_review(self, review_id, viewer_id=None, public=False, can_finalize=False):
         with self._get_cursor() as cursor:
             cursor.execute(
                 """
@@ -10514,7 +10725,7 @@ class Database:
                     lr.arai_status, lr.arai_comment, lr.arai_updated_by, au.name, lr.arai_updated_at,
                     lr.zhanna_status, lr.zhanna_comment, lr.zhanna_updated_by, zu.name, lr.zhanna_updated_at,
                     lr.head_status, lr.head_comment, lr.head_updated_by, hu.name, lr.head_updated_at,
-                    lr.final_status, lr.final_source, lr.final_decided_by, fu.name, lr.final_decided_at,
+                    lr.final_status, lr.final_source, lr.final_comment, lr.final_decided_by, fu.name, lr.final_decided_at,
                     lr.created_at, lr.updated_at,
                     d.name AS direction_name,
                     dep.id AS department_id,
@@ -10532,7 +10743,136 @@ class Database:
                 (review_id,)
             )
             row = cursor.fetchone()
-        return self._low_rating_row_to_dict(row) if row else None
+            item = self._low_rating_row_to_dict(row) if row else None
+            if item is not None:
+                self._attach_low_rating_review_entries_tx(cursor, [item], viewer_id=viewer_id)
+        if not item:
+            return None
+        if public:
+            return self._low_rating_public_item(item, viewer_id=viewer_id, can_finalize=can_finalize)
+        return item
+
+    def save_chat_manager_low_rating_personal_review(self, review_id, reviewer_id, status, comment=''):
+        normalized_status = self._normalize_low_rating_review_status(status)
+        clean_comment = str(comment or '').strip()[:4000]
+        reviewer_id_int = int(reviewer_id)
+
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT operator_id, day, head_status, head_comment
+                FROM chat_manager_low_rating_reviews
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (review_id,)
+            )
+            current = cursor.fetchone()
+            if not current:
+                return None
+            operator_id, day_obj, head_status, head_comment = current
+
+            cursor.execute(
+                """
+                INSERT INTO chat_manager_low_rating_review_entries (
+                    review_id, reviewer_id, status, comment, created_at, updated_at
+                )
+                VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (review_id, reviewer_id)
+                DO UPDATE SET
+                    status = EXCLUDED.status,
+                    comment = EXCLUDED.comment,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (review_id, reviewer_id_int, normalized_status, clean_comment)
+            )
+            final_status, final_source = self._resolve_low_rating_final_status_from_entries_tx(
+                cursor,
+                review_id,
+                manager_status=head_status
+            )
+            final_comment = head_comment if final_source == 'manager' else ''
+            cursor.execute(
+                """
+                UPDATE chat_manager_low_rating_reviews
+                SET final_status = %s,
+                    final_source = %s,
+                    final_comment = %s,
+                    final_decided_by = %s,
+                    final_decided_at = CASE WHEN %s IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                """,
+                (final_status, final_source, final_comment or '', reviewer_id_int if final_status else None, final_status, review_id)
+            )
+            adjustment = self._recalculate_chat_manager_score_adjustments_tx(cursor, [(operator_id, day_obj)])
+
+        item = self.get_chat_manager_low_rating_review(review_id, viewer_id=reviewer_id_int)
+        if item is not None:
+            item['adjustment'] = adjustment
+        return item
+
+    def finalize_chat_manager_low_rating_review(self, review_id, status, comment='', updated_by=None):
+        normalized_status = self._normalize_low_rating_review_status(status)
+        if not normalized_status:
+            raise ValueError("final status is required")
+        clean_comment = str(comment or '').strip()[:4000]
+        updated_by_id = int(updated_by) if updated_by is not None else None
+
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT operator_id, day
+                FROM chat_manager_low_rating_reviews
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (review_id,)
+            )
+            current = cursor.fetchone()
+            if not current:
+                return None
+            operator_id, day_obj = current
+
+            final_status, final_source = self._resolve_low_rating_final_status_from_entries_tx(
+                cursor,
+                review_id,
+                manager_status=normalized_status
+            )
+            final_comment = clean_comment if final_source == 'manager' else ''
+            cursor.execute(
+                """
+                UPDATE chat_manager_low_rating_reviews
+                SET head_status = %s,
+                    head_comment = %s,
+                    head_updated_by = %s,
+                    head_updated_at = CURRENT_TIMESTAMP,
+                    final_status = %s,
+                    final_source = %s,
+                    final_comment = %s,
+                    final_decided_by = %s,
+                    final_decided_at = CASE WHEN %s IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                """,
+                (
+                    normalized_status,
+                    clean_comment,
+                    updated_by_id,
+                    final_status,
+                    final_source,
+                    final_comment,
+                    updated_by_id if final_status else None,
+                    final_status,
+                    review_id,
+                )
+            )
+            adjustment = self._recalculate_chat_manager_score_adjustments_tx(cursor, [(operator_id, day_obj)])
+
+        item = self.get_chat_manager_low_rating_review(review_id, viewer_id=updated_by_id)
+        if item is not None:
+            item['adjustment'] = adjustment
+        return item
 
     def update_chat_manager_low_rating_review(self, review_id, reviewer, status, comment='', updated_by=None):
         reviewer_key = str(reviewer or '').strip().lower()
