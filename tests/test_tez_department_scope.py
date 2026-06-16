@@ -78,6 +78,13 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
         self.assertIn("'monitoring_scale'", source[source.index("const SALES_HEAD_VIEWS"):source.index("const VIEW_ALIASES")])
         self.assertNotIn("'monitoring_scale'", source[source.index("const SALES_SUPERVISOR_VIEWS"):source.index("const SALES_HEAD_VIEWS")])
 
+    def test_monitoring_scale_is_hidden_from_regular_supervisors(self):
+        source = _read(APP_PATH)
+
+        self.assertIn("isDepartmentHeadUser && departmentAllowsView(user, 'monitoring_scale')", source)
+        self.assertIn('view === "monitoring_scale" && !isAdminLikeRole && isDepartmentManager && isDepartmentHeadUser', source)
+        self.assertIn("view === 'monitoring_scale' && !isAdminLikeRole && !isDepartmentHeadUser", source)
+
     def test_department_manager_employee_accounting_keeps_supervisors(self):
         source = _read(APP_PATH)
 

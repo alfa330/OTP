@@ -10306,6 +10306,7 @@ class Database:
             'has_review_conflict': bool(item.get('has_review_conflict')),
             'needs_head_decision': bool(item.get('needs_head_decision')),
             'can_finalize': bool(can_finalize and item.get('has_review_conflict')),
+            'review_entries': item.get('review_entries') or [],
             'my_review_status': item.get('my_review_status'),
             'my_review_comment': item.get('my_review_comment') or '',
             'my_review_updated_at': item.get('my_review_updated_at'),
@@ -10336,6 +10337,31 @@ class Database:
             normalized = self._normalize_low_rating_review_status(status)
             bucket['status_counts'][normalized] = int(count or 0)
             bucket['review_count'] += int(count or 0)
+
+        review_entries = {}
+        cursor.execute(
+            """
+            SELECT e.review_id::text, e.reviewer_id, COALESCE(NULLIF(u.name, ''), ''), e.status, e.comment, e.updated_at
+            FROM chat_manager_low_rating_review_entries e
+            LEFT JOIN users u ON u.id = e.reviewer_id
+            WHERE e.review_id::text = ANY(%s)
+              AND e.status IS NOT NULL
+            ORDER BY e.updated_at ASC NULLS LAST, e.created_at ASC NULLS LAST
+            """,
+            (review_ids,)
+        )
+        for review_id, reviewer_id, reviewer_name, status, comment, updated_at in cursor.fetchall() or []:
+            normalized = self._normalize_low_rating_review_status(status)
+            if not normalized:
+                continue
+            review_entries.setdefault(str(review_id), []).append({
+                'reviewer_id': int(reviewer_id) if reviewer_id is not None else None,
+                'reviewer_name': reviewer_name or '',
+                'status': normalized,
+                'comment': comment or '',
+                'updated_at': updated_at.isoformat() if isinstance(updated_at, datetime) else None,
+                'is_mine': bool(viewer_id is not None and reviewer_id is not None and int(reviewer_id) == int(viewer_id)),
+            })
 
         my_entries = {}
         if viewer_id is not None:
@@ -10373,6 +10399,7 @@ class Database:
                 'my_review_updated_at': None,
             }))
             item['has_review_conflict'] = has_review_conflict
+            item['review_entries'] = review_entries.get(review_id, [])
             if item.get('final_status'):
                 item['review_state'] = 'resolved'
             elif has_review_conflict:

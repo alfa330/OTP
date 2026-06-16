@@ -5764,6 +5764,53 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </div>
                                             )}
 
+                                            {(() => {
+                                                const reviewEntries = Array.isArray(selectedLowRatingReview.review_entries)
+                                                    ? selectedLowRatingReview.review_entries
+                                                    : [];
+                                                return (
+                                                    <div className="rounded-[28px] border border-slate-200 bg-slate-50/80 p-4">
+                                                        <div className="mb-3 flex items-center justify-between gap-2">
+                                                            <div>
+                                                                <div className="text-sm font-semibold text-slate-900">Проверки</div>
+                                                                <div className="text-xs text-slate-500">Вердикты и комментарии видны всем проверяющим.</div>
+                                                            </div>
+                                                            <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-600 ring-1 ring-slate-200">
+                                                                {reviewEntries.length}
+                                                            </span>
+                                                        </div>
+                                                        {reviewEntries.length ? (
+                                                            <div className="max-h-60 space-y-2 overflow-y-auto pr-1 ios-modal-scroll">
+                                                                {reviewEntries.map((entry, index) => (
+                                                                    <div key={`${entry.reviewer_id || 'reviewer'}-${entry.updated_at || index}`} className="rounded-3xl bg-white px-4 py-3 ring-1 ring-slate-200">
+                                                                        <div className="flex flex-wrap items-center justify-between gap-2">
+                                                                            <div className="min-w-0">
+                                                                                <div className="truncate text-sm font-semibold text-slate-900">
+                                                                                    {entry.reviewer_name || 'Проверяющий'}{entry.is_mine ? ' · вы' : ''}
+                                                                                </div>
+                                                                                <div className="mt-0.5 text-[11px] text-slate-400">
+                                                                                    {formatLowRatingDateTime(entry.updated_at)}
+                                                                                </div>
+                                                                            </div>
+                                                                            <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-semibold ring-1 ${lowRatingStatusClass(entry.status)}`}>
+                                                                                {lowRatingStatusLabel(entry.status)}
+                                                                            </span>
+                                                                        </div>
+                                                                        <div className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-700">
+                                                                            {entry.comment || 'Без комментария'}
+                                                                        </div>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        ) : (
+                                                            <div className="rounded-3xl bg-white px-4 py-3 text-sm text-slate-500 ring-1 ring-slate-200">
+                                                                Проверок пока нет.
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                );
+                                            })()}
+
                                             <div className="rounded-[28px] border border-slate-200 bg-white p-4 shadow-sm">
                                                 <div className="mb-3 flex items-center justify-between gap-2">
                                                     <div>
@@ -38577,6 +38624,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // набор разделов и текущий view недоступен — перенаправляем на разрешённый.
             useEffect(() => {
                 if (!user || !user.id) return;
+                if (view === 'monitoring_scale' && !isAdminLikeRole && !isDepartmentHeadUser) {
+                    const fallback = firstAllowedView(user, []) || (isSupervisorRole(user?.role) ? 'operators' : 'hours');
+                    if (fallback && fallback !== view) setView(fallback);
+                    return;
+                }
                 if (!departmentRestrictsViews(user)) return;
                 if (isDepartmentHead(user) && view === 'manage_operators' && departmentAllowsView(user, 'manage_operators')) {
                     setView('manage_users');
@@ -38586,7 +38638,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) setView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -39082,7 +39134,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </button>
                                             </li>
                                             )}
-                                            {departmentAllowsView(user, 'monitoring_scale') && (
+                                            {isDepartmentHeadUser && departmentAllowsView(user, 'monitoring_scale') && (
                                             <li>
                                                 <button
                                                     onClick={(e) => handleSidebarViewNavigation(e, 'monitoring_scale', { onNavigate: () => stableSidebarFetchDirections() })}
@@ -41319,8 +41371,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 ))}
                             </>
                         )}
-                        {/* Глава отдела / СВ: Мониторинговая шкала, ограниченная своим отделом */}
-                        {( view === "monitoring_scale" && !isAdminLikeRole && isDepartmentManager && (
+                        {/* Глава отдела: Мониторинговая шкала, ограниченная своим отделом */}
+                        {( view === "monitoring_scale" && !isAdminLikeRole && isDepartmentManager && isDepartmentHeadUser && (
                             <MonitoringScaleView
                                 user={user}
                                 directions={directions}
