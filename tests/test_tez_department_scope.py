@@ -79,6 +79,12 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
         self.assertIn("handleSidebarViewNavigation(e, 'manage_users'", source)
         self.assertIn("setView('manage_users')", source)
         self.assertNotIn("manageOperatorsRoleView", source)
+        self.assertIn("const operatorUsers = useMemo(() => (", source)
+        self.assertIn("['operator', 'trainee'].includes(normalizeRole(employee?.role))", source)
+        self.assertIn("buildUpcomingBirthdays(operatorUsers", source)
+        self.assertIn("const filteredUsers = operatorUsers.filter", source)
+        self.assertIn("const allUsers = (Array.isArray(operatorUsers) ? operatorUsers : [])", source)
+        self.assertIn("const filteredByStatus = (operatorUsers || [])", source)
 
     def test_hours_accounting_groups_are_scoped_for_department_head(self):
         source = _read(APP_PATH)
