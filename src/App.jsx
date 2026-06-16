@@ -33285,9 +33285,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 });
             }, [getNextBirthdayMeta, isEmployeeVisibleByStatusTab]);
 
+            const operatorUsers = useMemo(() => (
+                (Array.isArray(users) ? users : []).filter((employee) =>
+                    ['operator', 'trainee'].includes(normalizeRole(employee?.role))
+                )
+            ), [users]);
+
             const upcomingManageUsersBirthdays = useMemo(() => (
-                buildUpcomingBirthdays(users, (employee) => employee?.direction || 'Без направления', 14)
-            ), [users, buildUpcomingBirthdays]);
+                buildUpcomingBirthdays(operatorUsers, (employee) => employee?.direction || 'Без направления', 14)
+            ), [operatorUsers, buildUpcomingBirthdays]);
 
             const isSvRoleForBirthdays = isSupervisorRole(user?.role);
 
@@ -33381,12 +33387,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [showOperatorsSvFilterMenu, showOperatorsDirectionFilterMenu]);
 
             const manageOperatorsBirthdaySource = useMemo(() => {
-                if (isSvRoleForBirthdays && Array.isArray(users) && users.length > 0) {
+                if (isSvRoleForBirthdays && Array.isArray(operatorUsers) && operatorUsers.length > 0) {
                     // For supervisors show upcoming birthdays across all operators, not only direct reports.
-                    return users;
+                    return operatorUsers;
                 }
                 return Array.isArray(svData?.operators) ? svData.operators : [];
-            }, [isSvRoleForBirthdays, users, svData?.operators]);
+            }, [isSvRoleForBirthdays, operatorUsers, svData?.operators]);
 
             const upcomingManageOperatorsBirthdays = useMemo(() => (
                 buildUpcomingBirthdays(
@@ -36677,7 +36683,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 );
             };
 
-            const filteredUsers = users.filter((u) => matchesEmployeeSearchQuery(u, manageUsersSearchQuery));
+            const filteredUsers = operatorUsers.filter((u) => matchesEmployeeSearchQuery(u, manageUsersSearchQuery));
 
             const filteredTrainerUsers = trainerUsers.filter((u) => matchesEmployeeSearchQuery(u, trainerSearchQuery));
 
@@ -36786,11 +36792,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             useEffect(() => {
                 setSelectedManageUsersIds((prev) => {
                     if (!prev.size) return prev;
-                    const availableIds = new Set((users || []).map((u) => Number(u.id)).filter((id) => Number.isFinite(id)));
+                    const availableIds = new Set((operatorUsers || []).map((u) => Number(u.id)).filter((id) => Number.isFinite(id)));
                     const next = new Set([...prev].filter((id) => availableIds.has(id)));
                     return next.size === prev.size ? prev : next;
                 });
-            }, [users]);
+            }, [operatorUsers]);
 
             useEffect(() => {
                 if (view !== 'manage_users' && view !== 'employees') {
@@ -39697,7 +39703,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <div className="flex flex-wrap gap-3 mb-6">
                                     {(() => {
                                         const _deptFilter = manageUsersDeptFilter ? Number(manageUsersDeptFilter) : null;
-                                        const allUsers = (Array.isArray(users) ? users : [])
+                                        const allUsers = (Array.isArray(operatorUsers) ? operatorUsers : [])
                                             .filter((u) => _deptFilter == null || Number(u?.department_id) === _deptFilter);
                                         return USER_STATUS_FILTER_TABS.map((tab) => {
                                             const count = allUsers.filter((u) => isEmployeeVisibleByStatusTab(u?.status, tab.key)).length;
@@ -39724,7 +39730,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     (() => {
                                         // Фильтруем по статусу и (опц.) по отделу
                                         const _deptFilter = manageUsersDeptFilter ? Number(manageUsersDeptFilter) : null;
-                                        const filteredByStatus = (users || [])
+                                        const filteredByStatus = (operatorUsers || [])
                                             .filter((u) => isEmployeeVisibleByStatusTab(u?.status, activeUserTab))
                                             .filter((u) => _deptFilter == null || Number(u?.department_id) === _deptFilter);
 
