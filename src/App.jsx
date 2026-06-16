@@ -1953,6 +1953,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const [chatMetricsSurgeSaving, setChatMetricsSurgeSaving] = useState(false);
         const [chatMetricsSurgeError, setChatMetricsSurgeError] = useState('');
         const [showChatMetricsSurgeEditor, setShowChatMetricsSurgeEditor] = useState(false);
+        const [showChatMetricsSyncDialog, setShowChatMetricsSyncDialog] = useState(false);
+        const [chatMetricsSyncDate, setChatMetricsSyncDate] = useState(() => {
+            const d = new Date();
+            return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        });
+        const [showLowRatingReviews, setShowLowRatingReviews] = useState(false);
+        const [lowRatingReviews, setLowRatingReviews] = useState([]);
+        const [lowRatingSummary, setLowRatingSummary] = useState({ total: 0, pending: 0, conflict: 0, valid: 0, invalid: 0 });
+        const [lowRatingFilter, setLowRatingFilter] = useState('attention');
+        const [lowRatingLoading, setLowRatingLoading] = useState(false);
+        const [lowRatingSavingKey, setLowRatingSavingKey] = useState('');
+        const [lowRatingError, setLowRatingError] = useState('');
         const chatMetricsInputRef = useRef(null);
 
         const [selectedTab, setSelectedTab] = useState('work_time');
@@ -2131,6 +2143,63 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             : []
         );
 
+        const LOW_RATING_REVIEW_OPTIONS = [
+            { value: '', label: 'На проверке' },
+            { value: 'valid', label: 'Обоснованно' },
+            { value: 'invalid', label: 'Необоснованно' },
+        ];
+
+        const LOW_RATING_FILTERS = [
+            { value: 'attention', label: 'К проверке' },
+            { value: 'conflict', label: 'Спорные' },
+            { value: 'invalid', label: 'Исключённые' },
+            { value: 'valid', label: 'Обоснованные' },
+            { value: 'all', label: 'Все' },
+        ];
+
+        const emptyLowRatingSummary = () => ({ total: 0, pending: 0, conflict: 0, valid: 0, invalid: 0 });
+
+        const lowRatingFilterCount = (filterValue) => {
+            const summary = lowRatingSummary || {};
+            if (filterValue === 'attention') return Number(summary.pending || 0) + Number(summary.conflict || 0);
+            if (filterValue === 'all') return Number(summary.total || 0);
+            return Number(summary[filterValue] || 0);
+        };
+
+        const lowRatingStatusLabel = (status) => {
+            const key = String(status || '').trim();
+            if (key === 'valid') return 'Обоснованно';
+            if (key === 'invalid') return 'Необоснованно';
+            return 'На проверке';
+        };
+
+        const lowRatingStatusClass = (status) => {
+            const key = String(status || '').trim();
+            if (key === 'valid') return 'bg-emerald-50 text-emerald-700 ring-emerald-200';
+            if (key === 'invalid') return 'bg-rose-50 text-rose-700 ring-rose-200';
+            return 'bg-slate-50 text-slate-500 ring-slate-200';
+        };
+
+        const lowRatingFinalLabel = (row) => {
+            if (row?.final_status === 'invalid') return 'Необоснованно · исключена';
+            if (row?.final_status === 'valid') return 'Обоснованно';
+            if (row?.review_state === 'conflict') return 'Нужен руководитель';
+            return 'На проверке';
+        };
+
+        const lowRatingFinalClass = (row) => {
+            if (row?.final_status === 'invalid') return 'bg-rose-600 text-white ring-rose-600';
+            if (row?.final_status === 'valid') return 'bg-emerald-600 text-white ring-emerald-600';
+            if (row?.review_state === 'conflict') return 'bg-amber-50 text-amber-800 ring-amber-200';
+            return 'bg-slate-50 text-slate-600 ring-slate-200';
+        };
+
+        const formatLowRatingDateTime = (value) => {
+            const text = String(value || '').trim();
+            if (!text) return '—';
+            return text.replace('T', ' ').slice(0, 19);
+        };
+
         const addChatMetricsSurgeWindow = () => {
             setChatMetricsSurgeWindows(prev => [...cloneChatMetricsSurgeWindows(prev), { start: '', end: '', description: '' }]);
         };
@@ -2151,6 +2220,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const chatMetricsDefaultDate = () => {
             const d = new Date();
             return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        };
+
+        const chatMetricsDefaultSyncDate = () => {
+            const todayDate = chatMetricsDefaultDate();
+            const monthKey = normalizeMonthKey(month);
+            return todayDate.startsWith(monthKey) ? todayDate : `${monthKey}-01`;
+        };
+
+        const openChatMetricsSyncDialog = () => {
+            if (chatMetricsImportState.loading) return;
+            setChatMetricsSyncDate(chatMetricsDefaultSyncDate());
+            setShowChatMetricsSyncDialog(true);
+            setShowChatMetricsSurgeEditor(false);
+        };
+
+        const closeChatMetricsSyncDialog = () => {
+            if (chatMetricsImportState.loading) return;
+            setShowChatMetricsSyncDialog(false);
         };
 
         const fetchChatMetricsSurgeWindows = async (targetMonth = chatMetricsSurgeMonth) => {
@@ -2174,6 +2261,91 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setChatMetricsSurgeError(error?.message || 'Не удалось загрузить окна наплыва');
             } finally {
                 setChatMetricsSurgeLoading(false);
+            }
+        };
+
+        const fetchLowRatingReviews = async (targetFilter = lowRatingFilter) => {
+            if (!user?.id || !isChatModel) return;
+            const filterKey = String(targetFilter || 'attention');
+            const params = new URLSearchParams();
+            params.append('month', normalizeMonthKey(month));
+            params.append('status', filterKey);
+            setLowRatingLoading(true);
+            setLowRatingError('');
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/chat_manager/low_rating_reviews?${params.toString()}`, {
+                    credentials: 'include',
+                    headers: withAccessTokenHeader({ 'X-User-Id': user.id })
+                });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(payload?.error || `HTTP ${response.status}`);
+                }
+                setLowRatingReviews(Array.isArray(payload?.rows) ? payload.rows : []);
+                setLowRatingSummary(payload?.summary || emptyLowRatingSummary());
+            } catch (error) {
+                console.error('fetch low rating reviews error:', error);
+                const message = error?.message || 'Не удалось загрузить низкие оценки';
+                setLowRatingReviews([]);
+                setLowRatingSummary(emptyLowRatingSummary());
+                setLowRatingError(message);
+                fallbackToast(message, 'error');
+            } finally {
+                setLowRatingLoading(false);
+            }
+        };
+
+        const updateLowRatingReviewDraft = (reviewId, patch) => {
+            setLowRatingReviews(prev => (Array.isArray(prev) ? prev : []).map(row => (
+                String(row?.id) === String(reviewId) ? { ...row, ...patch } : row
+            )));
+        };
+
+        const saveLowRatingReview = async (row, reviewer, patch = {}) => {
+            const reviewId = row?.id;
+            const reviewerKey = String(reviewer || '').trim().toLowerCase();
+            if (!reviewId || !user?.id || !['arai', 'zhanna', 'head'].includes(reviewerKey)) return;
+            const statusKey = `${reviewerKey}_status`;
+            const commentKey = `${reviewerKey}_comment`;
+            const status = Object.prototype.hasOwnProperty.call(patch, 'status') ? patch.status : row?.[statusKey];
+            const comment = Object.prototype.hasOwnProperty.call(patch, 'comment') ? patch.comment : row?.[commentKey];
+            const savingKey = `${reviewId}:${reviewerKey}`;
+            setLowRatingSavingKey(savingKey);
+            setLowRatingError('');
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/chat_manager/low_rating_reviews/${encodeURIComponent(reviewId)}`, {
+                    method: 'PATCH',
+                    credentials: 'include',
+                    headers: withAccessTokenHeader({
+                        'Content-Type': 'application/json',
+                        'X-User-Id': user.id
+                    }),
+                    body: JSON.stringify({
+                        reviewer: reviewerKey,
+                        status: status || '',
+                        comment: comment || ''
+                    })
+                });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(payload?.error || `HTTP ${response.status}`);
+                }
+                if (payload?.review) {
+                    setLowRatingReviews(prev => (Array.isArray(prev) ? prev : []).map(item => (
+                        String(item?.id) === String(reviewId) ? payload.review : item
+                    )));
+                }
+                await fetchLowRatingReviews(lowRatingFilter);
+                await fetchDailyHoursAndTrainings();
+                fallbackToast('Решение по низкой оценке сохранено', 'success');
+            } catch (error) {
+                console.error('save low rating review error:', error);
+                const message = error?.message || 'Не удалось сохранить решение по низкой оценке';
+                setLowRatingError(message);
+                fallbackToast(message, 'error');
+                await fetchLowRatingReviews(lowRatingFilter);
+            } finally {
+                setLowRatingSavingKey('');
             }
         };
 
@@ -2302,6 +2474,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             setChatMetricsImportState({ loading: false, summary, error: '' });
             fallbackToast(payload?.message || 'Метрики чат-менеджеров загружены', 'success');
             await fetchDailyHoursAndTrainings();
+            if (showLowRatingReviews) await fetchLowRatingReviews(lowRatingFilter);
             if (onUploaded) onUploaded();
             } catch (error) {
             console.error('Error importing chat manager metrics csv:', error);
@@ -2311,9 +2484,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
         };
 
-        const syncChat2DeskMetrics = async () => {
+        const syncChat2DeskMetrics = async (targetDate = chatMetricsSyncDate) => {
             if (!user?.id || chatMetricsImportState.loading) return;
+            const cleanDate = String(targetDate || '').trim();
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(cleanDate)) {
+                fallbackToast('Выберите дату синхронизации Chat2Desk', 'error');
+                return;
+            }
             setShowChatMetricsSurgeEditor(false);
+            setShowChatMetricsSyncDialog(false);
             setChatMetricsUpload(null);
             setChatMetricsImportState({ loading: true, summary: null, error: '' });
             try {
@@ -2324,7 +2503,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         'Content-Type': 'application/json',
                         'X-User-Id': user.id
                     }),
-                    body: JSON.stringify({})
+                    body: JSON.stringify({ date: cleanDate })
                 });
                 const payload = await response.json().catch(() => ({}));
                 if (!response.ok) {
@@ -2337,7 +2516,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 };
                 setChatMetricsImportState({ loading: false, summary, error: '' });
                 fallbackToast(payload?.message || 'Метрики Chat2Desk синхронизированы', 'success');
-                await fetchDailyHoursAndTrainings();
+                const syncedMonth = cleanDate.slice(0, 7);
+                if (syncedMonth && syncedMonth !== normalizeMonthKey(month)) {
+                    setMonth(syncedMonth);
+                } else {
+                    await fetchDailyHoursAndTrainings();
+                    if (showLowRatingReviews) await fetchLowRatingReviews(lowRatingFilter);
+                }
                 if (onUploaded) onUploaded();
             } catch (error) {
                 console.error('Error syncing Chat2Desk chat manager metrics:', error);
@@ -3467,6 +3652,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // eslint-disable-next-line react-hooks/exhaustive-deps
         }, [isChatModel, user?.id, chatMetricsSurgeMonth]);
 
+        useEffect(() => {
+            if (!isChatModel) {
+                setShowLowRatingReviews(false);
+                setLowRatingReviews([]);
+                setLowRatingSummary(emptyLowRatingSummary());
+                return;
+            }
+            if (!showLowRatingReviews || !user?.id) return;
+            fetchLowRatingReviews(lowRatingFilter);
+            // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, [isChatModel, showLowRatingReviews, lowRatingFilter, month, user?.id]);
+
         // Метки вкладок по модели. НЕ мутируем общий const TABS — строим производный массив.
         const VIEW_TABS = useMemo(() => {
             if (!isChatModel) return TABS;
@@ -4396,6 +4593,56 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const hoursRateColClass = 'w-28 shrink-0 p-2 text-center border-r';
         const hoursNormColClass = 'w-36 shrink-0 p-2 text-center border-r';
         const hoursSummaryColClass = 'shrink-0 p-2 text-center border-l';
+        const canSetLowRatingHeadDecision = isDepartmentHead(user) || isAdminLikeRoleFn(user?.role);
+        const lowRatingAttentionCount = lowRatingFilterCount('attention');
+
+        const renderLowRatingReviewerCell = (row, reviewer, label, disabled = false) => {
+            const reviewerKey = String(reviewer || '').trim();
+            const statusKey = `${reviewerKey}_status`;
+            const commentKey = `${reviewerKey}_comment`;
+            const updatedByKey = `${reviewerKey}_updated_by_name`;
+            const savingKey = `${row?.id}:${reviewerKey}`;
+            const isSaving = lowRatingSavingKey === savingKey;
+            const isDisabled = disabled || isSaving;
+            const selectedStatus = row?.[statusKey] || '';
+            return (
+                <div className="min-w-[220px] space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                        <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{label}</span>
+                        {isSaving && <FaIcon className="fas fa-spinner fa-spin text-slate-400" aria-hidden="true" />}
+                    </div>
+                    <select
+                        className="w-full rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 outline-none transition focus:border-blue-300 focus:ring-4 focus:ring-blue-100 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400"
+                        value={selectedStatus}
+                        disabled={isDisabled}
+                        onChange={(e) => {
+                            const nextStatus = e.target.value;
+                            updateLowRatingReviewDraft(row.id, { [statusKey]: nextStatus });
+                            saveLowRatingReview({ ...row, [statusKey]: nextStatus }, reviewerKey, { status: nextStatus });
+                        }}
+                    >
+                        {LOW_RATING_REVIEW_OPTIONS.map(option => (
+                            <option key={option.value || 'empty'} value={option.value}>{option.label}</option>
+                        ))}
+                    </select>
+                    <textarea
+                        className="min-h-[68px] w-full resize-y rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-blue-300 focus:bg-white focus:ring-4 focus:ring-blue-100 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400"
+                        value={row?.[commentKey] || ''}
+                        disabled={isDisabled}
+                        placeholder="Комментарий"
+                        maxLength={4000}
+                        onChange={(e) => updateLowRatingReviewDraft(row.id, { [commentKey]: e.target.value })}
+                        onBlur={(e) => saveLowRatingReview({ ...row, [commentKey]: e.target.value }, reviewerKey, { comment: e.target.value })}
+                    />
+                    {row?.[updatedByKey] && (
+                        <div className="truncate text-[11px] text-slate-400" title={row[updatedByKey]}>
+                            {row[updatedByKey]}
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
         return (
             <div className="bg-white p-5 rounded-xl shadow-md">
             <input
@@ -4423,6 +4670,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             {chatMetricsImportState.summary?.excluded_surge_rows ? (
                                 <span className="ml-2">• исключено по наплыву: {Number(chatMetricsImportState.summary.excluded_surge_rows)}</span>
                             ) : null}
+                            {Number(chatMetricsImportState.summary?.low_rating_saved || chatMetricsImportState.summary?.low_rating_count || 0) > 0 && (
+                                <span className="ml-2">• низкие оценки: {Number(chatMetricsImportState.summary?.low_rating_saved || chatMetricsImportState.summary?.low_rating_count || 0)}</span>
+                            )}
                             {Number(chatMetricsImportState.summary?.unmatched_count || 0) > 0 && (
                                 <div className="mt-1 text-amber-700">
                                     <FaIcon className="fas fa-user-slash mr-1"></FaIcon>
@@ -4532,6 +4782,65 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             </button>
                             <button className="px-3 py-2 rounded-md bg-cyan-600 text-white text-sm font-medium hover:bg-cyan-700" onClick={submitChatMetricsImport}>
                                 <FaIcon className="fas fa-upload mr-1"></FaIcon>Импортировать
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+            {showChatMetricsSyncDialog && (
+                <div className="fixed inset-0 z-[125] flex items-center justify-center bg-slate-950/30 p-4 backdrop-blur-sm" onClick={closeChatMetricsSyncDialog}>
+                    <div
+                        className="w-full max-w-sm overflow-hidden rounded-[28px] border border-white/70 bg-white/95 shadow-[0_24px_80px_rgba(15,23,42,0.22)] ring-1 ring-slate-900/5 backdrop-blur-xl"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="flex items-start justify-between gap-4 border-b border-slate-200/70 px-5 py-4">
+                            <div className="flex min-w-0 items-start gap-3">
+                                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-cyan-100 text-cyan-700 ring-1 ring-cyan-200/80">
+                                    <FaIcon className="fas fa-arrows-rotate" aria-hidden="true" />
+                                </span>
+                                <div className="min-w-0">
+                                    <h3 className="text-base font-semibold text-slate-900">Синхронизация Chat2Desk</h3>
+                                    <p className="mt-1 text-xs leading-5 text-slate-500">Метрики и низкие оценки за выбранный день.</p>
+                                </div>
+                            </div>
+                            <button
+                                type="button"
+                                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
+                                onClick={closeChatMetricsSyncDialog}
+                                disabled={chatMetricsImportState.loading}
+                                aria-label="Закрыть синхронизацию Chat2Desk"
+                            >
+                                <FaIcon className="fas fa-xmark" aria-hidden="true" />
+                            </button>
+                        </div>
+                        <div className="px-5 py-4">
+                            <label className="block">
+                                <span className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Дата</span>
+                                <input
+                                    type="date"
+                                    className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-800 outline-none transition focus:border-cyan-300 focus:bg-white focus:ring-4 focus:ring-cyan-100"
+                                    value={chatMetricsSyncDate || ''}
+                                    onChange={(e) => setChatMetricsSyncDate(e.target.value)}
+                                />
+                            </label>
+                        </div>
+                        <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200/70 bg-slate-50/80 px-5 py-4">
+                            <button
+                                type="button"
+                                className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                                onClick={closeChatMetricsSyncDialog}
+                                disabled={chatMetricsImportState.loading}
+                            >
+                                Отмена
+                            </button>
+                            <button
+                                type="button"
+                                className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold text-white shadow-sm transition ${chatMetricsImportState.loading ? 'cursor-wait bg-cyan-400' : 'bg-cyan-600 hover:bg-cyan-700'}`}
+                                onClick={() => syncChat2DeskMetrics(chatMetricsSyncDate)}
+                                disabled={chatMetricsImportState.loading}
+                            >
+                                <FaIcon className={`fas ${chatMetricsImportState.loading ? 'fa-spinner fa-spin' : 'fa-arrows-rotate'}`} aria-hidden="true" />
+                                {chatMetricsImportState.loading ? 'Синхронизируем...' : 'Синхронизировать'}
                             </button>
                         </div>
                     </div>
@@ -4836,7 +5145,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         type="button"
                                                         onClick={(e) => {
                                                             e.stopPropagation();
-                                                            syncChat2DeskMetrics();
+                                                            openChatMetricsSyncDialog();
                                                             setPinnedGroups([]);
                                                             setHoveredGroup(null);
                                                         }}
@@ -4849,6 +5158,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     >
                                                         <FaIcon className={`fas ${chatMetricsImportState.loading ? 'fa-spinner fa-spin' : 'fa-arrows-rotate'}`} />
                                                         Синхронизация
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            setShowLowRatingReviews(prev => !prev);
+                                                            setPinnedGroups([]);
+                                                            setHoveredGroup(null);
+                                                        }}
+                                                        className={`flex items-center gap-1.5 px-3 py-1.5 text-left text-xs font-semibold rounded-lg transition border ${
+                                                            showLowRatingReviews
+                                                                ? 'bg-slate-900 border-slate-900 text-white'
+                                                                : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
+                                                        }`}
+                                                    >
+                                                        <FaIcon className="fas fa-star-half-alt" />
+                                                        Низкие оценки{lowRatingAttentionCount ? ` (${lowRatingAttentionCount})` : ''}
                                                     </button>
                                                     <button
                                                         type="button"
@@ -5087,6 +5413,192 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 </>
                 )}
             </div>
+
+            {isChatModel && showLowRatingReviews && (
+                <section className="mb-4 overflow-hidden rounded-[28px] border border-slate-200 bg-white/95 shadow-[0_18px_50px_rgba(15,23,42,0.10)] ring-1 ring-slate-900/5">
+                    <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200/70 bg-slate-50/80 px-5 py-4">
+                        <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                                <span className="flex h-9 w-9 items-center justify-center rounded-2xl bg-slate-900 text-white shadow-sm">
+                                    <FaIcon className="fas fa-star-half-alt" aria-hidden="true" />
+                                </span>
+                                <div>
+                                    <h3 className="text-base font-semibold text-slate-900">Низкие оценки Chat2Desk</h3>
+                                    <p className="mt-0.5 text-xs text-slate-500">
+                                        Оценки ниже 4: совпадение Арай и Жанны закрывает решение, спорные строки ждут главу отдела.
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                            <button
+                                type="button"
+                                onClick={() => fetchLowRatingReviews(lowRatingFilter)}
+                                disabled={lowRatingLoading}
+                                className="inline-flex h-9 items-center gap-2 rounded-full border border-slate-200 bg-white px-3.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-wait disabled:text-slate-400"
+                            >
+                                <FaIcon className={`fas ${lowRatingLoading ? 'fa-spinner fa-spin' : 'fa-rotate'}`} aria-hidden="true" />
+                                Обновить
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setShowLowRatingReviews(false)}
+                                className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-slate-500 shadow-sm ring-1 ring-slate-200 transition hover:bg-slate-100 hover:text-slate-700"
+                                aria-label="Закрыть низкие оценки"
+                            >
+                                <FaIcon className="fas fa-xmark" aria-hidden="true" />
+                            </button>
+                        </div>
+                    </div>
+
+                    <div className="px-5 py-4">
+                        <div className="mb-4 flex flex-wrap items-center gap-2">
+                            {LOW_RATING_FILTERS.map(filter => {
+                                const active = lowRatingFilter === filter.value;
+                                const count = lowRatingFilterCount(filter.value);
+                                return (
+                                    <button
+                                        key={filter.value}
+                                        type="button"
+                                        onClick={() => setLowRatingFilter(filter.value)}
+                                        className={`inline-flex h-9 items-center gap-2 rounded-full px-3.5 text-xs font-semibold transition ${
+                                            active
+                                                ? 'bg-slate-900 text-white shadow-sm'
+                                                : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                        }`}
+                                    >
+                                        {filter.label}
+                                        <span className={`rounded-full px-2 py-0.5 text-[11px] ${active ? 'bg-white/20 text-white' : 'bg-white text-slate-500'}`}>
+                                            {count}
+                                        </span>
+                                    </button>
+                                );
+                            })}
+                        </div>
+
+                        <div className="mb-4 grid grid-cols-2 gap-2 md:grid-cols-5">
+                            {[
+                                ['Всего', lowRatingSummary.total, 'bg-slate-50 text-slate-700 ring-slate-200'],
+                                ['На проверке', lowRatingSummary.pending, 'bg-blue-50 text-blue-700 ring-blue-200'],
+                                ['Спорные', lowRatingSummary.conflict, 'bg-amber-50 text-amber-800 ring-amber-200'],
+                                ['Обоснованные', lowRatingSummary.valid, 'bg-emerald-50 text-emerald-700 ring-emerald-200'],
+                                ['Исключённые', lowRatingSummary.invalid, 'bg-rose-50 text-rose-700 ring-rose-200'],
+                            ].map(([label, value, klass]) => (
+                                <div key={label} className={`rounded-2xl px-3 py-2 text-xs ring-1 ${klass}`}>
+                                    <div className="text-[11px] font-semibold uppercase tracking-wide opacity-70">{label}</div>
+                                    <div className="mt-1 text-lg font-bold">{Number(value || 0)}</div>
+                                </div>
+                            ))}
+                        </div>
+
+                        {lowRatingError && (
+                            <div className="mb-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-medium text-rose-700">
+                                <FaIcon className="fas fa-triangle-exclamation mr-1" aria-hidden="true" />
+                                {lowRatingError}
+                            </div>
+                        )}
+
+                        {lowRatingLoading ? (
+                            <div className="rounded-3xl border border-slate-200 bg-slate-50/80 px-4 py-8 text-center text-sm font-medium text-slate-500">
+                                <FaIcon className="fas fa-spinner fa-spin mr-2" aria-hidden="true" />
+                                Загружаем низкие оценки...
+                            </div>
+                        ) : lowRatingReviews.length === 0 ? (
+                            <div className="rounded-3xl border border-dashed border-slate-200 bg-slate-50/80 px-4 py-8 text-center text-sm text-slate-500">
+                                Для выбранного фильтра строк нет.
+                            </div>
+                        ) : (
+                            <div className="overflow-x-auto rounded-2xl border border-slate-200">
+                                <table className="min-w-[1280px] w-full border-collapse text-left text-xs">
+                                    <thead className="bg-slate-50 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                                        <tr>
+                                            <th className="whitespace-nowrap px-3 py-3">Номер</th>
+                                            <th className="whitespace-nowrap px-3 py-3">ФИО оператора</th>
+                                            <th className="whitespace-nowrap px-3 py-3">Таксопарк</th>
+                                            <th className="whitespace-nowrap px-3 py-3">Дата</th>
+                                            <th className="whitespace-nowrap px-3 py-3 text-center">Оценка</th>
+                                            <th className="px-3 py-3">Арай</th>
+                                            <th className="px-3 py-3">Жанна</th>
+                                            <th className="px-3 py-3">Решение главы</th>
+                                            <th className="whitespace-nowrap px-3 py-3">Итог</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100 bg-white">
+                                        {lowRatingReviews.map(row => (
+                                            <tr key={row.id} className="align-top transition hover:bg-slate-50/70">
+                                                <td className="whitespace-nowrap px-3 py-3 font-semibold text-slate-800">
+                                                    {row.phone_number || row.phone_normalized || '—'}
+                                                </td>
+                                                <td className="px-3 py-3 text-slate-700">
+                                                    <div className="max-w-[180px] truncate font-medium" title={row.operator_name || ''}>
+                                                        {row.operator_name || '—'}
+                                                    </div>
+                                                    {row.department_name && (
+                                                        <div className="mt-1 max-w-[180px] truncate text-[11px] text-slate-400" title={row.department_name}>
+                                                            {row.department_name}
+                                                        </div>
+                                                    )}
+                                                </td>
+                                                <td className="px-3 py-3 text-slate-600">
+                                                    <div className="max-w-[160px] truncate" title={row.taxi_park || row.direction_name || ''}>
+                                                        {row.taxi_park || row.direction_name || '—'}
+                                                    </div>
+                                                </td>
+                                                <td className="whitespace-nowrap px-3 py-3 text-slate-600">
+                                                    {formatLowRatingDateTime(row.rated_at || row.day)}
+                                                </td>
+                                                <td className="px-3 py-3 text-center">
+                                                    <span className="inline-flex h-8 min-w-8 items-center justify-center rounded-full bg-rose-50 px-2 font-bold text-rose-700 ring-1 ring-rose-200">
+                                                        {Number(row.score || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 })}
+                                                    </span>
+                                                </td>
+                                                <td className="px-3 py-3">
+                                                    {renderLowRatingReviewerCell(row, 'arai', 'Обоснованность')}
+                                                </td>
+                                                <td className="px-3 py-3">
+                                                    {renderLowRatingReviewerCell(row, 'zhanna', 'Обоснованность')}
+                                                </td>
+                                                <td className="px-3 py-3">
+                                                    {renderLowRatingReviewerCell(
+                                                        row,
+                                                        'head',
+                                                        'Финально',
+                                                        !canSetLowRatingHeadDecision || (row.review_state !== 'conflict' && !row.head_status)
+                                                    )}
+                                                    {!canSetLowRatingHeadDecision && (
+                                                        <div className="mt-1 text-[11px] text-slate-400">Доступно главе отдела</div>
+                                                    )}
+                                                    {canSetLowRatingHeadDecision && row.review_state !== 'conflict' && !row.head_status && (
+                                                        <div className="mt-1 text-[11px] text-slate-400">Появится при споре</div>
+                                                    )}
+                                                </td>
+                                                <td className="px-3 py-3">
+                                                    <span className={`inline-flex rounded-full px-3 py-1.5 text-[11px] font-bold ring-1 ${lowRatingFinalClass(row)}`}>
+                                                        {lowRatingFinalLabel(row)}
+                                                    </span>
+                                                    <div className="mt-2 space-y-1">
+                                                        <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-semibold ring-1 ${lowRatingStatusClass(row.arai_status)}`}>
+                                                            Арай: {lowRatingStatusLabel(row.arai_status)}
+                                                        </span>
+                                                        <span className={`ml-1 inline-flex rounded-full px-2.5 py-1 text-[11px] font-semibold ring-1 ${lowRatingStatusClass(row.zhanna_status)}`}>
+                                                            Жанна: {lowRatingStatusLabel(row.zhanna_status)}
+                                                        </span>
+                                                    </div>
+                                                    {row.final_source && (
+                                                        <div className="mt-2 text-[11px] text-slate-400">
+                                                            {row.final_source === 'consensus' ? 'Совпадение проверяющих' : 'Решение главы отдела'}
+                                                        </div>
+                                                    )}
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+                    </div>
+                </section>
+            )}
 
             {/* Table */}
             <div className="overflow-auto border rounded-md">

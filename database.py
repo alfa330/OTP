@@ -1380,6 +1380,73 @@ class Database:
                 ADD COLUMN IF NOT EXISTS name_requests_chats_count INTEGER NOT NULL DEFAULT 0;
             """)
             cursor.execute("""
+                ALTER TABLE chat_manager_daily_metrics
+                ADD COLUMN IF NOT EXISTS raw_score_sum FLOAT;
+            """)
+            cursor.execute("""
+                ALTER TABLE chat_manager_daily_metrics
+                ADD COLUMN IF NOT EXISTS raw_score_count INTEGER;
+            """)
+            cursor.execute("""
+                UPDATE chat_manager_daily_metrics
+                SET raw_score_sum = score_sum
+                WHERE raw_score_sum IS NULL AND score_sum IS NOT NULL;
+            """)
+            cursor.execute("""
+                UPDATE chat_manager_daily_metrics
+                SET raw_score_count = score_count
+                WHERE raw_score_count IS NULL AND score_count IS NOT NULL;
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS chat_manager_low_rating_reviews (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    source TEXT NOT NULL DEFAULT 'chat2desk',
+                    source_key TEXT NOT NULL,
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    operator_name TEXT NOT NULL DEFAULT '',
+                    phone_number TEXT NOT NULL DEFAULT '',
+                    phone_normalized TEXT NOT NULL DEFAULT '',
+                    taxi_park TEXT NOT NULL DEFAULT '',
+                    rated_at TIMESTAMP,
+                    day DATE NOT NULL,
+                    score FLOAT NOT NULL,
+                    raw_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    imported_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    source_batch_id UUID,
+                    arai_status TEXT,
+                    arai_comment TEXT NOT NULL DEFAULT '',
+                    arai_updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    arai_updated_at TIMESTAMP,
+                    zhanna_status TEXT,
+                    zhanna_comment TEXT NOT NULL DEFAULT '',
+                    zhanna_updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    zhanna_updated_at TIMESTAMP,
+                    head_status TEXT,
+                    head_comment TEXT NOT NULL DEFAULT '',
+                    head_updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    head_updated_at TIMESTAMP,
+                    final_status TEXT,
+                    final_source TEXT,
+                    final_decided_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    final_decided_at TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(source, source_key)
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_chat_low_rating_reviews_operator_day
+                ON chat_manager_low_rating_reviews(operator_id, day);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_chat_low_rating_reviews_day
+                ON chat_manager_low_rating_reviews(day);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_chat_low_rating_reviews_final_status
+                ON chat_manager_low_rating_reviews(final_status);
+            """)
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS chat_metric_surge_windows (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     month DATE NOT NULL,
@@ -10056,6 +10123,490 @@ class Database:
         return result, totals
 
     @staticmethod
+    def _normalize_low_rating_review_status(value):
+        text = str(value or '').strip().lower()
+        if not text:
+            return None
+        if text in {'valid', 'justified', 'substantiated', 'true', '1', 'yes', 'обоснованно', 'обоснованная'}:
+            return 'valid'
+        if text in {'invalid', 'unjustified', 'not_valid', 'false', '0', 'no', 'необоснованно', 'необоснованная'}:
+            return 'invalid'
+        raise ValueError("review status must be valid, invalid or empty")
+
+    @staticmethod
+    def _resolve_low_rating_final_status(arai_status, zhanna_status, head_status):
+        arai = Database._normalize_low_rating_review_status(arai_status)
+        zhanna = Database._normalize_low_rating_review_status(zhanna_status)
+        head = Database._normalize_low_rating_review_status(head_status)
+        if arai and zhanna and arai == zhanna:
+            return arai, 'consensus'
+        if head:
+            return head, 'head'
+        return None, None
+
+    @staticmethod
+    def _parse_low_rating_datetime(value):
+        if value in (None, ''):
+            return None
+        if isinstance(value, datetime):
+            return value.replace(tzinfo=None)
+        if isinstance(value, date):
+            return datetime.combine(value, dt_time.min)
+        text = str(value or '').strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace('Z', '+00:00'))
+            if getattr(parsed, 'tzinfo', None) is not None:
+                parsed = parsed.astimezone().replace(tzinfo=None)
+            return parsed
+        except Exception:
+            pass
+        for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d'):
+            try:
+                return datetime.strptime(text, fmt)
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _normalize_low_rating_phone(value):
+        return re.sub(r'\D+', '', str(value or ''))
+
+    @staticmethod
+    def _low_rating_review_state(row):
+        arai = row.get('arai_status')
+        zhanna = row.get('zhanna_status')
+        final_status = row.get('final_status')
+        if final_status:
+            return 'resolved'
+        if arai and zhanna and arai != zhanna:
+            return 'conflict'
+        return 'pending'
+
+    @staticmethod
+    def _low_rating_row_to_dict(row):
+        keys = [
+            'id', 'source', 'source_key', 'operator_id', 'operator_name', 'phone_number',
+            'phone_normalized', 'taxi_park', 'rated_at', 'day', 'score', 'raw_payload',
+            'imported_by', 'source_batch_id', 'arai_status', 'arai_comment',
+            'arai_updated_by', 'arai_updated_by_name', 'arai_updated_at',
+            'zhanna_status', 'zhanna_comment', 'zhanna_updated_by',
+            'zhanna_updated_by_name', 'zhanna_updated_at', 'head_status',
+            'head_comment', 'head_updated_by', 'head_updated_by_name',
+            'head_updated_at', 'final_status', 'final_source',
+            'final_decided_by', 'final_decided_by_name', 'final_decided_at',
+            'created_at', 'updated_at', 'direction_name', 'department_id', 'department_name'
+        ]
+        item = dict(zip(keys, row))
+        for key in ('id', 'source_batch_id'):
+            if item.get(key) is not None:
+                item[key] = str(item[key])
+        for key in (
+            'rated_at', 'day', 'arai_updated_at', 'zhanna_updated_at',
+            'head_updated_at', 'final_decided_at', 'created_at', 'updated_at'
+        ):
+            value = item.get(key)
+            if isinstance(value, datetime):
+                item[key] = value.isoformat()
+            elif isinstance(value, date):
+                item[key] = value.strftime('%Y-%m-%d')
+            elif value is None:
+                item[key] = None
+        item['score'] = float(item.get('score') or 0)
+        item['review_state'] = Database._low_rating_review_state(item)
+        item['needs_head_decision'] = bool(item['review_state'] == 'conflict')
+        return item
+
+    def _recalculate_chat_manager_score_adjustments_tx(self, cursor, operator_day_pairs):
+        pairs = sorted({
+            (
+                int(op_id),
+                day_obj.date() if isinstance(day_obj, datetime)
+                else day_obj if isinstance(day_obj, date)
+                else datetime.strptime(str(day_obj), '%Y-%m-%d').date()
+            )
+            for op_id, day_obj in (operator_day_pairs or [])
+            if op_id is not None and day_obj is not None
+        }, key=lambda item: (item[0], item[1]))
+        if not pairs:
+            return {'adjusted_days': 0, 'aggregations': {}}
+
+        adjusted = []
+        for operator_id, day_obj in pairs:
+            cursor.execute(
+                """
+                SELECT raw_score_sum, raw_score_count
+                FROM chat_manager_daily_metrics
+                WHERE operator_id = %s AND day = %s
+                FOR UPDATE
+                """,
+                (operator_id, day_obj)
+            )
+            metric_row = cursor.fetchone()
+            if not metric_row:
+                continue
+            raw_sum, raw_count = metric_row
+            if raw_sum is None or raw_count is None:
+                continue
+            try:
+                base_sum = float(raw_sum)
+                base_count = int(raw_count)
+            except Exception:
+                continue
+
+            cursor.execute(
+                """
+                SELECT COALESCE(SUM(score), 0), COUNT(*)
+                FROM chat_manager_low_rating_reviews
+                WHERE operator_id = %s
+                  AND day = %s
+                  AND final_status = 'invalid'
+                """,
+                (operator_id, day_obj)
+            )
+            invalid_sum_raw, invalid_count_raw = cursor.fetchone() or (0, 0)
+            invalid_sum = float(invalid_sum_raw or 0.0)
+            invalid_count = int(invalid_count_raw or 0)
+            effective_count = max(0, base_count - invalid_count)
+            effective_sum = round(max(0.0, base_sum - invalid_sum), 4)
+            effective_avg = round(effective_sum / effective_count, 4) if effective_count > 0 else None
+
+            cursor.execute(
+                """
+                UPDATE chat_manager_daily_metrics
+                SET score_sum = %s,
+                    score_count = %s,
+                    avg_score = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE operator_id = %s AND day = %s
+                """,
+                (effective_sum, effective_count, effective_avg, operator_id, day_obj)
+            )
+            adjusted.append((operator_id, day_obj))
+
+        aggregations = {}
+        for operator_id, day_obj in adjusted:
+            month_key = day_obj.strftime('%Y-%m')
+            aggregations.setdefault(operator_id, {})[month_key] = self._aggregate_month_from_daily_tx(
+                cursor,
+                operator_id,
+                month_key
+            )
+        return {'adjusted_days': len(adjusted), 'aggregations': aggregations}
+
+    def save_chat_manager_low_ratings(self, low_ratings, imported_by=None, source_batch_id=None):
+        if not isinstance(low_ratings, list):
+            raise ValueError("low_ratings must be a list")
+
+        rows = []
+        affected_pairs = set()
+        imported_by_id = int(imported_by) if imported_by is not None else None
+        batch_id = str(source_batch_id) if source_batch_id else None
+
+        for item in low_ratings:
+            if not isinstance(item, dict):
+                continue
+            try:
+                operator_id = int(item.get('operator_id'))
+                score = float(str(item.get('score')).replace(',', '.'))
+            except Exception:
+                continue
+            if score >= 4:
+                continue
+
+            rated_at = self._parse_low_rating_datetime(
+                item.get('rated_at') or item.get('created_at') or item.get('date')
+            )
+            day_raw = item.get('day') or item.get('metric_day') or item.get('date')
+            day_obj = None
+            if isinstance(day_raw, datetime):
+                day_obj = day_raw.date()
+            elif isinstance(day_raw, date):
+                day_obj = day_raw
+            else:
+                try:
+                    day_obj = datetime.strptime(str(day_raw or '').strip()[:10], '%Y-%m-%d').date()
+                except Exception:
+                    day_obj = rated_at.date() if rated_at else None
+            if day_obj is None:
+                continue
+            if rated_at is None:
+                rated_at = datetime.combine(day_obj, dt_time.min)
+
+            source = str(item.get('source') or 'chat2desk').strip()[:64] or 'chat2desk'
+            phone_number = str(item.get('phone_number') or item.get('phone') or '').strip()[:64]
+            phone_normalized = self._normalize_low_rating_phone(phone_number)[:32]
+            taxi_park = str(item.get('taxi_park') or item.get('taxopark') or item.get('direction') or '').strip()[:255]
+            operator_name = str(item.get('operator_name') or '').strip()[:255]
+            raw_payload = item.get('raw_payload') if isinstance(item.get('raw_payload'), dict) else dict(item)
+
+            source_key = str(item.get('source_key') or item.get('external_id') or '').strip()
+            if not source_key:
+                source_key_seed = json.dumps({
+                    'source': source,
+                    'operator_id': operator_id,
+                    'rated_at': rated_at.isoformat() if rated_at else None,
+                    'day': day_obj.strftime('%Y-%m-%d'),
+                    'score': score,
+                    'phone': phone_normalized,
+                    'taxi_park': taxi_park,
+                    'source_row': item.get('source_row'),
+                    'raw': raw_payload,
+                }, ensure_ascii=False, sort_keys=True, default=str)
+                source_key = uuid.uuid5(uuid.NAMESPACE_URL, source_key_seed).hex
+            source_key = source_key[:255]
+
+            rows.append((
+                source,
+                source_key,
+                operator_id,
+                operator_name,
+                phone_number,
+                phone_normalized,
+                taxi_park,
+                rated_at,
+                day_obj,
+                score,
+                Json(raw_payload),
+                imported_by_id,
+                batch_id,
+            ))
+            affected_pairs.add((operator_id, day_obj))
+
+        if not rows:
+            return {'processed': 0, 'adjusted_days': 0}
+
+        with self._get_cursor() as cursor:
+            execute_values(
+                cursor,
+                """
+                INSERT INTO chat_manager_low_rating_reviews (
+                    source, source_key, operator_id, operator_name, phone_number,
+                    phone_normalized, taxi_park, rated_at, day, score, raw_payload,
+                    imported_by, source_batch_id
+                )
+                VALUES %s
+                ON CONFLICT (source, source_key)
+                DO UPDATE SET
+                    operator_id = EXCLUDED.operator_id,
+                    operator_name = COALESCE(NULLIF(EXCLUDED.operator_name, ''), chat_manager_low_rating_reviews.operator_name),
+                    phone_number = COALESCE(NULLIF(EXCLUDED.phone_number, ''), chat_manager_low_rating_reviews.phone_number),
+                    phone_normalized = COALESCE(NULLIF(EXCLUDED.phone_normalized, ''), chat_manager_low_rating_reviews.phone_normalized),
+                    taxi_park = COALESCE(NULLIF(EXCLUDED.taxi_park, ''), chat_manager_low_rating_reviews.taxi_park),
+                    rated_at = EXCLUDED.rated_at,
+                    day = EXCLUDED.day,
+                    score = EXCLUDED.score,
+                    raw_payload = EXCLUDED.raw_payload,
+                    imported_by = EXCLUDED.imported_by,
+                    source_batch_id = COALESCE(EXCLUDED.source_batch_id, chat_manager_low_rating_reviews.source_batch_id),
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                rows,
+                page_size=1000
+            )
+            adjustment = self._recalculate_chat_manager_score_adjustments_tx(cursor, affected_pairs)
+
+        return {
+            'processed': len(rows),
+            'adjusted_days': int((adjustment or {}).get('adjusted_days') or 0),
+            'aggregations': (adjustment or {}).get('aggregations') or {},
+        }
+
+    def list_chat_manager_low_rating_reviews(self, month, department_id=None, operator_id=None, status=None, limit=2000):
+        try:
+            year, mon = map(int, str(month or '').split('-'))
+            start = date(year, mon, 1)
+            end = date(year, mon, calendar.monthrange(year, mon)[1])
+        except Exception as exc:
+            raise ValueError("month must be in YYYY-MM format") from exc
+
+        where = ["lr.day >= %s", "lr.day <= %s"]
+        params = [start, end]
+        if department_id not in (None, ''):
+            where.append("u.department_id = %s")
+            params.append(int(department_id))
+        if operator_id not in (None, ''):
+            where.append("lr.operator_id = %s")
+            params.append(int(operator_id))
+
+        safe_limit = max(1, min(10000, int(limit or 2000)))
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT
+                    lr.id, lr.source, lr.source_key, lr.operator_id,
+                    COALESCE(NULLIF(lr.operator_name, ''), u.name, '') AS operator_name,
+                    lr.phone_number, lr.phone_normalized, lr.taxi_park,
+                    lr.rated_at, lr.day, lr.score, lr.raw_payload,
+                    lr.imported_by, lr.source_batch_id,
+                    lr.arai_status, lr.arai_comment, lr.arai_updated_by, au.name, lr.arai_updated_at,
+                    lr.zhanna_status, lr.zhanna_comment, lr.zhanna_updated_by, zu.name, lr.zhanna_updated_at,
+                    lr.head_status, lr.head_comment, lr.head_updated_by, hu.name, lr.head_updated_at,
+                    lr.final_status, lr.final_source, lr.final_decided_by, fu.name, lr.final_decided_at,
+                    lr.created_at, lr.updated_at,
+                    d.name AS direction_name,
+                    dep.id AS department_id,
+                    dep.name AS department_name
+                FROM chat_manager_low_rating_reviews lr
+                JOIN users u ON u.id = lr.operator_id
+                LEFT JOIN directions d ON d.id = u.direction_id
+                LEFT JOIN departments dep ON dep.id = u.department_id
+                LEFT JOIN users au ON au.id = lr.arai_updated_by
+                LEFT JOIN users zu ON zu.id = lr.zhanna_updated_by
+                LEFT JOIN users hu ON hu.id = lr.head_updated_by
+                LEFT JOIN users fu ON fu.id = lr.final_decided_by
+                WHERE {' AND '.join(where)}
+                ORDER BY lr.rated_at DESC NULLS LAST, lr.day DESC, lr.created_at DESC
+                LIMIT %s
+                """,
+                params + [safe_limit]
+            )
+            all_rows = [self._low_rating_row_to_dict(row) for row in cursor.fetchall() or []]
+
+        summary = {
+            'total': len(all_rows),
+            'pending': 0,
+            'conflict': 0,
+            'valid': 0,
+            'invalid': 0,
+        }
+        for item in all_rows:
+            state = item.get('review_state')
+            final_status = item.get('final_status')
+            if final_status == 'valid':
+                summary['valid'] += 1
+            elif final_status == 'invalid':
+                summary['invalid'] += 1
+            elif state == 'conflict':
+                summary['conflict'] += 1
+            else:
+                summary['pending'] += 1
+
+        status_key = str(status or 'attention').strip().lower()
+        if status_key in ('all', ''):
+            rows = all_rows
+        elif status_key == 'attention':
+            rows = [item for item in all_rows if not item.get('final_status')]
+        elif status_key in ('pending', 'conflict'):
+            rows = [item for item in all_rows if item.get('review_state') == status_key]
+        elif status_key in ('valid', 'invalid'):
+            rows = [item for item in all_rows if item.get('final_status') == status_key]
+        else:
+            rows = all_rows
+
+        return {
+            'month': f"{year:04d}-{mon:02d}",
+            'rows': rows,
+            'summary': summary,
+        }
+
+    def get_chat_manager_low_rating_review(self, review_id):
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    lr.id, lr.source, lr.source_key, lr.operator_id,
+                    COALESCE(NULLIF(lr.operator_name, ''), u.name, '') AS operator_name,
+                    lr.phone_number, lr.phone_normalized, lr.taxi_park,
+                    lr.rated_at, lr.day, lr.score, lr.raw_payload,
+                    lr.imported_by, lr.source_batch_id,
+                    lr.arai_status, lr.arai_comment, lr.arai_updated_by, au.name, lr.arai_updated_at,
+                    lr.zhanna_status, lr.zhanna_comment, lr.zhanna_updated_by, zu.name, lr.zhanna_updated_at,
+                    lr.head_status, lr.head_comment, lr.head_updated_by, hu.name, lr.head_updated_at,
+                    lr.final_status, lr.final_source, lr.final_decided_by, fu.name, lr.final_decided_at,
+                    lr.created_at, lr.updated_at,
+                    d.name AS direction_name,
+                    dep.id AS department_id,
+                    dep.name AS department_name
+                FROM chat_manager_low_rating_reviews lr
+                JOIN users u ON u.id = lr.operator_id
+                LEFT JOIN directions d ON d.id = u.direction_id
+                LEFT JOIN departments dep ON dep.id = u.department_id
+                LEFT JOIN users au ON au.id = lr.arai_updated_by
+                LEFT JOIN users zu ON zu.id = lr.zhanna_updated_by
+                LEFT JOIN users hu ON hu.id = lr.head_updated_by
+                LEFT JOIN users fu ON fu.id = lr.final_decided_by
+                WHERE lr.id = %s
+                """,
+                (review_id,)
+            )
+            row = cursor.fetchone()
+        return self._low_rating_row_to_dict(row) if row else None
+
+    def update_chat_manager_low_rating_review(self, review_id, reviewer, status, comment='', updated_by=None):
+        reviewer_key = str(reviewer or '').strip().lower()
+        field_map = {
+            'arai': ('arai_status', 'arai_comment', 'arai_updated_by', 'arai_updated_at'),
+            'zhanna': ('zhanna_status', 'zhanna_comment', 'zhanna_updated_by', 'zhanna_updated_at'),
+            'head': ('head_status', 'head_comment', 'head_updated_by', 'head_updated_at'),
+        }
+        if reviewer_key not in field_map:
+            raise ValueError("reviewer must be arai, zhanna or head")
+        normalized_status = self._normalize_low_rating_review_status(status)
+        clean_comment = str(comment or '').strip()[:4000]
+        updated_by_id = int(updated_by) if updated_by is not None else None
+        status_col, comment_col, by_col, at_col = field_map[reviewer_key]
+
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT operator_id, day, arai_status, zhanna_status, head_status
+                FROM chat_manager_low_rating_reviews
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (review_id,)
+            )
+            current = cursor.fetchone()
+            if not current:
+                return None
+            operator_id, day_obj, arai_status, zhanna_status, head_status = current
+
+            cursor.execute(
+                f"""
+                UPDATE chat_manager_low_rating_reviews
+                SET {status_col} = %s,
+                    {comment_col} = %s,
+                    {by_col} = %s,
+                    {at_col} = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                """,
+                (normalized_status, clean_comment, updated_by_id, review_id)
+            )
+
+            next_statuses = {
+                'arai': arai_status,
+                'zhanna': zhanna_status,
+                'head': head_status,
+            }
+            next_statuses[reviewer_key] = normalized_status
+            final_status, final_source = self._resolve_low_rating_final_status(
+                next_statuses.get('arai'),
+                next_statuses.get('zhanna'),
+                next_statuses.get('head')
+            )
+            cursor.execute(
+                """
+                UPDATE chat_manager_low_rating_reviews
+                SET final_status = %s,
+                    final_source = %s,
+                    final_decided_by = %s,
+                    final_decided_at = CASE WHEN %s IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                """,
+                (final_status, final_source, updated_by_id if final_status else None, final_status, review_id)
+            )
+            adjustment = self._recalculate_chat_manager_score_adjustments_tx(cursor, [(operator_id, day_obj)])
+
+        item = self.get_chat_manager_low_rating_review(review_id)
+        if item is not None:
+            item['adjustment'] = adjustment
+        return item
+
+    @staticmethod
     def _parse_chat_metric_surge_month(month):
         text = str(month or '').strip()
         if not re.fullmatch(r'\d{4}-\d{2}', text):
@@ -10214,7 +10765,9 @@ class Database:
                 continue
 
             day_raw = item.get('day') or item.get('date')
-            if isinstance(day_raw, date):
+            if isinstance(day_raw, datetime):
+                day_obj = day_raw.date()
+            elif isinstance(day_raw, date):
                 day_obj = day_raw
             else:
                 try:
@@ -10266,6 +10819,8 @@ class Database:
             # Если оценка пришла как сумма+количество (импорт отчёта), avg = sum/count.
             if avg_score_val is None and score_sum_val is not None and score_count_val:
                 avg_score_val = round(score_sum_val / score_count_val, 4)
+            raw_score_sum_val = score_sum_val if 'score_sum' in item else None
+            raw_score_count_val = score_count_val if 'score_count' in item else None
 
             whatsapp_chats_val = _optional_int(item.get('whatsapp_chats_count'))
             name_requests_chats_val = _optional_int(item.get('name_requests_chats_count'))
@@ -10284,6 +10839,8 @@ class Database:
                 score_count_val,
                 whatsapp_chats_val,
                 name_requests_chats_val,
+                raw_score_sum_val,
+                raw_score_count_val,
             ))
 
         if not rows:
@@ -10307,6 +10864,16 @@ class Database:
                 for col in sorted(update_set)
                 if col not in _CHAT_COUNT_COMPONENT_FIELDS and not (component_updates and col == 'chats_count')
             ]
+            if 'score_sum' in update_set:
+                set_clauses.append(
+                    "raw_score_sum = CASE WHEN EXCLUDED.raw_payload ? 'score_sum' "
+                    "THEN EXCLUDED.raw_score_sum ELSE chat_manager_daily_metrics.raw_score_sum END"
+                )
+            if 'score_count' in update_set:
+                set_clauses.append(
+                    "raw_score_count = CASE WHEN EXCLUDED.raw_payload ? 'score_count' "
+                    "THEN EXCLUDED.raw_score_count ELSE chat_manager_daily_metrics.raw_score_count END"
+                )
             set_clauses.extend([f"{col} = {_update_expr(col)}" for col in sorted(component_updates)])
             if component_updates:
                 whatsapp_expr = (
@@ -10341,6 +10908,8 @@ class Database:
                 "transfer_chat_count = EXCLUDED.transfer_chat_count",
                 "score_sum = COALESCE(EXCLUDED.score_sum, chat_manager_daily_metrics.score_sum)",
                 "score_count = COALESCE(EXCLUDED.score_count, chat_manager_daily_metrics.score_count)",
+                "raw_score_sum = COALESCE(EXCLUDED.raw_score_sum, chat_manager_daily_metrics.raw_score_sum)",
+                "raw_score_count = COALESCE(EXCLUDED.raw_score_count, chat_manager_daily_metrics.raw_score_count)",
             ]
         set_clauses += [
             "imported_by = EXCLUDED.imported_by",
@@ -10367,7 +10936,9 @@ class Database:
                     score_sum,
                     score_count,
                     whatsapp_chats_count,
-                    name_requests_chats_count
+                    name_requests_chats_count,
+                    raw_score_sum,
+                    raw_score_count
                 )
                 VALUES %s
                 ON CONFLICT (operator_id, day)
@@ -10378,6 +10949,10 @@ class Database:
                 page_size=2000
             )
 
+            score_adjustment = self._recalculate_chat_manager_score_adjustments_tx(
+                cursor,
+                [(row[0], row[1]) for row in rows]
+            )
             affected_months = sorted({(int(row[0]), row[1].strftime('%Y-%m')) for row in rows})
             aggregations = {}
             for operator_id, month_key in affected_months:
@@ -10390,7 +10965,8 @@ class Database:
         return {
             'batch_id': str(batch_id),
             'processed': len(rows),
-            'aggregations': aggregations
+            'aggregations': aggregations,
+            'score_adjustment': score_adjustment,
         }
 
     def get_daily_hours_for_operator_month(self, operator_id: int, month: str):
