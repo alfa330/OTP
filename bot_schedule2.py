@@ -17898,19 +17898,31 @@ def _chat2desk_build_daily_metrics(day_str, operator_lookup, operator_token_inde
     )
 
 
-def _chat2desk_sync_target_days(day=None):
+def _chat2desk_sync_target_days(day=None, date_from=None, date_to=None):
     if day is not None:
         parsed_day = _chat_metrics_parse_date(day)
         if parsed_day is None:
             raise ValueError("day must be in YYYY-MM-DD format")
         return [parsed_day]
 
+    if date_from is not None or date_to is not None:
+        start_day = _chat_metrics_parse_date(date_from)
+        end_day = _chat_metrics_parse_date(date_to or date_from)
+        if start_day is None or end_day is None:
+            raise ValueError("date_from and date_to must be in YYYY-MM-DD format")
+        if end_day < start_day:
+            raise ValueError("date_to must be greater than or equal to date_from")
+        days_count = (end_day - start_day).days + 1
+        if days_count > 31:
+            raise ValueError("Chat2Desk sync period cannot exceed 31 days")
+        return [start_day + timedelta(days=offset) for offset in range(days_count)]
+
     today = datetime.now(_chat2desk_sync_timezone()).date()
     days_back = _env_int('CHAT2DESK_SYNC_DAYS_BACK', CHAT2DESK_SYNC_DAYS_BACK, minimum=1, maximum=31)
     return [today - timedelta(days=offset) for offset in range(days_back, 0, -1)]
 
 
-def sync_chat2desk_daily_metrics(day=None, triggered_by='scheduler', force=False, imported_by=None):
+def sync_chat2desk_daily_metrics(day=None, date_from=None, date_to=None, triggered_by='scheduler', force=False, imported_by=None):
     if not force and not _chat2desk_sync_enabled():
         logging.info("Chat2Desk daily metrics sync skipped: disabled")
         return {'status': 'skipped', 'reason': 'disabled'}
@@ -17927,7 +17939,7 @@ def sync_chat2desk_daily_metrics(day=None, triggered_by='scheduler', force=False
     try:
         operator_lookup = _status_import_build_operator_lookup()
         operator_token_index = _chat_report_build_operator_token_index()
-        target_days = _chat2desk_sync_target_days(day)
+        target_days = _chat2desk_sync_target_days(day, date_from=date_from, date_to=date_to)
 
         for day_obj in target_days:
             day_str = day_obj.strftime('%Y-%m-%d')
@@ -20440,15 +20452,22 @@ def chat_manager_low_rating_reviews():
         status_filter = request.args.get('status') or 'attention'
         operator_id = request.args.get('operator_id') or None
         department_id = request.args.get('department_id') or None
+        page = request.args.get('page') or 1
+        per_page = request.args.get('per_page') or 12
         if not _is_global_admin_requester(requester_role, requester_id):
             department_id = _department_scope_id_for_requester(requester_id)
+        can_finalize = _is_global_admin_requester(requester_role, requester_id) or headed_dept_id is not None
 
         result = db.list_chat_manager_low_rating_reviews(
             month=month,
             department_id=department_id,
             operator_id=operator_id,
             status=status_filter,
-            limit=request.args.get('limit') or 2000
+            limit=request.args.get('limit') or 2000,
+            page=page,
+            per_page=per_page,
+            viewer_id=requester_id,
+            can_finalize=can_finalize
         )
         return jsonify({"status": "success", **result}), 200
 
@@ -20459,7 +20478,7 @@ def chat_manager_low_rating_reviews():
         return jsonify({"error": "Internal server error"}), 500
 
 
-@app.route('/api/chat_manager/low_rating_reviews/<review_id>', methods=['PATCH'])
+@app.route('/api/chat_manager/low_rating_reviews/<review_id>', methods=['GET', 'PATCH'])
 @require_api_key
 def update_chat_manager_low_rating_review(review_id):
     try:
@@ -20481,24 +20500,46 @@ def update_chat_manager_low_rating_review(review_id):
             if scope_dept is not None and int(current.get('department_id') or 0) != int(scope_dept):
                 return jsonify({"error": "Forbidden"}), 403
 
-        payload = request.get_json(silent=True) or {}
-        reviewer = str(payload.get('reviewer') or '').strip().lower()
-        if reviewer == 'head':
-            if not (_is_global_admin_requester(requester_role, requester_id) or (
-                headed_dept_id is not None and int(current.get('department_id') or 0) == int(headed_dept_id)
-            )):
-                return jsonify({"error": "Only department head can set final decision"}), 403
-
-        updated = db.update_chat_manager_low_rating_review(
-            review_id=review_id,
-            reviewer=reviewer,
-            status=payload.get('status'),
-            comment=payload.get('comment') or '',
-            updated_by=requester_id
+        can_finalize = _is_global_admin_requester(requester_role, requester_id) or (
+            headed_dept_id is not None and int(current.get('department_id') or 0) == int(headed_dept_id)
         )
+        if request.method == 'GET':
+            public_current = db.get_chat_manager_low_rating_review(
+                review_id,
+                viewer_id=requester_id,
+                public=True,
+                can_finalize=can_finalize
+            )
+            return jsonify({"status": "success", "review": public_current}), 200
+
+        payload = request.get_json(silent=True) or {}
+        action = str(payload.get('action') or payload.get('reviewer') or 'review').strip().lower()
+        if action in {'final', 'head', 'manager'}:
+            if not can_finalize:
+                return jsonify({"error": "Only department head can set final decision"}), 403
+            updated = db.finalize_chat_manager_low_rating_review(
+                review_id=review_id,
+                status=payload.get('status'),
+                comment=payload.get('comment') or '',
+                updated_by=requester_id
+            )
+        else:
+            updated = db.save_chat_manager_low_rating_personal_review(
+                review_id=review_id,
+                reviewer_id=requester_id,
+                status=payload.get('status'),
+                comment=payload.get('comment') or ''
+            )
+
         if not updated:
             return jsonify({"error": "Review not found"}), 404
-        return jsonify({"status": "success", "review": updated}), 200
+        public_updated = db.get_chat_manager_low_rating_review(
+            review_id,
+            viewer_id=requester_id,
+            public=True,
+            can_finalize=can_finalize
+        )
+        return jsonify({"status": "success", "review": public_updated}), 200
 
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -20520,11 +20561,34 @@ def sync_chat_manager_metrics_chat2desk():
 
         payload = request.get_json(silent=True) or {}
         target_day = payload.get('date') or request.args.get('date') or None
+        target_from = (
+            payload.get('date_from') or payload.get('start_date') or
+            request.args.get('date_from') or request.args.get('start_date') or None
+        )
+        target_to = (
+            payload.get('date_to') or payload.get('end_date') or
+            request.args.get('date_to') or request.args.get('end_date') or None
+        )
         if target_day and _chat_metrics_parse_date(target_day) is None:
             return jsonify({"error": "date must be in YYYY-MM-DD format"}), 400
+        if target_day and (target_from or target_to):
+            return jsonify({"error": "Use either date or date_from/date_to, not both"}), 400
+        if (target_from or target_to):
+            start_day = _chat_metrics_parse_date(target_from)
+            end_day = _chat_metrics_parse_date(target_to or target_from)
+            if start_day is None or end_day is None:
+                return jsonify({"error": "date_from and date_to must be in YYYY-MM-DD format"}), 400
+            if end_day < start_day:
+                return jsonify({"error": "date_to must be greater than or equal to date_from"}), 400
+            if (end_day - start_day).days + 1 > 31:
+                return jsonify({"error": "Период синхронизации Chat2Desk не может быть больше 31 дня"}), 400
+            target_from = start_day.strftime('%Y-%m-%d')
+            target_to = end_day.strftime('%Y-%m-%d')
 
         result = sync_chat2desk_daily_metrics(
             day=target_day,
+            date_from=target_from,
+            date_to=target_to,
             triggered_by='manual',
             force=True,
             imported_by=requester_id

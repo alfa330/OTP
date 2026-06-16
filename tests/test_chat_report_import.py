@@ -44,6 +44,8 @@ def _chat_report_namespace():
         "_chat_report_detect_types",
         "_chat_report_detect_type",
         "_chat_report_parse_dt",
+        "_status_import_parse_datetime",
+        "_chat_metrics_parse_date",
         "_chat_report_parse_surge_windows",
         "_chat_report_in_surge",
         "_chat_report_parse",
@@ -60,6 +62,7 @@ def _chat_report_namespace():
         "_chat2desk_rating_source_key",
         "_chat2desk_low_rating_payload",
         "_chat2desk_build_metrics_from_statistics_rows",
+        "_chat2desk_sync_target_days",
     }
 
     module = ast.parse(BOT_PATH.read_text(encoding="utf-8"))
@@ -337,6 +340,21 @@ class ChatReportImportTests(unittest.TestCase):
                 os.environ.pop("CHAT2DESK_AUTH_SCHEME", None)
             else:
                 os.environ["CHAT2DESK_AUTH_SCHEME"] = old_scheme
+
+    def test_chat2desk_sync_target_days_accepts_period(self):
+        target_days = self.ns["_chat2desk_sync_target_days"]
+        self.assertEqual(
+            [d.strftime("%Y-%m-%d") for d in target_days(date_from="2026-06-01", date_to="2026-06-03")],
+            ["2026-06-01", "2026-06-02", "2026-06-03"],
+        )
+        self.assertEqual(
+            [d.strftime("%Y-%m-%d") for d in target_days(day="2026-06-10")],
+            ["2026-06-10"],
+        )
+        with self.assertRaises(ValueError):
+            target_days(date_from="2026-06-10", date_to="2026-06-09")
+        with self.assertRaises(ValueError):
+            target_days(date_from="2026-06-01", date_to="2026-07-02")
 
     def test_response_time_average_and_surge_filter(self):
         parse = self.ns["_chat_report_parse"]

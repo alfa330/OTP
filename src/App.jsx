@@ -1958,6 +1958,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const d = new Date();
             return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
         });
+        const [chatMetricsSyncEndDate, setChatMetricsSyncEndDate] = useState(() => {
+            const d = new Date();
+            return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        });
         const [showLowRatingReviews, setShowLowRatingReviews] = useState(false);
         const [lowRatingReviews, setLowRatingReviews] = useState([]);
         const [lowRatingSummary, setLowRatingSummary] = useState({ total: 0, pending: 0, conflict: 0, valid: 0, invalid: 0 });
@@ -1965,6 +1969,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const [lowRatingLoading, setLowRatingLoading] = useState(false);
         const [lowRatingSavingKey, setLowRatingSavingKey] = useState('');
         const [lowRatingError, setLowRatingError] = useState('');
+        const [lowRatingPagination, setLowRatingPagination] = useState({ page: 1, per_page: 10, total: 0, total_pages: 1 });
+        const [selectedLowRatingReviewId, setSelectedLowRatingReviewId] = useState('');
+        const [lowRatingReviewDraft, setLowRatingReviewDraft] = useState({ status: '', comment: '' });
+        const [lowRatingFinalDraft, setLowRatingFinalDraft] = useState({ status: '', comment: '' });
         const chatMetricsInputRef = useRef(null);
 
         const [selectedTab, setSelectedTab] = useState('work_time');
@@ -2230,7 +2238,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         const openChatMetricsSyncDialog = () => {
             if (chatMetricsImportState.loading) return;
-            setChatMetricsSyncDate(chatMetricsDefaultSyncDate());
+            const defaultDate = chatMetricsDefaultSyncDate();
+            setChatMetricsSyncDate(defaultDate);
+            setChatMetricsSyncEndDate(defaultDate);
             setShowChatMetricsSyncDialog(true);
             setShowChatMetricsSurgeEditor(false);
         };
@@ -2264,12 +2274,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
         };
 
-        const fetchLowRatingReviews = async (targetFilter = lowRatingFilter) => {
+        const fetchLowRatingReviews = async (targetFilter = lowRatingFilter, targetPage = lowRatingPagination.page || 1) => {
             if (!user?.id || !isChatModel) return;
             const filterKey = String(targetFilter || 'attention');
             const params = new URLSearchParams();
             params.append('month', normalizeMonthKey(month));
             params.append('status', filterKey);
+            params.append('page', String(Math.max(1, Number(targetPage || 1))));
+            params.append('per_page', String(Number(lowRatingPagination.per_page || 10)));
             setLowRatingLoading(true);
             setLowRatingError('');
             try {
@@ -2281,13 +2293,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (!response.ok) {
                     throw new Error(payload?.error || `HTTP ${response.status}`);
                 }
-                setLowRatingReviews(Array.isArray(payload?.rows) ? payload.rows : []);
+                const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+                setLowRatingReviews(rows);
                 setLowRatingSummary(payload?.summary || emptyLowRatingSummary());
+                setLowRatingPagination(payload?.pagination || { page: 1, per_page: 10, total: rows.length, total_pages: 1 });
+                setSelectedLowRatingReviewId(prev => (
+                    rows.some(row => String(row?.id) === String(prev))
+                        ? prev
+                        : (rows[0]?.id ? String(rows[0].id) : '')
+                ));
             } catch (error) {
                 console.error('fetch low rating reviews error:', error);
                 const message = error?.message || 'Не удалось загрузить низкие оценки';
                 setLowRatingReviews([]);
                 setLowRatingSummary(emptyLowRatingSummary());
+                setLowRatingPagination(prev => ({ ...prev, page: 1, total: 0, total_pages: 1 }));
+                setSelectedLowRatingReviewId('');
                 setLowRatingError(message);
                 fallbackToast(message, 'error');
             } finally {
@@ -2295,22 +2316,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
         };
 
-        const updateLowRatingReviewDraft = (reviewId, patch) => {
+        const patchLowRatingReviewInList = (review) => {
+            if (!review?.id) return;
             setLowRatingReviews(prev => (Array.isArray(prev) ? prev : []).map(row => (
-                String(row?.id) === String(reviewId) ? { ...row, ...patch } : row
+                String(row?.id) === String(review.id) ? review : row
             )));
         };
 
-        const saveLowRatingReview = async (row, reviewer, patch = {}) => {
+        const saveLowRatingReview = async (row) => {
             const reviewId = row?.id;
-            const reviewerKey = String(reviewer || '').trim().toLowerCase();
-            if (!reviewId || !user?.id || !['arai', 'zhanna', 'head'].includes(reviewerKey)) return;
-            const statusKey = `${reviewerKey}_status`;
-            const commentKey = `${reviewerKey}_comment`;
-            const status = Object.prototype.hasOwnProperty.call(patch, 'status') ? patch.status : row?.[statusKey];
-            const comment = Object.prototype.hasOwnProperty.call(patch, 'comment') ? patch.comment : row?.[commentKey];
-            const savingKey = `${reviewId}:${reviewerKey}`;
-            setLowRatingSavingKey(savingKey);
+            if (!reviewId || !user?.id) return;
+            if (!lowRatingReviewDraft.status) {
+                fallbackToast('Выберите решение по проверке', 'error');
+                return;
+            }
+            setLowRatingSavingKey(`${reviewId}:review`);
             setLowRatingError('');
             try {
                 const response = await fetch(`${API_BASE_URL}/api/chat_manager/low_rating_reviews/${encodeURIComponent(reviewId)}`, {
@@ -2321,9 +2341,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         'X-User-Id': user.id
                     }),
                     body: JSON.stringify({
-                        reviewer: reviewerKey,
-                        status: status || '',
-                        comment: comment || ''
+                        action: 'review',
+                        status: lowRatingReviewDraft.status || '',
+                        comment: lowRatingReviewDraft.comment || ''
                     })
                 });
                 const payload = await response.json().catch(() => ({}));
@@ -2331,11 +2351,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     throw new Error(payload?.error || `HTTP ${response.status}`);
                 }
                 if (payload?.review) {
-                    setLowRatingReviews(prev => (Array.isArray(prev) ? prev : []).map(item => (
-                        String(item?.id) === String(reviewId) ? payload.review : item
-                    )));
+                    patchLowRatingReviewInList(payload.review);
+                    setLowRatingReviewDraft({
+                        status: payload.review.my_review_status || '',
+                        comment: payload.review.my_review_comment || '',
+                    });
                 }
-                await fetchLowRatingReviews(lowRatingFilter);
+                await fetchLowRatingReviews(lowRatingFilter, lowRatingPagination.page);
                 await fetchDailyHoursAndTrainings();
                 fallbackToast('Решение по низкой оценке сохранено', 'success');
             } catch (error) {
@@ -2343,7 +2365,55 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const message = error?.message || 'Не удалось сохранить решение по низкой оценке';
                 setLowRatingError(message);
                 fallbackToast(message, 'error');
-                await fetchLowRatingReviews(lowRatingFilter);
+                await fetchLowRatingReviews(lowRatingFilter, lowRatingPagination.page);
+            } finally {
+                setLowRatingSavingKey('');
+            }
+        };
+
+        const saveLowRatingFinalDecision = async (row) => {
+            const reviewId = row?.id;
+            if (!reviewId || !user?.id || !row?.can_finalize) return;
+            if (!lowRatingFinalDraft.status) {
+                fallbackToast('Выберите итоговое решение', 'error');
+                return;
+            }
+            setLowRatingSavingKey(`${reviewId}:final`);
+            setLowRatingError('');
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/chat_manager/low_rating_reviews/${encodeURIComponent(reviewId)}`, {
+                    method: 'PATCH',
+                    credentials: 'include',
+                    headers: withAccessTokenHeader({
+                        'Content-Type': 'application/json',
+                        'X-User-Id': user.id
+                    }),
+                    body: JSON.stringify({
+                        action: 'final',
+                        status: lowRatingFinalDraft.status || '',
+                        comment: lowRatingFinalDraft.comment || ''
+                    })
+                });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(payload?.error || `HTTP ${response.status}`);
+                }
+                if (payload?.review) {
+                    patchLowRatingReviewInList(payload.review);
+                    setLowRatingFinalDraft({
+                        status: payload.review.final_status || '',
+                        comment: payload.review.final_comment || '',
+                    });
+                }
+                await fetchLowRatingReviews(lowRatingFilter, lowRatingPagination.page);
+                await fetchDailyHoursAndTrainings();
+                fallbackToast('Итоговое решение сохранено', 'success');
+            } catch (error) {
+                console.error('save low rating final decision error:', error);
+                const message = error?.message || 'Не удалось сохранить итоговое решение';
+                setLowRatingError(message);
+                fallbackToast(message, 'error');
+                await fetchLowRatingReviews(lowRatingFilter, lowRatingPagination.page);
             } finally {
                 setLowRatingSavingKey('');
             }
@@ -2484,11 +2554,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
         };
 
-        const syncChat2DeskMetrics = async (targetDate = chatMetricsSyncDate) => {
+        const syncChat2DeskMetrics = async (targetDate = chatMetricsSyncDate, targetEndDate = chatMetricsSyncEndDate) => {
             if (!user?.id || chatMetricsImportState.loading) return;
-            const cleanDate = String(targetDate || '').trim();
-            if (!/^\d{4}-\d{2}-\d{2}$/.test(cleanDate)) {
-                fallbackToast('Выберите дату синхронизации Chat2Desk', 'error');
+            const cleanStartDate = String(targetDate || '').trim();
+            const cleanEndDate = String(targetEndDate || targetDate || '').trim();
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(cleanStartDate) || !/^\d{4}-\d{2}-\d{2}$/.test(cleanEndDate)) {
+                fallbackToast('Выберите период синхронизации Chat2Desk', 'error');
+                return;
+            }
+            if (cleanEndDate < cleanStartDate) {
+                fallbackToast('Дата окончания должна быть не раньше даты начала', 'error');
+                return;
+            }
+            const startDt = new Date(`${cleanStartDate}T00:00:00`);
+            const endDt = new Date(`${cleanEndDate}T00:00:00`);
+            const daysCount = Math.round((endDt - startDt) / 86400000) + 1;
+            if (!Number.isFinite(daysCount) || daysCount < 1 || daysCount > 31) {
+                fallbackToast('Период синхронизации Chat2Desk не может быть больше 31 дня', 'error');
                 return;
             }
             setShowChatMetricsSurgeEditor(false);
@@ -2503,7 +2585,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         'Content-Type': 'application/json',
                         'X-User-Id': user.id
                     }),
-                    body: JSON.stringify({ date: cleanDate })
+                    body: JSON.stringify(
+                        cleanStartDate === cleanEndDate
+                            ? { date: cleanStartDate }
+                            : { date_from: cleanStartDate, date_to: cleanEndDate }
+                    )
                 });
                 const payload = await response.json().catch(() => ({}));
                 if (!response.ok) {
@@ -2516,7 +2602,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 };
                 setChatMetricsImportState({ loading: false, summary, error: '' });
                 fallbackToast(payload?.message || 'Метрики Chat2Desk синхронизированы', 'success');
-                const syncedMonth = cleanDate.slice(0, 7);
+                const syncedMonth = cleanStartDate.slice(0, 7);
                 if (syncedMonth && syncedMonth !== normalizeMonthKey(month)) {
                     setMonth(syncedMonth);
                 } else {
@@ -3657,12 +3743,33 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setShowLowRatingReviews(false);
                 setLowRatingReviews([]);
                 setLowRatingSummary(emptyLowRatingSummary());
+                setSelectedLowRatingReviewId('');
                 return;
             }
             if (!showLowRatingReviews || !user?.id) return;
-            fetchLowRatingReviews(lowRatingFilter);
+            fetchLowRatingReviews(lowRatingFilter, lowRatingPagination.page);
             // eslint-disable-next-line react-hooks/exhaustive-deps
-        }, [isChatModel, showLowRatingReviews, lowRatingFilter, month, user?.id]);
+        }, [isChatModel, showLowRatingReviews, lowRatingFilter, lowRatingPagination.page, month, user?.id]);
+
+        const selectedLowRatingReview = useMemo(() => (
+            (lowRatingReviews || []).find(row => String(row?.id) === String(selectedLowRatingReviewId)) || null
+        ), [lowRatingReviews, selectedLowRatingReviewId]);
+
+        useEffect(() => {
+            if (!selectedLowRatingReview) {
+                setLowRatingReviewDraft({ status: '', comment: '' });
+                setLowRatingFinalDraft({ status: '', comment: '' });
+                return;
+            }
+            setLowRatingReviewDraft({
+                status: selectedLowRatingReview.my_review_status || '',
+                comment: selectedLowRatingReview.my_review_comment || '',
+            });
+            setLowRatingFinalDraft({
+                status: selectedLowRatingReview.final_status || '',
+                comment: selectedLowRatingReview.final_comment || '',
+            });
+        }, [selectedLowRatingReview]);
 
         // Метки вкладок по модели. НЕ мутируем общий const TABS — строим производный массив.
         const VIEW_TABS = useMemo(() => {
@@ -4593,55 +4700,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const hoursRateColClass = 'w-28 shrink-0 p-2 text-center border-r';
         const hoursNormColClass = 'w-36 shrink-0 p-2 text-center border-r';
         const hoursSummaryColClass = 'shrink-0 p-2 text-center border-l';
-        const canSetLowRatingHeadDecision = isDepartmentHead(user) || isAdminLikeRoleFn(user?.role);
         const lowRatingAttentionCount = lowRatingFilterCount('attention');
-
-        const renderLowRatingReviewerCell = (row, reviewer, label, disabled = false) => {
-            const reviewerKey = String(reviewer || '').trim();
-            const statusKey = `${reviewerKey}_status`;
-            const commentKey = `${reviewerKey}_comment`;
-            const updatedByKey = `${reviewerKey}_updated_by_name`;
-            const savingKey = `${row?.id}:${reviewerKey}`;
-            const isSaving = lowRatingSavingKey === savingKey;
-            const isDisabled = disabled || isSaving;
-            const selectedStatus = row?.[statusKey] || '';
-            return (
-                <div className="min-w-[220px] space-y-2">
-                    <div className="flex items-center justify-between gap-2">
-                        <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{label}</span>
-                        {isSaving && <FaIcon className="fas fa-spinner fa-spin text-slate-400" aria-hidden="true" />}
-                    </div>
-                    <select
-                        className="w-full rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 outline-none transition focus:border-blue-300 focus:ring-4 focus:ring-blue-100 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400"
-                        value={selectedStatus}
-                        disabled={isDisabled}
-                        onChange={(e) => {
-                            const nextStatus = e.target.value;
-                            updateLowRatingReviewDraft(row.id, { [statusKey]: nextStatus });
-                            saveLowRatingReview({ ...row, [statusKey]: nextStatus }, reviewerKey, { status: nextStatus });
-                        }}
-                    >
-                        {LOW_RATING_REVIEW_OPTIONS.map(option => (
-                            <option key={option.value || 'empty'} value={option.value}>{option.label}</option>
-                        ))}
-                    </select>
-                    <textarea
-                        className="min-h-[68px] w-full resize-y rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-blue-300 focus:bg-white focus:ring-4 focus:ring-blue-100 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400"
-                        value={row?.[commentKey] || ''}
-                        disabled={isDisabled}
-                        placeholder="Комментарий"
-                        maxLength={4000}
-                        onChange={(e) => updateLowRatingReviewDraft(row.id, { [commentKey]: e.target.value })}
-                        onBlur={(e) => saveLowRatingReview({ ...row, [commentKey]: e.target.value }, reviewerKey, { comment: e.target.value })}
-                    />
-                    {row?.[updatedByKey] && (
-                        <div className="truncate text-[11px] text-slate-400" title={row[updatedByKey]}>
-                            {row[updatedByKey]}
-                        </div>
-                    )}
-                </div>
-            );
-        };
 
         return (
             <div className="bg-white p-5 rounded-xl shadow-md">
@@ -4800,7 +4859,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </span>
                                 <div className="min-w-0">
                                     <h3 className="text-base font-semibold text-slate-900">Синхронизация Chat2Desk</h3>
-                                    <p className="mt-1 text-xs leading-5 text-slate-500">Метрики и низкие оценки за выбранный день.</p>
+                                    <p className="mt-1 text-xs leading-5 text-slate-500">Метрики и низкие оценки за выбранный период.</p>
                                 </div>
                             </div>
                             <button
@@ -4814,15 +4873,33 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             </button>
                         </div>
                         <div className="px-5 py-4">
-                            <label className="block">
-                                <span className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Дата</span>
-                                <input
-                                    type="date"
-                                    className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-800 outline-none transition focus:border-cyan-300 focus:bg-white focus:ring-4 focus:ring-cyan-100"
-                                    value={chatMetricsSyncDate || ''}
-                                    onChange={(e) => setChatMetricsSyncDate(e.target.value)}
-                                />
-                            </label>
+                            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                <label className="block">
+                                    <span className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">С</span>
+                                    <input
+                                        type="date"
+                                        className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-800 outline-none transition focus:border-cyan-300 focus:bg-white focus:ring-4 focus:ring-cyan-100"
+                                        value={chatMetricsSyncDate || ''}
+                                        onChange={(e) => {
+                                            const next = e.target.value;
+                                            setChatMetricsSyncDate(next);
+                                            if (!chatMetricsSyncEndDate || chatMetricsSyncEndDate < next) {
+                                                setChatMetricsSyncEndDate(next);
+                                            }
+                                        }}
+                                    />
+                                </label>
+                                <label className="block">
+                                    <span className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">По</span>
+                                    <input
+                                        type="date"
+                                        className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-800 outline-none transition focus:border-cyan-300 focus:bg-white focus:ring-4 focus:ring-cyan-100"
+                                        value={chatMetricsSyncEndDate || ''}
+                                        onChange={(e) => setChatMetricsSyncEndDate(e.target.value)}
+                                    />
+                                </label>
+                            </div>
+                            <div className="mt-2 text-[11px] text-slate-400">Максимум 31 день за один запуск.</div>
                         </div>
                         <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200/70 bg-slate-50/80 px-5 py-4">
                             <button
@@ -4836,7 +4913,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <button
                                 type="button"
                                 className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold text-white shadow-sm transition ${chatMetricsImportState.loading ? 'cursor-wait bg-cyan-400' : 'bg-cyan-600 hover:bg-cyan-700'}`}
-                                onClick={() => syncChat2DeskMetrics(chatMetricsSyncDate)}
+                                onClick={() => syncChat2DeskMetrics(chatMetricsSyncDate, chatMetricsSyncEndDate)}
                                 disabled={chatMetricsImportState.loading}
                             >
                                 <FaIcon className={`fas ${chatMetricsImportState.loading ? 'fa-spinner fa-spin' : 'fa-arrows-rotate'}`} aria-hidden="true" />
@@ -5415,189 +5492,343 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             </div>
 
             {isChatModel && showLowRatingReviews && (
-                <section className="mb-4 overflow-hidden rounded-[28px] border border-slate-200 bg-white/95 shadow-[0_18px_50px_rgba(15,23,42,0.10)] ring-1 ring-slate-900/5">
-                    <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200/70 bg-slate-50/80 px-5 py-4">
-                        <div className="min-w-0">
-                            <div className="flex flex-wrap items-center gap-2">
-                                <span className="flex h-9 w-9 items-center justify-center rounded-2xl bg-slate-900 text-white shadow-sm">
+                <div
+                    className="fixed inset-0 z-[135] flex items-center justify-center bg-slate-950/35 p-3 backdrop-blur-sm sm:p-6"
+                    onClick={() => setShowLowRatingReviews(false)}
+                >
+                    <div
+                        className="flex max-h-[90vh] w-full max-w-6xl flex-col overflow-hidden rounded-[30px] border border-white/70 bg-white/95 shadow-[0_30px_90px_rgba(15,23,42,0.24)] ring-1 ring-slate-900/5 backdrop-blur-xl"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200/70 px-5 py-4 sm:px-6">
+                            <div className="flex min-w-0 items-start gap-3">
+                                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-slate-900 text-white shadow-sm">
                                     <FaIcon className="fas fa-star-half-alt" aria-hidden="true" />
                                 </span>
-                                <div>
+                                <div className="min-w-0">
                                     <h3 className="text-base font-semibold text-slate-900">Низкие оценки Chat2Desk</h3>
-                                    <p className="mt-0.5 text-xs text-slate-500">
-                                        Оценки ниже 4: совпадение Арай и Жанны закрывает решение, спорные строки ждут главу отдела.
+                                    <p className="mt-1 text-xs leading-5 text-slate-500">
+                                        Откройте строку, проверьте детали и сохраните свою проверку. В списке виден только счетчик уже сделанных проверок.
                                     </p>
                                 </div>
                             </div>
-                        </div>
-                        <div className="flex flex-wrap items-center gap-2">
-                            <button
-                                type="button"
-                                onClick={() => fetchLowRatingReviews(lowRatingFilter)}
-                                disabled={lowRatingLoading}
-                                className="inline-flex h-9 items-center gap-2 rounded-full border border-slate-200 bg-white px-3.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-wait disabled:text-slate-400"
-                            >
-                                <FaIcon className={`fas ${lowRatingLoading ? 'fa-spinner fa-spin' : 'fa-rotate'}`} aria-hidden="true" />
-                                Обновить
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => setShowLowRatingReviews(false)}
-                                className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-slate-500 shadow-sm ring-1 ring-slate-200 transition hover:bg-slate-100 hover:text-slate-700"
-                                aria-label="Закрыть низкие оценки"
-                            >
-                                <FaIcon className="fas fa-xmark" aria-hidden="true" />
-                            </button>
-                        </div>
-                    </div>
-
-                    <div className="px-5 py-4">
-                        <div className="mb-4 flex flex-wrap items-center gap-2">
-                            {LOW_RATING_FILTERS.map(filter => {
-                                const active = lowRatingFilter === filter.value;
-                                const count = lowRatingFilterCount(filter.value);
-                                return (
-                                    <button
-                                        key={filter.value}
-                                        type="button"
-                                        onClick={() => setLowRatingFilter(filter.value)}
-                                        className={`inline-flex h-9 items-center gap-2 rounded-full px-3.5 text-xs font-semibold transition ${
-                                            active
-                                                ? 'bg-slate-900 text-white shadow-sm'
-                                                : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                                        }`}
-                                    >
-                                        {filter.label}
-                                        <span className={`rounded-full px-2 py-0.5 text-[11px] ${active ? 'bg-white/20 text-white' : 'bg-white text-slate-500'}`}>
-                                            {count}
-                                        </span>
-                                    </button>
-                                );
-                            })}
+                            <div className="flex items-center gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => fetchLowRatingReviews(lowRatingFilter, lowRatingPagination.page)}
+                                    disabled={lowRatingLoading}
+                                    className="inline-flex h-9 items-center gap-2 rounded-full border border-slate-200 bg-white px-3.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-wait disabled:text-slate-400"
+                                >
+                                    <FaIcon className={`fas ${lowRatingLoading ? 'fa-spinner fa-spin' : 'fa-rotate'}`} aria-hidden="true" />
+                                    Обновить
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setShowLowRatingReviews(false)}
+                                    className="flex h-9 w-9 items-center justify-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200 hover:text-slate-700"
+                                    aria-label="Закрыть низкие оценки"
+                                >
+                                    <FaIcon className="fas fa-xmark" aria-hidden="true" />
+                                </button>
+                            </div>
                         </div>
 
-                        <div className="mb-4 grid grid-cols-2 gap-2 md:grid-cols-5">
-                            {[
-                                ['Всего', lowRatingSummary.total, 'bg-slate-50 text-slate-700 ring-slate-200'],
-                                ['На проверке', lowRatingSummary.pending, 'bg-blue-50 text-blue-700 ring-blue-200'],
-                                ['Спорные', lowRatingSummary.conflict, 'bg-amber-50 text-amber-800 ring-amber-200'],
-                                ['Обоснованные', lowRatingSummary.valid, 'bg-emerald-50 text-emerald-700 ring-emerald-200'],
-                                ['Исключённые', lowRatingSummary.invalid, 'bg-rose-50 text-rose-700 ring-rose-200'],
-                            ].map(([label, value, klass]) => (
-                                <div key={label} className={`rounded-2xl px-3 py-2 text-xs ring-1 ${klass}`}>
-                                    <div className="text-[11px] font-semibold uppercase tracking-wide opacity-70">{label}</div>
-                                    <div className="mt-1 text-lg font-bold">{Number(value || 0)}</div>
+                        <div className="border-b border-slate-200/70 bg-slate-50/80 px-5 py-3 sm:px-6">
+                            <div className="flex flex-wrap items-center gap-2">
+                                {LOW_RATING_FILTERS.map(filter => {
+                                    const active = lowRatingFilter === filter.value;
+                                    const count = lowRatingFilterCount(filter.value);
+                                    return (
+                                        <button
+                                            key={filter.value}
+                                            type="button"
+                                            onClick={() => {
+                                                setLowRatingFilter(filter.value);
+                                                setLowRatingPagination(prev => ({ ...prev, page: 1 }));
+                                            }}
+                                            className={`inline-flex h-9 items-center gap-2 rounded-full px-3.5 text-xs font-semibold transition ${
+                                                active
+                                                    ? 'bg-slate-900 text-white shadow-sm'
+                                                    : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100'
+                                            }`}
+                                        >
+                                            {filter.label}
+                                            <span className={`rounded-full px-2 py-0.5 text-[11px] ${active ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                                                {count}
+                                            </span>
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        </div>
+
+                        <div className="min-h-0 flex-1 overflow-hidden p-4 sm:p-5">
+                            {lowRatingError && (
+                                <div className="mb-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-medium text-rose-700">
+                                    <FaIcon className="fas fa-triangle-exclamation mr-1" aria-hidden="true" />
+                                    {lowRatingError}
                                 </div>
-                            ))}
+                            )}
+
+                            <div className="grid h-full min-h-[520px] grid-cols-1 gap-4 lg:grid-cols-[360px_minmax(0,1fr)]">
+                                <div className="flex min-h-0 flex-col overflow-hidden rounded-[24px] border border-slate-200 bg-slate-50/80">
+                                    <div className="flex items-center justify-between gap-2 border-b border-slate-200 px-4 py-3">
+                                        <div>
+                                            <div className="text-sm font-semibold text-slate-900">Журнал</div>
+                                            <div className="text-xs text-slate-500">
+                                                {Number(lowRatingPagination.total || 0)} строк
+                                            </div>
+                                        </div>
+                                        {lowRatingLoading && <FaIcon className="fas fa-spinner fa-spin text-slate-400" aria-hidden="true" />}
+                                    </div>
+
+                                    <div className="min-h-0 flex-1 overflow-y-auto p-3">
+                                        {lowRatingLoading ? (
+                                            <div className="rounded-3xl border border-slate-200 bg-white px-4 py-8 text-center text-sm font-medium text-slate-500">
+                                                Загружаем...
+                                            </div>
+                                        ) : lowRatingReviews.length === 0 ? (
+                                            <div className="rounded-3xl border border-dashed border-slate-200 bg-white px-4 py-8 text-center text-sm text-slate-500">
+                                                Для выбранного фильтра строк нет.
+                                            </div>
+                                        ) : (
+                                            <div className="space-y-2">
+                                                {lowRatingReviews.map(row => {
+                                                    const selected = String(row.id) === String(selectedLowRatingReviewId);
+                                                    return (
+                                                        <button
+                                                            key={row.id}
+                                                            type="button"
+                                                            onClick={() => setSelectedLowRatingReviewId(String(row.id))}
+                                                            className={`w-full rounded-3xl border p-3 text-left transition ${
+                                                                selected
+                                                                    ? 'border-slate-900 bg-white shadow-sm ring-2 ring-slate-900/10'
+                                                                    : 'border-slate-200 bg-white hover:border-slate-300 hover:shadow-sm'
+                                                            }`}
+                                                        >
+                                                            <div className="flex items-start justify-between gap-3">
+                                                                <div className="min-w-0">
+                                                                    <div className="truncate text-sm font-semibold text-slate-900" title={row.operator_name || ''}>
+                                                                        {row.operator_name || '—'}
+                                                                    </div>
+                                                                    <div className="mt-1 truncate text-xs text-slate-500">
+                                                                        {row.phone_number || row.phone_normalized || '—'} · {row.taxi_park || row.direction_name || '—'}
+                                                                    </div>
+                                                                </div>
+                                                                <span className="inline-flex h-9 min-w-9 items-center justify-center rounded-full bg-rose-50 px-2 text-sm font-bold text-rose-700 ring-1 ring-rose-200">
+                                                                    {Number(row.score || 0).toLocaleString('ru-RU', { maximumFractionDigits: 1 })}
+                                                                </span>
+                                                            </div>
+                                                            <div className="mt-3 flex flex-wrap items-center gap-2">
+                                                                <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-bold ring-1 ${lowRatingFinalClass(row)}`}>
+                                                                    {lowRatingFinalLabel(row)}
+                                                                </span>
+                                                                <span className="inline-flex rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-600">
+                                                                    Проверок: {Number(row.review_count || 0)}
+                                                                </span>
+                                                                {row.my_review_status && (
+                                                                    <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-semibold ring-1 ${lowRatingStatusClass(row.my_review_status)}`}>
+                                                                        Моя: {lowRatingStatusLabel(row.my_review_status)}
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                            <div className="mt-2 text-[11px] text-slate-400">
+                                                                {formatLowRatingDateTime(row.rated_at || row.day)}
+                                                            </div>
+                                                        </button>
+                                                    );
+                                                })}
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    <div className="flex items-center justify-between gap-2 border-t border-slate-200 bg-white px-4 py-3">
+                                        <button
+                                            type="button"
+                                            className="flex h-8 w-8 items-center justify-center rounded-full bg-slate-100 text-slate-600 transition hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-40"
+                                            disabled={lowRatingLoading || Number(lowRatingPagination.page || 1) <= 1}
+                                            onClick={() => setLowRatingPagination(prev => ({ ...prev, page: Math.max(1, Number(prev.page || 1) - 1) }))}
+                                            aria-label="Предыдущая страница"
+                                        >
+                                            <FaIcon className="fas fa-chevron-left" aria-hidden="true" />
+                                        </button>
+                                        <div className="text-xs font-semibold text-slate-500">
+                                            {Number(lowRatingPagination.page || 1)} / {Number(lowRatingPagination.total_pages || 1)}
+                                        </div>
+                                        <button
+                                            type="button"
+                                            className="flex h-8 w-8 items-center justify-center rounded-full bg-slate-100 text-slate-600 transition hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-40"
+                                            disabled={lowRatingLoading || Number(lowRatingPagination.page || 1) >= Number(lowRatingPagination.total_pages || 1)}
+                                            onClick={() => setLowRatingPagination(prev => ({ ...prev, page: Math.min(Number(prev.total_pages || 1), Number(prev.page || 1) + 1) }))}
+                                            aria-label="Следующая страница"
+                                        >
+                                            <FaIcon className="fas fa-chevron-right" aria-hidden="true" />
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div className="min-h-0 overflow-y-auto rounded-[24px] border border-slate-200 bg-white p-4 sm:p-5">
+                                    {!selectedLowRatingReview ? (
+                                        <div className="flex h-full min-h-[360px] items-center justify-center rounded-3xl border border-dashed border-slate-200 bg-slate-50 text-sm text-slate-500">
+                                            Выберите строку слева.
+                                        </div>
+                                    ) : (
+                                        <div className="space-y-4">
+                                            <div className="flex flex-wrap items-start justify-between gap-3">
+                                                <div>
+                                                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Оценка</div>
+                                                    <div className="mt-1 text-2xl font-bold text-slate-900">
+                                                        {Number(selectedLowRatingReview.score || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 })}
+                                                    </div>
+                                                </div>
+                                                <span className={`inline-flex rounded-full px-3 py-1.5 text-xs font-bold ring-1 ${lowRatingFinalClass(selectedLowRatingReview)}`}>
+                                                    {lowRatingFinalLabel(selectedLowRatingReview)}
+                                                </span>
+                                            </div>
+
+                                            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                                                {[
+                                                    ['Оператор', selectedLowRatingReview.operator_name],
+                                                    ['Номер', selectedLowRatingReview.phone_number || selectedLowRatingReview.phone_normalized],
+                                                    ['Таксопарк', selectedLowRatingReview.taxi_park || selectedLowRatingReview.direction_name],
+                                                    ['Дата', formatLowRatingDateTime(selectedLowRatingReview.rated_at || selectedLowRatingReview.day)],
+                                                    ['Отдел', selectedLowRatingReview.department_name],
+                                                    ['Проверок сделано', Number(selectedLowRatingReview.review_count || 0)],
+                                                ].map(([label, value]) => (
+                                                    <div key={label} className="rounded-3xl bg-slate-50 px-4 py-3 ring-1 ring-slate-200/70">
+                                                        <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{label}</div>
+                                                        <div className="mt-1 min-h-[20px] text-sm font-semibold text-slate-800">{value || '—'}</div>
+                                                    </div>
+                                                ))}
+                                            </div>
+
+                                            {(selectedLowRatingReview.client_comment || selectedLowRatingReview.rating_text) && (
+                                                <div className="rounded-3xl bg-slate-50 px-4 py-3 ring-1 ring-slate-200/70">
+                                                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Комментарий клиента</div>
+                                                    <div className="mt-2 text-sm leading-6 text-slate-700">
+                                                        {selectedLowRatingReview.client_comment || selectedLowRatingReview.rating_text}
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            <div className="rounded-[28px] border border-slate-200 bg-white p-4 shadow-sm">
+                                                <div className="mb-3 flex items-center justify-between gap-2">
+                                                    <div>
+                                                        <div className="text-sm font-semibold text-slate-900">Моя проверка</div>
+                                                        <div className="text-xs text-slate-500">Эти поля видит и меняет только текущий пользователь.</div>
+                                                    </div>
+                                                    {lowRatingSavingKey === `${selectedLowRatingReview.id}:review` && (
+                                                        <FaIcon className="fas fa-spinner fa-spin text-slate-400" aria-hidden="true" />
+                                                    )}
+                                                </div>
+                                                <div className="mb-3 flex flex-wrap gap-2">
+                                                    {LOW_RATING_REVIEW_OPTIONS.filter(option => option.value).map(option => {
+                                                        const active = lowRatingReviewDraft.status === option.value;
+                                                        return (
+                                                            <button
+                                                                key={option.value}
+                                                                type="button"
+                                                                className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+                                                                    active
+                                                                        ? option.value === 'valid'
+                                                                            ? 'bg-emerald-600 text-white'
+                                                                            : 'bg-rose-600 text-white'
+                                                                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                                                }`}
+                                                                onClick={() => setLowRatingReviewDraft(prev => ({ ...prev, status: option.value }))}
+                                                            >
+                                                                {option.label}
+                                                            </button>
+                                                        );
+                                                    })}
+                                                </div>
+                                                <textarea
+                                                    className="min-h-[96px] w-full resize-y rounded-3xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-slate-300 focus:bg-white focus:ring-4 focus:ring-slate-100"
+                                                    value={lowRatingReviewDraft.comment || ''}
+                                                    onChange={(e) => setLowRatingReviewDraft(prev => ({ ...prev, comment: e.target.value }))}
+                                                    placeholder="Комментарий к проверке"
+                                                    maxLength={4000}
+                                                />
+                                                <div className="mt-3 flex justify-end">
+                                                    <button
+                                                        type="button"
+                                                        className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold text-white shadow-sm transition ${lowRatingSavingKey === `${selectedLowRatingReview.id}:review` ? 'cursor-wait bg-slate-400' : 'bg-slate-900 hover:bg-slate-800'}`}
+                                                        onClick={() => saveLowRatingReview(selectedLowRatingReview)}
+                                                        disabled={lowRatingSavingKey === `${selectedLowRatingReview.id}:review`}
+                                                    >
+                                                        <FaIcon className={`fas ${lowRatingSavingKey === `${selectedLowRatingReview.id}:review` ? 'fa-spinner fa-spin' : 'fa-save'}`} aria-hidden="true" />
+                                                        Сохранить проверку
+                                                    </button>
+                                                </div>
+                                            </div>
+
+                                            <div className="rounded-[28px] border border-slate-200 bg-slate-50/80 p-4">
+                                                <div className="mb-3 flex items-center justify-between gap-2">
+                                                    <div>
+                                                        <div className="text-sm font-semibold text-slate-900">Итоговое решение</div>
+                                                        <div className="text-xs text-slate-500">
+                                                            {selectedLowRatingReview.can_finalize ? 'Доступно для финального решения.' : 'Итог формируется по совпадению проверок или руководителем.'}
+                                                        </div>
+                                                    </div>
+                                                    <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-600 ring-1 ring-slate-200">
+                                                        {selectedLowRatingReview.final_source === 'consensus' ? 'Совпадение' : ['manager', 'head'].includes(selectedLowRatingReview.final_source) ? 'Руководитель' : 'Ожидает'}
+                                                    </span>
+                                                </div>
+                                                {selectedLowRatingReview.can_finalize ? (
+                                                    <>
+                                                        <div className="mb-3 flex flex-wrap gap-2">
+                                                            {LOW_RATING_REVIEW_OPTIONS.filter(option => option.value).map(option => {
+                                                                const active = lowRatingFinalDraft.status === option.value;
+                                                                return (
+                                                                    <button
+                                                                        key={option.value}
+                                                                        type="button"
+                                                                        className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+                                                                            active
+                                                                                ? option.value === 'valid'
+                                                                                    ? 'bg-emerald-600 text-white'
+                                                                                    : 'bg-rose-600 text-white'
+                                                                                : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100'
+                                                                        }`}
+                                                                        onClick={() => setLowRatingFinalDraft(prev => ({ ...prev, status: option.value }))}
+                                                                    >
+                                                                        {option.label}
+                                                                    </button>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                        <textarea
+                                                            className="min-h-[82px] w-full resize-y rounded-3xl border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-slate-300 focus:ring-4 focus:ring-slate-100"
+                                                            value={lowRatingFinalDraft.comment || ''}
+                                                            onChange={(e) => setLowRatingFinalDraft(prev => ({ ...prev, comment: e.target.value }))}
+                                                            placeholder="Комментарий к итоговому решению"
+                                                            maxLength={4000}
+                                                        />
+                                                        <div className="mt-3 flex justify-end">
+                                                            <button
+                                                                type="button"
+                                                                className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold text-white shadow-sm transition ${lowRatingSavingKey === `${selectedLowRatingReview.id}:final` ? 'cursor-wait bg-cyan-400' : 'bg-cyan-600 hover:bg-cyan-700'}`}
+                                                                onClick={() => saveLowRatingFinalDecision(selectedLowRatingReview)}
+                                                                disabled={lowRatingSavingKey === `${selectedLowRatingReview.id}:final`}
+                                                            >
+                                                                <FaIcon className={`fas ${lowRatingSavingKey === `${selectedLowRatingReview.id}:final` ? 'fa-spinner fa-spin' : 'fa-check'}`} aria-hidden="true" />
+                                                                Сохранить итог
+                                                            </button>
+                                                        </div>
+                                                    </>
+                                                ) : (
+                                                    <div className="rounded-3xl bg-white px-4 py-3 text-sm text-slate-600 ring-1 ring-slate-200">
+                                                        {selectedLowRatingReview.final_comment || 'Финальное решение пока не требует вашего действия.'}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
                         </div>
-
-                        {lowRatingError && (
-                            <div className="mb-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-medium text-rose-700">
-                                <FaIcon className="fas fa-triangle-exclamation mr-1" aria-hidden="true" />
-                                {lowRatingError}
-                            </div>
-                        )}
-
-                        {lowRatingLoading ? (
-                            <div className="rounded-3xl border border-slate-200 bg-slate-50/80 px-4 py-8 text-center text-sm font-medium text-slate-500">
-                                <FaIcon className="fas fa-spinner fa-spin mr-2" aria-hidden="true" />
-                                Загружаем низкие оценки...
-                            </div>
-                        ) : lowRatingReviews.length === 0 ? (
-                            <div className="rounded-3xl border border-dashed border-slate-200 bg-slate-50/80 px-4 py-8 text-center text-sm text-slate-500">
-                                Для выбранного фильтра строк нет.
-                            </div>
-                        ) : (
-                            <div className="overflow-x-auto rounded-2xl border border-slate-200">
-                                <table className="min-w-[1280px] w-full border-collapse text-left text-xs">
-                                    <thead className="bg-slate-50 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                                        <tr>
-                                            <th className="whitespace-nowrap px-3 py-3">Номер</th>
-                                            <th className="whitespace-nowrap px-3 py-3">ФИО оператора</th>
-                                            <th className="whitespace-nowrap px-3 py-3">Таксопарк</th>
-                                            <th className="whitespace-nowrap px-3 py-3">Дата</th>
-                                            <th className="whitespace-nowrap px-3 py-3 text-center">Оценка</th>
-                                            <th className="px-3 py-3">Арай</th>
-                                            <th className="px-3 py-3">Жанна</th>
-                                            <th className="px-3 py-3">Решение главы</th>
-                                            <th className="whitespace-nowrap px-3 py-3">Итог</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody className="divide-y divide-slate-100 bg-white">
-                                        {lowRatingReviews.map(row => (
-                                            <tr key={row.id} className="align-top transition hover:bg-slate-50/70">
-                                                <td className="whitespace-nowrap px-3 py-3 font-semibold text-slate-800">
-                                                    {row.phone_number || row.phone_normalized || '—'}
-                                                </td>
-                                                <td className="px-3 py-3 text-slate-700">
-                                                    <div className="max-w-[180px] truncate font-medium" title={row.operator_name || ''}>
-                                                        {row.operator_name || '—'}
-                                                    </div>
-                                                    {row.department_name && (
-                                                        <div className="mt-1 max-w-[180px] truncate text-[11px] text-slate-400" title={row.department_name}>
-                                                            {row.department_name}
-                                                        </div>
-                                                    )}
-                                                </td>
-                                                <td className="px-3 py-3 text-slate-600">
-                                                    <div className="max-w-[160px] truncate" title={row.taxi_park || row.direction_name || ''}>
-                                                        {row.taxi_park || row.direction_name || '—'}
-                                                    </div>
-                                                </td>
-                                                <td className="whitespace-nowrap px-3 py-3 text-slate-600">
-                                                    {formatLowRatingDateTime(row.rated_at || row.day)}
-                                                </td>
-                                                <td className="px-3 py-3 text-center">
-                                                    <span className="inline-flex h-8 min-w-8 items-center justify-center rounded-full bg-rose-50 px-2 font-bold text-rose-700 ring-1 ring-rose-200">
-                                                        {Number(row.score || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 })}
-                                                    </span>
-                                                </td>
-                                                <td className="px-3 py-3">
-                                                    {renderLowRatingReviewerCell(row, 'arai', 'Обоснованность')}
-                                                </td>
-                                                <td className="px-3 py-3">
-                                                    {renderLowRatingReviewerCell(row, 'zhanna', 'Обоснованность')}
-                                                </td>
-                                                <td className="px-3 py-3">
-                                                    {renderLowRatingReviewerCell(
-                                                        row,
-                                                        'head',
-                                                        'Финально',
-                                                        !canSetLowRatingHeadDecision || (row.review_state !== 'conflict' && !row.head_status)
-                                                    )}
-                                                    {!canSetLowRatingHeadDecision && (
-                                                        <div className="mt-1 text-[11px] text-slate-400">Доступно главе отдела</div>
-                                                    )}
-                                                    {canSetLowRatingHeadDecision && row.review_state !== 'conflict' && !row.head_status && (
-                                                        <div className="mt-1 text-[11px] text-slate-400">Появится при споре</div>
-                                                    )}
-                                                </td>
-                                                <td className="px-3 py-3">
-                                                    <span className={`inline-flex rounded-full px-3 py-1.5 text-[11px] font-bold ring-1 ${lowRatingFinalClass(row)}`}>
-                                                        {lowRatingFinalLabel(row)}
-                                                    </span>
-                                                    <div className="mt-2 space-y-1">
-                                                        <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-semibold ring-1 ${lowRatingStatusClass(row.arai_status)}`}>
-                                                            Арай: {lowRatingStatusLabel(row.arai_status)}
-                                                        </span>
-                                                        <span className={`ml-1 inline-flex rounded-full px-2.5 py-1 text-[11px] font-semibold ring-1 ${lowRatingStatusClass(row.zhanna_status)}`}>
-                                                            Жанна: {lowRatingStatusLabel(row.zhanna_status)}
-                                                        </span>
-                                                    </div>
-                                                    {row.final_source && (
-                                                        <div className="mt-2 text-[11px] text-slate-400">
-                                                            {row.final_source === 'consensus' ? 'Совпадение проверяющих' : 'Решение главы отдела'}
-                                                        </div>
-                                                    )}
-                                                </td>
-                                            </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
-                            </div>
-                        )}
                     </div>
-                </section>
+                </div>
             )}
 
             {/* Table */}
