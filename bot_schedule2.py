@@ -5115,6 +5115,8 @@ def get_admin_users():
             return jsonify({"error": "Forbidden"}), 403
 
         visible_roles = ['operator', 'trainee', 'trainer']
+        if headed_dept_id is not None:
+            visible_roles.extend(['sv', 'supervisor'])
         if requester_role == 'super_admin':
             visible_roles.append('admin')
         with db._get_cursor() as cursor:
@@ -7068,8 +7070,8 @@ def upsert_call_feedback(call_id):
             return jsonify({"error": message}), status_code
 
         requester_role = _normalize_user_role(requester[3])
-        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role)):
-            return jsonify({"error": "Only admins and supervisors can submit feedback"}), 403
+        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role) or _headed_department_id(requester_id) is not None):
+            return jsonify({"error": "Only admins, supervisors and department heads can submit feedback"}), 403
 
         feedback_comment = str(data.get('feedback_comment') or '').strip()
         delivery_comment = str(data.get('delivery_comment') or '').strip()
@@ -7368,8 +7370,8 @@ def create_call_feedback_batch():
             return jsonify({"error": message}), status_code
 
         requester_role = _normalize_user_role(requester[3])
-        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role)):
-            return jsonify({"error": "Only admins and supervisors can submit feedback"}), 403
+        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role) or _headed_department_id(requester_id) is not None):
+            return jsonify({"error": "Only admins, supervisors and department heads can submit feedback"}), 403
 
         delivery_comment = str(data.get('delivery_comment') or '').strip()
         feedback_date_raw = str(data.get('date') or '').strip()
@@ -9473,7 +9475,16 @@ def _create_reevaluation_request(call_id, requester, requester_id, comment):
         raise ValueError("Reevaluation request is available only for completed evaluations")
 
     requester_role = _normalize_reevaluation_request_role(requester[3] if requester else None)
-    if requester_role == 'operator':
+    requester_base_role = _normalize_user_role(requester[3] if requester else None)
+    is_department_head = (
+        _headed_department_id(requester_id) is not None
+        and not _is_super_admin_role(requester_base_role)
+    )
+    if is_department_head:
+        if not _ensure_call_access_for_requester(call_ctx.get('operator_id'), requester, requester_id):
+            raise PermissionError("Only admins or this department head can request reevaluation")
+        requester_role = 'admin'
+    elif requester_role == 'operator':
         if int(call_ctx.get('operator_id') or 0) != int(requester_id):
             raise PermissionError("Operators can request reevaluation only for their own calls")
         if not call_ctx.get('supervisor_id'):
@@ -9539,11 +9550,11 @@ def _resolve_reevaluation_request(call_id, approver_user_id, decision, comment=N
     if not approver:
         raise PermissionError("Approver not found")
     approver_role = _normalize_user_role(approver[3])
-    if not _is_admin_role(approver_role):
-        headed_dept_id = db.headed_department_id_for_user(approver_user_id)
-        operator_dept_id = db.get_user_department_id(call_ctx.get('operator_id'))
-        if headed_dept_id is None or operator_dept_id != headed_dept_id:
-            raise PermissionError("Only admins or this department head can decide reevaluation requests")
+    headed_dept_id = _headed_department_id(approver_user_id)
+    if not _is_admin_role(approver_role) and headed_dept_id is None:
+        raise PermissionError("Only admins or this department head can decide reevaluation requests")
+    if not _ensure_call_access_for_requester(call_ctx.get('operator_id'), approver, approver_user_id):
+        raise PermissionError("Only admins or this department head can decide reevaluation requests")
 
     decision_comment = str(comment or '').strip() or None
     with db._get_cursor() as cursor:
@@ -10404,8 +10415,11 @@ def list_groups_endpoint():
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
         role = _normalize_user_role(requester[3])
+        headed_dept_id = _headed_department_id(requester_id)
         include_archived = str(request.args.get('include_archived', '')).lower() in ('1', 'true', 'yes')
-        if _is_admin_role(role):
+        if headed_dept_id is not None and not _is_super_admin_role(role):
+            groups = db.list_groups(include_archived=include_archived, department_id=headed_dept_id)
+        elif _is_global_admin_requester(role, requester_id):
             dep = request.args.get('department_id')
             department_id = int(dep) if dep and str(dep).isdigit() else None
             groups = db.list_groups(include_archived=include_archived, department_id=department_id)
@@ -13532,9 +13546,10 @@ def get_call_reevaluation_requests():
             return jsonify({"error": message}), status_code
 
         requester_role = _normalize_user_role(requester[3]) if requester else ''
-        headed_dept_id = db.headed_department_id_for_user(requester_id)
-        is_department_head = headed_dept_id is not None and not _is_admin_role(requester_role)
-        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role) or is_department_head):
+        headed_dept_id = _headed_department_id(requester_id)
+        is_department_head = headed_dept_id is not None and not _is_super_admin_role(requester_role)
+        is_global_admin = _is_global_admin_requester(requester_role, requester_id)
+        if not (is_global_admin or _is_supervisor_role(requester_role) or is_department_head):
             return jsonify({"error": "Only admins, supervisors or department heads can view reevaluation requests"}), 403
 
         month = request.args.get('month') or None
@@ -13590,7 +13605,7 @@ def get_call_versions(call_id):
             return jsonify({"error": "Unauthorized"}), 401
 
         requester = db.get_user(id=requester_id)
-        if not requester or not _is_privileged_role(requester[3]):
+        if not requester or (not _is_privileged_role(requester[3]) and _headed_department_id(requester_id) is None):
             return jsonify({"error": "Forbidden: only admin or supervisor can access call versions"}), 403
 
         head_call = db.get_call_by_id(call_id)
@@ -13686,17 +13701,15 @@ def delete_draft_evaluation(evaluation_id):
             if status == 'evaluated':
                 return jsonify({"error": "Cannot delete evaluated imported call"}), 400
 
-            # Authorization: admins can delete anything; supervisors can delete calls for their operators
-            allowed = False
+            # Authorization: global admins can delete any draft; department heads only within their department.
             try:
-                role = requester[3]
+                role = _normalize_user_role(requester[3])
             except Exception:
                 role = None
 
-            if _is_admin_role(role):
-                allowed = True
-
-            if not allowed:
+            if not (_is_admin_role(role) or _headed_department_id(requester_id) is not None):
+                return jsonify({"error": "Unauthorized to delete this imported call"}), 403
+            if not _ensure_call_access_for_requester(operator_id, requester, requester_id):
                 return jsonify({"error": "Unauthorized to delete this imported call"}), 403
 
             cursor.execute("""
@@ -13718,10 +13731,11 @@ def get_audio_file(evaluation_id):
 
         requester = db.get_user(id=requester_id)
         requester_role = _normalize_user_role(requester[3]) if requester else ''
-        if not requester or (not _is_admin_role(requester_role) and requester_role not in ('sv', 'operator')):
+        headed_dept_id = _headed_department_id(requester_id)
+        if not requester or (not _is_admin_role(requester_role) and requester_role not in ('sv', 'operator') and headed_dept_id is None):
             return jsonify({"error": "Audio is not available for this role"}), 403
 
-        if requester_role == 'operator':
+        if requester_role == 'operator' and headed_dept_id is None:
             session_id = _current_session_id_from_access_token()
             if not _is_sensitive_access_unlocked(requester_id, session_id):
                 return jsonify({
@@ -13840,8 +13854,9 @@ def receive_call_evaluation():
             return jsonify({"error": message}), status_code
 
         requester_role = _normalize_user_role(requester[3])
-        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role)):
-            return jsonify({"error": "Only admins and supervisors can submit evaluations"}), 403
+        requester_headed_dept = _headed_department_id(requester_id)
+        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role) or requester_headed_dept is not None):
+            return jsonify({"error": "Only admins, supervisors and department heads can submit evaluations"}), 403
 
         required_fields = ['evaluator', 'operator', 'phone_number', 'appeal_date', 'score', 'comment', 'month', 'is_draft']
         missing_fields = [field for field in required_fields if field not in request.form]
@@ -13874,9 +13889,20 @@ def receive_call_evaluation():
         operator = db.get_user(name=operator_name)
         if not evaluator or not operator:
             return jsonify({"error": "Evaluator or operator not found"}), 404
+        if not _ensure_call_access_for_requester(operator[0], requester, requester_id):
+            return jsonify({"error": "Forbidden for this operator"}), 403
+        if is_correction and previous_version_id:
+            try:
+                previous_call = db.get_call_by_id(int(previous_version_id))
+            except (TypeError, ValueError):
+                previous_call = None
+            if not previous_call:
+                return jsonify({"error": "Previous evaluation not found"}), 404
+            if not _ensure_call_access_for_requester(previous_call.get("operator_id"), requester, requester_id):
+                return jsonify({"error": "Forbidden for this previous evaluation"}), 403
         if is_correction:
             # admins всегда могут делать переоценки
-            if _is_admin_role(requester[3]):
+            if _is_admin_role(requester_role) or requester_headed_dept is not None:
                 allowed = True
             else:
                 # non-admin может переоценивать ТОЛЬКО если:

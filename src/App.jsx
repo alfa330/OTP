@@ -1909,6 +1909,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const [offlineActivityModalState, setOfflineActivityModalState] = useState({ open: false, operatorId: null, date: '', activity: null, start_time: '09:00', end_time: '10:00', comment: '' });
         const [offlineActivityModalError, setOfflineActivityModalError] = useState('');
         const isHoursDepartmentHead = isDepartmentHead(user);
+        const hoursDepartmentScopeId = isHoursDepartmentHead ? headedDepartmentId(user) : null;
         const [selectedSvId, setSelectedSvId] = useState(user?.role === 'sv' ? user.id : '');
         const [reportScope, setReportScope] = useState('by_sv'); // 'by_sv' or 'all' (admin only)
         const [isLoading, setIsLoading] = useState(false);
@@ -2042,14 +2043,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         axios.get(`${API_BASE_URL}/api/admin/calculation_models`, { headers: { 'X-User-Id': user.id } }),
                     ]);
                     if (cancelled) return;
-                    if (groupsResp.data?.status === 'success') setGroupsList(groupsResp.data.groups || []);
+                    if (groupsResp.data?.status === 'success') {
+                        const nextGroups = Array.isArray(groupsResp.data.groups) ? groupsResp.data.groups : [];
+                        setGroupsList(
+                            hoursDepartmentScopeId != null
+                                ? nextGroups.filter((group) => Number(group?.department_id ?? group?.departmentId) === Number(hoursDepartmentScopeId))
+                                : nextGroups
+                        );
+                    }
                     if (modelsResp.data?.status === 'success') setCalcModelMetrics(modelsResp.data.calculation_model_metrics || {});
                 } catch (e) {
                     console.warn('group registry load failed (legacy mode):', e);
                 }
             })();
             return () => { cancelled = true; };
-        }, [user]);
+        }, [user, hoursDepartmentScopeId]);
 
         function fallbackToast(msg, type = 'success') {
             try {
@@ -34467,8 +34475,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const data = response.data;
                         if (data.status === 'success' && isMounted.current) {
                             const nextUsers = Array.isArray(data.users) ? data.users : [];
+                            const manageOperatorRoles = isDepartmentManager
+                                ? new Set(['operator', 'trainee', 'sv', 'supervisor'])
+                                : new Set(['operator']);
                             setAdminUsers(nextUsers);
-                            setUsers(nextUsers.filter((u) => String(u?.role || '').toLowerCase() === 'operator'));
+                            setUsers(nextUsers.filter((u) => manageOperatorRoles.has(normalizeRole(u?.role))));
                             setSystemAdmins(nextUsers.filter((u) => String(u?.role || '').toLowerCase() === 'admin'));
                             setTrainerUsers(nextUsers.filter((u) => String(u?.role || '').toLowerCase() === 'trainer'));
                         } else {

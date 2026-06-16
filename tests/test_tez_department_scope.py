@@ -8,6 +8,8 @@ ROOT = Path(__file__).resolve().parents[1]
 BOT_PATH = ROOT / "bot_schedule2.py"
 DATABASE_PATH = ROOT / "database.py"
 DEPARTMENT_VIEWS_PATH = ROOT / "src" / "utils" / "departmentViews.js"
+APP_PATH = ROOT / "src" / "App.jsx"
+CALL_EVALUATION_PATH = ROOT / "src" / "call_evaluation" / "main.jsx"
 
 
 def _read(path):
@@ -45,6 +47,7 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
         self.assertIn("'salary'", source)
         self.assertIn("const TEZ_MANAGER_VIEWS", source)
         self.assertIn("'manage_operators'", source)
+        self.assertIn("'qr_access'", source)
         self.assertIn("'call_evaluation'", source)
         self.assertIn("'call_division'", source)
         self.assertIn("'monitoring_scale'", source)
@@ -58,6 +61,30 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
         self.assertIn("if (isAdminLikeRole(user?.role) && !isDepartmentHead(user)) return null;", source)
         self.assertIn("const role = isDepartmentHead(user) ? 'sv' : normalizeRole(user?.role);", source)
         self.assertNotIn("isAdminLikeRole(user?.role) || isDepartmentHead(user)", source)
+
+    def test_department_manager_employee_accounting_keeps_supervisors(self):
+        source = _read(APP_PATH)
+
+        self.assertIn("const manageOperatorRoles = isDepartmentManager", source)
+        self.assertIn("new Set(['operator', 'trainee', 'sv', 'supervisor'])", source)
+        self.assertIn("manageOperatorRoles.has(normalizeRole(u?.role))", source)
+
+    def test_hours_accounting_groups_are_scoped_for_department_head(self):
+        source = _read(APP_PATH)
+
+        self.assertIn("const hoursDepartmentScopeId = isHoursDepartmentHead ? headedDepartmentId(user) : null;", source)
+        self.assertIn("group?.department_id ?? group?.departmentId", source)
+        self.assertIn("Number(hoursDepartmentScopeId)", source)
+
+    def test_call_evaluation_department_head_gets_admin_journal_with_department_scope(self):
+        source = _read(CALL_EVALUATION_PATH)
+
+        self.assertIn("const isScopedDepartmentHead = isDepartmentHead && canonicalRole !== 'super_admin';", source)
+        self.assertIn("const isAdminRole = isBaseAdminRole || isDepartmentHead;", source)
+        self.assertIn("const isGlobalAdminRole = isBaseAdminRole && !isScopedDepartmentHead;", source)
+        self.assertIn("const canManageFeedbackReportSetting = isGlobalAdminRole;", source)
+        self.assertIn("isAdminRole && (!isScopedDepartmentHead || selectedSupervisor)", source)
+        self.assertIn("const scopeId = shouldUseSelectedSupervisor ? selectedSupervisor : userId;", source)
 
 
 class TezDepartmentBackendScopeTests(unittest.TestCase):
@@ -95,15 +122,39 @@ class TezDepartmentBackendScopeTests(unittest.TestCase):
 
     def test_department_head_admin_role_is_not_treated_as_global_admin_for_lists(self):
         departments = _function_source(BOT_PATH, "api_admin_departments")
+        users = _function_source(BOT_PATH, "get_admin_users")
         sv_list = _function_source(BOT_PATH, "get_sv_list")
         directions = _function_source(BOT_PATH, "get_directions")
         sv_data = _function_source(BOT_PATH, "get_sv_data")
+        groups = _function_source(BOT_PATH, "list_groups_endpoint")
 
         self.assertIn("headed_dept_id = _headed_department_id(requester_id)", departments)
         self.assertIn("db.get_department_by_id(headed_dept_id)", departments)
+        self.assertIn("visible_roles.extend(['sv', 'supervisor'])", users)
         self.assertIn("_is_global_admin_requester(requester_role, requester_id)", sv_list)
         self.assertIn("_is_global_admin_requester(role, requester_id)", directions)
         self.assertIn("_is_global_admin_requester(requester_role, requester_id)", sv_data)
+        self.assertIn("headed_dept_id = _headed_department_id(requester_id)", groups)
+        self.assertIn("department_id=headed_dept_id", groups)
+        self.assertIn("_is_global_admin_requester(role, requester_id)", groups)
+
+    def test_call_evaluation_admin_actions_keep_department_scope(self):
+        create_request = _function_source(BOT_PATH, "_create_reevaluation_request")
+        resolve_request = _function_source(BOT_PATH, "_resolve_reevaluation_request")
+        requests = _function_source(BOT_PATH, "get_call_reevaluation_requests")
+        delete_draft = _function_source(BOT_PATH, "delete_draft_evaluation")
+        receive_eval = _function_source(BOT_PATH, "receive_call_evaluation")
+
+        self.assertIn("_headed_department_id(requester_id) is not None", create_request)
+        self.assertIn("_ensure_call_access_for_requester(call_ctx.get('operator_id'), requester, requester_id)", create_request)
+        self.assertIn("headed_dept_id = _headed_department_id(approver_user_id)", resolve_request)
+        self.assertIn("_ensure_call_access_for_requester(call_ctx.get('operator_id'), approver, approver_user_id)", resolve_request)
+        self.assertIn("is_global_admin = _is_global_admin_requester(requester_role, requester_id)", requests)
+        self.assertIn("department_id = int(headed_dept_id)", requests)
+        self.assertIn("_ensure_call_access_for_requester(operator_id, requester, requester_id)", delete_draft)
+        self.assertIn("requester_headed_dept = _headed_department_id(requester_id)", receive_eval)
+        self.assertIn("_ensure_call_access_for_requester(operator[0], requester, requester_id)", receive_eval)
+        self.assertIn("_ensure_call_access_for_requester(previous_call.get(\"operator_id\"), requester, requester_id)", receive_eval)
 
 
 if __name__ == "__main__":
