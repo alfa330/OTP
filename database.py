@@ -10303,8 +10303,9 @@ class Database:
             'final_decided_at': item.get('final_decided_at'),
             'review_count': int(item.get('review_count') or 0),
             'review_state': item.get('review_state') or 'pending',
+            'has_review_conflict': bool(item.get('has_review_conflict')),
             'needs_head_decision': bool(item.get('needs_head_decision')),
-            'can_finalize': bool(can_finalize),
+            'can_finalize': bool(can_finalize and item.get('has_review_conflict')),
             'my_review_status': item.get('my_review_status'),
             'my_review_comment': item.get('my_review_comment') or '',
             'my_review_updated_at': item.get('my_review_updated_at'),
@@ -10358,6 +10359,12 @@ class Database:
             review_id = str(item.get('id'))
             counts = by_review.get(review_id, {'review_count': 0, 'status_counts': {}})
             status_counts = counts.get('status_counts') or {}
+            review_count = int(counts.get('review_count') or 0)
+            has_review_conflict = bool(
+                review_count >= 2
+                and int(status_counts.get('valid') or 0) > 0
+                and int(status_counts.get('invalid') or 0) > 0
+            )
             item['review_count'] = int(counts.get('review_count') or 0)
             item['review_status_counts'] = status_counts
             item.update(my_entries.get(review_id, {
@@ -10365,13 +10372,14 @@ class Database:
                 'my_review_comment': '',
                 'my_review_updated_at': None,
             }))
+            item['has_review_conflict'] = has_review_conflict
             if item.get('final_status'):
                 item['review_state'] = 'resolved'
-            elif status_counts.get('valid') and status_counts.get('invalid'):
+            elif has_review_conflict:
                 item['review_state'] = 'conflict'
             else:
                 item['review_state'] = 'pending'
-            item['needs_head_decision'] = bool(item.get('review_state') == 'conflict' and not item.get('final_status'))
+            item['needs_head_decision'] = bool(has_review_conflict and not item.get('final_status'))
         return items
 
     def _resolve_low_rating_final_status_from_entries_tx(self, cursor, review_id, manager_status=None):
@@ -10391,10 +10399,15 @@ class Database:
             if normalized:
                 counts[normalized] = counts.get(normalized, 0) + int(count or 0)
         review_count = sum(counts.values())
+        has_review_conflict = bool(
+            review_count >= 2
+            and counts.get('valid', 0) > 0
+            and counts.get('invalid', 0) > 0
+        )
         if review_count >= 2 and len(counts) == 1:
             return next(iter(counts.keys())), 'consensus'
         manager = self._normalize_low_rating_review_status(manager_status)
-        if manager:
+        if manager and has_review_conflict:
             return manager, 'manager'
         return None, None
 
@@ -10833,6 +10846,30 @@ class Database:
             if not current:
                 return None
             operator_id, day_obj = current
+
+            cursor.execute(
+                """
+                SELECT status, COUNT(*)
+                FROM chat_manager_low_rating_review_entries
+                WHERE review_id = %s
+                  AND status IS NOT NULL
+                GROUP BY status
+                """,
+                (review_id,)
+            )
+            counts = {}
+            for status_value, count in cursor.fetchall() or []:
+                normalized = self._normalize_low_rating_review_status(status_value)
+                if normalized:
+                    counts[normalized] = counts.get(normalized, 0) + int(count or 0)
+            review_count = sum(counts.values())
+            has_review_conflict = bool(
+                review_count >= 2
+                and counts.get('valid', 0) > 0
+                and counts.get('invalid', 0) > 0
+            )
+            if not has_review_conflict:
+                raise ValueError("Final decision is available only when two reviews disagree")
 
             final_status, final_source = self._resolve_low_rating_final_status_from_entries_tx(
                 cursor,
