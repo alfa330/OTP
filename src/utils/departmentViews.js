@@ -14,6 +14,11 @@ const TEZ_MANAGER_VIEWS = [
     'surveys',
 ];
 
+const VIEW_ALIASES = {
+    sv_list: 'manage_operators',
+    manage_users: 'manage_operators',
+};
+
 /*
  * Хардкод-карта «отдел → роль → разрешённые разделы» (view-ключи из App.jsx).
  *
@@ -76,7 +81,9 @@ export const departmentRestrictsViews = (user) => Array.isArray(allowlistFor(use
 export const departmentAllowsView = (user, viewKey) => {
     const allow = allowlistFor(user);
     if (!allow) return true; // нет ограничений
-    return allow.includes(viewKey);
+    if (allow.includes(viewKey)) return true;
+    const alias = VIEW_ALIASES[viewKey];
+    return Boolean(alias && isDepartmentHead(user) && allow.includes(alias));
 };
 
 // Первый разрешённый раздел: сначала из переданных кандидатов, иначе — первый из allowlist.

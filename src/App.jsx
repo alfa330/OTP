@@ -29722,6 +29722,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const isScopedDepartmentHead = scopedDepartmentId != null;
             const isAdminLikeRole = isAdminLikeRoleFn(currentUserRole) && !isScopedDepartmentHead;
             const isDepartmentManager = isSupervisorRole(currentUserRole) || isScopedDepartmentHead;
+            const canUseAdminEmployeeAccounting = isAdminLikeRole || (isDepartmentHeadUser && departmentAllowsView(user, 'manage_operators'));
             const canFilterByDepartment = isAdminLikeRole || currentUserRole === 'trainer';
             const canUsePinnedTasks = isAdminLikeRole || isDepartmentManager || currentUserRole === 'trainer';
             const canAccessLmsSection = canAccessLmsSectionForUser(user);
@@ -29748,6 +29749,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const initialViewFromUrl = readAppViewFromUrl();
                 return initialViewFromUrl || 'hours';
             });
+            const isDepartmentHeadAdminEmployeeView = canUseAdminEmployeeAccounting && isDepartmentHeadUser && ['sv_list', 'manage_users'].includes(view);
             const [pinnedTask, setPinnedTask] = useState(null);
             const [pinnedTaskPool, setPinnedTaskPool] = useState([]);
             const [isPinnedTaskPoolLoading, setIsPinnedTaskPoolLoading] = useState(false);
@@ -29988,7 +29990,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [activeUserTab, setActiveUserTab] = useState("active");
             const [activeAdminTab, setActiveAdminTab] = useState("active");
             const [activeOperatorsTab, setActiveOperatorsTab] = useState("active");
-            const [manageOperatorsRoleView, setManageOperatorsRoleView] = useState('operator');
             const [operatorsSvFilter, setOperatorsSvFilter] = useState(() => getStoredMultiFilterValues(SUPERVISOR_OPERATORS_SV_FILTER_KEY));
             const [operatorsDirectionFilter, setOperatorsDirectionFilter] = useState(() => getStoredMultiFilterValues(SUPERVISOR_OPERATORS_DIRECTION_FILTER_KEY));
             const [showOperatorsSvFilterMenu, setShowOperatorsSvFilterMenu] = useState(false);
@@ -32974,7 +32975,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
 
                 if (isAdminLikeRole) setView('sv_list');
-                else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(firstAllowedView(user, ['manage_operators']) || 'salary');
+                else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                 else if (isSupervisorRole(user?.role)) setView('operators');
                 else setView('hours');
             }, [user, user?.id, user?.role, isAdminLikeRole, canAccessLmsSection, canAccessResourceFteSection, requestedViewFromLocation]);
@@ -33000,14 +33001,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
                 if (view === 'lms' && !canAccessLmsSection) {
                     if (isAdminLikeRole) setView('sv_list');
-                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(firstAllowedView(user, ['manage_operators']) || 'salary');
+                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                     else if (isSupervisorRole(user?.role)) setView('operators');
                     else if (user?.role === 'trainer') setView('surveys');
                     else setView('hours');
                 }
                 if (view === 'resource_fte' && !canAccessResourceFteSection) {
                     if (isAdminLikeRole) setView('sv_list');
-                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(firstAllowedView(user, ['manage_operators']) || 'salary');
+                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                     else if (isSupervisorRole(user?.role)) setView('operators');
                     else if (user?.role === 'trainer') setView('surveys');
                     else setView('hours');
@@ -37775,6 +37776,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             useEffect(() => {
                 if (!user || !user.id) return;
                 if (!departmentRestrictsViews(user)) return;
+                if (isDepartmentHead(user) && view === 'manage_operators' && departmentAllowsView(user, 'manage_operators')) {
+                    setView('manage_users');
+                    return;
+                }
                 if (departmentAllowsView(user, view)) return;
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
@@ -38205,11 +38210,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <li className="relative" ref={sidebarEmployeesRef}>
                                                 <button
                                                     onClick={stableSidebarHandleToggleEmployeesDropdown}
-                                                    className={`group w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 relative ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}
+                                                    className={`group w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 relative ${['sv_list', 'manage_users'].includes(view) ? 'bg-blue-700' : ''}`}
                                                     aria-expanded={showSidebarEmployeesDropdown}
                                                     aria-haspopup="menu"
                                                 >
-                                                    <FaIcon className="fas fa-user-edit"></FaIcon> <span className="sidebar-text">Учет сотрудников</span>
+                                                    <FaIcon className="fas fa-user-cog"></FaIcon> <span className="sidebar-text">Учет сотрудников</span>
                                                     <FaIcon className="fas fa-chevron-right ml-auto opacity-0 transform translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0 sidebar-text"></FaIcon>
                                                 </button>
 
@@ -38219,8 +38224,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         style={{ position: 'fixed', top: employeesDropdownPos.top, left: employeesDropdownPos.left, zIndex: 9999 }}
                                                     >
                                                         <button
-                                                            onClick={(e) => handleSidebarViewNavigation(e, 'manage_operators', { onNavigate: () => { setManageOperatorsRoleView('sv'); stableSidebarHandleToggleEmployeesDropdown(true); } })}
-                                                            className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'manage_operators' && manageOperatorsRoleView === 'sv' ? 'bg-gray-100 font-medium' : ''}`}
+                                                            onClick={(e) => handleSidebarViewNavigation(e, 'sv_list', { onNavigate: () => stableSidebarHandleToggleEmployeesDropdown(true) })}
+                                                            className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'sv_list' ? 'bg-gray-100 font-medium' : ''}`}
                                                         >
                                                             <FaIcon className="fas fa-users mr-2"></FaIcon> Супервайзеры
                                                         </button>
@@ -38228,8 +38233,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         <div className="border-t border-gray-200" />
 
                                                         <button
-                                                            onClick={(e) => handleSidebarViewNavigation(e, 'manage_operators', { onNavigate: () => { setManageOperatorsRoleView('operator'); stableSidebarHandleToggleEmployeesDropdown(true); } })}
-                                                            className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'manage_operators' && manageOperatorsRoleView === 'operator' ? 'bg-gray-100 font-medium' : ''}`}
+                                                            onClick={(e) => handleSidebarViewNavigation(e, 'manage_users', { onNavigate: () => stableSidebarHandleToggleEmployeesDropdown(true) })}
+                                                            className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'manage_users' ? 'bg-gray-100 font-medium' : ''}`}
                                                         >
                                                             <FaIcon className="fas fa-user-cog mr-2"></FaIcon> Операторы
                                                         </button>
@@ -38915,7 +38920,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 />
                             </Suspense>
                         ))}
-                        {isAdminLikeRole && (
+                        {(isAdminLikeRole || isDepartmentHeadAdminEmployeeView) && (
                         <>
                             {view === 'qr_access' && (
                                 <>
@@ -40744,61 +40749,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             )}
 
                                 {view === 'manage_operators' && (
-                                    isDepartmentHeadUser ? (
-                                    <>
-                                        <div className="mb-4 flex flex-col gap-3 rounded-xl border border-gray-200 bg-white px-5 py-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
-                                            <div>
-                                                <h2 className="text-2xl font-semibold text-gray-800">Учет сотрудников</h2>
-                                                <p className="text-sm text-gray-500">Показаны только сотрудники вашего отдела.</p>
-                                            </div>
-                                            <div className="flex items-center gap-2">
-                                                <FaIcon className="fa-solid fa-users-gear text-gray-400" />
-                                                <select
-                                                    value={manageOperatorsRoleView}
-                                                    onChange={(event) => setManageOperatorsRoleView(event.target.value)}
-                                                    className="px-3 py-3 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
-                                                    aria-label="Выберите тип сотрудников"
-                                                >
-                                                    <option value="operator">Операторы</option>
-                                                    <option value="sv">Супервайзеры</option>
-                                                </select>
-                                            </div>
-                                        </div>
-
-                                        {manageOperatorsRoleView === 'sv'
-                                            ? renderEmployeeDirectorySection({
-                                                title: 'Супервайзеры',
-                                                addLabel: 'Добавить супервайзера',
-                                                addIcon: 'fas fa-users',
-                                                role: 'sv',
-                                                items: (users || []).filter((employee) => ['sv', 'supervisor'].includes(normalizeRole(employee?.role))),
-                                                activeStatusTab: activeSvTab,
-                                                setActiveStatusTab: setActiveSvTab,
-                                                searchQuery: supervisorSearchQuery,
-                                                setSearchQuery: setSupervisorSearchQuery,
-                                                searchPlaceholder: 'Поиск по имени супервайзера...',
-                                                emptyText: 'Супервайзеры не найдены.',
-                                                emptySearchText: 'Супервайзеры по запросу не найдены.',
-                                                countLabel: 'супервайзеров',
-                                                canAdd: false
-                                            })
-                                            : renderEmployeeDirectorySection({
-                                                title: 'Операторы',
-                                                addLabel: 'Добавить оператора',
-                                                addIcon: 'fas fa-user-plus',
-                                                role: 'operator',
-                                                items: (users || []).filter((employee) => ['operator', 'trainee'].includes(normalizeRole(employee?.role))),
-                                                activeStatusTab: activeTab,
-                                                setActiveStatusTab: setActiveTab,
-                                                searchQuery: manageOperatorsSearchQuery,
-                                                setSearchQuery: setManageOperatorsSearchQuery,
-                                                searchPlaceholder: 'Поиск по имени, направлению или супервайзеру...',
-                                                emptyText: 'Операторы не найдены.',
-                                                emptySearchText: 'Операторы по запросу не найдены.',
-                                                countLabel: 'операторов'
-                                            })}
-                                    </>
-                                    ) : (
                                     <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                         <div className="flex justify-between items-center mb-6">
                                         <h2 className="text-2xl font-semibold text-gray-800">Операторы</h2>
@@ -41126,7 +41076,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         )}
                                         {renderEmployeeTableSectionSwitcher()}
                                     </div>
-                                    )
                                     )}
                                 {view === 'operators' && (
                                 <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">

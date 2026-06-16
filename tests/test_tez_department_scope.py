@@ -61,6 +61,11 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
         self.assertIn("if (isAdminLikeRole(user?.role) && !isDepartmentHead(user)) return null;", source)
         self.assertIn("const role = isDepartmentHead(user) ? 'sv' : normalizeRole(user?.role);", source)
         self.assertNotIn("isAdminLikeRole(user?.role) || isDepartmentHead(user)", source)
+        self.assertIn("const VIEW_ALIASES", source)
+        self.assertIn("sv_list: 'manage_operators'", source)
+        self.assertIn("manage_users: 'manage_operators'", source)
+        self.assertIn("const alias = VIEW_ALIASES[viewKey];", source)
+        self.assertIn("alias && isDepartmentHead(user) && allow.includes(alias)", source)
 
     def test_department_manager_employee_accounting_keeps_supervisors(self):
         source = _read(APP_PATH)
@@ -68,13 +73,12 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
         self.assertIn("const manageOperatorRoles = isDepartmentManager", source)
         self.assertIn("new Set(['operator', 'trainee', 'sv', 'supervisor'])", source)
         self.assertIn("manageOperatorRoles.has(normalizeRole(u?.role))", source)
-        self.assertIn("const [manageOperatorsRoleView, setManageOperatorsRoleView] = useState('operator');", source)
-        self.assertIn("departmentAllowsView(user, 'manage_operators') && isDepartmentHeadUser", source)
-        self.assertIn("setManageOperatorsRoleView('sv')", source)
-        self.assertIn("setManageOperatorsRoleView('operator')", source)
-        self.assertIn("manageOperatorsRoleView === 'sv'", source)
-        self.assertIn("['sv', 'supervisor'].includes(normalizeRole(employee?.role))", source)
-        self.assertIn("['operator', 'trainee'].includes(normalizeRole(employee?.role))", source)
+        self.assertIn("const canUseAdminEmployeeAccounting = isAdminLikeRole || (isDepartmentHeadUser && departmentAllowsView(user, 'manage_operators'));", source)
+        self.assertIn("const isDepartmentHeadAdminEmployeeView = canUseAdminEmployeeAccounting && isDepartmentHeadUser && ['sv_list', 'manage_users'].includes(view);", source)
+        self.assertIn("handleSidebarViewNavigation(e, 'sv_list'", source)
+        self.assertIn("handleSidebarViewNavigation(e, 'manage_users'", source)
+        self.assertIn("setView('manage_users')", source)
+        self.assertNotIn("manageOperatorsRoleView", source)
 
     def test_hours_accounting_groups_are_scoped_for_department_head(self):
         source = _read(APP_PATH)
