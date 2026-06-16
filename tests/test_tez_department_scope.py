@@ -46,6 +46,7 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
         self.assertIn("'surveys'", source)
         self.assertIn("'salary'", source)
         self.assertIn("const TEZ_MANAGER_VIEWS", source)
+        self.assertIn("const TEZ_SUPERVISOR_VIEWS = TEZ_MANAGER_VIEWS.filter((view) => view !== 'monitoring_scale');", source)
         self.assertIn("'manage_operators'", source)
         self.assertIn("'qr_access'", source)
         self.assertIn("'call_evaluation'", source)
@@ -59,7 +60,9 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
 
         self.assertIn("if (normalizeRole(user?.role) === 'super_admin') return null;", source)
         self.assertIn("if (isAdminLikeRole(user?.role) && !isDepartmentHead(user)) return null;", source)
-        self.assertIn("const role = isDepartmentHead(user) ? 'sv' : normalizeRole(user?.role);", source)
+        self.assertIn("const role = isDepartmentHead(user) ? 'head' : normalizeRole(user?.role);", source)
+        self.assertIn("head: TEZ_MANAGER_VIEWS", source)
+        self.assertIn("sv: TEZ_SUPERVISOR_VIEWS", source)
         self.assertNotIn("isAdminLikeRole(user?.role) || isDepartmentHead(user)", source)
         self.assertIn("const VIEW_ALIASES", source)
         self.assertIn("sv_list: 'manage_operators'", source)
@@ -69,11 +72,11 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
 
     def test_sales_department_manager_allowlist_keeps_monitoring_scale(self):
         source = _read(DEPARTMENT_VIEWS_PATH)
-        op_block = source[source.index("op: {"):]
-        sv_block_start = op_block.index("sv: [")
-        sv_block = op_block[sv_block_start:op_block.index("],", sv_block_start)]
 
-        self.assertIn("'monitoring_scale'", sv_block)
+        self.assertIn("head: SALES_HEAD_VIEWS", source)
+        self.assertIn("sv: SALES_SUPERVISOR_VIEWS", source)
+        self.assertIn("'monitoring_scale'", source[source.index("const SALES_HEAD_VIEWS"):source.index("const VIEW_ALIASES")])
+        self.assertNotIn("'monitoring_scale'", source[source.index("const SALES_SUPERVISOR_VIEWS"):source.index("const SALES_HEAD_VIEWS")])
 
     def test_department_manager_employee_accounting_keeps_supervisors(self):
         source = _read(APP_PATH)

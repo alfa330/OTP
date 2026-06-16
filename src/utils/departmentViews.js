@@ -13,6 +13,25 @@ const TEZ_MANAGER_VIEWS = [
     'salary',
     'surveys',
 ];
+const TEZ_SUPERVISOR_VIEWS = TEZ_MANAGER_VIEWS.filter((view) => view !== 'monitoring_scale');
+
+const SALES_SUPERVISOR_VIEWS = [
+    'manage_operators',
+    'qr_access',
+    'call_evaluation',
+    'call_division',
+    'work_schedules',
+    'trainings',
+    'technical_issues',
+    'surveys',
+    'tasks',
+    'salary',
+];
+const SALES_HEAD_VIEWS = [
+    ...SALES_SUPERVISOR_VIEWS.slice(0, 4),
+    'monitoring_scale',
+    ...SALES_SUPERVISOR_VIEWS.slice(4),
+];
 
 const VIEW_ALIASES = {
     sv_list: 'manage_operators',
@@ -26,7 +45,8 @@ const VIEW_ALIASES = {
  *  - Отдел отсутствует в карте  => ограничений НЕТ (напр. СЗоВ — все видят свои
  *    разделы по роли как обычно).
  *  - Роль отсутствует в конфиге отдела => для этой роли ограничений НЕТ.
- *  - Админы / супер-админы и главы отдела (управленцы) НЕ ограничиваются.
+ *  - Админы / супер-админы НЕ ограничиваются.
+ *  - Главы отделов используют отдельный head-набор.
  *  - Для остальных ролей спец-отдела показываем ТОЛЬКО перечисленные разделы.
  *
  * Ключ верхнего уровня — departments.code (lowercase). Внутри — роль → [view-ключи].
@@ -35,26 +55,16 @@ export const DEPARTMENT_VIEW_ALLOWLIST = {
     tez: {
         operator: TEZ_OPERATOR_VIEWS,
         trainee: TEZ_OPERATOR_VIEWS,
-        sv: TEZ_MANAGER_VIEWS,
+        head: TEZ_MANAGER_VIEWS,
+        sv: TEZ_SUPERVISOR_VIEWS,
     },
     op: {
         // Операторы ОП: Профиль, Зарплата + Мои смены, Мои оценки, Опросы
         operator: ['salary', 'profile', 'work_schedules', 'evaluation', 'surveys'],
         trainee: ['salary', 'profile', 'work_schedules', 'evaluation', 'surveys'],
         // Супервайзеры продаж: их рабочий набор разделов
-        sv: [
-            'manage_operators',   // Учет сотрудников (их группа)
-            'qr_access',          // QR доступ
-            'call_evaluation',    // Журнал оценок
-            'call_division',      // Деление звонков
-            'monitoring_scale',   // Мониторинговая шкала
-            'work_schedules',     // Графики работы
-            'trainings',          // Учет тренингов
-            'technical_issues',   // Тех причины
-            'surveys',            // Опросы
-            'tasks',              // Задачи
-            'salary',             // Калькулятор зарплаты
-        ],
+        head: SALES_HEAD_VIEWS,
+        sv: SALES_SUPERVISOR_VIEWS,
     },
 };
 
@@ -65,13 +75,13 @@ export const departmentCodeOf = (user) => {
 
 // Возвращает массив разрешённых разделов для пользователя, либо null (без ограничений).
 const allowlistFor = (user) => {
-    // Управленцы (админы/главы) — без ограничений по отделу.
+    // Глобальные админы — без ограничений по отделу; главы отделов идут по head-набору.
     if (normalizeRole(user?.role) === 'super_admin') return null;
     if (isAdminLikeRole(user?.role) && !isDepartmentHead(user)) return null;
     const code = departmentCodeOf(user);
     const deptCfg = code ? DEPARTMENT_VIEW_ALLOWLIST[code] : null;
     if (!deptCfg) return null;
-    const role = isDepartmentHead(user) ? 'sv' : normalizeRole(user?.role);
+    const role = isDepartmentHead(user) ? 'head' : normalizeRole(user?.role);
     const allow = deptCfg[role];
     return Array.isArray(allow) ? allow : null;
 };
