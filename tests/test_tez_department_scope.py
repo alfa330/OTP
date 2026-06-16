@@ -68,6 +68,13 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
         self.assertIn("const manageOperatorRoles = isDepartmentManager", source)
         self.assertIn("new Set(['operator', 'trainee', 'sv', 'supervisor'])", source)
         self.assertIn("manageOperatorRoles.has(normalizeRole(u?.role))", source)
+        self.assertIn("const [manageOperatorsRoleView, setManageOperatorsRoleView] = useState('operator');", source)
+        self.assertIn("departmentAllowsView(user, 'manage_operators') && isDepartmentHeadUser", source)
+        self.assertIn("setManageOperatorsRoleView('sv')", source)
+        self.assertIn("setManageOperatorsRoleView('operator')", source)
+        self.assertIn("manageOperatorsRoleView === 'sv'", source)
+        self.assertIn("['sv', 'supervisor'].includes(normalizeRole(employee?.role))", source)
+        self.assertIn("['operator', 'trainee'].includes(normalizeRole(employee?.role))", source)
 
     def test_hours_accounting_groups_are_scoped_for_department_head(self):
         source = _read(APP_PATH)
