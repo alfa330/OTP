@@ -47,6 +47,7 @@ export const DEPARTMENT_VIEW_ALLOWLIST = {
             'qr_access',          // QR доступ
             'call_evaluation',    // Журнал оценок
             'call_division',      // Деление звонков
+            'monitoring_scale',   // Мониторинговая шкала
             'work_schedules',     // Графики работы
             'trainings',          // Учет тренингов
             'technical_issues',   // Тех причины
