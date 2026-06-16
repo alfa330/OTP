@@ -67,6 +67,14 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
         self.assertIn("const alias = VIEW_ALIASES[viewKey];", source)
         self.assertIn("alias && isDepartmentHead(user) && allow.includes(alias)", source)
 
+    def test_sales_department_manager_allowlist_keeps_monitoring_scale(self):
+        source = _read(DEPARTMENT_VIEWS_PATH)
+        op_block = source[source.index("op: {"):]
+        sv_block_start = op_block.index("sv: [")
+        sv_block = op_block[sv_block_start:op_block.index("],", sv_block_start)]
+
+        self.assertIn("'monitoring_scale'", sv_block)
+
     def test_department_manager_employee_accounting_keeps_supervisors(self):
         source = _read(APP_PATH)
 
