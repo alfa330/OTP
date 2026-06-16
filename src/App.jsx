@@ -29988,6 +29988,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [activeUserTab, setActiveUserTab] = useState("active");
             const [activeAdminTab, setActiveAdminTab] = useState("active");
             const [activeOperatorsTab, setActiveOperatorsTab] = useState("active");
+            const [manageOperatorsRoleView, setManageOperatorsRoleView] = useState('operator');
             const [operatorsSvFilter, setOperatorsSvFilter] = useState(() => getStoredMultiFilterValues(SUPERVISOR_OPERATORS_SV_FILTER_KEY));
             const [operatorsDirectionFilter, setOperatorsDirectionFilter] = useState(() => getStoredMultiFilterValues(SUPERVISOR_OPERATORS_DIRECTION_FILTER_KEY));
             const [showOperatorsSvFilterMenu, setShowOperatorsSvFilterMenu] = useState(false);
@@ -38200,7 +38201,43 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     {isDepartmentManager && !isAdminLikeRole && (
                                         <>
                                             {canAccessLmsSection && !departmentRestrictsViews(user) && renderSidebarDividerInner()}
-                                            {departmentAllowsView(user, 'manage_operators') && (
+                                            {departmentAllowsView(user, 'manage_operators') && isDepartmentHeadUser && (
+                                            <li className="relative" ref={sidebarEmployeesRef}>
+                                                <button
+                                                    onClick={stableSidebarHandleToggleEmployeesDropdown}
+                                                    className={`group w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 relative ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}
+                                                    aria-expanded={showSidebarEmployeesDropdown}
+                                                    aria-haspopup="menu"
+                                                >
+                                                    <FaIcon className="fas fa-user-edit"></FaIcon> <span className="sidebar-text">Учет сотрудников</span>
+                                                    <FaIcon className="fas fa-chevron-right ml-auto opacity-0 transform translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0 sidebar-text"></FaIcon>
+                                                </button>
+
+                                                {(showSidebarEmployeesDropdown || isEmployeesClosing) && (
+                                                    <div
+                                                        className={`origin-top bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200 w-56 ${showSidebarEmployeesDropdown && !isEmployeesClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
+                                                        style={{ position: 'fixed', top: employeesDropdownPos.top, left: employeesDropdownPos.left, zIndex: 9999 }}
+                                                    >
+                                                        <button
+                                                            onClick={(e) => handleSidebarViewNavigation(e, 'manage_operators', { onNavigate: () => { setManageOperatorsRoleView('sv'); stableSidebarHandleToggleEmployeesDropdown(true); } })}
+                                                            className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'manage_operators' && manageOperatorsRoleView === 'sv' ? 'bg-gray-100 font-medium' : ''}`}
+                                                        >
+                                                            <FaIcon className="fas fa-users mr-2"></FaIcon> Супервайзеры
+                                                        </button>
+
+                                                        <div className="border-t border-gray-200" />
+
+                                                        <button
+                                                            onClick={(e) => handleSidebarViewNavigation(e, 'manage_operators', { onNavigate: () => { setManageOperatorsRoleView('operator'); stableSidebarHandleToggleEmployeesDropdown(true); } })}
+                                                            className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'manage_operators' && manageOperatorsRoleView === 'operator' ? 'bg-gray-100 font-medium' : ''}`}
+                                                        >
+                                                            <FaIcon className="fas fa-user-cog mr-2"></FaIcon> Операторы
+                                                        </button>
+                                                    </div>
+                                                )}
+                                            </li>
+                                            )}
+                                            {departmentAllowsView(user, 'manage_operators') && !isDepartmentHeadUser && (
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'manage_operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-user-edit"></FaIcon> <span className="sidebar-text">Учет сотрудников</span>
@@ -40707,6 +40744,61 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             )}
 
                                 {view === 'manage_operators' && (
+                                    isDepartmentHeadUser ? (
+                                    <>
+                                        <div className="mb-4 flex flex-col gap-3 rounded-xl border border-gray-200 bg-white px-5 py-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+                                            <div>
+                                                <h2 className="text-2xl font-semibold text-gray-800">Учет сотрудников</h2>
+                                                <p className="text-sm text-gray-500">Показаны только сотрудники вашего отдела.</p>
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                                <FaIcon className="fa-solid fa-users-gear text-gray-400" />
+                                                <select
+                                                    value={manageOperatorsRoleView}
+                                                    onChange={(event) => setManageOperatorsRoleView(event.target.value)}
+                                                    className="px-3 py-3 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+                                                    aria-label="Выберите тип сотрудников"
+                                                >
+                                                    <option value="operator">Операторы</option>
+                                                    <option value="sv">Супервайзеры</option>
+                                                </select>
+                                            </div>
+                                        </div>
+
+                                        {manageOperatorsRoleView === 'sv'
+                                            ? renderEmployeeDirectorySection({
+                                                title: 'Супервайзеры',
+                                                addLabel: 'Добавить супервайзера',
+                                                addIcon: 'fas fa-users',
+                                                role: 'sv',
+                                                items: (users || []).filter((employee) => ['sv', 'supervisor'].includes(normalizeRole(employee?.role))),
+                                                activeStatusTab: activeSvTab,
+                                                setActiveStatusTab: setActiveSvTab,
+                                                searchQuery: supervisorSearchQuery,
+                                                setSearchQuery: setSupervisorSearchQuery,
+                                                searchPlaceholder: 'Поиск по имени супервайзера...',
+                                                emptyText: 'Супервайзеры не найдены.',
+                                                emptySearchText: 'Супервайзеры по запросу не найдены.',
+                                                countLabel: 'супервайзеров',
+                                                canAdd: false
+                                            })
+                                            : renderEmployeeDirectorySection({
+                                                title: 'Операторы',
+                                                addLabel: 'Добавить оператора',
+                                                addIcon: 'fas fa-user-plus',
+                                                role: 'operator',
+                                                items: (users || []).filter((employee) => ['operator', 'trainee'].includes(normalizeRole(employee?.role))),
+                                                activeStatusTab: activeTab,
+                                                setActiveStatusTab: setActiveTab,
+                                                searchQuery: manageOperatorsSearchQuery,
+                                                setSearchQuery: setManageOperatorsSearchQuery,
+                                                searchPlaceholder: 'Поиск по имени, направлению или супервайзеру...',
+                                                emptyText: 'Операторы не найдены.',
+                                                emptySearchText: 'Операторы по запросу не найдены.',
+                                                countLabel: 'операторов'
+                                            })}
+                                    </>
+                                    ) : (
                                     <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                         <div className="flex justify-between items-center mb-6">
                                         <h2 className="text-2xl font-semibold text-gray-800">Операторы</h2>
@@ -41034,6 +41126,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         )}
                                         {renderEmployeeTableSectionSwitcher()}
                                     </div>
+                                    )
                                     )}
                                 {view === 'operators' && (
                                 <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
