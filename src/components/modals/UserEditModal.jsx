@@ -265,13 +265,14 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     const isOperatorDraft = (draft) => getRoleValue(draft) === 'operator';
     const isTraineeDraft = (draft) => getRoleValue(draft) === 'trainee';
     const canUseProxyCard = (draft) => !isTraineeDraft(draft);
-    const isAdminLikeRequester = isAdminLikeRoleFn(user?.role);
     const requesterRole = normalizeRole(user?.role);
+    const requesterHeadedDeptId = user?.headed_department_id ?? user?.headedDepartmentId ?? null;
+    const isScopedDepartmentHeadRequester = requesterHeadedDeptId != null && requesterHeadedDeptId !== '' && requesterRole !== 'super_admin';
+    const isAdminLikeRequester = isAdminLikeRoleFn(user?.role) && !isScopedDepartmentHeadRequester;
     const isSupervisorRequester = requesterRole === 'sv';
     // Отдел по умолчанию (СЗоВ) — когда отдел у пользователя не выбран явно.
     const szovDeptId = (departments || []).find((d) => String(d.code || '').toLowerCase() === 'szov')?.id ?? null;
     // Скоуп отдела создающего: супервайзер/глава видят и могут назначать только свой отдел.
-    const requesterHeadedDeptId = user?.headed_department_id ?? user?.headedDepartmentId ?? null;
     const requesterOwnDeptId = user?.department_id ?? null;
     const requesterScopeDeptId = isAdminLikeRequester
         ? null
@@ -353,7 +354,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         rate: base.rate ?? 1.0,
         direction_id: isTrainerBase ? "" : (base.direction_id ?? ""),
         department_id: base.department_id ?? (isDeptScoped ? requesterScopeDeptId : ""),
-        supervisor_id: isTrainerBase ? "" : (base.supervisor_id ?? (isAdminLikeRequester ? "" : (user?.id ?? ""))),
+        supervisor_id: isTrainerBase ? "" : (base.supervisor_id ?? ((isAdminLikeRequester || isScopedDepartmentHeadRequester) ? "" : (user?.id ?? ""))),
         status: initialStatus,
         gender: base.gender ?? "",
         birth_date: base.birth_date ?? "",
@@ -620,7 +621,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         gender: "",
         direction_id: "",
         department_id: "",
-        supervisor_id: isTrainerCreateRole ? "" : (isAdminLikeRequester ? "" : (user?.id ?? "")),
+        supervisor_id: isTrainerCreateRole ? "" : ((isAdminLikeRequester || isScopedDepartmentHeadRequester) ? "" : (user?.id ?? "")),
         status: "working",
         role: createRole,
         status_period_start_date: todayInputDate(),

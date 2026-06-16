@@ -17,10 +17,10 @@ def _function_source(name):
 
 
 class SupervisorDirectoryPayloadTests(unittest.TestCase):
-    def test_supervisor_list_full_payload_is_admin_only(self):
+    def test_supervisor_list_full_payload_is_global_admin_only(self):
         source = _function_source("get_sv_list")
 
-        self.assertIn("include_full_profile = _is_admin_role(requester_role)", source)
+        self.assertIn("include_full_profile = _is_global_admin_requester(requester_role, requester_id)", source)
         self.assertIn("taxipro_id,", source)
         self.assertIn('"has_proxy": bool(sv[29]) if sv[29] is not None else False', source)
         self.assertIn('"proxy_card_number": sv[30] or ""', source)
