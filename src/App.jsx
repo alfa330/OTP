@@ -15,7 +15,7 @@ import MonitoringScaleView from './components/monitoring/MonitoringScaleView';
 import FaIcon from './components/common/FaIcon';
 import AuthEntranceSplash from './components/common/AuthEntranceSplash';
 import OrazAitSplash from './components/common/OrazAitSplash';
-import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead } from './utils/roles';
+import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId } from './utils/roles';
 import { departmentAllowsView, departmentRestrictsViews, firstAllowedView } from './utils/departmentViews';
 import { calculateOperatorSalary, calculateChatSalary } from './utils/salaryFormula';
 
@@ -2607,7 +2607,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         // ====== Upload-per-day (preview) ======
         function openUploadForDay(day) {
-            if (isAdminLikeRoleFn(user?.role) && !selectedSvId) {
+            if (isAdminLikeRoleFn(user?.role) && !isHoursDepartmentHead && !selectedSvId) {
             fallbackToast('Выберите супервайзера перед загрузкой файла', 'error');
             return;
             }
@@ -2625,7 +2625,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             fallbackToast('Выберите файл', 'error');
             return;
             }
-            if (isAdminLikeRoleFn(user?.role) && !selectedSvId) {
+            if (isAdminLikeRoleFn(user?.role) && !isHoursDepartmentHead && !selectedSvId) {
             fallbackToast('Выберите супервайзера перед загрузкой файла', 'error');
             return;
             }
@@ -2682,7 +2682,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             fallbackToast('Нет данных для сохранения', 'error');
             return;
             }
-            if (isAdminLikeRoleFn(user?.role) && !selectedSvId) {
+            if (isAdminLikeRoleFn(user?.role) && !isHoursDepartmentHead && !selectedSvId) {
             fallbackToast('Выберите супервайзера перед сохранением', 'error');
             return;
             }
@@ -4311,7 +4311,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
 
             // If admin requested per-SV report, ensure a supervisor or group is selected
-            if (isAdminLikeRoleFn(user?.role) && reportScope === 'by_sv' && !selectedSvId && !selectedGroupId) {
+            if (isAdminLikeRoleFn(user?.role) && !isHoursDepartmentHead && reportScope === 'by_sv' && !selectedSvId && !selectedGroupId) {
             fallbackToast('Выберите супервайзера или группу для отчёта', 'error');
             return;
             }
@@ -4381,7 +4381,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         }
 
         // ======= RENDER =======
-        const isAdminWithoutSupervisorSelected = isAdminLikeRoleFn(user?.role) && !selectedSvId;
+        const isAdminWithoutSupervisorSelected = isAdminLikeRoleFn(user?.role) && !isHoursDepartmentHead && !selectedSvId;
         const isDayUploadDisabled = isChatModel || isAdminWithoutSupervisorSelected;
         const hoursDayColClass = 'w-[72px] shrink-0 p-2 text-center border-l';
         const hoursOperatorColClass = 'w-48 shrink-0 p-2 border-r';
@@ -29709,9 +29709,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [user, setUser] = useState(null);
             const currentUserRole = normalizeRole(user?.role);
             const isSuperAdmin = currentUserRole === 'super_admin';
-            const isAdminLikeRole = isAdminLikeRoleFn(currentUserRole);
             const isDepartmentHeadUser = isDepartmentHead(user);
-            const isScopedDepartmentHead = isDepartmentHeadUser && !isAdminLikeRole && departmentRestrictsViews(user);
+            const scopedDepartmentId = isDepartmentHeadUser && !isSuperAdmin ? headedDepartmentId(user) : null;
+            const isScopedDepartmentHead = scopedDepartmentId != null;
+            const isAdminLikeRole = isAdminLikeRoleFn(currentUserRole) && !isScopedDepartmentHead;
             const isDepartmentManager = isSupervisorRole(currentUserRole) || isScopedDepartmentHead;
             const canFilterByDepartment = isAdminLikeRole || currentUserRole === 'trainer';
             const canUsePinnedTasks = isAdminLikeRole || isDepartmentManager || currentUserRole === 'trainer';
@@ -32963,11 +32964,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return;
                 }
 
-                if (isAdminLikeRoleFn(user?.role)) setView('sv_list');
+                if (isAdminLikeRole) setView('sv_list');
                 else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(firstAllowedView(user, ['manage_operators']) || 'salary');
                 else if (isSupervisorRole(user?.role)) setView('operators');
                 else setView('hours');
-            }, [user, user?.id, user?.role, canAccessLmsSection, canAccessResourceFteSection, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, isAdminLikeRole, canAccessLmsSection, canAccessResourceFteSection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks' || !requestedTaskIdFromLocation) return;
@@ -32989,20 +32990,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setView('surveys');
                 }
                 if (view === 'lms' && !canAccessLmsSection) {
-                    if (isAdminLikeRoleFn(user?.role)) setView('sv_list');
+                    if (isAdminLikeRole) setView('sv_list');
                     else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(firstAllowedView(user, ['manage_operators']) || 'salary');
                     else if (isSupervisorRole(user?.role)) setView('operators');
                     else if (user?.role === 'trainer') setView('surveys');
                     else setView('hours');
                 }
                 if (view === 'resource_fte' && !canAccessResourceFteSection) {
-                    if (isAdminLikeRoleFn(user?.role)) setView('sv_list');
+                    if (isAdminLikeRole) setView('sv_list');
                     else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(firstAllowedView(user, ['manage_operators']) || 'salary');
                     else if (isSupervisorRole(user?.role)) setView('operators');
                     else if (user?.role === 'trainer') setView('surveys');
                     else setView('hours');
                 }
-            }, [isAuthInitializing, user, user?.role, view, canAccessLmsSection, canAccessResourceFteSection]);
+            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, view, canAccessLmsSection, canAccessResourceFteSection]);
 
             useEffect(() => {
                 // Only mirror `view` into the URL after authentication has
@@ -34407,7 +34408,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         });
                         const data = response.data;
                         if (data?.status === 'success' && Array.isArray(data.departments) && isMounted.current) {
-                            setDepartments(data.departments);
+                            const nextDepartments = scopedDepartmentId != null
+                                ? data.departments.filter((dept) => Number(dept?.id) === Number(scopedDepartmentId))
+                                : data.departments;
+                            setDepartments(nextDepartments);
                         }
                     } catch (err) {
                         // мягко игнорируем — селект отдела просто будет пустым
@@ -34480,7 +34484,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
 
             const fetchAdminSessions = useCallback(async ({ reset = true, query } = {}) => {
-                if (!user || !isAdminLikeRoleFn(user?.role)) return;
+                if (!user || !isAdminLikeRole) return;
 
                 const normalizedQuery = typeof query === 'string' ? query.trim() : adminSessionsQuery;
                 const nextOffset = reset ? 0 : adminSessionsOffset;
@@ -34548,6 +34552,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             }, [
                 user,
+                isAdminLikeRole,
                 adminSessionsQuery,
                 adminSessionsOffset,
                 adminSessionsHasMore,
@@ -34972,7 +34977,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         }
                     }
                     // Department reassignment (только админы; бэкенд тоже это проверяет)
-                    if (isAdminLikeRoleFn(user?.role)) {
+                    if (isAdminLikeRole) {
                         const nextDept = editedUser.department_id ? Number(editedUser.department_id) : null;
                         const prevDept = userToEdit?.department_id ? Number(userToEdit.department_id) : null;
                         if (nextDept !== null && nextDept !== prevDept) {
@@ -36338,7 +36343,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return;
                 }
 
-                if (!user || !isAdminLikeRoleFn(user?.role)) {
+                if (!user || !isAdminLikeRole) {
                     showToast('Только администратор может повышать сотрудников', 'error');
                     return;
                 }
@@ -36383,7 +36388,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 } finally {
                     if (isMounted.current) setPromotingUserId(null);
                 }
-            }, [API_BASE_URL, fetchUsers, showToast, user]);
+            }, [API_BASE_URL, fetchUsers, isAdminLikeRole, showToast, user]);
 
             const dismissAdminUser = useCallback(async (targetUser) => {
                 const targetUserId = Number(targetUser?.id);
@@ -37731,19 +37736,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             useEffect(() => {
                 if (!user || !user.id) return;
 
-                if (isAdminLikeRoleFn(user?.role)) {
+                if (isAdminLikeRole) {
                     fetchSvList();
                     fetchDirections();
                     fetchUsers();
                     fetchDepartments();
-                } else if (isSupervisorRole(user?.role)) {
+                } else if (isDepartmentManager) {
                     fetchSvList();
                     fetchUsers();
                     fetchDirections();
                     fetchDepartments();
-                } else if (isDepartmentHead(user)) {
-                    fetchUsers();
-                    fetchDirections();
                 } else if (user.role === 'trainer') {
                     fetchUsers();
                     fetchDirections();
@@ -37754,7 +37756,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     fetchSensitiveAccessStatus();
                     fetchSurveysPendingBadgeCount();
                 }
-            }, [user?.id, user?.role, user?.headed_department_id, user?.headedDepartmentId]);
+            }, [user?.id, user?.role, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentManager]);
 
             // Гард видимости разделов по отделу (Этап 10): если отдел ограничивает
             // набор разделов и текущий view недоступен — перенаправляем на разрешённый.
@@ -37771,12 +37773,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
             useEffect(() => {
                 if (!user?.id) return;
-                if (!(isAdminLikeRoleFn(user?.role) || isSupervisorRole(user?.role) || normalizeRole(user?.role) === 'trainer')) return;
+                if (!(isAdminLikeRole || isDepartmentManager || normalizeRole(user?.role) === 'trainer')) return;
                 const managementViews = ['manage_users', 'employees', 'sv_list', 'manage_trainers', 'manage_admins', 'manage_operators', 'departments', 'surveys'];
                 if (showUserEditModal || managementViews.includes(view)) {
                     fetchDepartments();
                 }
-            }, [showUserEditModal, view, user?.id, user?.role]);
+            }, [showUserEditModal, view, user?.id, user?.role, isAdminLikeRole, isDepartmentManager]);
 
             useEffect(() => {
                 if (!user || !user.id || !isSupervisorRole(user?.role)) return;
@@ -37865,10 +37867,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [selectedSvId, selectedReportMonth, selectedMonth]);
 
             useEffect(() => {
-                if (isAdminLikeRoleFn(user?.role) && view === 'admin_sessions') {
+                if (isAdminLikeRole && view === 'admin_sessions') {
                     refreshAdminSessions();
                 }
-            }, [user?.id, user?.role, view]);
+            }, [user?.id, user?.role, isAdminLikeRole, view]);
 
             /* === Sidebar perf: stable proxies + memoized JSX tree ===
                Сайдбар ~530 строк JSX живёт внутри огромного App-компонента,
@@ -38716,8 +38718,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     : 0;
             const isManageOperatorsReadOnly = user?.role === 'trainer';
             const callEvaluationIframeUrl = `${APP_BASE_URL}call_evaluation.html`;
-            const isCallEvaluationView = view === 'call_evaluation' && (isAdminLikeRoleFn(user?.role) || isDepartmentManager);
-            const canSeeCallEvaluation = isAdminLikeRoleFn(user?.role) || isDepartmentManager;
+            const isCallEvaluationView = view === 'call_evaluation' && (isAdminLikeRole || isDepartmentManager);
+            const canSeeCallEvaluation = isAdminLikeRole || isDepartmentManager;
             const isBirthdayBannerSuppressedView = isCallEvaluationView || view === 'trainings';
             const birthdayBannerVisible = !isBirthdayBannerSuppressedView && !birthdayBannerDismissed && Array.isArray(birthdaysToday) && birthdaysToday.length > 0;
             const birthdayBannerNames = (birthdaysToday || []).map((b) => {
@@ -40397,7 +40399,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         onRefresh={fetchDirections}
                                         departments={departments}
                                         showToast={showToast}
-                                        canEdit={isAdminLikeRoleFn(user?.role)}
+                                        canEdit={isAdminLikeRole}
                                     />
                                 ))}
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}

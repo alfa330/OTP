@@ -59,7 +59,8 @@ export const departmentCodeOf = (user) => {
 // Возвращает массив разрешённых разделов для пользователя, либо null (без ограничений).
 const allowlistFor = (user) => {
     // Управленцы (админы/главы) — без ограничений по отделу.
-    if (isAdminLikeRole(user?.role)) return null;
+    if (normalizeRole(user?.role) === 'super_admin') return null;
+    if (isAdminLikeRole(user?.role) && !isDepartmentHead(user)) return null;
     const code = departmentCodeOf(user);
     const deptCfg = code ? DEPARTMENT_VIEW_ALLOWLIST[code] : null;
     if (!deptCfg) return null;

@@ -2457,10 +2457,10 @@ const App = ({ user, initialSelection }) => {
     const userName = user?.name;
     const normalizedRole = String(userRole || '').trim().toLowerCase();
     const canonicalRole = normalizedRole === 'supervisor' ? 'sv' : normalizedRole;
-    const isAdminRole = canonicalRole === 'admin' || canonicalRole === 'super_admin';
     const isSupervisorRole = canonicalRole === 'sv';
     const headedDepartmentId = user?.headed_department_id ?? user?.headedDepartmentId ?? null;
     const isDepartmentHead = headedDepartmentId !== null && headedDepartmentId !== undefined && String(headedDepartmentId) !== '';
+    const isAdminRole = (canonicalRole === 'admin' || canonicalRole === 'super_admin') && (!isDepartmentHead || canonicalRole === 'super_admin');
     const canUseRequests = isAdminRole || isSupervisorRole || isDepartmentHead;
     const canDecideReevaluationRequests = isAdminRole || isDepartmentHead;
     const canUseCalibration = isAdminRole || isSupervisorRole;
@@ -2872,7 +2872,7 @@ const App = ({ user, initialSelection }) => {
 
     // Supervisors
     useEffect(() => {
-        if (!(isAdminRole || isSupervisorRole) || !userId) return;
+        if (!(isAdminRole || isSupervisorRole || isDepartmentHead) || !userId) return;
         let isCancelled = false;
 
         authFetch(`${API_BASE_URL}/api/admin/sv_list`, { headers:{'X-User-Id':userId} })
@@ -2893,7 +2893,7 @@ const App = ({ user, initialSelection }) => {
             });
 
         return () => { isCancelled = true; };
-    }, [isAdminRole, isSupervisorRole, userId, normalizeSupervisorList]);
+    }, [isAdminRole, isSupervisorRole, isDepartmentHead, userId, normalizeSupervisorList]);
 
     useEffect(() => {
         if (!initialSelection) return;
