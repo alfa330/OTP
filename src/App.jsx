@@ -1963,6 +1963,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
         });
         const [showLowRatingReviews, setShowLowRatingReviews] = useState(false);
+        const [lowRatingMonth, setLowRatingMonth] = useState(month);
         const [lowRatingReviews, setLowRatingReviews] = useState([]);
         const [lowRatingSummary, setLowRatingSummary] = useState({ total: 0, pending: 0, conflict: 0, valid: 0, invalid: 0 });
         const [lowRatingFilter, setLowRatingFilter] = useState('attention');
@@ -2174,6 +2175,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return Number(summary[filterValue] || 0);
         };
 
+        const changeLowRatingMonth = (value) => {
+            const monthKey = normalizeMonthKey(value);
+            setLowRatingMonth(monthKey);
+            setLowRatingPagination(prev => ({ ...prev, page: 1 }));
+            setSelectedLowRatingReviewId('');
+        };
+
+        const shiftLowRatingMonth = (delta) => {
+            changeLowRatingMonth(shiftMonthKey(lowRatingMonth, delta));
+        };
+
         const lowRatingStatusLabel = (status) => {
             const key = String(status || '').trim();
             if (key === 'valid') return 'Обоснованно';
@@ -2274,11 +2286,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
         };
 
-        const fetchLowRatingReviews = async (targetFilter = lowRatingFilter, targetPage = lowRatingPagination.page || 1) => {
+        const fetchLowRatingReviews = async (targetFilter = lowRatingFilter, targetPage = lowRatingPagination.page || 1, targetMonth = lowRatingMonth) => {
             if (!user?.id || !isChatModel) return;
             const filterKey = String(targetFilter || 'attention');
+            const monthKey = normalizeMonthKey(targetMonth);
             const params = new URLSearchParams();
-            params.append('month', normalizeMonthKey(month));
+            params.append('month', monthKey);
             params.append('status', filterKey);
             params.append('page', String(Math.max(1, Number(targetPage || 1))));
             params.append('per_page', String(Number(lowRatingPagination.per_page || 10)));
@@ -2603,6 +2616,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setChatMetricsImportState({ loading: false, summary, error: '' });
                 fallbackToast(payload?.message || 'Метрики Chat2Desk синхронизированы', 'success');
                 const syncedMonth = cleanStartDate.slice(0, 7);
+                if (syncedMonth && showLowRatingReviews) {
+                    setLowRatingMonth(syncedMonth);
+                    setLowRatingPagination(prev => ({ ...prev, page: 1 }));
+                }
                 if (syncedMonth && syncedMonth !== normalizeMonthKey(month)) {
                     setMonth(syncedMonth);
                 } else {
@@ -3749,7 +3766,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             if (!showLowRatingReviews || !user?.id) return;
             fetchLowRatingReviews(lowRatingFilter, lowRatingPagination.page);
             // eslint-disable-next-line react-hooks/exhaustive-deps
-        }, [isChatModel, showLowRatingReviews, lowRatingFilter, lowRatingPagination.page, month, user?.id]);
+        }, [isChatModel, showLowRatingReviews, lowRatingFilter, lowRatingPagination.page, lowRatingMonth, user?.id]);
 
         const selectedLowRatingReview = useMemo(() => (
             (lowRatingReviews || []).find(row => String(row?.id) === String(selectedLowRatingReviewId)) || null
@@ -5240,6 +5257,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         type="button"
                                                         onClick={(e) => {
                                                             e.stopPropagation();
+                                                            setLowRatingMonth(normalizeMonthKey(month));
+                                                            setLowRatingPagination(prev => ({ ...prev, page: 1 }));
                                                             setShowLowRatingReviews(prev => !prev);
                                                             setPinnedGroups([]);
                                                             setHoveredGroup(null);
@@ -5534,31 +5553,65 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </div>
 
                         <div className="border-b border-slate-200/70 bg-slate-50/80 px-5 py-3 sm:px-6">
-                            <div className="flex flex-wrap items-center gap-2">
-                                {LOW_RATING_FILTERS.map(filter => {
-                                    const active = lowRatingFilter === filter.value;
-                                    const count = lowRatingFilterCount(filter.value);
-                                    return (
-                                        <button
-                                            key={filter.value}
-                                            type="button"
-                                            onClick={() => {
-                                                setLowRatingFilter(filter.value);
-                                                setLowRatingPagination(prev => ({ ...prev, page: 1 }));
-                                            }}
-                                            className={`inline-flex h-9 items-center gap-2 rounded-full px-3.5 text-xs font-semibold transition ${
-                                                active
-                                                    ? 'bg-slate-900 text-white shadow-sm'
-                                                    : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100'
-                                            }`}
-                                        >
-                                            {filter.label}
-                                            <span className={`rounded-full px-2 py-0.5 text-[11px] ${active ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-500'}`}>
-                                                {count}
-                                            </span>
-                                        </button>
-                                    );
-                                })}
+                            <div className="flex flex-wrap items-center justify-between gap-3">
+                                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => shiftLowRatingMonth(-1)}
+                                        disabled={lowRatingLoading}
+                                        className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-slate-600 ring-1 ring-slate-200 transition hover:bg-slate-100 disabled:cursor-wait disabled:opacity-50"
+                                        aria-label="Предыдущий месяц"
+                                    >
+                                        <FaIcon className="fas fa-chevron-left" aria-hidden="true" />
+                                    </button>
+                                    <label className="relative flex h-9 min-w-[180px] items-center gap-2 rounded-full bg-white px-3.5 text-xs font-semibold text-slate-700 ring-1 ring-slate-200">
+                                        <FaIcon className="fas fa-calendar-alt text-slate-400" aria-hidden="true" />
+                                        <span className="min-w-0 truncate">{formatSurgeMonthLabel(lowRatingMonth)}</span>
+                                        <input
+                                            type="month"
+                                            value={normalizeMonthKey(lowRatingMonth)}
+                                            onChange={(e) => changeLowRatingMonth(e.target.value)}
+                                            disabled={lowRatingLoading}
+                                            className="absolute inset-0 h-full w-full cursor-pointer opacity-0 disabled:cursor-wait"
+                                            aria-label="Месяц журнала низких оценок"
+                                        />
+                                    </label>
+                                    <button
+                                        type="button"
+                                        onClick={() => shiftLowRatingMonth(1)}
+                                        disabled={lowRatingLoading}
+                                        className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-slate-600 ring-1 ring-slate-200 transition hover:bg-slate-100 disabled:cursor-wait disabled:opacity-50"
+                                        aria-label="Следующий месяц"
+                                    >
+                                        <FaIcon className="fas fa-chevron-right" aria-hidden="true" />
+                                    </button>
+                                </div>
+                                <div className="flex flex-wrap items-center gap-2">
+                                    {LOW_RATING_FILTERS.map(filter => {
+                                        const active = lowRatingFilter === filter.value;
+                                        const count = lowRatingFilterCount(filter.value);
+                                        return (
+                                            <button
+                                                key={filter.value}
+                                                type="button"
+                                                onClick={() => {
+                                                    setLowRatingFilter(filter.value);
+                                                    setLowRatingPagination(prev => ({ ...prev, page: 1 }));
+                                                }}
+                                                className={`inline-flex h-9 items-center gap-2 rounded-full px-3.5 text-xs font-semibold transition ${
+                                                    active
+                                                        ? 'bg-slate-900 text-white shadow-sm'
+                                                        : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100'
+                                                }`}
+                                            >
+                                                {filter.label}
+                                                <span className={`rounded-full px-2 py-0.5 text-[11px] ${active ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                                                    {count}
+                                                </span>
+                                            </button>
+                                        );
+                                    })}
+                                </div>
                             </div>
                         </div>
 
@@ -5576,7 +5629,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         <div>
                                             <div className="text-sm font-semibold text-slate-900">Журнал</div>
                                             <div className="text-xs text-slate-500">
-                                                {Number(lowRatingPagination.total || 0)} строк
+                                                {formatSurgeMonthLabel(lowRatingMonth)} · {Number(lowRatingPagination.total || 0)} строк
                                             </div>
                                         </div>
                                         {lowRatingLoading && <FaIcon className="fas fa-spinner fa-spin text-slate-400" aria-hidden="true" />}
