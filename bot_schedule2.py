@@ -20456,7 +20456,7 @@ def chat_manager_low_rating_reviews():
         per_page = request.args.get('per_page') or 12
         if not _is_global_admin_requester(requester_role, requester_id):
             department_id = _department_scope_id_for_requester(requester_id)
-        can_finalize = _is_global_admin_requester(requester_role, requester_id) or headed_dept_id is not None
+        role_can_finalize = _is_global_admin_requester(requester_role, requester_id) or headed_dept_id is not None
 
         result = db.list_chat_manager_low_rating_reviews(
             month=month,
@@ -20467,7 +20467,7 @@ def chat_manager_low_rating_reviews():
             page=page,
             per_page=per_page,
             viewer_id=requester_id,
-            can_finalize=can_finalize
+            can_finalize=role_can_finalize
         )
         return jsonify({"status": "success", **result}), 200
 
@@ -20500,9 +20500,10 @@ def update_chat_manager_low_rating_review(review_id):
             if scope_dept is not None and int(current.get('department_id') or 0) != int(scope_dept):
                 return jsonify({"error": "Forbidden"}), 403
 
-        can_finalize = _is_global_admin_requester(requester_role, requester_id) or (
+        role_can_finalize = _is_global_admin_requester(requester_role, requester_id) or (
             headed_dept_id is not None and int(current.get('department_id') or 0) == int(headed_dept_id)
         )
+        can_finalize = bool(role_can_finalize and current.get('has_review_conflict'))
         if request.method == 'GET':
             public_current = db.get_chat_manager_low_rating_review(
                 review_id,
@@ -20515,8 +20516,10 @@ def update_chat_manager_low_rating_review(review_id):
         payload = request.get_json(silent=True) or {}
         action = str(payload.get('action') or payload.get('reviewer') or 'review').strip().lower()
         if action in {'final', 'head', 'manager'}:
-            if not can_finalize:
+            if not role_can_finalize:
                 return jsonify({"error": "Only department head can set final decision"}), 403
+            if not current.get('has_review_conflict'):
+                return jsonify({"error": "Final decision is available only when two reviews disagree"}), 400
             updated = db.finalize_chat_manager_low_rating_review(
                 review_id=review_id,
                 status=payload.get('status'),
@@ -20537,7 +20540,7 @@ def update_chat_manager_low_rating_review(review_id):
             review_id,
             viewer_id=requester_id,
             public=True,
-            can_finalize=can_finalize
+            can_finalize=role_can_finalize
         )
         return jsonify({"status": "success", "review": public_updated}), 200
 
