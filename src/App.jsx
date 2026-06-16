@@ -5493,7 +5493,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             {isChatModel && showLowRatingReviews && (
                 <div
-                    className="fixed inset-0 z-[135] flex items-center justify-center bg-slate-950/35 p-3 backdrop-blur-sm sm:p-6"
+                    className="fixed inset-0 z-[135] flex items-start justify-center overflow-y-auto bg-slate-950/35 p-3 backdrop-blur-sm sm:items-center sm:p-6"
                     onClick={() => setShowLowRatingReviews(false)}
                 >
                     <div
@@ -5562,7 +5562,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             </div>
                         </div>
 
-                        <div className="min-h-0 flex-1 overflow-hidden p-4 sm:p-5">
+                        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 sm:p-5 lg:overflow-hidden ios-modal-scroll">
                             {lowRatingError && (
                                 <div className="mb-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-medium text-rose-700">
                                     <FaIcon className="fas fa-triangle-exclamation mr-1" aria-hidden="true" />
@@ -5570,8 +5570,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </div>
                             )}
 
-                            <div className="grid h-full min-h-[520px] grid-cols-1 gap-4 lg:grid-cols-[360px_minmax(0,1fr)]">
-                                <div className="flex min-h-0 flex-col overflow-hidden rounded-[24px] border border-slate-200 bg-slate-50/80">
+                            <div className="grid min-h-[520px] grid-cols-1 gap-4 lg:h-full lg:min-h-0 lg:grid-cols-[360px_minmax(0,1fr)]">
+                                <div className="flex min-h-0 max-h-[62vh] flex-col overflow-hidden rounded-[24px] border border-slate-200 bg-slate-50/80 lg:max-h-none">
                                     <div className="flex items-center justify-between gap-2 border-b border-slate-200 px-4 py-3">
                                         <div>
                                             <div className="text-sm font-semibold text-slate-900">Журнал</div>
@@ -5582,7 +5582,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         {lowRatingLoading && <FaIcon className="fas fa-spinner fa-spin text-slate-400" aria-hidden="true" />}
                                     </div>
 
-                                    <div className="min-h-0 flex-1 overflow-y-auto p-3">
+                                    <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3 ios-modal-scroll">
                                         {lowRatingLoading ? (
                                             <div className="rounded-3xl border border-slate-200 bg-white px-4 py-8 text-center text-sm font-medium text-slate-500">
                                                 Загружаем...
@@ -5667,7 +5667,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </div>
                                 </div>
 
-                                <div className="min-h-0 overflow-y-auto rounded-[24px] border border-slate-200 bg-white p-4 sm:p-5">
+                                <div className="min-h-0 max-h-[70vh] overflow-y-auto overscroll-contain rounded-[24px] border border-slate-200 bg-white p-4 sm:p-5 lg:max-h-none ios-modal-scroll">
                                     {!selectedLowRatingReview ? (
                                         <div className="flex h-full min-h-[360px] items-center justify-center rounded-3xl border border-dashed border-slate-200 bg-slate-50 text-sm text-slate-500">
                                             Выберите строку слева.
