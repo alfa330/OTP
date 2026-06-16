@@ -2460,11 +2460,15 @@ const App = ({ user, initialSelection }) => {
     const isSupervisorRole = canonicalRole === 'sv';
     const headedDepartmentId = user?.headed_department_id ?? user?.headedDepartmentId ?? null;
     const isDepartmentHead = headedDepartmentId !== null && headedDepartmentId !== undefined && String(headedDepartmentId) !== '';
-    const isAdminRole = (canonicalRole === 'admin' || canonicalRole === 'super_admin') && (!isDepartmentHead || canonicalRole === 'super_admin');
+    const isBaseAdminRole = canonicalRole === 'admin' || canonicalRole === 'super_admin';
+    const isScopedDepartmentHead = isDepartmentHead && canonicalRole !== 'super_admin';
+    const isAdminRole = isBaseAdminRole || isDepartmentHead;
+    const isGlobalAdminRole = isBaseAdminRole && !isScopedDepartmentHead;
+    const canManageFeedbackReportSetting = isGlobalAdminRole;
     const canUseRequests = isAdminRole || isSupervisorRole || isDepartmentHead;
     const canDecideReevaluationRequests = isAdminRole || isDepartmentHead;
-    const canUseCalibration = isAdminRole || isSupervisorRole;
-    const canManageCalibrationRooms = isAdminRole || isSupervisorRole;
+    const canUseCalibration = isGlobalAdminRole || isSupervisorRole;
+    const canManageCalibrationRooms = isGlobalAdminRole || isSupervisorRole;
     const canUseAnalytics = isAdminRole || isSupervisorRole;
     const canManageEvaluationNotifications = isAdminRole || isDepartmentHead;
     const [calls, setCalls] = useState([]);
@@ -2692,7 +2696,7 @@ const App = ({ user, initialSelection }) => {
     }), []);
 
     const loadFeedbackReportSetting = useCallback(async () => {
-        if (!isAdminRole || !userId) return;
+        if (!canManageFeedbackReportSetting || !userId) return;
         setFeedbackReportSetting(prev => ({ ...prev, loading: true }));
         try {
             const r = await authFetch(`${API_BASE_URL}/api/admin/call_feedback_report_setting`, {
@@ -2718,10 +2722,10 @@ const App = ({ user, initialSelection }) => {
             }));
             emitCallEvaluationToast(`Ошибка загрузки настройки отчёта: ${e.message}`, 'error');
         }
-    }, [isAdminRole, userId]);
+    }, [canManageFeedbackReportSetting, userId]);
 
     const toggleFeedbackReportSetting = useCallback(async (nextEnabled) => {
-        if (!isAdminRole || !userId) return;
+        if (!canManageFeedbackReportSetting || !userId) return;
         const previousEnabled = !!feedbackReportSetting.enabled;
         setFeedbackReportSetting(prev => ({
             ...prev,
@@ -2762,7 +2766,7 @@ const App = ({ user, initialSelection }) => {
             }));
             emitCallEvaluationToast(`Ошибка сохранения настройки: ${e.message}`, 'error');
         }
-    }, [isAdminRole, userId, feedbackReportSetting.enabled]);
+    }, [canManageFeedbackReportSetting, userId, feedbackReportSetting.enabled]);
 
     const loadEvaluationNotifySetting = useCallback(async () => {
         if (!canManageEvaluationNotifications || !userId) return;
@@ -2970,7 +2974,7 @@ const App = ({ user, initialSelection }) => {
     }, [operators, operatorFromToken]);
 
     useEffect(() => {
-        if (!isAdminRole || !userId) {
+        if (!canManageFeedbackReportSetting || !userId) {
             setFeedbackReportSetting({
                 loading: false,
                 saving: false,
@@ -2982,7 +2986,7 @@ const App = ({ user, initialSelection }) => {
         }
         if (activeSection !== 'journal') return;
         loadFeedbackReportSetting();
-    }, [isAdminRole, userId, activeSection, loadFeedbackReportSetting]);
+    }, [canManageFeedbackReportSetting, userId, activeSection, loadFeedbackReportSetting]);
 
     useEffect(() => {
         if (!canManageEvaluationNotifications || !userId) {
@@ -3015,8 +3019,10 @@ const App = ({ user, initialSelection }) => {
     // Operators
     useEffect(() => {
         if (!userId) return;
-        const shouldFilterBySelectedSupervisor = isAdminRole || isSupervisorRole;
-        const scopeId = shouldFilterBySelectedSupervisor ? selectedSupervisor : userId;
+        const shouldUseSelectedSupervisor =
+            isSupervisorRole ||
+            (isAdminRole && (!isScopedDepartmentHead || selectedSupervisor));
+        const scopeId = shouldUseSelectedSupervisor ? selectedSupervisor : userId;
         if (!scopeId) {
             setOperators([]);
             return;
@@ -3046,7 +3052,7 @@ const App = ({ user, initialSelection }) => {
                         const opSupervisorId = Number(op?.supervisor_id ?? op?.sv_id ?? op?.supervisorId);
                         return Number.isFinite(opSupervisorId) && opSupervisorId === scopedSupervisorId;
                     });
-                    const nextOperators = shouldFilterBySelectedSupervisor && hasSupervisorMeta ? filteredOperators : rawOperators;
+                    const nextOperators = shouldUseSelectedSupervisor && hasSupervisorMeta ? filteredOperators : rawOperators;
                     operatorsCacheRef.current.set(cacheKey, nextOperators);
                     setOperators(nextOperators);
                 } else {
@@ -3064,7 +3070,7 @@ const App = ({ user, initialSelection }) => {
             });
 
         return () => { isCancelled = true; };
-    }, [userId, isAdminRole, isSupervisorRole, selectedSupervisor, getOperatorsCacheKey]);
+    }, [userId, isAdminRole, isSupervisorRole, isScopedDepartmentHead, selectedSupervisor, getOperatorsCacheKey]);
 
     // Evaluations fetch
     const fetchEvaluations = useCallback(async ({ force = false } = {}) => {
@@ -4203,7 +4209,7 @@ const App = ({ user, initialSelection }) => {
                             </button>
                         </div>
                     )}
-                    {isAdminRole && activeSection === 'journal' && (
+                    {canManageFeedbackReportSetting && activeSection === 'journal' && (
                         <label
                             className="comment-visibility-toggle"
                             style={{
@@ -4915,7 +4921,7 @@ const App = ({ user, initialSelection }) => {
                                                         <span className="badge-dot" />
                                                         {isOpening ? 'Загрузка...' : room.my_evaluated ? 'Оценено' : room.joined ? 'В комнате' : 'Не вошел'}
                                                     </span>
-                                                    {isAdminRole && (
+                                                    {isGlobalAdminRole && (
                                                         <button
                                                             className="calibration-card-delete"
                                                             onClick={(e) => handleDeleteCalibrationRoom(e, room.id)}
@@ -5060,7 +5066,7 @@ const App = ({ user, initialSelection }) => {
                                                                         : call.my_evaluated
                                                                             ? <span className="badge badge-green"><span className="badge-dot" /> Оценен вами</span>
                                                                             : null}
-                                                                    {isAdminRole && (
+                                                                    {isGlobalAdminRole && (
                                                                         <button
                                                                             className="calibration-card-delete"
                                                                             onClick={(e) => handleDeleteCalibrationCall(e, call.id)}

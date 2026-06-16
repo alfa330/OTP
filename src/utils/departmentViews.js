@@ -3,6 +3,7 @@ import { isAdminLikeRole, isDepartmentHead, normalizeRole } from './roles';
 const TEZ_OPERATOR_VIEWS = ['profile', 'evaluation', 'hours', 'work_schedules', 'surveys', 'salary'];
 const TEZ_MANAGER_VIEWS = [
     'manage_operators',
+    'qr_access',
     'call_evaluation',
     'call_division',
     'monitoring_scale',
