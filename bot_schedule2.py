@@ -220,6 +220,7 @@ CHAT2DESK_SYNC_DAYS_BACK = _env_int('CHAT2DESK_SYNC_DAYS_BACK', 1, minimum=1, ma
 CHAT2DESK_API_TIMEOUT_SECONDS = _env_int('CHAT2DESK_API_TIMEOUT_SECONDS', 45, minimum=5, maximum=300)
 CHAT2DESK_API_PAGE_LIMIT = _env_int('CHAT2DESK_API_PAGE_LIMIT', 200, minimum=1, maximum=200)
 CHAT2DESK_API_MAX_PAGES = _env_int('CHAT2DESK_API_MAX_PAGES', 100, minimum=1, maximum=1000)
+CHAT2DESK_OPERATOR_LOOKUP_CACHE = {}
 
 if not API_TOKEN:
     raise Exception("Переменная окружения BOT_TOKEN обязательна.")
@@ -17507,6 +17508,15 @@ def _chat2desk_row_first(row, *keys):
     for key in keys:
         if key in row and row.get(key) not in (None, ''):
             return row.get(key)
+    lower_map = {
+        str(k).strip().lower(): v
+        for k, v in row.items()
+        if v not in (None, '')
+    }
+    for key in keys:
+        value = lower_map.get(str(key).strip().lower())
+        if value not in (None, ''):
+            return value
     return None
 
 
@@ -17632,6 +17642,94 @@ def _chat2desk_statistics_get(report, day_str):
     return rows
 
 
+def _chat2desk_operator_display_name(operator_payload):
+    if not isinstance(operator_payload, dict):
+        return ''
+    first_name = str(operator_payload.get('first_name') or '').strip()
+    last_name = str(operator_payload.get('last_name') or '').strip()
+    full_name = ' '.join(part for part in (first_name, last_name) if part).strip()
+    if full_name:
+        return full_name
+    return str(operator_payload.get('name') or operator_payload.get('email') or '').strip()
+
+
+def _chat2desk_operator_by_id(operator_id):
+    operator_key = str(operator_id or '').strip()
+    if not operator_key:
+        return None
+    if operator_key in CHAT2DESK_OPERATOR_LOOKUP_CACHE:
+        return CHAT2DESK_OPERATOR_LOOKUP_CACHE[operator_key]
+
+    authorization = _chat2desk_authorization_header()
+    if not authorization:
+        CHAT2DESK_OPERATOR_LOOKUP_CACHE[operator_key] = None
+        return None
+
+    timeout = _env_int('CHAT2DESK_API_TIMEOUT_SECONDS', CHAT2DESK_API_TIMEOUT_SECONDS, minimum=5, maximum=300)
+    url = f"{_chat2desk_api_base_url()}/v1/operators/{operator_key}"
+    try:
+        response = requests.get(
+            url,
+            headers={'Authorization': authorization, 'Accept': 'application/json'},
+            timeout=timeout
+        )
+        if response.status_code >= 400:
+            logging.warning("Chat2Desk operator lookup %s failed: HTTP %s", operator_key, response.status_code)
+            CHAT2DESK_OPERATOR_LOOKUP_CACHE[operator_key] = None
+            return None
+        payload = response.json()
+    except Exception:
+        logging.exception("Chat2Desk operator lookup %s failed", operator_key)
+        CHAT2DESK_OPERATOR_LOOKUP_CACHE[operator_key] = None
+        return None
+
+    data = payload.get('data') if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        data = payload if isinstance(payload, dict) else None
+    CHAT2DESK_OPERATOR_LOOKUP_CACHE[operator_key] = data
+    return data
+
+
+def _chat2desk_rating_operator_name(row):
+    raw_name = _chat2desk_row_first(row, 'operator_name', 'score_operator_name', 'operator', 'name')
+    if str(raw_name or '').strip():
+        return str(raw_name or '').strip()
+    operator_id = _chat2desk_row_first(row, 'operator_id')
+    operator_payload = _chat2desk_operator_by_id(operator_id)
+    return _chat2desk_operator_display_name(operator_payload)
+
+
+def _chat2desk_rating_source_key(row, metric_day, score):
+    parts = [
+        _chat2desk_row_first(row, 'rating_id'),
+        _chat2desk_row_first(row, 'valuation_request_id'),
+        _chat2desk_row_first(row, 'request_id'),
+        _chat2desk_row_first(row, 'operator_id'),
+        _chat2desk_row_first(row, 'created_at', 'request_start', 'date') or metric_day,
+        score,
+    ]
+    seed = '|'.join(str(part or '').strip() for part in parts)
+    if not seed.strip('|'):
+        seed = json.dumps(row, ensure_ascii=False, sort_keys=True, default=str)
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"chat2desk-rating:{seed}").hex
+
+
+def _chat2desk_low_rating_payload(row, op_id, operator_name, metric_day, score):
+    created_at_value = _chat2desk_row_first(row, 'created_at', 'request_start', 'date')
+    return {
+        'source': 'chat2desk_rating',
+        'source_key': _chat2desk_rating_source_key(row, metric_day, score),
+        'operator_id': int(op_id),
+        'operator_name': operator_name,
+        'phone_number': _chat2desk_row_first(row, 'phone'),
+        'taxi_park': _chat2desk_row_first(row, 'channel_name'),
+        'rated_at': created_at_value,
+        'day': metric_day,
+        'score': float(score),
+        'raw_payload': dict(row),
+    }
+
+
 def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_rows,
                                                   operator_lookup, operator_token_index,
                                                   surge_windows=None, preview_limit=None):
@@ -17648,6 +17746,7 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
     unmatched_names = {}
     unmatched_seen = set()
     excluded_surge = 0
+    low_ratings = []
     source_rows = sum(1 for row in (reply_rows or []) if _chat2desk_row_is_nonempty(row))
     source_rows += sum(1 for row in (rating_rows or []) if _chat2desk_row_is_nonempty(row))
 
@@ -17696,7 +17795,7 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
     for row_index, row in enumerate(rating_rows or []):
         if not isinstance(row, dict) or not _chat2desk_row_is_nonempty(row):
             continue
-        raw_name = _chat2desk_row_first(row, 'operator_name', 'score_operator_name', 'operator', 'name')
+        raw_name = _chat2desk_rating_operator_name(row)
         score = _chat_metrics_parse_number(_chat2desk_row_first(row, 'rating_scale_score', 'score', 'rating'))
         metric_day = _chat2desk_metric_day(
             _chat2desk_row_first(row, 'created_at', 'request_start', 'date'),
@@ -17714,6 +17813,8 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
         bucket = score_agg.setdefault((op_id, metric_day), {'score_sum': 0.0, 'score_count': 0})
         bucket['score_sum'] += float(score)
         bucket['score_count'] += 1
+        if float(score) < 4:
+            low_ratings.append(_chat2desk_low_rating_payload(row, op_id, raw_name, metric_day, score))
 
     update_fields = set()
     for (op_id, metric_day), bucket in response_agg.items():
@@ -17763,6 +17864,8 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
         'matched_rows': len(metrics),
         'unmatched_count': int(sum(unmatched_names.values())),
         'unmatched_preview': [{'name': name, 'rows': count} for name, count in unmatched_sorted[:preview_limit_value]],
+        'low_ratings': low_ratings,
+        'low_rating_count': len(low_ratings),
         'excluded_surge_rows': int(excluded_surge),
         'api_rows': {
             CHAT2DESK_STATISTICS_REPORT_REPLIES: len(reply_rows or []),
@@ -17845,12 +17948,22 @@ def sync_chat2desk_daily_metrics(day=None, triggered_by='scheduler', force=False
                         imported_by=imported_by,
                         update_fields=update_fields
                     )
+                low_rating_summary = {'processed': 0}
+                low_ratings = report.get('low_ratings') or []
+                if low_ratings:
+                    low_rating_summary = db.save_chat_manager_low_ratings(
+                        low_ratings=low_ratings,
+                        imported_by=imported_by,
+                        source_batch_id=(save_summary or {}).get('batch_id')
+                    )
                 day_results.append({
                     'day': day_str,
                     'status': 'success',
                     'source_rows': int(report.get('source_rows') or 0),
                     'matched_rows': int(report.get('matched_rows') or 0),
                     'processed': int((save_summary or {}).get('processed') or 0),
+                    'low_rating_count': int(report.get('low_rating_count') or 0),
+                    'low_rating_saved': int((low_rating_summary or {}).get('processed') or 0),
                     'unmatched_count': int(report.get('unmatched_count') or 0),
                     'excluded_surge_rows': int(report.get('excluded_surge_rows') or 0),
                     'update_fields': update_fields,
@@ -20309,6 +20422,91 @@ def chat_manager_surge_windows():
         return jsonify({"error": "Internal server error"}), 500
 
 
+@app.route('/api/chat_manager/low_rating_reviews', methods=['GET'])
+@require_api_key
+def chat_manager_low_rating_reviews():
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        requester_role = _normalize_user_role(requester[3])
+        headed_dept_id = _headed_department_id(requester_id)
+        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role) or headed_dept_id is not None):
+            return jsonify({"error": "Forbidden"}), 403
+
+        month = request.args.get('month') or datetime.now().strftime('%Y-%m')
+        status_filter = request.args.get('status') or 'attention'
+        operator_id = request.args.get('operator_id') or None
+        department_id = request.args.get('department_id') or None
+        if not _is_global_admin_requester(requester_role, requester_id):
+            department_id = _department_scope_id_for_requester(requester_id)
+
+        result = db.list_chat_manager_low_rating_reviews(
+            month=month,
+            department_id=department_id,
+            operator_id=operator_id,
+            status=status_filter,
+            limit=request.args.get('limit') or 2000
+        )
+        return jsonify({"status": "success", **result}), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error loading chat manager low rating reviews: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/chat_manager/low_rating_reviews/<review_id>', methods=['PATCH'])
+@require_api_key
+def update_chat_manager_low_rating_review(review_id):
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        requester_role = _normalize_user_role(requester[3])
+        headed_dept_id = _headed_department_id(requester_id)
+        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role) or headed_dept_id is not None):
+            return jsonify({"error": "Forbidden"}), 403
+
+        current = db.get_chat_manager_low_rating_review(review_id)
+        if not current:
+            return jsonify({"error": "Review not found"}), 404
+        if not _is_global_admin_requester(requester_role, requester_id):
+            scope_dept = _department_scope_id_for_requester(requester_id)
+            if scope_dept is not None and int(current.get('department_id') or 0) != int(scope_dept):
+                return jsonify({"error": "Forbidden"}), 403
+
+        payload = request.get_json(silent=True) or {}
+        reviewer = str(payload.get('reviewer') or '').strip().lower()
+        if reviewer == 'head':
+            if not (_is_global_admin_requester(requester_role, requester_id) or (
+                headed_dept_id is not None and int(current.get('department_id') or 0) == int(headed_dept_id)
+            )):
+                return jsonify({"error": "Only department head can set final decision"}), 403
+
+        updated = db.update_chat_manager_low_rating_review(
+            review_id=review_id,
+            reviewer=reviewer,
+            status=payload.get('status'),
+            comment=payload.get('comment') or '',
+            updated_by=requester_id
+        )
+        if not updated:
+            return jsonify({"error": "Review not found"}), 404
+        return jsonify({"status": "success", "review": updated}), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error updating chat manager low rating review: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/chat_manager/metrics/sync_chat2desk', methods=['POST'])
 @require_api_key
 def sync_chat_manager_metrics_chat2desk():
@@ -20380,6 +20578,8 @@ def sync_chat_manager_metrics_chat2desk():
             'source_rows': sum(int(item.get('source_rows') or 0) for item in success_days),
             'matched_rows': sum(int(item.get('matched_rows') or 0) for item in success_days),
             'processed': sum(int(item.get('processed') or 0) for item in success_days),
+            'low_rating_count': sum(int(item.get('low_rating_count') or 0) for item in success_days),
+            'low_rating_saved': sum(int(item.get('low_rating_saved') or 0) for item in success_days),
             'unmatched_count': sum(int(item.get('unmatched_count') or 0) for item in success_days),
             'excluded_surge_rows': sum(int(item.get('excluded_surge_rows') or 0) for item in success_days),
             'update_fields': update_fields,

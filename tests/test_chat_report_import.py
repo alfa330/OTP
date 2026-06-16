@@ -4,6 +4,7 @@ import json
 import os
 import re
 import unittest
+import uuid
 from datetime import datetime, timedelta
 from io import StringIO
 from pathlib import Path
@@ -53,6 +54,11 @@ def _chat_report_namespace():
         "_chat2desk_metric_day",
         "_chat2desk_row_first",
         "_chat2desk_row_is_nonempty",
+        "_chat2desk_operator_display_name",
+        "_chat2desk_operator_by_id",
+        "_chat2desk_rating_operator_name",
+        "_chat2desk_rating_source_key",
+        "_chat2desk_low_rating_payload",
         "_chat2desk_build_metrics_from_statistics_rows",
     }
 
@@ -75,7 +81,9 @@ def _chat_report_namespace():
         "timedelta": timedelta,
         "StringIO": StringIO,
         "ZoneInfo": ZoneInfo,
+        "uuid": uuid,
         "STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT": 30,
+        "CHAT2DESK_OPERATOR_LOOKUP_CACHE": {},
     }
     exec(compile(ast.Module(body=selected, type_ignores=[]), str(BOT_PATH), "exec"), namespace)
     return namespace
@@ -252,11 +260,21 @@ class ChatReportImportTests(unittest.TestCase):
                 "operator_name": operator_name,
                 "created_at": "2026-06-10 12:00:00",
                 "rating_scale_score": "5",
+                "phone": "77010000001",
+                "channel_name": "Jana Taxi",
+                "rating_id": 1042,
+                "request_id": 74120001,
+                "valuation_request_id": 74110001,
             },
             {
                 "operator_name": operator_name,
                 "created_at": "2026-06-10 13:00:00",
                 "rating_scale_score": "3",
+                "phone": "77010000002",
+                "channel_name": "Техподдержка iTaxi",
+                "rating_id": 1042,
+                "request_id": 74120002,
+                "valuation_request_id": 74110002,
             },
         ]
 
@@ -275,6 +293,16 @@ class ChatReportImportTests(unittest.TestCase):
         self.assertEqual(d10["score_sum"], 8.0)
         self.assertEqual(d10["score_count"], 2)
         self.assertEqual(d10["avg_score"], 4.0)
+        self.assertEqual(res["low_rating_count"], 1)
+        self.assertEqual(len(res["low_ratings"]), 1)
+        low = res["low_ratings"][0]
+        self.assertEqual(low["operator_id"], 2)
+        self.assertEqual(low["operator_name"], operator_name)
+        self.assertEqual(low["phone_number"], "77010000002")
+        self.assertEqual(low["taxi_park"], "Техподдержка iTaxi")
+        self.assertEqual(low["rated_at"], "2026-06-10 13:00:00")
+        self.assertEqual(low["score"], 3.0)
+        self.assertEqual(low["raw_payload"]["valuation_request_id"], 74110002)
 
         surge = json.dumps([{"start": "2026-06-10T10:01", "end": "2026-06-10T10:10"}])
         res2 = build("2026-06-10", replies, ratings, self.lookup, self.index, surge_windows=surge)
