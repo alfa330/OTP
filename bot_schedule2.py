@@ -18929,6 +18929,9 @@ def get_direction_work_schedules():
         direction_name = user_data[4]  # d.name from get_user()
         if not direction_name:
             return jsonify({"operators": [], "direction": None}), 200
+        requester_department_id = db.get_user_department_id(requester_id)
+        if requester_department_id is None:
+            return jsonify({"operators": [], "direction": direction_name}), 200
 
         start_date = request.args.get('start_date')
         end_date = request.args.get('end_date')
@@ -18941,6 +18944,7 @@ def get_direction_work_schedules():
             start_date=start_date,
             end_date=end_date,
             direction_name=direction_name,
+            department_id=requester_department_id,
             include_imported_statuses=include_imported_statuses,
             include_technical_issues=include_technical_issues,
             include_offline_activities=include_offline_activities
