@@ -1649,6 +1649,27 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         return merged;
         }
 
+        function subtractMinuteIntervals(baseInterval, subtractIntervals) {
+        if (!baseInterval || !Number.isFinite(baseInterval.start) || !Number.isFinite(baseInterval.end) || baseInterval.end <= baseInterval.start) return [];
+        let remaining = [{ start: baseInterval.start, end: baseInterval.end }];
+        for (const blocker of mergeMinuteIntervals(subtractIntervals || [])) {
+            const next = [];
+            for (const interval of remaining) {
+            const overlapStart = Math.max(interval.start, blocker.start);
+            const overlapEnd = Math.min(interval.end, blocker.end);
+            if (overlapEnd <= overlapStart) {
+                next.push(interval);
+                continue;
+            }
+            if (interval.start < overlapStart) next.push({ start: interval.start, end: overlapStart });
+            if (overlapEnd < interval.end) next.push({ start: overlapEnd, end: interval.end });
+            }
+            remaining = next;
+            if (remaining.length === 0) break;
+        }
+        return remaining;
+        }
+
         function minutesToDisplayTime(totalMinutes) {
         if (!Number.isFinite(totalMinutes)) return '';
         const normalized = ((Math.round(totalMinutes) % (24 * 60)) + (24 * 60)) % (24 * 60);
@@ -1661,8 +1682,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const intervals = [];
         for (const training of (Array.isArray(trainings) ? trainings : [])) {
             if (typeof predicate === 'function' && !predicate(training)) continue;
+            if (Array.isArray(training?.counted_intervals)) {
+            training.counted_intervals.forEach(interval => {
+                if (interval && Number.isFinite(interval.start) && Number.isFinite(interval.end) && interval.end > interval.start) intervals.push(interval);
+            });
+            } else {
             const interval = trainingToIntervalMinutes(training);
             if (interval) intervals.push(interval);
+            }
         }
         const totalMinutes = mergeMinuteIntervals(intervals).reduce((sum, interval) => sum + (interval.end - interval.start), 0);
         return Number((totalMinutes / 60).toFixed(2));
@@ -1777,7 +1804,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         const PLANNER_SHIFT_TYPE_REGULAR = 'regular';
         const PLANNER_SHIFT_TYPE_OFFICE_PRACTICE = 'office_practice';
+        const PLANNER_SHIFT_TYPE_PHONE_SHIFT = 'phone_shift';
         const PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL = 'Практика в офисе';
+        const PLANNER_SHIFT_TYPE_PHONE_SHIFT_LABEL = 'Смена на телефонах';
+
+        function plannerShiftTypePriority(value) {
+        const type = normalizePlannerShiftType(value);
+        if (type === PLANNER_SHIFT_TYPE_PHONE_SHIFT) return 2;
+        if (type === PLANNER_SHIFT_TYPE_OFFICE_PRACTICE) return 1;
+        return 0;
+        }
 
         function normalizePlannerShiftType(value) {
         const raw = String(value || '').trim().toLowerCase();
@@ -1791,6 +1827,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         ) {
             return PLANNER_SHIFT_TYPE_OFFICE_PRACTICE;
         }
+        if (
+            raw === 'phone_shift'
+            || raw === 'phones'
+            || raw === 'phone'
+            || raw === 'телефоны'
+            || raw === 'на телефонах'
+            || raw === 'смена на телефонах'
+        ) {
+            return PLANNER_SHIFT_TYPE_PHONE_SHIFT;
+        }
         return PLANNER_SHIFT_TYPE_REGULAR;
         }
 
@@ -1799,9 +1845,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         return normalizePlannerShiftType(shift.shift_type ?? shift.shiftType) === PLANNER_SHIFT_TYPE_OFFICE_PRACTICE;
         }
 
+        function isPlannerPhoneShift(shift) {
+        if (!shift || typeof shift !== 'object') return false;
+        return normalizePlannerShiftType(shift.shift_type ?? shift.shiftType) === PLANNER_SHIFT_TYPE_PHONE_SHIFT;
+        }
+
         function plannerShiftTypeLabel(value) {
         const type = normalizePlannerShiftType(value);
         if (type === PLANNER_SHIFT_TYPE_OFFICE_PRACTICE) return PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL;
+        if (type === PLANNER_SHIFT_TYPE_PHONE_SHIFT) return PLANNER_SHIFT_TYPE_PHONE_SHIFT_LABEL;
         return 'Обычная смена';
         }
 
@@ -1811,7 +1863,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const endMinutes = parseTimeToMinutes(shift.end);
         const isCrossing = Number.isFinite(startMinutes) && Number.isFinite(endMinutes) && endMinutes <= startMinutes && shift.end !== '00:00';
         const base = `${shift.start} — ${shift.end}${isCrossing ? ' (+1)' : ''}`;
-        return isPlannerOfficePracticeShift(shift) ? `${PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL}: ${base}` : base;
+        const typeLabel = plannerShiftTypeLabel(shift.shift_type ?? shift.shiftType);
+        return normalizePlannerShiftType(shift.shift_type ?? shift.shiftType) === PLANNER_SHIFT_TYPE_REGULAR ? base : `${typeLabel}: ${base}`;
         }
 
         function plannerShiftVisualMeta(shift) {
@@ -1819,10 +1872,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const endMinutes = parseTimeToMinutes(shift?.end);
         const isNight = Number.isFinite(startMinutes) && Number.isFinite(endMinutes) && endMinutes <= startMinutes;
         const isPractice = isPlannerOfficePracticeShift(shift);
+        const isPhoneShift = isPlannerPhoneShift(shift);
+        if (isPhoneShift) {
+            return {
+            isNight,
+            isPractice,
+            isPhoneShift,
+            barGradient: isNight ? 'linear-gradient(90deg,#4338ca,#0f766e)' : 'linear-gradient(90deg,#38bdf8,#4f46e5)',
+            chipClass: isNight
+                ? 'bg-indigo-100 text-indigo-900 border border-indigo-300'
+                : 'bg-cyan-50 text-indigo-800 border border-cyan-200',
+            dotClass: 'bg-indigo-500',
+            labelClass: 'text-indigo-800'
+            };
+        }
         if (isPractice) {
             return {
             isNight,
             isPractice,
+            isPhoneShift,
             barGradient: isNight ? 'linear-gradient(90deg,#059669,#047857)' : 'linear-gradient(90deg,#34d399,#059669)',
             chipClass: isNight
                 ? 'bg-emerald-100 text-emerald-900 border border-emerald-300'
@@ -1835,6 +1903,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return {
             isNight,
             isPractice,
+            isPhoneShift,
             barGradient: 'linear-gradient(90deg,#f97316,#ea580c)',
             chipClass: 'bg-orange-100 text-orange-800 border border-orange-200',
             dotClass: 'bg-orange-500',
@@ -1844,6 +1913,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         return {
             isNight,
             isPractice,
+            isPhoneShift,
             barGradient: 'linear-gradient(90deg,#60a5fa,#2563eb)',
             chipClass: 'bg-blue-100 text-blue-800 border border-blue-200',
             dotClass: 'bg-blue-500',
@@ -2796,6 +2866,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             const trainingsList = Array.isArray(trainingsResp.data) ? trainingsResp.data : (trainingsResp.data?.trainings || []);
             const scheduleOperators = Array.isArray(schedulesResp?.data?.operators) ? schedulesResp.data.operators : [];
+            const phoneShiftIntervalsByOperatorDay = {};
+            const addPhoneShiftInterval = (opId, dateKey, start, end) => {
+                if (!Number.isFinite(opId) || opId <= 0 || !dateKey || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) return;
+                if (!phoneShiftIntervalsByOperatorDay[opId]) phoneShiftIntervalsByOperatorDay[opId] = {};
+                if (!phoneShiftIntervalsByOperatorDay[opId][dateKey]) phoneShiftIntervalsByOperatorDay[opId][dateKey] = [];
+                phoneShiftIntervalsByOperatorDay[opId][dateKey].push({ start, end });
+            };
             const syntheticPracticeOfflineActivities = [];
             for (const op of scheduleOperators) {
                 const opId = Number(op?.id);
@@ -2807,10 +2884,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (!dateKey) continue;
                 const dayShifts = Array.isArray(dayShiftsRaw) ? dayShiftsRaw : [];
                 for (const shift of dayShifts) {
-                    if (normalizePlannerShiftType(shift?.shift_type ?? shift?.shiftType) !== PLANNER_SHIFT_TYPE_OFFICE_PRACTICE) continue;
+                    const shiftType = normalizePlannerShiftType(shift?.shift_type ?? shift?.shiftType);
                     const startTime = String(shift?.start || '').trim();
                     const endTime = String(shift?.end || '').trim();
                     if (!startTime || !endTime) continue;
+                    if (shiftType === PLANNER_SHIFT_TYPE_PHONE_SHIFT) {
+                    const shiftStart = parseTimeToMinutes(startTime);
+                    let shiftEnd = parseTimeToMinutes(endTime);
+                    if (shiftStart != null && shiftEnd != null) {
+                        if (shiftEnd <= shiftStart && endTime !== '00:00') shiftEnd += 24 * 60;
+                        addPhoneShiftInterval(opId, dateKey, shiftStart, Math.min(shiftEnd, 24 * 60));
+                        if (shiftEnd > 24 * 60) {
+                        const nextDate = new Date(`${dateKey}T00:00:00`);
+                        nextDate.setDate(nextDate.getDate() + 1);
+                        addPhoneShiftInterval(opId, todayDateStr(nextDate), 0, shiftEnd - 24 * 60);
+                        }
+                    }
+                    }
+                    if (shiftType !== PLANNER_SHIFT_TYPE_OFFICE_PRACTICE) continue;
                     syntheticPracticeOfflineActivities.push({
                     id: `practice-shift-${shift?.id ?? `${opId}-${dateKey}-${startTime}-${endTime}`}`,
                     operator_id: opId,
@@ -2828,7 +2919,33 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
                 }
             }
-            const mergedTrainingsList = [...trainingsList];
+            const mergedTrainingsList = trainingsList.map((training) => {
+                const opId = Number(training?.operator_id);
+                const dateKey = String(training?.date || '').trim();
+                const trainingInterval = trainingToIntervalMinutes(training);
+                const phoneIntervals = phoneShiftIntervalsByOperatorDay?.[opId]?.[dateKey] || [];
+                const phoneOverlapIntervals = trainingInterval
+                ? phoneIntervals.map((interval) => ({
+                    start: Math.max(trainingInterval.start, Number(interval.start)),
+                    end: Math.min(trainingInterval.end, Number(interval.end))
+                })).filter((interval) => interval.end > interval.start)
+                : [];
+                if (phoneOverlapIntervals.length === 0) return training;
+
+                const countedIntervals = subtractMinuteIntervals(trainingInterval, phoneOverlapIntervals);
+                const countedMinutes = countedIntervals.reduce((sum, interval) => sum + Math.max(0, interval.end - interval.start), 0);
+                const phoneShiftOfflineMinutes = mergeMinuteIntervals(phoneOverlapIntervals)
+                .reduce((sum, interval) => sum + Math.max(0, interval.end - interval.start), 0);
+                const originalCountsInHours = training?.count_in_hours !== false;
+                return {
+                ...training,
+                count_in_hours: originalCountsInHours && countedMinutes > 0,
+                counted_intervals: originalCountsInHours ? countedIntervals : [],
+                is_phone_shift_training: true,
+                phone_shift_offline_minutes: phoneShiftOfflineMinutes,
+                phone_shift_offline_comment: PLANNER_SHIFT_TYPE_PHONE_SHIFT_LABEL
+                };
+            });
             const tmap = {};
             for (const t of mergedTrainingsList) {
                 const op = t.operator_id;
@@ -10750,8 +10867,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const last = merged[merged.length - 1];
                 if (iv.start <= last.end) {
                     last.end = Math.max(last.end, iv.end);
-                    if (iv.shiftType === PLANNER_SHIFT_TYPE_OFFICE_PRACTICE) {
-                    last.shiftType = PLANNER_SHIFT_TYPE_OFFICE_PRACTICE;
+                    if (plannerShiftTypePriority(iv.shiftType) > plannerShiftTypePriority(last.shiftType)) {
+                    last.shiftType = iv.shiftType;
                     }
                 } else {
                     merged.push({ ...iv });
@@ -19844,6 +19961,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-emerald-200 bg-emerald-50 text-emerald-700">
                                                                     <span className="w-2 h-2 rounded-full bg-emerald-500"></span> {PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL}
                                                                 </span>
+                                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-cyan-200 bg-cyan-50 text-indigo-700">
+                                                                    <span className="w-2 h-2 rounded-full bg-indigo-500"></span> {PLANNER_SHIFT_TYPE_PHONE_SHIFT_LABEL}
+                                                                </span>
                                                                 <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-amber-200 bg-amber-50 text-amber-700">
                                                                     <span className="w-2 h-2 rounded-sm bg-amber-300 border border-amber-500/70"></span> Перерыв
                                                                 </span>
@@ -20132,6 +20252,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     )}
                                                                     {dayCard.shifts.map((seg, idx) => {
                                                                         const isPracticeShift = isPlannerOfficePracticeShift(seg);
+                                                                        const isPhoneShift = isPlannerPhoneShift(seg);
                                                                         const shiftLabel = plannerShiftDisplayLabel(seg);
                                                                         const visual = plannerShiftVisualMeta(seg);
                                                                         const segBreakCount = Array.isArray(seg.breaks) ? seg.breaks.length : 0;
@@ -20149,6 +20270,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                         {isPracticeShift && (
                                                                                             <span className="px-2 py-0.5 rounded-md bg-emerald-50 border border-emerald-200 text-emerald-700">
                                                                                                 {PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL}
+                                                                                            </span>
+                                                                                        )}
+                                                                                        {isPhoneShift && (
+                                                                                            <span className="px-2 py-0.5 rounded-md bg-cyan-50 border border-cyan-200 text-indigo-700">
+                                                                                                {PLANNER_SHIFT_TYPE_PHONE_SHIFT_LABEL}
                                                                                             </span>
                                                                                         )}
                                                                                         <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 tabular-nums">
@@ -21392,7 +21518,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         const eMin = timeToMinutes(sh.end);
                                                         const overnight = eMin <= sMin && sh.end !== '00:00';
                                                         const isPracticeShift = isPlannerOfficePracticeShift(sh);
-                                                        const chipClass = isPracticeShift
+                                                        const isPhoneShift = isPlannerPhoneShift(sh);
+                                                        const chipClass = isPhoneShift
+                                                            ? (overnight
+                                                                ? 'bg-indigo-100 text-indigo-900 border border-indigo-300'
+                                                                : 'bg-cyan-50 text-indigo-800 border border-cyan-200')
+                                                            : isPracticeShift
                                                             ? (overnight
                                                                 ? 'bg-emerald-200 text-emerald-900 border border-emerald-300'
                                                                 : 'bg-emerald-100 text-emerald-800 border border-emerald-200')
@@ -21401,7 +21532,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 : 'bg-blue-100 text-blue-800 border border-blue-200');
                                                         return (
                                                             <span key={si} className={`px-1 py-0.5 rounded text-[10px] font-medium tabular-nums leading-tight ${chipClass}`}>
-                                                                {isPracticeShift ? 'ПР ' : ''}{sh.start}–{sh.end}{overnight ? '↑' : ''}
+                                                                {isPhoneShift ? 'ТФ ' : (isPracticeShift ? 'ПР ' : '')}{sh.start}–{sh.end}{overnight ? '↑' : ''}
                                                             </span>
                                                         );
                                                     })}
@@ -21476,6 +21607,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <span className="inline-flex items-center gap-1 text-[10px] text-slate-500"><span className="w-2.5 h-2.5 rounded-sm bg-blue-100 border border-blue-200 inline-block"></span>Обычная</span>
                                                     <span className="inline-flex items-center gap-1 text-[10px] text-slate-500"><span className="w-2.5 h-2.5 rounded-sm bg-orange-100 border border-orange-200 inline-block"></span>Ночная</span>
                                                     <span className="inline-flex items-center gap-1 text-[10px] text-slate-500"><span className="w-2.5 h-2.5 rounded-sm bg-emerald-100 border border-emerald-200 inline-block"></span>Практика</span>
+                                                    <span className="inline-flex items-center gap-1 text-[10px] text-slate-500"><span className="w-2.5 h-2.5 rounded-sm bg-cyan-50 border border-cyan-200 inline-block"></span>Телефоны</span>
                                                     <span className="inline-flex items-center gap-1 text-[10px] text-slate-500"><span className="w-2.5 h-2.5 rounded-sm bg-sky-50 border border-sky-200 inline-block"></span>Выходной</span>
                                                 </div>
                                             </div>
@@ -23972,6 +24104,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             >
                                 <option value={PLANNER_SHIFT_TYPE_REGULAR}>Обычная смена</option>
                                 <option value={PLANNER_SHIFT_TYPE_OFFICE_PRACTICE}>{PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL}</option>
+                                <option value={PLANNER_SHIFT_TYPE_PHONE_SHIFT}>{PLANNER_SHIFT_TYPE_PHONE_SHIFT_LABEL}</option>
                             </select>
                         </div>
                         <div className="mt-4 p-3 bg-blue-50 border border-blue-100 rounded-lg">
@@ -24006,6 +24139,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 const crossing = timeToMinutes(seg.end) <= timeToMinutes(seg.start);
                                 const duration = ((timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? timeToMinutes(seg.end) + 1440 : timeToMinutes(seg.end)) - timeToMinutes(seg.start)) / 60;
                                 const isPracticeShift = isPlannerOfficePracticeShift(seg);
+                                const isPhoneShift = isPlannerPhoneShift(seg);
                                 const isEditing = modalState.editIndex === idx;
                                 return (
                                 <div key={idx} className={`flex items-center gap-3 p-4 rounded-lg border-2 transition-all ${isEditing ? 'border-blue-400 bg-blue-50 shadow-md' : 'border-slate-200 bg-white hover:border-slate-300 hover:shadow-sm'}`}>
@@ -24014,6 +24148,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <span className="text-base font-bold text-slate-900">{seg.start} — {seg.end}</span>
                                             {crossing && <span className="px-2 py-0.5 bg-orange-100 text-orange-700 text-xs font-semibold rounded-full">+1 день</span>}
                                             {isPracticeShift && <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 text-xs font-semibold rounded-full">{PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL}</span>}
+                                            {isPhoneShift && <span className="px-2 py-0.5 bg-cyan-50 text-indigo-700 border border-cyan-200 text-xs font-semibold rounded-full">{PLANNER_SHIFT_TYPE_PHONE_SHIFT_LABEL}</span>}
                                             {isEditing && <span className="px-2 py-0.5 bg-blue-500 text-white text-xs font-semibold rounded-full">Редактируется</span>}
                                         </div>
                                         <div className="text-sm text-slate-600 flex items-center gap-2">
@@ -24109,6 +24244,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             >
                                 <option value={PLANNER_SHIFT_TYPE_REGULAR}>Обычная смена</option>
                                 <option value={PLANNER_SHIFT_TYPE_OFFICE_PRACTICE}>{PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL}</option>
+                                <option value={PLANNER_SHIFT_TYPE_PHONE_SHIFT}>{PLANNER_SHIFT_TYPE_PHONE_SHIFT_LABEL}</option>
                             </select>
                         </div>
                     </div>

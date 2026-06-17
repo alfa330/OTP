@@ -4,6 +4,7 @@ import re
 import textwrap
 import unittest
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,6 +66,88 @@ class _TechReasonDummy:
 
 
 class WorkScheduleBreakRuleTests(unittest.TestCase):
+    def test_phone_shift_type_normalization_and_merge_priority(self):
+        namespace = {
+            "Any": Any,
+            "Dict": Dict,
+            "List": List,
+            "Optional": Optional,
+            "WORK_SHIFT_TYPE_REGULAR": "regular",
+            "WORK_SHIFT_TYPE_OFFICE_PRACTICE": "office_practice",
+            "WORK_SHIFT_TYPE_PHONE_SHIFT": "phone_shift",
+            "WORK_SHIFT_TYPE_ALLOWED": {"regular", "office_practice", "phone_shift"},
+            "WORK_SHIFT_TYPE_PRIORITY": {
+                "regular": 0,
+                "office_practice": 1,
+                "phone_shift": 2,
+            },
+        }
+        for function_name in (
+            "_time_to_minutes",
+            "_minutes_to_time",
+            "_normalize_work_shift_type_value",
+            "_work_shift_type_priority",
+            "_merge_shifts_for_date",
+        ):
+            exec(_function_source(DATABASE_PATH, function_name), namespace)
+
+        normalize = namespace["_normalize_work_shift_type_value"]
+        merge = namespace["_merge_shifts_for_date"]
+
+        self.assertEqual(normalize("phone_shift"), "phone_shift")
+        self.assertEqual(normalize("phones"), "phone_shift")
+        self.assertEqual(normalize("office_practice"), "office_practice")
+
+        result = merge([
+            {"id": 1, "start": "09:00", "end": "13:00", "shift_type": "regular"},
+            {"id": 2, "start": "10:00", "end": "12:00", "shift_type": "phone_shift"},
+            {"id": 3, "start": "12:00", "end": "14:00", "shift_type": "office_practice"},
+        ])
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["start"], "09:00")
+        self.assertEqual(result[0]["end"], "14:00")
+        self.assertEqual(result[0]["shift_type"], "phone_shift")
+
+    def test_phone_shift_training_is_exposed_as_offline_activity_source(self):
+        recalc_source = _function_source(
+            DATABASE_PATH,
+            "_recalculate_auto_daily_hours_tx",
+            class_name="Database",
+        )
+        list_source = _function_source(
+            DATABASE_PATH,
+            "get_operator_offline_activities",
+            class_name="Database",
+        )
+        summary_source = _function_source(
+            DATABASE_PATH,
+            "get_hours_summary",
+            class_name="Database",
+        )
+        loader_source = _function_source(
+            DATABASE_PATH,
+            "_load_phone_shift_training_offline_intervals_by_operator_day_tx",
+            class_name="Database",
+        )
+        manual_loader_source = _function_source(
+            DATABASE_PATH,
+            "_load_phone_shift_manual_training_offline_intervals_by_operator_day_tx",
+            class_name="Database",
+        )
+
+        self.assertIn("WORK_SHIFT_TYPE_PHONE_SHIFT", recalc_source)
+        self.assertIn("phone_shift_training_intervals", recalc_source)
+        self.assertIn("_schedule_auto_subtract_intervals", recalc_source)
+        self.assertIn("WORK_SHIFT_PHONE_SHIFT_OFFLINE_COMMENT", loader_source)
+        self.assertIn("work_shift_training_status", loader_source)
+        self.assertIn("training_phone_shift", manual_loader_source)
+        self.assertIn("counted_only", manual_loader_source)
+        self.assertIn("manual_phone_training_counted_totals", summary_source)
+        self.assertIn("manual_phone_training_map", list_source)
+        self.assertIn("_load_phone_shift_training_offline_intervals_by_operator_day_tx", list_source)
+        self.assertIn("'read_only': True", list_source)
+
     def test_database_custom_direction_rules_disable_default_fallback_for_gaps(self):
         namespace = {}
         exec(_function_source(DATABASE_PATH, "_pick_break_durations_for_shift", class_name="Database"), namespace)

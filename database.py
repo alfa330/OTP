@@ -306,10 +306,18 @@ def _minutes_to_time(minutes: int) -> str:
 
 WORK_SHIFT_TYPE_REGULAR = 'regular'
 WORK_SHIFT_TYPE_OFFICE_PRACTICE = 'office_practice'
+WORK_SHIFT_TYPE_PHONE_SHIFT = 'phone_shift'
 WORK_SHIFT_OFFICE_PRACTICE_OFFLINE_COMMENT = 'Практика в офисе'
+WORK_SHIFT_PHONE_SHIFT_OFFLINE_COMMENT = 'смена на телефонах'
 WORK_SHIFT_TYPE_ALLOWED = {
     WORK_SHIFT_TYPE_REGULAR,
-    WORK_SHIFT_TYPE_OFFICE_PRACTICE
+    WORK_SHIFT_TYPE_OFFICE_PRACTICE,
+    WORK_SHIFT_TYPE_PHONE_SHIFT
+}
+WORK_SHIFT_TYPE_PRIORITY = {
+    WORK_SHIFT_TYPE_REGULAR: 0,
+    WORK_SHIFT_TYPE_OFFICE_PRACTICE: 1,
+    WORK_SHIFT_TYPE_PHONE_SHIFT: 2
 }
 
 
@@ -319,9 +327,14 @@ def _normalize_work_shift_type_value(value: Optional[str]) -> str:
         return WORK_SHIFT_TYPE_REGULAR
     if raw in ('office_practice', 'practice', 'практика', 'практика в офисе', 'практика в офисе таксопарка'):
         return WORK_SHIFT_TYPE_OFFICE_PRACTICE
+    if raw in ('phone_shift', 'phones', 'phone', 'телефоны', 'на телефонах', 'смена на телефонах'):
+        return WORK_SHIFT_TYPE_PHONE_SHIFT
     if raw not in WORK_SHIFT_TYPE_ALLOWED:
         raise ValueError("Invalid shift_type")
     return raw
+
+def _work_shift_type_priority(value: Optional[str]) -> int:
+    return int(WORK_SHIFT_TYPE_PRIORITY.get(_normalize_work_shift_type_value(value), 0))
 
 def _merge_shifts_for_date(shifts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
@@ -373,9 +386,9 @@ def _merge_shifts_for_date(shifts: List[Dict[str, Any]]) -> List[Dict[str, Any]]
                     last['original_ids'] = [last['original'].get('id')]
                 if interval['original'].get('id'):
                     last['original_ids'].append(interval['original'].get('id'))
-                # Для объединенного интервала приоритет у "Практики в офисе".
-                if interval.get('shift_type') == WORK_SHIFT_TYPE_OFFICE_PRACTICE:
-                    last['shift_type'] = WORK_SHIFT_TYPE_OFFICE_PRACTICE
+                # Для объединенного интервала оставляем самый специфичный тип смены.
+                if _work_shift_type_priority(interval.get('shift_type')) > _work_shift_type_priority(last.get('shift_type')):
+                    last['shift_type'] = interval.get('shift_type')
             else:
                 merged.append(interval.copy())
     
@@ -1629,11 +1642,20 @@ class Database:
                     shift_date DATE NOT NULL,
                     start_time TIME NOT NULL,
                     end_time TIME NOT NULL,
-                    shift_type VARCHAR(32) NOT NULL DEFAULT 'regular' CHECK (shift_type IN ('regular', 'office_practice')),
+                    shift_type VARCHAR(32) NOT NULL DEFAULT 'regular' CHECK (shift_type IN ('regular', 'office_practice', 'phone_shift')),
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(operator_id, shift_date, start_time, end_time)
                 );
+            """)
+            cursor.execute("""
+                ALTER TABLE work_shifts
+                DROP CONSTRAINT IF EXISTS work_shifts_shift_type_check;
+            """)
+            cursor.execute("""
+                ALTER TABLE work_shifts
+                ADD CONSTRAINT work_shifts_shift_type_check
+                CHECK (shift_type IN ('regular', 'office_practice', 'phone_shift'));
             """)
 
             # Break periods within shifts
@@ -9965,6 +9987,393 @@ class Database:
 
         return result, totals
 
+    def _phone_shift_training_status_keys(self):
+        return sorted({
+            self._normalize_import_status_key(item)
+            for item in (
+                set(CHAT_MANAGER_TRAINING_STATUS_KEYS)
+                | {SCHEDULE_AUTO_TRAINING_STATUS_KEY, 'training', 'study'}
+            )
+            if self._normalize_import_status_key(item)
+        })
+
+    def _time_label_from_seconds(self, seconds_value, round_end=False):
+        seconds_int = max(0, int(seconds_value or 0))
+        if round_end:
+            minutes = int((seconds_int + 59) // 60)
+        else:
+            minutes = int(seconds_int // 60)
+        return _minutes_to_time(minutes)
+
+    def _load_phone_shift_training_offline_intervals_by_operator_day_tx(
+        self,
+        cursor,
+        operator_ids,
+        start_date,
+        end_date,
+        group_id=None
+    ):
+        op_ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
+        result = {op_id: {} for op_id in op_ids}
+        totals = {op_id: 0.0 for op_id in op_ids}
+        if not op_ids:
+            return result, totals
+
+        start_date_obj = self._normalize_schedule_date(start_date)
+        end_date_obj = self._normalize_schedule_date(end_date)
+        if end_date_obj < start_date_obj:
+            start_date_obj, end_date_obj = end_date_obj, start_date_obj
+
+        shift_source_start = start_date_obj - timedelta(days=1)
+        shift_source_end = end_date_obj
+        cursor.execute(
+            """
+            SELECT id, operator_id, shift_date, start_time, end_time
+            FROM work_shifts
+            WHERE operator_id = ANY(%s)
+              AND COALESCE(shift_type, 'regular') = %s
+              AND shift_date >= %s
+              AND shift_date <= %s
+            ORDER BY operator_id, shift_date, start_time, end_time, id
+            """,
+            (op_ids, WORK_SHIFT_TYPE_PHONE_SHIFT, shift_source_start, shift_source_end)
+        )
+
+        phone_shift_intervals_by_day = {}
+        for shift_id, op_id, shift_date_value, start_time_value, end_time_value in cursor.fetchall() or []:
+            op_id_int = int(op_id)
+            if op_id_int not in result or shift_date_value is None:
+                continue
+            start_min, end_min = self._schedule_interval_minutes(start_time_value, end_time_value)
+            day_chunks = self._split_absolute_minutes_intervals_by_day(
+                [{'start': int(start_min), 'end': int(end_min)}],
+                shift_date_value
+            )
+            for chunk in day_chunks:
+                chunk_date = chunk.get('date')
+                if not chunk_date:
+                    continue
+                if chunk_date < start_date_obj or chunk_date > end_date_obj:
+                    continue
+                start_sec = int(chunk.get('start_min') or 0) * 60
+                end_sec = int(chunk.get('end_min') or 0) * 60
+                if end_sec <= start_sec:
+                    continue
+                phone_shift_intervals_by_day.setdefault((op_id_int, chunk_date), []).append({
+                    'start': start_sec,
+                    'end': end_sec,
+                    'shift_id': int(shift_id)
+                })
+
+        if not phone_shift_intervals_by_day:
+            return result, totals
+
+        group_filter_sql = ""
+        params = [op_ids, self._phone_shift_training_status_keys(), start_date_obj, end_date_obj]
+        if group_id is not None:
+            group_filter_sql = """
+              AND EXISTS (
+                  SELECT 1
+                  FROM group_operator_memberships gom
+                  WHERE gom.operator_id = oss.operator_id
+                    AND gom.group_id = %s
+                    AND gom.start_date <= oss.status_date
+                    AND (gom.end_date IS NULL OR gom.end_date >= oss.status_date)
+              )
+            """
+            params.append(int(group_id))
+
+        cursor.execute(
+            f"""
+            SELECT
+                oss.id,
+                oss.operator_id,
+                oss.status_date,
+                oss.start_at,
+                oss.end_at,
+                oss.status_key
+            FROM operator_status_segments oss
+            WHERE oss.operator_id = ANY(%s)
+              AND LOWER(BTRIM(oss.status_key)) = ANY(%s)
+              AND oss.status_date >= %s
+              AND oss.status_date <= %s
+              {group_filter_sql}
+            ORDER BY oss.operator_id, oss.status_date, oss.start_at, oss.end_at, oss.id
+            """,
+            params
+        )
+
+        raw_intersections = {op_id: {} for op_id in op_ids}
+        for status_id, op_id, status_date_value, start_at_value, end_at_value, status_key in cursor.fetchall() or []:
+            op_id_int = int(op_id)
+            if op_id_int not in result:
+                continue
+            for chunk in self._schedule_auto_split_status_segment_by_day(status_date_value, start_at_value, end_at_value):
+                chunk_day = chunk.get('day')
+                if not isinstance(chunk_day, date):
+                    continue
+                if chunk_day < start_date_obj or chunk_day > end_date_obj:
+                    continue
+                phone_intervals = phone_shift_intervals_by_day.get((op_id_int, chunk_day)) or []
+                if not phone_intervals:
+                    continue
+                status_interval = {
+                    'start': int(chunk.get('start', 0)),
+                    'end': int(chunk.get('end', 0))
+                }
+                intersections = self._schedule_auto_intersect_interval_with_list(
+                    status_interval,
+                    phone_intervals
+                )
+                if not intersections:
+                    continue
+                day_key = chunk_day.strftime('%Y-%m-%d')
+                for interval in intersections:
+                    start_sec = int(interval.get('start', 0))
+                    end_sec = int(interval.get('end', 0))
+                    if end_sec <= start_sec:
+                        continue
+                    raw_intersections.setdefault(op_id_int, {}).setdefault(day_key, []).append({
+                        'start': start_sec,
+                        'end': end_sec,
+                        'status_id': int(status_id),
+                        'status_key': self._normalize_import_status_key(status_key)
+                    })
+
+        for op_id_int, days_map in raw_intersections.items():
+            for day_key, intervals in (days_map or {}).items():
+                merged = self._merge_break_intervals(intervals or [])
+                for idx, interval in enumerate(merged):
+                    start_sec = int(interval.get('start', 0))
+                    end_sec = int(interval.get('end', 0))
+                    duration_seconds = max(0, end_sec - start_sec)
+                    if duration_seconds <= 0:
+                        continue
+                    result.setdefault(op_id_int, {}).setdefault(day_key, []).append({
+                        'id': f"phone-shift-training-{op_id_int}-{day_key}-{idx}-{start_sec}-{end_sec}",
+                        'date': day_key,
+                        'start_seconds': start_sec,
+                        'end_seconds': end_sec,
+                        'duration_seconds': duration_seconds,
+                        'start_time': self._time_label_from_seconds(start_sec),
+                        'end_time': self._time_label_from_seconds(end_sec, round_end=True),
+                        'comment': WORK_SHIFT_PHONE_SHIFT_OFFLINE_COMMENT,
+                        'source': 'work_shift_training_status',
+                        'shift_type': WORK_SHIFT_TYPE_PHONE_SHIFT,
+                        'read_only': True,
+                        'is_phone_shift_training': True
+                    })
+                    totals[op_id_int] = round(
+                        float(totals.get(op_id_int, 0.0)) + (float(duration_seconds) / 3600.0),
+                        4
+                    )
+
+        return result, totals
+
+    def _load_phone_shift_manual_training_offline_intervals_by_operator_day_tx(
+        self,
+        cursor,
+        operator_ids,
+        start_date,
+        end_date,
+        group_id=None,
+        counted_only=False
+    ):
+        op_ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
+        result = {op_id: {} for op_id in op_ids}
+        totals = {op_id: 0.0 for op_id in op_ids}
+        if not op_ids:
+            return result, totals
+
+        start_date_obj = self._normalize_schedule_date(start_date)
+        end_date_obj = self._normalize_schedule_date(end_date)
+        if end_date_obj < start_date_obj:
+            start_date_obj, end_date_obj = end_date_obj, start_date_obj
+
+        shift_source_start = start_date_obj - timedelta(days=1)
+        shift_source_end = end_date_obj
+        cursor.execute(
+            """
+            SELECT id, operator_id, shift_date, start_time, end_time
+            FROM work_shifts
+            WHERE operator_id = ANY(%s)
+              AND COALESCE(shift_type, 'regular') = %s
+              AND shift_date >= %s
+              AND shift_date <= %s
+            ORDER BY operator_id, shift_date, start_time, end_time, id
+            """,
+            (op_ids, WORK_SHIFT_TYPE_PHONE_SHIFT, shift_source_start, shift_source_end)
+        )
+
+        phone_shift_intervals_by_day = {}
+        for shift_id, op_id, shift_date_value, start_time_value, end_time_value in cursor.fetchall() or []:
+            op_id_int = int(op_id)
+            if op_id_int not in result or shift_date_value is None:
+                continue
+            start_min, end_min = self._schedule_interval_minutes(start_time_value, end_time_value)
+            day_chunks = self._split_absolute_minutes_intervals_by_day(
+                [{'start': int(start_min), 'end': int(end_min)}],
+                shift_date_value
+            )
+            for chunk in day_chunks:
+                chunk_date = chunk.get('date')
+                if not chunk_date:
+                    continue
+                if chunk_date < start_date_obj or chunk_date > end_date_obj:
+                    continue
+                start_sec = int(chunk.get('start_min') or 0) * 60
+                end_sec = int(chunk.get('end_min') or 0) * 60
+                if end_sec <= start_sec:
+                    continue
+                phone_shift_intervals_by_day.setdefault((op_id_int, chunk_date), []).append({
+                    'start': start_sec,
+                    'end': end_sec,
+                    'shift_id': int(shift_id)
+                })
+
+        if not phone_shift_intervals_by_day:
+            return result, totals
+
+        group_filter_sql = ""
+        counted_filter_sql = "AND t.count_in_hours = TRUE" if counted_only else ""
+        params = [op_ids, start_date_obj - timedelta(days=1), end_date_obj]
+        if group_id is not None:
+            group_filter_sql = """
+              AND EXISTS (
+                  SELECT 1
+                  FROM group_operator_memberships gom
+                  WHERE gom.operator_id = t.operator_id
+                    AND gom.group_id = %s
+                    AND gom.start_date <= t.training_date
+                    AND (gom.end_date IS NULL OR gom.end_date >= t.training_date)
+              )
+            """
+            params.append(int(group_id))
+
+        cursor.execute(
+            f"""
+            SELECT
+                t.id,
+                t.operator_id,
+                t.training_date,
+                t.start_time,
+                t.end_time,
+                t.count_in_hours
+            FROM trainings t
+            WHERE t.operator_id = ANY(%s)
+              AND t.training_date >= %s
+              AND t.training_date <= %s
+              {counted_filter_sql}
+              {group_filter_sql}
+            ORDER BY t.operator_id, t.training_date, t.start_time, t.end_time, t.id
+            """,
+            params
+        )
+
+        raw_intersections = {op_id: {} for op_id in op_ids}
+        for training_id, op_id, training_date_value, start_time_value, end_time_value, count_in_hours in cursor.fetchall() or []:
+            op_id_int = int(op_id)
+            if op_id_int not in result or training_date_value is None:
+                continue
+            start_min, end_min = self._schedule_interval_minutes(start_time_value, end_time_value)
+            day_chunks = self._split_absolute_minutes_intervals_by_day(
+                [{'start': int(start_min), 'end': int(end_min)}],
+                training_date_value
+            )
+            for chunk in day_chunks:
+                chunk_day = chunk.get('date')
+                if not isinstance(chunk_day, date):
+                    continue
+                if chunk_day < start_date_obj or chunk_day > end_date_obj:
+                    continue
+                phone_intervals = phone_shift_intervals_by_day.get((op_id_int, chunk_day)) or []
+                if not phone_intervals:
+                    continue
+                training_interval = {
+                    'start': int(chunk.get('start_min') or 0) * 60,
+                    'end': int(chunk.get('end_min') or 0) * 60
+                }
+                intersections = self._schedule_auto_intersect_interval_with_list(
+                    training_interval,
+                    phone_intervals
+                )
+                if not intersections:
+                    continue
+                day_key = chunk_day.strftime('%Y-%m-%d')
+                for interval in intersections:
+                    start_sec = int(interval.get('start', 0))
+                    end_sec = int(interval.get('end', 0))
+                    if end_sec <= start_sec:
+                        continue
+                    raw_intersections.setdefault(op_id_int, {}).setdefault(day_key, []).append({
+                        'start': start_sec,
+                        'end': end_sec,
+                        'training_id': int(training_id),
+                        'count_in_hours': bool(count_in_hours)
+                    })
+
+        for op_id_int, days_map in raw_intersections.items():
+            for day_key, intervals in (days_map or {}).items():
+                merged = self._merge_break_intervals(intervals or [])
+                for idx, interval in enumerate(merged):
+                    start_sec = int(interval.get('start', 0))
+                    end_sec = int(interval.get('end', 0))
+                    duration_seconds = max(0, end_sec - start_sec)
+                    if duration_seconds <= 0:
+                        continue
+                    result.setdefault(op_id_int, {}).setdefault(day_key, []).append({
+                        'id': f"phone-shift-manual-training-{op_id_int}-{day_key}-{idx}-{start_sec}-{end_sec}",
+                        'date': day_key,
+                        'start_seconds': start_sec,
+                        'end_seconds': end_sec,
+                        'duration_seconds': duration_seconds,
+                        'start_time': self._time_label_from_seconds(start_sec),
+                        'end_time': self._time_label_from_seconds(end_sec, round_end=True),
+                        'comment': WORK_SHIFT_PHONE_SHIFT_OFFLINE_COMMENT,
+                        'source': 'training_phone_shift',
+                        'shift_type': WORK_SHIFT_TYPE_PHONE_SHIFT,
+                        'read_only': True,
+                        'is_phone_shift_training': True
+                    })
+                    totals[op_id_int] = round(
+                        float(totals.get(op_id_int, 0.0)) + (float(duration_seconds) / 3600.0),
+                        4
+                    )
+
+        return result, totals
+
+    def _sum_phone_shift_offline_interval_maps(self, operator_ids, *interval_maps):
+        op_ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
+        intervals_by_operator_day = {op_id: {} for op_id in op_ids}
+        for interval_map in interval_maps:
+            for op_id_raw, days_map in (interval_map or {}).items():
+                try:
+                    op_id_int = int(op_id_raw)
+                except Exception:
+                    continue
+                if op_id_int not in intervals_by_operator_day:
+                    continue
+                for day_key, items in (days_map or {}).items():
+                    for item in (items or []):
+                        start_sec = int(item.get('start_seconds') or 0)
+                        end_sec = int(item.get('end_seconds') or 0)
+                        if end_sec <= start_sec:
+                            continue
+                        day_key_text = str(item.get('date') or day_key)
+                        intervals_by_operator_day[op_id_int].setdefault(day_key_text, []).append({
+                            'start': start_sec,
+                            'end': end_sec
+                        })
+
+        totals = {op_id: 0.0 for op_id in op_ids}
+        for op_id, days_map in intervals_by_operator_day.items():
+            total_seconds = 0
+            for intervals in (days_map or {}).values():
+                for interval in self._merge_break_intervals(intervals or []):
+                    total_seconds += max(0, int(interval.get('end', 0)) - int(interval.get('start', 0)))
+            totals[op_id] = round(float(total_seconds) / 3600.0, 4)
+        return totals
+
     def _load_offline_activities_by_operator_day_tx(self, cursor, operator_ids, start_date, end_date, group_id=None):
         """
         Возвращает:
@@ -10119,6 +10528,73 @@ class Database:
                 "read_only": True,
             })
             totals[op_id_int] = round(float(totals.get(op_id_int, 0.0)) + float(duration_hours), 2)
+
+        manual_phone_training_map, _manual_phone_training_totals = self._load_phone_shift_manual_training_offline_intervals_by_operator_day_tx(
+            cursor=cursor,
+            operator_ids=op_ids,
+            start_date=start_date,
+            end_date=end_date,
+            group_id=group_id
+        )
+        status_phone_training_map, _status_phone_training_totals = self._load_phone_shift_training_offline_intervals_by_operator_day_tx(
+            cursor=cursor,
+            operator_ids=op_ids,
+            start_date=start_date,
+            end_date=end_date,
+            group_id=group_id
+        )
+        phone_training_seen = {op_id: set() for op_id in op_ids}
+        for phone_training_map in (manual_phone_training_map, status_phone_training_map):
+            for op_id_int, days_map in (phone_training_map or {}).items():
+                try:
+                    op_id_int = int(op_id_int)
+                except Exception:
+                    continue
+                if op_id_int not in result:
+                    continue
+                for day_key, items in (days_map or {}).items():
+                    for item in (items or []):
+                        start_sec = max(0, int(item.get('start_seconds') or 0))
+                        end_sec = max(0, int(item.get('end_seconds') or 0))
+                        if end_sec <= start_sec:
+                            continue
+                        signature = (str(item.get('date') or day_key), start_sec, end_sec)
+                        if signature in phone_training_seen.setdefault(op_id_int, set()):
+                            continue
+                        phone_training_seen[op_id_int].add(signature)
+                        duration_seconds = end_sec - start_sec
+                        duration_minutes = self._schedule_auto_seconds_to_display_minutes(duration_seconds)
+                        duration_hours = round(float(duration_seconds) / 3600.0, 2)
+                        start_text = item.get('start_time')
+                        end_text = item.get('end_time')
+                        result.setdefault(op_id_int, {}).setdefault(str(day_key), []).append({
+                            "id": item.get('id'),
+                            "operator_id": op_id_int,
+                            "date": item.get('date') or str(day_key),
+                            "start_time": start_text,
+                            "end_time": end_text,
+                            "time_range": f"{start_text} - {end_text}" if start_text and end_text else None,
+                            "comment": WORK_SHIFT_PHONE_SHIFT_OFFLINE_COMMENT,
+                            "created_by_name": "Планировщик",
+                            "created_at": None,
+                            "duration_minutes": int(duration_minutes),
+                            "duration_seconds": int(duration_seconds),
+                            "duration_hours": float(duration_hours),
+                            "source": item.get('source') or "work_shift_training_status",
+                            "shift_type": WORK_SHIFT_TYPE_PHONE_SHIFT,
+                            "is_phone_shift_training": True,
+                            "read_only": True,
+                        })
+        phone_training_totals = self._sum_phone_shift_offline_interval_maps(
+            op_ids,
+            manual_phone_training_map,
+            status_phone_training_map
+        )
+        for op_id_int in op_ids:
+            totals[op_id_int] = round(
+                float(totals.get(op_id_int, 0.0)) + float(phone_training_totals.get(op_id_int, 0.0) or 0.0),
+                2
+            )
 
         return result, totals
 
@@ -13298,7 +13774,21 @@ class Database:
             GROUP BY t.operator_id
         """, params)
 
-        return {int(op_id): float(hours or 0.0) for op_id, hours in cursor.fetchall()}
+        totals = {int(op_id): float(hours or 0.0) for op_id, hours in cursor.fetchall()}
+        _manual_phone_training_map, manual_phone_training_totals = self._load_phone_shift_manual_training_offline_intervals_by_operator_day_tx(
+            cursor=cursor,
+            operator_ids=normalized_ids,
+            start_date=start_date,
+            end_date=end_date,
+            group_id=group_id,
+            counted_only=True
+        )
+        for op_id in normalized_ids:
+            totals[op_id] = max(
+                0.0,
+                float(totals.get(op_id, 0.0)) - float(manual_phone_training_totals.get(op_id, 0.0) or 0.0)
+            )
+        return totals
 
     def _get_tenure_months_for_reference(self, hire_date_value, reference_date: Optional[date]) -> Optional[int]:
         if not hire_date_value or not reference_date:
@@ -13425,13 +13915,40 @@ class Database:
                 'offline_activity_hours': 0.0,
             }
 
+        manual_phone_training_map, _manual_phone_training_totals = self._load_phone_shift_manual_training_offline_intervals_by_operator_day_tx(
+            cursor=cursor,
+            operator_ids=[operator_id],
+            start_date=month_start_date,
+            end_date=next_month_start - timedelta(days=1)
+        )
+        _manual_phone_training_counted_map, manual_phone_training_counted_totals = self._load_phone_shift_manual_training_offline_intervals_by_operator_day_tx(
+            cursor=cursor,
+            operator_ids=[operator_id],
+            start_date=month_start_date,
+            end_date=next_month_start - timedelta(days=1),
+            counted_only=True
+        )
+        status_phone_training_map, _status_phone_training_totals = self._load_phone_shift_training_offline_intervals_by_operator_day_tx(
+            cursor=cursor,
+            operator_ids=[operator_id],
+            start_date=month_start_date,
+            end_date=next_month_start - timedelta(days=1)
+        )
+        phone_training_totals = self._sum_phone_shift_offline_interval_maps(
+            [operator_id],
+            manual_phone_training_map,
+            status_phone_training_map
+        )
         return {
             'hire_date_value': row[0],
             'regular_hours': float(row[1] or 0.0),
             'operator_norm_hours': float(row[2] or 0.0),
-            'training_hours': float(row[3] or 0.0),
+            'training_hours': max(
+                0.0,
+                float(row[3] or 0.0) - float(manual_phone_training_counted_totals.get(int(operator_id), 0.0) or 0.0)
+            ),
             'technical_issue_hours': float(row[4] or 0.0),
-            'offline_activity_hours': float(row[5] or 0.0),
+            'offline_activity_hours': float(row[5] or 0.0) + float(phone_training_totals.get(int(operator_id), 0.0) or 0.0),
         }
 
     def _build_operator_call_evaluation_target(
@@ -13602,6 +14119,18 @@ class Database:
             """, (operator_id, current_month))
             tr_row = cursor.fetchone()
             training_hours = float(tr_row[0] or 0.0)
+            month_start_date, next_month_start = self._get_month_date_range(current_month)
+            _manual_phone_training_counted_map, manual_phone_training_counted_totals = self._load_phone_shift_manual_training_offline_intervals_by_operator_day_tx(
+                cursor=cursor,
+                operator_ids=[operator_id],
+                start_date=month_start_date,
+                end_date=next_month_start - timedelta(days=1),
+                counted_only=True
+            )
+            training_hours = max(
+                0.0,
+                training_hours - float(manual_phone_training_counted_totals.get(int(operator_id), 0.0) or 0.0)
+            )
 
             # 3) Рассчитываем техсбои за месяц (учитываются в часах выполнения нормы)
             cursor.execute("""
@@ -13650,6 +14179,24 @@ class Database:
             """, (operator_id, current_month))
             practice_row = cursor.fetchone()
             offline_activity_hours += float(practice_row[0] or 0.0)
+            manual_phone_training_map, _manual_phone_training_totals = self._load_phone_shift_manual_training_offline_intervals_by_operator_day_tx(
+                cursor=cursor,
+                operator_ids=[operator_id],
+                start_date=month_start_date,
+                end_date=next_month_start - timedelta(days=1)
+            )
+            status_phone_training_map, _status_phone_training_totals = self._load_phone_shift_training_offline_intervals_by_operator_day_tx(
+                cursor=cursor,
+                operator_ids=[operator_id],
+                start_date=month_start_date,
+                end_date=next_month_start - timedelta(days=1)
+            )
+            phone_training_totals = self._sum_phone_shift_offline_interval_maps(
+                [operator_id],
+                manual_phone_training_map,
+                status_phone_training_map
+            )
+            offline_activity_hours += float(phone_training_totals.get(int(operator_id), 0.0) or 0.0)
 
             # 4) Количество оценённых звонков и средняя оценка (как раньше)
             cursor.execute("""
@@ -14057,15 +14604,60 @@ class Database:
         with self._get_cursor() as cursor:
             cursor.execute(query, params)
             rows = cursor.fetchall()
+            phone_training_totals = {}
+            manual_phone_training_counted_totals = {}
+            if month and rows:
+                try:
+                    month_start_date, next_month_start = self._get_month_date_range(month)
+                    operator_ids_for_phone_training = [
+                        int(row[0]) for row in rows if row and row[0] is not None
+                    ]
+                    manual_phone_training_map, _manual_phone_training_totals = self._load_phone_shift_manual_training_offline_intervals_by_operator_day_tx(
+                        cursor=cursor,
+                        operator_ids=operator_ids_for_phone_training,
+                        start_date=month_start_date,
+                        end_date=next_month_start - timedelta(days=1)
+                    )
+                    _manual_phone_training_counted_map, manual_phone_training_counted_totals = self._load_phone_shift_manual_training_offline_intervals_by_operator_day_tx(
+                        cursor=cursor,
+                        operator_ids=operator_ids_for_phone_training,
+                        start_date=month_start_date,
+                        end_date=next_month_start - timedelta(days=1),
+                        counted_only=True
+                    )
+                    status_phone_training_map, _status_phone_training_totals = self._load_phone_shift_training_offline_intervals_by_operator_day_tx(
+                        cursor=cursor,
+                        operator_ids=operator_ids_for_phone_training,
+                        start_date=month_start_date,
+                        end_date=next_month_start - timedelta(days=1)
+                    )
+                    phone_training_totals = self._sum_phone_shift_offline_interval_maps(
+                        operator_ids_for_phone_training,
+                        manual_phone_training_map,
+                        status_phone_training_map
+                    )
+                except Exception:
+                    logging.exception("Failed to load phone-shift training offline totals for hours summary")
+                    phone_training_totals = {}
+                    manual_phone_training_counted_totals = {}
 
             result = []
             for row in rows:
                 calculation_model_code = self._normalize_calculation_model_code(row[4], row[3])
                 regular_hours = float(row[5])
                 total_calls = int(row[8])
-                training_hours = round(float(row[9]), 2)
+                training_hours = round(
+                    max(
+                        0.0,
+                        float(row[9]) - float(manual_phone_training_counted_totals.get(int(row[0]), 0.0) or 0.0)
+                    ),
+                    2
+                )
                 technical_issue_hours = round(float(row[10]), 2)
-                offline_activity_hours = round(float(row[11]), 2)
+                offline_activity_hours = round(
+                    float(row[11]) + float(phone_training_totals.get(int(row[0]), 0.0) or 0.0),
+                    2
+                )
                 chat_chats_count = int(row[12] or 0)
                 chat_avg_score = float(row[13]) if row[13] is not None else None
                 chat_avg_response_time_seconds = float(row[14]) if row[14] is not None else None
@@ -17749,6 +18341,9 @@ class Database:
 
         where_parts = []
         params = []
+        activity_date_obj = None
+        date_from_obj = None
+        date_to_obj = None
         supervisor_id_int = None
         if supervisor_id is not None and str(supervisor_id).strip() != '':
             try:
@@ -17776,10 +18371,12 @@ class Database:
         else:
             if date_from:
                 from_obj = self._parse_technical_issue_date(date_from, field_name='date_from')
+                date_from_obj = from_obj
                 where_parts.append("oa.activity_date >= %s")
                 params.append(from_obj)
             if date_to:
                 to_obj = self._parse_technical_issue_date(date_to, field_name='date_to')
+                date_to_obj = to_obj
                 where_parts.append("oa.activity_date <= %s")
                 params.append(to_obj)
 
@@ -17883,6 +18480,141 @@ class Database:
                     'duration_minutes': int(duration_minutes),
                     'duration_hours': round(float(duration_minutes) / 60.0, 2)
                 })
+
+            phone_start_obj = activity_date_obj or date_from_obj
+            phone_end_obj = activity_date_obj or date_to_obj
+            if phone_start_obj and phone_end_obj:
+                if phone_end_obj < phone_start_obj:
+                    phone_start_obj, phone_end_obj = phone_end_obj, phone_start_obj
+
+                operator_where_parts = []
+                operator_params = []
+                if not role_has_min(role_norm, 'admin') and scope_department_id is not None:
+                    operator_where_parts.append("op.department_id = %s")
+                    operator_params.append(int(scope_department_id))
+                if supervisor_id_int is not None:
+                    operator_where_parts.append("op.supervisor_id = %s")
+                    operator_params.append(supervisor_id_int)
+                if operator_id_int is not None:
+                    operator_where_parts.append("op.id = %s")
+                    operator_params.append(operator_id_int)
+                if group_id_int is not None:
+                    operator_where_parts.append("""
+                        EXISTS (
+                            SELECT 1
+                            FROM group_operator_memberships gom
+                            WHERE gom.operator_id = op.id
+                              AND gom.group_id = %s
+                              AND gom.start_date <= %s
+                              AND (gom.end_date IS NULL OR gom.end_date >= %s)
+                        )
+                    """)
+                    operator_params.extend([group_id_int, phone_end_obj, phone_start_obj])
+
+                operator_where_sql = f"WHERE {' AND '.join(operator_where_parts)}" if operator_where_parts else ""
+                cursor.execute(
+                    f"""
+                        SELECT
+                            op.id,
+                            op.name,
+                            op.supervisor_id,
+                            sv.name,
+                            op.direction_id,
+                            d.name
+                        FROM users op
+                        LEFT JOIN users sv ON sv.id = op.supervisor_id
+                        LEFT JOIN directions d ON d.id = op.direction_id
+                        {operator_where_sql}
+                    """,
+                    operator_params
+                )
+                operator_meta = {}
+                for op_row in cursor.fetchall() or []:
+                    op_id_int = int(op_row[0])
+                    operator_meta[op_id_int] = {
+                        'operator_name': op_row[1],
+                        'supervisor_id': int(op_row[2]) if op_row[2] is not None else None,
+                        'supervisor_name': op_row[3],
+                        'direction_id': int(op_row[4]) if op_row[4] is not None else None,
+                        'direction_name': op_row[5]
+                    }
+
+                phone_operator_ids = sorted(operator_meta.keys())
+                if phone_operator_ids:
+                    manual_phone_training_map, _manual_phone_training_totals = self._load_phone_shift_manual_training_offline_intervals_by_operator_day_tx(
+                        cursor=cursor,
+                        operator_ids=phone_operator_ids,
+                        start_date=phone_start_obj,
+                        end_date=phone_end_obj,
+                        group_id=group_id_int
+                    )
+                    status_phone_training_map, _status_phone_training_totals = self._load_phone_shift_training_offline_intervals_by_operator_day_tx(
+                        cursor=cursor,
+                        operator_ids=phone_operator_ids,
+                        start_date=phone_start_obj,
+                        end_date=phone_end_obj,
+                        group_id=group_id_int
+                    )
+                    phone_training_seen = {op_id: set() for op_id in phone_operator_ids}
+                    phone_virtual_count = 0
+                    for phone_training_map in (manual_phone_training_map, status_phone_training_map):
+                        for op_id_int, days_map in (phone_training_map or {}).items():
+                            try:
+                                op_id_int = int(op_id_int)
+                            except Exception:
+                                continue
+                            meta = operator_meta.get(op_id_int) or {}
+                            for day_key, day_items in (days_map or {}).items():
+                                for item in (day_items or []):
+                                    start_sec = max(0, int(item.get('start_seconds') or 0))
+                                    end_sec = max(0, int(item.get('end_seconds') or 0))
+                                    if end_sec <= start_sec:
+                                        continue
+                                    signature = (str(item.get('date') or day_key), start_sec, end_sec)
+                                    if signature in phone_training_seen.setdefault(op_id_int, set()):
+                                        continue
+                                    phone_training_seen[op_id_int].add(signature)
+                                    duration_seconds = end_sec - start_sec
+                                    duration_minutes = self._schedule_auto_seconds_to_display_minutes(duration_seconds)
+                                    start_text = item.get('start_time')
+                                    end_text = item.get('end_time')
+                                    items.append({
+                                        'id': item.get('id'),
+                                        'batch_id': None,
+                                        'operator_id': int(op_id_int),
+                                        'operator_name': meta.get('operator_name'),
+                                        'supervisor_id': meta.get('supervisor_id'),
+                                        'supervisor_name': meta.get('supervisor_name'),
+                                        'direction_id': meta.get('direction_id'),
+                                        'direction_name': meta.get('direction_name'),
+                                        'date': item.get('date'),
+                                        'start_time': start_text,
+                                        'end_time': end_text,
+                                        'time_range': f"{start_text} - {end_text}" if start_text and end_text else None,
+                                        'comment': WORK_SHIFT_PHONE_SHIFT_OFFLINE_COMMENT,
+                                        'created_by_id': None,
+                                        'created_by_name': 'Планировщик',
+                                        'created_at': None,
+                                        'duration_minutes': int(duration_minutes),
+                                        'duration_seconds': int(duration_seconds),
+                                        'duration_hours': round(float(duration_seconds) / 3600.0, 2),
+                                        'source': item.get('source') or 'work_shift_training_status',
+                                        'shift_type': WORK_SHIFT_TYPE_PHONE_SHIFT,
+                                        'is_phone_shift_training': True,
+                                        'read_only': True
+                                    })
+                                    phone_virtual_count += 1
+
+                    items.sort(
+                        key=lambda item: (
+                            str(item.get('date') or ''),
+                            str(item.get('start_time') or ''),
+                            str(item.get('created_at') or ''),
+                            str(item.get('id') or '')
+                        ),
+                        reverse=True
+                    )
+                    total += phone_virtual_count
 
             return {
                 'total': total,
@@ -19838,6 +20570,9 @@ class Database:
 
     def _is_office_practice_shift_type(self, value):
         return self._normalize_work_shift_type(value) == WORK_SHIFT_TYPE_OFFICE_PRACTICE
+
+    def _is_phone_shift_type(self, value):
+        return self._normalize_work_shift_type(value) == WORK_SHIFT_TYPE_PHONE_SHIFT
 
     def _normalize_shift_breaks(self, breaks):
         if breaks is None:
@@ -21928,6 +22663,24 @@ class Database:
               AND ws.shift_date <= %s
         """, (operator_id, start, end))
         total_offline_hours += float(cursor.fetchone()[0] or 0.0)
+        manual_phone_training_map, _manual_phone_training_totals = self._load_phone_shift_manual_training_offline_intervals_by_operator_day_tx(
+            cursor=cursor,
+            operator_ids=[operator_id],
+            start_date=start,
+            end_date=end
+        )
+        status_phone_training_map, _status_phone_training_totals = self._load_phone_shift_training_offline_intervals_by_operator_day_tx(
+            cursor=cursor,
+            operator_ids=[operator_id],
+            start_date=start,
+            end_date=end
+        )
+        phone_training_totals = self._sum_phone_shift_offline_interval_maps(
+            [operator_id],
+            manual_phone_training_map,
+            status_phone_training_map
+        )
+        total_offline_hours += float(phone_training_totals.get(int(operator_id), 0.0) or 0.0)
 
         effective_hours_for_calls = max(0.0, float(total_work_time or 0.0))
 
@@ -22095,6 +22848,26 @@ class Database:
               AND ws.shift_date >= %s AND ws.shift_date <= %s
         """, (operator_id, seg_start, seg_end))
         total_offline_hours += float(cursor.fetchone()[0] or 0.0)
+        manual_phone_training_map, _manual_phone_training_totals = self._load_phone_shift_manual_training_offline_intervals_by_operator_day_tx(
+            cursor=cursor,
+            operator_ids=[operator_id],
+            start_date=seg_start,
+            end_date=seg_end,
+            group_id=gid
+        )
+        status_phone_training_map, _status_phone_training_totals = self._load_phone_shift_training_offline_intervals_by_operator_day_tx(
+            cursor=cursor,
+            operator_ids=[operator_id],
+            start_date=seg_start,
+            end_date=seg_end,
+            group_id=gid
+        )
+        phone_training_totals = self._sum_phone_shift_offline_interval_maps(
+            [operator_id],
+            manual_phone_training_map,
+            status_phone_training_map
+        )
+        total_offline_hours += float(phone_training_totals.get(int(operator_id), 0.0) or 0.0)
 
         effective_hours_for_calls = max(0.0, float(total_work_time or 0.0))
         calls_per_hour = (float(total_calls) / effective_hours_for_calls) if effective_hours_for_calls > 0 else 0.0
@@ -22527,7 +23300,8 @@ class Database:
                     continue
                 shifts_segments_by_day.setdefault((int(op_id), day_value), []).append({
                     'start': local_start,
-                    'end': local_end
+                    'end': local_end,
+                    'shift_type': shift_type_norm
                 })
 
         status_start_for_query = calc_start_date_obj - timedelta(days=1)
@@ -22691,12 +23465,25 @@ class Database:
             day_shift_intervals = self._merge_break_intervals(
                 shifts_segments_by_day.get((op_id, day_value)) or []
             )
+            day_phone_shift_intervals = self._merge_break_intervals([
+                {'start': int(seg.get('start', 0)), 'end': int(seg.get('end', 0))}
+                for seg in (shifts_segments_by_day.get((op_id, day_value)) or [])
+                if seg.get('shift_type') == WORK_SHIFT_TYPE_PHONE_SHIFT
+            ])
             work_seconds = self._schedule_auto_overlap_minutes(day_shift_intervals, day_work_status)
             talk_seconds = self._schedule_auto_overlap_minutes(day_shift_intervals, day_talk_status)
             # Перерывы считаем по фактическим статусам в пределах смены, независимо от
             # запланированных break-интервалов графика.
             break_seconds = self._schedule_auto_overlap_minutes(day_shift_intervals, day_break_status)
-            training_intervals_effective = self._merge_break_intervals(day_training_status or [])
+            phone_shift_training_intervals = self._merge_break_intervals([
+                item
+                for interval in (day_phone_shift_intervals or [])
+                for item in self._schedule_auto_intersect_interval_with_list(interval, day_training_status)
+            ])
+            training_intervals_effective = self._schedule_auto_subtract_intervals(
+                self._merge_break_intervals(day_training_status or []),
+                phone_shift_training_intervals
+            )
             training_seconds_in_shift = self._schedule_auto_overlap_minutes(day_shift_intervals, training_intervals_effective)
             technical_reason_seconds_in_shift = self._schedule_auto_overlap_minutes(day_shift_intervals, day_technical_reason_status)
             no_phone_seconds_in_shift = self._schedule_auto_overlap_minutes(day_shift_intervals, day_no_phone_status)
@@ -24110,6 +24897,56 @@ class Database:
                     'isPracticeShift': True,
                     'readOnly': True
                 })
+
+        if start_date_obj and end_date_obj:
+            manual_phone_training_map, _manual_phone_training_totals = self._load_phone_shift_manual_training_offline_intervals_by_operator_day_tx(
+                cursor=cursor,
+                operator_ids=op_ids,
+                start_date=start_date_obj,
+                end_date=end_date_obj
+            )
+            status_phone_training_map, _status_phone_training_totals = self._load_phone_shift_training_offline_intervals_by_operator_day_tx(
+                cursor=cursor,
+                operator_ids=op_ids,
+                start_date=start_date_obj,
+                end_date=end_date_obj
+            )
+            phone_training_seen = {op_id: set() for op_id in op_ids}
+            for phone_training_map in (manual_phone_training_map, status_phone_training_map):
+                for op_id, days_map in (phone_training_map or {}).items():
+                    try:
+                        op_id = int(op_id)
+                    except Exception:
+                        continue
+                    for day_key, items in (days_map or {}).items():
+                        for item in (items or []):
+                            start_sec = max(0, int(item.get('start_seconds') or 0))
+                            end_sec = max(0, int(item.get('end_seconds') or 0))
+                            if end_sec <= start_sec:
+                                continue
+                            signature = (str(item.get('date') or day_key), start_sec, end_sec)
+                            if signature in phone_training_seen.setdefault(op_id, set()):
+                                continue
+                            phone_training_seen[op_id].add(signature)
+                            start_min_local = max(0, min(1440, int(start_sec // 60)))
+                            end_min_local = max(0, min(1440, int((end_sec + 59) // 60)))
+                            if end_min_local <= start_min_local:
+                                end_min_local = min(1440, start_min_local + 1)
+                            result.setdefault(op_id, {}).setdefault(day_key, []).append({
+                                'id': item.get('id'),
+                                'batch_id': None,
+                                'date': day_key,
+                                'start': item.get('start_time') or _minutes_to_time(start_min_local),
+                                'end': item.get('end_time') or _minutes_to_time(end_min_local),
+                                'startMin': start_min_local,
+                                'endMin': end_min_local,
+                                'durationSeconds': int(end_sec - start_sec),
+                                'comment': WORK_SHIFT_PHONE_SHIFT_OFFLINE_COMMENT,
+                                'source': item.get('source') or 'work_shift_training_status',
+                                'shift_type': WORK_SHIFT_TYPE_PHONE_SHIFT,
+                                'isPhoneShiftTraining': True,
+                                'readOnly': True
+                            })
 
         def _segment_sort_id(value):
             raw_id = value.get('id') if isinstance(value, dict) else None

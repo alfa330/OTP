@@ -19684,7 +19684,7 @@ def save_work_shift():
         "shift_date": "YYYY-MM-DD",
         "start_time": "HH:MM",
         "end_time": "HH:MM",
-        "shift_type": "regular" | "office_practice",  // optional
+        "shift_type": "regular" | "office_practice" | "phone_shift",  // optional
         "breaks": [{"start": minutes, "end": minutes}, ...],  // optional
         "previous_start_time": "HH:MM",  // optional, for edit without duplicates
         "previous_end_time": "HH:MM"     // optional, for edit without duplicates
