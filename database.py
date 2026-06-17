@@ -24242,6 +24242,7 @@ class Database:
         start_date=None,
         end_date=None,
         direction_name=None,
+        department_id=None,
         include_imported_statuses=False,
         include_technical_issues=False,
         include_offline_activities=False
@@ -24249,6 +24250,7 @@ class Database:
         """
         Получить всех операторов со сменами и выходными днями за период.
         Если direction_name задан — только операторы этого направления.
+        Если department_id задан — только операторы этого отдела.
         Возвращает список операторов с их сменами и выходными.
         """
         start_date_obj = self._normalize_schedule_date(start_date) if start_date else None
@@ -24256,26 +24258,41 @@ class Database:
 
         with self._get_cursor() as cursor:
             self._sync_user_statuses_from_schedule_periods_tx(cursor)
+            department_filter_id = int(department_id) if department_id is not None else None
             if direction_name:
+                operator_filters = [
+                    "u.role = 'operator'",
+                    "LOWER(d.name) = LOWER(%s)",
+                    "(u.status IS NULL OR u.status != 'fired')"
+                ]
+                operator_params = [direction_name]
+                if department_filter_id is not None:
+                    operator_filters.append("u.department_id = %s")
+                    operator_params.append(department_filter_id)
                 cursor.execute("""
                     SELECT u.id, u.name, u.supervisor_id, s.name as supervisor_name,
                            d.name as direction, u.status, u.rate
                     FROM users u
                     LEFT JOIN users s ON u.supervisor_id = s.id
                     LEFT JOIN directions d ON u.direction_id = d.id
-                    WHERE u.role = 'operator' AND LOWER(d.name) = LOWER(%s) AND (u.status IS NULL OR u.status != 'fired')
+                    WHERE """ + " AND ".join(operator_filters) + """
                     ORDER BY u.name
-                """, (direction_name,))
+                """, operator_params)
             else:
+                operator_filters = ["u.role = 'operator'"]
+                operator_params = []
+                if department_filter_id is not None:
+                    operator_filters.append("u.department_id = %s")
+                    operator_params.append(department_filter_id)
                 cursor.execute("""
                     SELECT u.id, u.name, u.supervisor_id, s.name as supervisor_name,
                            d.name as direction, u.status, u.rate
                     FROM users u
                     LEFT JOIN users s ON u.supervisor_id = s.id
                     LEFT JOIN directions d ON u.direction_id = d.id
-                    WHERE u.role = 'operator'
+                    WHERE """ + " AND ".join(operator_filters) + """
                     ORDER BY d.name, u.name
-                """)
+                """, operator_params)
             operators = cursor.fetchall()
             if not operators:
                 return []

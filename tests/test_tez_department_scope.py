@@ -155,6 +155,16 @@ class TezDepartmentBackendScopeTests(unittest.TestCase):
         self.assertIn("scope_department_id=None", offline)
         self.assertIn("op.department_id = %s", offline)
 
+    def test_operator_direction_schedule_is_scoped_to_own_department(self):
+        endpoint = _function_source(BOT_PATH, "get_direction_work_schedules")
+        schedule_query = _function_source(DATABASE_PATH, "get_operators_with_shifts", class_name="Database")
+
+        self.assertIn("requester_department_id = db.get_user_department_id(requester_id)", endpoint)
+        self.assertIn("department_id=requester_department_id", endpoint)
+        self.assertIn("department_id=None", schedule_query)
+        self.assertIn("department_filter_id = int(department_id) if department_id is not None else None", schedule_query)
+        self.assertGreaterEqual(schedule_query.count("u.department_id = %s"), 2)
+
     def test_department_head_admin_role_is_not_treated_as_global_admin_for_lists(self):
         departments = _function_source(BOT_PATH, "api_admin_departments")
         users = _function_source(BOT_PATH, "get_admin_users")
