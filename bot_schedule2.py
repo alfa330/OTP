@@ -217,6 +217,11 @@ CHAT2DESK_SYNC_TIMEZONE = (os.getenv('CHAT2DESK_SYNC_TIMEZONE') or 'Asia/Almaty'
 CHAT2DESK_SYNC_HOUR = _env_int('CHAT2DESK_SYNC_HOUR', 4, minimum=0, maximum=23)
 CHAT2DESK_SYNC_MINUTE = _env_int('CHAT2DESK_SYNC_MINUTE', 10, minimum=0, maximum=59)
 CHAT2DESK_SYNC_DAYS_BACK = _env_int('CHAT2DESK_SYNC_DAYS_BACK', 1, minimum=1, maximum=31)
+CHAT2DESK_STATUS_SYNC_ENABLED = _env_bool('CHAT2DESK_STATUS_SYNC_ENABLED', CHAT2DESK_SYNC_ENABLED)
+CHAT2DESK_STATUS_SYNC_DEFAULT_HOUR = (CHAT2DESK_SYNC_HOUR + ((CHAT2DESK_SYNC_MINUTE + 20) // 60)) % 24
+CHAT2DESK_STATUS_SYNC_DEFAULT_MINUTE = (CHAT2DESK_SYNC_MINUTE + 20) % 60
+CHAT2DESK_STATUS_SYNC_HOUR = _env_int('CHAT2DESK_STATUS_SYNC_HOUR', CHAT2DESK_STATUS_SYNC_DEFAULT_HOUR, minimum=0, maximum=23)
+CHAT2DESK_STATUS_SYNC_MINUTE = _env_int('CHAT2DESK_STATUS_SYNC_MINUTE', CHAT2DESK_STATUS_SYNC_DEFAULT_MINUTE, minimum=0, maximum=59)
 CHAT2DESK_API_TIMEOUT_SECONDS = _env_int('CHAT2DESK_API_TIMEOUT_SECONDS', 45, minimum=5, maximum=300)
 CHAT2DESK_API_PAGE_LIMIT = _env_int('CHAT2DESK_API_PAGE_LIMIT', 200, minimum=1, maximum=200)
 CHAT2DESK_API_MAX_PAGES = _env_int('CHAT2DESK_API_MAX_PAGES', 100, minimum=1, maximum=1000)
@@ -17642,6 +17647,7 @@ def _chat_report_parse(header, data_rows, operator_lookup, operator_token_index,
 CHAT2DESK_STATISTICS_REPORT_REPLIES = 'operator_replies'
 CHAT2DESK_STATISTICS_REPORT_RATING = 'rating'
 CHAT2DESK_STATISTICS_REPORT_OPERATOR_STATS = 'operator_stats'
+CHAT2DESK_STATISTICS_REPORT_OPERATOR_EVENTS = 'operator_events'
 
 
 def _chat2desk_api_token():
@@ -17674,6 +17680,10 @@ def _chat2desk_api_base_url():
 
 def _chat2desk_sync_enabled():
     return _env_bool('CHAT2DESK_SYNC_ENABLED', CHAT2DESK_SYNC_ENABLED)
+
+
+def _chat2desk_status_sync_enabled():
+    return _env_bool('CHAT2DESK_STATUS_SYNC_ENABLED', CHAT2DESK_STATUS_SYNC_ENABLED)
 
 
 def _chat2desk_sync_timezone():
@@ -18169,6 +18179,43 @@ def _chat2desk_build_daily_metrics(day_str, operator_lookup, operator_token_inde
     )
 
 
+def _chat2desk_build_status_import_from_operator_events(day_str, event_rows, operator_lookup, preview_limit=None):
+    parsed_day = _chat_metrics_parse_date(day_str)
+    if parsed_day is None:
+        raise ValueError("day_str must be in YYYY-MM-DD format")
+
+    buf = StringIO()
+    writer = csv.writer(buf, delimiter=';', quotechar='"', lineterminator='\n')
+    writer.writerow(['OperatorName', 'StateName', 'TimeChange', 'StateNote'])
+    for row in (event_rows or []):
+        if not isinstance(row, dict):
+            writer.writerow(['', '', '', ''])
+            continue
+        operator_name = _chat2desk_row_first(row, 'operator_name', 'operator', 'name')
+        event_name = _chat2desk_row_first(row, 'event', 'state_name', 'state', 'status_name', 'status')
+        event_at = _chat2desk_row_first(row, 'created_at', 'time_change', 'changed_at', 'timestamp', 'date')
+        state_note = _chat2desk_row_first(row, 'state_note', 'status_note', 'note') or ''
+        writer.writerow([
+            str(operator_name or '').strip(),
+            str(event_name or '').strip(),
+            str(event_at or '').strip(),
+            str(state_note or '').strip()
+        ])
+
+    parsed = _status_import_parse_csv(
+        buf.getvalue(),
+        operator_lookup,
+        max_source_rows=STATUS_IMPORT_MAX_SOURCE_ROWS,
+        invalid_rows_preview_limit=preview_limit
+    )
+    parsed['api_rows'] = {
+        CHAT2DESK_STATISTICS_REPORT_OPERATOR_EVENTS: len(event_rows or [])
+    }
+    parsed['source'] = 'chat2desk_operator_events'
+    parsed['day'] = parsed_day.strftime('%Y-%m-%d')
+    return parsed
+
+
 def _chat2desk_sync_target_days(day=None, date_from=None, date_to=None):
     if day is not None:
         parsed_day = _chat_metrics_parse_date(day)
@@ -18281,6 +18328,153 @@ def sync_chat2desk_daily_metrics(day=None, date_from=None, date_to=None, trigger
     finally:
         try:
             CHAT_MANAGER_METRICS_IMPORT_LOCK.release()
+        except Exception:
+            pass
+
+
+def sync_chat2desk_operator_statuses(day=None, date_from=None, date_to=None, triggered_by='manual', force=False, imported_by=None):
+    if not force and not _chat2desk_sync_enabled():
+        logging.info("Chat2Desk operator statuses sync skipped: disabled")
+        return {'status': 'skipped', 'reason': 'disabled'}
+    if not _chat2desk_api_token():
+        logging.warning("Chat2Desk operator statuses sync skipped: CHAT2DESK_API_TOKEN is not set")
+        return {'status': 'skipped', 'reason': 'missing_token'}
+
+    if not STATUS_IMPORT_LOCK.acquire(blocking=False):
+        logging.warning("Chat2Desk operator statuses sync skipped: status import is already running")
+        return {'status': 'skipped', 'reason': 'locked'}
+
+    started = time.time()
+    day_results = []
+    try:
+        operator_lookup = _status_import_build_operator_lookup()
+        target_days = _chat2desk_sync_target_days(day, date_from=date_from, date_to=date_to)
+
+        for day_obj in target_days:
+            day_str = day_obj.strftime('%Y-%m-%d')
+            try:
+                event_rows = _chat2desk_statistics_get(
+                    CHAT2DESK_STATISTICS_REPORT_OPERATOR_EVENTS,
+                    day_str
+                )
+                parsed = _chat2desk_build_status_import_from_operator_events(
+                    day_str,
+                    event_rows,
+                    operator_lookup,
+                    preview_limit=STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
+                )
+                save_summary = {
+                    'batch_id': None,
+                    'source_rows': int(parsed.get('source_rows') or 0),
+                    'valid_events': int(parsed.get('valid_events') or 0),
+                    'matched_events': 0,
+                    'segments_saved': 0,
+                    'deleted_events': 0,
+                    'deleted_segments': 0,
+                    'invalid_rows_count': int(parsed.get('invalid_rows_count') or 0),
+                    'parse_errors_count': int(parsed.get('parse_errors_count') or 0),
+                    'operators_count': 0,
+                    'open_tail_events': int(parsed.get('open_tail_events') or 0),
+                    'zero_or_negative_transitions': int(parsed.get('zero_or_negative_transitions') or 0),
+                    'date_from': None,
+                    'date_to': None,
+                }
+                status_events_for_save = [
+                    event
+                    for event in (parsed.get('events') or [])
+                    if str(event.get('event_kind') or 'status') != 'action'
+                ]
+                if status_events_for_save:
+                    save_summary = db.save_operator_status_import(
+                        events=status_events_for_save,
+                        segments=parsed.get('segments') or [],
+                        imported_by=imported_by,
+                        summary={
+                            'source_rows': int(parsed.get('source_rows') or 0),
+                            'valid_events': int(parsed.get('valid_events') or 0),
+                            'invalid_rows_count': int(parsed.get('invalid_rows_count') or 0),
+                            'parse_errors_count': int(parsed.get('parse_errors_count') or 0),
+                            'open_tail_events': int(parsed.get('open_tail_events') or 0),
+                            'zero_or_negative_transitions': int(parsed.get('zero_or_negative_transitions') or 0),
+                            'action_events_count': int(parsed.get('action_events_count') or 0),
+                            'ignored_events_count': int(parsed.get('ignored_events_count') or 0),
+                            'meta': {
+                                'api': 'sync_statuses_chat2desk',
+                                'source': 'chat2desk_operator_events',
+                                'report': CHAT2DESK_STATISTICS_REPORT_OPERATOR_EVENTS,
+                                'day': day_str,
+                            }
+                        }
+                    )
+
+                chat_metrics_summary = {'processed': 0}
+                if parsed.get('chat_metrics'):
+                    transfer_metrics = []
+                    for metric in (parsed.get('chat_metrics') or []):
+                        if not isinstance(metric, dict):
+                            continue
+                        transfer_metrics.append({
+                            'operator_id': metric.get('operator_id'),
+                            'day': metric.get('day'),
+                            'transfer_chat_count': metric.get('transfer_chat_count'),
+                            'source': 'chat2desk_events'
+                        })
+                    chat_metrics_summary = db.save_chat_manager_daily_metrics(
+                        metrics=transfer_metrics,
+                        imported_by=imported_by,
+                        preserve_missing=True,
+                        update_fields=['transfer_chat_count']
+                    )
+
+                day_results.append({
+                    'day': day_str,
+                    'status': 'success',
+                    'source_rows': int(parsed.get('source_rows') or 0),
+                    'valid_events': int(parsed.get('valid_events') or 0),
+                    'matched_events': int((save_summary or {}).get('matched_events') or 0),
+                    'segments_saved': int((save_summary or {}).get('segments_saved') or 0),
+                    'deleted_events': int((save_summary or {}).get('deleted_events') or 0),
+                    'deleted_segments': int((save_summary or {}).get('deleted_segments') or 0),
+                    'invalid_rows_count': int(parsed.get('invalid_rows_count') or 0),
+                    'parse_errors_count': int(parsed.get('parse_errors_count') or 0),
+                    'operators_count': int((save_summary or {}).get('operators_count') or 0),
+                    'open_tail_events': int(parsed.get('open_tail_events') or 0),
+                    'zero_or_negative_transitions': int(parsed.get('zero_or_negative_transitions') or 0),
+                    'action_events_count': int(parsed.get('action_events_count') or 0),
+                    'ignored_events_count': int(parsed.get('ignored_events_count') or 0),
+                    'api_rows': parsed.get('api_rows') or {},
+                    'batch_id': (save_summary or {}).get('batch_id'),
+                    'date_from': (save_summary or {}).get('date_from'),
+                    'date_to': (save_summary or {}).get('date_to'),
+                    'invalid_rows_preview': parsed.get('invalid_rows_preview') or [],
+                    'chat_metrics': chat_metrics_summary,
+                })
+                logging.info(
+                    "Chat2Desk operator statuses sync %s: rows=%s matched=%s segments=%s invalid=%s",
+                    day_str,
+                    int(parsed.get('source_rows') or 0),
+                    int((save_summary or {}).get('matched_events') or 0),
+                    int((save_summary or {}).get('segments_saved') or 0),
+                    int(parsed.get('invalid_rows_count') or 0)
+                )
+            except Exception as exc:
+                logging.exception("Chat2Desk operator statuses sync failed for %s", day_str)
+                day_results.append({
+                    'day': day_str,
+                    'status': 'failed',
+                    'error': str(exc)
+                })
+
+        has_failed = any(item.get('status') == 'failed' for item in day_results)
+        return {
+            'status': 'partial_failed' if has_failed else 'success',
+            'triggered_by': triggered_by,
+            'days': day_results,
+            'elapsed_seconds': round(time.time() - started, 2)
+        }
+    finally:
+        try:
+            STATUS_IMPORT_LOCK.release()
         except Exception:
             pass
 
@@ -20674,6 +20868,136 @@ def import_work_schedules_statuses_csv():
     finally:
         if lock_acquired:
             STATUS_IMPORT_LOCK.release()
+
+
+@app.route('/api/work_schedules/sync_statuses_chat2desk', methods=['POST'])
+@require_api_key
+def sync_work_schedules_statuses_chat2desk():
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not (_is_admin_role(requester[3]) or _is_supervisor_role(requester[3])):
+            return jsonify({"error": "Forbidden"}), 403
+
+        payload = request.get_json(silent=True) or {}
+        target_day = payload.get('date') or request.args.get('date') or None
+        target_from = (
+            payload.get('date_from') or payload.get('start_date') or
+            request.args.get('date_from') or request.args.get('start_date') or None
+        )
+        target_to = (
+            payload.get('date_to') or payload.get('end_date') or
+            request.args.get('date_to') or request.args.get('end_date') or None
+        )
+        if target_day and _chat_metrics_parse_date(target_day) is None:
+            return jsonify({"error": "date must be in YYYY-MM-DD format"}), 400
+        if target_day and (target_from or target_to):
+            return jsonify({"error": "Use either date or date_from/date_to, not both"}), 400
+        if target_from or target_to:
+            start_day = _chat_metrics_parse_date(target_from)
+            end_day = _chat_metrics_parse_date(target_to or target_from)
+            if start_day is None or end_day is None:
+                return jsonify({"error": "date_from and date_to must be in YYYY-MM-DD format"}), 400
+            if end_day < start_day:
+                return jsonify({"error": "date_to must be greater than or equal to date_from"}), 400
+            if (end_day - start_day).days + 1 > 31:
+                return jsonify({"error": "Период синхронизации Chat2Desk не может быть больше 31 дня"}), 400
+            target_from = start_day.strftime('%Y-%m-%d')
+            target_to = end_day.strftime('%Y-%m-%d')
+
+        result = sync_chat2desk_operator_statuses(
+            day=target_day,
+            date_from=target_from,
+            date_to=target_to,
+            triggered_by='manual',
+            force=True,
+            imported_by=requester_id
+        )
+        status = result.get('status')
+        if status == 'skipped':
+            reason = result.get('reason')
+            if reason == 'missing_token':
+                return jsonify({"error": "CHAT2DESK_API_TOKEN не задан", "sync": result}), 400
+            if reason == 'locked':
+                return jsonify({
+                    "error": "Импорт статусов уже выполняется. Повторите через несколько секунд.",
+                    "sync": result
+                }), 429
+            return jsonify({"error": f"Синхронизация Chat2Desk пропущена: {reason or 'unknown'}", "sync": result}), 400
+
+        days = [item for item in (result.get('days') or []) if isinstance(item, dict)]
+        failed_days = [item for item in days if item.get('status') == 'failed']
+        success_days = [item for item in days if item.get('status') == 'success']
+
+        if failed_days and not success_days:
+            return jsonify({
+                "error": failed_days[0].get('error') or "Синхронизация статусов Chat2Desk не выполнена",
+                "sync": result
+            }), 502
+
+        api_rows = {}
+        invalid_preview = []
+        for item in success_days:
+            for key, value in (item.get('api_rows') or {}).items():
+                try:
+                    api_rows[key] = int(api_rows.get(key) or 0) + int(value or 0)
+                except Exception:
+                    continue
+            for row in (item.get('invalid_rows_preview') or []):
+                if len(invalid_preview) >= STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT:
+                    break
+                invalid_preview.append(row)
+
+        date_values = [
+            str(item.get('date_from') or item.get('day') or '').strip()
+            for item in success_days
+            if str(item.get('date_from') or item.get('day') or '').strip()
+        ]
+        date_to_values = [
+            str(item.get('date_to') or item.get('day') or '').strip()
+            for item in success_days
+            if str(item.get('date_to') or item.get('day') or '').strip()
+        ]
+        import_block = {
+            'batch_id': next((item.get('batch_id') for item in success_days if item.get('batch_id')), None),
+            'source_rows': sum(int(item.get('source_rows') or 0) for item in success_days),
+            'valid_events': sum(int(item.get('valid_events') or 0) for item in success_days),
+            'matched_events': sum(int(item.get('matched_events') or 0) for item in success_days),
+            'segments_saved': sum(int(item.get('segments_saved') or 0) for item in success_days),
+            'deleted_events': sum(int(item.get('deleted_events') or 0) for item in success_days),
+            'deleted_segments': sum(int(item.get('deleted_segments') or 0) for item in success_days),
+            'invalid_rows_count': sum(int(item.get('invalid_rows_count') or 0) for item in success_days),
+            'parse_errors_count': sum(int(item.get('parse_errors_count') or 0) for item in success_days),
+            'operators_count': sum(int(item.get('operators_count') or 0) for item in success_days),
+            'open_tail_events': sum(int(item.get('open_tail_events') or 0) for item in success_days),
+            'zero_or_negative_transitions': sum(int(item.get('zero_or_negative_transitions') or 0) for item in success_days),
+            'action_events_count': sum(int(item.get('action_events_count') or 0) for item in success_days),
+            'ignored_events_count': sum(int(item.get('ignored_events_count') or 0) for item in success_days),
+            'date_from': min(date_values) if date_values else None,
+            'date_to': max(date_to_values) if date_to_values else None,
+            'api_rows': api_rows,
+            'days': days,
+        }
+        message = "Статусы Chat2Desk синхронизированы"
+        if failed_days:
+            message = "Статусы Chat2Desk синхронизированы частично"
+        return jsonify({
+            "status": "success" if not failed_days else "partial_failed",
+            "message": message,
+            "import": import_block,
+            "sync": result,
+            "warnings": {
+                "invalid_rows_preview": invalid_preview
+            }
+        }), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error syncing Chat2Desk operator statuses: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/chat_manager/surge_windows', methods=['GET', 'PUT'])
@@ -31129,7 +31453,18 @@ async def run_recruiting_resumes_job_async(triggered_by='scheduler'):
 
 async def run_chat2desk_daily_metrics_sync_async(triggered_by='scheduler'):
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(executor_pool, sync_chat2desk_daily_metrics, None, triggered_by)
+    return await loop.run_in_executor(
+        executor_pool,
+        lambda: sync_chat2desk_daily_metrics(triggered_by=triggered_by)
+    )
+
+
+async def run_chat2desk_operator_statuses_sync_async(triggered_by='scheduler'):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        executor_pool,
+        lambda: sync_chat2desk_operator_statuses(triggered_by=triggered_by)
+    )
 
 # === Главный запуск =============================================================================================
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('reject_reval:'))
@@ -31274,6 +31609,22 @@ if __name__ == '__main__':
         )
     else:
         logging.info("Chat2Desk daily metrics sync is disabled by CHAT2DESK_SYNC_ENABLED")
+
+    if _chat2desk_sync_enabled() and _chat2desk_status_sync_enabled():
+        scheduler.add_job(
+            run_chat2desk_operator_statuses_sync_async,
+            CronTrigger(
+                hour=_env_int('CHAT2DESK_STATUS_SYNC_HOUR', CHAT2DESK_STATUS_SYNC_HOUR, minimum=0, maximum=23),
+                minute=_env_int('CHAT2DESK_STATUS_SYNC_MINUTE', CHAT2DESK_STATUS_SYNC_MINUTE, minimum=0, maximum=59),
+                timezone=_chat2desk_sync_timezone()
+            ),
+            id='chat2desk_operator_statuses_daily',
+            misfire_grace_time=3600,
+            max_instances=1,
+            coalesce=True
+        )
+    elif _chat2desk_sync_enabled():
+        logging.info("Chat2Desk operator statuses sync is disabled by CHAT2DESK_STATUS_SYNC_ENABLED")
 
     # Ретеншн сырых событий статусов: удаляем operator_status_events старше горизонта хранения
     # (STATUS_EVENTS_RETENTION_DAYS, по умолчанию 120 дней). Сегменты (источник отчётов) не трогаем;
