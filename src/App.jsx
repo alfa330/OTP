@@ -2663,6 +2663,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             } else if (user.role === 'sv' && !isHoursDepartmentHead) {
                 trainingsParams.append('id', String(user.id));
             }
+            if (selectedGroupId) {
+                trainingsParams.append('group_id', selectedGroupId);
+            }
 
             const url = `${API_BASE_URL}/api/sv/daily_hours?${hoursParams.toString()}`;
             const trainingsUrl = `${API_BASE_URL}/api/trainings?${trainingsParams.toString()}`;
@@ -2670,12 +2673,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             technicalParams.append('date_from', `${month}-01`);
             technicalParams.append('date_to', `${month}-${String(daysInMonth).padStart(2, '0')}`);
             technicalParams.append('limit', '5000');
+            if (selectedGroupId) {
+                technicalParams.append('group_id', selectedGroupId);
+            }
             const technicalIssuesUrl = `${API_BASE_URL}/api/technical_issues?${technicalParams.toString()}`;
             const offlineParams = new URLSearchParams();
             offlineParams.append('date_from', `${month}-01`);
             offlineParams.append('date_to', `${month}-${String(daysInMonth).padStart(2, '0')}`);
             offlineParams.append('limit', '5000');
-            if (selectedSvId && !isHoursDepartmentHead) {
+            if (selectedGroupId) {
+                offlineParams.append('group_id', selectedGroupId);
+            } else if (selectedSvId && !isHoursDepartmentHead) {
                 offlineParams.append('supervisor_id', selectedSvId);
             }
             const offlineActivitiesUrl = `${API_BASE_URL}/api/offline_activities?${offlineParams.toString()}`;
@@ -2903,7 +2911,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         // ====== Upload-per-day (preview) ======
         function openUploadForDay(day) {
-            if (isAdminLikeRoleFn(user?.role) && !isHoursDepartmentHead && !selectedSvId) {
+            if (isAdminLikeRoleFn(user?.role) && !isHoursDepartmentHead && !selectedSvId && !selectedGroupId) {
             fallbackToast('Выберите супервайзера перед загрузкой файла', 'error');
             return;
             }
@@ -2944,6 +2952,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             if (selectedSvId) {
                 form.append('sv_id', String(selectedSvId));
             }
+            if (selectedGroupId) {
+                form.append('group_id', String(selectedGroupId));
+            }
             const resp = await axios.post(`${API_BASE_URL}/api/sv/preview_calls_table`, form, {
                 headers: { 'X-User-Id': user.id, 'Content-Type': 'multipart/form-data' },
                 onUploadProgress: (p) => {
@@ -2978,7 +2989,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             fallbackToast('Нет данных для сохранения', 'error');
             return;
             }
-            if (isAdminLikeRoleFn(user?.role) && !isHoursDepartmentHead && !selectedSvId) {
+            if (isAdminLikeRoleFn(user?.role) && !isHoursDepartmentHead && !selectedSvId && !selectedGroupId) {
             fallbackToast('Выберите супервайзера перед сохранением', 'error');
             return;
             }
@@ -2987,6 +2998,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const payload = {
                 date: (previewOperators[0]?.date || selectedDayUpload.dateStr),
                 sv_id: selectedSvId || null,
+                group_id: selectedGroupId || null,
                 operators: previewOperators.map(r => ({
                 operator_id: r.operator_id,
                 name: r.name,
@@ -3261,6 +3273,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const payload = {
                 date: cellModel.dateStr,
                 sv_id: selectedSvId || null,
+                group_id: selectedGroupId || null,
                 operators: [{
                 operator_id: cellModel.operator_id,
                 name: cellModel.name,
@@ -3401,6 +3414,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const resp = await axios.post(`${API_BASE_URL}/api/hours/upload_group_day`, {
                     date: dateStr,
                     sv_id: selectedSvId || null,
+                    group_id: selectedGroupId || null,
                     operators: rows
                 }, {
                     headers: { 'X-User-Id': user.id, 'Content-Type': 'application/json' },
@@ -4452,15 +4466,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             if (!user || !trainingModalState.operatorId) return;
             setIsTrainingActionLoading(true);
             try {
+            const trainingPayload = selectedGroupId ? { ...data, group_id: selectedGroupId } : data;
             if (trainingModalState.training?.id) {
-                await axios.put(`${API_BASE_URL}/api/trainings/${trainingModalState.training.id}`, data, {
+                await axios.put(`${API_BASE_URL}/api/trainings/${trainingModalState.training.id}`, trainingPayload, {
                 headers: {
                     'X-User-Id': user.id
                 }
                 });
                 fallbackToast('Тренинг обновлен', 'success');
             } else {
-                await axios.post(`${API_BASE_URL}/api/trainings`, { ...data, operator_id: trainingModalState.operatorId }, {
+                await axios.post(`${API_BASE_URL}/api/trainings`, { ...trainingPayload, operator_id: trainingModalState.operatorId }, {
                 headers: {
                     'X-User-Id': user.id
                 }
@@ -4600,7 +4615,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 date,
                 start_time: startTime,
                 end_time: endTime,
-                comment
+                comment,
+                group_id: selectedGroupId || null
             };
             if (offlineActivityModalState?.activity?.id) {
                 await axios.put(`${API_BASE_URL}/api/offline_activities/${offlineActivityModalState.activity.id}`, payload, {

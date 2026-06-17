@@ -9875,7 +9875,7 @@ class Database:
                         insert_bonus_vals
                     )
 
-    def _load_technical_issues_by_operator_day_tx(self, cursor, operator_ids, start_date, end_date):
+    def _load_technical_issues_by_operator_day_tx(self, cursor, operator_ids, start_date, end_date, group_id=None):
         """
         Возвращает:
         - map: {operator_id: {day_num_str: [issues...]}}
@@ -9887,8 +9887,23 @@ class Database:
         if not op_ids:
             return result, totals
 
-        cursor.execute(
+        group_filter_sql = ""
+        params = [op_ids, start_date, end_date]
+        if group_id is not None:
+            group_filter_sql = """
+              AND EXISTS (
+                  SELECT 1
+                  FROM group_operator_memberships gom
+                  WHERE gom.operator_id = ti.operator_id
+                    AND gom.group_id = %s
+                    AND gom.start_date <= ti.issue_date
+                    AND (gom.end_date IS NULL OR gom.end_date >= ti.issue_date)
+              )
             """
+            params.append(int(group_id))
+
+        cursor.execute(
+            f"""
             SELECT
                 ti.id,
                 ti.operator_id,
@@ -9906,9 +9921,10 @@ class Database:
             WHERE ti.operator_id = ANY(%s)
               AND ti.issue_date >= %s
               AND ti.issue_date <= %s
+              {group_filter_sql}
             ORDER BY ti.operator_id, ti.issue_date, ti.start_time, ti.end_time, ti.id
             """,
-            (op_ids, start_date, end_date),
+            params,
         )
         for issue_id, op_id, issue_date, start_time, end_time, reason, comment, workplace_number, for_supervisor, created_by_name, created_at in cursor.fetchall() or []:
             try:
@@ -9949,7 +9965,7 @@ class Database:
 
         return result, totals
 
-    def _load_offline_activities_by_operator_day_tx(self, cursor, operator_ids, start_date, end_date):
+    def _load_offline_activities_by_operator_day_tx(self, cursor, operator_ids, start_date, end_date, group_id=None):
         """
         Возвращает:
         - map: {operator_id: {day_num_str: [activities...]}}
@@ -9961,8 +9977,23 @@ class Database:
         if not op_ids:
             return result, totals
 
-        cursor.execute(
+        group_filter_sql = ""
+        params = [op_ids, start_date, end_date]
+        if group_id is not None:
+            group_filter_sql = """
+              AND EXISTS (
+                  SELECT 1
+                  FROM group_operator_memberships gom
+                  WHERE gom.operator_id = oa.operator_id
+                    AND gom.group_id = %s
+                    AND gom.start_date <= oa.activity_date
+                    AND (gom.end_date IS NULL OR gom.end_date >= oa.activity_date)
+              )
             """
+            params.append(int(group_id))
+
+        cursor.execute(
+            f"""
             SELECT
                 oa.id,
                 oa.operator_id,
@@ -9977,9 +10008,10 @@ class Database:
             WHERE oa.operator_id = ANY(%s)
               AND oa.activity_date >= %s
               AND oa.activity_date <= %s
+              {group_filter_sql}
             ORDER BY oa.operator_id, oa.activity_date, oa.start_time, oa.end_time, oa.id
             """,
-            (op_ids, start_date, end_date),
+            params,
         )
         for activity_id, op_id, activity_date, start_time, end_time, comment, created_by_name, created_at in cursor.fetchall() or []:
             try:
@@ -10016,8 +10048,23 @@ class Database:
             })
             totals[op_id_int] = round(float(totals.get(op_id_int, 0.0)) + float(duration_hours), 2)
 
-        cursor.execute(
+        shift_group_filter_sql = ""
+        shift_params = [op_ids, start_date, end_date]
+        if group_id is not None:
+            shift_group_filter_sql = """
+              AND EXISTS (
+                  SELECT 1
+                  FROM group_operator_memberships gom
+                  WHERE gom.operator_id = ws.operator_id
+                    AND gom.group_id = %s
+                    AND gom.start_date <= ws.shift_date
+                    AND (gom.end_date IS NULL OR gom.end_date >= ws.shift_date)
+              )
             """
+            shift_params.append(int(group_id))
+
+        cursor.execute(
+            f"""
             SELECT
                 ws.id,
                 ws.operator_id,
@@ -10029,9 +10076,10 @@ class Database:
               AND COALESCE(ws.shift_type, 'regular') = 'office_practice'
               AND ws.shift_date >= %s
               AND ws.shift_date <= %s
+              {shift_group_filter_sql}
             ORDER BY ws.operator_id, ws.shift_date, ws.start_time, ws.end_time, ws.id
             """,
-            (op_ids, start_date, end_date),
+            shift_params,
         )
         for shift_id, op_id, shift_date, start_time, end_time in cursor.fetchall() or []:
             try:
@@ -10074,7 +10122,7 @@ class Database:
 
         return result, totals
 
-    def _load_chat_manager_metrics_by_operator_day_tx(self, cursor, operator_ids, start_date, end_date):
+    def _load_chat_manager_metrics_by_operator_day_tx(self, cursor, operator_ids, start_date, end_date, group_id=None):
         op_ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
         result = {op_id: {} for op_id in op_ids}
         totals = {
@@ -10091,8 +10139,23 @@ class Database:
         if not op_ids:
             return result, totals
 
-        cursor.execute(
+        group_filter_sql = ""
+        params = [op_ids, start_date, end_date]
+        if group_id is not None:
+            group_filter_sql = """
+              AND EXISTS (
+                  SELECT 1
+                  FROM group_operator_memberships gom
+                  WHERE gom.operator_id = chat_manager_daily_metrics.operator_id
+                    AND gom.group_id = %s
+                    AND gom.start_date <= chat_manager_daily_metrics.day
+                    AND (gom.end_date IS NULL OR gom.end_date >= chat_manager_daily_metrics.day)
+              )
             """
+            params.append(int(group_id))
+
+        cursor.execute(
+            f"""
             SELECT
                 operator_id,
                 day,
@@ -10108,9 +10171,10 @@ class Database:
             WHERE operator_id = ANY(%s)
               AND day >= %s
               AND day <= %s
+              {group_filter_sql}
             ORDER BY operator_id, day
             """,
-            (op_ids, start_date, end_date)
+            params
         )
 
         # Средняя оценка считается ВЗВЕШЕННО: суммируем score_sum и score_count по дням.
@@ -11932,25 +11996,29 @@ class Database:
                 cursor=cursor,
                 operator_ids=op_ids,
                 start_date=start,
-                end_date=end
+                end_date=end,
+                group_id=group_id
             )
             offline_map_by_operator, offline_totals_by_operator = self._load_offline_activities_by_operator_day_tx(
                 cursor=cursor,
                 operator_ids=op_ids,
                 start_date=start,
-                end_date=end
+                end_date=end,
+                group_id=group_id
             )
             training_totals_by_operator = self._load_training_hours_by_operator_tx(
                 cursor=cursor,
                 operator_ids=op_ids,
                 start_date=start,
-                end_date=end
+                end_date=end,
+                group_id=group_id
             )
             chat_metrics_by_operator, chat_totals_by_operator = self._load_chat_manager_metrics_by_operator_day_tx(
                 cursor=cursor,
                 operator_ids=op_ids,
                 start_date=start,
-                end_date=end
+                end_date=end,
+                group_id=group_id
             )
 
             # Сбор финального списка операторов
@@ -11980,13 +12048,14 @@ class Database:
                 technical_issue_hours = float(technical_totals_by_operator.get(op_id, 0.0)) if isinstance(technical_totals_by_operator, dict) else 0.0
                 offline_activity_hours = float(offline_totals_by_operator.get(op_id, 0.0)) if isinstance(offline_totals_by_operator, dict) else 0.0
                 no_phone_hours = float(no_phone_totals_by_operator.get(op_id, 0.0))
-                accounted_hours = float(regular_hours or 0.0) + training_hours + technical_issue_hours + offline_activity_hours
+                accounted_regular_hours = float(grp_regular if group_id is not None else (regular_hours or 0.0))
+                accounted_hours = accounted_regular_hours + training_hours + technical_issue_hours + offline_activity_hours
                 chat_metrics_by_day = chat_metrics_by_operator.get(op_id, {}) if isinstance(chat_metrics_by_operator, dict) else {}
                 chat_metric_totals = chat_totals_by_operator.get(op_id, {}) if isinstance(chat_totals_by_operator, dict) else {}
                 if calculation_model_code == CALCULATION_MODEL_CHAT_MANAGER:
                     _chat_chats = int(chat_metric_totals.get("chats_count") or 0)
                     total_calls = _chat_chats
-                    regular_hours_for_rate = max(0.0, float(regular_hours or 0.0))
+                    regular_hours_for_rate = max(0.0, accounted_regular_hours)
                     calls_per_hour = (float(total_calls) / regular_hours_for_rate) if regular_hours_for_rate > 0 else 0.0
                     for day_key, metrics in (chat_metrics_by_day or {}).items():
                         entry = op_daily.setdefault(str(day_key), {
@@ -13184,7 +13253,7 @@ class Database:
     def _get_full_rate_norm_hours(self, month: Optional[str]) -> float:
         return float(self._get_month_work_days(month) * 8.0)
 
-    def _load_training_hours_by_operator_tx(self, cursor, operator_ids, start_date, end_date):
+    def _load_training_hours_by_operator_tx(self, cursor, operator_ids, start_date, end_date, group_id=None):
         normalized_ids = []
         seen_ids = set()
         for raw_id in (operator_ids or []):
@@ -13200,7 +13269,22 @@ class Database:
         if not normalized_ids:
             return {}
 
-        cursor.execute("""
+        group_filter_sql = ""
+        params = [normalized_ids, start_date, end_date]
+        if group_id is not None:
+            group_filter_sql = """
+              AND EXISTS (
+                  SELECT 1
+                  FROM group_operator_memberships gom
+                  WHERE gom.operator_id = t.operator_id
+                    AND gom.group_id = %s
+                    AND gom.start_date <= t.training_date
+                    AND (gom.end_date IS NULL OR gom.end_date >= t.training_date)
+              )
+            """
+            params.append(int(group_id))
+
+        cursor.execute(f"""
             SELECT
                 t.operator_id,
                 COALESCE(SUM(
@@ -13215,8 +13299,9 @@ class Database:
               AND t.count_in_hours = TRUE
               AND t.training_date >= %s
               AND t.training_date <= %s
+              {group_filter_sql}
             GROUP BY t.operator_id
-        """, (normalized_ids, start_date, end_date))
+        """, params)
 
         return {int(op_id): float(hours or 0.0) for op_id, hours in cursor.fetchall()}
 
@@ -17275,6 +17360,7 @@ class Database:
         operator_id=None,
         reason=None,
         workplace_number=None,
+        group_id=None,
         limit=500,
         offset=0,
         scope_department_id=None
@@ -17319,6 +17405,26 @@ class Database:
                 raise ValueError("Invalid operator_id")
             where_parts.append("ti.operator_id = %s")
             params.append(operator_id_int)
+
+        group_id_int = None
+        if group_id is not None and str(group_id).strip() != '':
+            try:
+                group_id_int = int(group_id)
+            except (TypeError, ValueError):
+                raise ValueError("Invalid group_id")
+            if group_id_int <= 0:
+                raise ValueError("Invalid group_id")
+            where_parts.append("""
+                EXISTS (
+                    SELECT 1
+                    FROM group_operator_memberships gom
+                    WHERE gom.operator_id = ti.operator_id
+                      AND gom.group_id = %s
+                      AND gom.start_date <= ti.issue_date
+                      AND (gom.end_date IS NULL OR gom.end_date >= ti.issue_date)
+                )
+            """)
+            params.append(group_id_int)
 
         reason_text = str(reason or '').strip()
         if reason_text:
@@ -17502,6 +17608,7 @@ class Database:
         end_time=None,
         comment=None,
         operator_id=None,
+        group_id=None,
         scope_department_id=None
     ):
         role_norm = self._normalize_technical_issue_role(requester_role)
@@ -17518,19 +17625,50 @@ class Database:
         if not operator_ids_norm:
             raise ValueError("Field 'operator_id' is required")
 
+        group_id_int = None
+        if group_id is not None and str(group_id).strip() != '':
+            try:
+                group_id_int = int(group_id)
+            except (TypeError, ValueError):
+                raise ValueError("Invalid group_id")
+            if group_id_int <= 0:
+                raise ValueError("Invalid group_id")
+
         comment_text = str(comment or '').strip() or None
         requester_id_int = int(requester_id)
 
         with self._get_cursor() as cursor:
-            target_operator_ids, _ = self._resolve_technical_issue_operator_ids_tx(
-                cursor=cursor,
-                requester_id=requester_id_int,
-                requester_role=role_norm,
-                operator_ids=operator_ids_norm,
-                direction_ids=None,
-                scope_department_id=scope_department_id
-            )
-            target_operator_id = int(target_operator_ids[0])
+            if group_id_int is not None:
+                target_operator_id = int(operator_ids_norm[0])
+                cursor.execute("SELECT id, department_id FROM groups WHERE id = %s", (group_id_int,))
+                group_row = cursor.fetchone()
+                if not group_row:
+                    raise ValueError("Group not found")
+
+                if role_norm == 'sv' and scope_department_id is not None:
+                    if int(group_row[1] or 0) != int(scope_department_id):
+                        raise ValueError("Forbidden group for sv")
+                elif role_norm == 'sv':
+                    if not self._supervisor_has_group_access_for_period_tx(
+                        cursor, requester_id_int, group_id_int, issue_date_obj, issue_date_obj
+                    ):
+                        raise ValueError("Forbidden group for sv")
+
+                cursor.execute("SELECT 1 FROM users WHERE id = %s", (target_operator_id,))
+                if cursor.fetchone() is None:
+                    raise ValueError("Operator not found")
+                if not self._operator_in_group_on_date_tx(cursor, group_id_int, target_operator_id, issue_date_obj):
+                    raise ValueError("Operator is not in selected group on activity date")
+            else:
+                target_operator_ids, _ = self._resolve_technical_issue_operator_ids_tx(
+                    cursor=cursor,
+                    requester_id=requester_id_int,
+                    requester_role=role_norm,
+                    operator_ids=operator_ids_norm,
+                    direction_ids=None,
+                    scope_department_id=scope_department_id
+                )
+                target_operator_id = int(target_operator_ids[0])
 
             overlaps_by_operator = self._find_shift_overlap_intervals_for_technical_issue_tx(
                 cursor=cursor,
@@ -17601,6 +17739,7 @@ class Database:
         date_to=None,
         operator_id=None,
         supervisor_id=None,
+        group_id=None,
         limit=500,
         offset=0,
         scope_department_id=None
@@ -17657,6 +17796,26 @@ class Database:
                 raise ValueError("Invalid operator_id")
             where_parts.append("oa.operator_id = %s")
             params.append(operator_id_int)
+
+        group_id_int = None
+        if group_id is not None and str(group_id).strip() != '':
+            try:
+                group_id_int = int(group_id)
+            except (TypeError, ValueError):
+                raise ValueError("Invalid group_id")
+            if group_id_int <= 0:
+                raise ValueError("Invalid group_id")
+            where_parts.append("""
+                EXISTS (
+                    SELECT 1
+                    FROM group_operator_memberships gom
+                    WHERE gom.operator_id = oa.operator_id
+                      AND gom.group_id = %s
+                      AND gom.start_date <= oa.activity_date
+                      AND (gom.end_date IS NULL OR gom.end_date >= oa.activity_date)
+                )
+            """)
+            params.append(group_id_int)
 
         where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
         base_sql = """
@@ -19798,6 +19957,109 @@ class Database:
             (int(supervisor_id), as_of, as_of),
         )
         return [int(r[0]) for r in (cursor.fetchall() or []) if r[0] is not None]
+
+    def _supervisor_has_group_access_for_period_tx(self, cursor, supervisor_id, group_id, start_date, end_date):
+        """True, если СВ вёл группу хотя бы часть указанного периода."""
+        if supervisor_id is None or group_id is None or start_date is None or end_date is None:
+            return False
+        cursor.execute(
+            """
+            SELECT 1
+            FROM group_supervisor_memberships gsm
+            WHERE gsm.supervisor_id = %s
+              AND gsm.group_id = %s
+              AND gsm.start_date <= %s
+              AND (gsm.end_date IS NULL OR gsm.end_date >= %s)
+            LIMIT 1
+            """,
+            (int(supervisor_id), int(group_id), end_date, start_date),
+        )
+        return cursor.fetchone() is not None
+
+    def supervisor_has_group_access_for_period(self, supervisor_id, group_id, start_date, end_date=None):
+        if end_date is None:
+            end_date = start_date
+        if isinstance(start_date, str):
+            start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
+        if isinstance(end_date, str):
+            end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
+        with self._get_cursor() as cursor:
+            return self._supervisor_has_group_access_for_period_tx(
+                cursor, supervisor_id, group_id, start_date, end_date
+            )
+
+    def _operator_in_group_on_date_tx(self, cursor, group_id, operator_id, as_of):
+        if group_id is None or operator_id is None or as_of is None:
+            return False
+        cursor.execute(
+            """
+            SELECT 1
+            FROM group_operator_memberships gom
+            WHERE gom.group_id = %s
+              AND gom.operator_id = %s
+              AND gom.start_date <= %s
+              AND (gom.end_date IS NULL OR gom.end_date >= %s)
+            LIMIT 1
+            """,
+            (int(group_id), int(operator_id), as_of, as_of),
+        )
+        return cursor.fetchone() is not None
+
+    def operator_in_group_on_date(self, group_id, operator_id, as_of):
+        if isinstance(as_of, str):
+            as_of = datetime.strptime(as_of, '%Y-%m-%d').date()
+        with self._get_cursor() as cursor:
+            return self._operator_in_group_on_date_tx(cursor, group_id, operator_id, as_of)
+
+    def find_operator_in_group_by_name(self, group_id, name, as_of):
+        """Поиск оператора по ФИО среди исторического состава группы на дату."""
+        if not name:
+            return None
+        if isinstance(as_of, str):
+            as_of = datetime.strptime(as_of, '%Y-%m-%d').date()
+        name = str(name).strip()
+        if not name:
+            return None
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT u.id, u.telegram_id, u.name, u.role, u.direction_id,
+                       u.hire_date, u.supervisor_id, u.login
+                FROM group_operator_memberships gom
+                JOIN users u ON u.id = gom.operator_id
+                WHERE gom.group_id = %s
+                  AND gom.start_date <= %s
+                  AND (gom.end_date IS NULL OR gom.end_date >= %s)
+                  AND LOWER(u.name) = LOWER(%s)
+                ORDER BY gom.start_date DESC
+                LIMIT 1
+                """,
+                (int(group_id), as_of, as_of, name),
+            )
+            row = cursor.fetchone()
+            if row:
+                return row
+
+            tokens = re.split(r'\s+', name)
+            surname = tokens[0] if tokens else ''
+            if not surname:
+                return None
+            cursor.execute(
+                """
+                SELECT u.id, u.telegram_id, u.name, u.role, u.direction_id,
+                       u.hire_date, u.supervisor_id, u.login
+                FROM group_operator_memberships gom
+                JOIN users u ON u.id = gom.operator_id
+                WHERE gom.group_id = %s
+                  AND gom.start_date <= %s
+                  AND (gom.end_date IS NULL OR gom.end_date >= %s)
+                  AND u.name ILIKE %s
+                ORDER BY gom.start_date DESC
+                LIMIT 1
+                """,
+                (int(group_id), as_of, as_of, f"%{surname}%"),
+            )
+            return cursor.fetchone()
 
     def get_supervisor_group_ids(self, supervisor_id, month=None):
         """Публичный: id групп, которые ведёт СВ на конец месяца YYYY-MM (или сегодня)."""

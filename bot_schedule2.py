@@ -5903,22 +5903,32 @@ def preview_calls_table():
         if not (_is_supervisor_role(requester_role) or _is_admin_role(requester_role)):
             return jsonify({"error": "Unauthorized: только супервайзеры или администраторы могут загружать таблицы"}), 403
 
+        group_id_raw = (request.form.get('group_id') or '').strip()
+        selected_group_id = None
+        if group_id_raw:
+            if not group_id_raw.isdigit() or int(group_id_raw) <= 0:
+                return jsonify({"error": "Некорректный group_id"}), 400
+            selected_group_id = int(group_id_raw)
+            if not db.get_group(selected_group_id):
+                return jsonify({"error": "Группа не найдена"}), 404
+
         selected_sv_id = None
         if _is_supervisor_role(requester_role):
             selected_sv_id = user_id
         else:
             sv_id_raw = (request.form.get('sv_id') or '').strip()
-            if not sv_id_raw:
+            if not sv_id_raw and selected_group_id is None:
                 return jsonify({"error": "Для администратора требуется выбранный супервайзер (sv_id)"}), 400
-            try:
-                selected_sv_id = int(sv_id_raw)
-            except Exception:
-                return jsonify({"error": "Некорректный sv_id"}), 400
+            if sv_id_raw:
+                try:
+                    selected_sv_id = int(sv_id_raw)
+                except Exception:
+                    return jsonify({"error": "Некорректный sv_id"}), 400
 
-            selected_sv = db.get_user(id=selected_sv_id)
-            selected_sv_role = str(selected_sv[3] or '').strip().lower() if selected_sv else ''
-            if not selected_sv or selected_sv_role not in ('sv', 'supervisor'):
-                return jsonify({"error": "Супервайзер не найден"}), 404 
+                selected_sv = db.get_user(id=selected_sv_id)
+                selected_sv_role = str(selected_sv[3] or '').strip().lower() if selected_sv else ''
+                if not selected_sv or selected_sv_role not in ('sv', 'supervisor'):
+                    return jsonify({"error": "Супервайзер не найден"}), 404 
 
         # Только парсим файл, не сохраняем.
         # date (YYYY-MM-DD) опционально: если передан, вернем только строки этой даты.
@@ -5931,6 +5941,7 @@ def preview_calls_table():
             "status": "success",
             "sheet_name": sheet_name,
             "sv_id": selected_sv_id,
+            "group_id": selected_group_id,
             "operators": operators
         }), 200
 
@@ -5997,6 +6008,12 @@ def sv_daily_hours():
     """
     try:
         month = request.args.get('month') or datetime.now().strftime('%Y-%m')
+        try:
+            _year, _mon = map(int, str(month).split('-'))
+            _month_start = dt_date(_year, _mon, 1)
+            _month_end = dt_date(_year, _mon, calendar.monthrange(_year, _mon)[1])
+        except Exception:
+            return jsonify({"error": "Invalid month format. Use YYYY-MM"}), 400
         # group_id (опц.) — group-aware режим: операторы и метрики по группе за месяц.
         group_param = request.args.get('group_id')
         group_id = int(group_param) if group_param and str(group_param).isdigit() else None
@@ -6035,7 +6052,9 @@ def sv_daily_hours():
                 _sv_dept = db.get_user_department_id(supervisor_id)
                 _allowed = (
                     (_grp and _sv_dept is not None and _grp.get('department_id') == _sv_dept)
-                    or group_id in db.get_supervisor_group_ids(supervisor_id, month)
+                    or db.supervisor_has_group_access_for_period(
+                        supervisor_id, group_id, _month_start, _month_end
+                    )
                 )
                 if not _allowed:
                     return jsonify({"error": "Forbidden: not your department's group"}), 403
@@ -6113,6 +6132,18 @@ def upload_group_day():
         if not operators or not isinstance(operators, list):
             return jsonify({"error": "Field 'operators' must be a non-empty array"}), 400
 
+        group_id_raw = data.get('group_id')
+        selected_group_id = None
+        if group_id_raw not in (None, ''):
+            try:
+                selected_group_id = int(group_id_raw)
+            except Exception:
+                return jsonify({"error": "Invalid 'group_id' value"}), 400
+            if selected_group_id <= 0:
+                return jsonify({"error": "Invalid 'group_id' value"}), 400
+            if not db.get_group(selected_group_id):
+                return jsonify({"error": "Selected group not found"}), 404
+
         # Получаем id запроса (и проверяем пользователя)
         requester_header = request.headers.get('X-User-Id')
         if not requester_header or not requester_header.isdigit():
@@ -6128,17 +6159,19 @@ def upload_group_day():
         if _is_supervisor_role(requester_role):
             sv_id = requester_id
         elif _is_admin_role(requester_role):
-            if sv_id_payload in (None, ''):
+            if selected_group_id is None and sv_id_payload in (None, ''):
                 return jsonify({"error": "Field 'sv_id' is required for admin requests"}), 400
-            try:
-                sv_id = int(sv_id_payload)
-            except Exception:
-                return jsonify({"error": "Invalid 'sv_id' value"}), 400
+            sv_id = None
+            if sv_id_payload not in (None, ''):
+                try:
+                    sv_id = int(sv_id_payload)
+                except Exception:
+                    return jsonify({"error": "Invalid 'sv_id' value"}), 400
 
-            supervisor_user = db.get_user(id=sv_id)
-            supervisor_role = str(supervisor_user[3] or '').strip().lower() if supervisor_user else ''
-            if not supervisor_user or supervisor_role not in ('sv', 'supervisor'):
-                return jsonify({"error": "Selected supervisor not found"}), 404
+                supervisor_user = db.get_user(id=sv_id)
+                supervisor_role = str(supervisor_user[3] or '').strip().lower() if supervisor_user else ''
+                if not supervisor_user or supervisor_role not in ('sv', 'supervisor'):
+                    return jsonify({"error": "Selected supervisor not found"}), 404
         else:
             return jsonify({"error": "Unauthorized: only supervisors or admins can upload hours"}), 403
 
@@ -6164,6 +6197,19 @@ def upload_group_day():
                 row_month = str(row.get('month') or row_date_str[:7]).strip()
                 if not re.match(r'^\d{4}-\d{2}$', row_month):
                     row_month = row_date_str[:7]
+
+                if selected_group_id is not None and _is_supervisor_role(requester_role):
+                    if not db.supervisor_has_group_access_for_period(
+                        requester_id, selected_group_id, row_day_obj, row_day_obj
+                    ):
+                        skipped.append({
+                            "row": idx,
+                            "reason": "supervisor has no access to selected group on row date",
+                            "name": name,
+                            "date": row_date_str,
+                            "group_id": selected_group_id
+                        })
+                        continue
 
                 def _optional_float(field_name):
                     if field_name not in row:
@@ -6222,12 +6268,27 @@ def upload_group_day():
                     try:
                         op_id_int = int(op_id)
                         user_row = db.get_user(id=op_id_int)
-                        if user_row and user_row[3] == 'operator':  # role == operator
+                        if user_row and (selected_group_id is not None or user_row[3] == 'operator'):  # role == operator in legacy mode
+                            if selected_group_id is not None:
+                                if not db.operator_in_group_on_date(selected_group_id, op_id_int, row_day_obj):
+                                    skipped.append({
+                                        "row": idx,
+                                        "reason": "operator not in selected group on row date",
+                                        "name": name,
+                                        "operator_id": op_id,
+                                        "date": row_date_str,
+                                        "group_id": selected_group_id
+                                    })
+                                    continue
+                                resolved_operator_id = op_id_int
+                                # group_id/date membership is authoritative in group-aware mode.
+                                # Current users.supervisor_id may already point to the new group.
                             # Ensure operator belongs to the selected/current supervisor.
-                            if user_row[6] != sv_id:  # user_row[6] == supervisor_id in get_user select
+                            elif user_row[6] != sv_id:  # user_row[6] == supervisor_id in get_user select
                                 skipped.append({"row": idx, "reason": "operator not under selected supervisor", "name": name, "operator_id": op_id})
                                 continue
-                            resolved_operator_id = op_id_int
+                            else:
+                                resolved_operator_id = op_id_int
                         else:
                             skipped.append({"row": idx, "reason": "operator_id not found or not operator", "name": name, "operator_id": op_id})
                             continue
@@ -6236,7 +6297,11 @@ def upload_group_day():
                         continue
                 else:
                     # try find by name under sv_id (if sv_id is known)
-                    if sv_id:
+                    if selected_group_id is not None:
+                        user_row = db.find_operator_in_group_by_name(selected_group_id, name, row_day_obj)
+                        if user_row:
+                            resolved_operator_id = user_row[0]
+                    elif sv_id:
                         with db._get_cursor() as cursor:
                             cursor.execute("""
                                 SELECT id FROM users
@@ -6337,7 +6402,8 @@ def upload_group_day():
                                                     fine_reason=fine_reason,
                                                     fine_comment=fine_comment,
                                                     fines=fines_arr,
-                                                    bonuses=bonuses_arr)
+                                                    bonuses=bonuses_arr,
+                                                    group_id=selected_group_id)
 
                     # Ручной ввод чат-метрик (если переданы): время ответа/переводы/средняя оценка.
                     # Количество чатов приходит только из отдельных отчётов метрик чатов (A+B),
@@ -6397,7 +6463,13 @@ def upload_group_day():
                         except Exception as _cm_err:
                             logging.warning("upload_group_day: failed to save chat metrics for op %s: %s", resolved_operator_id, _cm_err)
 
-                    processed.append({"row": idx, "operator_id": resolved_operator_id, "name": name, "date": row_date_str})
+                    processed.append({
+                        "row": idx,
+                        "operator_id": resolved_operator_id,
+                        "name": name,
+                        "date": row_date_str,
+                        "group_id": selected_group_id
+                    })
                     processed_operator_ids.add(resolved_operator_id)
                     processed_months_by_operator.setdefault(resolved_operator_id, set()).add(row_month)
                 except Exception as e:
@@ -14363,6 +14435,9 @@ def get_monthly_report_hours():
         month = request.args.get('month')
         if not month or not MONTH_RE.match(month):
             return jsonify({"error": "month required in format YYYY-MM"}), 400
+        _report_year, _report_mon = map(int, month.split('-'))
+        _report_start = dt_date(_report_year, _report_mon, 1)
+        _report_end = dt_date(_report_year, _report_mon, calendar.monthrange(_report_year, _report_mon)[1])
 
         requester_id, requester, auth_error = _get_authenticated_requester()
         if auth_error:
@@ -14385,7 +14460,9 @@ def get_monthly_report_hours():
                 _sv_dept = scope_department_id
                 _allowed = (
                     (_grp and _sv_dept is not None and _grp.get('department_id') == _sv_dept)
-                    or group_id in db.get_supervisor_group_ids(requester_id, month)
+                    or db.supervisor_has_group_access_for_period(
+                        requester_id, group_id, _report_start, _report_end
+                    )
                 )
                 if not _allowed:
                     return jsonify({"error": "Forbidden: not your department's group"}), 403
@@ -14582,12 +14659,27 @@ def get_trainings():
             return jsonify({"error": message}), status_code
 
         month = request.args.get('month')
+        period_start = None
+        period_end = None
         if month:
             try:
-                datetime.strptime(month, '%Y-%m')
+                parsed_month = datetime.strptime(month, '%Y-%m')
+                period_start = dt_date(parsed_month.year, parsed_month.month, 1)
+                period_end = dt_date(
+                    parsed_month.year,
+                    parsed_month.month,
+                    calendar.monthrange(parsed_month.year, parsed_month.month)[1]
+                )
             except ValueError:
                 logging.warning(f"Invalid month format: {month}")
                 return jsonify({"error": "Invalid month format. Use YYYY-MM"}), 400
+        else:
+            today = datetime.now().date()
+            period_start = today
+            period_end = today
+
+        group_param = request.args.get('group_id')
+        group_id = int(group_param) if group_param and str(group_param).isdigit() else None
 
         role = _normalize_user_role(requester[3])
         headed_dept_id = _headed_department_id(requester_id)
@@ -14618,7 +14710,31 @@ def get_trainings():
             where_clauses.append("TO_CHAR(t.training_date, 'YYYY-MM') = %s")
             params.append(month)
 
-        if headed_dept_id is not None and not _is_admin_role(role):
+        if group_id is not None:
+            group = db.get_group(group_id)
+            if not group:
+                return jsonify({"error": "Group not found"}), 404
+            if headed_dept_id is not None and not _is_admin_role(role):
+                if group.get('department_id') != headed_dept_id:
+                    return jsonify({"error": "Forbidden: not your department's group"}), 403
+            elif _is_supervisor_role(role):
+                if not db.supervisor_has_group_access_for_period(requester_id, group_id, period_start, period_end):
+                    return jsonify({"error": "Forbidden: not your group"}), 403
+            elif role == 'operator':
+                return jsonify({"error": "Unsupported target role"}), 400
+
+            where_clauses.append("""
+                EXISTS (
+                    SELECT 1
+                    FROM group_operator_memberships gom
+                    WHERE gom.operator_id = t.operator_id
+                      AND gom.group_id = %s
+                      AND gom.start_date <= t.training_date
+                      AND (gom.end_date IS NULL OR gom.end_date >= t.training_date)
+                )
+            """)
+            params.append(group_id)
+        elif headed_dept_id is not None and not _is_admin_role(role):
             where_clauses.append("u.department_id = %s")
             params.append(headed_dept_id)
         elif role == 'operator':
@@ -14714,6 +14830,39 @@ def _find_overlapping_training(operator_id, training_date, start_time, end_time,
             }
     return None
 
+def _parse_optional_group_id(value):
+    if value in (None, ''):
+        return None, None
+    try:
+        group_id = int(value)
+    except Exception:
+        return None, ("Invalid group_id", 400)
+    if group_id <= 0:
+        return None, ("Invalid group_id", 400)
+    return group_id, None
+
+def _training_group_scope_error(requester, requester_id, group_id, operator_id, training_date):
+    if group_id is None:
+        return None
+    group = db.get_group(group_id)
+    if not group:
+        return ("Group not found", 404)
+
+    role = _normalize_user_role(requester[3])
+    headed_dept_id = _headed_department_id(requester_id)
+    if headed_dept_id is not None and not _is_admin_role(role):
+        if group.get('department_id') != headed_dept_id:
+            return ("Forbidden: not your department's group", 403)
+    elif _is_supervisor_role(role):
+        if not db.supervisor_has_group_access_for_period(requester_id, group_id, training_date, training_date):
+            return ("Forbidden: not your group", 403)
+    elif not _is_admin_role(role):
+        return ("Forbidden", 403)
+
+    if not db.operator_in_group_on_date(group_id, operator_id, training_date):
+        return ("Operator not in selected group on training date", 403)
+    return None
+
 @app.route('/api/trainings', methods=['POST'])
 @require_api_key
 def add_training():
@@ -14744,6 +14893,11 @@ def add_training():
             logging.warning(f"Unauthorized attempt to add training by user {requester_id}")
             return jsonify({"error": "Unauthorized"}), 403
 
+        group_id, group_id_error = _parse_optional_group_id(data.get('group_id'))
+        if group_id_error:
+            message, status_code = group_id_error
+            return jsonify({"error": message}), status_code
+
         try:
             datetime.strptime(data['date'], '%Y-%m-%d')
             datetime.strptime(data['start_time'], '%H:%M')
@@ -14763,19 +14917,31 @@ def add_training():
             return jsonify({"error": "Invalid training reason"}), 400
 
         if not is_batch_request:
-            operator, scope_error = _load_target_user_with_scope(
-                requester,
-                requester_id,
-                operator_ids[0],
-                allow_self=False,
-                supervisor_target_roles=('operator',),
-                not_found_message="Operator not found",
-                forbidden_message="Forbidden for this operator"
-            )
-            if scope_error:
-                message, status_code = scope_error
-                logging.warning("Blocked training creation: requester=%s operator=%s error=%s", requester_id, operator_ids[0], message)
-                return jsonify({"error": message}), status_code
+            if group_id is not None:
+                operator = db.get_user(id=int(operator_ids[0]))
+                if not operator:
+                    return jsonify({"error": "Operator not found"}), 404
+                group_scope_error = _training_group_scope_error(
+                    requester, requester_id, group_id, int(operator[0]), data['date']
+                )
+                if group_scope_error:
+                    message, status_code = group_scope_error
+                    logging.warning("Blocked group training creation: requester=%s operator=%s group=%s error=%s", requester_id, operator_ids[0], group_id, message)
+                    return jsonify({"error": message}), status_code
+            else:
+                operator, scope_error = _load_target_user_with_scope(
+                    requester,
+                    requester_id,
+                    operator_ids[0],
+                    allow_self=False,
+                    supervisor_target_roles=('operator',),
+                    not_found_message="Operator not found",
+                    forbidden_message="Forbidden for this operator"
+                )
+                if scope_error:
+                    message, status_code = scope_error
+                    logging.warning("Blocked training creation: requester=%s operator=%s error=%s", requester_id, operator_ids[0], message)
+                    return jsonify({"error": message}), status_code
 
             overlapping_training = _find_overlapping_training(
                 int(operator[0]),
@@ -14810,29 +14976,57 @@ def add_training():
 
         for raw_operator_id in operator_ids:
             try:
-                operator, scope_error = _load_target_user_with_scope(
-                    requester,
-                    requester_id,
-                    raw_operator_id,
-                    allow_self=False,
-                    supervisor_target_roles=('operator',),
-                    not_found_message="Operator not found",
-                    forbidden_message="Forbidden for this operator"
-                )
-                if scope_error:
-                    message, status_code = scope_error
-                    logging.warning(
-                        "Blocked batch training creation: requester=%s operator=%s error=%s",
+                if group_id is not None:
+                    operator = db.get_user(id=int(raw_operator_id))
+                    if not operator:
+                        errors.append({
+                            "operator_id": int(raw_operator_id),
+                            "error": "Operator not found",
+                            "status_code": 404
+                        })
+                        continue
+                    group_scope_error = _training_group_scope_error(
+                        requester, requester_id, group_id, int(operator[0]), data['date']
+                    )
+                    if group_scope_error:
+                        message, status_code = group_scope_error
+                        logging.warning(
+                            "Blocked group batch training creation: requester=%s operator=%s group=%s error=%s",
+                            requester_id,
+                            raw_operator_id,
+                            group_id,
+                            message
+                        )
+                        errors.append({
+                            "operator_id": int(raw_operator_id),
+                            "error": str(message),
+                            "status_code": int(status_code)
+                        })
+                        continue
+                else:
+                    operator, scope_error = _load_target_user_with_scope(
+                        requester,
                         requester_id,
                         raw_operator_id,
-                        message
+                        allow_self=False,
+                        supervisor_target_roles=('operator',),
+                        not_found_message="Operator not found",
+                        forbidden_message="Forbidden for this operator"
                     )
-                    errors.append({
-                        "operator_id": int(raw_operator_id),
-                        "error": str(message),
-                        "status_code": int(status_code)
-                    })
-                    continue
+                    if scope_error:
+                        message, status_code = scope_error
+                        logging.warning(
+                            "Blocked batch training creation: requester=%s operator=%s error=%s",
+                            requester_id,
+                            raw_operator_id,
+                            message
+                        )
+                        errors.append({
+                            "operator_id": int(raw_operator_id),
+                            "error": str(message),
+                            "status_code": int(status_code)
+                        })
+                        continue
 
                 scoped_operator_id = int(operator[0])
                 overlapping_training = _find_overlapping_training(
@@ -14933,18 +15127,40 @@ def update_training(training_id):
                 logging.warning(f"Training not found: {training_id}")
                 return jsonify({"error": "Training not found"}), 404
 
-        operator, scope_error = _load_target_user_with_scope(
-            requester,
-            requester_id,
-            training[1],
-            allow_self=False,
-            supervisor_target_roles=('operator',),
-            not_found_message="Operator not found",
-            forbidden_message="Forbidden for this operator"
-        )
-        if scope_error:
-            message, status_code = scope_error
+        group_id, group_id_error = _parse_optional_group_id(data.get('group_id'))
+        if group_id_error:
+            message, status_code = group_id_error
             return jsonify({"error": message}), status_code
+
+        if group_id is not None:
+            effective_scope_date = data.get('date') or training[2].strftime('%Y-%m-%d')
+            try:
+                datetime.strptime(effective_scope_date, '%Y-%m-%d')
+            except ValueError:
+                logging.warning(f"Invalid date format: {effective_scope_date}")
+                return jsonify({"error": "Invalid date format"}), 400
+            operator = db.get_user(id=int(training[1]))
+            if not operator:
+                return jsonify({"error": "Operator not found"}), 404
+            group_scope_error = _training_group_scope_error(
+                requester, requester_id, group_id, int(training[1]), effective_scope_date
+            )
+            if group_scope_error:
+                message, status_code = group_scope_error
+                return jsonify({"error": message}), status_code
+        else:
+            operator, scope_error = _load_target_user_with_scope(
+                requester,
+                requester_id,
+                training[1],
+                allow_self=False,
+                supervisor_target_roles=('operator',),
+                not_found_message="Operator not found",
+                forbidden_message="Forbidden for this operator"
+            )
+            if scope_error:
+                message, status_code = scope_error
+                return jsonify({"error": message}), status_code
 
         if 'date' in data:
             try:
@@ -15250,6 +15466,7 @@ def list_technical_issues():
         date_from = (request.args.get('date_from') or '').strip() or None
         date_to = (request.args.get('date_to') or '').strip() or None
         operator_id = (request.args.get('operator_id') or '').strip() or None
+        group_id = (request.args.get('group_id') or '').strip() or None
         reason = (request.args.get('reason') or '').strip() or None
         workplace_number = (request.args.get('workplace_number') or request.args.get('workplace') or '').strip() or None
         limit = request.args.get('limit', 500)
@@ -15262,6 +15479,7 @@ def list_technical_issues():
             date_from=date_from,
             date_to=date_to,
             operator_id=operator_id,
+            group_id=group_id,
             reason=reason,
             workplace_number=workplace_number,
             limit=limit,
@@ -15788,6 +16006,7 @@ def create_offline_activity():
             end_time=end_time,
             comment=comment,
             operator_id=operator_id,
+            group_id=payload.get('group_id'),
             scope_department_id=scope_department_id
         )
 
@@ -15826,6 +16045,7 @@ def list_offline_activities():
         date_to = (request.args.get('date_to') or '').strip() or None
         operator_id = (request.args.get('operator_id') or '').strip() or None
         supervisor_id = (request.args.get('supervisor_id') or request.args.get('sv_id') or '').strip() or None
+        group_id = (request.args.get('group_id') or '').strip() or None
         limit = request.args.get('limit', 500)
         offset = request.args.get('offset', 0)
 
@@ -15837,6 +16057,7 @@ def list_offline_activities():
             date_to=date_to,
             operator_id=operator_id,
             supervisor_id=supervisor_id,
+            group_id=group_id,
             limit=limit,
             offset=offset,
             scope_department_id=scope_department_id
