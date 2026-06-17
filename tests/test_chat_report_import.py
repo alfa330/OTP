@@ -27,6 +27,7 @@ def _chat_report_namespace():
         "CHAT2DESK_SYNC_TIMEZONE",
         "CHAT2DESK_STATISTICS_REPORT_REPLIES",
         "CHAT2DESK_STATISTICS_REPORT_RATING",
+        "CHAT2DESK_STATISTICS_REPORT_OPERATOR_STATS",
     }
     wanted_functions = {
         "_env_bool",
@@ -316,6 +317,42 @@ class ChatReportImportTests(unittest.TestCase):
         self.assertEqual(d10_after_surge["score_count"], 2)
         self.assertEqual(d10_after_surge["avg_score"], 4.0)
         self.assertEqual(res2["excluded_surge_rows"], 1)
+
+    def test_chat2desk_operator_stats_imports_chat_count(self):
+        build = self.ns["_chat2desk_build_metrics_from_statistics_rows"]
+        operator_name = OPERATORS[1][1]
+        operator_stats = [
+            {
+                "operator_name": operator_name,
+                "date": "2026-06-10",
+                "channel_name": "Support",
+                "transport": "whatsapp",
+                "requests_took_part": 3,
+            },
+            {
+                "operator_name": operator_name,
+                "date": "2026-06-10",
+                "channel_name": "Support",
+                "transport": "wa_dialog",
+                "requests_took_part": "4",
+            },
+        ]
+
+        res = build(
+            "2026-06-10",
+            [],
+            [],
+            self.lookup,
+            self.index,
+            operator_stats_rows=operator_stats,
+        )
+
+        self.assertEqual(res["detected_type"], "chats_count")
+        self.assertEqual(res["update_fields"], ["chats_count"])
+        self.assertEqual(res["source_rows"], 2)
+        self.assertEqual(res["api_rows"]["operator_stats"], 2)
+        by_key = {(m["operator_id"], m["day"]): m for m in res["metrics"]}
+        self.assertEqual(by_key[(2, "2026-06-10")]["chats_count"], 7)
 
     def test_chat2desk_api_token_normalizes_common_env_copies(self):
         parse_token = self.ns["_chat2desk_api_token"]

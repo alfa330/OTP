@@ -17641,6 +17641,7 @@ def _chat_report_parse(header, data_rows, operator_lookup, operator_token_index,
 
 CHAT2DESK_STATISTICS_REPORT_REPLIES = 'operator_replies'
 CHAT2DESK_STATISTICS_REPORT_RATING = 'rating'
+CHAT2DESK_STATISTICS_REPORT_OPERATOR_STATS = 'operator_stats'
 
 
 def _chat2desk_api_token():
@@ -17953,6 +17954,7 @@ def _chat2desk_low_rating_payload(row, op_id, operator_name, metric_day, score):
 
 def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_rows,
                                                   operator_lookup, operator_token_index,
+                                                  operator_stats_rows=None,
                                                   surge_windows=None, preview_limit=None):
     preview_limit_value = STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
     if preview_limit is not None:
@@ -17970,6 +17972,7 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
     low_ratings = []
     source_rows = sum(1 for row in (reply_rows or []) if _chat2desk_row_is_nonempty(row))
     source_rows += sum(1 for row in (rating_rows or []) if _chat2desk_row_is_nonempty(row))
+    source_rows += sum(1 for row in (operator_stats_rows or []) if _chat2desk_row_is_nonempty(row))
 
     def metric_for(op_id, metric_day):
         return metrics_by_key.setdefault((int(op_id), metric_day), {
@@ -18037,7 +18040,35 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
         if float(score) < 4:
             low_ratings.append(_chat2desk_low_rating_payload(row, op_id, raw_name, metric_day, score))
 
+    chat_count_agg = {}
+    for row_index, row in enumerate(operator_stats_rows or []):
+        if not isinstance(row, dict) or not _chat2desk_row_is_nonempty(row):
+            continue
+        raw_name = _chat2desk_row_first(row, 'operator_name', 'operator', 'name')
+        chats_value = _chat_metrics_parse_number(_chat2desk_row_first(row, 'requests_took_part'))
+        metric_day = _chat2desk_metric_day(
+            _chat2desk_row_first(row, 'date', 'created_at'),
+            day_str,
+            target_tz=target_tz
+        )
+        if not raw_name or chats_value is None or not metric_day:
+            if raw_name:
+                note_unmatched(raw_name, f"operator_stats:{row_index}")
+            continue
+        op_id, _ = _chat_report_resolve_operator(raw_name, operator_lookup, operator_token_index)
+        if op_id is None:
+            note_unmatched(raw_name, f"operator_stats:{row_index}")
+            continue
+        bucket = chat_count_agg.setdefault((op_id, metric_day), {'chats_count': 0})
+        bucket['chats_count'] += int(round(chats_value))
+
     update_fields = set()
+    for (op_id, metric_day), bucket in chat_count_agg.items():
+        metric = metric_for(op_id, metric_day)
+        metric['chats_count'] = int(bucket.get('chats_count') or 0)
+    if chat_count_agg:
+        update_fields.add('chats_count')
+
     for (op_id, metric_day), bucket in response_agg.items():
         if bucket['count'] <= 0:
             continue
@@ -18056,10 +18087,26 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
     if score_agg:
         update_fields.update(CHAT_REPORT_TYPE_FIELDS[CHAT_REPORT_TYPE_SCORE])
 
-    if response_agg and score_agg:
+    detected_parts = []
+    if chat_count_agg:
+        detected_parts.append('chats_count')
+    if response_agg:
+        detected_parts.append(CHAT_REPORT_TYPE_RESPONSE)
+    if score_agg:
+        detected_parts.append(CHAT_REPORT_TYPE_SCORE)
+
+    if len(detected_parts) > 1:
         detected_type = CHAT_REPORT_TYPE_COMBINED
-        detected_types = [CHAT_REPORT_TYPE_RESPONSE, CHAT_REPORT_TYPE_SCORE]
-        detected_label = 'Chat2Desk API: ' + ', '.join(CHAT_REPORT_TYPE_LABELS[t] for t in detected_types)
+        detected_types = detected_parts
+        detected_label_parts = [
+            'Кол-во чатов' if t == 'chats_count' else CHAT_REPORT_TYPE_LABELS[t]
+            for t in detected_types
+        ]
+        detected_label = 'Chat2Desk API: ' + ', '.join(detected_label_parts)
+    elif chat_count_agg:
+        detected_type = 'chats_count'
+        detected_types = ['chats_count']
+        detected_label = 'Chat2Desk API: Кол-во чатов'
     elif response_agg:
         detected_type = CHAT_REPORT_TYPE_RESPONSE
         detected_types = [CHAT_REPORT_TYPE_RESPONSE]
@@ -18091,6 +18138,7 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
         'api_rows': {
             CHAT2DESK_STATISTICS_REPORT_REPLIES: len(reply_rows or []),
             CHAT2DESK_STATISTICS_REPORT_RATING: len(rating_rows or []),
+            CHAT2DESK_STATISTICS_REPORT_OPERATOR_STATS: len(operator_stats_rows or []),
         },
     }
 
@@ -18108,12 +18156,14 @@ def _chat2desk_saved_surge_windows_for_day(day_obj):
 def _chat2desk_build_daily_metrics(day_str, operator_lookup, operator_token_index, surge_windows=None):
     reply_rows = _chat2desk_statistics_get(CHAT2DESK_STATISTICS_REPORT_REPLIES, day_str)
     rating_rows = _chat2desk_statistics_get(CHAT2DESK_STATISTICS_REPORT_RATING, day_str)
+    operator_stats_rows = _chat2desk_statistics_get(CHAT2DESK_STATISTICS_REPORT_OPERATOR_STATS, day_str)
     return _chat2desk_build_metrics_from_statistics_rows(
         day_str,
         reply_rows,
         rating_rows,
         operator_lookup,
         operator_token_index,
+        operator_stats_rows=operator_stats_rows,
         surge_windows=surge_windows,
         preview_limit=STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
     )
