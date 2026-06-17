@@ -11639,33 +11639,6 @@ class Database:
             total_calls = 0
             total_efficiency_hours = calls_per_hour = fines = 0.0
         calculation_model_code = self._normalize_calculation_model_code(calculation_model_raw, direction_name)
-        if calculation_model_code == CALCULATION_MODEL_CHAT_MANAGER:
-            _chat_chats = int(chat_metric_totals.get("chats_count") or 0)
-            total_calls = _chat_chats
-            regular_hours_for_rate = max(0.0, float(regular_hours or 0.0))
-            calls_per_hour = (float(total_calls) / regular_hours_for_rate) if regular_hours_for_rate > 0 else 0.0
-            for day_key, metrics in (chat_metrics_by_day or {}).items():
-                entry = daily_map.setdefault(str(day_key), {
-                    "work_time": 0.0,
-                    "break_time": 0.0,
-                    "talk_time": 0.0,
-                    "calls": 0,
-                    "efficiency": 0.0,
-                    "fine_amount": 0.0,
-                    "fine_reason": None,
-                    "fine_comment": None,
-                    "fines": [],
-                    "bonuses": []
-                })
-                entry["chat_metrics"] = metrics
-                entry["calls"] = int(metrics.get("chats_count") or 0)
-
-        accounted_hours = (
-            float(regular_hours or 0.0)
-            + float(training_hours or 0.0)
-            + float(technical_issue_hours or 0.0)
-            + float(offline_activity_hours or 0.0)
-        )
 
         # Сегменты членства оператора за месяц — для уведомления «несколько направлений»
         # и селектора в «Мои часы». daily здесь НЕ разбиты по группам; сегменты дают
@@ -11699,13 +11672,51 @@ class Database:
                     "end_day": int(clipped_end.day),
                     "is_current": seg_end is None,
                 })
+        segment_model_codes = {
+            str(seg.get("calculation_model_code") or "").strip()
+            for seg in group_segments
+            if seg.get("calculation_model_code")
+        }
+        effective_calculation_model_code = (
+            next(iter(segment_model_codes))
+            if len(segment_model_codes) == 1
+            else calculation_model_code
+        )
+
+        if effective_calculation_model_code == CALCULATION_MODEL_CHAT_MANAGER:
+            _chat_chats = int(chat_metric_totals.get("chats_count") or 0)
+            total_calls = _chat_chats
+            regular_hours_for_rate = max(0.0, float(regular_hours or 0.0))
+            calls_per_hour = (float(total_calls) / regular_hours_for_rate) if regular_hours_for_rate > 0 else 0.0
+            for day_key, metrics in (chat_metrics_by_day or {}).items():
+                entry = daily_map.setdefault(str(day_key), {
+                    "work_time": 0.0,
+                    "break_time": 0.0,
+                    "talk_time": 0.0,
+                    "calls": 0,
+                    "efficiency": 0.0,
+                    "fine_amount": 0.0,
+                    "fine_reason": None,
+                    "fine_comment": None,
+                    "fines": [],
+                    "bonuses": []
+                })
+                entry["chat_metrics"] = metrics
+                entry["calls"] = int(metrics.get("chats_count") or 0)
+
+        accounted_hours = (
+            float(regular_hours or 0.0)
+            + float(training_hours or 0.0)
+            + float(technical_issue_hours or 0.0)
+            + float(offline_activity_hours or 0.0)
+        )
 
         operator_obj = {
             "operator_id": operator_id,
             "name": name,
             "direction": direction_name,
-            "calculation_model_code": calculation_model_code,
-            "calculationModelCode": calculation_model_code,
+            "calculation_model_code": effective_calculation_model_code,
+            "calculationModelCode": effective_calculation_model_code,
             "rate": rate,
             "norm_hours": float(norm_hours),
             "fines": float(fines),
@@ -11840,31 +11851,15 @@ class Database:
 
             # --- transfer-aware: членства всех операторов, пересекающие месяц ---
             # Только в group-aware режиме (group_id задан). В legacy сегменты пустые,
-            # фронт остаётся в прежнем поведении 1:1.
+            # фронт остаётся в прежнем поведении 1:1. Важно отдавать модель сегмента:
+            # при переводе между операторской и чат-моделью UI должен брать метрики
+            # той модели, которая действовала в конкретные дни.
             segments_by_operator = {}
             if group_id is not None:
-                cursor.execute(
-                    """
-                    SELECT gom.operator_id, gom.group_id, gr.name, gom.start_date, gom.end_date
-                    FROM group_operator_memberships gom
-                    JOIN groups gr ON gr.id = gom.group_id
-                    WHERE gom.operator_id = ANY(%s)
-                      AND gom.start_date <= %s
-                      AND (gom.end_date IS NULL OR gom.end_date >= %s)
-                    ORDER BY gom.operator_id, gom.start_date
-                    """,
-                    (op_ids, end, start),
-                )
-                for seg_op_id, seg_group_id, seg_group_name, seg_start, seg_end in cursor.fetchall() or []:
-                    clipped_start = seg_start if (seg_start and seg_start > start) else start
-                    clipped_end = seg_end if (seg_end and seg_end < end) else end
-                    segments_by_operator.setdefault(int(seg_op_id), []).append({
-                        "group_id": int(seg_group_id),
-                        "group_name": seg_group_name,
-                        "start_day": int(clipped_start.day),
-                        "end_day": int(clipped_end.day),
-                        "is_current": int(seg_group_id) == int(group_id),
-                    })
+                segments_by_operator = self._load_segments_by_operator_tx(cursor, op_ids, start, end)
+                for segs in segments_by_operator.values():
+                    for seg in segs:
+                        seg["is_current"] = int(seg.get("group_id") or 0) == int(group_id)
 
             # --- статус оператора на конец месяца (из user_history; fallback — текущий) ---
             # Прошлый месяц должен показывать статус, который был тогда, а не нынешний.
