@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DB = (ROOT / "database.py").read_text(encoding="utf-8-sig")
 BOT = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+APP = (ROOT / "src" / "App.jsx").read_text(encoding="utf-8-sig")
 
 
 class SchemaTests(unittest.TestCase):
@@ -135,6 +136,30 @@ class ReadPathTests(unittest.TestCase):
     def test_sv_daily_hours_accepts_group_id(self):
         self.assertIn("get_daily_hours_by_group_month", BOT)
         self.assertIn("get_supervisor_group_ids", BOT)  # проверка доступа СВ к группе
+
+    def test_group_month_reads_activity_metrics_by_historical_membership(self):
+        for helper in [
+            "_load_training_hours_by_operator_tx(self, cursor, operator_ids, start_date, end_date, group_id=None)",
+            "_load_technical_issues_by_operator_day_tx(self, cursor, operator_ids, start_date, end_date, group_id=None)",
+            "_load_offline_activities_by_operator_day_tx(self, cursor, operator_ids, start_date, end_date, group_id=None)",
+            "_load_chat_manager_metrics_by_operator_day_tx(self, cursor, operator_ids, start_date, end_date, group_id=None)",
+        ]:
+            self.assertIn(helper, DB)
+        self.assertIn("gom.group_id = %s", DB)
+        self.assertIn("group_id=group_id", DB)
+
+    def test_group_writes_use_membership_date_instead_of_current_supervisor(self):
+        self.assertIn("selected_group_id = None", BOT)
+        self.assertIn("db.operator_in_group_on_date(selected_group_id, op_id_int, row_day_obj)", BOT)
+        self.assertIn("db.find_operator_in_group_by_name(selected_group_id, name, row_day_obj)", BOT)
+        self.assertIn("group_id=selected_group_id", BOT)
+
+    def test_hours_frontend_sends_selected_group_context(self):
+        self.assertIn("hoursParams.append('group_id', selectedGroupId)", APP)
+        self.assertIn("trainingsParams.append('group_id', selectedGroupId)", APP)
+        self.assertIn("technicalParams.append('group_id', selectedGroupId)", APP)
+        self.assertIn("offlineParams.append('group_id', selectedGroupId)", APP)
+        self.assertIn("group_id: selectedGroupId || null", APP)
 
 
 if __name__ == "__main__":
