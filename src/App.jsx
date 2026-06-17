@@ -11092,6 +11092,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [plannerStatusAnomalyError, setPlannerStatusAnomalyError] = useState('');
             const [plannerStatusAnomalyFileName, setPlannerStatusAnomalyFileName] = useState('');
             const [plannerStatusImportSummary, setPlannerStatusImportSummary] = useState(null);
+            const [plannerStatusApiSyncLoading, setPlannerStatusApiSyncLoading] = useState(false);
             const [plannerChatMetricsImportState, setPlannerChatMetricsImportState] = useState({
                 loading: false,
                 summary: null,
@@ -15009,6 +15010,103 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 } finally {
                     setPlannerStatusAnomalyLoading(false);
                     if (event?.target) event.target.value = '';
+                }
+            };
+
+            const syncPlannerChat2DeskStatuses = async () => {
+                if (!user?.id || plannerStatusApiSyncLoading || plannerStatusAnomalyLoading) return;
+                const visibleDaysSorted = (Array.isArray(visibleRange) ? [...visibleRange] : [])
+                    .map(day => String(day || '').trim())
+                    .filter(day => /^\d{4}-\d{2}-\d{2}$/.test(day))
+                    .sort((a, b) => a.localeCompare(b));
+                if (visibleDaysSorted.length === 0) {
+                    emitAppToast('Нет дат для синхронизации статусов Chat2Desk', 'warning');
+                    return;
+                }
+
+                const daysBetween = (startDate, endDate) => {
+                    const start = new Date(`${startDate}T00:00:00`);
+                    const end = new Date(`${endDate}T00:00:00`);
+                    const count = Math.round((end - start) / 86400000) + 1;
+                    return Number.isFinite(count) ? count : 0;
+                };
+                const visibleStart = visibleDaysSorted[0];
+                const visibleEnd = visibleDaysSorted[visibleDaysSorted.length - 1];
+                const paddedStart = String(plannerStatusFetchRange?.start || '').trim();
+                const paddedEnd = String(plannerStatusFetchRange?.end || '').trim();
+                const paddedDays = (/^\d{4}-\d{2}-\d{2}$/.test(paddedStart) && /^\d{4}-\d{2}-\d{2}$/.test(paddedEnd))
+                    ? daysBetween(paddedStart, paddedEnd)
+                    : 0;
+                const syncStart = paddedDays >= 1 && paddedDays <= 31 ? paddedStart : visibleStart;
+                const syncEnd = paddedDays >= 1 && paddedDays <= 31 ? paddedEnd : visibleEnd;
+                const syncDays = daysBetween(syncStart, syncEnd);
+                if (syncDays < 1 || syncDays > 31) {
+                    emitAppToast('Период синхронизации Chat2Desk не может быть больше 31 дня', 'warning');
+                    return;
+                }
+
+                setPlannerStatusApiSyncLoading(true);
+                setPlannerStatusAnomalyError('');
+                setPlannerStatusImportSummary(null);
+                setPlannerStatusAnomalyOnly(false);
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/sync_statuses_chat2desk`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: withAccessTokenHeader({
+                            'Content-Type': 'application/json',
+                            'X-User-Id': user?.id
+                        }),
+                        body: JSON.stringify(
+                            syncStart === syncEnd
+                                ? { date: syncStart }
+                                : { date_from: syncStart, date_to: syncEnd }
+                        )
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+
+                    const summary = {
+                        ...(payload?.import || {}),
+                        message: payload?.message || ''
+                    };
+                    setPlannerStatusImportSummary(summary);
+                    setPlannerStatusAnomalyFileName(syncStart === syncEnd
+                        ? `Chat2Desk ${syncStart}`
+                        : `Chat2Desk ${syncStart} - ${syncEnd}`
+                    );
+
+                    plannerLoadedStatusRangeKeysRef.current = new Set();
+                    plannerLoadingStatusRangeKeysRef.current = new Set();
+                    plannerActiveStatusWindowKeyRef.current = '';
+                    const currentRangeStart = String(plannerStatusFetchRange?.start || syncStart || '').trim();
+                    const currentRangeEnd = String(plannerStatusFetchRange?.end || syncEnd || '').trim();
+                    const statusData = currentRangeStart && currentRangeEnd
+                        ? await fetchPlannerImportedStatusesForRange(currentRangeStart, currentRangeEnd, { force: true })
+                        : null;
+                    const serverOperators = Array.isArray(statusData?.operators) ? statusData.operators : [];
+                    const analysis = buildPlannerStatusAnalysisFromOperators(serverOperators.length ? serverOperators : operators);
+                    setPlannerStatusAnomalyAnalysis(analysis);
+                    setPlannerStatusModalFocus(null);
+                    setPlannerStatusHourlyExpandedKey('');
+                    setPlannerStatusGroupingDirectionKeys([]);
+                    setPlannerStatusSpecialViewEnabled(Boolean(analysis?.days?.length));
+                    const firstAnomalyDay = (analysis?.days || []).find(d => Number(d?.noPhoneAnomalyCount || 0) > 0)?.dateKey;
+                    const firstVisibleDay = (analysis?.days || []).find(d => String(d?.dateKey || '') >= visibleStart && String(d?.dateKey || '') <= visibleEnd)?.dateKey;
+                    const firstDay = firstAnomalyDay || firstVisibleDay || analysis?.days?.[0]?.dateKey || '';
+                    setPlannerStatusHourlyDayKey(String(firstDay || ''));
+                    setPlannerStatusAnomalyExpandedDays(firstDay ? { [firstDay]: true } : {});
+                    setShowPlannerStatusAnomalyModal(true);
+                    emitAppToast(payload?.message || 'Статусы Chat2Desk синхронизированы', 'success');
+                } catch (error) {
+                    console.error('Error syncing Chat2Desk operator statuses:', error);
+                    const message = error?.message || 'Не удалось синхронизировать статусы Chat2Desk';
+                    setPlannerStatusAnomalyError(message);
+                    emitAppToast(message, 'error');
+                } finally {
+                    setPlannerStatusApiSyncLoading(false);
                 }
             };
 
@@ -21833,12 +21931,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     setShowPlannerTopActionsMenu(false);
                                                     triggerPlannerStatusAnomalyImportSelect();
                                                 }}
-                                                disabled={plannerStatusAnomalyLoading}
+                                                disabled={plannerStatusAnomalyLoading || plannerStatusApiSyncLoading}
                                                 className="w-full px-3 py-2 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
                                                 title="Загрузить CSV/XLSX переключений статусов операторов"
                                             >
                                                 <FaIcon className={`fas ${plannerStatusAnomalyLoading ? 'fa-spinner fa-spin' : 'fa-upload'}`}></FaIcon>
                                                 {plannerStatusAnomalyLoading ? 'Загрузка...' : 'Загрузить статусы'}
+                                            </button>
+
+                                            <button
+                                                onClick={() => {
+                                                    setShowPlannerTopActionsMenu(false);
+                                                    syncPlannerChat2DeskStatuses();
+                                                }}
+                                                disabled={plannerStatusAnomalyLoading || plannerStatusApiSyncLoading}
+                                                className="w-full px-3 py-2 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                                                title="Синхронизировать переключения рабочих статусов Chat2Desk за видимый диапазон"
+                                            >
+                                                <FaIcon className={`fas ${plannerStatusApiSyncLoading ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}`}></FaIcon>
+                                                {plannerStatusApiSyncLoading ? 'Синхронизация...' : 'Статусы Chat2Desk'}
                                             </button>
 
                                             <button
@@ -27008,11 +27119,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <button
                                         type="button"
                                         onClick={triggerPlannerStatusAnomalyImportSelect}
-                                        disabled={plannerStatusAnomalyLoading}
+                                        disabled={plannerStatusAnomalyLoading || plannerStatusApiSyncLoading}
                                         className="px-3 py-2 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
                                     >
                                         <FaIcon className={`fas ${plannerStatusAnomalyLoading ? 'fa-spinner fa-spin' : 'fa-file-csv'}`}></FaIcon>
                                         {plannerStatusAnomalyLoading ? 'Анализируем...' : (hasAnalysis ? 'Загрузить другой файл' : 'Загрузить файл')}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={syncPlannerChat2DeskStatuses}
+                                        disabled={plannerStatusAnomalyLoading || plannerStatusApiSyncLoading}
+                                        className="px-3 py-2 rounded-lg border border-sky-200 bg-sky-50 hover:bg-sky-100 text-sky-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                                        title="Синхронизировать переключения статусов Chat2Desk за видимый диапазон"
+                                    >
+                                        <FaIcon className={`fas ${plannerStatusApiSyncLoading ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}`}></FaIcon>
+                                        {plannerStatusApiSyncLoading ? 'Синхронизация...' : 'Из Chat2Desk'}
                                     </button>
                                     {hasAnalysis && (
                                         <div className="flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-1 py-1">

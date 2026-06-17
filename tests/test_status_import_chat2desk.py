@@ -21,6 +21,7 @@ def _status_import_namespace():
         "CHAT2DESK_STATUS_EVENT_MAP",
         "CHAT2DESK_ACTION_EVENT_MAP",
         "CHAT2DESK_IGNORED_STATUS_EVENTS",
+        "CHAT2DESK_STATISTICS_REPORT_OPERATOR_EVENTS",
     }
     wanted_functions = {
         "_status_import_normalize_key",
@@ -36,6 +37,9 @@ def _status_import_namespace():
         "_status_import_xlsx_rows",
         "_status_import_parse_csv",
         "_status_import_parse_xlsx",
+        "_chat_metrics_parse_date",
+        "_chat2desk_row_first",
+        "_chat2desk_build_status_import_from_operator_events",
     }
 
     module = ast.parse(BOT_PATH.read_text(encoding="utf-8"))
@@ -73,6 +77,7 @@ def _status_import_namespace():
             ).strip("._ "),
         ),
         "STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT": 30,
+        "STATUS_IMPORT_MAX_SOURCE_ROWS": 120000,
     }
     exec(
         compile(ast.Module(body=selected_nodes, type_ignores=[]), str(BOT_PATH), "exec"),
@@ -172,6 +177,72 @@ class StatusImportChat2DeskTests(unittest.TestCase):
             ["online", "тех причина", "take chat"],
         )
         self.assertEqual(parsed["action_events_count"], 1)
+
+    def test_chat2desk_operator_events_rows_can_feed_status_import(self):
+        build = self.ns["_chat2desk_build_status_import_from_operator_events"]
+        normalize_name = self.ns["_status_import_normalize_operator_name"]
+
+        rows = [
+            {
+                "operator_id": 100,
+                "operator_name": "Jane Doe",
+                "event": "online",
+                "created_at": "2026-06-06 09:00:00",
+                "status_duration": 3600,
+            },
+            {
+                "operator_id": 100,
+                "operator_name": "Jane Doe",
+                "event": "break",
+                "created_at": "2026-06-06 10:00:00",
+                "status_duration": 60,
+            },
+            {
+                "operator_id": 100,
+                "operator_name": "Jane Doe",
+                "event": "take_chat",
+                "created_at": "2026-06-06 10:01:00",
+                "status_duration": "",
+            },
+            {
+                "operator_id": 100,
+                "operator_name": "Jane Doe",
+                "event": "holiday",
+                "created_at": "2026-06-06 18:00:00",
+                "status_duration": 1800,
+            },
+            {
+                "operator_id": 100,
+                "operator_name": "Jane Doe",
+                "event": "offline",
+                "created_at": "2026-06-06 18:30:00",
+                "status_duration": "",
+            },
+        ]
+
+        parsed = build(
+            "2026-06-06",
+            rows,
+            {normalize_name("Jane Doe"): [{"id": 1, "name": "Jane Doe"}]},
+            preview_limit=10,
+        )
+
+        self.assertEqual(parsed["source_rows"], 5)
+        self.assertEqual(parsed["valid_events"], 5)
+        self.assertEqual(parsed["matched_events"], 4)
+        self.assertEqual(parsed["invalid_rows_count"], 0)
+        self.assertEqual(parsed["action_events_count"], 1)
+        self.assertEqual(parsed["ignored_events_count"], 1)
+        self.assertEqual(parsed["api_rows"]["operator_events"], 5)
+        self.assertEqual(
+            [event["status_key"] for event in parsed["events"]],
+            ["online", "break", "take chat", "holiday"],
+        )
+        self.assertEqual(len(parsed["segments"]), 2)
+        self.assertEqual(parsed["segments"][0]["status_key"], "online")
+        self.assertEqual(parsed["segments"][0]["duration_sec"], 3600)
+        self.assertEqual(parsed["segments"][1]["status_key"], "break")
+        self.assertEqual(parsed["segments"][1]["duration_sec"], 28800)
 
 
 if __name__ == "__main__":
