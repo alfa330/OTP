@@ -29,6 +29,14 @@ class CallsUploadRegressionTests(unittest.TestCase):
         self.assertNotIn("calls = EXCLUDED.calls", source)
         self.assertIn("imported call counts must survive", source)
 
+    def test_auto_daily_recalculation_uses_historical_group_scope(self):
+        source = _database_method_source("_recalculate_auto_daily_hours_tx")
+
+        self.assertIn("as_of=day_value", source)
+        self.assertIn("_get_operator_group_id_tx(\n                    cursor, op_id, day_value", source)
+        self.assertIn("operator_id, day, group_id, work_time", source)
+        self.assertIn("group_id = COALESCE(EXCLUDED.group_id, daily_hours.group_id)", source)
+
     def test_calls_preview_does_not_restrict_upload_to_selected_day(self):
         source = APP_PATH.read_text(encoding="utf-8-sig")
 

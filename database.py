@@ -22479,8 +22479,6 @@ class Database:
         if calc_start_date_obj is None or calc_end_date_obj is None:
             return {'updated_days': 0, 'aggregated_months': 0}
 
-        calculation_model_by_operator = self._load_operator_calculation_models_tx(cursor, op_ids)
-
         # Для корректного расчета текущего дня учитываем смены, начавшиеся днем ранее
         # и перешедшие через полночь.
         shifts_source_start = calc_start_date_obj - timedelta(days=1)
@@ -22630,12 +22628,25 @@ class Database:
 
         upsert_rows = []
         affected_months = set()
+        calculation_model_by_operator_day = {}
+        group_id_by_operator_day = {}
 
         for op_id, day_value in sorted(target_days, key=lambda x: (x[0], x[1])):
+            operator_day_key = (int(op_id), day_value)
+            if operator_day_key not in calculation_model_by_operator_day:
+                calculation_model_by_operator_day[operator_day_key] = self._get_operator_calculation_model_tx(
+                    cursor, op_id, as_of=day_value
+                )
+            if operator_day_key not in group_id_by_operator_day:
+                group_id_by_operator_day[operator_day_key] = self._get_operator_group_id_tx(
+                    cursor, op_id, day_value
+                )
+
             day_statuses = statuses_by_day.get((op_id, day_value)) or []
             status_profile = self._status_profile_for_calculation_model(
-                calculation_model_by_operator.get(int(op_id), CALCULATION_MODEL_OPERATOR)
+                calculation_model_by_operator_day.get(operator_day_key, CALCULATION_MODEL_OPERATOR)
             )
+            day_group_id = group_id_by_operator_day.get(operator_day_key)
             work_status_keys = set(status_profile.get('work') or set())
             talk_status_keys = set(status_profile.get('talk') or set())
             break_status_keys = set(status_profile.get('break') or set())
@@ -22817,6 +22828,7 @@ class Database:
             upsert_rows.append((
                 int(op_id),
                 day_value,
+                day_group_id,
                 float(work_time_hours),
                 float(break_time_hours),
                 float(talk_time_hours),
@@ -22852,7 +22864,7 @@ class Database:
                 cursor,
                 """
                 INSERT INTO daily_hours (
-                    operator_id, day, work_time, break_time, talk_time, calls, efficiency,
+                    operator_id, day, group_id, work_time, break_time, talk_time, calls, efficiency,
                     training_time,
                     late_minutes, late_seconds,
                     early_leave_minutes, early_leave_seconds,
@@ -22867,6 +22879,7 @@ class Database:
                 VALUES %s
                 ON CONFLICT (operator_id, day)
                 DO UPDATE SET
+                    group_id = COALESCE(EXCLUDED.group_id, daily_hours.group_id),
                     work_time = EXCLUDED.work_time,
                     break_time = EXCLUDED.break_time,
                     talk_time = EXCLUDED.talk_time,
@@ -22898,7 +22911,7 @@ class Database:
                 """,
                 upsert_rows,
                 template="""(
-                    %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s,
                     %s,
                     %s, %s,
                     %s, %s,

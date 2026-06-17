@@ -1,11 +1,7 @@
-"""Статические инварианты миграции supervisor_id -> группы.
-
-В духе остального харнеса: без живой БД, через инспекцию исходников. Рантайм-поведение
-(переводы, метки модели) проверено вживую на проде; здесь фиксируем код-инварианты,
-чтобы будущие правки их не сломали.
-"""
+"""Static invariants for the supervisor_id -> groups migration."""
 import unittest
 from pathlib import Path
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DB = (ROOT / "database.py").read_text(encoding="utf-8-sig")
@@ -54,30 +50,26 @@ class ResolverTests(unittest.TestCase):
         self.assertIn(
             "def _get_operator_calculation_model_tx(self, cursor, operator_id, as_of=None)", DB
         )
-        # group-aware ветка идёт через членство, fallback — направление
         self.assertIn("group_operator_memberships gom", DB)
 
     def test_monthly_callers_thread_as_of(self):
         self.assertIn("_get_operator_calculation_model_tx(cursor, operator_id, as_of=end)", DB)
         self.assertIn("_get_operator_calculation_model_tx(cursor, operator_id, as_of=_cm_end)", DB)
 
-    def test_range_callers_stay_legacy(self):
-        # диапазонные вызовы НЕ передают as_of: классификация статусов на пересчёте
-        # сохраняет прежнее поведение (намеренно).
+    def test_auto_aggregation_uses_historical_day_scope(self):
         self.assertIn(
-            "calculation_model_by_operator = self._load_operator_calculation_models_tx(cursor, op_ids)",
+            "_get_operator_calculation_model_tx(\n                    cursor, op_id, as_of=day_value",
             DB,
         )
+        self.assertIn("_get_operator_group_id_tx(\n                    cursor, op_id, day_value", DB)
 
 
 class UpsertSafetyTests(unittest.TestCase):
     def test_daily_conflict_unchanged_but_stamps_group(self):
-        # правило «один оператор = одна группа в день» делает (operator_id, day) совместимым
         self.assertIn("ON CONFLICT (operator_id, day)", DB)
         self.assertIn("group_id = COALESCE(EXCLUDED.group_id, daily_hours.group_id)", DB)
 
     def test_work_hours_conflict_not_swapped_yet(self):
-        # рискованный своп (group_id, operator_id, month) отложен — без потери данных
         self.assertIn("ON CONFLICT (operator_id, month)", DB)
         self.assertIn("group_id = COALESCE(EXCLUDED.group_id, work_hours.group_id)", DB)
 
@@ -85,8 +77,8 @@ class UpsertSafetyTests(unittest.TestCase):
 class BackfillTests(unittest.TestCase):
     def test_backfill_exists_guarded_and_savepointed(self):
         self.assertIn("def _backfill_groups_from_supervisors_tx(self, cursor)", DB)
-        self.assertIn("SELECT 1 FROM groups LIMIT 1", DB)  # идемпотентный guard
-        self.assertIn("SAVEPOINT sp_groups_backfill", DB)  # сбой не роняет init
+        self.assertIn("SELECT 1 FROM groups LIMIT 1", DB)
+        self.assertIn("SAVEPOINT sp_groups_backfill", DB)
 
     def test_backfill_group_naming(self):
         self.assertIn('"{} группа {}".format(sv_name, dir_name)', DB)
@@ -109,7 +101,6 @@ class CrudTests(unittest.TestCase):
             self.assertIn(m, DB, f"missing method: {m}")
 
     def test_one_active_group_per_operator(self):
-        # перевод в новую группу закрывает прошлую основную
         self.assertIn("WHERE operator_id = %s AND end_date IS NULL AND group_id <> %s", DB)
 
     def test_endpoints_exist(self):
@@ -135,7 +126,7 @@ class ReadPathTests(unittest.TestCase):
 
     def test_sv_daily_hours_accepts_group_id(self):
         self.assertIn("get_daily_hours_by_group_month", BOT)
-        self.assertIn("get_supervisor_group_ids", BOT)  # проверка доступа СВ к группе
+        self.assertIn("get_supervisor_group_ids", BOT)
 
     def test_group_month_reads_activity_metrics_by_historical_membership(self):
         for helper in [
