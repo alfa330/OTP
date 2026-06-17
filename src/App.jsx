@@ -219,6 +219,60 @@ const normalizeSalaryCalculatorType = (value) => {
     const normalized = String(value || '').trim().toLowerCase();
     return SALARY_CALCULATOR_TYPES.has(normalized) ? normalized : 'call';
 };
+
+const normalizeWorkHoursCalculationModelCode = (value) => (
+    String(value || '').trim() === 'chat_manager' ? 'chat_manager' : 'operator'
+);
+
+const getWorkHoursFallbackModelCode = (hoursData) => normalizeWorkHoursCalculationModelCode(
+    hoursData?.calculation_model_code ||
+    hoursData?.calculationModelCode ||
+    'operator'
+);
+
+const getWorkHoursSegmentsWithModels = (hoursData) => (
+    Array.isArray(hoursData?.group_segments)
+        ? hoursData.group_segments.filter((segment) => (
+            segment &&
+            segment.calculation_model_code &&
+            Number.isFinite(Number(segment.start_day)) &&
+            Number.isFinite(Number(segment.end_day))
+        ))
+        : []
+);
+
+const resolveWorkHoursDayModelCode = (hoursData, day, fallbackCode = null) => {
+    const dayNum = Number(day);
+    const fallback = fallbackCode
+        ? normalizeWorkHoursCalculationModelCode(fallbackCode)
+        : getWorkHoursFallbackModelCode(hoursData);
+    if (!Number.isFinite(dayNum)) return fallback;
+
+    const segment = getWorkHoursSegmentsWithModels(hoursData).find((item) => {
+        const startDay = Number(item.start_day);
+        const endDay = Number(item.end_day);
+        return dayNum >= startDay && dayNum <= endDay;
+    });
+
+    return segment
+        ? normalizeWorkHoursCalculationModelCode(segment.calculation_model_code)
+        : fallback;
+};
+
+const resolveWorkHoursMonthModelInfo = (hoursData) => {
+    const fallback = getWorkHoursFallbackModelCode(hoursData);
+    const modelCodes = Array.from(new Set(
+        getWorkHoursSegmentsWithModels(hoursData)
+            .map((segment) => normalizeWorkHoursCalculationModelCode(segment.calculation_model_code))
+    ));
+
+    return {
+        fallback,
+        modelCode: modelCodes.length === 1 ? modelCodes[0] : fallback,
+        modelCodes,
+        hasMixedModels: modelCodes.length > 1,
+    };
+};
 const normalizeDepartmentCode = (value) => String(value || '').trim().toLowerCase();
 const findDepartmentById = (departments = [], departmentId = null) => {
     if (departmentId === null || departmentId === undefined || departmentId === '') return null;
@@ -34316,12 +34370,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const [showModal, setShowModal] = useState(false);
                 const [showLegend, setShowLegend] = useState(false);
                 const REQUEST_MESSAGE_MAX_LENGTH = 500;
-                const calculationModelCode = String(
-                    hoursData?.calculation_model_code ||
-                    hoursData?.calculationModelCode ||
-                    ''
-                ).trim();
-                const isChatModel = calculationModelCode === 'chat_manager';
+                const calculationModelCode = resolveWorkHoursMonthModelInfo(hoursData).modelCode;
 
                 const formatFixed2 = (value) => {
                     const n = Number(value);
@@ -34533,7 +34582,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         + Number(technicalHoursForDay || 0)
                         + Number(offlineHoursForDay || 0);
 
-                    const hasFines = Array.isArray(dayData?.fines) && dayData.fines.length > 0;
+                    const dayCalculationModelCode = resolveWorkHoursDayModelCode(hoursData, day, calculationModelCode);
+                    const isDayChatModel = dayCalculationModelCode === 'chat_manager';
+                    const dayChatMetricsByDay = (
+                        hoursData?.chat_metrics_by_day &&
+                        typeof hoursData.chat_metrics_by_day === 'object' &&
+                        !Array.isArray(hoursData.chat_metrics_by_day)
+                    ) ? hoursData.chat_metrics_by_day : {};
+                    const dayChatMetrics = isDayChatModel
+                        ? (dayData?.chat_metrics || dayChatMetricsByDay[dayKey] || null)
+                        : null;
+                    const normalizedDayData = dayChatMetrics
+                        ? {
+                            ...dayData,
+                            chat_metrics: dayChatMetrics,
+                            calls: Number(dayChatMetrics.chats_count ?? dayData?.calls ?? 0) || 0,
+                        }
+                        : dayData;
+                    const hasFines = Array.isArray(normalizedDayData?.fines) && normalizedDayData.fines.length > 0;
                     cells.push({
                         day,
                         dateStr,
@@ -34542,7 +34608,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         trainingHours: Number(trainingHoursForDay || 0),
                         technicalHours: Number(technicalHoursForDay || 0),
                         offlineHours: Number(offlineHoursForDay || 0),
-                        dayData,
+                        dayData: normalizedDayData,
+                        calculationModelCode: dayCalculationModelCode,
+                        isChatModel: isDayChatModel,
                         isPastDayWithZero: isPastDay && combinedHours === 0,
                         isToday,
                         hasTraining,
@@ -34843,7 +34911,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 const work = Number(normalize("work_time") ?? 0);
                                 const effPercent =
                                     work > 0 && Number.isFinite(eff) ? ((eff / work) * 100).toFixed(2) + "%" : "—";
-                                const chatMetrics = d?.chat_metrics || {};
+                                const chatMetricsByDay = (
+                                    hoursData?.chat_metrics_by_day &&
+                                    typeof hoursData.chat_metrics_by_day === 'object' &&
+                                    !Array.isArray(hoursData.chat_metrics_by_day)
+                                ) ? hoursData.chat_metrics_by_day : {};
+                                const selectedDayIsChatModel = selectedDay?.calculationModelCode === 'chat_manager' || selectedDay?.isChatModel === true;
+                                const chatMetrics = selectedDayIsChatModel
+                                    ? (d?.chat_metrics || chatMetricsByDay[String(selectedDay.day)] || {})
+                                    : {};
                                 const fmtSeconds = (value) => {
                                     const n = Number(value);
                                     if (!Number.isFinite(n) || n <= 0) return "—";
@@ -34851,7 +34927,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     return `${(n / 60).toFixed(2)} мин`;
                                 };
 
-                                const metrics = isChatModel ? [
+                                const metrics = selectedDayIsChatModel ? [
                                     {
                                     key: "break_time",
                                     label: "Перерыв",
@@ -42750,12 +42826,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             // На входе ожидаем стабильный формат от бекенда:
                                             // { status, month, days_in_month, operators: [ { operator_id, name, rate, norm_hours, fines, daily, aggregates, training_hours? } ] }
                                             const op = hoursData.operators.find(o => Number(o.operator_id) === Number(user.id)) || hoursData.operators[0];
-                                            const calculationModelCode = String(
-                                                op?.calculation_model_code ||
-                                                op?.calculationModelCode ||
-                                                ''
-                                            ).trim();
-                                            const isChatModel = calculationModelCode === 'chat_manager';
+                                            const monthModelInfo = resolveWorkHoursMonthModelInfo(op);
+                                            const calculationModelCode = monthModelInfo.modelCode;
+                                            const hasMixedCalculationModels = monthModelInfo.hasMixedModels;
+                                            const isChatModel = !hasMixedCalculationModels && calculationModelCode === 'chat_manager';
                                             const interactionLabel = isChatModel ? 'Чаты' : 'Звонки';
                                             const interactionPerHourLabel = isChatModel ? 'Чаты в час' : 'Звонки в час';
                                             const interactionIcon = isChatModel ? 'fas fa-comments' : 'fas fa-phone';
@@ -42777,11 +42851,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 }
                                                 return Number(total) || 0;
                                             })();
-                                            const totalCalls = Number(
-                                                op.aggregates?.total_calls ??
-                                                op.chat_metrics?.chats_count ??
-                                                0
-                                            );
+                                            const chatInteractionsTotal = Number(op.chat_metrics?.chats_count ?? op.aggregates?.total_calls ?? 0);
+                                            const callInteractionsTotal = Number(op.aggregates?.total_calls ?? 0);
+                                            const totalCalls = isChatModel
+                                                ? (Number.isFinite(chatInteractionsTotal) ? chatInteractionsTotal : 0)
+                                                : (Number.isFinite(callInteractionsTotal) ? callInteractionsTotal : 0);
                                             const opTechnicalField = Number(op.technical_issue_hours ?? 0);
                                             const opOfflineField = Number(op.offline_activity_hours ?? 0);
 
@@ -42880,35 +42954,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const callsPerHour = effectiveCallHours > 0
                                                 ? (safeNum(totalCalls) / effectiveCallHours)
                                                 : 0;
-                                            // При переводе посреди месяца между РАЗНЫМИ моделями интенсивность нельзя
-                                            // показывать одним числом (звонки и чаты не суммируются). Считаем раскладку
-                                            // по направлениям из daily по диапазону дней каждого сегмента (часы/штрафы — общие).
-                                            const interactionSegments = (() => {
-                                                const segs = Array.isArray(op.group_segments) ? op.group_segments : [];
-                                                const models = new Set(segs.map((s) => String(s.calculation_model_code || '').trim() === 'chat_manager' ? 'chat' : 'call'));
-                                                if (segs.length < 2 || models.size < 2) return null;
-                                                const dmap = (op && typeof op.daily === 'object' && !Array.isArray(op.daily)) ? op.daily : {};
-                                                return segs.map((s) => {
-                                                    const model = String(s.calculation_model_code || '').trim() === 'chat_manager' ? 'chat' : 'call';
-                                                    const sd = Number(s.start_day), ed = Number(s.end_day);
-                                                    let segHours = 0, segInter = 0;
-                                                    for (let d = sd; d <= ed; d++) {
-                                                        const dd = dmap[String(d)];
-                                                        if (!dd) continue;
-                                                        segHours += safeNum(dd.work_time);
-                                                        segInter += safeNum(dd.calls);
-                                                    }
-                                                    return {
-                                                        name: s.direction_name || s.group_name,
-                                                        startDay: sd, endDay: ed,
-                                                        label: model === 'chat' ? 'Чаты' : 'Звонки',
-                                                        perHourLabel: model === 'chat' ? 'Чаты в час' : 'Звонки в час',
-                                                        icon: model === 'chat' ? 'fas fa-comments' : 'fas fa-phone',
-                                                        total: segInter,
-                                                        perHour: segHours > 0 ? (segInter / segHours) : 0,
-                                                    };
-                                                });
-                                            })();
                                             const completionPct = safeNum(norm) > 0 ? (safeNum(regular) / safeNum(norm)) * 100 : 0;
                                             const clampedCompletionPct = Math.max(0, Math.min(100, completionPct));
                                             const hoursDelta = safeNum(regular) - safeNum(norm);
@@ -42953,7 +42998,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             );
                                             const chatAvgScore = safeNum(op.aggregates?.chat_avg_score);
                                             const chatRespMinutes = safeNum(op.aggregates?.chat_avg_response_time_seconds) / 60;
-                                            const estimatedSalary = calculateSalaryByFormula({
+                                            const estimatedOperatorSalary = calculateSalaryByFormula({
                                                 hoursNorm: norm,
                                                 totalHours: regular,
                                                 quality: salaryQuality,
@@ -42961,6 +43006,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 experience: salaryExperience,
                                                 bonuses,
                                             });
+                                            const estimatedChatSalary = calculateChatSalary({
+                                                hoursNorm: norm,
+                                                totalHours: regular,
+                                                quality: salaryQuality,
+                                                avgScore: chatAvgScore,
+                                                responseTime: chatRespMinutes,
+                                                chatsPerHour: callsPerHour,
+                                                experience: salaryChatExperience,
+                                                bonuses,
+                                            });
+                                            const estimatedSalary = isChatModel ? estimatedChatSalary : estimatedOperatorSalary;
                                             const formatEstimatedSalaryMoney = (value) => {
                                                 const n = Number(value);
                                                 if (!Number.isFinite(n)) return '0 ₸';
@@ -43003,7 +43059,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             const wt = safeNum(d.work_time);
                                                             baseHours += wt;
                                                             if (wt > 0) workedDays += 1; // норму делим по ОТРАБОТАННЫМ дням, не календарным
-                                                            if (!isChatModel) interactions += safeNum(d.calls);
+                                                            if (p.model !== 'chat') interactions += safeNum(d.calls);
                                                             if (Array.isArray(d.bonuses)) for (const b of d.bonuses) partBonuses += safeNum(b?.amount);
                                                         }
                                                         const cm = chatByDay[String(day)] || (d && d.chat_metrics) || null;
@@ -43012,7 +43068,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             if (sc > 0) { scoreSum += sc; scoreN += 1; }
                                                             const rt = safeNum(cm.avg_response_time_seconds);
                                                             if (rt > 0) { respSum += rt; respN += 1; }
-                                                            if (isChatModel) interactions += safeNum(cm.chats_count);
+                                                            if (p.model === 'chat') interactions += safeNum(cm.chats_count);
                                                         }
                                                     }
                                                     return {
@@ -43187,28 +43243,48 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         Интенсивность и корректировки
                                                     </h3>
                                                     <div className="space-y-3">
-                                                        {interactionSegments ? (
+                                                        {dualSalaryResults && dualSalaryResults.length >= 2 ? (
                                                             <>
                                                             <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">
-                                                                Перевод посреди месяца — интенсивность по направлениям раздельно (звонки и чаты не суммируются)
+                                                                Перевод посреди месяца — примерная зарплата считается отдельно по каждой модели
                                                             </div>
-                                                            {interactionSegments.map((s, i) => (
+                                                            {dualSalaryResults.map((part, i) => (
                                                                 <div key={i} className="rounded-lg bg-white border border-gray-200 px-3 py-2.5">
                                                                     <div className="text-sm font-medium text-gray-700 flex items-center gap-2 mb-1.5">
-                                                                        <FaIcon className={`${s.icon} text-gray-400`}></FaIcon>
-                                                                        {s.name}
-                                                                        <span className="text-xs text-gray-400">· дни {s.startDay}–{s.endDay}</span>
+                                                                        <FaIcon className={`${part.model === 'chat' ? 'fas fa-comments' : 'fas fa-headset'} text-gray-400`}></FaIcon>
+                                                                        {part.directionName || (part.model === 'chat' ? 'Чат менеджер' : 'Основа')}
+                                                                        <span className="text-xs text-gray-400">· {part.partLabel}</span>
                                                                     </div>
                                                                     <div className="flex items-center justify-between text-sm">
-                                                                        <span className="text-gray-600">{s.perHourLabel}</span>
-                                                                        <span className={`font-bold ${getCallsPerHourColor(s.perHour)}`}>{safeNum(s.perHour).toFixed(2)}</span>
+                                                                        <span className="text-gray-600">Примерная ЗП</span>
+                                                                        <span className="font-bold text-green-600">{formatEstimatedSalaryMoney(part.finalSalary)}</span>
                                                                     </div>
                                                                     <div className="flex items-center justify-between text-sm mt-0.5">
-                                                                        <span className="text-gray-600">Всего: {s.label.toLowerCase()}</span>
-                                                                        <span className="font-bold text-gray-900">{safeNum(s.total).toFixed(0)}</span>
+                                                                        <span className="text-gray-600">Отработано</span>
+                                                                        <span className="font-bold text-gray-900">{safeNum(part.hoursWorked).toFixed(2)} ч</span>
+                                                                    </div>
+                                                                    <div className="flex items-center justify-between text-sm mt-0.5">
+                                                                        <span className="text-gray-600">Баллы KPI</span>
+                                                                        <span className="font-bold text-gray-900">{safeNum(part.points).toFixed(0)}</span>
                                                                     </div>
                                                                 </div>
                                                             ))}
+                                                            <div className="rounded-lg bg-white border border-green-200 px-3 py-2.5">
+                                                                <div className="flex items-center justify-between text-sm">
+                                                                    <span className="font-medium text-gray-700">Итого по моделям</span>
+                                                                    <span className="text-lg font-bold text-green-600">
+                                                                        {formatEstimatedSalaryMoney(dualSalaryResults.reduce((sum, part) => sum + safeNum(part.finalSalary), 0))}
+                                                                    </span>
+                                                                </div>
+                                                            </div>
+                                                            <button
+                                                                type="button"
+                                                                onClick={openSalaryCalculatorWithHours}
+                                                                className="w-full inline-flex items-center justify-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100 transition"
+                                                            >
+                                                                <FaIcon className="fas fa-arrow-right"></FaIcon>
+                                                                Открыть общий калькулятор
+                                                            </button>
                                                             </>
                                                         ) : (
                                                             <>
@@ -43254,28 +43330,36 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 Примерная зарплата
                                                             </span>
                                                             <div className="mt-1 text-xs text-gray-500">
-                                                                {isChatModel
+                                                                {dualSalaryResults && dualSalaryResults.length >= 2
+                                                                    ? 'Сумма рассчитана отдельно по операторской и чат-модели.'
+                                                                    : isChatModel
                                                                     ? 'Для чат-модели используется отдельный калькулятор.'
                                                                     : `По формуле калькулятора${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`}
                                                             </div>
                                                             <div className="mt-1 text-[11px] text-gray-400">
-                                                                {isChatModel
+                                                                {dualSalaryResults && dualSalaryResults.length >= 2
+                                                                    ? 'Откройте общий расчёт, чтобы посмотреть обе части подробно.'
+                                                                    : isChatModel
                                                                     ? 'Чаты, оценка и время ответа уже подтянуты в часы работы.'
                                                                     : 'Штрафы в формуле калькулятора не вычитаются.'}
                                                             </div>
                                                             </div>
                                                             <span className="text-lg font-bold text-green-600 whitespace-nowrap">
-                                                            {isChatModel ? 'Чат' : formatEstimatedSalaryMoney(estimatedSalary.finalSalary)}
+                                                            {dualSalaryResults && dualSalaryResults.length >= 2
+                                                                ? formatEstimatedSalaryMoney(dualSalaryResults.reduce((sum, part) => sum + safeNum(part.finalSalary), 0))
+                                                                : formatEstimatedSalaryMoney(estimatedSalary.finalSalary)}
                                                             </span>
                                                         </div>
-                                                        <button
-                                                            type="button"
-                                                            onClick={openSalaryCalculatorWithHours}
-                                                            className="mt-3 w-full inline-flex items-center justify-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100 transition"
-                                                        >
-                                                            <FaIcon className="fas fa-arrow-right"></FaIcon>
-                                                            {isChatModel ? 'Открыть чат-калькулятор' : 'Открыть в калькуляторе'}
-                                                        </button>
+                                                        {!(dualSalaryResults && dualSalaryResults.length >= 2) && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={openSalaryCalculatorWithHours}
+                                                                className="mt-3 w-full inline-flex items-center justify-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100 transition"
+                                                            >
+                                                                <FaIcon className="fas fa-arrow-right"></FaIcon>
+                                                                {isChatModel ? 'Открыть чат-калькулятор' : 'Открыть в калькуляторе'}
+                                                            </button>
+                                                        )}
                                                         </div>
                                                     </div>
                                                     </div>
