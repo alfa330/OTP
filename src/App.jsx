@@ -6,6 +6,7 @@ import Papa from 'papaparse';
 import jsQR from 'jsqr';
 import ToastContainer from './components/common/ToastContainer';
 import SalaryCalculationResult from './components/salary/SalaryCalculationResult';
+import SalaryComingSoon from './components/salary/SalaryComingSoon';
 import TasksView, { PinnedTaskWidget } from './components/tasks/TasksView';
 import SurveysView from './components/surveys/SurveysView';
 import TechnicalIssuesView from './components/technical/TechnicalIssuesView';
@@ -136,6 +137,7 @@ const DEFAULT_USERS_REPORT_OPTIONS = {
     includeDismissalDetails: true
 };
 const SALARY_CALCULATOR_TYPES = new Set(['call', 'chat', 'converter']);
+const SALARY_CALCULATOR_READY_DEPARTMENT_CODES = new Set(['szov']);
 const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     admin_sessions: 'Admin sessions',
     ai_feedback: 'Dos AI',
@@ -216,6 +218,25 @@ const normalizeClientAuthTransport = (value) => {
 const normalizeSalaryCalculatorType = (value) => {
     const normalized = String(value || '').trim().toLowerCase();
     return SALARY_CALCULATOR_TYPES.has(normalized) ? normalized : 'call';
+};
+const normalizeDepartmentCode = (value) => String(value || '').trim().toLowerCase();
+const findDepartmentById = (departments = [], departmentId = null) => {
+    if (departmentId === null || departmentId === undefined || departmentId === '') return null;
+    return (departments || []).find((department) => Number(department?.id) === Number(departmentId)) || null;
+};
+const resolveSalaryDepartment = (user, departments = []) => {
+    const headedDepartmentIdValue = user?.headed_department_id ?? user?.headedDepartmentId ?? null;
+    const userDepartmentIdValue = user?.department_id ?? user?.departmentId ?? null;
+    const departmentId = headedDepartmentIdValue ?? userDepartmentIdValue;
+    const listedDepartment = findDepartmentById(departments, departmentId);
+    const code = normalizeDepartmentCode(listedDepartment?.code ?? user?.department_code ?? user?.departmentCode);
+    const name = listedDepartment?.name ?? user?.department_name ?? user?.departmentName ?? '';
+
+    return { code, name };
+};
+const departmentHasSalaryCalculator = (departmentCode) => {
+    const code = normalizeDepartmentCode(departmentCode);
+    return !code || SALARY_CALCULATOR_READY_DEPARTMENT_CODES.has(code);
 };
 const normalizeAnalyticsToken = (value) =>
     String(value || '')
@@ -30713,6 +30734,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [calculatorType, setCalculatorType] = useState(() =>
                 normalizeSalaryCalculatorType(getStoredValue('calculatorType', 'call'))
             );
+            const salaryDepartment = useMemo(
+                () => resolveSalaryDepartment(user, departments),
+                [
+                    departments,
+                    user?.department_id,
+                    user?.departmentId,
+                    user?.department_code,
+                    user?.departmentCode,
+                    user?.department_name,
+                    user?.departmentName,
+                    user?.headed_department_id,
+                    user?.headedDepartmentId
+                ]
+            );
+            const hasSalaryCalculatorForDepartment = departmentHasSalaryCalculator(salaryDepartment.code);
             const appViewAnalyticsKeyRef = useRef('');
             const [tableUrl, setTableUrl] = useState(''); // URL таблицы
             const [previewData, setPreviewData] = useState(null); // Данные предпросмотра (sheet_name, operators)
@@ -44177,6 +44213,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <FaIcon className="fas fa-calculator text-blue-600"></FaIcon>
                                                     <span className="text-blue-600">Калькулятор зарплаты</span>
                                                 </h2>
+                                                {!hasSalaryCalculatorForDepartment ? (
+                                                    <SalaryComingSoon departmentName={salaryDepartment.name} />
+                                                ) : (
+                                                    <>
                                                 {salaryDualResult && salaryDualResult.length >= 2 && (
                                                     <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50/60 p-4 sm:p-5">
                                                         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-2">
@@ -44541,6 +44581,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             ) : null}
                                                           </div>
                                                         )}
+                                                    </>
+                                                )}
                                                       </div>
                                                     )}
                         {showDisputeModal && (
