@@ -3863,6 +3863,7 @@ class Database:
             return None
 
     def get_admin_feedback_telegram_report_setting(self, user_id: int) -> Optional[bool]:
+        """Настройка Excel-отчёта для администратора или главы активного отдела."""
         try:
             user_id_int = int(user_id)
         except (TypeError, ValueError):
@@ -3875,7 +3876,14 @@ class Database:
                 FROM users u
                 LEFT JOIN admin_profiles ap ON ap.user_id = u.id
                 WHERE u.id = %s
-                  AND LOWER(COALESCE(u.role, '')) IN ('admin', 'super_admin')
+                  AND (
+                      LOWER(COALESCE(u.role, '')) IN ('admin', 'super_admin')
+                      OR EXISTS (
+                          SELECT 1 FROM departments d
+                          WHERE d.head_user_id = u.id
+                            AND COALESCE(d.is_active, TRUE) = TRUE
+                      )
+                  )
                 LIMIT 1
             """, (user_id_int,))
             row = cursor.fetchone()
@@ -3894,7 +3902,14 @@ class Database:
                 UPDATE users
                 SET feedback_telegram_report_enabled = %s
                 WHERE id = %s
-                  AND LOWER(COALESCE(role, '')) IN ('admin', 'super_admin')
+                  AND (
+                      LOWER(COALESCE(role, '')) IN ('admin', 'super_admin')
+                      OR EXISTS (
+                          SELECT 1 FROM departments d
+                          WHERE d.head_user_id = users.id
+                            AND COALESCE(d.is_active, TRUE) = TRUE
+                      )
+                  )
                 RETURNING COALESCE(feedback_telegram_report_enabled, FALSE)
             """, (bool(enabled), user_id_int))
             row = cursor.fetchone()
@@ -3909,25 +3924,53 @@ class Database:
             return bool(row[0])
 
     def get_admins_with_feedback_telegram_reports_enabled(self) -> List[Dict[str, Any]]:
+        """Подписанные администраторы (все отделы) и главы (только их отделы)."""
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT u.id, u.name, u.telegram_id
+                SELECT
+                    u.id,
+                    u.name,
+                    u.telegram_id,
+                    LOWER(COALESCE(u.role, '')) AS role_norm,
+                    COALESCE(
+                        ARRAY_AGG(DISTINCT d.id ORDER BY d.id) FILTER (WHERE d.id IS NOT NULL),
+                        ARRAY[]::INTEGER[]
+                    ) AS headed_department_ids,
+                    COALESCE(
+                        ARRAY_AGG(DISTINCT d.name ORDER BY d.name) FILTER (WHERE d.name IS NOT NULL),
+                        ARRAY[]::VARCHAR[]
+                    ) AS headed_department_names
                 FROM users u
                 LEFT JOIN admin_profiles ap ON ap.user_id = u.id
-                WHERE LOWER(COALESCE(u.role, '')) IN ('admin', 'super_admin')
-                  AND u.telegram_id IS NOT NULL
+                LEFT JOIN departments d
+                  ON d.head_user_id = u.id
+                 AND COALESCE(d.is_active, TRUE) = TRUE
+                WHERE u.telegram_id IS NOT NULL
+                  AND (
+                      LOWER(COALESCE(u.role, '')) IN ('admin', 'super_admin')
+                      OR d.id IS NOT NULL
+                  )
                   AND COALESCE(ap.feedback_telegram_report_enabled,
                                u.feedback_telegram_report_enabled, FALSE) = TRUE
+                GROUP BY u.id, u.name, u.telegram_id, u.role
                 ORDER BY u.name
             """)
             rows = cursor.fetchall()
 
         result = []
         for row in rows:
+            role_norm = str(row[3] or '').strip().lower()
+            is_admin = role_norm in ('admin', 'super_admin')
+            department_ids = [int(value) for value in (row[4] or []) if value is not None]
+            department_names = [str(value) for value in (row[5] or []) if value]
             result.append({
                 "id": int(row[0]),
                 "name": row[1] or "",
-                "telegram_id": int(row[2]) if row[2] is not None else None
+                "telegram_id": int(row[2]) if row[2] is not None else None,
+                "scope": "global" if is_admin else "department",
+                "department_ids": None if is_admin else department_ids,
+                "department_names": [] if is_admin else department_names,
+                "department_name": None if is_admin else ", ".join(department_names),
             })
         return result
 
@@ -9701,6 +9744,24 @@ class Database:
             cursor.execute("SELECT id FROM departments WHERE head_user_id = %s LIMIT 1", (user_id,))
             r = cursor.fetchone()
             return r[0] if r else None
+
+    def get_headed_departments_for_user(self, user_id):
+        """Вернуть все активные отделы, которые возглавляет пользователь."""
+        if not user_id:
+            return []
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, name
+                FROM departments
+                WHERE head_user_id = %s
+                  AND COALESCE(is_active, TRUE) = TRUE
+                ORDER BY name, id
+            """, (user_id,))
+            return [
+                {"id": int(row[0]), "name": row[1] or ""}
+                for row in (cursor.fetchall() or [])
+                if row and row[0] is not None
+            ]
 
     def get_user_department_id(self, user_id):
         """Лёгкий доступ к users.department_id без позиционного кортежа get_user."""
@@ -15831,6 +15892,7 @@ class Database:
         month: str,
         operator_ids: Optional[List[int]] = None,
         supervisor_ids: Optional[List[int]] = None,
+        department_ids: Optional[List[int]] = None,
         reference_date=None
     ) -> List[Dict[str, Any]]:
         if not month:
@@ -15859,10 +15921,13 @@ class Database:
 
         operator_ids_norm = _normalize_ids(operator_ids)
         supervisor_ids_norm = _normalize_ids(supervisor_ids)
+        department_ids_norm = _normalize_ids(department_ids)
 
         if operator_ids is not None and not operator_ids_norm:
             return []
         if supervisor_ids is not None and not supervisor_ids_norm:
+            return []
+        if department_ids is not None and not department_ids_norm:
             return []
 
         params: List[Any] = [month, month]
@@ -15876,6 +15941,9 @@ class Database:
         if supervisor_ids_norm is not None:
             where_clauses.append("op.supervisor_id = ANY(%s)")
             params.append(supervisor_ids_norm)
+        if department_ids_norm is not None:
+            where_clauses.append("op.department_id = ANY(%s)")
+            params.append(department_ids_norm)
 
         where_sql = " AND ".join(where_clauses) if where_clauses else "TRUE"
 
@@ -16034,8 +16102,17 @@ class Database:
 
         return result
 
-    def get_feedback_sla_report_for_month(self, month: str, reference_date=None) -> Dict[str, Any]:
-        rows = self.get_feedback_sla_rows_for_month(month=month, reference_date=reference_date)
+    def get_feedback_sla_report_for_month(
+        self,
+        month: str,
+        reference_date=None,
+        department_ids: Optional[List[int]] = None
+    ) -> Dict[str, Any]:
+        rows = self.get_feedback_sla_rows_for_month(
+            month=month,
+            department_ids=department_ids,
+            reference_date=reference_date
+        )
 
         overview = {
             "total_evaluated": 0,
@@ -16077,6 +16154,7 @@ class Database:
                 "pending": 0,
                 "pending_overdue": 0,
                 "overdue_total": 0,
+                "items": [],
                 "on_time_items": [],
                 "overdue_items": []
             })
@@ -16098,14 +16176,18 @@ class Database:
                 "operator_id": item.get("operator_id"),
                 "operator_name": item.get("operator_name"),
                 "score": item.get("score"),
+                "evaluation_date": item.get("evaluation_date"),
                 "deadline_days": item.get("deadline_days"),
                 "due_date": item.get("due_date"),
                 "feedback_date": item.get("feedback_date"),
+                "feedback_provided": feedback_provided,
+                "feedback_supervisor_name": item.get("feedback_supervisor_name"),
                 "status": status,
                 "overdue_days": item.get("overdue_days"),
                 "has_critical_error": bool(item.get("has_critical_error"))
             }
 
+            bucket["items"].append(call_item)
             if status == 'on_time' and feedback_provided:
                 bucket["on_time_items"].append(call_item)
             elif status == 'overdue':
@@ -16116,6 +16198,10 @@ class Database:
         supervisors = list(supervisor_map.values())
         for bucket in supervisors:
             bucket["overdue_total"] = int(bucket["feedback_overdue"] + bucket["pending_overdue"])
+            bucket["items"] = sorted(
+                bucket["items"],
+                key=lambda item: (item.get("evaluation_date") or "", item.get("operator_name") or "")
+            )
             bucket["on_time_items"] = sorted(
                 bucket["on_time_items"],
                 key=lambda item: (item.get("due_date") or "", item.get("operator_name") or "")

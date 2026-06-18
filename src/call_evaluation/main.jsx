@@ -2464,7 +2464,7 @@ const App = ({ user, initialSelection }) => {
     const isScopedDepartmentHead = isDepartmentHead && canonicalRole !== 'super_admin';
     const isAdminRole = isBaseAdminRole || isDepartmentHead;
     const isGlobalAdminRole = isBaseAdminRole && !isScopedDepartmentHead;
-    const canManageFeedbackReportSetting = isGlobalAdminRole;
+    const canManageFeedbackReportSetting = isGlobalAdminRole || isDepartmentHead;
     const canUseRequests = isAdminRole || isSupervisorRole || isDepartmentHead;
     const canDecideReevaluationRequests = isAdminRole || isDepartmentHead;
     const canUseCalibration = isGlobalAdminRole || isSupervisorRole;
@@ -2524,12 +2524,15 @@ const App = ({ user, initialSelection }) => {
     const [showVersionsModal, setShowVersionsModal] = useState(false);
     const [versionHistory, setVersionHistory] = useState([]);
     const [showNotificationSettings, setShowNotificationSettings] = useState(false);
+    const [feedbackReportPreviewSending, setFeedbackReportPreviewSending] = useState(false);
     const [feedbackReportSetting, setFeedbackReportSetting] = useState({
         loading: false,
         saving: false,
         loaded: false,
         enabled: false,
-        telegramConnected: false
+        telegramConnected: false,
+        scope: 'none',
+        departmentName: ''
     });
     const [evaluationNotifySetting, setEvaluationNotifySetting] = useState({
         loading: false,
@@ -2720,7 +2723,9 @@ const App = ({ user, initialSelection }) => {
                 loading: false,
                 loaded: true,
                 enabled: !!d.enabled,
-                telegramConnected: !!d.telegram_connected
+                telegramConnected: !!d.telegram_connected,
+                scope: d.scope || 'none',
+                departmentName: d.department_name || ''
             }));
         } catch (e) {
             setFeedbackReportSetting(prev => ({
@@ -2758,7 +2763,9 @@ const App = ({ user, initialSelection }) => {
                 saving: false,
                 loaded: true,
                 enabled: !!d.enabled,
-                telegramConnected: !!d.telegram_connected
+                telegramConnected: !!d.telegram_connected,
+                scope: d.scope || prev.scope,
+                departmentName: d.department_name || prev.departmentName
             }));
             emitCallEvaluationToast(
                 d.enabled
@@ -2775,6 +2782,26 @@ const App = ({ user, initialSelection }) => {
             emitCallEvaluationToast(`Ошибка сохранения настройки: ${e.message}`, 'error');
         }
     }, [canManageFeedbackReportSetting, userId, feedbackReportSetting.enabled]);
+
+    const sendFeedbackReportPreview = useCallback(async () => {
+        if (!canManageFeedbackReportSetting || !userId || feedbackReportPreviewSending) return;
+        setFeedbackReportPreviewSending(true);
+        try {
+            const r = await authFetch(`${API_BASE_URL}/api/admin/call_feedback_report_preview`, {
+                method: 'POST',
+                headers: { 'X-User-Id': userId }
+            });
+            const d = await r.json();
+            if (!r.ok || d?.status !== 'success') {
+                throw new Error(d?.error || 'Не удалось сформировать отчёт');
+            }
+            emitCallEvaluationToast('Excel-отчёт отправлен в Telegram', 'success');
+        } catch (e) {
+            emitCallEvaluationToast(`Ошибка отправки отчёта: ${e.message}`, 'error');
+        } finally {
+            setFeedbackReportPreviewSending(false);
+        }
+    }, [canManageFeedbackReportSetting, userId, feedbackReportPreviewSending]);
 
     const loadEvaluationNotifySetting = useCallback(async () => {
         if (!canManageEvaluationNotifications || !userId) return;
@@ -2988,7 +3015,9 @@ const App = ({ user, initialSelection }) => {
                 saving: false,
                 loaded: false,
                 enabled: false,
-                telegramConnected: false
+                telegramConnected: false,
+                scope: 'none',
+                departmentName: ''
             });
             return;
         }
@@ -5534,9 +5563,11 @@ const App = ({ user, initialSelection }) => {
                                                 <span className="notification-subscription-badge">Понедельник · 09:05</span>
                                             </div>
                                             <p>
-                                                Сводка за текущий месяц по всем отделам: сколько оценок проведено, по скольким
-                                                предоставлена обратная связь, что выполнено в срок и где есть просрочки.
-                                                После общей сводки придёт детализация по супервайзерам.
+                                                В Telegram придёт оформленный Excel-файл за текущий месяц: сводка {feedbackReportSetting.scope === 'department'
+                                                    ? `по отделу «${feedbackReportSetting.departmentName || 'Ваш отдел'}»`
+                                                    : 'по всем отделам'},
+                                                показатели соблюдения сроков, диаграмма по супервайзерам и полная детализация
+                                                по каждой оценке.
                                             </p>
                                         </div>
                                         <label className="notification-settings-switch">
@@ -5561,8 +5592,10 @@ const App = ({ user, initialSelection }) => {
                                         <div className="notification-settings-scope">
                                             <span className="notification-settings-scope-label">Период и охват</span>
                                             <span className="notification-settings-scope-value">
-                                                <FaIcon className="fas fa-globe" />
-                                                Текущий месяц · все отделы
+                                                <FaIcon className={`fas fa-${feedbackReportSetting.scope === 'department' ? 'building' : 'globe'}`} />
+                                                Текущий месяц · {feedbackReportSetting.scope === 'department'
+                                                    ? (feedbackReportSetting.departmentName || 'ваш отдел')
+                                                    : 'все отделы'}
                                             </span>
                                         </div>
                                         <div className={`notification-settings-status ${feedbackReportSetting.telegramConnected ? 'is-connected' : 'is-warning'}`}>
@@ -5575,6 +5608,31 @@ const App = ({ user, initialSelection }) => {
                                                         ? (feedbackReportSetting.enabled ? 'Подписка включена' : 'Подписка выключена')
                                                         : 'Telegram не подключён к профилю'))}
                                         </div>
+                                    </div>
+                                    <div className="notification-report-preview">
+                                        <div className="notification-report-preview-copy">
+                                            <span className="notification-report-preview-icon" aria-hidden="true">
+                                                <FaIcon className="fas fa-file-excel" />
+                                            </span>
+                                            <span>
+                                                <strong>Посмотреть отчёт сейчас</strong>
+                                                <small>Разовая отправка не включает еженедельную подписку.</small>
+                                            </span>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            className="btn btn-secondary btn-sm"
+                                            onClick={sendFeedbackReportPreview}
+                                            disabled={
+                                                feedbackReportPreviewSending ||
+                                                feedbackReportSetting.loading ||
+                                                !feedbackReportSetting.telegramConnected
+                                            }
+                                        >
+                                            {feedbackReportPreviewSending
+                                                ? <><span className="spinner spinner-dark" /> Формируем...</>
+                                                : <><FaIcon className="fab fa-telegram-plane" /> Отправить Excel</>}
+                                        </button>
                                     </div>
                                 </section>
                             )}
