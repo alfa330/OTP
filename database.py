@@ -19998,7 +19998,6 @@ class Database:
             calculations_by_reason = defaultdict(set)
             totals_by_day = defaultdict(float)
 
-            rich_default_font = InlineFont(color='111827')
             rich_separator_font = InlineFont(color='6B7280')
             rate_col = 2 + (1 if include_supervisor else 0)
             day_start_col = rate_col + 1
@@ -20118,8 +20117,7 @@ class Database:
                 calculation = fine_calculation_text(fine, reason, amount)
                 if calculation:
                     calculations_by_reason[reason].add(calculation)
-                    return f"{reason}: {fmt_amt(amount)} ({calculation})"
-                return f"{reason}: {fmt_amt(amount)}"
+                return fmt_amt(amount)
 
             def set_rich_cell(ws, r, c, parts):
                 cell = ws.cell(r, c)
@@ -20129,22 +20127,20 @@ class Database:
                 return cell
 
             def set_fines_cell(ws, r, c, fines_list):
-                total = sum(fine_amount(fine) for fine in fines_list)
-                parts = [
-                    TextBlock(rich_default_font, f"Итого {fmt_amt(total)}: ")
-                ]
+                parts = []
                 for idx, fine in enumerate(fines_list):
                     reason = fine_reason(fine)
                     used_reasons.add(reason)
                     if idx > 0:
                         parts.append(TextBlock(rich_separator_font, ", "))
-                    parts.append(TextBlock(InlineFont(color=reason_color(reason)), fine_item_text(fine)))
+                    parts.append(TextBlock(InlineFont(color=reason_color(reason), b=True), fine_item_text(fine)))
                 return set_rich_cell(ws, r, c, parts)
 
             row = 2
             for op in operators:
                 name = op.get('name') or f"op_{op.get('operator_id')}"
-                set_cell(ws_f, row, 1, name, align_center=False)
+                name_cell = set_cell(ws_f, row, 1, name, align_center=False)
+                name_cell.font = Font(bold=True)
 
                 col_idx = 2
                 if include_supervisor:
@@ -20153,7 +20149,8 @@ class Database:
                     col_idx += 1
 
                 rate = op.get('rate') or 0
-                set_cell(ws_f, row, col_idx, float(rate), align_center=False)
+                rate_cell = set_cell(ws_f, row, col_idx, float(rate), align_center=False)
+                rate_cell.font = Font(bold=True)
 
                 fines_map = op.get('daily', {})
                 seg = _op_seg(op)
@@ -20184,6 +20181,7 @@ class Database:
 
                 total_col = day_start_col + len(days)
                 total_cell = set_cell(ws_f, row, total_col, row_total)
+                total_cell.font = Font(bold=True)
                 if row_total:
                     total_cell.fill = FILL_POS
                 if row_has_fines:
