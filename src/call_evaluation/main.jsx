@@ -2583,6 +2583,13 @@ const App = ({ user, initialSelection }) => {
     const [analyticsViewSortField, setAnalyticsViewSortField] = useState('name');
     const [analyticsViewSortDir, setAnalyticsViewSortDir] = useState('asc');
     const [analyticsAiModal, setAnalyticsAiModal] = useState({ show: false, loading: false, title: '', result: null, error: '' });
+    const [analyticsReportModal, setAnalyticsReportModal] = useState({
+        show: false,
+        format: 'standard',
+        departmentId: ''
+    });
+    const [analyticsReportDepartments, setAnalyticsReportDepartments] = useState([]);
+    const [analyticsReportDepartmentsLoading, setAnalyticsReportDepartmentsLoading] = useState(false);
 
     const fmtDate = (ds) => {
         if (!ds) return '—';
@@ -4021,22 +4028,97 @@ const App = ({ user, initialSelection }) => {
         finally { setAnalyticsLoading(false); }
     }, [userId]);
 
-    const analyticsGenerateReport = useCallback(async () => {
+    const loadAnalyticsReportDepartments = useCallback(async () => {
+        if (!isGlobalAdminRole || !userId) {
+            setAnalyticsReportDepartments([]);
+            return;
+        }
+        if (analyticsReportDepartments.length > 0 || analyticsReportDepartmentsLoading) return;
+        setAnalyticsReportDepartmentsLoading(true);
+        try {
+            const r = await authFetch(`${API_BASE_URL}/api/admin/departments`, {
+                headers: { 'X-User-Id': userId }
+            });
+            const d = await readJsonSafe(r);
+            if (!r.ok || d?.status !== 'success') {
+                throw new Error(d?.error || 'Не удалось загрузить отделы');
+            }
+            const nextDepartments = Array.isArray(d.departments)
+                ? d.departments.filter((dept) => dept && dept.is_active !== false)
+                : [];
+            setAnalyticsReportDepartments(nextDepartments);
+        } catch (e) {
+            emitCallEvaluationToast(`Ошибка загрузки отделов: ${e.message}`, 'error');
+        } finally {
+            setAnalyticsReportDepartmentsLoading(false);
+        }
+    }, [isGlobalAdminRole, userId, analyticsReportDepartments.length, analyticsReportDepartmentsLoading]);
+
+    const openAnalyticsReportModal = useCallback(() => {
+        setAnalyticsReportModal(prev => ({
+            show: true,
+            format: prev.format || 'standard',
+            departmentId: prev.departmentId || ''
+        }));
+        if (isGlobalAdminRole) {
+            loadAnalyticsReportDepartments();
+        }
+    }, [isGlobalAdminRole, loadAnalyticsReportDepartments]);
+
+    const closeAnalyticsReportModal = useCallback(() => {
+        if (analyticsLoading) return;
+        setAnalyticsReportModal(prev => ({ ...prev, show: false }));
+    }, [analyticsLoading]);
+
+    const analyticsGenerateReport = useCallback(async ({ format = 'standard', departmentId = '' } = {}) => {
         setAnalyticsLoading(true);
         try {
-            const r = await authFetch(`${API_BASE_URL}/api/admin/monthly_report?month=${analyticsMonth}`, { headers: { 'X-User-Id': userId } });
-            if (r.ok) {
-                const blob = await r.blob();
-                const url = window.URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url; a.download = `monthly_report_${analyticsMonth}.xlsx`;
-                document.body.appendChild(a); a.click(); a.remove();
-                window.URL.revokeObjectURL(url);
-                emitCallEvaluationToast('Отчёт скачан', 'success');
-            } else emitCallEvaluationToast('Ошибка генерации отчёта', 'error');
-        } catch { emitCallEvaluationToast('Ошибка генерации отчёта', 'error'); }
+            const normalizedFormat = format === 'dates' ? 'dates' : 'standard';
+            const query = new URLSearchParams({
+                month: analyticsMonth,
+                format: normalizedFormat
+            });
+            if (isGlobalAdminRole && departmentId) {
+                query.set('department_id', departmentId);
+            }
+            const r = await authFetch(`${API_BASE_URL}/api/admin/monthly_report?${query.toString()}`, { headers: { 'X-User-Id': userId } });
+            if (!r.ok) {
+                const d = await readJsonSafe(r);
+                throw new Error(d?.error || 'Ошибка генерации отчёта');
+            }
+
+            const blob = await r.blob();
+            const contentDisposition = r.headers.get('content-disposition') || '';
+            let filename = normalizedFormat === 'dates'
+                ? `monthly_report_dates_${analyticsMonth}.xlsx`
+                : `monthly_report_${analyticsMonth}.xlsx`;
+            const utf8NameMatch = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
+            const plainNameMatch = contentDisposition.match(/filename=\"?([^\";]+)\"?/i);
+            if (utf8NameMatch?.[1]) {
+                try {
+                    filename = decodeURIComponent(utf8NameMatch[1]);
+                } catch {
+                    filename = utf8NameMatch[1];
+                }
+            } else if (plainNameMatch?.[1]) {
+                filename = plainNameMatch[1];
+            }
+
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            window.URL.revokeObjectURL(url);
+            setAnalyticsReportModal(prev => ({ ...prev, show: false }));
+            emitCallEvaluationToast('Отчёт скачан', 'success');
+        } catch (e) {
+            emitCallEvaluationToast(e.message || 'Ошибка генерации отчёта', 'error');
+        }
         finally { setAnalyticsLoading(false); }
-    }, [analyticsMonth, userId]);
+    }, [analyticsMonth, userId, isGlobalAdminRole]);
 
     const analyticsNotifySv = useCallback(async (svId, operatorName, callCount, targetCalls) => {
         setAnalyticsLoading(true);
@@ -5484,6 +5566,117 @@ const App = ({ user, initialSelection }) => {
                 </div>
             )}
 
+            {analyticsReportModal.show && (
+                <div
+                    className="modal-backdrop"
+                    onMouseDown={(e) => {
+                        if (e.target === e.currentTarget) closeAnalyticsReportModal();
+                    }}
+                >
+                    <div className="modal analytics-export-modal" onMouseDown={(e) => e.stopPropagation()}>
+                        <div className="modal-header">
+                            <div>
+                                <h2>Выгрузка отчёта</h2>
+                                <div className="modal-header-sub">Журнал оценок за выбранный месяц</div>
+                            </div>
+                            <button
+                                type="button"
+                                className="close-btn"
+                                onClick={closeAnalyticsReportModal}
+                                disabled={analyticsLoading}
+                                title="Закрыть"
+                            >
+                                <FaIcon className="fas fa-times" />
+                            </button>
+                        </div>
+                        <div className="modal-body analytics-export-body">
+                            <div className="analytics-export-grid">
+                                <div className="field">
+                                    <label className="label">Месяц</label>
+                                    <select
+                                        value={analyticsMonth}
+                                        onChange={(e) => setAnalyticsMonth(e.target.value)}
+                                        className="select"
+                                        disabled={analyticsLoading}
+                                    >
+                                        {getAnalyticsMonthOptions()}
+                                    </select>
+                                </div>
+                                {isGlobalAdminRole && (
+                                    <div className="field">
+                                        <label className="label">Отдел</label>
+                                        <select
+                                            value={analyticsReportModal.departmentId}
+                                            onChange={(e) => setAnalyticsReportModal(prev => ({
+                                                ...prev,
+                                                departmentId: e.target.value
+                                            }))}
+                                            className="select"
+                                            disabled={analyticsLoading || analyticsReportDepartmentsLoading}
+                                        >
+                                            <option value="">Все отделы</option>
+                                            {analyticsReportDepartments.map((dept) => (
+                                                <option key={dept.id} value={dept.id}>{dept.name}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                )}
+                            </div>
+
+                            {!isGlobalAdminRole && (
+                                <div className="analytics-export-scope-note">
+                                    <FaIcon className="fas fa-building" />
+                                    <span>Данные будут выгружены по отделу сотрудника.</span>
+                                </div>
+                            )}
+
+                            <div className="field" style={{ marginBottom: 0 }}>
+                                <label className="label">Формат</label>
+                                <div className="analytics-export-format-list">
+                                    <button
+                                        type="button"
+                                        className={`analytics-export-format ${analyticsReportModal.format === 'standard' ? 'active' : ''}`}
+                                        onClick={() => setAnalyticsReportModal(prev => ({ ...prev, format: 'standard' }))}
+                                        disabled={analyticsLoading}
+                                    >
+                                        <span className="analytics-export-format-icon"><FaIcon className="fas fa-table" /></span>
+                                        <span className="analytics-export-format-text">
+                                            <span className="analytics-export-format-title">Обычный с количеством</span>
+                                            <span className="analytics-export-format-desc">Оценки подряд, средний балл, кол-во и план.</span>
+                                        </span>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className={`analytics-export-format ${analyticsReportModal.format === 'dates' ? 'active' : ''}`}
+                                        onClick={() => setAnalyticsReportModal(prev => ({ ...prev, format: 'dates' }))}
+                                        disabled={analyticsLoading}
+                                    >
+                                        <span className="analytics-export-format-icon"><FaIcon className="fas fa-calendar-alt" /></span>
+                                        <span className="analytics-export-format-text">
+                                            <span className="analytics-export-format-title">По датам</span>
+                                            <span className="analytics-export-format-desc">ФИО и дни месяца, несколько оценок в день через запятую.</span>
+                                        </span>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        <div className="modal-footer">
+                            <button className="btn btn-secondary" onClick={closeAnalyticsReportModal} disabled={analyticsLoading}>Отмена</button>
+                            <button
+                                className="btn btn-primary"
+                                onClick={() => analyticsGenerateReport({
+                                    format: analyticsReportModal.format,
+                                    departmentId: analyticsReportModal.departmentId
+                                })}
+                                disabled={analyticsLoading}
+                            >
+                                {analyticsLoading ? <><span className="spinner" /> Выгрузка...</> : <><FaIcon className="fas fa-download" /> Скачать</>}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* ── Analytics section ── */}
             {activeSection === 'analytics' && canUseAnalytics && (
                 <div className="main-panel" style={{ margin: '0 0 16px' }}>
@@ -5528,7 +5721,7 @@ const App = ({ user, initialSelection }) => {
                             <button
                                 className="btn btn-sm"
                                 style={{ background: 'var(--green-light)', color: 'var(--green)', borderColor: 'var(--green)' }}
-                                onClick={analyticsGenerateReport}
+                                onClick={openAnalyticsReportModal}
                                 disabled={analyticsLoading}
                                 title="Скачать отчёт по прослушанным звонкам за выбранный месяц"
                             >

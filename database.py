@@ -14303,7 +14303,8 @@ class Database:
                     sp.end_date as status_period_end_date,
                     sp.dismissal_reason as status_period_dismissal_reason,
                     COALESCE(sp.is_blacklist, FALSE) as status_period_is_blacklist,
-                    sp.comment as status_period_comment
+                    sp.comment as status_period_comment,
+                    u.department_id
                 FROM users u
                 LEFT JOIN directions d ON u.direction_id = d.id
                 LEFT JOIN users s ON u.supervisor_id = s.id
@@ -14360,7 +14361,8 @@ class Database:
                     'status_period_end_date': row[17].strftime('%Y-%m-%d') if row[17] else None,
                     'status_period_dismissal_reason': row[18] or '',
                     'status_period_is_blacklist': bool(row[19]) if row[19] is not None else False,
-                    'status_period_comment': row[20] or ''
+                    'status_period_comment': row[20] or '',
+                    'department_id': row[21]
                 } for row in cursor.fetchall()
             ]
 
