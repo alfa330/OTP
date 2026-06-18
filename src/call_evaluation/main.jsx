@@ -2523,6 +2523,7 @@ const App = ({ user, initialSelection }) => {
     const [openingCalibrationCallId, setOpeningCalibrationCallId] = useState(null);
     const [showVersionsModal, setShowVersionsModal] = useState(false);
     const [versionHistory, setVersionHistory] = useState([]);
+    const [showNotificationSettings, setShowNotificationSettings] = useState(false);
     const [feedbackReportSetting, setFeedbackReportSetting] = useState({
         loading: false,
         saving: false,
@@ -3013,6 +3014,19 @@ const App = ({ user, initialSelection }) => {
         if (activeSection !== 'journal') return;
         loadEvaluationNotifySetting();
     }, [canManageEvaluationNotifications, userId, activeSection, loadEvaluationNotifySetting]);
+
+    useEffect(() => {
+        if (!showNotificationSettings) return undefined;
+        const handleKeyDown = (event) => {
+            if (event.key === 'Escape') setShowNotificationSettings(false);
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, [showNotificationSettings]);
+
+    useEffect(() => {
+        if (activeSection !== 'journal') setShowNotificationSettings(false);
+    }, [activeSection]);
 
     // Directions
     useEffect(() => {
@@ -4209,6 +4223,9 @@ const App = ({ user, initialSelection }) => {
         !evaluationNotifySetting.telegramConnected ||
         !evaluationNotifySetting.departmentId
     );
+    const hasEnabledJournalNotifications = !!evaluationNotifySetting.enabled || (
+        canManageFeedbackReportSetting && !!feedbackReportSetting.enabled
+    );
 
     return (
         <div className="app">
@@ -4250,85 +4267,6 @@ const App = ({ user, initialSelection }) => {
                         >
                             Калибровка
                         </button>
-                    )}
-                    {canManageEvaluationNotifications && activeSection === 'journal' && (
-                        <div
-                            className="evaluation-notify-control"
-                            title={evaluationNotifyDepartmentName ? `Отдел: ${evaluationNotifyDepartmentName}` : undefined}
-                        >
-                            {isAdminRole && (
-                                <select
-                                    className="select evaluation-notify-select"
-                                    value={evaluationNotifySetting.departmentId || ''}
-                                    disabled={
-                                        !!evaluationNotifySetting.loading ||
-                                        !!evaluationNotifySetting.saving ||
-                                        !evaluationNotifySetting.telegramConnected
-                                    }
-                                    onChange={(e) => {
-                                        const nextDepartmentId = e.target.value;
-                                        setEvaluationNotifySetting(prev => ({
-                                            ...prev,
-                                            departmentId: nextDepartmentId,
-                                            departmentName: evaluationNotifyDepartments.find((dept) => String(dept?.id) === String(nextDepartmentId))?.name || ''
-                                        }));
-                                        if (evaluationNotifySetting.enabled) {
-                                            saveEvaluationNotifySetting({ enabled: true, departmentId: nextDepartmentId });
-                                        }
-                                    }}
-                                >
-                                    <option value="">Отдел</option>
-                                    {evaluationNotifyDepartments.map((dept) => (
-                                        <option key={dept.id} value={dept.id}>{dept.name}</option>
-                                    ))}
-                                </select>
-                            )}
-                            <button
-                                className={`btn btn-sm ${evaluationNotifySetting.enabled ? 'btn-green' : 'btn-secondary'}`}
-                                disabled={evaluationNotifyDisabled}
-                                onClick={() => saveEvaluationNotifySetting({
-                                    enabled: !evaluationNotifySetting.enabled,
-                                    departmentId: evaluationNotifySetting.departmentId
-                                })}
-                            >
-                                <FaIcon className={`fas fa-${evaluationNotifySetting.enabled ? 'bell' : 'bell-slash'}`} />
-                                {evaluationNotifySetting.loading
-                                    ? 'Загрузка...'
-                                    : (evaluationNotifySetting.telegramConnected
-                                        ? (evaluationNotifySetting.enabled ? 'Уведомления включены' : 'Получать уведомления')
-                                        : 'Telegram не подключён')}
-                            </button>
-                        </div>
-                    )}
-                    {canManageFeedbackReportSetting && activeSection === 'journal' && (
-                        <label
-                            className="comment-visibility-toggle"
-                            style={{
-                                marginBottom: 0,
-                                padding: '6px 10px',
-                                border: '1px solid var(--border)',
-                                borderRadius: 'var(--radius)',
-                                background: 'var(--surface-2)'
-                            }}
-                        >
-                            <input
-                                type="checkbox"
-                                checked={!!feedbackReportSetting.enabled}
-                                disabled={
-                                    !!feedbackReportSetting.loading ||
-                                    !!feedbackReportSetting.saving ||
-                                    !feedbackReportSetting.telegramConnected
-                                }
-                                onChange={(e) => toggleFeedbackReportSetting(e.target.checked)}
-                            />
-                            <span>
-                                {feedbackReportSetting.loading
-                                    ? 'Telegram-отчёт ОС: загрузка...'
-                                    : (feedbackReportSetting.telegramConnected
-                                        ? 'Telegram-отчёт ОС'
-                                        : 'Telegram не подключён')}
-                            </span>
-                        </label>
                     )}
                     {userName && <span className="header-user">{userName}</span>}
                 </div>
@@ -5432,6 +5370,233 @@ const App = ({ user, initialSelection }) => {
                     </>
                 )}
             </div>
+            )}
+
+            {canManageEvaluationNotifications && activeSection === 'journal' && (
+                <button
+                    type="button"
+                    className={`notification-settings-fab ${hasEnabledJournalNotifications ? 'has-active-subscription' : ''}`}
+                    onClick={() => setShowNotificationSettings(true)}
+                    aria-label="Открыть настройки уведомлений"
+                    aria-haspopup="dialog"
+                    aria-expanded={showNotificationSettings}
+                    title="Настройки уведомлений"
+                >
+                    <span className="notification-settings-fab-icon" aria-hidden="true">
+                        <FaIcon className="fas fa-bell" />
+                    </span>
+                    <span className="notification-settings-fab-label">Уведомления</span>
+                    {hasEnabledJournalNotifications && <span className="notification-settings-fab-dot" aria-hidden="true" />}
+                </button>
+            )}
+
+            {showNotificationSettings && canManageEvaluationNotifications && activeSection === 'journal' && (
+                <div
+                    className="modal-backdrop notification-settings-backdrop"
+                    role="presentation"
+                    onMouseDown={(event) => {
+                        if (event.target === event.currentTarget) setShowNotificationSettings(false);
+                    }}
+                >
+                    <div
+                        className="modal notification-settings-modal"
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="notification-settings-title"
+                        onMouseDown={(event) => event.stopPropagation()}
+                    >
+                        <div className="modal-header notification-settings-modal-header">
+                            <div className="notification-settings-heading">
+                                <span className="notification-settings-heading-icon" aria-hidden="true">
+                                    <FaIcon className="fas fa-bell" />
+                                </span>
+                                <div>
+                                    <h2 id="notification-settings-title">Уведомления Журнала оценок</h2>
+                                    <div className="modal-header-sub">Персональные подписки в Telegram</div>
+                                </div>
+                            </div>
+                            <button
+                                type="button"
+                                className="close-btn"
+                                onClick={() => setShowNotificationSettings(false)}
+                                aria-label="Закрыть настройки уведомлений"
+                            >
+                                <FaIcon className="fas fa-times" />
+                            </button>
+                        </div>
+                        <div className="modal-body notification-settings-body">
+                            <div className="notification-settings-intro">
+                                <FaIcon className="fas fa-info-circle" />
+                                <p>
+                                    Выберите, какие события получать лично. Настройки действуют только для вашей учётной записи,
+                                    а сообщения приходят в Telegram, привязанный к профилю.
+                                </p>
+                            </div>
+
+                            <section className="notification-subscription-card" aria-labelledby="evaluation-notification-title">
+                                <div className="notification-subscription-main">
+                                    <div className="notification-subscription-icon notification-subscription-icon-blue" aria-hidden="true">
+                                        <FaIcon className="fas fa-clipboard-check" />
+                                    </div>
+                                    <div className="notification-subscription-copy">
+                                        <div className="notification-subscription-title-row">
+                                            <h3 id="evaluation-notification-title">Новые оценки и переоценки</h3>
+                                            <span className="notification-subscription-badge">Сразу после публикации</span>
+                                        </div>
+                                        <p>
+                                            Telegram сообщит о каждой опубликованной оценке сотрудника выбранного отдела.
+                                            В сообщении будут оценщик, оператор, месяц, номер обращения, итоговый балл,
+                                            комментарий и запись звонка, если она доступна.
+                                        </p>
+                                    </div>
+                                    <label className="notification-settings-switch">
+                                        <input
+                                            type="checkbox"
+                                            role="switch"
+                                            aria-label="Получать уведомления о новых оценках и переоценках"
+                                            checked={!!evaluationNotifySetting.enabled}
+                                            disabled={evaluationNotifyDisabled}
+                                            onChange={(event) => saveEvaluationNotifySetting({
+                                                enabled: event.target.checked,
+                                                departmentId: evaluationNotifySetting.departmentId
+                                            })}
+                                        />
+                                        <span className="notification-settings-switch-track" aria-hidden="true">
+                                            <span className="notification-settings-switch-thumb" />
+                                        </span>
+                                    </label>
+                                </div>
+
+                                <div className="notification-subscription-options evaluation-notify-control">
+                                    {evaluationNotifySetting.scope === 'admin' ? (
+                                        <div className="notification-settings-field">
+                                            <label className="label" htmlFor="evaluation-notify-department">Отдел для подписки</label>
+                                            <select
+                                                id="evaluation-notify-department"
+                                                className="select evaluation-notify-select"
+                                                value={evaluationNotifySetting.departmentId || ''}
+                                                disabled={
+                                                    !!evaluationNotifySetting.loading ||
+                                                    !!evaluationNotifySetting.saving ||
+                                                    !evaluationNotifySetting.telegramConnected
+                                                }
+                                                onChange={(event) => {
+                                                    const nextDepartmentId = event.target.value;
+                                                    setEvaluationNotifySetting(prev => ({
+                                                        ...prev,
+                                                        departmentId: nextDepartmentId,
+                                                        departmentName: evaluationNotifyDepartments.find(
+                                                            (dept) => String(dept?.id) === String(nextDepartmentId)
+                                                        )?.name || ''
+                                                    }));
+                                                    if (evaluationNotifySetting.enabled) {
+                                                        saveEvaluationNotifySetting({ enabled: true, departmentId: nextDepartmentId });
+                                                    }
+                                                }}
+                                            >
+                                                <option value="" disabled={!!evaluationNotifySetting.enabled}>Выберите отдел</option>
+                                                {evaluationNotifyDepartments.map((dept) => (
+                                                    <option key={dept.id} value={dept.id}>{dept.name}</option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                    ) : (
+                                        <div className="notification-settings-scope">
+                                            <span className="notification-settings-scope-label">Область подписки</span>
+                                            <span className="notification-settings-scope-value">
+                                                <FaIcon className="fas fa-building" />
+                                                {evaluationNotifyDepartmentName || 'Ваш отдел'}
+                                            </span>
+                                        </div>
+                                    )}
+                                    <div className={`notification-settings-status ${evaluationNotifySetting.telegramConnected ? 'is-connected' : 'is-warning'}`}>
+                                        <FaIcon className={`fas fa-${evaluationNotifySetting.telegramConnected ? 'paper-plane' : 'exclamation-circle'}`} />
+                                        {evaluationNotifySetting.loading
+                                            ? 'Загрузка настройки...'
+                                            : (evaluationNotifySetting.saving
+                                                ? 'Сохраняем...'
+                                                : (evaluationNotifySetting.telegramConnected
+                                                    ? (evaluationNotifySetting.enabled ? 'Подписка включена' : 'Подписка выключена')
+                                                    : 'Telegram не подключён к профилю'))}
+                                    </div>
+                                </div>
+                            </section>
+
+                            {canManageFeedbackReportSetting && (
+                                <section className="notification-subscription-card" aria-labelledby="feedback-report-title">
+                                    <div className="notification-subscription-main">
+                                        <div className="notification-subscription-icon notification-subscription-icon-green" aria-hidden="true">
+                                            <FaIcon className="fas fa-chart-line" />
+                                        </div>
+                                        <div className="notification-subscription-copy">
+                                            <div className="notification-subscription-title-row">
+                                                <h3 id="feedback-report-title">Еженедельный отчёт по обратной связи</h3>
+                                                <span className="notification-subscription-badge">Понедельник · 09:05</span>
+                                            </div>
+                                            <p>
+                                                Сводка за текущий месяц по всем отделам: сколько оценок проведено, по скольким
+                                                предоставлена обратная связь, что выполнено в срок и где есть просрочки.
+                                                После общей сводки придёт детализация по супервайзерам.
+                                            </p>
+                                        </div>
+                                        <label className="notification-settings-switch">
+                                            <input
+                                                type="checkbox"
+                                                role="switch"
+                                                aria-label="Получать еженедельный отчёт по обратной связи"
+                                                checked={!!feedbackReportSetting.enabled}
+                                                disabled={
+                                                    !!feedbackReportSetting.loading ||
+                                                    !!feedbackReportSetting.saving ||
+                                                    !feedbackReportSetting.telegramConnected
+                                                }
+                                                onChange={(event) => toggleFeedbackReportSetting(event.target.checked)}
+                                            />
+                                            <span className="notification-settings-switch-track" aria-hidden="true">
+                                                <span className="notification-settings-switch-thumb" />
+                                            </span>
+                                        </label>
+                                    </div>
+                                    <div className="notification-subscription-options">
+                                        <div className="notification-settings-scope">
+                                            <span className="notification-settings-scope-label">Период и охват</span>
+                                            <span className="notification-settings-scope-value">
+                                                <FaIcon className="fas fa-globe" />
+                                                Текущий месяц · все отделы
+                                            </span>
+                                        </div>
+                                        <div className={`notification-settings-status ${feedbackReportSetting.telegramConnected ? 'is-connected' : 'is-warning'}`}>
+                                            <FaIcon className={`fas fa-${feedbackReportSetting.telegramConnected ? 'paper-plane' : 'exclamation-circle'}`} />
+                                            {feedbackReportSetting.loading
+                                                ? 'Загрузка настройки...'
+                                                : (feedbackReportSetting.saving
+                                                    ? 'Сохраняем...'
+                                                    : (feedbackReportSetting.telegramConnected
+                                                        ? (feedbackReportSetting.enabled ? 'Подписка включена' : 'Подписка выключена')
+                                                        : 'Telegram не подключён к профилю'))}
+                                        </div>
+                                    </div>
+                                </section>
+                            )}
+
+                            {!evaluationNotifySetting.telegramConnected && (
+                                <div className="notification-settings-telegram-note">
+                                    <FaIcon className="fab fa-telegram-plane" />
+                                    <div>
+                                        <strong>Сначала подключите Telegram</strong>
+                                        <span>После привязки Telegram к профилю тумблеры станут доступны.</span>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                        <div className="modal-footer notification-settings-footer">
+                            <span>Изменения в подписках сохраняются автоматически.</span>
+                            <button type="button" className="btn btn-primary" onClick={() => setShowNotificationSettings(false)}>
+                                Готово
+                            </button>
+                        </div>
+                    </div>
+                </div>
             )}
 
             {/* Modals */}
