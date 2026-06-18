@@ -19981,27 +19981,167 @@ class Database:
             headers = ["ФИО"]
             if include_supervisor:
                 headers.append("Супервайзер")
-            headers += [
-                "Ставка",
-                "Кол-во Опозданий",
-                "Минуты",
-                "Сумма Опозданий",
-                "Корп такси",
-                "Кол-во Не выход",
-                "Сумма Не выход",
-                "Прокси Карта",
-                "Другое",
-                "Итого"   # <--- НОВАЯ КОЛОНКА
-            ]
+            headers += ["Ставка"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Итого"]
             _make_header(ws_f, headers)
 
-            row = 2
+            reason_colors = {
+                'Опоздание': 'EA580C',
+                'Корп такси': '2563EB',
+                'Не выход': 'DC2626',
+                'Прокси карта': '7C3AED',
+                'Другое': '047857',
+            }
+            dynamic_reason_colors = {}
+            dynamic_palette = ['0F766E', 'BE123C', '4338CA', 'A16207', '0369A1', '86198F', 'B45309']
+            known_reason_order = ['Опоздание', 'Корп такси', 'Не выход', 'Прокси карта', 'Другое']
+            used_reasons = set()
+            calculations_by_reason = defaultdict(set)
+            totals_by_day = defaultdict(float)
+
+            rich_default_font = InlineFont(color='111827')
+            rich_separator_font = InlineFont(color='6B7280')
+            rate_col = 2 + (1 if include_supervisor else 0)
+            day_start_col = rate_col + 1
+
             def fmt_amt(x):
                 try:
-                    return float(x or 0.0)
+                    amount = float(x or 0.0)
+                except Exception:
+                    amount = 0.0
+                if abs(amount - round(amount)) < 1e-9:
+                    return f"{int(round(amount)):,}".replace(",", " ")
+                return f"{amount:,.2f}".rstrip('0').rstrip('.').replace(",", " ").replace(".", ",")
+
+            def fine_amount(fine):
+                if not isinstance(fine, dict):
+                    return 0.0
+                try:
+                    return float(fine.get('amount', fine.get('fine_amount', 0)) or 0.0)
                 except Exception:
                     return 0.0
 
+            def fine_reason(fine):
+                if not isinstance(fine, dict):
+                    return 'Другое'
+                return str(fine.get('reason') or fine.get('fine_reason') or 'Другое').strip() or 'Другое'
+
+            def reason_color(reason):
+                if reason in reason_colors:
+                    return reason_colors[reason]
+                if reason not in dynamic_reason_colors:
+                    dynamic_reason_colors[reason] = dynamic_palette[len(dynamic_reason_colors) % len(dynamic_palette)]
+                return dynamic_reason_colors[reason]
+
+            def fmt_calc_number(value):
+                try:
+                    number = float(value)
+                except Exception:
+                    return None
+                if abs(number - round(number)) < 1e-9:
+                    return str(int(round(number)))
+                return f"{number:.2f}".rstrip('0').rstrip('.').replace(".", ",")
+
+            def fine_calculation_text(fine, reason, amount):
+                if isinstance(fine, dict):
+                    explicit_calc = (
+                        fine.get('calculation')
+                        or fine.get('calculation_text')
+                        or fine.get('calculationText')
+                        or fine.get('calc')
+                        or fine.get('formula')
+                    )
+                    if explicit_calc:
+                        return str(explicit_calc).strip()
+
+                reason_lc = reason.lower()
+                if reason_lc == 'опоздание':
+                    minutes = fine.get('minutes') if isinstance(fine, dict) else None
+                    if minutes in (None, '') and amount:
+                        minutes = amount / 50.0
+                    minutes_text = fmt_calc_number(minutes)
+                    return f"{minutes_text} мин x 50" if minutes_text is not None else "минуты x 50"
+                if reason_lc == 'не выход' or 'не выход' in reason_lc:
+                    return "фикс. 10 000"
+                if 'прокси' in reason_lc:
+                    return "фикс. 5 000"
+                return ""
+
+            def legend_calculation_text(reason):
+                reason_lc = reason.lower()
+                if reason_lc == 'опоздание':
+                    return "минуты x 50"
+                if reason_lc == 'не выход' or 'не выход' in reason_lc:
+                    return "фикс. 10 000"
+                if 'прокси' in reason_lc:
+                    return "фикс. 5 000"
+                custom_calculations = calculations_by_reason.get(reason) or set()
+                return "; ".join(sorted(custom_calculations))
+
+            def extract_day_fines(day_entry):
+                if not isinstance(day_entry, dict):
+                    return []
+
+                fines_list = []
+                if isinstance(day_entry.get('fines'), list):
+                    fines_list = [fine for fine in day_entry.get('fines') if isinstance(fine, dict)]
+
+                if fines_list:
+                    return fines_list
+
+                legacy_amount = day_entry.get('fine_amount')
+                legacy_reason = day_entry.get('fine_reason')
+                legacy_comment = day_entry.get('fine_comment')
+                has_legacy_fine = False
+                try:
+                    has_legacy_fine = abs(float(legacy_amount or 0.0)) > 0
+                except Exception:
+                    has_legacy_fine = False
+                has_legacy_fine = has_legacy_fine or bool(str(legacy_reason or '').strip()) or bool(str(legacy_comment or '').strip())
+                if not has_legacy_fine:
+                    return []
+
+                fine = {
+                    'amount': legacy_amount or 0.0,
+                    'reason': legacy_reason or 'Другое',
+                    'comment': legacy_comment,
+                }
+                try:
+                    if str(fine['reason']) == 'Опоздание':
+                        fine['minutes'] = int(round(float(fine['amount'] or 0.0) / 50.0)) if fine['amount'] else 0
+                except Exception:
+                    pass
+                return [fine]
+
+            def fine_item_text(fine):
+                amount = fine_amount(fine)
+                reason = fine_reason(fine)
+                calculation = fine_calculation_text(fine, reason, amount)
+                if calculation:
+                    calculations_by_reason[reason].add(calculation)
+                    return f"{reason}: {fmt_amt(amount)} ({calculation})"
+                return f"{reason}: {fmt_amt(amount)}"
+
+            def set_rich_cell(ws, r, c, parts):
+                cell = ws.cell(r, c)
+                cell.value = CellRichText(parts)
+                cell.alignment = Alignment(horizontal='center', vertical='center', wrapText=True)
+                cell.border = BORDER_ALL
+                return cell
+
+            def set_fines_cell(ws, r, c, fines_list):
+                total = sum(fine_amount(fine) for fine in fines_list)
+                parts = [
+                    TextBlock(rich_default_font, f"Итого {fmt_amt(total)}: ")
+                ]
+                for idx, fine in enumerate(fines_list):
+                    reason = fine_reason(fine)
+                    used_reasons.add(reason)
+                    if idx > 0:
+                        parts.append(TextBlock(rich_separator_font, ", "))
+                    parts.append(TextBlock(InlineFont(color=reason_color(reason)), fine_item_text(fine)))
+                return set_rich_cell(ws, r, c, parts)
+
+            row = 2
             for op in operators:
                 name = op.get('name') or f"op_{op.get('operator_id')}"
                 set_cell(ws_f, row, 1, name, align_center=False)
@@ -20014,70 +20154,91 @@ class Database:
 
                 rate = op.get('rate') or 0
                 set_cell(ws_f, row, col_idx, float(rate), align_center=False)
-                col_idx += 1
 
                 fines_map = op.get('daily', {})
                 seg = _op_seg(op)
+                row_total = 0.0
+                row_has_fines = False
 
-                count_late = 0
-                minutes_late = 0
-                sum_late = 0.0
-                sum_korp = 0.0
-                count_no_show = 0
-                sum_no_show = 0.0
-                sum_proxy = 0.0
-                sum_other = 0.0
-
-                for _dkey, day_entry in fines_map.items():
+                for day_idx, day in enumerate(days, start=day_start_col):
                     if seg is not None:
                         try:
-                            if not _seg_has_day(seg, int(_dkey)):
+                            if not _seg_has_day(seg, int(day)):
+                                set_cell(ws_f, row, day_idx, "др.", fill=FILL_FOREIGN)
                                 continue
                         except Exception:
                             pass
-                    fines_list = day_entry.get('fines', []) if isinstance(day_entry, dict) else []
-                    for f in fines_list:
-                        reason = (f.get('reason') or '').strip()
-                        amt = float(f.get('amount') or 0.0)
-                        rl = reason.lower()
+                    day_entry = fines_map.get(str(day)) if isinstance(fines_map, dict) else None
+                    if day_entry is None and isinstance(fines_map, dict):
+                        day_entry = fines_map.get(day)
+                    fines_list = extract_day_fines(day_entry)
+                    if not fines_list:
+                        set_cell(ws_f, row, day_idx, "")
+                        continue
 
-                        if rl == 'опоздание':
-                            count_late += 1
-                            minutes = float(f.get('minutes')) if f.get('minutes') is not None else (amt / 50.0 if amt else 0.0)
-                            minutes_late += minutes
-                            sum_late += amt
-                        elif 'корп' in rl and 'такси' in rl:
-                            sum_korp += amt
-                        elif rl == 'не выход' or 'не выход' in rl:
-                            count_no_show += 1
-                            sum_no_show += amt
-                        elif 'прокси' in rl:
-                            sum_proxy += amt
-                        else:
-                            sum_other += amt
+                    day_total = sum(fine_amount(fine) for fine in fines_list)
+                    row_total += day_total
+                    totals_by_day[day] += day_total
+                    row_has_fines = True
+                    set_fines_cell(ws_f, row, day_idx, fines_list)
 
-                # Итоговая сумма штрафов
-                total_fines = sum_late + sum_korp + sum_no_show + sum_proxy + sum_other
-
-                # Записываем данные
-                set_cell(ws_f, row, col_idx, int(count_late)); col_idx += 1
-                set_cell(ws_f, row, col_idx, minutes_late); col_idx += 1
-                set_cell(ws_f, row, col_idx, fmt_amt(sum_late)); col_idx += 1
-                set_cell(ws_f, row, col_idx, fmt_amt(sum_korp)); col_idx += 1
-                set_cell(ws_f, row, col_idx, int(count_no_show)); col_idx += 1
-                set_cell(ws_f, row, col_idx, fmt_amt(sum_no_show)); col_idx += 1
-                set_cell(ws_f, row, col_idx, fmt_amt(sum_proxy)); col_idx += 1
-                set_cell(ws_f, row, col_idx, fmt_amt(sum_other)); col_idx += 1
-
-                # Новая колонка — ИТОГО
-                set_cell(ws_f, row, col_idx, fmt_amt(total_fines)); col_idx += 1
+                total_col = day_start_col + len(days)
+                total_cell = set_cell(ws_f, row, total_col, row_total)
+                if row_total:
+                    total_cell.fill = FILL_POS
+                if row_has_fines:
+                    ws_f.row_dimensions[row].height = 42
 
                 row += 1
 
+            total_row = row
+            total_label_cell = set_cell(ws_f, total_row, 1, "Итого", align_center=False)
+            total_label_cell.font = Font(bold=True)
+            for empty_col in range(2, day_start_col):
+                empty_cell = set_cell(ws_f, total_row, empty_col, "")
+                empty_cell.font = Font(bold=True)
+            grand_total = 0.0
+            for day_idx, day in enumerate(days, start=day_start_col):
+                day_total = totals_by_day.get(day, 0.0)
+                grand_total += day_total
+                cell = set_cell(ws_f, total_row, day_idx, day_total)
+                cell.font = Font(bold=True)
+                if day_total:
+                    cell.fill = FILL_POS
+            grand_cell = set_cell(ws_f, total_row, day_start_col + len(days), grand_total)
+            grand_cell.font = Font(bold=True)
+            if grand_total:
+                grand_cell.fill = FILL_POS
+
+            legend_start = total_row + 2
+            legend_title = ws_f.cell(legend_start, 1)
+            legend_title.value = "Легенда причин"
+            legend_title.font = Font(bold=True)
+
+            legend_header_row = legend_start + 1
+            set_cell(ws_f, legend_header_row, 1, "Причина", align_center=False).font = Font(bold=True)
+            set_cell(ws_f, legend_header_row, 2, "Расчет", align_center=False).font = Font(bold=True)
+
+            legend_reasons = [reason for reason in known_reason_order if reason in used_reasons or reason in reason_colors]
+            legend_reasons += sorted(reason for reason in used_reasons if reason not in legend_reasons)
+            for offset, reason in enumerate(legend_reasons, start=1):
+                legend_row = legend_header_row + offset
+                reason_cell = set_cell(ws_f, legend_row, 1, reason, align_center=False)
+                reason_cell.font = Font(color=reason_color(reason), bold=True)
+                set_cell(ws_f, legend_row, 2, legend_calculation_text(reason), align_center=False)
+
             ws_f.column_dimensions['A'].width = 28
+            if include_supervisor:
+                ws_f.column_dimensions['B'].width = 22
             for i in range(2, len(headers) + 1):
                 col = ws_f.cell(1, i).column_letter
-                ws_f.column_dimensions[col].width = 14
+                if i == rate_col:
+                    ws_f.column_dimensions[col].width = 12
+                elif day_start_col <= i < day_start_col + len(days):
+                    ws_f.column_dimensions[col].width = 24
+                else:
+                    ws_f.column_dimensions[col].width = 14
+            ws_f.freeze_panes = f"{get_column_letter(day_start_col)}2"
 
         # Модель отчёта: листы model-aware, только если ВСЯ выгрузка — чисто чат-модели
         # (per-group экспорт чат-группы). Смешанные/операторские — прежняя раскладка.
