@@ -13153,9 +13153,20 @@ def download_task_attachment(attachment_id):
 def handle_monthly_report():
     try:
         month = request.args.get('month')
-        user_id = request.args.get('')
         if not month:
             month = datetime.now().strftime('%Y-%m')
+
+        report_format = str(
+            request.args.get('format')
+            or request.args.get('report_format')
+            or 'standard'
+        ).strip().lower()
+        if report_format in {'count', 'counts', 'default', 'ordinary'}:
+            report_format = 'standard'
+        if report_format in {'date', 'dates', 'by_dates', 'date_matrix'}:
+            report_format = 'dates'
+        if report_format not in {'standard', 'dates'}:
+            return jsonify({"error": "Invalid report format"}), 400
         
         # Validate month format
         try:
@@ -13168,15 +13179,82 @@ def handle_monthly_report():
         user_id = int(request.headers.get('X-User-Id'))
         user = db.get_user(id=user_id)
         role = _normalize_user_role(user[3]) if user else ''
-        if role == "sv":
-            # get_user returns tuple: (id, telegram_id, name, role, ... , status)
-            if user[5] == "fired":
-                return jsonify({"error": "Your status is fired. No report available."}), 403
-            svs=[(user[0], user[2], "", "", "", user[5])]
-        elif _is_admin_role(role):
-            svs = [sv for sv in db.get_supervisors() if len(sv) > 5 and sv[5] != "fired"]
+        headed_dept_id = _headed_department_id(user_id)
+        is_global_admin = _is_global_admin_requester(role, user_id)
+        is_department_head = headed_dept_id is not None and not _is_super_admin_role(role)
+
+        if not (is_global_admin or role == "sv" or is_department_head):
+            return jsonify({"error": "Only admin, super admin, department head or SV can access to this report"}), 403
+
+        requested_department_id = request.args.get('department_id')
+        effective_department_id = None
+        fallback_supervisor_id = None
+        scope_label = 'Все отделы'
+
+        if is_global_admin:
+            if requested_department_id not in (None, ''):
+                try:
+                    effective_department_id = int(requested_department_id)
+                except (TypeError, ValueError):
+                    return jsonify({"error": "Invalid department_id"}), 400
+                department = db.get_department_by_id(effective_department_id)
+                if not department or department.get('is_active') is False:
+                    return jsonify({"error": "Department not found"}), 404
+                scope_label = department.get('name') or f"Отдел {effective_department_id}"
         else:
-            return jsonify({"error": "Only admin, super admin or SV can access to this report"}), 404
+            if role == "sv" and user[5] == "fired":
+                return jsonify({"error": "Your status is fired. No report available."}), 403
+            effective_department_id = _department_scope_id_for_requester(user_id)
+            if effective_department_id is not None:
+                department = db.get_department_by_id(effective_department_id)
+                scope_label = (department or {}).get('name') or f"Отдел {effective_department_id}"
+            elif role == "sv":
+                fallback_supervisor_id = user[0]
+                scope_label = user[2] or 'Мой отчёт'
+
+        def _fetch_report_supervisors(department_id=None, supervisor_id=None):
+            query = """
+                SELECT u.id, u.name, u.status, u.department_id
+                FROM users u
+                WHERE LOWER(COALESCE(u.role, '')) IN ('sv', 'supervisor')
+            """
+            params = []
+            if supervisor_id is not None:
+                query += " AND u.id = %s"
+                params.append(int(supervisor_id))
+            elif department_id is not None:
+                query += """
+                    AND (
+                        u.department_id = %s
+                        OR EXISTS (
+                            SELECT 1
+                            FROM users op
+                            WHERE op.supervisor_id = u.id
+                              AND LOWER(COALESCE(op.role, '')) = 'operator'
+                              AND op.department_id = %s
+                        )
+                    )
+                """
+                params.extend([int(department_id), int(department_id)])
+            query += " ORDER BY u.name"
+            with db._get_cursor() as cursor:
+                cursor.execute(query, params)
+                rows = cursor.fetchall()
+            return [
+                {
+                    "id": row[0],
+                    "name": row[1],
+                    "status": row[2],
+                    "department_id": row[3]
+                }
+                for row in rows
+                if str(row[2] or '').strip().lower() != 'fired'
+            ]
+
+        svs = _fetch_report_supervisors(
+            department_id=effective_department_id,
+            supervisor_id=fallback_supervisor_id
+        )
 
         if not svs:
             return jsonify({"error": "No supervisors found"}), 404
@@ -13201,12 +13279,42 @@ def handle_monthly_report():
         # Итоговые колонки
         total_format = workbook.add_format({'border': 1, 'bold': True, 'bg_color': '#E2EFDA', 'num_format': '0.00', 'align': 'center'})
         total_int_format = workbook.add_format({'border': 1, 'bold': True, 'bg_color': '#E2EFDA', 'num_format': '0', 'align': 'center'})
+        text_format = workbook.add_format({'border': 1, 'align': 'center', 'valign': 'vcenter'})
+        muted_format = workbook.add_format({'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_color': '#9CA3AF'})
+        section_format = workbook.add_format({'bold': True, 'font_color': '#374151'})
 
-        def _fetch_latest_scores_for_user(target_user_id, target_month, evaluator_id=None):
+        report_year = month_start.year
+        report_month = month_start.month
+        month_days = [
+            dt_date(report_year, report_month, day)
+            for day in range(1, calendar.monthrange(report_year, report_month)[1] + 1)
+        ]
+
+        def _format_score_text(score):
+            try:
+                numeric = float(score)
+            except (TypeError, ValueError):
+                return ''
+            if numeric.is_integer():
+                return str(int(numeric))
+            return f"{numeric:.2f}".rstrip('0').rstrip('.')
+
+        def _score_format(score, default_format=None):
+            try:
+                numeric = float(score)
+            except (TypeError, ValueError):
+                return default_format or text_format
+            if numeric < 80:
+                return red_format
+            if numeric < 95:
+                return yellow_format
+            return green_format
+
+        def _fetch_latest_score_rows_for_user(target_user_id, target_month, evaluator_id=None):
             with db._get_cursor() as cursor:
                 if evaluator_id is None:
                     cursor.execute("""
-                        SELECT c.score
+                        SELECT c.score, c.created_at
                         FROM calls c
                         JOIN (
                             SELECT phone_number, appeal_date, MAX(created_at) as max_date
@@ -13224,7 +13332,7 @@ def handle_monthly_report():
                     """, (target_user_id, target_month, target_user_id, target_month))
                 else:
                     cursor.execute("""
-                        SELECT c.score
+                        SELECT c.score, c.created_at
                         FROM calls c
                         JOIN (
                             SELECT phone_number, appeal_date, MAX(created_at) as max_date
@@ -13240,7 +13348,18 @@ def handle_monthly_report():
                         WHERE c.is_draft = FALSE AND c.operator_id = %s AND c.month = %s AND c.evaluator_id = %s
                         ORDER BY c.created_at ASC
                     """, (target_user_id, target_month, evaluator_id, target_user_id, target_month, evaluator_id))
-                return [row[0] for row in cursor.fetchall()]
+                result = []
+                for row in cursor.fetchall():
+                    created_at = row[1]
+                    if hasattr(created_at, 'date'):
+                        score_date = created_at.date()
+                    else:
+                        try:
+                            score_date = datetime.strptime(str(created_at)[:10], '%Y-%m-%d').date()
+                        except Exception:
+                            score_date = None
+                    result.append({"score": row[0], "date": score_date})
+                return result
 
         def _has_monthly_evaluation_data(target_user_id, target_month):
             try:
@@ -13259,12 +13378,63 @@ def handle_monthly_report():
                 logging.exception("Failed to check monthly evaluation data for user %s", target_user_id)
                 return False
 
+        def _write_date_matrix(worksheet, start_row, title, report_rows, score_key, count_key, avg_key, evaluation_targets):
+            worksheet.write(start_row, 0, title, section_format)
+            header_row = start_row + 1
+            headers = ['ФИО'] + [day.strftime('%d.%m') for day in month_days] + ['Средний балл', 'Кол-во', 'План']
+            for col, header in enumerate(headers):
+                worksheet.write(header_row, col, header, header_format)
+
+            avg_col = len(month_days) + 1
+            count_col = avg_col + 1
+            plan_col = count_col + 1
+            first_data_row = header_row + 1
+
+            for row_offset, op_row in enumerate(report_rows):
+                row_idx = first_data_row + row_offset
+                op_id = op_row.get('id')
+                worksheet.write(row_idx, 0, op_row.get('name') or '', fio_format)
+
+                by_day = {day: [] for day in month_days}
+                for score_row in op_row.get(score_key) or []:
+                    score_date = score_row.get('date')
+                    if score_date in by_day:
+                        by_day[score_date].append(score_row.get('score'))
+
+                for day_idx, day in enumerate(month_days, start=1):
+                    day_scores = by_day.get(day) or []
+                    if not day_scores:
+                        worksheet.write(row_idx, day_idx, '', muted_format)
+                        continue
+                    cell_text = ', '.join(_format_score_text(score) for score in day_scores if score is not None)
+                    numeric_scores = []
+                    for score in day_scores:
+                        try:
+                            numeric_scores.append(float(score))
+                        except (TypeError, ValueError):
+                            pass
+                    worst_score = min(numeric_scores) if numeric_scores else None
+                    worksheet.write(row_idx, day_idx, cell_text, _score_format(worst_score, text_format))
+
+                evaluation_target = evaluation_targets.get(int(op_id)) if op_id is not None else None
+                planned_calls = int(evaluation_target.get('required_calls') or 0) if isinstance(evaluation_target, dict) else 0
+                worksheet.write(row_idx, avg_col, op_row.get(avg_key) or 0.0, total_format)
+                worksheet.write(row_idx, count_col, op_row.get(count_key) or 0, total_int_format)
+                worksheet.write(row_idx, plan_col, planned_calls, total_int_format)
+
+            return first_data_row + len(report_rows) + 1
+
         for sv in svs:
-            sv_id, sv_name = sv[0], sv[1]
+            sv_id, sv_name = sv.get('id'), sv.get('name') or ''
             # Exclude supervisors with status 'fired' (should already be filtered above, but double check)
-            if len(sv) > 5 and sv[5] == "fired":
+            if str(sv.get('status') or '').strip().lower() == "fired":
                 continue
             operators = db.get_operators_by_supervisor(sv_id)
+            if effective_department_id is not None:
+                operators = [
+                    op for op in operators
+                    if op.get('department_id') is not None and int(op.get('department_id')) == int(effective_department_id)
+                ]
             special_evaluator_id = 169
             report_rows = []
             target_ids = []
@@ -13275,8 +13445,10 @@ def handle_monthly_report():
                 op_status = str(op.get('status') or '').strip().lower()
                 target_ids.append(op_id)
 
-                scores = _fetch_latest_scores_for_user(op_id, month, evaluator_id=None)
-                special_scores = _fetch_latest_scores_for_user(op_id, month, evaluator_id=special_evaluator_id)
+                score_rows = _fetch_latest_score_rows_for_user(op_id, month, evaluator_id=None)
+                special_score_rows = _fetch_latest_score_rows_for_user(op_id, month, evaluator_id=special_evaluator_id)
+                scores = [row.get('score') for row in score_rows]
+                special_scores = [row.get('score') for row in special_score_rows]
 
                 is_dismissed_operator = op_status in ('fired', 'dismissal')
                 # Keep dismissed operators in export only when they have monthly journal data.
@@ -13286,8 +13458,14 @@ def handle_monthly_report():
                 report_rows.append({
                     'id': op_id,
                     'name': op_name,
+                    'score_rows': score_rows,
+                    'special_score_rows': special_score_rows,
                     'scores': scores,
-                    'special_scores': special_scores
+                    'special_scores': special_scores,
+                    'score_count': len(scores),
+                    'special_score_count': len(special_scores),
+                    'avg_score': (sum(scores) / len(scores)) if scores else 0.0,
+                    'special_avg_score': (sum(special_scores) / len(special_scores)) if special_scores else 0.0
                 })
 
             target_ids.append(sv_id)
@@ -13297,20 +13475,55 @@ def handle_monthly_report():
                 evaluation_targets = {}
 
             # Добавляем самого супервайзера в его группу, если за месяц есть оценки.
-            sv_scores = _fetch_latest_scores_for_user(sv_id, month, evaluator_id=None)
-            sv_special_scores = _fetch_latest_scores_for_user(sv_id, month, evaluator_id=special_evaluator_id)
+            sv_score_rows = _fetch_latest_score_rows_for_user(sv_id, month, evaluator_id=None)
+            sv_special_score_rows = _fetch_latest_score_rows_for_user(sv_id, month, evaluator_id=special_evaluator_id)
+            sv_scores = [row.get('score') for row in sv_score_rows]
+            sv_special_scores = [row.get('score') for row in sv_special_score_rows]
             if sv_scores or sv_special_scores:
                 report_rows.append({
                     'id': sv_id,
                     'name': f"{sv_name} (СВ)",
+                    'score_rows': sv_score_rows,
+                    'special_score_rows': sv_special_score_rows,
                     'scores': sv_scores,
-                    'special_scores': sv_special_scores
+                    'special_scores': sv_special_scores,
+                    'score_count': len(sv_scores),
+                    'special_score_count': len(sv_special_scores),
+                    'avg_score': (sum(sv_scores) / len(sv_scores)) if sv_scores else 0.0,
+                    'special_avg_score': (sum(sv_special_scores) / len(sv_special_scores)) if sv_special_scores else 0.0
                 })
 
             report_rows.sort(key=lambda row: str(row.get('name') or '').strip().casefold())
 
             safe_sheet_name = sv_name[:31].replace('/', '_').replace('\\', '_').replace('?', '_').replace('*', '_').replace('[', '_').replace(']', '_')
             worksheet = workbook.add_worksheet(safe_sheet_name)
+
+            if report_format == 'dates':
+                next_row = _write_date_matrix(
+                    worksheet,
+                    0,
+                    f"Оценки по датам · {scope_label}",
+                    report_rows,
+                    'score_rows',
+                    'score_count',
+                    'avg_score',
+                    evaluation_targets
+                )
+                _write_date_matrix(
+                    worksheet,
+                    next_row,
+                    f"Оценки проверяющего {special_evaluator_id} · {scope_label}",
+                    report_rows,
+                    'special_score_rows',
+                    'special_score_count',
+                    'special_avg_score',
+                    evaluation_targets
+                )
+                worksheet.set_column(0, 0, 30)
+                for i in range(1, len(month_days) + 1):
+                    worksheet.set_column(i, i, 10)
+                worksheet.set_column(len(month_days) + 1, len(month_days) + 3, 14)
+                continue
 
             special_table_header_row = len(report_rows) + 2
             score_column_count = max(
@@ -13407,7 +13620,7 @@ def handle_monthly_report():
         output.seek(0)
 
         if output.getvalue():
-            filename = f"Monthly_Report_{month}.xlsx"
+            filename = f"Monthly_Report_{month}.xlsx" if report_format == 'standard' else f"Monthly_Report_Dates_{month}.xlsx"
             return send_file(
                 output,
                 as_attachment=True,
