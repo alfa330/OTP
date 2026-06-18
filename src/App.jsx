@@ -30976,6 +30976,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 confirm_login: ''
             });
             const [selectedReportMonth, setSelectedReportMonth] = useState(() => getStoredValue('selectedReportMonth', currentMonth));
+            const [monthlyReportModal, setMonthlyReportModal] = useState({
+                show: false,
+                format: 'standard',
+                departmentId: ''
+            });
             const [callEvaluationContext, setCallEvaluationContext] = useState(null);
             const [callEvaluationFrameReady, setCallEvaluationFrameReady] = useState(false);
             const [callEvalActiveTab, setCallEvalActiveTab] = useState('analytics');
@@ -38597,28 +38602,81 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             };
 
-            const generateMonthlyReport = async () => {
+            const openMonthlyReportModal = () => {
+                if (isLoading) return;
+                setMonthlyReportModal((prev) => ({
+                    show: true,
+                    format: prev.format || 'standard',
+                    departmentId: prev.departmentId || ''
+                }));
+                if (isAdminLikeRole && departments.length === 0) {
+                    fetchDepartments();
+                }
+            };
+
+            const closeMonthlyReportModal = () => {
+                if (isLoading) return;
+                setMonthlyReportModal((prev) => ({ ...prev, show: false }));
+            };
+
+            const generateMonthlyReport = async (options = {}) => {
+                if (options && typeof options.preventDefault === 'function') {
+                    options.preventDefault();
+                }
+                if (!options || options.confirmed !== true) {
+                    openMonthlyReportModal();
+                    return;
+                }
+
+                const { format = 'standard', departmentId = '' } = options;
+                const normalizedFormat = format === 'dates' ? 'dates' : 'standard';
+                const reportMonth = selectedReportMonth || selectedMonth || currentMonth;
+                const query = new URLSearchParams({
+                    month: reportMonth,
+                    format: normalizedFormat
+                });
+                if (isAdminLikeRole && departmentId) {
+                    query.set('department_id', departmentId);
+                }
+
                 setIsLoading(true);
 
                 try {
                     const response = await axios.get(
-                        `${API_BASE_URL}/api/admin/monthly_report?month=${selectedReportMonth}`,
+                        `${API_BASE_URL}/api/admin/monthly_report?${query.toString()}`,
                         {
-                            headers: { 'X-User-Id': user.id},
+                            headers: withAccessTokenHeader({ 'X-User-Id': user.id}),
                             responseType: 'blob' // <-- Важно для бинарных файлов (xlsx)
                         }
                     );
                     if (response.status === 200 && response.data) {
+                        const contentDisposition = response.headers?.['content-disposition'] || '';
+                        let filename = normalizedFormat === 'dates'
+                            ? `monthly_report_dates_${reportMonth}.xlsx`
+                            : `monthly_report_${reportMonth}.xlsx`;
+                        const utf8NameMatch = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
+                        const plainNameMatch = contentDisposition.match(/filename="?([^";]+)"?/i);
+                        if (utf8NameMatch?.[1]) {
+                            try {
+                                filename = decodeURIComponent(utf8NameMatch[1]);
+                            } catch {
+                                filename = utf8NameMatch[1];
+                            }
+                        } else if (plainNameMatch?.[1]) {
+                            filename = plainNameMatch[1];
+                        }
+
                         // Создаем ссылку для скачивания файла
                         const url = window.URL.createObjectURL(new Blob([response.data]));
                         const link = document.createElement('a');
                         link.href = url;
-                        link.setAttribute('download', `monthly_report_${selectedReportMonth}.xlsx`);
+                        link.setAttribute('download', filename);
                         document.body.appendChild(link);
                         link.click();
                         link.remove();
                         window.URL.revokeObjectURL(url);
-                        showToast('Report generated and downloaded successfully', 'success');
+                        setMonthlyReportModal((prev) => ({ ...prev, show: false }));
+                        showToast('Отчёт скачан', 'success');
                     } else {
                         showToast('Failed to generate report: No file received', 'error');
                     }
@@ -42337,7 +42395,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                         {/* Generate report */}
                                         <button
-                                        onClick={generateMonthlyReport}
+                                        onClick={openMonthlyReportModal}
                                         disabled={isLoading}
                                         className={`inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium transition ${isLoading ? 'bg-blue-600 opacity-60 cursor-not-allowed text-white' : 'bg-blue-600 text-white hover:bg-blue-700'}`}
                                         aria-disabled={isLoading}
@@ -44939,6 +44997,137 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 />
                             </Suspense>
                         )}
+                        {monthlyReportModal.show && (
+                            <SimpleModal
+                                open={monthlyReportModal.show}
+                                onClose={closeMonthlyReportModal}
+                                panelClassName="w-[560px] max-w-[calc(100vw-1rem)] p-0 overflow-hidden rounded-xl"
+                            >
+                                <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-6 py-4">
+                                    <div>
+                                        <h3 className="text-lg font-semibold text-slate-900">Выгрузка отчёта</h3>
+                                        <p className="mt-1 text-sm text-slate-500">Журнал оценок за выбранный месяц</p>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={closeMonthlyReportModal}
+                                        disabled={isLoading}
+                                        className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 disabled:opacity-50"
+                                        aria-label="Закрыть"
+                                    >
+                                        <FaIcon className="fas fa-times" />
+                                    </button>
+                                </div>
+
+                                <div className="space-y-5 px-6 py-5">
+                                    <div className="grid gap-4 sm:grid-cols-2">
+                                        <label className="block">
+                                            <span className="mb-1.5 block text-sm font-medium text-slate-700">Месяц</span>
+                                            <select
+                                                value={selectedReportMonth}
+                                                onChange={(e) => setSelectedReportMonth(e.target.value)}
+                                                disabled={isLoading}
+                                                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-800 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50 disabled:text-slate-400"
+                                            >
+                                                {getMonthOptions()}
+                                            </select>
+                                        </label>
+
+                                        {isAdminLikeRole && (
+                                            <label className="block">
+                                                <span className="mb-1.5 block text-sm font-medium text-slate-700">Отдел</span>
+                                                <select
+                                                    value={monthlyReportModal.departmentId}
+                                                    onChange={(e) => setMonthlyReportModal((prev) => ({
+                                                        ...prev,
+                                                        departmentId: e.target.value
+                                                    }))}
+                                                    disabled={isLoading}
+                                                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-800 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50 disabled:text-slate-400"
+                                                >
+                                                    <option value="">Все отделы</option>
+                                                    {departments
+                                                        .filter((dept) => dept && dept.isActive !== false && dept.is_active !== false)
+                                                        .map((dept) => (
+                                                            <option key={dept.id} value={dept.id}>{dept.name}</option>
+                                                        ))}
+                                                </select>
+                                            </label>
+                                        )}
+                                    </div>
+
+                                    {!isAdminLikeRole && (
+                                        <div className="flex items-center gap-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+                                            <FaIcon className="fas fa-building text-slate-400" />
+                                            <span>Данные будут выгружены по отделу сотрудника.</span>
+                                        </div>
+                                    )}
+
+                                    <div>
+                                        <div className="mb-2 text-sm font-medium text-slate-700">Формат</div>
+                                        <div className="grid gap-3">
+                                            <button
+                                                type="button"
+                                                onClick={() => setMonthlyReportModal((prev) => ({ ...prev, format: 'standard' }))}
+                                                disabled={isLoading}
+                                                className={`flex items-start gap-3 rounded-lg border px-4 py-3 text-left transition disabled:opacity-60 ${
+                                                    monthlyReportModal.format === 'standard'
+                                                        ? 'border-blue-300 bg-blue-50 ring-2 ring-blue-100'
+                                                        : 'border-slate-200 bg-white hover:bg-slate-50'
+                                                }`}
+                                            >
+                                                <FaIcon className="fas fa-table mt-0.5 text-blue-600" />
+                                                <span>
+                                                    <span className="block text-sm font-semibold text-slate-900">Обычный с количеством</span>
+                                                    <span className="block text-xs text-slate-500">Оценки подряд, средний балл, кол-во и план.</span>
+                                                </span>
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => setMonthlyReportModal((prev) => ({ ...prev, format: 'dates' }))}
+                                                disabled={isLoading}
+                                                className={`flex items-start gap-3 rounded-lg border px-4 py-3 text-left transition disabled:opacity-60 ${
+                                                    monthlyReportModal.format === 'dates'
+                                                        ? 'border-blue-300 bg-blue-50 ring-2 ring-blue-100'
+                                                        : 'border-slate-200 bg-white hover:bg-slate-50'
+                                                }`}
+                                            >
+                                                <FaIcon className="fas fa-calendar-alt mt-0.5 text-blue-600" />
+                                                <span>
+                                                    <span className="block text-sm font-semibold text-slate-900">По датам</span>
+                                                    <span className="block text-xs text-slate-500">ФИО и дни месяца, несколько оценок в день через запятую.</span>
+                                                </span>
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div className="flex flex-col-reverse gap-3 border-t border-slate-100 bg-slate-50 px-6 py-4 sm:flex-row sm:items-center sm:justify-end">
+                                    <button
+                                        type="button"
+                                        onClick={closeMonthlyReportModal}
+                                        disabled={isLoading}
+                                        className="inline-flex items-center justify-center rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100 disabled:opacity-50"
+                                    >
+                                        Отмена
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => generateMonthlyReport({
+                                            confirmed: true,
+                                            format: monthlyReportModal.format,
+                                            departmentId: monthlyReportModal.departmentId
+                                        })}
+                                        disabled={isLoading}
+                                        className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                                    >
+                                        <FaIcon className={`fas ${isLoading ? 'fa-spinner fa-spin' : 'fa-download'}`} />
+                                        {isLoading ? 'Выгрузка...' : 'Скачать'}
+                                    </button>
+                                </div>
+                            </SimpleModal>
+                        )}
+
                         {showUsersReportModal && (
                             <SimpleModal
                                 open={showUsersReportModal}

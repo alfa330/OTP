@@ -4070,7 +4070,16 @@ const App = ({ user, initialSelection }) => {
         setAnalyticsReportModal(prev => ({ ...prev, show: false }));
     }, [analyticsLoading]);
 
-    const analyticsGenerateReport = useCallback(async ({ format = 'standard', departmentId = '' } = {}) => {
+    const analyticsGenerateReport = useCallback(async (options = {}) => {
+        if (options && typeof options.preventDefault === 'function') {
+            options.preventDefault();
+        }
+        if (!options || options.confirmed !== true) {
+            openAnalyticsReportModal();
+            return;
+        }
+
+        const { format = 'standard', departmentId = '' } = options;
         setAnalyticsLoading(true);
         try {
             const normalizedFormat = format === 'dates' ? 'dates' : 'standard';
@@ -4118,7 +4127,7 @@ const App = ({ user, initialSelection }) => {
             emitCallEvaluationToast(e.message || 'Ошибка генерации отчёта', 'error');
         }
         finally { setAnalyticsLoading(false); }
-    }, [analyticsMonth, userId, isGlobalAdminRole]);
+    }, [analyticsMonth, userId, isGlobalAdminRole, openAnalyticsReportModal]);
 
     const analyticsNotifySv = useCallback(async (svId, operatorName, callCount, targetCalls) => {
         setAnalyticsLoading(true);
@@ -5665,6 +5674,7 @@ const App = ({ user, initialSelection }) => {
                             <button
                                 className="btn btn-primary"
                                 onClick={() => analyticsGenerateReport({
+                                    confirmed: true,
                                     format: analyticsReportModal.format,
                                     departmentId: analyticsReportModal.departmentId
                                 })}
