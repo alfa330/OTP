@@ -6837,8 +6837,15 @@ def admin_call_feedback_report_setting():
             return jsonify({"error": message}), status_code
 
         requester_role = _normalize_user_role(requester[3])
-        if not _is_admin_role(requester_role):
-            return jsonify({"error": "Only admins can manage this setting"}), 403
+        is_admin = _is_admin_role(requester_role)
+        headed_departments = db.get_headed_departments_for_user(requester_id) or []
+        if not is_admin and not headed_departments:
+            return jsonify({"error": "Only admins and department heads can manage this setting"}), 403
+        report_scope = "global" if is_admin else "department"
+        report_department_names = [
+            str(item.get('name') or '') for item in headed_departments if item.get('name')
+        ]
+        report_department_name = ", ".join(report_department_names)
 
         if request.method == 'GET':
             enabled = db.get_admin_feedback_telegram_report_setting(requester_id)
@@ -6847,7 +6854,10 @@ def admin_call_feedback_report_setting():
             return jsonify({
                 "status": "success",
                 "enabled": bool(enabled),
-                "telegram_connected": bool(requester[1])
+                "telegram_connected": bool(requester[1]),
+                "scope": report_scope,
+                "department_name": report_department_name or None,
+                "department_names": report_department_names,
             }), 200
 
         data = request.get_json(silent=True) or {}
@@ -6874,12 +6884,90 @@ def admin_call_feedback_report_setting():
         return jsonify({
             "status": "success",
             "enabled": bool(updated),
-            "telegram_connected": bool(requester[1])
+            "telegram_connected": bool(requester[1]),
+            "scope": report_scope,
+            "department_name": report_department_name or None,
+            "department_names": report_department_names,
         }), 200
 
     except Exception:
         logging.exception("Error in /api/admin/call_feedback_report_setting")
         return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/admin/call_feedback_report_preview', methods=['POST'])
+@require_api_key
+def admin_call_feedback_report_preview():
+    """Разово сформировать текущий Excel-отчёт и отправить его администратору в Telegram."""
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        requester_role = _normalize_user_role(requester[3])
+        is_admin = _is_admin_role(requester_role)
+        headed_departments = db.get_headed_departments_for_user(requester_id) or []
+        if not is_admin and not headed_departments:
+            return jsonify({"error": "Only admins and department heads can request this report"}), 403
+
+        department_ids = None if is_admin else [
+            int(item.get('id')) for item in headed_departments if item.get('id') is not None
+        ]
+        department_names = [
+            str(item.get('name') or '') for item in headed_departments if item.get('name')
+        ]
+        scope_label = 'Все отделы' if is_admin else (', '.join(department_names) or 'Отдел главы')
+
+        telegram_id = requester[1]
+        if not telegram_id:
+            return jsonify({"error": "Telegram не подключён к профилю"}), 400
+
+        try:
+            now_dt = datetime.now(ZoneInfo('Asia/Almaty'))
+        except Exception:
+            now_dt = datetime.now()
+
+        month = now_dt.strftime('%Y-%m')
+        generated_label = now_dt.strftime('%d.%m.%Y %H:%M')
+        report_data = db.get_feedback_sla_report_for_month(
+            month=month,
+            department_ids=department_ids,
+            reference_date=now_dt.date()
+        ) or {}
+        xlsx_bytes = _build_call_feedback_report_xlsx(
+            report_data=report_data,
+            month=month,
+            generated_at=generated_label,
+            scope_label=scope_label
+        )
+        response = _send_call_feedback_report_document(
+            chat_id=telegram_id,
+            xlsx_bytes=xlsx_bytes,
+            month=month,
+            generated_label=generated_label,
+            preview=True,
+            scope_label=scope_label
+        )
+        if response.status_code != 200:
+            logging.warning(
+                "Call feedback Excel preview send failed for admin %s: %s",
+                requester_id,
+                _get_telegram_error_text(response)
+            )
+            return jsonify({"error": "Не удалось отправить отчёт в Telegram"}), 502
+
+        return jsonify({
+            "status": "success",
+            "month": month,
+            "scope": "global" if is_admin else "department",
+            "department_name": None if is_admin else scope_label,
+            "message": "Excel-отчёт отправлен в Telegram"
+        }), 200
+    except Exception:
+        logging.exception("Error in /api/admin/call_feedback_report_preview")
+        return jsonify({"error": "Internal server error"}), 500
+
 
 def _parse_boolean_setting(raw_value, field_name='enabled'):
     if isinstance(raw_value, bool):
@@ -31131,7 +31219,419 @@ def sync_generate_weekly_report():
             pass
 
 
-def sync_send_weekly_call_feedback_report():
+def _build_call_feedback_report_xlsx(report_data, month, generated_at, scope_label='Все отделы'):
+    """Сформировать оформленный Excel-отчёт по соблюдению сроков обратной связи."""
+    output = BytesIO()
+    workbook = xlsxwriter.Workbook(output, {'in_memory': True})
+    workbook.set_properties({
+        'title': f'Отчёт по обратной связи за {month}',
+        'subject': 'Сроки предоставления обратной связи по оценкам',
+        'author': 'OTP',
+        'company': 'OTP',
+        'comments': f'Сформирован {generated_at}'
+    })
+
+    colors = {
+        'navy': '#172554',
+        'blue': '#2563EB',
+        'blue_light': '#EFF6FF',
+        'green': '#16A34A',
+        'green_light': '#F0FDF4',
+        'amber': '#D97706',
+        'amber_light': '#FFFBEB',
+        'red': '#DC2626',
+        'red_light': '#FEF2F2',
+        'slate': '#475569',
+        'slate_light': '#F8FAFC',
+        'border': '#E2E8F0',
+        'white': '#FFFFFF'
+    }
+
+    title_fmt = workbook.add_format({
+        'bold': True, 'font_size': 18, 'font_color': colors['white'],
+        'bg_color': colors['navy'], 'align': 'left', 'valign': 'vcenter'
+    })
+    subtitle_fmt = workbook.add_format({
+        'font_size': 10, 'font_color': '#CBD5E1', 'bg_color': colors['navy'],
+        'align': 'left', 'valign': 'vcenter'
+    })
+    card_label_fmt = workbook.add_format({
+        'bold': True, 'font_size': 9, 'font_color': colors['slate'],
+        'bg_color': colors['slate_light'], 'align': 'center', 'valign': 'vcenter',
+        'border': 1, 'border_color': colors['border']
+    })
+    card_value_blue = workbook.add_format({
+        'bold': True, 'font_size': 20, 'font_color': colors['blue'],
+        'bg_color': colors['blue_light'], 'align': 'center', 'valign': 'vcenter',
+        'border': 1, 'border_color': colors['border']
+    })
+    card_value_green = workbook.add_format({
+        'bold': True, 'font_size': 20, 'font_color': colors['green'],
+        'bg_color': colors['green_light'], 'align': 'center', 'valign': 'vcenter',
+        'border': 1, 'border_color': colors['border']
+    })
+    card_value_red = workbook.add_format({
+        'bold': True, 'font_size': 20, 'font_color': colors['red'],
+        'bg_color': colors['red_light'], 'align': 'center', 'valign': 'vcenter',
+        'border': 1, 'border_color': colors['border']
+    })
+    section_fmt = workbook.add_format({
+        'bold': True, 'font_size': 11, 'font_color': colors['navy'],
+        'bg_color': '#E2E8F0', 'align': 'left', 'valign': 'vcenter'
+    })
+    header_fmt = workbook.add_format({
+        'bold': True, 'font_color': colors['white'], 'bg_color': colors['blue'],
+        'border': 1, 'border_color': '#1D4ED8', 'align': 'center',
+        'valign': 'vcenter', 'text_wrap': True
+    })
+    text_fmt = workbook.add_format({
+        'font_color': '#1E293B', 'border': 1, 'border_color': colors['border'],
+        'valign': 'vcenter'
+    })
+    center_fmt = workbook.add_format({
+        'font_color': '#1E293B', 'border': 1, 'border_color': colors['border'],
+        'align': 'center', 'valign': 'vcenter'
+    })
+    percent_fmt = workbook.add_format({
+        'font_color': '#1E293B', 'border': 1, 'border_color': colors['border'],
+        'align': 'center', 'valign': 'vcenter', 'num_format': '0.0%'
+    })
+    total_label_fmt = workbook.add_format({
+        'bold': True, 'font_color': colors['navy'], 'bg_color': '#E2E8F0',
+        'border': 1, 'border_color': '#CBD5E1', 'valign': 'vcenter'
+    })
+    total_num_fmt = workbook.add_format({
+        'bold': True, 'font_color': colors['navy'], 'bg_color': '#E2E8F0',
+        'border': 1, 'border_color': '#CBD5E1', 'align': 'center', 'valign': 'vcenter'
+    })
+    note_fmt = workbook.add_format({
+        'font_size': 9, 'font_color': colors['slate'], 'bg_color': colors['slate_light'],
+        'border': 1, 'border_color': colors['border'], 'text_wrap': True,
+        'valign': 'top'
+    })
+    score_fmt = workbook.add_format({
+        'font_color': '#1E293B', 'border': 1, 'border_color': colors['border'],
+        'align': 'center', 'valign': 'vcenter', 'num_format': '0.0'
+    })
+
+    def _int(value):
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _float(value):
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    overview = report_data.get('overview') or {}
+    supervisors = report_data.get('supervisors') or []
+
+    summary = workbook.add_worksheet('Сводка')
+    summary.hide_gridlines(2)
+    summary.set_tab_color(colors['blue'])
+    summary.set_zoom(90)
+    summary.merge_range('A1:I2', f'Отчёт по обратной связи · {month}', title_fmt)
+    summary.merge_range(
+        'A3:I3',
+        f'Область: {scope_label} · Сформирован: {generated_at} · Часовой пояс: Asia/Almaty',
+        subtitle_fmt
+    )
+    summary.set_row(0, 27)
+    summary.set_row(1, 16)
+    summary.set_row(2, 20)
+
+    cards = [
+        ('Всего оценок', _int(overview.get('total_evaluated')), card_value_blue),
+        ('Обратная связь предоставлена', _int(overview.get('feedback_provided')), card_value_blue),
+        ('В срок', _int(overview.get('feedback_on_time')), card_value_green),
+        ('Всего просрочено', _int(overview.get('overdue_total')), card_value_red),
+    ]
+    for idx, (label, value, value_fmt) in enumerate(cards):
+        start_col = idx * 2
+        summary.merge_range(4, start_col, 4, start_col + 1, label, card_label_fmt)
+        summary.merge_range(5, start_col, 6, start_col + 1, value, value_fmt)
+    summary.set_row(4, 22)
+    summary.set_row(5, 25)
+    summary.set_row(6, 25)
+
+    summary.merge_range('A9:I9', 'Результаты по супервайзерам', section_fmt)
+    summary_headers = [
+        'Супервайзер', 'Оценок', 'ОС предоставлена', 'В срок',
+        'Просрочено с ОС', 'Без ОС (всего)', 'Просрочено без ОС',
+        'Всего просрочено', 'Доля ОС в срок'
+    ]
+    header_row = 9
+    for col, label in enumerate(summary_headers):
+        summary.write(header_row, col, label, header_fmt)
+    summary.set_row(header_row, 34)
+
+    for row_offset, bucket in enumerate(supervisors, start=1):
+        row = header_row + row_offset
+        provided = _int(bucket.get('feedback_provided'))
+        on_time = _int(bucket.get('feedback_on_time'))
+        values = [
+            bucket.get('supervisor_name') or 'Без супервайзера',
+            _int(bucket.get('total_evaluated')),
+            provided,
+            on_time,
+            _int(bucket.get('feedback_overdue')),
+            _int(bucket.get('pending')),
+            _int(bucket.get('pending_overdue')),
+            _int(bucket.get('overdue_total')),
+            (on_time / provided) if provided > 0 else 0,
+        ]
+        summary.write(row, 0, values[0], text_fmt)
+        for col in range(1, 8):
+            summary.write_number(row, col, values[col], center_fmt)
+        summary.write_number(row, 8, values[8], percent_fmt)
+
+    if supervisors:
+        table_last_row = header_row + len(supervisors)
+        summary.add_table(header_row, 0, table_last_row, 8, {
+            'name': 'FeedbackSupervisorSummary',
+            'style': 'Table Style Medium 2',
+            'columns': [{'header': label} for label in summary_headers]
+        })
+        total_row = table_last_row + 1
+    else:
+        summary.merge_range(header_row + 1, 0, header_row + 2, 8, 'За выбранный месяц данных пока нет.', note_fmt)
+        total_row = header_row + 3
+
+    summary.write(total_row, 0, 'ИТОГО', total_label_fmt)
+    total_values = [
+        _int(overview.get('total_evaluated')),
+        _int(overview.get('feedback_provided')),
+        _int(overview.get('feedback_on_time')),
+        _int(overview.get('feedback_overdue')),
+        _int(overview.get('pending')),
+        _int(overview.get('pending_overdue')),
+        _int(overview.get('overdue_total')),
+    ]
+    for col, value in enumerate(total_values, start=1):
+        summary.write_number(total_row, col, value, total_num_fmt)
+    provided_total = _int(overview.get('feedback_provided'))
+    on_time_total = _int(overview.get('feedback_on_time'))
+    summary.write_number(total_row, 8, (on_time_total / provided_total) if provided_total else 0, percent_fmt)
+
+    note_row = total_row + 2
+    summary.merge_range(
+        note_row, 0, note_row + 2, 8,
+        'Как читать отчёт: «В срок» — обратная связь предоставлена не позднее дедлайна. '
+        '«Просрочено с ОС» — обратная связь предоставлена после дедлайна. '
+        '«Просрочено без ОС» — дедлайн уже прошёл, обратной связи нет. '
+        'Полный список оценок находится на листе «Детализация».',
+        note_fmt
+    )
+    summary.set_row(note_row, 22)
+    summary.set_row(note_row + 1, 22)
+    summary.set_row(note_row + 2, 22)
+
+    if supervisors:
+        chart = workbook.add_chart({'type': 'column'})
+        first_data_row = header_row + 1
+        last_data_row = header_row + len(supervisors)
+        chart.add_series({
+            'name': 'В срок',
+            'categories': ['Сводка', first_data_row, 0, last_data_row, 0],
+            'values': ['Сводка', first_data_row, 3, last_data_row, 3],
+            'fill': {'color': colors['green']},
+            'border': {'none': True}
+        })
+        chart.add_series({
+            'name': 'Просрочено с ОС',
+            'categories': ['Сводка', first_data_row, 0, last_data_row, 0],
+            'values': ['Сводка', first_data_row, 4, last_data_row, 4],
+            'fill': {'color': colors['amber']},
+            'border': {'none': True}
+        })
+        chart.add_series({
+            'name': 'Просрочено без ОС',
+            'categories': ['Сводка', first_data_row, 0, last_data_row, 0],
+            'values': ['Сводка', first_data_row, 6, last_data_row, 6],
+            'fill': {'color': colors['red']},
+            'border': {'none': True}
+        })
+        chart.set_title({'name': 'Статусы обратной связи по супервайзерам'})
+        chart.set_y_axis({'name': 'Количество оценок', 'major_gridlines': {'visible': True, 'line': {'color': colors['border']}}})
+        chart.set_x_axis({'label_position': 'low'})
+        chart.set_legend({'position': 'bottom'})
+        chart.set_style(10)
+        summary.insert_chart('K5', chart, {'x_scale': 1.15, 'y_scale': 1.05})
+
+    summary.set_column('A:A', 27)
+    summary.set_column('B:H', 14)
+    summary.set_column('I:I', 16)
+    summary.set_column('J:J', 2)
+    summary.set_column('K:R', 12)
+    summary.freeze_panes(header_row + 1, 1)
+    summary.set_landscape()
+    summary.fit_to_pages(1, 0)
+    summary.set_margins(0.3, 0.3, 0.4, 0.4)
+    summary.set_header('&L&9OTP&R&9Отчёт по обратной связи')
+    summary.set_footer('&CСтраница &P из &N')
+
+    detail = workbook.add_worksheet('Детализация')
+    detail.hide_gridlines(2)
+    detail.set_tab_color(colors['green'])
+    detail.set_zoom(90)
+    detail.merge_range('A1:L2', f'Детализация по оценкам · {month}', title_fmt)
+    detail.merge_range('A3:L3', f'Область: {scope_label} · Сформирован: {generated_at}', subtitle_fmt)
+    detail_headers = [
+        '№', 'Супервайзер', 'Оператор', 'ID оценки', 'Дата оценки', 'Балл',
+        'Дедлайн ОС', 'Дата ОС', 'Статус', 'Просрочка, дней',
+        'Критическая ошибка', 'Кто предоставил ОС'
+    ]
+    detail_header_row = 4
+    for col, label in enumerate(detail_headers):
+        detail.write(detail_header_row, col, label, header_fmt)
+    detail.set_row(detail_header_row, 34)
+
+    detail_rows = []
+    for bucket in supervisors:
+        items = bucket.get('items')
+        if not isinstance(items, list):
+            items = (bucket.get('on_time_items') or []) + (bucket.get('overdue_items') or [])
+        seen_call_ids = set()
+        for item in items:
+            call_id = item.get('call_id')
+            if call_id in seen_call_ids:
+                continue
+            seen_call_ids.add(call_id)
+            status = str(item.get('status') or '').strip().lower()
+            feedback_provided = bool(item.get('feedback_provided') or item.get('feedback_date'))
+            if status == 'on_time':
+                status_label = 'В срок'
+            elif status == 'overdue' and feedback_provided:
+                status_label = 'Просрочено с ОС'
+            elif status == 'overdue':
+                status_label = 'Просрочено без ОС'
+            else:
+                status_label = 'Ожидает ОС'
+            detail_rows.append({
+                'supervisor_name': bucket.get('supervisor_name') or 'Без супервайзера',
+                'operator_name': item.get('operator_name') or '',
+                'call_id': call_id,
+                'evaluation_date': item.get('evaluation_date') or '',
+                'score': _float(item.get('score')),
+                'due_date': item.get('due_date') or '',
+                'feedback_date': item.get('feedback_date') or '',
+                'status': status_label,
+                'overdue_days': _int(item.get('overdue_days')),
+                'critical': 'Да' if item.get('has_critical_error') else 'Нет',
+                'feedback_supervisor_name': item.get('feedback_supervisor_name') or ''
+            })
+
+    detail_rows.sort(key=lambda item: (
+        0 if item['status'] == 'Просрочено без ОС' else 1 if item['status'] == 'Просрочено с ОС' else 2,
+        item['supervisor_name'].lower(), item['operator_name'].lower(), item['evaluation_date']
+    ))
+
+    for idx, item in enumerate(detail_rows, start=1):
+        row = detail_header_row + idx
+        detail.write_number(row, 0, idx, center_fmt)
+        detail.write(row, 1, item['supervisor_name'], text_fmt)
+        detail.write(row, 2, item['operator_name'], text_fmt)
+        if item['call_id'] is None:
+            detail.write_blank(row, 3, None, center_fmt)
+        else:
+            detail.write_number(row, 3, _int(item['call_id']), center_fmt)
+        detail.write(row, 4, item['evaluation_date'], center_fmt)
+        if item['score'] is None:
+            detail.write_blank(row, 5, None, score_fmt)
+        else:
+            detail.write_number(row, 5, item['score'], score_fmt)
+        detail.write(row, 6, item['due_date'], center_fmt)
+        detail.write(row, 7, item['feedback_date'], center_fmt)
+        detail.write(row, 8, item['status'], center_fmt)
+        detail.write_number(row, 9, item['overdue_days'], center_fmt)
+        detail.write(row, 10, item['critical'], center_fmt)
+        detail.write(row, 11, item['feedback_supervisor_name'], text_fmt)
+
+    if detail_rows:
+        detail_last_row = detail_header_row + len(detail_rows)
+        detail.add_table(detail_header_row, 0, detail_last_row, len(detail_headers) - 1, {
+            'name': 'FeedbackEvaluationDetails',
+            'style': 'Table Style Medium 2',
+            'columns': [{'header': label} for label in detail_headers]
+        })
+        green_row_fmt = workbook.add_format({'bg_color': colors['green_light'], 'font_color': '#166534'})
+        amber_row_fmt = workbook.add_format({'bg_color': colors['amber_light'], 'font_color': '#92400E'})
+        red_row_fmt = workbook.add_format({'bg_color': colors['red_light'], 'font_color': '#991B1B'})
+        detail.conditional_format(detail_header_row + 1, 8, detail_last_row, 8, {
+            'type': 'text', 'criteria': 'containing', 'value': 'В срок', 'format': green_row_fmt
+        })
+        detail.conditional_format(detail_header_row + 1, 8, detail_last_row, 8, {
+            'type': 'text', 'criteria': 'containing', 'value': 'Просрочено с ОС', 'format': amber_row_fmt
+        })
+        detail.conditional_format(detail_header_row + 1, 8, detail_last_row, 8, {
+            'type': 'text', 'criteria': 'containing', 'value': 'Просрочено без ОС', 'format': red_row_fmt
+        })
+        detail.conditional_format(detail_header_row + 1, 10, detail_last_row, 10, {
+            'type': 'text', 'criteria': 'containing', 'value': 'Да', 'format': red_row_fmt
+        })
+    else:
+        detail.merge_range(detail_header_row + 1, 0, detail_header_row + 2, len(detail_headers) - 1, 'За выбранный месяц данных пока нет.', note_fmt)
+
+    detail.set_column('A:A', 6)
+    detail.set_column('B:C', 24)
+    detail.set_column('D:D', 11)
+    detail.set_column('E:E', 14)
+    detail.set_column('F:F', 9)
+    detail.set_column('G:H', 14)
+    detail.set_column('I:I', 21)
+    detail.set_column('J:J', 15)
+    detail.set_column('K:K', 17)
+    detail.set_column('L:L', 24)
+    detail.freeze_panes(detail_header_row + 1, 3)
+    detail.set_landscape()
+    detail.fit_to_pages(1, 0)
+    detail.set_margins(0.3, 0.3, 0.4, 0.4)
+    detail.set_header('&L&9OTP&R&9Детализация по обратной связи')
+    detail.set_footer('&CСтраница &P из &N')
+
+    workbook.close()
+    output.seek(0)
+    return output.getvalue()
+
+
+def _send_call_feedback_report_document(
+    chat_id,
+    xlsx_bytes,
+    month,
+    generated_label,
+    preview=False,
+    scope_label='Все отделы'
+):
+    telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendDocument"
+    suffix = '_preview' if preview else ''
+    filename = f"Feedback_report_{month}_{datetime.now().strftime('%Y%m%d')}{suffix}.xlsx"
+    caption_title = 'Тестовый отчёт по обратной связи' if preview else 'Еженедельный отчёт по обратной связи'
+    caption = (
+        f"📊 {caption_title}\n"
+        f"Период: {month}\n"
+        f"Область: {scope_label}\n"
+        f"Сформирован: {generated_label}\n"
+        "В Excel-файле находятся сводка по супервайзерам и полная детализация по оценкам."
+    )
+    files = {
+        'document': (
+            filename,
+            xlsx_bytes,
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+    }
+    return requests.post(
+        telegram_url,
+        files=files,
+        data={'chat_id': int(chat_id), 'caption': caption},
+        timeout=30
+    )
+
+
+def _legacy_sync_send_weekly_call_feedback_report_text():
     try:
         try:
             now_dt = datetime.now(ZoneInfo('Asia/Almaty'))
@@ -31374,6 +31874,84 @@ def sync_send_weekly_call_feedback_report():
         return False
     finally:
         _trim_process_memory('weekly_call_feedback_report', force=True)
+
+
+def sync_send_weekly_call_feedback_report():
+    """Отправить подписанным администраторам еженедельный Excel-отчёт по ОС."""
+    try:
+        try:
+            now_dt = datetime.now(ZoneInfo('Asia/Almaty'))
+        except Exception:
+            now_dt = datetime.now()
+
+        recipients = db.get_admins_with_feedback_telegram_reports_enabled() or []
+        if not recipients:
+            logging.info("Weekly call feedback report skipped: no opted-in admins")
+            return True
+
+        month = now_dt.strftime('%Y-%m')
+        generated_label = now_dt.strftime('%d.%m.%Y %H:%M')
+        report_cache = {}
+
+        sent_count = 0
+        for recipient in recipients:
+            chat_id = recipient.get('telegram_id')
+            if not chat_id:
+                continue
+            try:
+                department_ids = recipient.get('department_ids')
+                cache_key = None if department_ids is None else tuple(sorted(int(value) for value in department_ids))
+                scope_label = (
+                    'Все отделы'
+                    if department_ids is None
+                    else (recipient.get('department_name') or 'Отдел главы')
+                )
+                if cache_key not in report_cache:
+                    report_data = db.get_feedback_sla_report_for_month(
+                        month=month,
+                        department_ids=department_ids,
+                        reference_date=now_dt.date()
+                    ) or {}
+                    report_cache[cache_key] = _build_call_feedback_report_xlsx(
+                        report_data=report_data,
+                        month=month,
+                        generated_at=generated_label,
+                        scope_label=scope_label
+                    )
+                response = _send_call_feedback_report_document(
+                    chat_id=chat_id,
+                    xlsx_bytes=report_cache[cache_key],
+                    month=month,
+                    generated_label=generated_label,
+                    preview=False,
+                    scope_label=scope_label
+                )
+                if response.status_code == 200:
+                    sent_count += 1
+                else:
+                    logging.warning(
+                        "Weekly call feedback Excel report send failed for admin %s: %s",
+                        recipient.get('id'),
+                        _get_telegram_error_text(response)
+                    )
+            except Exception:
+                logging.exception(
+                    "Failed to send weekly call feedback Excel report to admin %s",
+                    recipient.get('id')
+                )
+
+        logging.info(
+            "Weekly call feedback Excel report sent to %s of %s recipients",
+            sent_count,
+            len(recipients)
+        )
+        return sent_count == len([item for item in recipients if item.get('telegram_id')])
+    except Exception:
+        logging.exception("Critical error in weekly call feedback Excel report job")
+        return False
+    finally:
+        _trim_process_memory('weekly_call_feedback_report', force=True)
+
 
 async def generate_weekly_report():
     loop = asyncio.get_event_loop()

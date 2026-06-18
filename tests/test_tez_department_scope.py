@@ -117,7 +117,7 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
         self.assertIn("const isScopedDepartmentHead = isDepartmentHead && canonicalRole !== 'super_admin';", source)
         self.assertIn("const isAdminRole = isBaseAdminRole || isDepartmentHead;", source)
         self.assertIn("const isGlobalAdminRole = isBaseAdminRole && !isScopedDepartmentHead;", source)
-        self.assertIn("const canManageFeedbackReportSetting = isGlobalAdminRole;", source)
+        self.assertIn("const canManageFeedbackReportSetting = isGlobalAdminRole || isDepartmentHead;", source)
         self.assertIn("isAdminRole && (!isScopedDepartmentHead || selectedSupervisor)", source)
         self.assertIn("const scopeId = shouldUseSelectedSupervisor ? selectedSupervisor : userId;", source)
 
