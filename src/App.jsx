@@ -11242,6 +11242,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [plannerStatusMatchExportGroupMode, setPlannerStatusMatchExportGroupMode] = useState('supervisor');
             const [plannerStatusMatchExportLoading, setPlannerStatusMatchExportLoading] = useState(false);
             const [plannerStatusMatchExportError, setPlannerStatusMatchExportError] = useState('');
+            // Синхронизация статусов операторов из Oktell (период до 3 дней).
+            const [showPlannerOktellSyncModal, setShowPlannerOktellSyncModal] = useState(false);
+            const [plannerOktellSyncRange, setPlannerOktellSyncRange] = useState(() => {
+                const d = new Date();
+                d.setDate(d.getDate() - 1);
+                const yesterday = todayDateStr(d);
+                return { start: yesterday, end: yesterday };
+            });
+            const [plannerOktellSyncActiveEdge, setPlannerOktellSyncActiveEdge] = useState('start');
+            const [plannerOktellSyncCalendarMonth, setPlannerOktellSyncCalendarMonth] = useState(() => {
+                const today = new Date();
+                return new Date(today.getFullYear(), today.getMonth(), 1);
+            });
+            const [plannerOktellSyncLoading, setPlannerOktellSyncLoading] = useState(false);
+            const [plannerOktellSyncError, setPlannerOktellSyncError] = useState('');
             const [plannerStatusGroupingForecastState, setPlannerStatusGroupingForecastState] = useState({
                 loading: false,
                 dateKey: '',
@@ -15224,6 +15239,154 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     emitAppToast(message, 'error');
                 } finally {
                     setPlannerStatusApiSyncLoading(false);
+                }
+            };
+
+            // === Синхронизация статусов операторов из Oktell (телефония) ===
+            const OKTELL_SYNC_MAX_DAYS = 3;
+            const oktellSyncSpanDays = (startKey, endKey) => {
+                const s = parseDateStr(startKey);
+                const e = parseDateStr(endKey);
+                if (Number.isNaN(s?.getTime?.()) || Number.isNaN(e?.getTime?.())) return 0;
+                return Math.round((e - s) / 86400000) + 1;
+            };
+            const setPlannerOktellSyncRangeDraft = (nextRange, activeEdge = 'end') => {
+                const normalizedRange = normalizePlannerStatusMatchExportRange(nextRange);
+                const fallbackDate = todayDateStr(new Date());
+                const safeRange = normalizedRange || {
+                    start: isPlannerStatusMatchExportDateKey(nextRange?.start) ? nextRange.start : fallbackDate,
+                    end: isPlannerStatusMatchExportDateKey(nextRange?.end) ? nextRange.end : fallbackDate
+                };
+                setPlannerOktellSyncRange(safeRange);
+                const monthSource = parseDateStr(safeRange.start);
+                if (!Number.isNaN(monthSource?.getTime?.())) {
+                    setPlannerOktellSyncCalendarMonth(new Date(monthSource.getFullYear(), monthSource.getMonth(), 1));
+                }
+                setPlannerOktellSyncActiveEdge(activeEdge === 'start' ? 'start' : 'end');
+                setPlannerOktellSyncError('');
+            };
+            const openPlannerOktellSyncModal = () => {
+                const d = new Date();
+                d.setDate(d.getDate() - 1);
+                const yesterday = todayDateStr(d);
+                setPlannerOktellSyncRangeDraft({ start: yesterday, end: yesterday }, 'end');
+                setShowPlannerOktellSyncModal(true);
+            };
+            const setPlannerOktellSyncPreset = (preset) => {
+                const base = new Date();
+                if (preset === 'today') {
+                    const day = todayDateStr(base);
+                    setPlannerOktellSyncRangeDraft({ start: day, end: day }, 'end');
+                    return;
+                }
+                if (preset === 'last3') {
+                    const end = todayDateStr(base);
+                    const start = todayDateStr(addDays(base, -(OKTELL_SYNC_MAX_DAYS - 1)));
+                    setPlannerOktellSyncRangeDraft({ start, end }, 'end');
+                    return;
+                }
+                const d = new Date();
+                d.setDate(d.getDate() - 1);
+                const day = todayDateStr(d);
+                setPlannerOktellSyncRangeDraft({ start: day, end: day }, 'end');
+            };
+            const selectPlannerOktellSyncDate = (dateKey) => {
+                const selectedDateKey = String(dateKey || '').trim();
+                if (!isPlannerStatusMatchExportDateKey(selectedDateKey)) return;
+                const currentRange = normalizePlannerStatusMatchExportRange(plannerOktellSyncRange) || {
+                    start: selectedDateKey,
+                    end: selectedDateKey
+                };
+                if (plannerOktellSyncActiveEdge === 'start') {
+                    let start = selectedDateKey;
+                    let end = selectedDateKey > currentRange.end ? selectedDateKey : currentRange.end;
+                    if (oktellSyncSpanDays(start, end) > OKTELL_SYNC_MAX_DAYS) {
+                        end = todayDateStr(addDays(parseDateStr(start), OKTELL_SYNC_MAX_DAYS - 1));
+                    }
+                    setPlannerOktellSyncRangeDraft({ start, end }, 'end');
+                    return;
+                }
+                let start = selectedDateKey < currentRange.start ? selectedDateKey : currentRange.start;
+                let end = selectedDateKey < currentRange.start ? currentRange.start : selectedDateKey;
+                if (oktellSyncSpanDays(start, end) > OKTELL_SYNC_MAX_DAYS) {
+                    start = todayDateStr(addDays(parseDateStr(end), -(OKTELL_SYNC_MAX_DAYS - 1)));
+                }
+                setPlannerOktellSyncRangeDraft({ start, end }, 'end');
+            };
+            const syncPlannerOktellStatuses = async () => {
+                if (!user?.id || plannerOktellSyncLoading) return;
+                const normalized = normalizePlannerStatusMatchExportRange(plannerOktellSyncRange);
+                if (!normalized) {
+                    setPlannerOktellSyncError('Выберите период синхронизации');
+                    return;
+                }
+                const span = oktellSyncSpanDays(normalized.start, normalized.end);
+                if (span < 1 || span > OKTELL_SYNC_MAX_DAYS) {
+                    setPlannerOktellSyncError(`Период синхронизации Oktell не может быть больше ${OKTELL_SYNC_MAX_DAYS} дней`);
+                    return;
+                }
+
+                setPlannerOktellSyncLoading(true);
+                setPlannerOktellSyncError('');
+                setPlannerStatusAnomalyError('');
+                setPlannerStatusImportSummary(null);
+                setPlannerStatusAnomalyOnly(false);
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/sync_statuses_oktell`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: withAccessTokenHeader({
+                            'Content-Type': 'application/json',
+                            'X-User-Id': user?.id
+                        }),
+                        body: JSON.stringify(
+                            normalized.start === normalized.end
+                                ? { date: normalized.start }
+                                : { date_from: normalized.start, date_to: normalized.end }
+                        )
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+
+                    const summary = {
+                        ...(payload?.import || {}),
+                        message: payload?.message || ''
+                    };
+                    setPlannerStatusImportSummary(summary);
+                    setPlannerStatusAnomalyFileName(normalized.start === normalized.end
+                        ? `Oktell ${normalized.start}`
+                        : `Oktell ${normalized.start} - ${normalized.end}`
+                    );
+
+                    plannerLoadedStatusRangeKeysRef.current = new Set();
+                    plannerLoadingStatusRangeKeysRef.current = new Set();
+                    plannerActiveStatusWindowKeyRef.current = '';
+                    const currentRangeStart = String(plannerStatusFetchRange?.start || normalized.start || '').trim();
+                    const currentRangeEnd = String(plannerStatusFetchRange?.end || normalized.end || '').trim();
+                    const statusData = currentRangeStart && currentRangeEnd
+                        ? await fetchPlannerImportedStatusesForRange(currentRangeStart, currentRangeEnd, { force: true })
+                        : null;
+                    const serverOperators = Array.isArray(statusData?.operators) ? statusData.operators : [];
+                    const analysis = buildPlannerStatusAnalysisFromOperators(serverOperators.length ? serverOperators : operators);
+                    setPlannerStatusAnomalyAnalysis(analysis);
+                    setPlannerStatusModalFocus(null);
+                    setPlannerStatusHourlyExpandedKey('');
+                    setPlannerStatusGroupingDirectionKeys([]);
+                    setPlannerStatusSpecialViewEnabled(Boolean(analysis?.days?.length));
+                    const firstDay = (analysis?.days || [])[0]?.dateKey || '';
+                    setPlannerStatusHourlyDayKey(String(firstDay || ''));
+                    setPlannerStatusAnomalyExpandedDays(firstDay ? { [firstDay]: true } : {});
+                    setShowPlannerOktellSyncModal(false);
+                    emitAppToast(payload?.message || 'Статусы из Oktell синхронизированы', 'success');
+                } catch (error) {
+                    console.error('Error syncing Oktell operator statuses:', error);
+                    const message = error?.message || 'Не удалось синхронизировать статусы из Oktell';
+                    setPlannerOktellSyncError(message);
+                    emitAppToast(message, 'error');
+                } finally {
+                    setPlannerOktellSyncLoading(false);
                 }
             };
 
@@ -22062,14 +22225,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <button
                                                 onClick={() => {
                                                     setShowPlannerTopActionsMenu(false);
-                                                    triggerPlannerStatusAnomalyImportSelect();
+                                                    openPlannerOktellSyncModal();
                                                 }}
-                                                disabled={plannerStatusAnomalyLoading || plannerStatusApiSyncLoading}
+                                                disabled={plannerOktellSyncLoading || plannerStatusAnomalyLoading || plannerStatusApiSyncLoading}
                                                 className="w-full px-3 py-2 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
-                                                title="Загрузить CSV/XLSX переключений статусов телефонии (чат-менеджеры не затрагиваются)"
+                                                title="Синхронизировать переключения статусов операторов напрямую из Oktell за выбранный период (до 3 дней). Чат-менеджеры не затрагиваются."
                                             >
-                                                <FaIcon className={`fas ${plannerStatusAnomalyLoading ? 'fa-spinner fa-spin' : 'fa-upload'}`}></FaIcon>
-                                                {plannerStatusAnomalyLoading ? 'Загрузка...' : 'Загрузить статусы'}
+                                                <FaIcon className={`fas ${plannerOktellSyncLoading ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}`}></FaIcon>
+                                                {plannerOktellSyncLoading ? 'Синхронизация...' : 'Синхронизация с Oktell'}
                                             </button>
 
                                             <button
@@ -25416,6 +25579,230 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     >
                                         <FaIcon className={`fas ${plannerStatusMatchExportLoading ? 'fa-spinner fa-spin' : 'fa-download'} text-xs`}></FaIcon>
                                         {plannerStatusMatchExportLoading ? 'Выгрузка...' : 'Выгрузить'}
+                                    </button>
+                                </div>
+                            </div>
+                        );
+                    })()}
+                </SimpleModal>
+
+                <SimpleModal
+                    open={!!showPlannerOktellSyncModal && user?.role !== 'operator'}
+                    onClose={() => {
+                        if (!plannerOktellSyncLoading) setShowPlannerOktellSyncModal(false);
+                    }}
+                    panelClassName="w-[min(94vw,760px)] max-w-[calc(100vw-1rem)] p-0 rounded-2xl overflow-hidden border border-slate-200 bg-white shadow-2xl"
+                >
+                    {(() => {
+                        const normalizedRange = normalizePlannerStatusMatchExportRange(plannerOktellSyncRange);
+                        const dateCount = normalizedRange ? getPlannerStatusMatchDateKeys(normalizedRange).length : 0;
+                        const rangeLabel = normalizedRange
+                            ? `${formatDateRuShort(normalizedRange.start)} - ${formatDateRuShort(normalizedRange.end)}`
+                            : 'Период не выбран';
+                        const tooManyDays = dateCount > OKTELL_SYNC_MAX_DAYS;
+                        const monthNames = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
+                        const weekDayLabels = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+                        const calendarBaseMonth = plannerOktellSyncCalendarMonth instanceof Date && !Number.isNaN(plannerOktellSyncCalendarMonth.getTime())
+                            ? plannerOktellSyncCalendarMonth
+                            : new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
+                        const calendarMonths = [
+                            new Date(calendarBaseMonth.getFullYear(), calendarBaseMonth.getMonth(), 1),
+                            new Date(calendarBaseMonth.getFullYear(), calendarBaseMonth.getMonth() + 1, 1)
+                        ];
+                        const todayKey = todayDateStr(new Date());
+                        const buildCalendarCells = (monthDate) => {
+                            const monthStart = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1);
+                            const gridStart = weekStart(monthStart);
+                            return Array.from({ length: 42 }).map((_, idx) => {
+                                const date = addDays(gridStart, idx);
+                                const dateKey = todayDateStr(date);
+                                const inMonth = date.getMonth() === monthStart.getMonth();
+                                const isStart = normalizedRange?.start === dateKey;
+                                const isEnd = normalizedRange?.end === dateKey;
+                                const isInRange = !!normalizedRange && dateKey > normalizedRange.start && dateKey < normalizedRange.end;
+                                return { date, dateKey, inMonth, isStart, isEnd, isInRange, isToday: dateKey === todayKey };
+                            });
+                        };
+                        const setCalendarMonthOffset = (offset) => {
+                            setPlannerOktellSyncCalendarMonth(prev => {
+                                const base = prev instanceof Date && !Number.isNaN(prev.getTime()) ? prev : calendarBaseMonth;
+                                return new Date(base.getFullYear(), base.getMonth() + offset, 1);
+                            });
+                        };
+                        const presetItems = [
+                            { key: 'yesterday', label: 'Вчера' },
+                            { key: 'today', label: 'Сегодня' },
+                            { key: 'last3', label: `Посл. ${OKTELL_SYNC_MAX_DAYS} дня` }
+                        ];
+                        return (
+                            <div className="text-slate-900">
+                                <div className="px-5 pt-5 pb-4 bg-slate-50 border-b border-slate-200">
+                                    <div className="flex items-start justify-between gap-4">
+                                        <div className="min-w-0">
+                                            <div className="inline-flex items-center gap-2 rounded-lg border border-sky-200 bg-sky-50 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-sky-700">
+                                                <FaIcon className="fas fa-cloud-arrow-down text-[10px]"></FaIcon>
+                                                Oktell
+                                            </div>
+                                            <h3 className="mt-3 text-lg font-bold text-slate-900">Синхронизация с Oktell</h3>
+                                            <div className="mt-1 text-sm text-slate-500">{rangeLabel}</div>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowPlannerOktellSyncModal(false)}
+                                            disabled={plannerOktellSyncLoading}
+                                            className="w-9 h-9 rounded-xl border border-slate-200 bg-white hover:bg-slate-100 text-slate-500 hover:text-slate-800 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                                            title="Закрыть"
+                                        >
+                                            <FaIcon className="fas fa-times text-xs"></FaIcon>
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div className="px-5 py-4 space-y-4">
+                                    <div className="rounded-xl border border-slate-200 bg-slate-100 p-1 grid grid-cols-3 gap-1">
+                                        {presetItems.map(item => (
+                                            <button
+                                                key={`oktell-sync-preset-${item.key}`}
+                                                type="button"
+                                                onClick={() => setPlannerOktellSyncPreset(item.key)}
+                                                disabled={plannerOktellSyncLoading}
+                                                className="h-9 rounded-lg text-xs font-semibold text-slate-600 hover:text-slate-950 hover:bg-white disabled:opacity-60 disabled:cursor-not-allowed"
+                                            >
+                                                {item.label}
+                                            </button>
+                                        ))}
+                                    </div>
+
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                        {[
+                                            { key: 'start', title: 'Начало', value: normalizedRange?.start },
+                                            { key: 'end', title: 'Конец', value: normalizedRange?.end }
+                                        ].map(item => {
+                                            const isActive = plannerOktellSyncActiveEdge === item.key;
+                                            return (
+                                                <button
+                                                    key={`oktell-sync-edge-${item.key}`}
+                                                    type="button"
+                                                    onClick={() => setPlannerOktellSyncActiveEdge(item.key)}
+                                                    disabled={plannerOktellSyncLoading}
+                                                    className={`rounded-xl border px-3 py-2 text-left transition disabled:opacity-60 disabled:cursor-not-allowed ${isActive ? 'border-sky-300 bg-sky-50 ring-2 ring-sky-100' : 'border-slate-200 bg-white hover:bg-slate-50'}`}
+                                                >
+                                                    <span className="block text-[11px] font-semibold uppercase tracking-wide text-slate-400">{item.title}</span>
+                                                    <span className="mt-1 block text-sm font-semibold text-slate-900">
+                                                        {item.value ? formatDateRuShort(item.value) : 'Выберите дату'}
+                                                    </span>
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+
+                                    <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
+                                        <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-3">
+                                            <button
+                                                type="button"
+                                                onClick={() => setCalendarMonthOffset(-1)}
+                                                disabled={plannerOktellSyncLoading}
+                                                className="w-8 h-8 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 text-slate-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                title="Предыдущий месяц"
+                                            >
+                                                <FaIcon className="fas fa-angle-left"></FaIcon>
+                                            </button>
+                                            <div className="text-center min-w-0">
+                                                <div className="text-sm font-semibold text-slate-900">Выберите период (до {OKTELL_SYNC_MAX_DAYS} дней)</div>
+                                                <div className="text-[11px] text-slate-500">
+                                                    Активно: {plannerOktellSyncActiveEdge === 'start' ? 'начало периода' : 'конец периода'}
+                                                </div>
+                                            </div>
+                                            <button
+                                                type="button"
+                                                onClick={() => setCalendarMonthOffset(1)}
+                                                disabled={plannerOktellSyncLoading}
+                                                className="w-8 h-8 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 text-slate-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                title="Следующий месяц"
+                                            >
+                                                <FaIcon className="fas fa-angle-right"></FaIcon>
+                                            </button>
+                                        </div>
+
+                                        <div className="p-3 grid grid-cols-1 md:grid-cols-2 gap-4">
+                                            {calendarMonths.map((monthDate) => (
+                                                <div key={`oktell-sync-month-${monthDate.getFullYear()}-${monthDate.getMonth()}`}>
+                                                    <div className="mb-2 text-sm font-semibold text-slate-800">
+                                                        {monthNames[monthDate.getMonth()]} {monthDate.getFullYear()}
+                                                    </div>
+                                                    <div className="grid grid-cols-7 gap-1 text-center">
+                                                        {weekDayLabels.map(label => (
+                                                            <div key={`oktell-sync-weekday-${monthDate.getMonth()}-${label}`} className="h-6 flex items-center justify-center text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                                                                {label}
+                                                            </div>
+                                                        ))}
+                                                        {buildCalendarCells(monthDate).map(cell => {
+                                                            const isEndpoint = cell.isStart || cell.isEnd;
+                                                            const dayClass = [
+                                                                'relative h-9 rounded-lg text-sm font-semibold transition flex items-center justify-center disabled:cursor-not-allowed',
+                                                                cell.inMonth ? 'text-slate-700 hover:bg-sky-50' : 'text-slate-300 hover:bg-slate-50',
+                                                                cell.isInRange ? 'bg-sky-50 text-sky-800' : '',
+                                                                isEndpoint ? 'bg-slate-900 text-white hover:bg-slate-800 shadow-sm' : '',
+                                                                cell.isToday && !isEndpoint ? 'ring-1 ring-sky-300' : ''
+                                                            ].filter(Boolean).join(' ');
+                                                            return (
+                                                                <button
+                                                                    key={`oktell-sync-day-${cell.dateKey}`}
+                                                                    type="button"
+                                                                    onClick={() => selectPlannerOktellSyncDate(cell.dateKey)}
+                                                                    disabled={plannerOktellSyncLoading}
+                                                                    className={dayClass}
+                                                                    title={formatDateRuShort(cell.dateKey)}
+                                                                >
+                                                                    {cell.date.getDate()}
+                                                                </button>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+                                            <div className="text-[11px] text-slate-400">Дней</div>
+                                            <div className={`mt-0.5 text-lg font-semibold tabular-nums ${tooManyDays ? 'text-rose-600' : ''}`}>{dateCount || '-'}</div>
+                                        </div>
+                                        <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+                                            <div className="text-[11px] text-slate-400">Лимит</div>
+                                            <div className="mt-0.5 text-lg font-semibold tabular-nums">{OKTELL_SYNC_MAX_DAYS}</div>
+                                        </div>
+                                    </div>
+
+                                    <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[12px] text-slate-500">
+                                        Подтягиваются только операторы (чат-менеджеры синхронизируются отдельно через Chat2Desk и здесь не затрагиваются).
+                                    </div>
+
+                                    {(plannerOktellSyncError || tooManyDays) && (
+                                        <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+                                            {plannerOktellSyncError || `Период не может быть больше ${OKTELL_SYNC_MAX_DAYS} дней`}
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div className="px-5 py-4 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowPlannerOktellSyncModal(false)}
+                                        disabled={plannerOktellSyncLoading}
+                                        className="h-10 px-4 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 text-sm font-semibold text-slate-700 disabled:opacity-60 disabled:cursor-not-allowed"
+                                    >
+                                        Отмена
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={syncPlannerOktellStatuses}
+                                        disabled={plannerOktellSyncLoading || !normalizedRange || dateCount <= 0 || tooManyDays}
+                                        className="h-10 px-4 rounded-lg bg-slate-800 hover:bg-slate-900 text-white text-sm font-semibold shadow-sm disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-2"
+                                    >
+                                        <FaIcon className={`fas ${plannerOktellSyncLoading ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'} text-xs`}></FaIcon>
+                                        {plannerOktellSyncLoading ? 'Синхронизация...' : 'Синхронизировать'}
                                     </button>
                                 </div>
                             </div>
