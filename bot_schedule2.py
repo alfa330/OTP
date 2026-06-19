@@ -17056,8 +17056,18 @@ def _status_import_normalize_header(value):
     return re.sub(r'[\s_-]+', '', str(value or '').replace('\ufeff', '').strip().lower())
 
 
+# Казахские буквы, которых нет в русском, нередко расходятся в написании имён между
+# системами (Oktell/OTP/Chat2Desk): «Мадиұлы»/«Мадиулы», «Әсел»/«Асел». Сводим их к
+# ближайшим русским, чтобы одно и то же имя матчилось независимо от раскладки.
+_KZ_TO_RU_FOLD = str.maketrans({
+    'ә': 'а', 'ғ': 'г', 'қ': 'к', 'ң': 'н', 'ө': 'о',
+    'ұ': 'у', 'ү': 'у', 'һ': 'х', 'і': 'и',
+})
+
+
 def _status_import_normalize_operator_name(value):
     text = re.sub(r'\s+', ' ', str(value or '').strip()).replace('ё', 'е').replace('Ё', 'Е').lower()
+    text = text.translate(_KZ_TO_RU_FOLD)
     # Имена в БД и Chat2Desk нередко расходятся на конечный мягкий/твёрдый знак
     # («Асель»/«Асел», «Игорь»/«Игор»), поэтому срезаем «ь»/«ъ» в конце
     # каждого слова — чтобы оба варианта матчились как один оператор.
@@ -17078,6 +17088,41 @@ def _status_import_operator_name_variants(value):
         variants.add(f"{tokens[1]} {tokens[0]} {tokens[2]}")
         variants.add(f"{tokens[1]} {tokens[0]}")
     return [item for item in variants if item]
+
+
+def _status_import_dedupe_operator_infos(infos):
+    seen = {}
+    for info in (infos or []):
+        try:
+            oid = int(info.get('id'))
+        except Exception:
+            continue
+        if oid not in seen:
+            seen[oid] = info
+    return list(seen.values())
+
+
+def _status_import_resolve_operator_matches(operator_name, operator_lookup):
+    """Сопоставляет имя из источника с операторами OTP.
+
+    Tier 1 — точное полное имя (как было раньше): сохраняет прежнее поведение,
+    никаких регрессий по уже совпадавшим именам.
+    Tier 2 — если полное имя не нашлось, пробуем «Фамилия Имя» (и в обратном
+    порядке). Это лечит расхождения, ломавшие матчинг: разное число токенов
+    (ФИО vs Фамилия+Имя) и разные формы отчества (-кызы/-овна, -улы/-ович),
+    которые не влияют на фамилию и имя. Tier 2 срабатывает только при
+    однозначном совпадении, иначе строка остаётся «не найдена/неоднозначна».
+    """
+    norm = _status_import_normalize_operator_name(operator_name)
+    exact = _status_import_dedupe_operator_infos(operator_lookup.get(norm))
+    if exact:
+        return exact  # ровно 1 -> матч; >1 -> неоднозначно (как и раньше)
+    tokens = re.findall(r"[a-zа-яёәғқңөұүһі]+", norm, flags=re.IGNORECASE)
+    fallback = []
+    if len(tokens) >= 2:
+        for key in (f"{tokens[0]} {tokens[1]}", f"{tokens[1]} {tokens[0]}"):
+            fallback.extend(operator_lookup.get(key) or [])
+    return _status_import_dedupe_operator_infos(fallback)
 
 
 CHAT2DESK_STATUS_EVENT_MAP = {
@@ -17265,75 +17310,23 @@ def _status_import_build_operator_lookup(exclude_chat_managers=False):
     return lookup
 
 
-def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, invalid_rows_preview_limit=None):
-    if not isinstance(csv_text, str):
-        raise ValueError("CSV text is required")
+def _status_import_build_status_events(row_iter, operator_lookup, invalid_rows_preview_limit=None):
+    """Единый конвейер построения событий/сегментов статусов операторов из УЖЕ
+    разобранных строк — без промежуточного CSV.
 
-    try:
-        dialect = csv.Sniffer().sniff(csv_text[:4096], delimiters=';,\t')
-    except Exception:
-        dialect = csv.excel()
-        dialect.delimiter = ';'
+    `row_iter` — итерируемое из dict с ключами:
+        row_num, operator_name, state_name, state_note, time_change.
 
-    reader = csv.reader(StringIO(csv_text), dialect)
-    header = None
-    for candidate_header in reader:
-        if any(str(cell or '').strip() for cell in candidate_header):
-            header = candidate_header
-            break
-    if not header:
-        raise ValueError("Файл пустой")
-
-    normalized_header = [_status_import_normalize_header(h) for h in header]
-
-    def _find_col(candidates):
-        for candidate in candidates:
-            if candidate in normalized_header:
-                return normalized_header.index(candidate)
-        return None
-
-    operator_col = _find_col([
-        'operatorname', 'operator', 'name', 'employee', 'manager', 'agent', 'user',
-        'fio', 'fullname', 'оператор', 'сотрудник', 'фио', 'имя', 'менеджер',
-        'чатменеджер', 'чатменеджеры'
-    ])
-    state_col = _find_col([
-        'statename', 'state', 'status', 'statusname', 'action', 'event', 'eventname',
-        'статус', 'состояние', 'действие', 'событие'
-    ])
-    time_col = _find_col([
-        'timechange', 'datetime', 'date', 'eventdate', 'createdat', 'changedat', 'timestamp',
-        'датавремя', 'времяизменения', 'датаизменения'
-    ])
-    date_col = _find_col(['date', 'day', 'дата', 'день'])
-    time_of_day_col = _find_col(['time', 'время'])
-    note_col = _find_col(['statenote', 'statusnote', 'note'])
-
-    if operator_col is None or state_col is None or (time_col is None and (date_col is None or time_of_day_col is None)):
-        raise ValueError("CSV должен содержать колонки OperatorName;StateName;TimeChange")
-
-    max_rows_value = None
-    if max_source_rows is not None:
-        try:
-            max_rows_value = int(max_source_rows)
-        except Exception:
-            max_rows_value = None
-        if max_rows_value is not None and max_rows_value <= 0:
-            max_rows_value = None
-
+    Через этот core идут и ручная загрузка (CSV/XLSX -> строки -> core), и живые
+    выгрузки (Oktell и последующие интеграции), чтобы все источники использовали одну
+    логику матчинга операторов и сборки сегментов. Возвращает тот же сводный dict.
+    """
     preview_limit_value = STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
     if invalid_rows_preview_limit is not None:
         try:
             preview_limit_value = max(1, int(invalid_rows_preview_limit))
         except Exception:
             preview_limit_value = STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
-
-    def _cell(cols, idx):
-        if idx is None:
-            return ''
-        if idx < 0 or idx >= len(cols):
-            return ''
-        return str(cols[idx] or '').strip()
 
     source_rows = 0
     valid_events = 0
@@ -17359,63 +17352,34 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
             'time_change': str(time_change or '').strip()
         })
 
-    for row_num, cols in enumerate(reader, start=2):
+    for row in row_iter:
         source_rows += 1
-        if max_rows_value is not None and source_rows > max_rows_value:
-            raise OverflowError(f"Лимит строк CSV превышен ({max_rows_value})")
-
-        operator_name = _cell(cols, operator_col)
-        source_state_name = _cell(cols, state_col)
-        state_note = _cell(cols, note_col)
-        time_change = _cell(cols, time_col)
-        date_value = _cell(cols, date_col)
-        time_value = _cell(cols, time_of_day_col)
-        if not time_change and date_col is not None and time_of_day_col is not None:
-            time_change = f"{date_value} {time_value}".strip()
+        row_num = int(row.get('row_num') or (source_rows + 1))
+        operator_name = str(row.get('operator_name') or '').strip()
+        source_state_name = str(row.get('state_name') or '').strip()
+        state_note = str(row.get('state_note') or '').strip()
+        time_change = str(row.get('time_change') or '').strip()
 
         if not operator_name and not source_state_name and not state_note and not time_change:
             continue
 
         if not operator_name or not source_state_name or not time_change:
-            _push_invalid(
-                row_num=row_num,
-                reason='Отсутствуют обязательные поля',
-                operator_name=operator_name,
-                source_state_name=source_state_name,
-                state_note=state_note,
-                time_change=time_change
-            )
+            _push_invalid(row_num, 'Отсутствуют обязательные поля', operator_name, source_state_name, state_note, time_change)
             continue
 
         ts = _status_import_parse_datetime(time_change)
-        if not ts and date_col is not None and time_of_day_col is not None:
-            combined_time_change = f"{date_value} {time_value}".strip()
-            if combined_time_change and combined_time_change != time_change:
-                time_change = combined_time_change
-                ts = _status_import_parse_datetime(time_change)
         if not ts:
-            _push_invalid(
-                row_num=row_num,
-                reason='Некорректный формат TimeChange',
-                operator_name=operator_name,
-                source_state_name=source_state_name,
-                state_note=state_note,
-                time_change=time_change
-            )
+            _push_invalid(row_num, 'Некорректный формат TimeChange', operator_name, source_state_name, state_note, time_change)
             continue
 
         valid_events += 1
 
-        operator_key = _status_import_normalize_operator_name(operator_name)
-        operator_matches = operator_lookup.get(operator_key) or []
+        operator_matches = _status_import_resolve_operator_matches(operator_name, operator_lookup)
         if len(operator_matches) != 1:
             _push_invalid(
-                row_num=row_num,
-                reason='Оператор не найден' if len(operator_matches) == 0 else 'Найдено несколько операторов с таким именем',
-                operator_name=operator_name,
-                source_state_name=source_state_name,
-                state_note=state_note,
-                time_change=time_change
+                row_num,
+                'Оператор не найден' if len(operator_matches) == 0 else 'Найдено несколько операторов с таким именем',
+                operator_name, source_state_name, state_note, time_change
             )
             continue
 
@@ -17543,6 +17507,103 @@ def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, in
         'segments': segments,
         'chat_metrics': list(chat_metrics_by_operator_day.values())
     }
+
+
+def _status_import_parse_csv(csv_text, operator_lookup, max_source_rows=None, invalid_rows_preview_limit=None):
+    if not isinstance(csv_text, str):
+        raise ValueError("CSV text is required")
+
+    try:
+        dialect = csv.Sniffer().sniff(csv_text[:4096], delimiters=';,\t')
+    except Exception:
+        dialect = csv.excel()
+        dialect.delimiter = ';'
+
+    reader = csv.reader(StringIO(csv_text), dialect)
+    header = None
+    for candidate_header in reader:
+        if any(str(cell or '').strip() for cell in candidate_header):
+            header = candidate_header
+            break
+    if not header:
+        raise ValueError("Файл пустой")
+
+    normalized_header = [_status_import_normalize_header(h) for h in header]
+
+    def _find_col(candidates):
+        for candidate in candidates:
+            if candidate in normalized_header:
+                return normalized_header.index(candidate)
+        return None
+
+    operator_col = _find_col([
+        'operatorname', 'operator', 'name', 'employee', 'manager', 'agent', 'user',
+        'fio', 'fullname', 'оператор', 'сотрудник', 'фио', 'имя', 'менеджер',
+        'чатменеджер', 'чатменеджеры'
+    ])
+    state_col = _find_col([
+        'statename', 'state', 'status', 'statusname', 'action', 'event', 'eventname',
+        'статус', 'состояние', 'действие', 'событие'
+    ])
+    time_col = _find_col([
+        'timechange', 'datetime', 'date', 'eventdate', 'createdat', 'changedat', 'timestamp',
+        'датавремя', 'времяизменения', 'датаизменения'
+    ])
+    date_col = _find_col(['date', 'day', 'дата', 'день'])
+    time_of_day_col = _find_col(['time', 'время'])
+    note_col = _find_col(['statenote', 'statusnote', 'note'])
+
+    if operator_col is None or state_col is None or (time_col is None and (date_col is None or time_of_day_col is None)):
+        raise ValueError("CSV должен содержать колонки OperatorName;StateName;TimeChange")
+
+    max_rows_value = None
+    if max_source_rows is not None:
+        try:
+            max_rows_value = int(max_source_rows)
+        except Exception:
+            max_rows_value = None
+        if max_rows_value is not None and max_rows_value <= 0:
+            max_rows_value = None
+
+    def _cell(cols, idx):
+        if idx is None:
+            return ''
+        if idx < 0 or idx >= len(cols):
+            return ''
+        return str(cols[idx] or '').strip()
+
+    def _row_iter():
+        seen = 0
+        for row_num, cols in enumerate(reader, start=2):
+            seen += 1
+            if max_rows_value is not None and seen > max_rows_value:
+                raise OverflowError(f"Лимит строк CSV превышен ({max_rows_value})")
+            time_change = _cell(cols, time_col)
+            date_value = _cell(cols, date_col)
+            time_value = _cell(cols, time_of_day_col)
+            if not time_change and date_col is not None and time_of_day_col is not None:
+                time_change = f"{date_value} {time_value}".strip()
+            # Совместимость со старым поведением: если выбранный TimeChange не парсится,
+            # а пара дата+время парсится — используем её.
+            if date_col is not None and time_of_day_col is not None:
+                combined = f"{date_value} {time_value}".strip()
+                if (combined and combined != time_change
+                        and _status_import_parse_datetime(time_change) is None
+                        and _status_import_parse_datetime(combined) is not None):
+                    time_change = combined
+            yield {
+                'row_num': row_num,
+                'operator_name': _cell(cols, operator_col),
+                'state_name': _cell(cols, state_col),
+                'state_note': _cell(cols, note_col),
+                'time_change': time_change,
+            }
+
+    return _status_import_build_status_events(
+        _row_iter(),
+        operator_lookup,
+        invalid_rows_preview_limit=invalid_rows_preview_limit
+    )
 
 
 def _xlsx_cell_ref_to_index(ref):
@@ -19216,21 +19277,6 @@ def _oktell_fetch_status_rows(range_from, range_to):
     return rows, pages
 
 
-def _oktell_rows_to_csv(rows):
-    """Собираем CSV ровно в той форме, что ждёт _status_import_parse_csv (как при ручной загрузке)."""
-    buf = StringIO()
-    writer = csv.writer(buf, delimiter=';')
-    writer.writerow(['OperatorName', 'StateName', 'StateNote', 'TimeChange'])
-    for r in rows:
-        writer.writerow([
-            r.get('OperatorName') or '',
-            r.get('StateName') or '',
-            r.get('StateNote') or '',
-            r.get('TimeChange') or '',
-        ])
-    return buf.getvalue()
-
-
 def _oktell_sync_target_days(day=None, date_from=None, date_to=None):
     """Возвращает список date (включительно). day переопределяет диапазон. По умолчанию — вчера."""
     if day:
@@ -19274,11 +19320,23 @@ def sync_oktell_operator_statuses(day=None, date_from=None, date_to=None, trigge
     try:
         operator_lookup = _status_import_build_operator_lookup(exclude_chat_managers=True)
         rows, pages = _oktell_fetch_status_rows(range_from, range_to)
-        csv_text = _oktell_rows_to_csv(rows)
-        parsed = _status_import_parse_csv(
-            csv_text,
+
+        def _oktell_row_iter():
+            # Кормим строки Oktell напрямую в общий core статус-импорта — без
+            # промежуточного CSV. Тот же путь смогут переиспользовать будущие
+            # интеграции, которые раньше шли через загрузку CSV.
+            for idx, r in enumerate(rows):
+                yield {
+                    'row_num': idx + 2,
+                    'operator_name': r.get('OperatorName'),
+                    'state_name': r.get('StateName'),
+                    'state_note': r.get('StateNote'),
+                    'time_change': r.get('TimeChange'),
+                }
+
+        parsed = _status_import_build_status_events(
+            _oktell_row_iter(),
             operator_lookup,
-            max_source_rows=STATUS_IMPORT_MAX_SOURCE_ROWS,
             invalid_rows_preview_limit=STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT,
         )
         events_for_save = parsed.get('events') or []
