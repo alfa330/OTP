@@ -6029,7 +6029,8 @@ def sv_daily_hours():
 
         role = _normalize_user_role(requester[3])
         headed_dept_id = _headed_department_id(requester_id)
-        if headed_dept_id is not None and not _is_admin_role(role):
+        is_global_admin = _is_global_admin_requester(role, requester_id)
+        if headed_dept_id is not None and not is_global_admin:
             if group_id is not None:
                 _grp = db.get_group(group_id)
                 if not (_grp and _grp.get('department_id') == headed_dept_id):
@@ -14761,7 +14762,7 @@ def get_monthly_report_hours():
             # Отчёт строго в рамках группы за месяц: все операторы — одной модели расчёта,
             # поэтому листы выбираются корректно (чат-группа → без «Звонки»/«Эффективность»).
             # СВ может выгружать только группы своего отдела (или те, что ведёт); админ — любые.
-            if not _is_admin_role(role):
+            if not _is_global_admin_requester(role, requester_id):
                 _grp = db.get_group(group_id)
                 _sv_dept = scope_department_id
                 _allowed = (
@@ -14780,12 +14781,30 @@ def get_monthly_report_hours():
                 supervisor_id = int(supervisor_id)
             except ValueError:
                 return jsonify({"error": "supervisor_id must be integer"}), 400
+            if not _is_global_admin_requester(role, requester_id):
+                target_supervisor, scope_error = _load_target_user_with_scope(
+                    requester,
+                    requester_id,
+                    supervisor_id,
+                    allow_self=True,
+                    supervisor_target_roles=('sv', 'supervisor'),
+                    not_found_message="Supervisor not found",
+                    forbidden_message="Forbidden: supervisor is outside your department"
+                )
+                if scope_error:
+                    message, status_code = scope_error
+                    return jsonify({"error": message}), status_code
+                if _normalize_user_role(target_supervisor[3]) != 'sv':
+                    return jsonify({"error": "Supervisor not found"}), 404
 
         logging.info("Начало генерации отчета: supervisor_id=%s group_id=%s month=%s generate_all=%s", supervisor_id, group_id, month, generate_all)
 
         try:
             if generate_all:
-                operators = db.get_daily_hours_for_all_month(month, department_id=scope_department_id if not _is_admin_role(role) else None)
+                operators = db.get_daily_hours_for_all_month(
+                    month,
+                    department_id=None if _is_global_admin_requester(role, requester_id) else scope_department_id
+                )
             elif group_id is not None:
                 operators = db.get_daily_hours_by_group_month(group_id, month)
             else:
@@ -15020,7 +15039,7 @@ def get_trainings():
             group = db.get_group(group_id)
             if not group:
                 return jsonify({"error": "Group not found"}), 404
-            if headed_dept_id is not None and not _is_admin_role(role):
+            if headed_dept_id is not None and not _is_global_admin_requester(role, requester_id):
                 if group.get('department_id') != headed_dept_id:
                     return jsonify({"error": "Forbidden: not your department's group"}), 403
             elif _is_supervisor_role(role):
@@ -15040,7 +15059,7 @@ def get_trainings():
                 )
             """)
             params.append(group_id)
-        elif headed_dept_id is not None and not _is_admin_role(role):
+        elif headed_dept_id is not None and not _is_global_admin_requester(role, requester_id):
             where_clauses.append("u.department_id = %s")
             params.append(headed_dept_id)
         elif role == 'operator':

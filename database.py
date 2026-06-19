@@ -17789,14 +17789,26 @@ class Database:
 
         if direction_ids_norm:
             cursor.execute("""
-                SELECT id
+                SELECT id, department_id
                 FROM directions
                 WHERE id = ANY(%s) AND is_active = TRUE
             """, (direction_ids_norm,))
-            valid_direction_ids = {int(row[0]) for row in cursor.fetchall()}
+            direction_rows = cursor.fetchall()
+            valid_direction_ids = {int(row[0]) for row in direction_rows}
             missing_directions = [dir_id for dir_id in direction_ids_norm if dir_id not in valid_direction_ids]
             if missing_directions:
                 raise ValueError(f"Directions not found or inactive: {', '.join(map(str, missing_directions))}")
+
+            if role_norm == 'sv' and scope_department_id is not None:
+                forbidden_directions = [
+                    int(direction_id)
+                    for direction_id, department_id in direction_rows
+                    if int(department_id or 0) != int(scope_department_id)
+                ]
+                if forbidden_directions:
+                    raise ValueError(
+                        f"Forbidden directions for sv: {', '.join(map(str, forbidden_directions))}"
+                    )
 
             if role_norm == 'sv' and scope_department_id is not None:
                 cursor.execute("""
