@@ -9846,6 +9846,30 @@ class Database:
             cursor.execute("UPDATE users SET department_id = %s WHERE id = %s RETURNING id", (department_id, user_id))
             return cursor.fetchone() is not None
 
+    def upsert_daily_calls(self, operator_id, day, calls, group_id=None):
+        """Обновляет ТОЛЬКО количество звонков (daily_hours.calls) за день оператора,
+        не затрагивая остальные поля (work_time/break_time/talk_time/efficiency/штрафы/
+        бонусы). Используется синхронизацией звонков из Oktell — она не должна затирать
+        вручную внесённые часы. Уникальность (operator_id, day); при создании новой строки
+        остальные метрики берут DEFAULT 0, а group_id резолвится в активную группу на дату.
+        """
+        if isinstance(day, str):
+            day = datetime.strptime(day, "%Y-%m-%d").date()
+        with self._get_cursor() as cursor:
+            if group_id is None:
+                group_id = self._get_operator_group_id_tx(cursor, operator_id, day)
+            cursor.execute("""
+                INSERT INTO daily_hours (operator_id, day, calls, group_id)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (operator_id, day)
+                DO UPDATE SET
+                    calls = EXCLUDED.calls,
+                    group_id = COALESCE(daily_hours.group_id, EXCLUDED.group_id)
+                RETURNING id
+            """, (operator_id, day, int(calls or 0), group_id))
+            res = cursor.fetchone()
+            return res[0] if res else None
+
     def insert_or_update_daily_hours(self, operator_id, day, work_time=0.0, break_time=0.0,
                                     talk_time=0.0, calls=0, efficiency=0.0,
                                     fine_amount=0.0, fine_reason=None, fine_comment=None,

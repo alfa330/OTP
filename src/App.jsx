@@ -2121,6 +2121,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const d = new Date();
             return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
         });
+        // Синхронизация кол-ва звонков из Oktell (операторская модель, таб «Звонки»).
+        const _oktellCallsYesterday = () => {
+            const d = new Date();
+            d.setDate(d.getDate() - 1);
+            return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        };
+        const [showOktellCallsSyncDialog, setShowOktellCallsSyncDialog] = useState(false);
+        const [oktellCallsSyncStart, setOktellCallsSyncStart] = useState(_oktellCallsYesterday);
+        const [oktellCallsSyncEnd, setOktellCallsSyncEnd] = useState(_oktellCallsYesterday);
+        const [oktellCallsSyncLoading, setOktellCallsSyncLoading] = useState(false);
         const [showLowRatingReviews, setShowLowRatingReviews] = useState(false);
         const [lowRatingMonth, setLowRatingMonth] = useState(month);
         const [lowRatingReviews, setLowRatingReviews] = useState([]);
@@ -2419,6 +2429,66 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const closeChatMetricsSyncDialog = () => {
             if (chatMetricsImportState.loading) return;
             setShowChatMetricsSyncDialog(false);
+        };
+
+        const openOktellCallsSyncDialog = () => {
+            if (oktellCallsSyncLoading) return;
+            const y = _oktellCallsYesterday();
+            setOktellCallsSyncStart(y);
+            setOktellCallsSyncEnd(y);
+            setShowOktellCallsSyncDialog(true);
+        };
+
+        const closeOktellCallsSyncDialog = () => {
+            if (oktellCallsSyncLoading) return;
+            setShowOktellCallsSyncDialog(false);
+        };
+
+        const syncOktellCalls = async (startDate = oktellCallsSyncStart, endDate = oktellCallsSyncEnd) => {
+            if (!user?.id || oktellCallsSyncLoading) return;
+            const s = String(startDate || '').trim();
+            const e = String(endDate || startDate || '').trim();
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(s) || !/^\d{4}-\d{2}-\d{2}$/.test(e)) {
+                fallbackToast('Выберите период синхронизации Oktell', 'error');
+                return;
+            }
+            if (e < s) {
+                fallbackToast('Дата окончания должна быть не раньше даты начала', 'error');
+                return;
+            }
+            const days = Math.round((new Date(`${e}T00:00:00`) - new Date(`${s}T00:00:00`)) / 86400000) + 1;
+            if (!Number.isFinite(days) || days < 1 || days > 31) {
+                fallbackToast('Период синхронизации Oktell не может быть больше 31 дня', 'error');
+                return;
+            }
+            setShowOktellCallsSyncDialog(false);
+            setOktellCallsSyncLoading(true);
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/hours/sync_calls_oktell`, {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: withAccessTokenHeader({
+                        'Content-Type': 'application/json',
+                        'X-User-Id': user.id
+                    }),
+                    body: JSON.stringify(s === e ? { date: s } : { date_from: s, date_to: e })
+                });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(payload?.error || `HTTP ${response.status}`);
+                }
+                const sync = payload?.sync || {};
+                const parts = [`обновлено ${sync.updated ?? 0}`, `операторов ${sync.operators_count ?? 0}`];
+                if (sync.unmatched) parts.push(`не сопоставлено ${sync.unmatched}`);
+                fallbackToast(`${payload?.message || 'Звонки синхронизированы из Oktell'} (${parts.join(', ')})`, 'success');
+                await fetchDailyHoursAndTrainings();
+                if (onUploaded) onUploaded();
+            } catch (error) {
+                console.error('Error syncing Oktell calls:', error);
+                fallbackToast(error?.message || 'Не удалось синхронизировать звонки из Oktell', 'error');
+            } finally {
+                setOktellCallsSyncLoading(false);
+            }
         };
 
         const fetchChatMetricsSurgeWindows = async (targetMonth = chatMetricsSurgeMonth) => {
@@ -5162,6 +5232,83 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </div>
                 </div>
             )}
+            {showOktellCallsSyncDialog && (
+                <div className="fixed inset-0 z-[125] flex items-center justify-center bg-slate-950/30 p-4 backdrop-blur-sm" onClick={closeOktellCallsSyncDialog}>
+                    <div
+                        className="w-full max-w-sm overflow-hidden rounded-[28px] border border-white/70 bg-white/95 shadow-[0_24px_80px_rgba(15,23,42,0.22)] ring-1 ring-slate-900/5 backdrop-blur-xl"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="flex items-start justify-between gap-4 border-b border-slate-200/70 px-5 py-4">
+                            <div className="flex min-w-0 items-start gap-3">
+                                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-sky-100 text-sky-700 ring-1 ring-sky-200/80">
+                                    <FaIcon className="fas fa-cloud-arrow-down" aria-hidden="true" />
+                                </span>
+                                <div className="min-w-0">
+                                    <h3 className="text-base font-semibold text-slate-900">Синхронизация с Oktell</h3>
+                                    <p className="mt-1 text-xs leading-5 text-slate-500">Количество звонков по операторам за выбранный период.</p>
+                                </div>
+                            </div>
+                            <button
+                                type="button"
+                                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
+                                onClick={closeOktellCallsSyncDialog}
+                                disabled={oktellCallsSyncLoading}
+                                aria-label="Закрыть синхронизацию Oktell"
+                            >
+                                <FaIcon className="fas fa-xmark" aria-hidden="true" />
+                            </button>
+                        </div>
+                        <div className="px-5 py-4">
+                            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                <label className="block">
+                                    <span className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">С</span>
+                                    <input
+                                        type="date"
+                                        className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-800 outline-none transition focus:border-sky-300 focus:bg-white focus:ring-4 focus:ring-sky-100"
+                                        value={oktellCallsSyncStart || ''}
+                                        onChange={(e) => {
+                                            const next = e.target.value;
+                                            setOktellCallsSyncStart(next);
+                                            if (!oktellCallsSyncEnd || oktellCallsSyncEnd < next) {
+                                                setOktellCallsSyncEnd(next);
+                                            }
+                                        }}
+                                    />
+                                </label>
+                                <label className="block">
+                                    <span className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">По</span>
+                                    <input
+                                        type="date"
+                                        className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-800 outline-none transition focus:border-sky-300 focus:bg-white focus:ring-4 focus:ring-sky-100"
+                                        value={oktellCallsSyncEnd || ''}
+                                        onChange={(e) => setOktellCallsSyncEnd(e.target.value)}
+                                    />
+                                </label>
+                            </div>
+                            <div className="mt-2 text-[11px] text-slate-400">Максимум 31 день. Чат-менеджеры не затрагиваются.</div>
+                        </div>
+                        <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200/70 bg-slate-50/80 px-5 py-4">
+                            <button
+                                type="button"
+                                className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                                onClick={closeOktellCallsSyncDialog}
+                                disabled={oktellCallsSyncLoading}
+                            >
+                                Отмена
+                            </button>
+                            <button
+                                type="button"
+                                className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold text-white shadow-sm transition ${oktellCallsSyncLoading ? 'cursor-wait bg-sky-400' : 'bg-sky-600 hover:bg-sky-700'}`}
+                                onClick={() => syncOktellCalls(oktellCallsSyncStart, oktellCallsSyncEnd)}
+                                disabled={oktellCallsSyncLoading}
+                            >
+                                <FaIcon className={`fas ${oktellCallsSyncLoading ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}`} aria-hidden="true" />
+                                {oktellCallsSyncLoading ? 'Синхронизируем...' : 'Синхронизировать'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
             <div className="mb-4 flex flex-wrap items-stretch justify-between gap-3">
                 {/* === Параметры (+ переключатель отчёта в той же линии) === */}
                 <div className="flex flex-wrap items-stretch gap-3">
@@ -5380,6 +5527,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     <div className="flex flex-wrap items-center gap-2">
                         {WORKHOURS_METRIC_GROUPS.map(group => {
                             const isMetricsGroup = group.label === 'Метрики';
+                            const groupHasCalls = Array.isArray(group.tabs) && group.tabs.some(t => t && t.key === 'calls');
                             const activeInGroup = group.tabs.some(tab => tab.key === selectedTab);
                             const validSurgeCount = cloneChatMetricsSurgeWindows(chatMetricsSurgeWindows).filter(w => w.start && w.end).length;
                             const groupIconClass = group.tone === 'cyan'
@@ -5511,6 +5659,29 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     >
                                                         <FaIcon className="fas fa-wave-square" />
                                                         Наплывы{validSurgeCount ? ` (${validSurgeCount})` : ''}
+                                                    </button>
+                                                </div>
+                                            )}
+                                            {!isChatModel && groupHasCalls && (
+                                                <div className="border-t border-slate-100 mt-1 pt-1.5 px-2 flex flex-col gap-1">
+                                                    <button
+                                                        type="button"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            openOktellCallsSyncDialog();
+                                                            setPinnedGroups([]);
+                                                            setHoveredGroup(null);
+                                                        }}
+                                                        disabled={oktellCallsSyncLoading}
+                                                        className={`flex items-center gap-1.5 px-3 py-1.5 text-left text-xs font-semibold rounded-lg transition border ${
+                                                            oktellCallsSyncLoading
+                                                                ? 'bg-sky-50 border-sky-100 text-sky-400 cursor-not-allowed'
+                                                                : 'bg-sky-50 border-sky-200 text-sky-800 hover:bg-sky-100'
+                                                        }`}
+                                                        title="Подтянуть количество звонков по операторам из Oktell за выбранный период (до 31 дня). Чат-менеджеры не затрагиваются."
+                                                    >
+                                                        <FaIcon className={`fas ${oktellCallsSyncLoading ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}`} />
+                                                        Синхронизация с Oktell
                                                     </button>
                                                 </div>
                                             )}
