@@ -1536,6 +1536,9 @@ class Database:
                     issue_date DATE NOT NULL,
                     start_time TIME NOT NULL DEFAULT TIME '00:00:00',
                     end_time TIME NOT NULL DEFAULT TIME '23:59:59',
+                    requested_issue_date DATE,
+                    requested_start_time TIME,
+                    requested_end_time TIME,
                     reason VARCHAR(255) NOT NULL,
                     comment TEXT,
                     workplace_number INTEGER,
@@ -1548,6 +1551,18 @@ class Database:
             cursor.execute("""
                 ALTER TABLE operator_technical_issues
                 ADD COLUMN IF NOT EXISTS for_supervisor BOOLEAN NOT NULL DEFAULT FALSE;
+            """)
+            cursor.execute("""
+                ALTER TABLE operator_technical_issues
+                ADD COLUMN IF NOT EXISTS requested_issue_date DATE;
+            """)
+            cursor.execute("""
+                ALTER TABLE operator_technical_issues
+                ADD COLUMN IF NOT EXISTS requested_start_time TIME;
+            """)
+            cursor.execute("""
+                ALTER TABLE operator_technical_issues
+                ADD COLUMN IF NOT EXISTS requested_end_time TIME;
             """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS technical_issue_workplace_settings (
@@ -17995,6 +18010,9 @@ class Database:
                         chunk['date'],
                         chunk['start_time'],
                         chunk['end_time'],
+                        issue_date_obj,
+                        start_time_obj,
+                        end_time_obj,
                         reason_text,
                         comment_text,
                         workplace_number_int,
@@ -18015,6 +18033,9 @@ class Database:
                         issue_date,
                         start_time,
                         end_time,
+                        requested_issue_date,
+                        requested_start_time,
+                        requested_end_time,
                         reason,
                         comment,
                         workplace_number,
@@ -18040,6 +18061,199 @@ class Database:
                 'skipped_operator_count': len(skipped_operator_ids),
                 'selected_direction_ids': selected_direction_ids,
                 'selected_direction_names': [direction_name_map.get(dir_id) for dir_id in selected_direction_ids if direction_name_map.get(dir_id)],
+                'date': issue_date_obj.strftime('%Y-%m-%d'),
+                'start_time': start_time_obj.strftime('%H:%M'),
+                'end_time': end_time_obj.strftime('%H:%M'),
+                'reason': reason_text,
+                'workplace_number': workplace_number_int,
+                'for_supervisor': bool(for_supervisor)
+            }
+
+    def update_operator_technical_issue_batch(
+        self,
+        requester_id,
+        requester_role,
+        issue_id,
+        issue_date,
+        reason,
+        start_time=None,
+        end_time=None,
+        comment=None,
+        direction_ids=None,
+        workplace_number=None,
+        scope_department_id=None
+    ):
+        """Atomically rebuild every row of a massive technical-issue batch."""
+        role_norm = self._normalize_technical_issue_role(requester_role)
+        if not (role_has_min(role_norm, 'admin') or role_norm == 'sv'):
+            raise ValueError("Only admin and sv can update technical issues")
+
+        try:
+            issue_id_int = int(issue_id)
+        except (TypeError, ValueError):
+            raise ValueError("Invalid technical issue id")
+        if issue_id_int <= 0:
+            raise ValueError("Invalid technical issue id")
+
+        reason_text = str(reason or '').strip()
+        if reason_text not in TECHNICAL_ISSUE_REASONS_SET:
+            raise ValueError("Invalid technical issue reason")
+
+        issue_date_obj = self._parse_technical_issue_date(issue_date, field_name='date')
+        start_time_obj = self._parse_technical_issue_time(start_time, field_name='start_time', default_value='00:00')
+        end_time_obj = self._parse_technical_issue_time(end_time, field_name='end_time', default_value='23:59')
+        if start_time_obj == end_time_obj:
+            raise ValueError("start_time and end_time cannot be equal")
+
+        selected_direction_ids = self._coerce_int_list(direction_ids)
+        if not selected_direction_ids:
+            raise ValueError("Select at least one direction for a massive technical issue")
+
+        comment_text = str(comment or '').strip() or None
+        workplace_number_int = self._parse_technical_issue_workplace_number(
+            workplace_number,
+            field_name='workplace_number',
+            required=False
+        )
+        requester_id_int = int(requester_id)
+
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    ti.batch_id::text,
+                    ti.direction_ids,
+                    ti.created_by,
+                    ti.created_at
+                FROM operator_technical_issues ti
+                WHERE ti.id = %s
+                """,
+                (issue_id_int,)
+            )
+            source_row = cursor.fetchone()
+            if not source_row:
+                raise ValueError("Technical issue not found")
+
+            batch_id = source_row[0]
+            if not self._normalize_direction_ids_json_payload(source_row[1]):
+                raise ValueError("Only massive technical issues can be edited as a batch")
+
+            cursor.execute(
+                """
+                SELECT op.supervisor_id, op.department_id, ti.created_by
+                FROM operator_technical_issues ti
+                JOIN users op ON op.id = ti.operator_id
+                WHERE ti.batch_id = %s::uuid
+                """,
+                (batch_id,)
+            )
+            access_rows = cursor.fetchall() or []
+            if not access_rows:
+                raise ValueError("Technical issue not found")
+            if role_norm == 'sv':
+                for supervisor_id, department_id, created_by in access_rows:
+                    can_manage_by_scope = (
+                        int(department_id or 0) == int(scope_department_id)
+                        if scope_department_id is not None
+                        else int(supervisor_id or 0) == requester_id_int
+                    )
+                    can_manage_by_creator = int(created_by or 0) == requester_id_int
+                    if not (can_manage_by_scope or can_manage_by_creator):
+                        raise PermissionError("Forbidden")
+
+            target_operator_ids, selected_direction_ids = self._resolve_technical_issue_operator_ids_tx(
+                cursor=cursor,
+                requester_id=requester_id_int,
+                requester_role=role_norm,
+                direction_ids=selected_direction_ids,
+                enforce_supervisor_scope=False,
+                scope_department_id=scope_department_id
+            )
+            overlaps_by_operator = self._find_shift_overlap_intervals_for_technical_issue_tx(
+                cursor=cursor,
+                operator_ids=target_operator_ids,
+                issue_date_obj=issue_date_obj,
+                start_time_obj=start_time_obj,
+                end_time_obj=end_time_obj
+            )
+            eligible_operator_ids = sorted(overlaps_by_operator.keys())
+            if not eligible_operator_ids:
+                raise ValueError("No selected operators have shifts in the specified time range")
+
+            for_supervisor = self._get_technical_issue_workplace_flag_tx(cursor, workplace_number_int)
+            issue_values = []
+            for operator_id in eligible_operator_ids:
+                day_chunks = self._split_absolute_minutes_intervals_by_day(
+                    overlaps_by_operator.get(operator_id) or [],
+                    issue_date_obj
+                )
+                for chunk in day_chunks:
+                    issue_values.append((
+                        batch_id,
+                        int(operator_id),
+                        chunk['date'],
+                        chunk['start_time'],
+                        chunk['end_time'],
+                        issue_date_obj,
+                        start_time_obj,
+                        end_time_obj,
+                        reason_text,
+                        comment_text,
+                        workplace_number_int,
+                        for_supervisor,
+                        Json(selected_direction_ids),
+                        int(source_row[2])
+                    ))
+
+            if not issue_values:
+                raise ValueError("No overlapping shift intervals were found")
+
+            cursor.execute(
+                "DELETE FROM operator_technical_issues WHERE batch_id = %s::uuid",
+                (batch_id,)
+            )
+            execute_values(
+                cursor,
+                """
+                    INSERT INTO operator_technical_issues (
+                        batch_id,
+                        operator_id,
+                        issue_date,
+                        start_time,
+                        end_time,
+                        requested_issue_date,
+                        requested_start_time,
+                        requested_end_time,
+                        reason,
+                        comment,
+                        workplace_number,
+                        for_supervisor,
+                        direction_ids,
+                        created_by,
+                        created_at
+                    )
+                    VALUES %s
+                """,
+                [values + (source_row[3],) for values in issue_values]
+            )
+
+            direction_name_map = self._get_direction_name_map_tx(cursor, selected_direction_ids)
+            eligible_operator_set = set(eligible_operator_ids)
+            skipped_operator_ids = [op_id for op_id in target_operator_ids if op_id not in eligible_operator_set]
+            return {
+                'batch_id': batch_id,
+                'updated_count': len(issue_values),
+                'updated_operator_count': len(eligible_operator_ids),
+                'operator_ids': eligible_operator_ids,
+                'requested_operator_ids': target_operator_ids,
+                'skipped_operator_ids': skipped_operator_ids,
+                'skipped_operator_count': len(skipped_operator_ids),
+                'selected_direction_ids': selected_direction_ids,
+                'selected_direction_names': [
+                    direction_name_map.get(dir_id)
+                    for dir_id in selected_direction_ids
+                    if direction_name_map.get(dir_id)
+                ],
                 'date': issue_date_obj.strftime('%Y-%m-%d'),
                 'start_time': start_time_obj.strftime('%H:%M'),
                 'end_time': end_time_obj.strftime('%H:%M'),
@@ -18174,7 +18388,20 @@ class Database:
                         ti.created_by,
                         cb.name,
                         ti.created_at,
-                        ti.direction_ids
+                        ti.direction_ids,
+                        (
+                            SELECT COUNT(*)
+                            FROM operator_technical_issues batch_rows
+                            WHERE batch_rows.batch_id = ti.batch_id
+                        ) AS batch_record_count,
+                        (
+                            SELECT COUNT(DISTINCT batch_rows.operator_id)
+                            FROM operator_technical_issues batch_rows
+                            WHERE batch_rows.batch_id = ti.batch_id
+                        ) AS batch_operator_count,
+                        ti.requested_issue_date,
+                        ti.requested_start_time,
+                        ti.requested_end_time
                     {base_sql}
                     {where_sql}
                     ORDER BY ti.issue_date DESC, ti.start_time DESC, ti.created_at DESC, ti.id DESC
@@ -18217,7 +18444,12 @@ class Database:
                     'created_by_name': row[16],
                     'created_at': row[17].strftime('%Y-%m-%d %H:%M:%S') if row[17] else None,
                     'selected_direction_ids': selected_direction_ids,
-                    'selected_direction_names': [direction_name_map.get(dir_id) for dir_id in selected_direction_ids if direction_name_map.get(dir_id)]
+                    'selected_direction_names': [direction_name_map.get(dir_id) for dir_id in selected_direction_ids if direction_name_map.get(dir_id)],
+                    'batch_record_count': int(row[19] or 0),
+                    'batch_operator_count': int(row[20] or 0),
+                    'requested_issue_date': row[21].strftime('%Y-%m-%d') if row[21] else None,
+                    'requested_start_time': row[22].strftime('%H:%M') if row[22] else None,
+                    'requested_end_time': row[23].strftime('%H:%M') if row[23] else None
                 })
 
             return {
@@ -18251,7 +18483,8 @@ class Database:
                     ti.issue_date,
                     ti.start_time,
                     ti.end_time,
-                    ti.reason
+                    ti.reason,
+                    ti.direction_ids
                 FROM operator_technical_issues ti
                 JOIN users op ON op.id = ti.operator_id
                 WHERE ti.id = %s
@@ -18262,29 +18495,44 @@ class Database:
             if not row:
                 raise ValueError("Technical issue not found")
 
-            supervisor_id = int(row[3]) if row[3] is not None else None
-            operator_department_id = int(row[4]) if row[4] is not None else None
-            issue_created_by = int(row[5]) if row[5] is not None else None
-            if role_norm == 'sv':
-                can_manage_by_scope = (
-                    operator_department_id == int(scope_department_id)
-                    if scope_department_id is not None
-                    else supervisor_id == requester_id_int
-                )
-                can_manage_by_creator = issue_created_by == requester_id_int
-                if not (can_manage_by_scope or can_manage_by_creator):
-                    raise PermissionError("Forbidden")
+            delete_as_batch = bool(self._normalize_direction_ids_json_payload(row[10]))
 
-            cursor.execute(
-                """
-                DELETE FROM operator_technical_issues
-                WHERE id = %s
-                RETURNING id
-                """,
-                (issue_id_int,)
-            )
-            deleted_row = cursor.fetchone()
-            if not deleted_row:
+            access_rows = [(row[3], row[4], row[5])]
+            if delete_as_batch:
+                cursor.execute(
+                    """
+                    SELECT op.supervisor_id, op.department_id, ti.created_by
+                    FROM operator_technical_issues ti
+                    JOIN users op ON op.id = ti.operator_id
+                    WHERE ti.batch_id = %s::uuid
+                    """,
+                    (row[1],)
+                )
+                access_rows = cursor.fetchall() or []
+
+            if role_norm == 'sv':
+                for supervisor_id, operator_department_id, issue_created_by in access_rows:
+                    can_manage_by_scope = (
+                        int(operator_department_id or 0) == int(scope_department_id)
+                        if scope_department_id is not None
+                        else int(supervisor_id or 0) == requester_id_int
+                    )
+                    can_manage_by_creator = int(issue_created_by or 0) == requester_id_int
+                    if not (can_manage_by_scope or can_manage_by_creator):
+                        raise PermissionError("Forbidden")
+
+            if delete_as_batch:
+                cursor.execute(
+                    "DELETE FROM operator_technical_issues WHERE batch_id = %s::uuid RETURNING id",
+                    (row[1],)
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM operator_technical_issues WHERE id = %s RETURNING id",
+                    (issue_id_int,)
+                )
+            deleted_rows = cursor.fetchall() or []
+            if not deleted_rows:
                 raise ValueError("Technical issue not found")
 
             return {
@@ -18294,7 +18542,9 @@ class Database:
                 'date': row[6].strftime('%Y-%m-%d') if row[6] else None,
                 'start_time': row[7].strftime('%H:%M') if row[7] else None,
                 'end_time': row[8].strftime('%H:%M') if row[8] else None,
-                'reason': row[9]
+                'reason': row[9],
+                'deleted_count': len(deleted_rows),
+                'deleted_as_batch': delete_as_batch
             }
 
     def create_operator_offline_activity(

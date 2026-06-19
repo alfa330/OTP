@@ -171,6 +171,63 @@ const isMassiveReason = (reason) => {
     return MASS_KEYWORDS.some((kw) => lower.includes(kw));
 };
 
+const isMassiveIssue = (item) => toIntList(item?.selected_direction_ids).length > 0;
+
+const buildJournalEntries = (rows) => {
+    const entries = [];
+    const massiveByBatch = new Map();
+
+    for (const item of Array.isArray(rows) ? rows : []) {
+        const batchId = String(item?.batch_id || '').trim();
+        if (!batchId || !isMassiveIssue(item)) {
+            entries.push(item);
+            continue;
+        }
+
+        let entry = massiveByBatch.get(batchId);
+        if (!entry) {
+            entry = {
+                ...item,
+                is_massive_group: true,
+                batch_items: [],
+                operator_names: [],
+            };
+            massiveByBatch.set(batchId, entry);
+            entries.push(entry);
+        }
+        entry.batch_items.push(item);
+    }
+
+    for (const entry of massiveByBatch.values()) {
+        const items = entry.batch_items;
+        const dates = items.map((item) => String(item?.date || '')).filter(Boolean).sort();
+        const firstDate = dates[0] || String(entry.date || '');
+        const lastDate = dates[dates.length - 1] || firstDate;
+        const firstDateItems = items.filter((item) => String(item?.date || '') === firstDate);
+        const lastDateItems = items.filter((item) => String(item?.date || '') === lastDate);
+        const startTimes = firstDateItems.map((item) => String(item?.start_time || '')).filter(Boolean).sort();
+        const endTimes = lastDateItems.map((item) => String(item?.end_time || '')).filter(Boolean).sort();
+        const operatorNames = [...new Set(items.map((item) => String(item?.operator_name || '').trim()).filter(Boolean))]
+            .sort((a, b) => a.localeCompare(b, 'ru', { sensitivity: 'base' }));
+        const directionNames = [...new Set(items.flatMap((item) => (
+            Array.isArray(item?.selected_direction_names) ? item.selected_direction_names : []
+        )).map((name) => String(name || '').trim()).filter(Boolean))];
+        const directionIds = [...new Set(items.flatMap((item) => toIntList(item?.selected_direction_ids)))];
+
+        entry.date = String(entry.requested_issue_date || firstDate);
+        entry.start_time = String(entry.requested_start_time || startTimes[0] || entry.start_time || '');
+        entry.end_time = String(entry.requested_end_time || endTimes[endTimes.length - 1] || entry.end_time || '');
+        entry.time_range = entry.start_time && entry.end_time ? `${entry.start_time} - ${entry.end_time}` : entry.time_range;
+        entry.operator_names = operatorNames;
+        entry.operator_count = Number(entry.batch_operator_count || operatorNames.length || 0);
+        entry.record_count = Number(entry.batch_record_count || items.length || 0);
+        entry.selected_direction_ids = directionIds;
+        entry.selected_direction_names = directionNames;
+    }
+
+    return entries;
+};
+
 // ─── Duration helpers ─────────────────────────────────────────────────────────
 
 const parseTimeMinutes = (timeStr) => {
@@ -622,6 +679,7 @@ const CustomMultiSelect = memo(function CustomMultiSelect({ items, selectedIds, 
 
 const AddIssueModal = memo(function AddIssueModal({
     isOpen, onClose, onSubmit, submitting,
+    editingIssue,
     reasons, visibleOperators, visibleDirections,
     createDate, setCreateDate,
     createStartTime, setCreateStartTime,
@@ -644,6 +702,7 @@ const AddIssueModal = memo(function AddIssueModal({
     if (!isOpen) return null;
 
     const toggleMassive = () => {
+        if (editingIssue) return;
         setIsMassive((m) => !m);
         setCreateOperatorIds([]);
         setCreateDirectionIds([]);
@@ -663,7 +722,7 @@ const AddIssueModal = memo(function AddIssueModal({
                 <div className="flex items-center justify-between px-6 py-4 rounded-t-2xl bg-gradient-to-r from-blue-600 to-blue-700 shrink-0">
                     <h3 className="text-base font-bold text-white flex items-center gap-2">
                         <FaIcon className="fas fa-tools" style={{ width: '1em', height: '1em' }} />
-                        Добавить техническую причину
+                        {editingIssue ? 'Редактировать массовую техпричину' : 'Добавить техническую причину'}
                     </h3>
                     <button
                         type="button"
@@ -765,7 +824,8 @@ const AddIssueModal = memo(function AddIssueModal({
                                     role="switch"
                                     aria-checked={isMassive}
                                     onClick={toggleMassive}
-                                    className={`relative inline-flex h-[26px] w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${isMassive ? 'bg-blue-600' : 'bg-gray-200'}`}
+                                    disabled={Boolean(editingIssue)}
+                                    className={`relative inline-flex h-[26px] w-11 shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${isMassive ? 'bg-blue-600' : 'bg-gray-200'} ${editingIssue ? 'cursor-not-allowed opacity-70' : 'cursor-pointer'}`}
                                 >
                                     <span
                                         className={`pointer-events-none inline-block h-[22px] w-[22px] transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${isMassive ? 'translate-x-5' : 'translate-x-0'}`}
@@ -829,7 +889,7 @@ const AddIssueModal = memo(function AddIssueModal({
                         className={`inline-flex items-center gap-2 rounded-lg px-5 py-2 text-sm font-semibold text-white transition-colors ${submitting ? 'bg-blue-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'}`}
                     >
                         <FaIcon className={`fas ${submitting ? 'fa-spinner fa-spin' : 'fa-save'}`} style={{ width: '0.9em', height: '0.9em' }} />
-                        {submitting ? 'Сохранение...' : 'Сохранить'}
+                        {submitting ? 'Сохранение...' : editingIssue ? 'Сохранить изменения' : 'Сохранить'}
                     </button>
                 </div>
             </div>
@@ -1347,13 +1407,15 @@ const AnalyticsPanel = memo(function AnalyticsPanel({ rows }) {
 
 // ─── TechnicalIssueRow ────────────────────────────────────────────────────────
 
-const TechnicalIssueRow = memo(function TechnicalIssueRow({ item, canDelete, isDeleting, onDelete, isEven }) {
+const TechnicalIssueRow = memo(function TechnicalIssueRow({ item, canEdit, canDelete, isDeleting, onEdit, onDelete, isEven }) {
     const directionNames = Array.isArray(item?.selected_direction_names)
         ? item.selected_direction_names.filter((n) => String(n || '').trim() !== '')
         : [];
-    const massive = isMassiveReason(item?.reason);
+    const massive = Boolean(item?.is_massive_group) || isMassiveIssue(item) || isMassiveReason(item?.reason);
     const forSupervisor = isTruthyFlag(item?.for_supervisor ?? item?.is_for_supervisor ?? item?.forSupervisor);
-    const rowBg = isEven ? 'bg-white' : 'bg-slate-50/70';
+    const rowBg = item?.is_massive_group
+        ? 'bg-amber-50/70 border-y border-amber-200'
+        : (isEven ? 'bg-white' : 'bg-slate-50/70');
 
     return (
         <tr className={`${rowBg} hover:bg-blue-50/50 transition-colors`}>
@@ -1364,8 +1426,21 @@ const TechnicalIssueRow = memo(function TechnicalIssueRow({ item, canDelete, isD
                 {item?.time_range || ((item?.start_time && item?.end_time) ? `${item.start_time}–${item.end_time}` : '—')}
             </td>
             <td className="px-3 py-2.5 text-xs text-gray-700">
-                <div className="font-semibold text-gray-800 leading-tight">{item?.operator_name || '—'}</div>
-                {item?.direction_name && (
+                {item?.is_massive_group ? (
+                    <>
+                        <div className="font-bold text-amber-800 leading-tight flex items-center gap-1.5">
+                            <FaIcon className="fas fa-users" style={{ width: '0.85em', height: '0.85em' }} />
+                            {item?.operator_count || item?.operator_names?.length || 0} операторов
+                        </div>
+                        <div className="text-[10px] text-amber-700/70 leading-tight mt-1 line-clamp-2" title={(item?.operator_names || []).join(', ')}>
+                            {(item?.operator_names || []).slice(0, 3).join(', ')}
+                            {(item?.operator_names?.length || 0) > 3 ? ` и ещё ${item.operator_names.length - 3}` : ''}
+                        </div>
+                    </>
+                ) : (
+                    <div className="font-semibold text-gray-800 leading-tight">{item?.operator_name || '—'}</div>
+                )}
+                {!item?.is_massive_group && item?.direction_name && (
                     <div className="text-[11px] text-gray-400 leading-tight mt-0.5">{item.direction_name}</div>
                 )}
             </td>
@@ -1389,7 +1464,7 @@ const TechnicalIssueRow = memo(function TechnicalIssueRow({ item, canDelete, isD
                 <div className="flex flex-wrap items-start gap-1">
                     {massive && (
                         <span className="shrink-0 rounded-full bg-amber-100 border border-amber-300 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-widest text-amber-700">
-                            Масс.
+                            Массовая
                         </span>
                     )}
                     <span className="line-clamp-2 leading-snug">{item?.reason || '—'}</span>
@@ -1409,25 +1484,41 @@ const TechnicalIssueRow = memo(function TechnicalIssueRow({ item, canDelete, isD
             <td className="px-3 py-2.5 text-[11px] text-gray-400 whitespace-nowrap">
                 {item?.created_at || '—'}
             </td>
-            {canDelete && (
+            {(canDelete || (canEdit && item?.is_massive_group)) && (
                 <td className="px-3 py-2.5 text-right whitespace-nowrap">
-                    <button
-                        type="button"
-                        onClick={() => onDelete(item)}
-                        disabled={isDeleting}
-                        title="Удалить"
-                        aria-label="Удалить техсбой"
-                        className={`inline-flex items-center justify-center rounded-lg border p-1.5 transition-colors ${
-                            isDeleting
-                                ? 'cursor-not-allowed border-red-100 bg-red-50 text-red-300'
-                                : 'border-red-200 bg-white text-red-400 hover:bg-red-50 hover:text-red-600'
-                        }`}
-                    >
-                        <FaIcon
-                            className={`fas ${isDeleting ? 'fa-spinner fa-spin' : 'fa-trash'}`}
-                            style={{ width: '0.85em', height: '0.85em' }}
-                        />
-                    </button>
+                    <div className="inline-flex items-center gap-1">
+                        {canEdit && item?.is_massive_group && (
+                            <button
+                                type="button"
+                                onClick={() => onEdit(item)}
+                                disabled={isDeleting}
+                                title="Редактировать массовую техпричину"
+                                aria-label="Редактировать массовую техпричину"
+                                className="inline-flex items-center justify-center rounded-lg border border-blue-200 bg-white p-1.5 text-blue-500 transition-colors hover:bg-blue-50 hover:text-blue-700"
+                            >
+                                <FaIcon className="fas fa-pen" style={{ width: '0.85em', height: '0.85em' }} />
+                            </button>
+                        )}
+                        {canDelete && (
+                            <button
+                                type="button"
+                                onClick={() => onDelete(item)}
+                                disabled={isDeleting}
+                                title={item?.is_massive_group ? 'Удалить массовую техпричину' : 'Удалить'}
+                                aria-label={item?.is_massive_group ? 'Удалить массовую техпричину' : 'Удалить техсбой'}
+                                className={`inline-flex items-center justify-center rounded-lg border p-1.5 transition-colors ${
+                                    isDeleting
+                                        ? 'cursor-not-allowed border-red-100 bg-red-50 text-red-300'
+                                        : 'border-red-200 bg-white text-red-400 hover:bg-red-50 hover:text-red-600'
+                                }`}
+                            >
+                                <FaIcon
+                                    className={`fas ${isDeleting ? 'fa-spinner fa-spin' : 'fa-trash'}`}
+                                    style={{ width: '0.85em', height: '0.85em' }}
+                                />
+                            </button>
+                        )}
+                    </div>
                 </td>
             )}
         </tr>
@@ -1512,6 +1603,7 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
     const [exporting, setExporting]       = useState(false);
     const [deletingId, setDeletingId]     = useState(null);
     const [isModalOpen, setIsModalOpen]   = useState(false);
+    const [editingIssue, setEditingIssue] = useState(null);
     const [workplaceSettings, setWorkplaceSettings] = useState([]);
     const [updatingWorkplaceNumber, setUpdatingWorkplaceNumber] = useState(null);
 
@@ -1538,6 +1630,7 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
         if (workplaceNumber === null) return false;
         return Boolean(workplaceSettingsMap.get(workplaceNumber)?.forSupervisor);
     }, [createWorkplaceNumber, workplaceSettingsMap]);
+    const journalEntries = useMemo(() => buildJournalEntries(rows), [rows]);
 
     const latestReqId    = useRef(0);
     const lastQueryRef   = useRef('');
@@ -1665,8 +1758,22 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
         setIsMassive(false);
     }, []);
 
-    const openModal = () => { resetForm(); setIsModalOpen(true); };
-    const closeModal = () => setIsModalOpen(false);
+    const openModal = () => { resetForm(); setEditingIssue(null); setIsModalOpen(true); };
+    const openEditModal = useCallback((issue) => {
+        if (!issue?.is_massive_group) return;
+        setCreateDate(String(issue?.date || ''));
+        setCreateStartTime(String(issue?.start_time || '00:00'));
+        setCreateEndTime(String(issue?.end_time || '23:59'));
+        setCreateWorkplaceNumber(normalizeWorkplaceNumber(issue?.workplace_number) ?? '');
+        setCreateReason(String(issue?.reason || ''));
+        setCreateComment(String(issue?.comment || ''));
+        setCreateOperatorIds([]);
+        setCreateDirectionIds(toIntList(issue?.selected_direction_ids));
+        setIsMassive(true);
+        setEditingIssue(issue);
+        setIsModalOpen(true);
+    }, []);
+    const closeModal = () => { setIsModalOpen(false); setEditingIssue(null); };
 
     // ── create issue ──
     const handleCreateIssue = useCallback(async (event) => {
@@ -1696,9 +1803,18 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
                 operator_ids: toIntList(createOperatorIds),
                 direction_ids: toIntList(createDirectionIds),
             };
-            const res = await axios.post(`${apiBaseUrl}/api/technical_issues`, payload, { headers: buildHeaders() });
-            const count = Number(res?.data?.result?.created_count || 0);
-            notify(count > 0 ? `Сохранено записей: ${count}` : 'Техническая причина сохранена', 'success');
+            const editingId = Number(editingIssue?.id);
+            const isEditing = Number.isFinite(editingId) && editingId > 0;
+            const res = isEditing
+                ? await axios.put(`${apiBaseUrl}/api/technical_issues/${editingId}`, payload, { headers: buildHeaders() })
+                : await axios.post(`${apiBaseUrl}/api/technical_issues`, payload, { headers: buildHeaders() });
+            const count = Number(res?.data?.result?.updated_count || res?.data?.result?.created_count || 0);
+            notify(
+                isEditing
+                    ? `Массовая техпричина обновлена для ${Number(res?.data?.result?.updated_operator_count || 0)} операторов`
+                    : (count > 0 ? `Сохранено записей: ${count}` : 'Техническая причина сохранена'),
+                'success'
+            );
             closeModal();
             await fetchRows(appliedFilters, { force: true });
         } catch (err) {
@@ -1706,7 +1822,7 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
         } finally {
             setSubmitting(false);
         }
-    }, [apiBaseUrl, appliedFilters, buildHeaders, canCreate, createComment, createDate, createDirectionIds, createEndTime, createOperatorIds, createReason, createStartTime, createWorkplaceNumber, fetchRows, notify]);
+    }, [apiBaseUrl, appliedFilters, buildHeaders, canCreate, createComment, createDate, createDirectionIds, createEndTime, createOperatorIds, createReason, createStartTime, createWorkplaceNumber, editingIssue, fetchRows, notify]);
 
     // ── export ──
     const handleExport = useCallback(async () => {
@@ -1735,14 +1851,17 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
         if (!canDelete) return;
         const id = Number(issue?.id);
         if (!Number.isFinite(id) || id <= 0) return;
+        const isMassiveGroup = Boolean(issue?.is_massive_group);
         const name = String(issue?.operator_name || '').trim();
         const date = String(issue?.date || '').trim();
-        const msg = name ? `Удалить техсбой оператора "${name}"${date ? ` (${date})` : ''}?` : `Удалить техсбой${date ? ` (${date})` : ''}?`;
+        const msg = isMassiveGroup
+            ? `Удалить массовую техпричину для ${issue?.operator_count || 0} операторов${date ? ` (${date})` : ''}?`
+            : (name ? `Удалить техсбой оператора "${name}"${date ? ` (${date})` : ''}?` : `Удалить техсбой${date ? ` (${date})` : ''}?`);
         if (typeof window !== 'undefined' && !window.confirm(msg)) return;
         setDeletingId(id);
         try {
             await axios.delete(`${apiBaseUrl}/api/technical_issues/${id}`, { headers: buildHeaders() });
-            notify('Техсбой удален', 'success');
+            notify(isMassiveGroup ? 'Массовая техпричина удалена' : 'Техсбой удален', 'success');
             await fetchRows(appliedFilters, { force: true });
         } catch (err) {
             notify(err?.response?.data?.error || 'Не удалось удалить техсбой', 'error');
@@ -1779,6 +1898,7 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
                 onClose={closeModal}
                 onSubmit={handleCreateIssue}
                 submitting={submitting}
+                editingIssue={editingIssue}
                 reasons={reasons}
                 visibleOperators={visibleOperators}
                 visibleDirections={visibleDirections}
@@ -1954,7 +2074,9 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
                                 <FaIcon className="fas fa-table" style={{ width: '0.9em', height: '0.9em' }} />
                                 Журнал тех причин
                             </div>
-                            <div className="text-xs text-blue-600 font-semibold">Записей: {total}</div>
+                            <div className="text-xs text-blue-600 font-semibold">
+                                Блоков: {journalEntries.length} · записей: {total}
+                            </div>
                         </div>
 
                         {loading ? (
@@ -1995,7 +2117,7 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y divide-gray-100">
-                                        {rows.map((item, idx) => {
+                                        {journalEntries.map((item, idx) => {
                                             const itemId = Number(item?.id);
                                             const key = Number.isFinite(itemId) && itemId > 0
                                                 ? `ti-${itemId}`
@@ -2004,8 +2126,10 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
                                                 <TechnicalIssueRow
                                                     key={key}
                                                     item={item}
+                                                    canEdit={canCreate}
                                                     canDelete={canDelete}
                                                     isDeleting={deletingId === item?.id}
+                                                    onEdit={openEditModal}
                                                     onDelete={handleDeleteIssue}
                                                     isEven={idx % 2 === 0}
                                                 />
