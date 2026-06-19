@@ -76,6 +76,15 @@ class FourYouAccessControlTests(unittest.TestCase):
         # Пакетное удаление в коде идёт через параметризованный массив (без SQL-инъекций).
         self.assertIn("WHERE id = ANY(%s::uuid[])", self.db_source)
 
+    def test_feed_is_randomized_and_optimized(self):
+        # Случайный порядок фото при каждом открытии.
+        self.assertIn("const shuffle = (input)", self.lenta_source)
+        self.assertIn("shuffle(Array.isArray(response?.data?.images)", self.lenta_source)
+        # Оптимизация без потери анимации: куллинг за экраном + пропуск кадров в покое.
+        self.assertIn("cullRadius", self.lenta_source)
+        self.assertIn("const isSettled", self.lenta_source)
+        self.assertIn("needsRenderRef", self.lenta_source)
+
     def test_higher_quality_variant_loads_seamlessly(self):
         # Превью всегда снизу; полноразмерный вариант проявляется поверх по onLoad —
         # апгрейд качества незаметен (без моргания/пустого кадра).
