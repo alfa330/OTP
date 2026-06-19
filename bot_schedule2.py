@@ -245,6 +245,16 @@ OKTELL_SYNC_NIGHTLY_MINUTE = _env_int('OKTELL_SYNC_NIGHTLY_MINUTE', 0, minimum=0
 OKTELL_SYNC_INTRADAY_HOURS = (os.getenv('OKTELL_SYNC_INTRADAY_HOURS') or '10,13,16,19,22').strip()
 OKTELL_SYNC_INTRADAY_MINUTE = _env_int('OKTELL_SYNC_INTRADAY_MINUTE', 5, minimum=0, maximum=59)
 
+# Oktell: количество звонков по операторам (раздел «Учёт часов» -> таб «Звонки»).
+OKTELL_CALLS_SYNC_ENABLED = _env_bool('OKTELL_CALLS_SYNC_ENABLED', True)
+OKTELL_CALLS_MAX_RANGE_DAYS = _env_int('OKTELL_CALLS_MAX_RANGE_DAYS', 31, minimum=1, maximum=92)
+# Размер окна одного запроса к прокси (агрегат операторы×даты режется лимитом в 1000 строк).
+OKTELL_CALLS_CHUNK_DAYS = _env_int('OKTELL_CALLS_CHUNK_DAYS', 7, minimum=1, maximum=31)
+OKTELL_CALLS_NIGHTLY_HOUR = _env_int('OKTELL_CALLS_NIGHTLY_HOUR', 5, minimum=0, maximum=23)
+OKTELL_CALLS_NIGHTLY_MINUTE = _env_int('OKTELL_CALLS_NIGHTLY_MINUTE', 25, minimum=0, maximum=59)
+OKTELL_CALLS_INTRADAY_HOURS = (os.getenv('OKTELL_CALLS_INTRADAY_HOURS') or '11,14,17,20,23').strip()
+OKTELL_CALLS_INTRADAY_MINUTE = _env_int('OKTELL_CALLS_INTRADAY_MINUTE', 20, minimum=0, maximum=59)
+
 if not API_TOKEN:
     raise Exception("Переменная окружения BOT_TOKEN обязательна.")
 
@@ -19417,6 +19427,167 @@ def sync_oktell_operator_statuses(day=None, date_from=None, date_to=None, trigge
             pass
 
 
+# === Oktell: количество звонков по операторам (Учёт часов -> Звонки) =============================
+# Плоский (single SELECT) аналог отчёта «Кол-во звонков операторов, группировка по датам».
+# Считаем обработанные звонки на оператора за день и пишем ТОЛЬКО в daily_hours.calls
+# (часы/перерывы не трогаем). Операторы матчатся по имени, чат-менеджеры исключаются.
+OKTELL_CALLS_SYNC_LOCK = threading.Lock()
+
+
+def _oktell_calls_sync_enabled():
+    return bool(OKTELL_CALLS_SYNC_ENABLED)
+
+
+def _oktell_calls_target_days(day=None, date_from=None, date_to=None):
+    """Список date (включительно). day переопределяет диапазон. По умолчанию — вчера.
+    Лимит периода — OKTELL_CALLS_MAX_RANGE_DAYS (до месяца)."""
+    if day:
+        d = _oktell_parse_date(day)
+        if d is None:
+            raise ValueError("date must be in YYYY-MM-DD format")
+        return [d]
+    if date_from or date_to:
+        start = _oktell_parse_date(date_from or date_to)
+        end = _oktell_parse_date(date_to or date_from)
+        if start is None or end is None:
+            raise ValueError("date_from and date_to must be in YYYY-MM-DD format")
+        if end < start:
+            raise ValueError("date_to must be greater than or equal to date_from")
+        span = (end - start).days + 1
+        if span > OKTELL_CALLS_MAX_RANGE_DAYS:
+            raise ValueError(f"Период синхронизации звонков Oktell не может быть больше {OKTELL_CALLS_MAX_RANGE_DAYS} дней")
+        return [start + timedelta(days=i) for i in range(span)]
+    today = datetime.now().date()
+    return [today - timedelta(days=1)]
+
+
+def _oktell_call_count_sql(date_from_compact, date_to_excl_compact):
+    return (
+        "SELECT oi.Name AS OperatorName, "
+        "CONVERT(varchar(10), os.DateStart, 23) AS CallDate, "
+        "COUNT(*) AS CallCount "
+        "FROM oktell_cc_temp.dbo.A_Cube_CC_OperatorStates os "
+        "INNER JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo oi ON oi.Id = os.IdOperator "
+        "INNER JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_Task tk ON tk.Id = os.IdTask "
+        "WHERE os.State IN (6, 14) AND os.CallResult IS NOT NULL "
+        f"AND os.DateStart >= '{date_from_compact}' AND os.DateStart < '{date_to_excl_compact}' "
+        "GROUP BY oi.Name, CONVERT(varchar(10), os.DateStart, 23)"
+    )
+
+
+def _oktell_fetch_call_counts(range_from, range_to):
+    """Список dict {OperatorName, CallDate, CallCount} за период. Тянем окнами по
+    OKTELL_CALLS_CHUNK_DAYS дней; если окно упёрлось в лимит прокси (1000 строк) —
+    до-тягиваем его по одному дню, чтобы не потерять данные."""
+    rows = []
+
+    def _window(a, b):
+        page = _oktell_query(_oktell_call_count_sql(
+            a.strftime('%Y%m%d'), (b + timedelta(days=1)).strftime('%Y%m%d')))
+        if len(page) >= OKTELL_API_PAGE_SIZE and a < b:
+            d = a
+            while d <= b:
+                rows.extend(_oktell_query(_oktell_call_count_sql(
+                    d.strftime('%Y%m%d'), (d + timedelta(days=1)).strftime('%Y%m%d'))))
+                d += timedelta(days=1)
+        else:
+            rows.extend(page)
+
+    cur = range_from
+    while cur <= range_to:
+        chunk_end = min(range_to, cur + timedelta(days=OKTELL_CALLS_CHUNK_DAYS - 1))
+        _window(cur, chunk_end)
+        cur = chunk_end + timedelta(days=1)
+    return rows
+
+
+def sync_oktell_operator_calls(day=None, date_from=None, date_to=None, triggered_by='scheduler', force=False, imported_by=None):
+    """Синхронизирует кол-во звонков операторов из Oktell в daily_hours.calls.
+    Только операторы (чат-менеджеры исключаются матчингом по имени). Меняет ТОЛЬКО calls."""
+    if not force and not _oktell_calls_sync_enabled():
+        logging.info("Oktell calls sync skipped: disabled")
+        return {'status': 'skipped', 'reason': 'disabled'}
+    if not _oktell_api_ready():
+        logging.warning("Oktell calls sync skipped: OKTELL_IP/OKTELL_API_TOKEN is not set")
+        return {'status': 'skipped', 'reason': 'missing_token'}
+
+    target_days = _oktell_calls_target_days(day, date_from=date_from, date_to=date_to)
+    range_from = target_days[0]
+    range_to = target_days[-1]
+
+    if not OKTELL_CALLS_SYNC_LOCK.acquire(blocking=False):
+        logging.warning("Oktell calls sync skipped: another calls sync is already running")
+        return {'status': 'skipped', 'reason': 'locked'}
+
+    started = time.time()
+    try:
+        operator_lookup = _status_import_build_operator_lookup(exclude_chat_managers=True)
+        rows = _oktell_fetch_call_counts(range_from, range_to)
+
+        source_rows = len(rows)
+        matched_operators = set()
+        updated = 0
+        unmatched = 0
+        unmatched_preview = []
+        for r in rows:
+            operator_name = str(r.get('OperatorName') or '').strip()
+            day_str = str(r.get('CallDate') or '').strip()
+            try:
+                calls_count = int(r.get('CallCount') or 0)
+            except Exception:
+                calls_count = 0
+            if not operator_name or not day_str:
+                continue
+            matches = _status_import_resolve_operator_matches(operator_name, operator_lookup)
+            if len(matches) != 1:
+                unmatched += 1
+                if len(unmatched_preview) < STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT:
+                    unmatched_preview.append({
+                        'operator_name': operator_name,
+                        'day': day_str,
+                        'calls': calls_count,
+                        'reason': 'Оператор не найден' if not matches else 'Найдено несколько операторов с таким именем',
+                    })
+                continue
+            operator_id = int(matches[0]['id'])
+            db.upsert_daily_calls(operator_id, day_str, calls_count)
+            matched_operators.add(operator_id)
+            updated += 1
+
+        logging.info(
+            "Oktell calls sync %s..%s: source_rows=%s updated=%s operators=%s unmatched=%s",
+            range_from.strftime('%Y-%m-%d'), range_to.strftime('%Y-%m-%d'),
+            source_rows, updated, len(matched_operators), unmatched
+        )
+        return {
+            'status': 'success',
+            'triggered_by': triggered_by,
+            'date_from': range_from.strftime('%Y-%m-%d'),
+            'date_to': range_to.strftime('%Y-%m-%d'),
+            'source_rows': source_rows,
+            'updated': updated,
+            'operators_count': len(matched_operators),
+            'unmatched': unmatched,
+            'unmatched_preview': unmatched_preview,
+            'elapsed_seconds': round(time.time() - started, 2),
+        }
+    except Exception as exc:
+        logging.exception("Oktell calls sync failed")
+        return {
+            'status': 'failed',
+            'triggered_by': triggered_by,
+            'date_from': range_from.strftime('%Y-%m-%d'),
+            'date_to': range_to.strftime('%Y-%m-%d'),
+            'error': str(exc),
+            'elapsed_seconds': round(time.time() - started, 2),
+        }
+    finally:
+        try:
+            OKTELL_CALLS_SYNC_LOCK.release()
+        except Exception:
+            pass
+
+
 def _ws_time_to_minutes(value):
     if value is None:
         return 0
@@ -22014,6 +22185,80 @@ def sync_work_schedules_statuses_oktell():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error syncing Oktell operator statuses: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/hours/sync_calls_oktell', methods=['POST'])
+@require_api_key
+def sync_hours_calls_oktell():
+    """Ручной запуск синхронизации кол-ва звонков операторов из Oktell за период (до месяца)."""
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not (_is_admin_role(requester[3]) or _is_supervisor_role(requester[3])):
+            return jsonify({"error": "Forbidden"}), 403
+
+        payload = request.get_json(silent=True) or {}
+        target_day = payload.get('date') or request.args.get('date') or None
+        target_from = (
+            payload.get('date_from') or payload.get('start_date') or
+            request.args.get('date_from') or request.args.get('start_date') or None
+        )
+        target_to = (
+            payload.get('date_to') or payload.get('end_date') or
+            request.args.get('date_to') or request.args.get('end_date') or None
+        )
+        if target_day and _oktell_parse_date(target_day) is None:
+            return jsonify({"error": "date must be in YYYY-MM-DD format"}), 400
+        if target_day and (target_from or target_to):
+            return jsonify({"error": "Use either date or date_from/date_to, not both"}), 400
+        if target_from or target_to:
+            start_day = _oktell_parse_date(target_from)
+            end_day = _oktell_parse_date(target_to or target_from)
+            if start_day is None or end_day is None:
+                return jsonify({"error": "date_from and date_to must be in YYYY-MM-DD format"}), 400
+            if end_day < start_day:
+                return jsonify({"error": "date_to must be greater than or equal to date_from"}), 400
+            if (end_day - start_day).days + 1 > OKTELL_CALLS_MAX_RANGE_DAYS:
+                return jsonify({"error": f"Период синхронизации звонков Oktell не может быть больше {OKTELL_CALLS_MAX_RANGE_DAYS} дней"}), 400
+            target_from = start_day.strftime('%Y-%m-%d')
+            target_to = end_day.strftime('%Y-%m-%d')
+
+        result = sync_oktell_operator_calls(
+            day=target_day,
+            date_from=target_from,
+            date_to=target_to,
+            triggered_by='manual',
+            force=True,
+            imported_by=requester_id
+        )
+        status = result.get('status')
+        if status == 'skipped':
+            reason = result.get('reason')
+            if reason == 'missing_token':
+                return jsonify({"error": "OKTELL_IP/OKTELL_API_TOKEN не задан", "sync": result}), 400
+            if reason == 'locked':
+                return jsonify({
+                    "error": "Синхронизация звонков уже выполняется. Повторите через несколько секунд.",
+                    "sync": result
+                }), 429
+            return jsonify({"error": f"Синхронизация звонков Oktell пропущена: {reason or 'unknown'}", "sync": result}), 400
+        if status == 'failed':
+            return jsonify({"error": result.get('error') or "Синхронизация звонков Oktell не выполнена", "sync": result}), 502
+
+        return jsonify({
+            "status": "success",
+            "message": "Звонки операторов синхронизированы из Oktell",
+            "sync": result,
+            "warnings": {"unmatched_preview": result.get('unmatched_preview') or []}
+        }), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error syncing Oktell operator calls: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 
@@ -32991,6 +33236,24 @@ async def run_oktell_operator_statuses_today_sync_async(triggered_by='scheduler-
         return sync_oktell_operator_statuses(day=today, triggered_by=triggered_by)
     return await loop.run_in_executor(executor_pool, _run)
 
+
+async def run_oktell_operator_calls_sync_async(triggered_by='scheduler'):
+    # Ночной прогон звонков: полный предыдущий день.
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        executor_pool,
+        lambda: sync_oktell_operator_calls(triggered_by=triggered_by)
+    )
+
+
+async def run_oktell_operator_calls_today_sync_async(triggered_by='scheduler-intraday'):
+    # Внутридневной добор звонков текущего дня.
+    loop = asyncio.get_event_loop()
+    def _run():
+        today = datetime.now().strftime('%Y-%m-%d')
+        return sync_oktell_operator_calls(day=today, triggered_by=triggered_by)
+    return await loop.run_in_executor(executor_pool, _run)
+
 # === Главный запуск =============================================================================================
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('reject_reval:'))
 async def handle_reject_reval(callback_query: types.CallbackQuery, state: FSMContext):
@@ -33180,6 +33443,35 @@ if __name__ == '__main__':
         )
     else:
         logging.info("Oktell operator statuses sync is disabled by OKTELL_SYNC_ENABLED")
+
+    # Синхронизация кол-ва звонков операторов из Oktell в daily_hours.calls (раздел «Учёт часов»).
+    if _oktell_calls_sync_enabled():
+        scheduler.add_job(
+            run_oktell_operator_calls_sync_async,
+            CronTrigger(
+                hour=OKTELL_CALLS_NIGHTLY_HOUR,
+                minute=OKTELL_CALLS_NIGHTLY_MINUTE,
+                timezone=ZoneInfo(OKTELL_SYNC_TIMEZONE)
+            ),
+            id='oktell_operator_calls_nightly',
+            misfire_grace_time=3600,
+            max_instances=1,
+            coalesce=True
+        )
+        scheduler.add_job(
+            run_oktell_operator_calls_today_sync_async,
+            CronTrigger(
+                hour=OKTELL_CALLS_INTRADAY_HOURS,
+                minute=OKTELL_CALLS_INTRADAY_MINUTE,
+                timezone=ZoneInfo(OKTELL_SYNC_TIMEZONE)
+            ),
+            id='oktell_operator_calls_intraday',
+            misfire_grace_time=1800,
+            max_instances=1,
+            coalesce=True
+        )
+    else:
+        logging.info("Oktell calls sync is disabled by OKTELL_CALLS_SYNC_ENABLED")
 
     # Ретеншн сырых событий статусов: удаляем operator_status_events старше горизонта хранения
     # (STATUS_EVENTS_RETENTION_DAYS, по умолчанию 120 дней). Сегменты (источник отчётов) не трогаем;
