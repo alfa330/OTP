@@ -11,6 +11,8 @@ class FourYouAccessControlTests(unittest.TestCase):
         cls.app_source = (ROOT / "src" / "App.jsx").read_text(encoding="utf-8-sig")
         cls.api_source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
         cls.db_source = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+        cls.lenta_source = (ROOT / "src" / "components" / "four_you" / "lenta.jsx").read_text(encoding="utf-8-sig")
+        cls.lenta_css = (ROOT / "src" / "components" / "four_you" / "lenta.css").read_text(encoding="utf-8-sig")
 
     def test_frontend_access_is_bound_to_the_two_user_ids(self):
         self.assertIn("const FOUR_YOU_ADMIN_USER_ID = 2;", self.app_source)
@@ -18,6 +20,7 @@ class FourYouAccessControlTests(unittest.TestCase):
         self.assertIn("Number(userLike?.id) === FOUR_YOU_ADMIN_USER_ID", self.app_source)
         self.assertIn("Number(userLike?.id) === FOUR_YOU_VIEWER_USER_ID", self.app_source)
         self.assertIn("normalizeRole(userLike?.role) === 'super_admin'", self.app_source)
+        self.assertIn('title="Раздел временно недоступен"', self.app_source)
 
     def test_backend_access_is_bound_to_id_and_admin_role(self):
         self.assertIn("FOUR_YOU_ADMIN_USER_ID = int(os.getenv('FOUR_YOU_ADMIN_USER_ID', '2'))", self.api_source)
@@ -40,6 +43,28 @@ class FourYouAccessControlTests(unittest.TestCase):
         self.assertIn("display_blob_path", self.db_source)
         self.assertIn("format='WEBP'", self.api_source)
         self.assertIn("max-age=31536000, immutable", self.api_source)
+
+    def test_lenta_preserves_original_motion_parameters(self):
+        for expected in (
+            "perspective: 4000",
+            "step: 160",
+            "dirX: 160",
+            "dirY: 40",
+            "dirZ: -45",
+            "selectedZ: 620",
+            "leftDownX: -2600",
+            "leftDownY: 1750",
+            "rightUpX: 2600",
+            "rightUpY: -1750",
+            "splitZ: -220",
+            "expandMixRef.current, expandTarget, 0.036",
+            "selectedMixRef.current, expandTarget, 0.13",
+        ):
+            self.assertIn(expected, self.lenta_source)
+        self.assertIn("--panel-w: clamp(300px, 31vw, 470px);", self.lenta_css)
+        self.assertIn("--panel-h: clamp(410px, 70vh, 630px);", self.lenta_css)
+        self.assertIn("window.innerWidth * 0.5", self.lenta_source)
+        self.assertIn("window.innerHeight * 0.5", self.lenta_source)
 
 
 if __name__ == "__main__":
