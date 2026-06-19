@@ -227,6 +227,24 @@ CHAT2DESK_API_PAGE_LIMIT = _env_int('CHAT2DESK_API_PAGE_LIMIT', 200, minimum=1, 
 CHAT2DESK_API_MAX_PAGES = _env_int('CHAT2DESK_API_MAX_PAGES', 100, minimum=1, maximum=1000)
 CHAT2DESK_OPERATOR_LOOKUP_CACHE = {}
 
+# === Oktell (операторское направление: статусы из телефонии) =====================================
+# Отдельная от Chat2Desk интеграция. Читаем переключения статусов прямо из БД Oktell через
+# HTTP-прокси /query (только SELECT, readonly) и кормим их в ТОТ ЖЕ конвейер, что и ручная
+# CSV-загрузка статусов. Chat2Desk не затрагивается.
+OKTELL_API_URL = (os.getenv('OKTELL_IP') or '').strip()
+OKTELL_API_TOKEN = (os.getenv('OKTELL_API_TOKEN') or '').strip()
+OKTELL_SYNC_ENABLED = _env_bool('OKTELL_SYNC_ENABLED', True)
+OKTELL_SYNC_TIMEZONE = (os.getenv('OKTELL_SYNC_TIMEZONE') or 'Asia/Almaty').strip() or 'Asia/Almaty'
+OKTELL_API_TIMEOUT_SECONDS = _env_int('OKTELL_API_TIMEOUT_SECONDS', 60, minimum=5, maximum=300)
+OKTELL_API_PAGE_SIZE = _env_int('OKTELL_API_PAGE_SIZE', 1000, minimum=1, maximum=1000)
+OKTELL_API_MAX_PAGES = _env_int('OKTELL_API_MAX_PAGES', 500, minimum=1, maximum=5000)
+OKTELL_SYNC_MAX_RANGE_DAYS = _env_int('OKTELL_SYNC_MAX_RANGE_DAYS', 3, minimum=1, maximum=31)
+OKTELL_SYNC_NIGHTLY_HOUR = _env_int('OKTELL_SYNC_NIGHTLY_HOUR', 5, minimum=0, maximum=23)
+OKTELL_SYNC_NIGHTLY_MINUTE = _env_int('OKTELL_SYNC_NIGHTLY_MINUTE', 0, minimum=0, maximum=59)
+# Внутридневной добор текущего дня: список часов (Asia/Almaty), через запятую.
+OKTELL_SYNC_INTRADAY_HOURS = (os.getenv('OKTELL_SYNC_INTRADAY_HOURS') or '10,13,16,19,22').strip()
+OKTELL_SYNC_INTRADAY_MINUTE = _env_int('OKTELL_SYNC_INTRADAY_MINUTE', 5, minimum=0, maximum=59)
+
 if not API_TOKEN:
     raise Exception("Переменная окружения BOT_TOKEN обязательна.")
 
@@ -18810,6 +18828,234 @@ def sync_chat2desk_operator_statuses(day=None, date_from=None, date_to=None, tri
             pass
 
 
+# === Oktell operator statuses (телефония) =======================================================
+# Тянем переключения статусов из БД Oktell по HTTP /query (один SELECT, readonly, постранично по
+# Enumerator из-за лимита прокси в 1000 строк) и прогоняем через тот же конвейер, что и ручная
+# CSV-загрузка: Oktell -> CSV-текст -> _status_import_parse_csv -> db.save_operator_status_import.
+# Только операторы (exclude_chat_managers=True). Chat2Desk — отдельное направление, не трогаем.
+
+def _oktell_sync_enabled():
+    return bool(OKTELL_SYNC_ENABLED)
+
+
+def _oktell_api_ready():
+    return bool(OKTELL_API_URL) and bool(OKTELL_API_TOKEN)
+
+
+def _oktell_parse_date(value):
+    text = str(value or '').strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, '%Y-%m-%d').date()
+    except Exception:
+        return None
+
+
+def _oktell_query(sql):
+    """Один read-only SELECT к прокси Oktell. Возвращает список dict (rows)."""
+    if not _oktell_api_ready():
+        raise RuntimeError("OKTELL_IP/OKTELL_API_TOKEN is not set")
+    resp = requests.post(
+        OKTELL_API_URL,
+        json={"sql": sql},
+        headers={"X-API-Key": OKTELL_API_TOKEN},
+        timeout=OKTELL_API_TIMEOUT_SECONDS,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Oktell proxy HTTP {resp.status_code}: {resp.text[:300]}")
+    payload = resp.json()
+    return payload.get('rows') or []
+
+
+def _oktell_status_page_sql(date_from_compact, date_to_excl_compact, cursor):
+    # Один SELECT, keyset по Enumerator. Прокси режет на 1000 строк -> листаем по курсору.
+    return (
+        "SELECT TOP 1000 "
+        "oi.Name AS OperatorName, "
+        "CASE h.State "
+        "WHEN 0 THEN N'Выключен' WHEN 1 THEN N'Готов' WHEN 2 THEN N'Перерыв' "
+        "WHEN 3 THEN N'Нет на месте' WHEN 5 THEN N'Занят' WHEN 6 THEN N'Зарезервировано' "
+        "WHEN 7 THEN N'Без телефона' "
+        "ELSE N'Неизвестно (' + CAST(h.State AS nvarchar(10)) + N')' END AS StateName, "
+        "COALESCE(ls.Name, ist.Name, NULLIF(LTRIM(RTRIM(h.Info)), N'')) AS StateNote, "
+        "CONVERT(varchar(19), h.TimeChange, 120) AS TimeChange, "
+        "h.Enumerator AS Enumerator "
+        "FROM oktell.dbo.A_UserStateHistory h "
+        "JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo oi ON oi.Id = h.UserId "
+        "LEFT JOIN oktell_settings.dbo.A_TaskManager_CardLunchStates ls ON ls.Id = h.ICode "
+        "LEFT JOIN oktell.dbo.A_UserStateInfoTypes ist ON ist.Id = h.ICode "
+        f"WHERE h.TimeChange >= '{date_from_compact}' AND h.TimeChange < '{date_to_excl_compact}' "
+        f"AND h.Enumerator > {int(cursor)} "
+        "ORDER BY h.Enumerator"
+    )
+
+
+def _oktell_fetch_status_rows(range_from, range_to):
+    """range_from/range_to — date (включительно). Постранично тянет строки статусов из Oktell."""
+    date_from_compact = range_from.strftime('%Y%m%d')
+    date_to_excl_compact = (range_to + timedelta(days=1)).strftime('%Y%m%d')
+    rows = []
+    cursor = -1
+    pages = 0
+    while pages < OKTELL_API_MAX_PAGES:
+        page = _oktell_query(_oktell_status_page_sql(date_from_compact, date_to_excl_compact, cursor))
+        if not page:
+            break
+        rows.extend(page)
+        pages += 1
+        try:
+            cursor = max(int(r.get('Enumerator')) for r in page)
+        except Exception:
+            break
+        if len(page) < OKTELL_API_PAGE_SIZE:
+            break
+    return rows, pages
+
+
+def _oktell_rows_to_csv(rows):
+    """Собираем CSV ровно в той форме, что ждёт _status_import_parse_csv (как при ручной загрузке)."""
+    buf = StringIO()
+    writer = csv.writer(buf, delimiter=';')
+    writer.writerow(['OperatorName', 'StateName', 'StateNote', 'TimeChange'])
+    for r in rows:
+        writer.writerow([
+            r.get('OperatorName') or '',
+            r.get('StateName') or '',
+            r.get('StateNote') or '',
+            r.get('TimeChange') or '',
+        ])
+    return buf.getvalue()
+
+
+def _oktell_sync_target_days(day=None, date_from=None, date_to=None):
+    """Возвращает список date (включительно). day переопределяет диапазон. По умолчанию — вчера."""
+    if day:
+        d = _oktell_parse_date(day)
+        if d is None:
+            raise ValueError("date must be in YYYY-MM-DD format")
+        return [d]
+    if date_from or date_to:
+        start = _oktell_parse_date(date_from or date_to)
+        end = _oktell_parse_date(date_to or date_from)
+        if start is None or end is None:
+            raise ValueError("date_from and date_to must be in YYYY-MM-DD format")
+        if end < start:
+            raise ValueError("date_to must be greater than or equal to date_from")
+        span = (end - start).days + 1
+        if span > OKTELL_SYNC_MAX_RANGE_DAYS:
+            raise ValueError(f"Период синхронизации Oktell не может быть больше {OKTELL_SYNC_MAX_RANGE_DAYS} дней")
+        return [start + timedelta(days=i) for i in range(span)]
+    today = datetime.now().date()
+    return [today - timedelta(days=1)]
+
+
+def sync_oktell_operator_statuses(day=None, date_from=None, date_to=None, triggered_by='scheduler', force=False, imported_by=None):
+    if not force and not _oktell_sync_enabled():
+        logging.info("Oktell operator statuses sync skipped: disabled")
+        return {'status': 'skipped', 'reason': 'disabled'}
+    if not _oktell_api_ready():
+        logging.warning("Oktell operator statuses sync skipped: OKTELL_IP/OKTELL_API_TOKEN is not set")
+        return {'status': 'skipped', 'reason': 'missing_token'}
+
+    # Резолвим диапазон до захвата лока, чтобы ошибки валидации не держали лок.
+    target_days = _oktell_sync_target_days(day, date_from=date_from, date_to=date_to)
+    range_from = target_days[0]
+    range_to = target_days[-1]
+
+    if not STATUS_IMPORT_LOCK.acquire(blocking=False):
+        logging.warning("Oktell operator statuses sync skipped: status import is already running")
+        return {'status': 'skipped', 'reason': 'locked'}
+
+    started = time.time()
+    try:
+        operator_lookup = _status_import_build_operator_lookup(exclude_chat_managers=True)
+        rows, pages = _oktell_fetch_status_rows(range_from, range_to)
+        csv_text = _oktell_rows_to_csv(rows)
+        parsed = _status_import_parse_csv(
+            csv_text,
+            operator_lookup,
+            max_source_rows=STATUS_IMPORT_MAX_SOURCE_ROWS,
+            invalid_rows_preview_limit=STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT,
+        )
+        events_for_save = parsed.get('events') or []
+        save_summary = {
+            'batch_id': None,
+            'source_rows': int(parsed.get('source_rows') or 0),
+            'valid_events': int(parsed.get('valid_events') or 0),
+            'matched_events': 0,
+            'segments_saved': 0,
+            'deleted_events': 0,
+            'deleted_segments': 0,
+            'invalid_rows_count': int(parsed.get('invalid_rows_count') or 0),
+            'parse_errors_count': int(parsed.get('parse_errors_count') or 0),
+            'operators_count': 0,
+            'open_tail_events': int(parsed.get('open_tail_events') or 0),
+            'zero_or_negative_transitions': int(parsed.get('zero_or_negative_transitions') or 0),
+            'date_from': None,
+            'date_to': None,
+        }
+        if events_for_save:
+            save_summary = db.save_operator_status_import(
+                events=events_for_save,
+                segments=parsed.get('segments') or [],
+                imported_by=imported_by,
+                summary={
+                    'source_rows': int(parsed.get('source_rows') or 0),
+                    'valid_events': int(parsed.get('valid_events') or 0),
+                    'invalid_rows_count': int(parsed.get('invalid_rows_count') or 0),
+                    'parse_errors_count': int(parsed.get('parse_errors_count') or 0),
+                    'open_tail_events': int(parsed.get('open_tail_events') or 0),
+                    'zero_or_negative_transitions': int(parsed.get('zero_or_negative_transitions') or 0),
+                    'action_events_count': int(parsed.get('action_events_count') or 0),
+                    'meta': {
+                        'api': 'sync_statuses_oktell',
+                        'source': 'oktell_operator_events',
+                        'date_from': range_from.strftime('%Y-%m-%d'),
+                        'date_to': range_to.strftime('%Y-%m-%d'),
+                        'oktell_rows': len(rows),
+                        'pages': int(pages),
+                    }
+                }
+            )
+
+        logging.info(
+            "Oktell operator statuses sync %s..%s: oktell_rows=%s matched=%s segments=%s invalid=%s pages=%s",
+            range_from.strftime('%Y-%m-%d'), range_to.strftime('%Y-%m-%d'),
+            len(rows),
+            int((save_summary or {}).get('matched_events') or 0),
+            int((save_summary or {}).get('segments_saved') or 0),
+            int(parsed.get('invalid_rows_count') or 0),
+            pages,
+        )
+        return {
+            'status': 'success',
+            'triggered_by': triggered_by,
+            'date_from': range_from.strftime('%Y-%m-%d'),
+            'date_to': range_to.strftime('%Y-%m-%d'),
+            'oktell_rows': len(rows),
+            'pages': int(pages),
+            'import': save_summary,
+            'invalid_rows_preview': parsed.get('invalid_rows_preview') or [],
+            'elapsed_seconds': round(time.time() - started, 2),
+        }
+    except Exception as exc:
+        logging.exception("Oktell operator statuses sync failed")
+        return {
+            'status': 'failed',
+            'triggered_by': triggered_by,
+            'date_from': range_from.strftime('%Y-%m-%d'),
+            'date_to': range_to.strftime('%Y-%m-%d'),
+            'error': str(exc),
+            'elapsed_seconds': round(time.time() - started, 2),
+        }
+    finally:
+        try:
+            STATUS_IMPORT_LOCK.release()
+        except Exception:
+            pass
+
+
 def _ws_time_to_minutes(value):
     if value is None:
         return 0
@@ -21330,6 +21576,83 @@ def sync_work_schedules_statuses_chat2desk():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error syncing Chat2Desk operator statuses: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/work_schedules/sync_statuses_oktell', methods=['POST'])
+@require_api_key
+def sync_work_schedules_statuses_oktell():
+    """Ручной запуск синхронизации статусов операторов из Oktell за день/период (до 3 дней)."""
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not (_is_admin_role(requester[3]) or _is_supervisor_role(requester[3])):
+            return jsonify({"error": "Forbidden"}), 403
+
+        payload = request.get_json(silent=True) or {}
+        target_day = payload.get('date') or request.args.get('date') or None
+        target_from = (
+            payload.get('date_from') or payload.get('start_date') or
+            request.args.get('date_from') or request.args.get('start_date') or None
+        )
+        target_to = (
+            payload.get('date_to') or payload.get('end_date') or
+            request.args.get('date_to') or request.args.get('end_date') or None
+        )
+        if target_day and _oktell_parse_date(target_day) is None:
+            return jsonify({"error": "date must be in YYYY-MM-DD format"}), 400
+        if target_day and (target_from or target_to):
+            return jsonify({"error": "Use either date or date_from/date_to, not both"}), 400
+        if target_from or target_to:
+            start_day = _oktell_parse_date(target_from)
+            end_day = _oktell_parse_date(target_to or target_from)
+            if start_day is None or end_day is None:
+                return jsonify({"error": "date_from and date_to must be in YYYY-MM-DD format"}), 400
+            if end_day < start_day:
+                return jsonify({"error": "date_to must be greater than or equal to date_from"}), 400
+            if (end_day - start_day).days + 1 > OKTELL_SYNC_MAX_RANGE_DAYS:
+                return jsonify({"error": f"Период синхронизации Oktell не может быть больше {OKTELL_SYNC_MAX_RANGE_DAYS} дней"}), 400
+            target_from = start_day.strftime('%Y-%m-%d')
+            target_to = end_day.strftime('%Y-%m-%d')
+
+        result = sync_oktell_operator_statuses(
+            day=target_day,
+            date_from=target_from,
+            date_to=target_to,
+            triggered_by='manual',
+            force=True,
+            imported_by=requester_id
+        )
+        status = result.get('status')
+        if status == 'skipped':
+            reason = result.get('reason')
+            if reason == 'missing_token':
+                return jsonify({"error": "OKTELL_IP/OKTELL_API_TOKEN не задан", "sync": result}), 400
+            if reason == 'locked':
+                return jsonify({
+                    "error": "Импорт статусов уже выполняется. Повторите через несколько секунд.",
+                    "sync": result
+                }), 429
+            return jsonify({"error": f"Синхронизация Oktell пропущена: {reason or 'unknown'}", "sync": result}), 400
+        if status == 'failed':
+            return jsonify({"error": result.get('error') or "Синхронизация статусов Oktell не выполнена", "sync": result}), 502
+
+        return jsonify({
+            "status": "success",
+            "message": "Статусы операторов синхронизированы из Oktell",
+            "import": result.get('import') or {},
+            "sync": result,
+            "warnings": {
+                "invalid_rows_preview": result.get('invalid_rows_preview') or []
+            }
+        }), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error syncing Oktell operator statuses: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 
@@ -32289,6 +32612,24 @@ async def run_chat2desk_operator_statuses_sync_async(triggered_by='scheduler'):
         lambda: sync_chat2desk_operator_statuses(triggered_by=triggered_by)
     )
 
+
+async def run_oktell_operator_statuses_sync_async(triggered_by='scheduler'):
+    # Ночной прогон: полный предыдущий день (по умолчанию sync тянет вчера).
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        executor_pool,
+        lambda: sync_oktell_operator_statuses(triggered_by=triggered_by)
+    )
+
+
+async def run_oktell_operator_statuses_today_sync_async(triggered_by='scheduler-intraday'):
+    # Внутридневной добор текущего дня.
+    loop = asyncio.get_event_loop()
+    def _run():
+        today = datetime.now().strftime('%Y-%m-%d')
+        return sync_oktell_operator_statuses(day=today, triggered_by=triggered_by)
+    return await loop.run_in_executor(executor_pool, _run)
+
 # === Главный запуск =============================================================================================
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('reject_reval:'))
 async def handle_reject_reval(callback_query: types.CallbackQuery, state: FSMContext):
@@ -32448,6 +32789,36 @@ if __name__ == '__main__':
         )
     elif _chat2desk_sync_enabled():
         logging.info("Chat2Desk operator statuses sync is disabled by CHAT2DESK_STATUS_SYNC_ENABLED")
+
+    # Синхронизация статусов операторов из Oktell (телефония). Ночью — полный предыдущий день,
+    # днём — несколько раз добираем текущий день. Отдельные job_id, Chat2Desk не затрагивается.
+    if _oktell_sync_enabled():
+        scheduler.add_job(
+            run_oktell_operator_statuses_sync_async,
+            CronTrigger(
+                hour=OKTELL_SYNC_NIGHTLY_HOUR,
+                minute=OKTELL_SYNC_NIGHTLY_MINUTE,
+                timezone=ZoneInfo(OKTELL_SYNC_TIMEZONE)
+            ),
+            id='oktell_operator_statuses_nightly',
+            misfire_grace_time=3600,
+            max_instances=1,
+            coalesce=True
+        )
+        scheduler.add_job(
+            run_oktell_operator_statuses_today_sync_async,
+            CronTrigger(
+                hour=OKTELL_SYNC_INTRADAY_HOURS,
+                minute=OKTELL_SYNC_INTRADAY_MINUTE,
+                timezone=ZoneInfo(OKTELL_SYNC_TIMEZONE)
+            ),
+            id='oktell_operator_statuses_intraday',
+            misfire_grace_time=1800,
+            max_instances=1,
+            coalesce=True
+        )
+    else:
+        logging.info("Oktell operator statuses sync is disabled by OKTELL_SYNC_ENABLED")
 
     # Ретеншн сырых событий статусов: удаляем operator_status_events старше горизонта хранения
     # (STATUS_EVENTS_RETENTION_DAYS, по умолчанию 120 дней). Сегменты (источник отчётов) не трогаем;
