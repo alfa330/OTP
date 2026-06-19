@@ -834,6 +834,29 @@ class Database:
                 ALTER TABLE users
                 ADD COLUMN IF NOT EXISTS rate_change_report_enabled BOOLEAN NOT NULL DEFAULT FALSE;
             """)
+            # Приватная фотолента "4 You". В таблице храним только ссылки на
+            # оптимизированные варианты; сами изображения остаются в закрытом GCS.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS four_you_images (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    preview_bucket VARCHAR(255) NOT NULL,
+                    preview_blob_path TEXT NOT NULL,
+                    display_bucket VARCHAR(255) NOT NULL,
+                    display_blob_path TEXT NOT NULL,
+                    original_name VARCHAR(255) NOT NULL,
+                    width INTEGER NOT NULL,
+                    height INTEGER NOT NULL,
+                    preview_file_size INTEGER NOT NULL DEFAULT 0,
+                    display_file_size INTEGER NOT NULL DEFAULT 0,
+                    uploaded_by INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+                    sort_order BIGINT NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_four_you_images_order
+                ON four_you_images(sort_order, created_at, id);
+            """)
             # ──────────────────────────────────────────────────────────────
             # ГРУППЫ: историческая принадлежность операторов и СВ по датам +
             # модель расчёта на уровне группы. Это источник истины принадлежности
@@ -32664,6 +32687,102 @@ class Database:
                 "gcs_bucket": row[7],
                 "gcs_blob_path": row[8],
                 "task_id": row[9]
+            }
+
+    def list_four_you_images(self):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    id,
+                    preview_bucket,
+                    preview_blob_path,
+                    display_bucket,
+                    display_blob_path,
+                    original_name,
+                    width,
+                    height,
+                    preview_file_size,
+                    display_file_size,
+                    uploaded_by,
+                    sort_order,
+                    created_at
+                FROM four_you_images
+                ORDER BY sort_order ASC, created_at ASC, id ASC
+            """)
+            return [
+                {
+                    "id": str(row[0]),
+                    "preview_bucket": row[1],
+                    "preview_blob_path": row[2],
+                    "display_bucket": row[3],
+                    "display_blob_path": row[4],
+                    "original_name": row[5],
+                    "width": int(row[6] or 0),
+                    "height": int(row[7] or 0),
+                    "preview_file_size": int(row[8] or 0),
+                    "display_file_size": int(row[9] or 0),
+                    "uploaded_by": int(row[10]),
+                    "sort_order": int(row[11] or 0),
+                    "created_at": row[12].isoformat() if row[12] else None,
+                }
+                for row in cursor.fetchall()
+            ]
+
+    def create_four_you_image(self, image_data: dict):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO four_you_images (
+                    preview_bucket,
+                    preview_blob_path,
+                    display_bucket,
+                    display_blob_path,
+                    original_name,
+                    width,
+                    height,
+                    preview_file_size,
+                    display_file_size,
+                    uploaded_by,
+                    sort_order
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                image_data["preview_bucket"],
+                image_data["preview_blob_path"],
+                image_data["display_bucket"],
+                image_data["display_blob_path"],
+                image_data["original_name"],
+                int(image_data["width"]),
+                int(image_data["height"]),
+                int(image_data.get("preview_file_size") or 0),
+                int(image_data.get("display_file_size") or 0),
+                int(image_data["uploaded_by"]),
+                int(image_data.get("sort_order") or 0),
+            ))
+            row = cursor.fetchone()
+            return str(row[0]) if row else None
+
+    def delete_four_you_image(self, image_id: str):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                DELETE FROM four_you_images
+                WHERE id = %s
+                RETURNING
+                    id,
+                    preview_bucket,
+                    preview_blob_path,
+                    display_bucket,
+                    display_blob_path
+            """, (str(image_id),))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return {
+                "id": str(row[0]),
+                "preview_bucket": row[1],
+                "preview_blob_path": row[2],
+                "display_bucket": row[3],
+                "display_blob_path": row[4],
             }
 
     def save_ai_feedback_cache(self, operator_id: int, month: str, feedback_data: dict):

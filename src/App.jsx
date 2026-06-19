@@ -112,6 +112,7 @@ const ResourceFteView = lazyWithRetry(() => import('./components/resources/Resou
 const ShiftAuctionView = lazyWithRetry(() => import('./components/resources/ShiftAuctionView'));
 const DepartmentsView = lazyWithRetry(() => import('./components/departments/DepartmentsView'));
 const GroupsView = lazyWithRetry(() => import('./components/groups/GroupsView'));
+const FourYouView = lazyWithRetry(() => import('./components/four_you/lenta'));
 
 
 if (typeof window !== 'undefined') {
@@ -131,6 +132,8 @@ const AUTH_TRANSPORT_STORAGE_KEY = 'otp_auth_transport';
 const ACCESS_TOKEN_STORAGE_KEY = 'otp_access_token';
 const REFRESH_TOKEN_STORAGE_KEY = 'otp_refresh_token';
 const ADMIN_SESSIONS_PAGE_SIZE = 100;
+const FOUR_YOU_ADMIN_USER_ID = 2;
+const FOUR_YOU_VIEWER_USER_ID = 241;
 const DEFAULT_USERS_REPORT_OPTIONS = {
     sheetMode: 'summary_and_supervisors',
     includeFired: false,
@@ -147,6 +150,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     departments: 'Departments',
     employees: 'Employees',
     evaluation: 'My evaluations',
+    four_you: '4 You',
     hours: 'Hours',
     lms: 'LMS',
     manage_admins: 'Manage admins',
@@ -934,6 +938,16 @@ const canAccessResourceFteSectionForUser = (userLike) => {
     const role = normalizeRole(userLike?.role);
     return role === 'super_admin' || role === 'admin' || isSupervisorRole(role);
 };
+
+const canManageFourYouForUser = (userLike) => (
+    normalizeRole(userLike?.role) === 'super_admin' &&
+    Number(userLike?.id) === FOUR_YOU_ADMIN_USER_ID
+);
+
+const canAccessFourYouForUser = (userLike) => (
+    canManageFourYouForUser(userLike) ||
+    Number(userLike?.id) === FOUR_YOU_VIEWER_USER_ID
+);
 
 const DEV_LETTER_ACCESS_OPERATOR_NAME = '\u041d\u0443\u0440\u0448\u043e\u0432\u0430 \u0410\u0439\u0448\u0430 \u041a\u0430\u043d\u0430\u0433\u0430\u0442\u043a\u044b\u0437\u044b';
 const normalizeDevLetterAccessName = (value) =>
@@ -31306,6 +31320,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canUsePinnedTasks = isAdminLikeRole || isDepartmentManager || currentUserRole === 'trainer';
             const canAccessLmsSection = canAccessLmsSectionForUser(user);
             const canAccessResourceFteSection = canAccessResourceFteSectionForUser(user);
+            const canAccessFourYouSection = canAccessFourYouForUser(user);
+            const canManageFourYouSection = canManageFourYouForUser(user);
             const canAccessDevLetterSection = canAccessDevLetterForUser(user);
             const canChangeAccountAvatar = isAdminLikeRole || isDepartmentManager;
             const [isAuthInitializing, setIsAuthInitializing] = useState(true);
@@ -34567,7 +34583,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const canOpenRequestedView =
                     requestedViewFromUrl &&
                     (requestedViewFromUrl !== 'lms' || canAccessLmsSection) &&
-                    (requestedViewFromUrl !== 'resource_fte' || canAccessResourceFteSection);
+                    (requestedViewFromUrl !== 'resource_fte' || canAccessResourceFteSection) &&
+                    (requestedViewFromUrl !== 'four_you' || canAccessFourYouSection);
                 if (canOpenRequestedView) {
                     setView(requestedViewFromUrl);
                     return;
@@ -34577,7 +34594,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                 else if (isSupervisorRole(user?.role)) setView('operators');
                 else setView('hours');
-            }, [user, user?.id, user?.role, isAdminLikeRole, canAccessLmsSection, canAccessResourceFteSection, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, isAdminLikeRole, canAccessLmsSection, canAccessResourceFteSection, canAccessFourYouSection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks' || !requestedTaskIdFromLocation) return;
@@ -34612,7 +34629,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     else if (user?.role === 'trainer') setView('surveys');
                     else setView('hours');
                 }
-            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, view, canAccessLmsSection, canAccessResourceFteSection]);
+                if (view === 'four_you' && !canAccessFourYouSection) {
+                    if (isAdminLikeRole) setView('sv_list');
+                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
+                    else if (isSupervisorRole(user?.role)) setView('operators');
+                    else if (user?.role === 'trainer') setView('surveys');
+                    else setView('hours');
+                }
+            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, view, canAccessLmsSection, canAccessResourceFteSection, canAccessFourYouSection]);
 
             useEffect(() => {
                 // Only mirror `view` into the URL after authentication has
@@ -39661,13 +39685,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <span className="bg-white text-blue-800 px-3 py-1.5 rounded-l-2xl shadow-md text-3xl border border-white">
                                       iCORE
                                     </span>
-                                    <span className="bg-blue-800 text-indigo-700 px-2 py-1.5 rounded-r-2xl border-t border-b border-r border-white text-3xl -ml-px flex items-center">
+                                    <button
+                                      type="button"
+                                      onClick={canManageFourYouSection ? (e) => handleSidebarViewNavigation(e, 'four_you') : undefined}
+                                      aria-label={canManageFourYouSection ? 'Открыть 4 You' : undefined}
+                                      className={`bg-blue-800 text-indigo-700 px-2 py-1.5 rounded-r-2xl border-t border-b border-r border-white text-3xl -ml-px flex items-center ${canManageFourYouSection ? 'cursor-pointer hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-white/80' : 'cursor-default'}`}
+                                    >
                                       <img src="https://iili.io/Kfw7PQp.png" alt="Site Icon" className="w-10 h-10 object-contain"/>
-                                    </span>
+                                    </button>
                                   </span>
                                   {/* Мини логотип для свёрнутого состояния */}
                                   <span className="sidebar-logo-mini">
-                                    <img src="https://iili.io/Kfw7PQp.png" alt="Site Icon" className="w-10 h-10 object-contain"/>
+                                    <button
+                                      type="button"
+                                      onClick={canManageFourYouSection ? (e) => handleSidebarViewNavigation(e, 'four_you') : undefined}
+                                      aria-label={canManageFourYouSection ? 'Открыть 4 You' : undefined}
+                                      className={canManageFourYouSection ? 'cursor-pointer rounded-xl focus:outline-none focus:ring-2 focus:ring-white/80' : 'cursor-default'}
+                                    >
+                                      <img src="https://iili.io/Kfw7PQp.png" alt="Site Icon" className="w-10 h-10 object-contain"/>
+                                    </button>
                                   </span>
                                 </h1>
                                 <ul ref={sidebarMenuScrollRef} className={`space-y-2 flex-1 min-h-0 sidebar-menu-scroll`}>
@@ -40171,6 +40207,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </>
                                     )}
 
+                                    {canAccessFourYouSection && !canManageFourYouSection && (
+                                        <li>
+                                            <button
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'four_you')}
+                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'four_you' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <FaIcon className="fas fa-heart text-rose-300" />
+                                                <span className="sidebar-text">4 You</span>
+                                            </button>
+                                        </li>
+                                    )}
+
                                     {canAccessDevLetterSection && (
                                         <li>
                                             <button
@@ -40280,6 +40328,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 isSuperAdmin,
                 canAccessLmsSection,
                 canAccessResourceFteSection,
+                canAccessFourYouSection,
+                canManageFourYouSection,
                 canAccessDevLetterSection,
                 canChangeAccountAvatar,
                 showSidebarAccountDropdown,
@@ -40534,13 +40584,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 ? 'p-0 h-screen overflow-hidden'
                                 : (canAccessLmsSection && view === 'lms')
                                     ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
-                                    : (view === 'tasks' || view === 'work_schedules' || view === 'shift_auction' || (view === 'resource_fte' && canAccessResourceFteSection))
+                                    : (view === 'four_you' || view === 'tasks' || view === 'work_schedules' || view === 'shift_auction' || (view === 'resource_fte' && canAccessResourceFteSection))
                                         ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
                                     : 'p-8 bg-gray-50 min-h-screen overflow-y-auto'
                         } ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}
                         style={isCallEvaluationView ? { backgroundColor: '#f7f7f5' } : undefined}
                     >
-                        {birthdayBannerVisible && (
+                        {birthdayBannerVisible && view !== 'four_you' && (
                         <div className="relative overflow-hidden rounded-2xl border border-amber-200/70 bg-gradient-to-r from-amber-50 via-yellow-50 to-rose-50 px-4 py-4 mb-6 shadow-lg">
                             <div
                                 className="pointer-events-none absolute inset-0 opacity-70"
@@ -40571,6 +40621,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </button>
                             </div>
                         </div>
+                        )}
+                        {canAccessFourYouSection && view === 'four_you' && (
+                            <Suspense fallback={<div className="h-screen flex items-center justify-center text-sm text-slate-500">Загрузка 4 You…</div>}>
+                                <FourYouView
+                                    user={user}
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    showToast={showToast}
+                                />
+                            </Suspense>
                         )}
                         {canAccessLmsSection && view === 'lms' && (
                             <LmsView
