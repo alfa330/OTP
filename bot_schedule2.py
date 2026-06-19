@@ -1876,6 +1876,12 @@ AVATAR_UPLOAD_FOLDER = (os.getenv('AVATAR_UPLOAD_FOLDER') or 'AvatarUploads/').s
 AVATAR_THUMBNAIL_SUFFIX = (os.getenv('AVATAR_THUMBNAIL_SUFFIX') or '128').strip() or '128'
 AVATAR_SIGNED_URL_CACHE = {}
 AVATAR_SIGNED_URL_CACHE_LOCK = threading.Lock()
+FOUR_YOU_ADMIN_USER_ID = int(os.getenv('FOUR_YOU_ADMIN_USER_ID', '2'))
+FOUR_YOU_VIEWER_USER_ID = int(os.getenv('FOUR_YOU_VIEWER_USER_ID', '241') or 241)
+FOUR_YOU_MAX_FILES_PER_UPLOAD = int(os.getenv('FOUR_YOU_MAX_FILES_PER_UPLOAD', '20'))
+FOUR_YOU_MAX_FILE_SIZE_BYTES = int(os.getenv('FOUR_YOU_MAX_FILE_SIZE_BYTES', str(15 * 1024 * 1024)))
+FOUR_YOU_MAX_IMAGE_PIXELS = int(os.getenv('FOUR_YOU_MAX_IMAGE_PIXELS', str(40_000_000)))
+FOUR_YOU_UPLOAD_FOLDER = (os.getenv('FOUR_YOU_UPLOAD_FOLDER') or 'FourYou/').strip()
 TASK_TAG_LABELS = {
     'task': 'Задача',
     'problem': 'Проблема',
@@ -2780,6 +2786,124 @@ def _delete_avatar_blobs(bucket_name, *blob_paths):
             bucket.blob(blob_path).delete()
         except Exception:
             pass
+
+
+def _resolve_four_you_viewer_user_id():
+    return FOUR_YOU_VIEWER_USER_ID if FOUR_YOU_VIEWER_USER_ID > 0 else None
+
+
+def _four_you_access_for_requester(requester_id, requester):
+    requester_role = _normalize_user_role(requester[3] if requester else None)
+    requester_id = int(requester_id or 0)
+    requester_status = str(requester[11] if requester and len(requester) > 11 else '').strip().lower()
+    if requester_status in ('fired', 'dismissal'):
+        return False, False
+    can_upload = requester_role == 'super_admin' and requester_id == FOUR_YOU_ADMIN_USER_ID
+    viewer_user_id = _resolve_four_you_viewer_user_id()
+    can_view = can_upload or (viewer_user_id is not None and requester_id == int(viewer_user_id))
+    return can_view, can_upload
+
+
+def _four_you_route_guard(require_upload=False):
+    requester_id, requester, auth_error = _get_authenticated_requester()
+    if auth_error:
+        message, status_code = auth_error
+        return None, None, jsonify({"error": message}), status_code
+    can_view, can_upload = _four_you_access_for_requester(requester_id, requester)
+    if not can_view or (require_upload and not can_upload):
+        return None, None, jsonify({"error": "Access denied"}), 403
+    return requester_id, can_upload, None, None
+
+
+def _four_you_bucket_name():
+    return (
+        (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_FOUR_YOU') or '').strip()
+        or (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS') or '').strip()
+        or (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET') or '').strip()
+    )
+
+
+def _four_you_convert_image_variants(raw_bytes):
+    if Image is None:
+        raise RuntimeError("Image processing is unavailable")
+    try:
+        with Image.open(BytesIO(raw_bytes)) as source:
+            source_width, source_height = source.size
+            if source_width <= 0 or source_height <= 0 or (source_width * source_height) > FOUR_YOU_MAX_IMAGE_PIXELS:
+                raise ValueError("Image dimensions are not allowed")
+            source.load()
+            image = ImageOps.exif_transpose(source) if ImageOps is not None else source.copy()
+            width, height = image.size
+            if image.mode not in ('RGB', 'RGBA'):
+                has_alpha = 'A' in image.getbands() or 'transparency' in image.info
+                image = image.convert('RGBA' if has_alpha else 'RGB')
+
+            resample = Image.Resampling.LANCZOS if hasattr(Image, 'Resampling') else Image.LANCZOS
+
+            def _encode(max_side, quality):
+                variant = image.copy()
+                if max(variant.size) > max_side:
+                    variant.thumbnail((max_side, max_side), resample)
+                output = BytesIO()
+                variant.save(
+                    output,
+                    format='WEBP',
+                    quality=quality,
+                    method=6,
+                    optimize=True
+                )
+                return output.getvalue(), variant.size
+
+            preview_bytes, _ = _encode(840, 80)
+            display_bytes, display_size = _encode(1920, 88)
+            return preview_bytes, display_bytes, int(display_size[0]), int(display_size[1])
+    except (ValueError, RuntimeError):
+        raise
+    except Exception as error:
+        raise ValueError("Unsupported or damaged image") from error
+
+
+def _four_you_blob_paths():
+    folder = FOUR_YOU_UPLOAD_FOLDER.strip('/')
+    prefix = f"{folder}/" if folder else ""
+    date_prefix = datetime.utcnow().strftime('%Y/%m/%d')
+    random_id = uuid.uuid4().hex
+    base_path = f"{prefix}{date_prefix}/{random_id}"
+    return f"{base_path}_preview.webp", f"{base_path}_display.webp"
+
+
+def _four_you_image_payload(image_row):
+    return {
+        "id": image_row.get("id"),
+        "preview_url": _build_avatar_signed_url(
+            image_row.get("preview_bucket"),
+            image_row.get("preview_blob_path")
+        ),
+        "display_url": _build_avatar_signed_url(
+            image_row.get("display_bucket"),
+            image_row.get("display_blob_path")
+        ),
+        "width": int(image_row.get("width") or 0),
+        "height": int(image_row.get("height") or 0),
+        "created_at": image_row.get("created_at"),
+    }
+
+
+def _delete_four_you_blobs(image_row):
+    refs = {
+        (str(image_row.get("preview_bucket") or '').strip(), str(image_row.get("preview_blob_path") or '').strip()),
+        (str(image_row.get("display_bucket") or '').strip(), str(image_row.get("display_blob_path") or '').strip()),
+    }
+    client = None
+    for bucket_name, blob_path in refs:
+        if not bucket_name or not blob_path:
+            continue
+        try:
+            if client is None:
+                client = get_gcs_client()
+            client.bucket(bucket_name).blob(blob_path).delete()
+        except Exception:
+            logging.warning("Failed to delete 4 You blob %s/%s", bucket_name, blob_path, exc_info=True)
 
 
 def _resolve_avatar_target_user(requester, requester_id, target_user_id):
@@ -4906,6 +5030,127 @@ def manage_user_avatar():
     except Exception as e:
         logging.error(f"Error in /api/user/avatar: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/four_you/images', methods=['GET', 'POST', 'OPTIONS'])
+@require_auth
+def four_you_images():
+    requester_id, can_upload, guard_response, guard_status = _four_you_route_guard(
+        require_upload=request.method == 'POST'
+    )
+    if guard_response is not None:
+        return guard_response, guard_status
+
+    if request.method == 'GET':
+        rows = db.list_four_you_images()
+        response = jsonify({
+            "status": "success",
+            "can_upload": bool(can_upload),
+            "images": [_four_you_image_payload(row) for row in rows],
+        })
+        response.headers['Cache-Control'] = 'private, max-age=30'
+        return response, 200
+
+    files = [item for item in request.files.getlist('images') if item and item.filename]
+    if not files:
+        single_file = request.files.get('image')
+        files = [single_file] if single_file and single_file.filename else []
+    if not files:
+        return jsonify({"error": "Выберите изображения"}), 400
+    if len(files) > FOUR_YOU_MAX_FILES_PER_UPLOAD:
+        return jsonify({"error": f"За один раз можно загрузить не более {FOUR_YOU_MAX_FILES_PER_UPLOAD} изображений"}), 400
+
+    bucket_name = _four_you_bucket_name()
+    if not bucket_name:
+        return jsonify({"error": "Хранилище 4 You не настроено"}), 500
+
+    created_ids = []
+    uploaded_rows = []
+    try:
+        client = get_gcs_client()
+        bucket = client.bucket(bucket_name)
+        order_seed = time.time_ns()
+
+        for index, file_storage in enumerate(files):
+            raw_bytes = file_storage.read() or b''
+            if not raw_bytes:
+                raise ValueError(f"Файл «{file_storage.filename}» пуст")
+            if len(raw_bytes) > FOUR_YOU_MAX_FILE_SIZE_BYTES:
+                max_mb = FOUR_YOU_MAX_FILE_SIZE_BYTES // (1024 * 1024)
+                raise ValueError(f"Файл «{file_storage.filename}» превышает лимит {max_mb} МБ")
+            content_type = str(file_storage.mimetype or '').strip().lower()
+            if not content_type.startswith('image/'):
+                raise ValueError(f"Файл «{file_storage.filename}» не является изображением")
+
+            preview_bytes, display_bytes, width, height = _four_you_convert_image_variants(raw_bytes)
+            preview_path, display_path = _four_you_blob_paths()
+            uploaded_row = {
+                "preview_bucket": bucket_name,
+                "preview_blob_path": preview_path,
+                "display_bucket": bucket_name,
+                "display_blob_path": display_path,
+            }
+            uploaded_rows.append(uploaded_row)
+
+            preview_blob = bucket.blob(preview_path)
+            preview_blob.cache_control = 'private, max-age=31536000, immutable'
+            preview_blob.upload_from_string(preview_bytes, content_type='image/webp')
+
+            display_blob = bucket.blob(display_path)
+            display_blob.cache_control = 'private, max-age=31536000, immutable'
+            display_blob.upload_from_string(display_bytes, content_type='image/webp')
+
+            original_name = (secure_filename(file_storage.filename) or f'image-{index + 1}')[:255]
+            image_id = db.create_four_you_image({
+                **uploaded_row,
+                "original_name": original_name,
+                "width": width,
+                "height": height,
+                "preview_file_size": len(preview_bytes),
+                "display_file_size": len(display_bytes),
+                "uploaded_by": requester_id,
+                "sort_order": order_seed + index,
+            })
+            if not image_id:
+                raise RuntimeError("Не удалось сохранить изображение")
+            created_ids.append(image_id)
+
+        rows = db.list_four_you_images()
+        return jsonify({
+            "status": "success",
+            "can_upload": True,
+            "images": [_four_you_image_payload(row) for row in rows],
+        }), 201
+    except Exception as error:
+        for image_id in created_ids:
+            try:
+                db.delete_four_you_image(image_id)
+            except Exception:
+                logging.warning("Failed to roll back 4 You image metadata %s", image_id, exc_info=True)
+        for uploaded_row in uploaded_rows:
+            _delete_four_you_blobs(uploaded_row)
+        if isinstance(error, ValueError):
+            return jsonify({"error": str(error)}), 400
+        logging.error("4 You upload failed: %s", error, exc_info=True)
+        return jsonify({"error": "Не удалось загрузить изображения"}), 500
+
+
+@app.route('/api/four_you/images/<image_id>', methods=['DELETE', 'OPTIONS'])
+@require_auth
+def delete_four_you_image(image_id):
+    _, _, guard_response, guard_status = _four_you_route_guard(require_upload=True)
+    if guard_response is not None:
+        return guard_response, guard_status
+    try:
+        normalized_image_id = str(uuid.UUID(str(image_id)))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Некорректный идентификатор изображения"}), 400
+
+    deleted_row = db.delete_four_you_image(normalized_image_id)
+    if not deleted_row:
+        return jsonify({"error": "Изображение не найдено"}), 404
+    _delete_four_you_blobs(deleted_row)
+    return jsonify({"status": "success", "deleted_id": normalized_image_id}), 200
 
 
 @app.route('/api/average_scores', methods=['GET'])
