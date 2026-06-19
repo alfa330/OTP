@@ -10,6 +10,16 @@ const smooth = (value) => {
     return t * t * (3 - 2 * t);
 };
 
+// Fisher–Yates: случайный порядок фото при каждом открытии ленты.
+const shuffle = (input) => {
+    const items = input.slice();
+    for (let i = items.length - 1; i > 0; i -= 1) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [items[i], items[j]] = [items[j], items[i]];
+    }
+    return items;
+};
+
 // Значения сохранены из unveil_scroll_demo_split_all_together_faster_selected.html.
 const PARAMS = Object.freeze({
     perspective: 4000,
@@ -53,6 +63,7 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const expandMixRef = useRef(0);
     const selectedMixRef = useRef(0);
     const hoverMixRef = useRef([]);
+    const needsRenderRef = useRef(true);
 
     const [images, setImages] = useState([]);
     const [activeIndex, setActiveIndex] = useState(null);
@@ -78,7 +89,7 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 headers: authHeaders(),
                 signal,
             });
-            const rows = Array.isArray(response?.data?.images) ? response.data.images : [];
+            const rows = shuffle(Array.isArray(response?.data?.images) ? response.data.images : []);
             setImages(rows);
             setCanUpload(Boolean(response?.data?.can_upload));
             hoverMixRef.current = new Array(rows.length).fill(0);
@@ -148,6 +159,9 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
     useEffect(() => {
         if (!images.length) return undefined;
         let animationFrame = 0;
+        // Кэш применённых z-index/display, чтобы не дёргать стили зря.
+        const lastZ = new Array(images.length).fill(null);
+        const lastDisplay = new Array(images.length).fill('');
 
         const getRailScreenCenter = () => {
             const rect = railRef.current.getBoundingClientRect();
@@ -161,6 +175,12 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
             const max = (images.length - 1) * PARAMS.step;
             const activeFloat = scrollRef.current / PARAMS.step;
             const railCenter = getRailScreenCenter();
+            const hasActive = activeIndexRef.current !== null;
+            // Окно видимости: карточки, ушедшие за край экрана, не рисуем.
+            // Радиус считается от ширины окна, поэтому ни одна ВИДИМАЯ карточка
+            // не выпадает — геометрия и анимация на экране не меняются.
+            const cullRadius = Math.ceil((window.innerWidth * 0.5 + 470) / PARAMS.dirX) + 2;
+            const sceneRect = hasActive ? scene.getBoundingClientRect() : null;
 
             for (let index = 0; index < images.length; index += 1) {
                 const card = cardRefs.current[index];
@@ -168,16 +188,25 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 const distance = index - activeFloat;
                 const absoluteDistance = Math.abs(distance);
                 const isActive = activeIndexRef.current === index;
-                const hasActive = activeIndexRef.current !== null;
+
+                if (!isActive && absoluteDistance > cullRadius) {
+                    if (lastDisplay[index] !== 'none') { card.style.display = 'none'; lastDisplay[index] = 'none'; }
+                    continue;
+                }
+                if (lastDisplay[index] !== '') { card.style.display = ''; lastDisplay[index] = ''; }
+
                 const hoverTarget = hoveredRef.current === index && !expandedRef.current && !draggingRef.current ? 1 : 0;
-                hoverMixRef.current[index] = lerp(hoverMixRef.current[index] || 0, hoverTarget, 0.15);
+                let hoverMix = lerp(hoverMixRef.current[index] || 0, hoverTarget, 0.15);
+                if (hoverTarget === 0 && hoverMix < 0.001) hoverMix = 0;
+                else if (hoverTarget === 1 && hoverMix > 0.999) hoverMix = 1;
+                hoverMixRef.current[index] = hoverMix;
 
                 const baseX = distance * PARAMS.dirX;
                 const baseY = -distance * PARAMS.dirY;
                 const baseZ = (distance * PARAMS.dirZ) - (absoluteDistance * PARAMS.depthFade);
-                let x = baseX + hoverMixRef.current[index] * PARAMS.hoverX;
+                let x = baseX + hoverMix * PARAMS.hoverX;
                 let y = baseY;
-                let z = baseZ + hoverMixRef.current[index] * PARAMS.hoverZComp;
+                let z = baseZ + hoverMix * PARAMS.hoverZComp;
                 let rotateX = PARAMS.cardRotX;
                 let rotateY = PARAMS.cardRotY;
                 let rotateZ = PARAMS.cardRotZ;
@@ -188,21 +217,20 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
                     if (isActive) {
                         const targetZ = PARAMS.selectedZ;
                         const projectionScale = PARAMS.perspective / (PARAMS.perspective - targetZ);
-                        const sceneRect = scene.getBoundingClientRect();
                         const perspectiveOriginX = sceneRect.left + sceneRect.width * 0.04;
                         const perspectiveOriginY = sceneRect.top - sceneRect.height * 1.20;
                         const targetX = (((window.innerWidth * 0.5 - perspectiveOriginX) / projectionScale)
                             + perspectiveOriginX - railCenter.x);
                         const targetY = (((window.innerHeight * 0.5 - perspectiveOriginY) / projectionScale)
                             + perspectiveOriginY - railCenter.y);
-
-                        x = lerp(baseX, targetX, selectedMixRef.current);
-                        y = lerp(baseY, targetY, selectedMixRef.current);
-                        z = lerp(baseZ, targetZ, selectedMixRef.current);
-                        rotateX = lerp(PARAMS.cardRotX, 0, selectedMixRef.current);
-                        rotateY = lerp(PARAMS.cardRotY, 0, selectedMixRef.current);
-                        rotateZ = lerp(PARAMS.cardRotZ, 0, selectedMixRef.current);
-                        scale = lerp(1, PARAMS.selectedScale, selectedMixRef.current);
+                        const sm = selectedMixRef.current;
+                        x = lerp(baseX, targetX, sm);
+                        y = lerp(baseY, targetY, sm);
+                        z = lerp(baseZ, targetZ, sm);
+                        rotateX = lerp(PARAMS.cardRotX, 0, sm);
+                        rotateY = lerp(PARAMS.cardRotY, 0, sm);
+                        rotateZ = lerp(PARAMS.cardRotZ, 0, sm);
+                        scale = lerp(1, PARAMS.selectedScale, sm);
                         opacity = 1;
                     } else {
                         const leftSide = index < activeIndexRef.current;
@@ -216,23 +244,33 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
                     }
                 }
 
-                card.style.setProperty('--x', `${x}px`);
-                card.style.setProperty('--y', `${y}px`);
-                card.style.setProperty('--z', `${z}px`);
-                card.style.setProperty('--rx', `${rotateX}deg`);
-                card.style.setProperty('--ry', `${rotateY}deg`);
-                card.style.setProperty('--rz', `${rotateZ}deg`);
-                card.style.setProperty('--s', scale);
+                // Один transform вместо семи CSS-переменных — меньше записей за кадр.
+                card.style.transform = `translate3d(${x}px, ${y}px, ${z}px) rotateX(${rotateX}deg) rotateY(${rotateY}deg) rotateZ(${rotateZ}deg) scale(${scale})`;
                 card.style.opacity = opacity;
 
-                let zIndex = 1000 - Math.round(absoluteDistance * 10) + Math.round(hoverMixRef.current[index] * 80);
+                let zIndex = 1000 - Math.round(absoluteDistance * 10) + Math.round(hoverMix * 80);
                 if (hasActive && !isActive) zIndex = 400 - Math.round(absoluteDistance * 4);
                 if (isActive) zIndex = 3000;
-                card.style.zIndex = String(zIndex);
+                if (lastZ[index] !== zIndex) { card.style.zIndex = String(zIndex); lastZ[index] = zIndex; }
             }
 
             const progress = max <= 0 ? 0 : (scrollRef.current / max) * 100;
             if (progressRef.current) progressRef.current.style.width = `${clamp(progress, 0, 100)}%`;
+        };
+
+        // Лента «в покое»: ничего не движется и не нужно перерисовывать.
+        // Наведение считается завершённым, когда hoverMix дошёл до своей цели
+        // (статично приподнятая карточка тоже «в покое» — кадры не тратим).
+        const isSettled = () => {
+            if (scrollRef.current !== targetRef.current) return false;
+            const expandTarget = expandedRef.current ? 1 : 0;
+            if (expandMixRef.current !== expandTarget || selectedMixRef.current !== expandTarget) return false;
+            const mixes = hoverMixRef.current;
+            for (let i = 0; i < mixes.length; i += 1) {
+                const want = (hoveredRef.current === i && !expandedRef.current && !draggingRef.current) ? 1 : 0;
+                if ((mixes[i] || 0) !== want) return false;
+            }
+            return true;
         };
 
         const animate = () => {
@@ -251,18 +289,31 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 && expandMixRef.current <= 0.002 && selectedMixRef.current <= 0.002) {
                 activeIndexRef.current = null;
                 setActiveIndex(null);
+                needsRenderRef.current = true;
             }
 
             if (railRef.current) {
                 railRef.current.style.transform = `translate3d(0,0,0) rotateX(${PARAMS.railRotX}deg) rotateY(${PARAMS.railRotY}deg) rotateZ(${PARAMS.railRotZ}deg)`;
             }
-            setCardClasses();
-            updateCards();
+
+            // Тяжёлую отрисовку 34 карточек делаем только когда что-то реально
+            // движется (или помечено к перерисовке) — в покое кадр почти бесплатный.
+            if (needsRenderRef.current || !isSettled()) {
+                setCardClasses();
+                updateCards();
+                if (isSettled()) needsRenderRef.current = false;
+            }
             animationFrame = window.requestAnimationFrame(animate);
         };
 
+        const handleResize = () => { needsRenderRef.current = true; };
+        window.addEventListener('resize', handleResize);
+        needsRenderRef.current = true;
         animationFrame = window.requestAnimationFrame(animate);
-        return () => window.cancelAnimationFrame(animationFrame);
+        return () => {
+            window.removeEventListener('resize', handleResize);
+            window.cancelAnimationFrame(animationFrame);
+        };
     }, [images, setCardClasses]);
 
     useEffect(() => {
@@ -344,9 +395,12 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 },
             });
             const rows = Array.isArray(response?.data?.images) ? response.data.images : [];
-            setImages(rows);
-            hoverMixRef.current = new Array(rows.length).fill(0);
-            if (rows.length) openCard(rows.length - 1);
+            const prevIds = new Set(images.map((item) => item.id));
+            const added = rows.filter((item) => !prevIds.has(item.id));
+            const next = [...images, ...added];
+            hoverMixRef.current = new Array(next.length).fill(0);
+            setImages(next);
+            if (added.length) openCard(next.length - 1);
             showToast?.(`Загружено изображений: ${selectedFiles.length}`, 'success');
         } catch (uploadError) {
             showToast?.(uploadError?.response?.data?.error || 'Не удалось загрузить изображения', 'error');
@@ -419,18 +473,19 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
             const response = await axios.post(`${apiBaseUrl}/api/four_you/images/delete_batch`, { ids }, {
                 headers: authHeaders(),
             });
-            const rows = Array.isArray(response?.data?.images) ? response.data.images : [];
+            const deletedSet = new Set(response?.data?.deleted_ids || ids);
+            const next = images.filter((item) => !deletedSet.has(item.id));
             activeIndexRef.current = null;
             expandedRef.current = false;
             expandMixRef.current = 0;
             selectedMixRef.current = 0;
             setActiveIndex(null);
-            setImages(rows);
-            hoverMixRef.current = new Array(rows.length).fill(0);
-            targetRef.current = clamp(targetRef.current, 0, Math.max(0, (rows.length - 1) * PARAMS.step));
+            setImages(next);
+            hoverMixRef.current = new Array(next.length).fill(0);
+            targetRef.current = clamp(targetRef.current, 0, Math.max(0, (next.length - 1) * PARAMS.step));
             setSelectedIds(new Set());
             setSelectMode(false);
-            showToast?.(`Удалено фото: ${response?.data?.deleted_count ?? ids.length}`, 'success');
+            showToast?.(`Удалено фото: ${response?.data?.deleted_count ?? deletedSet.size}`, 'success');
         } catch (deleteError) {
             showToast?.(deleteError?.response?.data?.error || 'Не удалось удалить выбранные фото', 'error');
         } finally {
