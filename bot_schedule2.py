@@ -15885,6 +15885,64 @@ def delete_technical_issue(issue_id):
         return jsonify({"error": f"Internal server error"}), 500
 
 
+@app.route('/api/technical_issues/<int:issue_id>', methods=['PUT', 'PATCH'])
+@require_api_key
+def update_technical_issue_batch(issue_id):
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+        requester_id = int(requester_id)
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "User not found"}), 404
+
+        requester_role = _normalize_management_role(requester[3])
+        effective_role, scope_department_id = _effective_management_scope(requester, requester_id)
+        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role) or _headed_department_id(requester_id) is not None):
+            return jsonify({"error": "Forbidden"}), 403
+
+        payload = request.get_json(silent=True) or {}
+        workplace_number = payload.get('workplace_number')
+        if workplace_number is None:
+            workplace_number = payload.get('workplace')
+
+        direction_ids = _normalize_int_id_list(payload.get('direction_ids'))
+        direction_ids.extend(_normalize_int_id_list(payload.get('direction_id')))
+        direction_ids = _normalize_int_id_list(direction_ids)
+
+        result = db.update_operator_technical_issue_batch(
+            requester_id=requester_id,
+            requester_role=effective_role,
+            issue_id=issue_id,
+            issue_date=payload.get('date') or payload.get('issue_date'),
+            start_time=payload.get('start_time') or payload.get('start'),
+            end_time=payload.get('end_time') or payload.get('end'),
+            reason=payload.get('reason'),
+            comment=payload.get('comment'),
+            direction_ids=direction_ids,
+            workplace_number=workplace_number,
+            scope_department_id=scope_department_id
+        )
+
+        return jsonify({
+            "status": "success",
+            "message": "Massive technical issue updated",
+            "result": result
+        }), 200
+    except PermissionError:
+        return jsonify({"error": "Forbidden"}), 403
+    except ValueError as e:
+        error_text = str(e)
+        if error_text == "Technical issue not found":
+            return jsonify({"error": error_text}), 404
+        return jsonify({"error": error_text}), 400
+    except Exception as e:
+        logging.error(f"Error updating technical issue batch {issue_id}: {e}", exc_info=True)
+        return jsonify({"error": f"Internal server error"}), 500
+
+
 def _recruiting_now_iso():
     try:
         return datetime.now(ZoneInfo('Asia/Almaty')).isoformat()
