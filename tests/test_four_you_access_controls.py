@@ -61,8 +61,10 @@ class FourYouAccessControlTests(unittest.TestCase):
             "selectedMixRef.current, expandTarget, 0.13",
         ):
             self.assertIn(expected, self.lenta_source)
-        self.assertIn("--panel-w: clamp(300px, 31vw, 470px);", self.lenta_css)
-        self.assertIn("--panel-h: clamp(410px, 70vh, 630px);", self.lenta_css)
+        # Ширина адаптивна (capped at the original 470px); высота считается
+        # от ширины, поэтому пропорции карточки 470x630 сохраняются на любом экране.
+        self.assertIn("--panel-w: clamp(300px, 42vw, 470px);", self.lenta_css)
+        self.assertIn("--panel-h: calc(var(--panel-w) * 1.34);", self.lenta_css)
         self.assertIn("window.innerWidth * 0.5", self.lenta_source)
         self.assertIn("window.innerHeight * 0.5", self.lenta_source)
 
