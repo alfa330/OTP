@@ -62,6 +62,9 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const [isUploading, setIsUploading] = useState(false);
     const [uploadProgress, setUploadProgress] = useState(0);
     const [deletingId, setDeletingId] = useState('');
+    const [selectMode, setSelectMode] = useState(false);
+    const [selectedIds, setSelectedIds] = useState(() => new Set());
+    const [isBulkDeleting, setIsBulkDeleting] = useState(false);
 
     const authHeaders = useCallback(() => withAccessTokenHeader({
         'X-User-Id': String(user?.id || ''),
@@ -301,15 +304,18 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
         const moved = Math.hypot(event.clientX - dragStartXRef.current, event.clientY - dragStartYRef.current);
         draggingRef.current = false;
         sceneRef.current?.classList.remove('is-dragging');
-        if (moved < 8) {
-            const card = event.target.closest('[data-lenta-card-index]');
-            if (card) {
-                const index = Number(card.dataset.lentaCardIndex);
-                if (expandedRef.current && activeIndexRef.current === index) closeCard();
-                else openCard(index);
-            } else if (expandedRef.current) {
-                closeCard();
-            }
+        if (moved >= 8) return;
+        const card = event.target.closest('[data-lenta-card-index]');
+        if (selectMode) {
+            if (card) toggleSelect(Number(card.dataset.lentaCardIndex));
+            return;
+        }
+        if (card) {
+            const index = Number(card.dataset.lentaCardIndex);
+            if (expandedRef.current && activeIndexRef.current === index) closeCard();
+            else openCard(index);
+        } else if (expandedRef.current) {
+            closeCard();
         }
     };
 
@@ -376,6 +382,62 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
         }
     };
 
+    const toggleSelect = (index) => {
+        const image = images[index];
+        if (!image) return;
+        setSelectedIds((prev) => {
+            const next = new Set(prev);
+            if (next.has(image.id)) next.delete(image.id);
+            else next.add(image.id);
+            return next;
+        });
+    };
+
+    const enterSelectMode = () => {
+        expandedRef.current = false;
+        setSelectedIds(new Set());
+        setSelectMode(true);
+    };
+
+    const exitSelectMode = () => {
+        setSelectMode(false);
+        setSelectedIds(new Set());
+    };
+
+    const toggleSelectAll = () => {
+        setSelectedIds((prev) => (
+            prev.size === images.length ? new Set() : new Set(images.map((item) => item.id))
+        ));
+    };
+
+    const deleteSelected = async () => {
+        if (!canUpload || isBulkDeleting || selectedIds.size === 0) return;
+        const ids = Array.from(selectedIds);
+        if (!window.confirm(`Удалить выбранные фото (${ids.length})?`)) return;
+        setIsBulkDeleting(true);
+        try {
+            const response = await axios.post(`${apiBaseUrl}/api/four_you/images/delete_batch`, { ids }, {
+                headers: authHeaders(),
+            });
+            const rows = Array.isArray(response?.data?.images) ? response.data.images : [];
+            activeIndexRef.current = null;
+            expandedRef.current = false;
+            expandMixRef.current = 0;
+            selectedMixRef.current = 0;
+            setActiveIndex(null);
+            setImages(rows);
+            hoverMixRef.current = new Array(rows.length).fill(0);
+            targetRef.current = clamp(targetRef.current, 0, Math.max(0, (rows.length - 1) * PARAMS.step));
+            setSelectedIds(new Set());
+            setSelectMode(false);
+            showToast?.(`Удалено фото: ${response?.data?.deleted_count ?? ids.length}`, 'success');
+        } catch (deleteError) {
+            showToast?.(deleteError?.response?.data?.error || 'Не удалось удалить выбранные фото', 'error');
+        } finally {
+            setIsBulkDeleting(false);
+        }
+    };
+
     return (
         <section
             ref={sceneRef}
@@ -389,10 +451,40 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
         >
             {canUpload && (
                 <div className="lenta-admin-controls" data-lenta-control>
-                    <button type="button" onClick={() => fileInputRef.current?.click()} disabled={isUploading}>
-                        <FaIcon className={`fas ${isUploading ? 'fa-spinner fa-spin' : 'fa-plus'}`} />
-                        <span>{isUploading ? `${uploadProgress}%` : 'Добавить фото'}</span>
-                    </button>
+                    {!selectMode ? (
+                        <>
+                            <button type="button" onClick={() => fileInputRef.current?.click()} disabled={isUploading}>
+                                <FaIcon className={`fas ${isUploading ? 'fa-spinner fa-spin' : 'fa-plus'}`} />
+                                <span>{isUploading ? `${uploadProgress}%` : 'Добавить фото'}</span>
+                            </button>
+                            {images.length > 0 && (
+                                <button type="button" onClick={enterSelectMode}>
+                                    <FaIcon className="fas fa-check-square" />
+                                    <span>Выбрать</span>
+                                </button>
+                            )}
+                        </>
+                    ) : (
+                        <>
+                            <button type="button" onClick={toggleSelectAll}>
+                                <FaIcon className="fas fa-check-double" />
+                                <span>{selectedIds.size === images.length && images.length > 0 ? 'Снять все' : 'Выбрать все'}</span>
+                            </button>
+                            <button
+                                type="button"
+                                className="lenta-danger"
+                                onClick={deleteSelected}
+                                disabled={selectedIds.size === 0 || isBulkDeleting}
+                            >
+                                <FaIcon className={`fas ${isBulkDeleting ? 'fa-spinner fa-spin' : 'fa-trash-alt'}`} />
+                                <span>{isBulkDeleting ? 'Удаление…' : `Удалить (${selectedIds.size})`}</span>
+                            </button>
+                            <button type="button" onClick={exitSelectMode} disabled={isBulkDeleting}>
+                                <FaIcon className="fas fa-times" />
+                                <span>Отмена</span>
+                            </button>
+                        </>
+                    )}
                     <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/webp" multiple hidden onChange={handleUpload} />
                 </div>
             )}
@@ -422,14 +514,35 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
                             }}
                         >
                             <img
-                                src={activeIndex === index ? image.display_url : image.preview_url}
+                                className="lenta-card-photo"
+                                src={image.preview_url}
                                 alt=""
                                 loading={index < 4 ? 'eager' : 'lazy'}
                                 decoding="async"
                                 fetchPriority={index < 2 ? 'high' : 'auto'}
                                 draggable="false"
                             />
-                            {canUpload && activeIndex === index && (
+                            {activeIndex === index && (
+                                <img
+                                    key={`hi-${image.id}`}
+                                    className="lenta-card-photo lenta-card-photo-hi"
+                                    src={image.display_url}
+                                    alt=""
+                                    decoding="async"
+                                    fetchPriority="high"
+                                    draggable="false"
+                                    onLoad={(event) => event.currentTarget.classList.add('is-ready')}
+                                />
+                            )}
+                            {canUpload && selectMode && (
+                                <span
+                                    className={`lenta-card-check ${selectedIds.has(image.id) ? 'is-checked' : ''}`}
+                                    aria-hidden="true"
+                                >
+                                    <i className="lenta-check-mark">{selectedIds.has(image.id) ? '✓' : ''}</i>
+                                </span>
+                            )}
+                            {canUpload && !selectMode && activeIndex === index && (
                                 <button
                                     type="button"
                                     className="lenta-card-delete"
