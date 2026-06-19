@@ -1,234 +1,167 @@
-.four-you-view {
-  --four-you-card-width: clamp(300px, 31vw, 470px);
-  --four-you-card-height: clamp(410px, 70vh, 630px);
-  position: relative;
+.lenta-scene {
+  --bg: #f3f3f1;
+  --panel-w: clamp(300px, 31vw, 470px);
+  --panel-h: clamp(410px, 70vh, 630px);
+  position: fixed;
+  inset: 0;
   width: 100%;
-  height: 100vh;
+  min-height: 100%;
   overflow: hidden;
-  outline: none;
-  color: #101010;
-  cursor: grab;
-  user-select: none;
   perspective: 4000px;
   perspective-origin: 4% -120%;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   background:
-    radial-gradient(circle at 84% 8%, rgba(255, 255, 255, .98), transparent 34%),
+    radial-gradient(circle at 84% 8%, rgba(255,255,255,.98), transparent 34%),
     linear-gradient(180deg, #f8f8f7 0%, #f1f1ef 100%);
+  color: #101010;
+  user-select: none;
+  cursor: grab;
 }
 
-.four-you-view.is-dragging { cursor: grabbing; }
+.lenta-scene.is-dragging { cursor: grabbing; }
 
-.four-you-view::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background-image: radial-gradient(rgba(0, 0, 0, .035) .7px, transparent .7px);
-  background-size: 5px 5px;
-  opacity: .38;
-}
-
-.four-you-header {
-  position: absolute;
-  inset: 24px 26px auto 28px;
-  z-index: 5000;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  pointer-events: none;
-}
-
-.four-you-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  font-size: clamp(22px, 2.4vw, 34px);
-  font-weight: 800;
-  letter-spacing: -.055em;
-}
-
-.four-you-heart {
-  color: #e11d48;
-  font-size: .85em;
-  filter: drop-shadow(0 6px 12px rgba(225, 29, 72, .18));
-}
-
-.four-you-actions {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  pointer-events: auto;
-}
-
-.four-you-control,
-.four-you-empty button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  min-height: 42px;
-  border: 1px solid rgba(15, 23, 42, .1);
-  border-radius: 999px;
-  padding: 0 17px;
-  font-size: 13px;
-  font-weight: 700;
-  color: #172033;
-  background: rgba(255, 255, 255, .78);
-  box-shadow: 0 8px 28px rgba(15, 23, 42, .08);
-  backdrop-filter: blur(14px);
-  transition: transform .18s ease, background .18s ease, box-shadow .18s ease;
-}
-
-.four-you-control:hover,
-.four-you-empty button:hover {
-  transform: translateY(-1px);
-  background: #fff;
-  box-shadow: 0 12px 32px rgba(15, 23, 42, .12);
-}
-
-.four-you-control:disabled { cursor: wait; opacity: .65; }
-.four-you-upload { color: #fff; background: #151515; border-color: #151515; }
-.four-you-upload:hover { background: #000; }
-.four-you-delete { color: #be123c; }
-
-.four-you-rail {
+.lenta-rail {
   position: absolute;
   left: 57%;
   top: 50%;
   width: 1px;
   height: 1px;
   transform-style: preserve-3d;
+  will-change: transform;
 }
 
-.four-you-card {
-  --four-you-x: 0px;
-  --four-you-y: 0px;
-  --four-you-z: 0px;
-  --four-you-ry: -10deg;
+.lenta-card {
+  --x: 0px;
+  --y: 0px;
+  --z: 0px;
+  --rx: 0deg;
+  --ry: -10deg;
+  --rz: 0deg;
+  --s: 1;
   position: absolute;
-  left: calc(var(--four-you-card-width) * -.5);
-  top: calc(var(--four-you-card-height) * -.5);
-  width: var(--four-you-card-width);
-  height: var(--four-you-card-height);
-  overflow: hidden;
-  border: 1px solid rgba(0, 0, 0, .14);
-  border-radius: 3px;
-  background: rgba(255, 255, 255, .16);
-  box-shadow: 0 20px 48px rgba(0, 0, 0, .06), inset 0 0 0 1px rgba(255, 255, 255, .18);
-  transform: translate3d(var(--four-you-x), var(--four-you-y), var(--four-you-z)) rotateY(var(--four-you-ry));
+  width: var(--panel-w);
+  height: var(--panel-h);
+  left: calc(var(--panel-w) * -.5);
+  top: calc(var(--panel-h) * -.5);
+  transform:
+    translate3d(var(--x), var(--y), var(--z))
+    rotateX(var(--rx))
+    rotateY(var(--ry))
+    rotateZ(var(--rz))
+    scale(var(--s));
   transform-style: preserve-3d;
+  overflow: hidden;
+  border: 1px solid rgba(0,0,0,.14);
+  background: rgba(255,255,255,.16);
+  box-shadow:
+    0 20px 48px rgba(0,0,0,.05),
+    inset 0 0 0 1px rgba(255,255,255,.18);
+  will-change: transform, opacity;
   backface-visibility: hidden;
   contain: layout paint style;
-  will-change: transform, opacity;
   cursor: pointer;
-  transition: border-color .22s ease, box-shadow .22s ease, filter .22s ease;
+  transition:
+    border-color .22s ease,
+    box-shadow .22s ease,
+    filter .22s ease,
+    opacity .22s ease;
 }
 
-.four-you-card::after {
+.lenta-card::after {
   content: "";
   position: absolute;
   inset: 0;
-  pointer-events: none;
   background:
-    linear-gradient(90deg, rgba(255, 255, 255, .13), transparent 24%, rgba(0, 0, 0, .07)),
-    linear-gradient(180deg, transparent 65%, rgba(0, 0, 0, .18));
+    linear-gradient(90deg, rgba(255,255,255,.18), transparent 24%, rgba(0,0,0,.08)),
+    linear-gradient(180deg, transparent, rgba(0,0,0,.08));
+  opacity: .32;
+  pointer-events: none;
 }
 
-.four-you-card.is-selected {
-  border-color: rgba(0, 0, 0, .3);
-  box-shadow: 0 56px 140px rgba(0, 0, 0, .2), inset 0 0 0 1px rgba(255, 255, 255, .42);
+.lenta-card.is-selected {
+  border-color: rgba(0,0,0,.28);
+  box-shadow:
+    0 56px 140px rgba(0,0,0,.18),
+    inset 0 0 0 1px rgba(255,255,255,.42);
   filter: saturate(1.03) contrast(1.02);
 }
 
-.four-you-card img {
+.lenta-card img {
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
   pointer-events: none;
-  background: #e8e8e5;
 }
 
-.four-you-card-number {
-  position: absolute;
-  right: 18px;
-  bottom: 16px;
-  z-index: 2;
-  color: rgba(255, 255, 255, .88);
-  font-size: 10px;
-  font-weight: 800;
-  letter-spacing: .18em;
-  text-shadow: 0 1px 8px rgba(0, 0, 0, .32);
-}
-
-.four-you-progress {
-  position: absolute;
+.lenta-progress {
+  position: fixed;
   left: 0;
-  right: 0;
   bottom: 0;
-  z-index: 5000;
   height: 2px;
-  background: rgba(0, 0, 0, .08);
+  width: 100%;
+  background: rgba(0,0,0,.08);
+  z-index: 30;
 }
 
-.four-you-progress span {
+.lenta-progress span {
   display: block;
-  width: 0;
   height: 100%;
+  width: 0%;
   background: #101010;
+  transform-origin: left center;
   will-change: width;
 }
 
-.four-you-status {
+/* Дополнение к демо только для загрузки супер-администратором. */
+.lenta-admin-controls {
+  position: absolute;
+  top: 20px;
+  right: 22px;
+  z-index: 5000;
+  display: flex;
+  gap: 8px;
+}
+
+.lenta-admin-controls button,
+.lenta-empty button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 0 14px;
+  border: 1px solid rgba(0,0,0,.14);
+  border-radius: 2px;
+  background: rgba(255,255,255,.9);
+  color: #101010;
+  font: 700 12px/1 Inter, ui-sans-serif, system-ui, sans-serif;
+  box-shadow: 0 8px 24px rgba(0,0,0,.08);
+  backdrop-filter: blur(9px);
+}
+
+.lenta-admin-controls button:disabled { opacity: .6; cursor: wait; }
+
+.lenta-status {
   position: absolute;
   left: 50%;
   top: 50%;
-  z-index: 20;
-  display: flex;
-  align-items: center;
-  gap: 12px;
+  z-index: 50;
   transform: translate(-50%, -50%);
-  color: #52525b;
-  font-size: 14px;
+  color: rgba(16,16,16,.62);
+  font-size: 13px;
 }
 
-.four-you-loader {
-  width: 22px;
-  height: 22px;
-  border: 2px solid rgba(0, 0, 0, .13);
-  border-top-color: #111;
-  border-radius: 50%;
-  animation: four-you-spin .72s linear infinite;
-}
-
-.four-you-error { color: #be123c; }
-
-.four-you-empty {
-  width: min(440px, calc(100% - 48px));
-  flex-direction: column;
-  gap: 8px;
-  text-align: center;
-}
-
-.four-you-empty strong { color: #18181b; font-size: 20px; letter-spacing: -.025em; }
-.four-you-empty-heart { color: #e11d48; font-size: 54px; line-height: 1; }
-.four-you-empty button { margin-top: 12px; color: #fff; background: #151515; }
-
-@keyframes four-you-spin { to { transform: rotate(360deg); } }
+.lenta-error { color: #a3122f; }
+.lenta-empty { display: flex; flex-direction: column; align-items: center; gap: 14px; }
 
 @media (max-width: 760px) {
-  .four-you-view {
-    --four-you-card-width: min(76vw, 330px);
-    --four-you-card-height: min(58vh, 460px);
+  .lenta-scene {
+    --panel-w: min(76vw, 330px);
+    --panel-h: min(58vh, 460px);
   }
-  .four-you-header { inset: 16px 14px auto 16px; }
-  .four-you-control { min-width: 42px; padding: 0 13px; }
-  .four-you-control span { display: none; }
-  .four-you-rail { left: 54%; }
-}
 
-@media (prefers-reduced-motion: reduce) {
-  .four-you-control,
-  .four-you-card { transition: none; }
+  .lenta-admin-controls button span { display: none; }
+  .lenta-admin-controls button { width: 38px; padding: 0; justify-content: center; }
 }

@@ -40381,8 +40381,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     {canAccessFourYouSection && !canManageFourYouSection && (
                                         <li>
                                             <button
-                                                onClick={(e) => handleSidebarViewNavigation(e, 'four_you')}
-                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'four_you' ? 'bg-blue-700' : ''}`}
+                                                type="button"
+                                                disabled
+                                                aria-disabled="true"
+                                                title="Раздел временно недоступен"
+                                                className="w-full text-left py-3 px-4 rounded-lg flex items-center gap-3 cursor-not-allowed opacity-60"
                                             >
                                                 <FaIcon className="fas fa-heart text-rose-300" />
                                                 <span className="sidebar-text">4 You</span>
