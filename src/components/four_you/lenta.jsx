@@ -286,7 +286,9 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
         dragStartYRef.current = event.clientY;
         dragStartTargetRef.current = targetRef.current;
         sceneRef.current?.classList.add('is-dragging');
-        event.currentTarget.setPointerCapture?.(event.pointerId);
+        // ВАЖНО: без setPointerCapture. Захват указателя перенаправлял бы
+        // pointerup на <section>, и event.target переставал быть карточкой —
+        // тогда openCard не вызывается и фото не открывается по клику.
     };
 
     const handlePointerMove = (event) => {
@@ -387,12 +389,6 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
         >
             {canUpload && (
                 <div className="lenta-admin-controls" data-lenta-control>
-                    {activeIndex != null && images[activeIndex] && (
-                        <button type="button" onClick={deleteActiveImage} disabled={Boolean(deletingId)}>
-                            <FaIcon className={`fas ${deletingId ? 'fa-spinner fa-spin' : 'fa-trash-alt'}`} />
-                            <span>Удалить</span>
-                        </button>
-                    )}
                     <button type="button" onClick={() => fileInputRef.current?.click()} disabled={isUploading}>
                         <FaIcon className={`fas ${isUploading ? 'fa-spinner fa-spin' : 'fa-plus'}`} />
                         <span>{isUploading ? `${uploadProgress}%` : 'Добавить фото'}</span>
@@ -433,6 +429,19 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
                                 fetchPriority={index < 2 ? 'high' : 'auto'}
                                 draggable="false"
                             />
+                            {canUpload && activeIndex === index && (
+                                <button
+                                    type="button"
+                                    className="lenta-card-delete"
+                                    data-lenta-control
+                                    onClick={(event) => { event.stopPropagation(); deleteActiveImage(); }}
+                                    disabled={Boolean(deletingId)}
+                                    title="Удалить это фото"
+                                >
+                                    <FaIcon className={`fas ${deletingId ? 'fa-spinner fa-spin' : 'fa-trash-alt'}`} />
+                                    <span>{deletingId ? 'Удаление…' : 'Удалить фото'}</span>
+                                </button>
+                            )}
                         </article>
                     ))}
                 </div>
