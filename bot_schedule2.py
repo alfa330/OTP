@@ -16895,7 +16895,7 @@ def _status_import_split_segment_by_day(start_dt, end_dt):
     return result
 
 
-def _status_import_build_operator_lookup():
+def _status_import_build_operator_lookup(exclude_chat_managers=False):
     lookup = {}
     for row in (db.get_all_operators() or []):
         try:
@@ -16903,9 +16903,20 @@ def _status_import_build_operator_lookup():
         except Exception:
             continue
         operator_name = str(row[1] or '').strip()
+        direction_name = str(row[7] or '').strip() if len(row) > 7 else ''
+        calculation_model_code = str(row[8] or '').strip().lower() if len(row) > 8 else ''
+        direction_key = ' '.join(direction_name.lower().split())
+        is_chat_manager = (
+            calculation_model_code == 'chat_manager'
+            or direction_key in ('чат менеджер', 'chat manager')
+        )
+        if exclude_chat_managers and is_chat_manager:
+            continue
         operator_info = {
             'id': operator_id,
-            'name': operator_name
+            'name': operator_name,
+            'direction_name': direction_name,
+            'calculation_model_code': calculation_model_code
         }
         for key in _status_import_operator_name_variants(operator_name):
             lookup.setdefault(key, [])
@@ -21060,7 +21071,9 @@ def import_work_schedules_statuses_csv():
                 "error": f"Файл слишком большой. Лимит: {STATUS_IMPORT_MAX_FILE_SIZE_MB} MB"
             }), 413
 
-        operator_lookup = _status_import_build_operator_lookup()
+        # Manual upload is the telephony status source. Chat managers have their
+        # own Chat2Desk sync and must never be matched (or replaced) by this import.
+        operator_lookup = _status_import_build_operator_lookup(exclude_chat_managers=True)
         if file_ext in ('.xlsx', '.xlsm'):
             parsed = _status_import_parse_xlsx(
                 raw_bytes,
