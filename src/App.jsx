@@ -15078,7 +15078,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     }
                     const formData = new FormData();
                     formData.append('file', file);
-                    formData.append('source', 'chat2desk_statuses');
+                    formData.append('source', 'telephony_statuses');
                     const saveResponse = await fetch(`${API_BASE_URL}/api/work_schedules/import_statuses_csv`, {
                         method: 'POST',
                         credentials: 'include',
@@ -22066,7 +22066,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 }}
                                                 disabled={plannerStatusAnomalyLoading || plannerStatusApiSyncLoading}
                                                 className="w-full px-3 py-2 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
-                                                title="Загрузить CSV/XLSX переключений статусов операторов"
+                                                title="Загрузить CSV/XLSX переключений статусов телефонии (чат-менеджеры не затрагиваются)"
                                             >
                                                 <FaIcon className={`fas ${plannerStatusAnomalyLoading ? 'fa-spinner fa-spin' : 'fa-upload'}`}></FaIcon>
                                                 {plannerStatusAnomalyLoading ? 'Загрузка...' : 'Загрузить статусы'}

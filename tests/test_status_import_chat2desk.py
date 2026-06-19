@@ -32,6 +32,7 @@ def _status_import_namespace():
         "_status_import_resolve_break_note_label",
         "_status_import_resolve_display_state",
         "_status_import_secure_filename_and_ext",
+        "_status_import_build_operator_lookup",
         "_status_import_split_segment_by_day",
         "_xlsx_cell_ref_to_index",
         "_status_import_xlsx_rows",
@@ -99,6 +100,33 @@ class StatusImportChat2DeskTests(unittest.TestCase):
         self.assertEqual(resolve("status.tech_break", None)["key"], "тех причина")
         self.assertEqual(resolve("take_chat", None)["key"], "take chat")
         self.assertEqual(resolve("transfer_chat", None)["key"], "transfer chat")
+
+    def test_telephony_lookup_excludes_chat_managers(self):
+        build_lookup = self.ns["_status_import_build_operator_lookup"]
+
+        class FakeDb:
+            @staticmethod
+            def get_all_operators():
+                return [
+                    (1, "Phone Operator", 10, None, None, None, None, "Основа", "operator"),
+                    (2, "Chat By Model", 20, None, None, None, None, "Поддержка", "chat_manager"),
+                    (3, "Chat By Name", 30, None, None, None, None, "Чат менеджер", None),
+                ]
+
+        previous_db = self.ns.get("db")
+        self.ns["db"] = FakeDb()
+        try:
+            all_lookup = build_lookup()
+            telephony_lookup = build_lookup(exclude_chat_managers=True)
+        finally:
+            self.ns["db"] = previous_db
+
+        normalize = self.ns["_status_import_normalize_operator_name"]
+        self.assertIn(normalize("Phone Operator"), telephony_lookup)
+        self.assertNotIn(normalize("Chat By Model"), telephony_lookup)
+        self.assertNotIn(normalize("Chat By Name"), telephony_lookup)
+        self.assertIn(normalize("Chat By Model"), all_lookup)
+        self.assertIn(normalize("Chat By Name"), all_lookup)
 
     def test_operator_name_normalization_collapses_trailing_soft_sign(self):
         normalize_name = self.ns["_status_import_normalize_operator_name"]

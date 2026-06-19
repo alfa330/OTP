@@ -16607,9 +16607,19 @@ class Database:
     def get_all_operators(self):
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT id, name, direction_id, hire_date, supervisor_id, scores_table_url, hours_table_url
-                FROM users 
-                WHERE role = 'operator'
+                SELECT
+                    u.id,
+                    u.name,
+                    u.direction_id,
+                    u.hire_date,
+                    u.supervisor_id,
+                    u.scores_table_url,
+                    u.hours_table_url,
+                    d.name AS direction_name,
+                    d.calculation_model_code
+                FROM users u
+                LEFT JOIN directions d ON d.id = u.direction_id
+                WHERE u.role = 'operator'
             """)
             return cursor.fetchall()
 
