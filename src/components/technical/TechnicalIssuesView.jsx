@@ -1,7 +1,13 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import FaIcon from '../common/FaIcon';
-import { normalizeRole, isAdminLikeRole, isSupervisorRole } from '../../utils/roles';
+import {
+    normalizeRole,
+    isAdminLikeRole,
+    isSupervisorRole,
+    isDepartmentHead,
+    headedDepartmentId,
+} from '../../utils/roles';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -1432,6 +1438,10 @@ const TechnicalIssueRow = memo(function TechnicalIssueRow({ item, canDelete, isD
 
 const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast, apiBaseUrl, withAccessTokenHeader }) => {
     const role = normalizeRole(user?.role);
+    const scopeDepartmentId = isDepartmentHead(user)
+        ? headedDepartmentId(user)
+        : (isSupervisorRole(role) ? Number(user?.department_id ?? user?.departmentId) : null);
+    const hasDepartmentScope = Number.isFinite(scopeDepartmentId) && scopeDepartmentId > 0;
     const canCreate = isAdminLikeRole(role) || isSupervisorRole(role);
     const canView   = isAdminLikeRole(role) || isSupervisorRole(role);
     const canExport = isAdminLikeRole(role) || isSupervisorRole(role); // admins + super_admins + supervisors
@@ -1456,8 +1466,12 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
         const list = Array.isArray(operators) ? operators : [];
         return list
             .filter((op) => String(op?.role || 'operator').trim().toLowerCase() === 'operator')
+            .filter((op) => {
+                if (!hasDepartmentScope) return true;
+                return Number(op?.department_id ?? op?.departmentId) === scopeDepartmentId;
+            })
             .sort((a, b) => String(a?.name || '').localeCompare(String(b?.name || ''), 'ru', { sensitivity: 'base' }));
-    }, [operators]);
+    }, [hasDepartmentScope, operators, scopeDepartmentId]);
 
     const visibleDirections = useMemo(() => {
         const list = Array.isArray(directions) ? directions : [];
@@ -1468,11 +1482,18 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
             .filter((dir) => {
                 const id = Number(dir?.id);
                 if (!Number.isFinite(id) || id <= 0) return false;
-                if (isAdminLikeRole(role) || isSupervisorRole(role)) return true;
+                if (hasDepartmentScope) {
+                    const directionDepartmentId = Number(dir?.department_id ?? dir?.departmentId);
+                    if (Number.isFinite(directionDepartmentId) && directionDepartmentId > 0) {
+                        return directionDepartmentId === scopeDepartmentId;
+                    }
+                    return allowedIds.has(id);
+                }
+                if (isAdminLikeRole(role)) return true;
                 return allowedIds.has(id);
             })
             .sort((a, b) => String(a?.name || '').localeCompare(String(b?.name || ''), 'ru', { sensitivity: 'base' }));
-    }, [directions, role, visibleOperators]);
+    }, [directions, hasDepartmentScope, role, scopeDepartmentId, visibleOperators]);
 
     const initialFilters = useMemo(() => ({
         dateFrom: currentMonthStartIso(),

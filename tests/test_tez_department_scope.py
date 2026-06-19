@@ -111,6 +111,14 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
         self.assertIn("group?.department_id ?? group?.departmentId", source)
         self.assertIn("Number(hoursDepartmentScopeId)", source)
 
+    def test_technical_issue_selectors_are_scoped_for_department_managers(self):
+        source = _read(ROOT / "src" / "components" / "technical" / "TechnicalIssuesView.jsx")
+
+        self.assertIn("const scopeDepartmentId = isDepartmentHead(user)", source)
+        self.assertIn("isSupervisorRole(role) ? Number(user?.department_id ?? user?.departmentId) : null", source)
+        self.assertIn("Number(op?.department_id ?? op?.departmentId) === scopeDepartmentId", source)
+        self.assertIn("directionDepartmentId === scopeDepartmentId", source)
+
     def test_call_evaluation_department_head_gets_admin_journal_with_department_scope(self):
         source = _read(CALL_EVALUATION_PATH)
 
@@ -164,6 +172,27 @@ class TezDepartmentBackendScopeTests(unittest.TestCase):
         self.assertIn("department_id=None", schedule_query)
         self.assertIn("department_filter_id = int(department_id) if department_id is not None else None", schedule_query)
         self.assertGreaterEqual(schedule_query.count("u.department_id = %s"), 2)
+
+    def test_management_schedule_list_is_filtered_to_requester_scope(self):
+        endpoint = _function_source(BOT_PATH, "get_operators_with_schedules")
+
+        self.assertIn("_filter_operators_for_requester_scope(user_data, user_id, operators)", endpoint)
+
+    def test_hours_and_technical_issue_targets_use_department_scope(self):
+        daily_hours = _function_source(BOT_PATH, "sv_daily_hours")
+        monthly_report = _function_source(BOT_PATH, "get_monthly_report_hours")
+        resolver = _function_source(
+            DATABASE_PATH,
+            "_resolve_technical_issue_operator_ids_tx",
+            class_name="Database",
+        )
+
+        self.assertIn("is_global_admin = _is_global_admin_requester(role, requester_id)", daily_hours)
+        self.assertIn("headed_dept_id is not None and not is_global_admin", daily_hours)
+        self.assertIn("department_id=None if _is_global_admin_requester(role, requester_id) else scope_department_id", monthly_report)
+        self.assertIn("Forbidden: supervisor is outside your department", monthly_report)
+        self.assertIn("SELECT id, department_id", resolver)
+        self.assertIn("Forbidden directions for sv", resolver)
 
     def test_department_head_admin_role_is_not_treated_as_global_admin_for_lists(self):
         departments = _function_source(BOT_PATH, "api_admin_departments")
