@@ -5163,6 +5163,45 @@ def delete_four_you_image(image_id):
     return jsonify({"status": "success", "deleted_id": normalized_image_id}), 200
 
 
+@app.route('/api/four_you/images/delete_batch', methods=['POST', 'OPTIONS'])
+@require_auth
+def delete_four_you_images_batch():
+    _, _, guard_response, guard_status = _four_you_route_guard(require_upload=True)
+    if guard_response is not None:
+        return guard_response, guard_status
+
+    payload = request.get_json(silent=True) or {}
+    raw_ids = payload.get('ids')
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return jsonify({"error": "Не выбраны изображения"}), 400
+    if len(raw_ids) > 500:
+        return jsonify({"error": "За один раз можно удалить не более 500 изображений"}), 400
+
+    normalized_ids = []
+    seen = set()
+    for raw_id in raw_ids:
+        try:
+            normalized = str(uuid.UUID(str(raw_id)))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Некорректный идентификатор изображения"}), 400
+        if normalized not in seen:
+            seen.add(normalized)
+            normalized_ids.append(normalized)
+
+    deleted_rows = db.delete_four_you_images(normalized_ids)
+    for deleted_row in deleted_rows:
+        _delete_four_you_blobs(deleted_row)
+
+    rows = db.list_four_you_images()
+    return jsonify({
+        "status": "success",
+        "deleted_ids": [row["id"] for row in deleted_rows],
+        "deleted_count": len(deleted_rows),
+        "can_upload": True,
+        "images": [_four_you_image_payload(row) for row in rows],
+    }), 200
+
+
 @app.route('/api/average_scores', methods=['GET'])
 @require_api_key
 def api_average_scores():

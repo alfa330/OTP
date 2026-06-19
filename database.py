@@ -32809,6 +32809,32 @@ class Database:
                 "display_blob_path": row[4],
             }
 
+    def delete_four_you_images(self, image_ids):
+        ids = [str(image_id) for image_id in (image_ids or []) if image_id]
+        if not ids:
+            return []
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                DELETE FROM four_you_images
+                WHERE id = ANY(%s::uuid[])
+                RETURNING
+                    id,
+                    preview_bucket,
+                    preview_blob_path,
+                    display_bucket,
+                    display_blob_path
+            """, (ids,))
+            return [
+                {
+                    "id": str(row[0]),
+                    "preview_bucket": row[1],
+                    "preview_blob_path": row[2],
+                    "display_bucket": row[3],
+                    "display_blob_path": row[4],
+                }
+                for row in cursor.fetchall()
+            ]
+
     def save_ai_feedback_cache(self, operator_id: int, month: str, feedback_data: dict):
         """Сохранить или обновить AI фидбэк в кэше"""
         with self._get_cursor() as cursor:

@@ -68,6 +68,21 @@ class FourYouAccessControlTests(unittest.TestCase):
         self.assertIn("window.innerWidth * 0.5", self.lenta_source)
         self.assertIn("window.innerHeight * 0.5", self.lenta_source)
 
+    def test_bulk_delete_route_is_admin_guarded(self):
+        batch_route = "@app.route('/api/four_you/images/delete_batch', methods=['POST', 'OPTIONS'])\n@require_auth"
+        self.assertIn(batch_route, self.api_source)
+        self.assertIn("_four_you_route_guard(require_upload=True)", self.api_source)
+        self.assertIn("def delete_four_you_images(self, image_ids)", self.db_source)
+        # Пакетное удаление в коде идёт через параметризованный массив (без SQL-инъекций).
+        self.assertIn("WHERE id = ANY(%s::uuid[])", self.db_source)
+
+    def test_higher_quality_variant_loads_seamlessly(self):
+        # Превью всегда снизу; полноразмерный вариант проявляется поверх по onLoad —
+        # апгрейд качества незаметен (без моргания/пустого кадра).
+        self.assertIn("lenta-card-photo-hi", self.lenta_source)
+        self.assertIn("classList.add('is-ready')", self.lenta_source)
+        self.assertIn("lenta-card-photo-hi.is-ready", self.lenta_css)
+
 
 if __name__ == "__main__":
     unittest.main()
