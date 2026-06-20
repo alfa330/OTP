@@ -157,6 +157,11 @@ const SHIFT_AUCTION_LOT_PATCH_EVENTS = new Set([
 // How long monitor/self snapshot refreshes are coalesced for, so a burst of
 // claims can't trigger one heavy snapshot rebuild per event and stampede the DB.
 const SHIFT_AUCTION_SNAPSHOT_REFRESH_DEBOUNCE_MS = 2500;
+// On a 401 the SSE stream's access token has expired. Refresh it and reconnect
+// immediately (instead of looping with the stale token, which produced a storm
+// of dropped connections). Capped so a genuinely dead session falls back to the
+// normal backoff path instead of spinning.
+const SHIFT_AUCTION_SSE_MAX_AUTH_REFRESH = 3;
 
 const isSameRealtimeAuctionLot = (currentLot, incomingLot) => {
   if (!currentLot || !incomingLot) return false;
@@ -3701,6 +3706,21 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     let reconnectTimer = null;
     let pollTimer = null;
     let reconnectAttempt = 0;
+    let authRefreshAttempts = 0;
+
+    // Refresh the access token by reusing the global axios interceptor's
+    // refresh-and-retry (any axios 401 triggers a single shared refresh and
+    // persists the rotated token). `/api/auth/me` is the cheapest such call.
+    // The SSE stream uses fetch(), which bypasses that interceptor, so it must
+    // ask for the refresh explicitly before reconnecting.
+    const refreshAuthSession = async () => {
+      try {
+        await axios.get(`${apiRoot}/api/auth/me`, { headers: buildHeadersRef.current?.() || {} });
+        return true;
+      } catch (_error) {
+        return false;
+      }
+    };
 
     const stopPolling = () => {
       if (pollTimer) {
@@ -3742,10 +3762,28 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           signal: abortController.signal,
           credentials: 'include'
         });
+        if (response.status === 401) {
+          // Access token expired mid-stream. Refresh once and reconnect right
+          // away with the fresh token rather than backing off with the stale
+          // one. Capped so a truly dead session falls through to backoff.
+          if (!cancelled && authRefreshAttempts < SHIFT_AUCTION_SSE_MAX_AUTH_REFRESH) {
+            authRefreshAttempts += 1;
+            const refreshed = await refreshAuthSession();
+            if (!cancelled && refreshed) {
+              reconnectAttempt = 0;
+              return readStream();
+            }
+          }
+          throw new Error('SSE auth refresh failed');
+        }
         if (!response.ok || !response.body) throw new Error('SSE connection failed');
+        const recoveredAfterGap = reconnectAttempt > 0 || authRefreshAttempts > 0;
         setConnectionState('online');
         reconnectAttempt = 0;
+        authRefreshAttempts = 0;
         stopPolling();
+        // After any gap, resync once so missed state can never linger on screen.
+        if (recoveredAfterGap) fetchSnapshotRef.current?.({ silent: true });
         const reader = response.body.getReader();
         const decoder = new TextDecoder('utf-8');
         let buffer = '';
