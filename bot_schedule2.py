@@ -4,6 +4,7 @@ import threading
 import asyncio
 import requests
 import select
+import collections
 import gc
 import ctypes
 import calendar
@@ -417,8 +418,18 @@ CORS(app, resources={
 
 SHIFT_AUCTION_EVENT_HEARTBEAT_SECONDS = 15
 SHIFT_AUCTION_EVENT_LISTENER_RETRY_SECONDS = 2
+# How many recent events to keep in memory for SSE fan-out. The single PG
+# listener fetches new events ONCE and pushes them into this buffer; every
+# connected stream then reads from RAM instead of hitting the DB on each
+# notification. This converts the old O(streams x events) DB query storm
+# (which saturated the connection pool during a live auction) into O(events).
+SHIFT_AUCTION_EVENT_BUFFER_MAXLEN = _env_int('SHIFT_AUCTION_EVENT_BUFFER_MAXLEN', 2000, minimum=200)
+SHIFT_AUCTION_EVENT_FETCH_LIMIT = 500
 shift_auction_event_condition = threading.Condition()
 shift_auction_event_signal_id = 0
+shift_auction_event_buffer = collections.deque(maxlen=SHIFT_AUCTION_EVENT_BUFFER_MAXLEN)
+shift_auction_event_buffer_max_id = 0
+shift_auction_event_buffer_ready = False
 shift_auction_event_listener_started = False
 shift_auction_event_listener_lock = threading.Lock()
 
@@ -458,6 +469,137 @@ def _wait_for_shift_auction_event_signal(last_seen_signal_id, timeout_seconds):
         return shift_auction_event_signal_id
 
 
+def _fetch_shift_auction_events_with_cursor(cursor, after_id, limit=SHIFT_AUCTION_EVENT_FETCH_LIMIT):
+    """Fetch events after ``after_id`` using a caller-provided cursor.
+
+    Used by the PG listener on its OWN dedicated connection so the event
+    fan-out never touches the shared application connection pool.
+    """
+    cursor.execute(
+        """
+        SELECT id, event_type, payload, created_at
+        FROM shift_auction_test_events
+        WHERE id > %s
+        ORDER BY id
+        LIMIT %s
+        """,
+        (int(after_id or 0), int(limit)),
+    )
+    return [
+        {
+            "id": row[0],
+            "event_type": row[1],
+            "payload": row[2] or {},
+            "created_at": row[3].isoformat() if row[3] else None,
+        }
+        for row in (cursor.fetchall() or [])
+    ]
+
+
+def _fetch_recent_shift_auction_events_with_cursor(cursor):
+    """Warm a new process with the newest buffer window, not the full history."""
+    cursor.execute(
+        """
+        SELECT id, event_type, payload, created_at
+        FROM shift_auction_test_events
+        ORDER BY id DESC
+        LIMIT %s
+        """,
+        (int(SHIFT_AUCTION_EVENT_BUFFER_MAXLEN),),
+    )
+    rows = list(cursor.fetchall() or [])
+    rows.reverse()
+    return [
+        {
+            "id": row[0],
+            "event_type": row[1],
+            "payload": row[2] or {},
+            "created_at": row[3].isoformat() if row[3] else None,
+        }
+        for row in rows
+    ]
+
+
+def _publish_shift_auction_events(events):
+    """Append freshly fetched events to the in-memory buffer and wake waiters once."""
+    global shift_auction_event_signal_id, shift_auction_event_buffer_max_id
+    if not events:
+        return
+    with shift_auction_event_condition:
+        appended = False
+        for event in events:
+            try:
+                event_id = int(event.get("id") or 0)
+            except Exception:
+                event_id = 0
+            if event_id <= shift_auction_event_buffer_max_id:
+                continue
+            shift_auction_event_buffer.append(event)
+            shift_auction_event_buffer_max_id = event_id
+            appended = True
+        if appended:
+            shift_auction_event_signal_id += 1
+            shift_auction_event_condition.notify_all()
+
+
+def _read_shift_auction_events_from_buffer(after_id):
+    """Return ``(events, covered, signal_id, floor_id)`` after ``after_id``.
+
+    ``covered`` is True when the in-memory buffer is guaranteed to contain the
+    full contiguous range after ``after_id`` (so the caller can trust RAM and
+    skip the DB). It is False only when the client is further behind than the
+    buffer window — then the caller does a one-off DB catch-up.
+    """
+    after_id = int(after_id or 0)
+    with shift_auction_event_condition:
+        signal_id = shift_auction_event_signal_id
+        if not shift_auction_event_buffer:
+            # During listener warm-up, wait for its signal instead of making all
+            # newly connected streams hit the shared application DB pool.
+            return [], True, signal_id, None
+        min_buffered_id = int(shift_auction_event_buffer[0].get("id") or 0)
+        covered = (after_id + 1) >= min_buffered_id
+        # The buffer is strictly id-ascending, so scan from the tail and stop at
+        # the first already-seen id — O(new events) instead of O(buffer length).
+        events = []
+        for event in reversed(shift_auction_event_buffer):
+            if int(event.get("id") or 0) > after_id:
+                events.append(event)
+            else:
+                break
+        events.reverse()
+    return events, covered, signal_id, min_buffered_id
+
+
+def _drain_shift_auction_events(cursor):
+    """Fetch and broadcast ALL events after the buffer head, paging to exhaustion.
+
+    ``_publish_shift_auction_events`` advances ``shift_auction_event_buffer_max_id``,
+    so each iteration re-reads the global and makes monotonic progress. Looping
+    until a short page guarantees a large backlog — a reconnect after an outage,
+    or a burst of more than ``SHIFT_AUCTION_EVENT_FETCH_LIMIT`` NOTIFYs — is fully
+    drained instead of stranding the tail until the next live event arrives.
+    """
+    while True:
+        batch = _fetch_shift_auction_events_with_cursor(cursor, shift_auction_event_buffer_max_id)
+        if not batch:
+            break
+        _publish_shift_auction_events(batch)
+        if len(batch) < SHIFT_AUCTION_EVENT_FETCH_LIMIT:
+            break
+
+
+def _initialize_shift_auction_event_buffer(cursor):
+    """Load the recent window once and mark the process-local fan-out ready."""
+    global shift_auction_event_buffer_ready, shift_auction_event_signal_id
+    _publish_shift_auction_events(_fetch_recent_shift_auction_events_with_cursor(cursor))
+    with shift_auction_event_condition:
+        shift_auction_event_buffer_ready = True
+        # Also wake streams when the table is empty and no event was published.
+        shift_auction_event_signal_id += 1
+        shift_auction_event_condition.notify_all()
+
+
 def _run_shift_auction_pg_listener():
     while True:
         conn = None
@@ -469,16 +611,36 @@ def _run_shift_auction_pg_listener():
             cursor.execute(f"LISTEN {SHIFT_AUCTION_TEST_EVENT_NOTIFY_CHANNEL}")
             logging.info("Shift auction event listener connected")
 
+            # A new process needs only the recent window. A reconnect keeps its
+            # RAM buffer and drains every missed page to the current head.
+            if shift_auction_event_buffer_ready:
+                _drain_shift_auction_events(cursor)
+            else:
+                _initialize_shift_auction_event_buffer(cursor)
+
             while True:
                 readable, _, _ = select.select([conn], [], [], SHIFT_AUCTION_EVENT_HEARTBEAT_SECONDS)
-                if not readable:
-                    cursor.execute("SELECT 1")
-                    continue
-
+                # Always poll + drain: a NOTIFY can be absorbed into conn.notifies
+                # as a side effect of running the events query below, so we must
+                # not rely on socket readability alone to detect new events.
                 conn.poll()
+                got_notify = False
                 while conn.notifies:
                     conn.notifies.pop(0)
-                    _signal_shift_auction_event_waiters()
+                    got_notify = True
+                if not readable:
+                    # Idle heartbeat — keep the connection alive.
+                    cursor.execute("SELECT 1")
+                    # Executing a query can itself move pending NOTIFYs into
+                    # conn.notifies, so poll and drain once more afterwards.
+                    conn.poll()
+                    while conn.notifies:
+                        conn.notifies.pop(0)
+                        got_notify = True
+                if got_notify:
+                    # Fetch to exhaustion once, regardless of how many NOTIFYs
+                    # arrived. This also handles bursts larger than one page.
+                    _drain_shift_auction_events(cursor)
         except Exception as error:
             logging.warning("Shift auction event listener reconnecting after error: %s", error, exc_info=True)
             _signal_shift_auction_event_waiters()
@@ -4266,7 +4428,16 @@ def api_shift_auction_test_events():
         heartbeat_at = time.time()
         yield f": connected {int(heartbeat_at)}\n\n"
         while True:
-            events = db.get_shift_auction_test_events_after(last_event_id, limit=100)
+            events, covered, last_signal_id, buffer_floor_id = _read_shift_auction_events_from_buffer(last_event_id)
+            if not covered:
+                # Client is behind the in-memory window (fresh connect or long
+                # disconnect). One-off DB catch-up, then resume from RAM.
+                events = db.get_shift_auction_test_events_after(last_event_id, limit=SHIFT_AUCTION_EVENT_FETCH_LIMIT)
+                if not events and buffer_floor_id is not None:
+                    # Old rows may have been pruned. Advance across the deleted
+                    # gap so this stream can resume from the in-memory window.
+                    last_event_id = max(last_event_id, int(buffer_floor_id) - 1)
+                    continue
             if events:
                 for event in events:
                     last_event_id = max(last_event_id, int(event.get('id') or 0))
@@ -4274,7 +4445,6 @@ def api_shift_auction_test_events():
                     yield f"event: {event['event_type']}\n"
                     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                 heartbeat_at = time.time()
-                last_signal_id = _get_shift_auction_event_signal_id()
                 continue
 
             elapsed = time.time() - heartbeat_at
