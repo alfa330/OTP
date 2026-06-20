@@ -5691,7 +5691,7 @@ class Database:
                 saved_shift_rows = cursor.fetchall() or []
 
             cursor.execute("""
-                SELECT selected_schedule_plan_id, enabled
+                SELECT selected_schedule_plan_id, enabled, finished_at
                 FROM shift_auction_test_access
                 WHERE id = 1
                 FOR UPDATE
@@ -5699,6 +5699,7 @@ class Database:
             current_settings_row = cursor.fetchone()
             current_selected_plan_id = current_settings_row[0] if current_settings_row else None
             current_enabled = bool(current_settings_row[1]) if current_settings_row and len(current_settings_row) > 1 else False
+            current_finished_at = current_settings_row[2] if current_settings_row and len(current_settings_row) > 2 else None
 
             valid_ids = []
             if normalized_ids:
@@ -5729,13 +5730,18 @@ class Database:
                 )
 
             next_selected_plan_id = selected_plan_id if selected_plan_id is not None else current_selected_plan_id
+            # Saving an enabled auction after a previous explicit finish starts a
+            # new run even when the weekly plan (and therefore its lots) stays the
+            # same. Otherwise stale finished_at wins over the new future start and
+            # the UI correctly—but unexpectedly—shows "closed" with no countdown.
+            should_reset_run_state = bool(
+                should_refresh_lots
+                or (bool(enabled) and (not current_enabled or current_finished_at is not None))
+            )
             # Top-up belongs to one auction run, not to the singleton settings
             # row forever. Reset it whenever another period is loaded or a
             # disabled auction is started again.
-            should_reset_topup = bool(
-                should_refresh_lots
-                or (bool(enabled) and not current_enabled)
-            )
+            should_reset_topup = should_reset_run_state
             cursor.execute("""
                 UPDATE shift_auction_test_access
                 SET enabled = %s,
@@ -5758,10 +5764,10 @@ class Database:
                 starts_at,
                 ends_at,
                 next_selected_plan_id,
-                should_refresh_lots,
-                should_refresh_lots,
-                should_refresh_lots,
-                should_refresh_lots,
+                should_reset_run_state,
+                should_reset_run_state,
+                should_reset_run_state,
+                should_reset_run_state,
                 should_reset_topup,
                 should_reset_topup,
                 updated_by,
@@ -5818,6 +5824,7 @@ class Database:
                 "selected_operator_ids": valid_ids,
                 "selected_schedule_plan_id": next_selected_plan_id,
                 "lots_refreshed": should_refresh_lots,
+                "run_state_reset": should_reset_run_state,
                 "topup_reset": should_reset_topup,
                 "date_from": selected_period_row[1].strftime('%Y-%m-%d') if selected_period_row and selected_period_row[1] else None,
                 "date_to": selected_period_row[2].strftime('%Y-%m-%d') if selected_period_row and selected_period_row[2] else None,

@@ -154,6 +154,9 @@ class ShiftAuctionLockingTests(unittest.TestCase):
         )
 
         self.assertIn("should_reset_topup", update_source)
+        self.assertIn("current_finished_at is not None", update_source)
+        self.assertIn("should_reset_run_state", update_source)
+        self.assertIn("finished_at = CASE WHEN %s THEN NULL", update_source)
         self.assertIn("topup_started_at = CASE WHEN %s THEN NULL", update_source)
         self.assertIn("topup_started_by = CASE WHEN %s THEN NULL", update_source)
         self.assertIn("topup_started_at = NULL", control_source)
