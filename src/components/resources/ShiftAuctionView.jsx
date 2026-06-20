@@ -147,6 +147,54 @@ const AUCTION_DURATION_PRESETS = [
 
 const AUCTION_TIME_PRESETS = ['09:00', '12:00', '15:00', '18:00', '20:00'];
 const AUCTION_WEEKDAY_LABELS = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+// Realtime events that carry a full `payload.lot` — these can be applied to a
+// single lot in place instead of refetching the whole (heavy) snapshot.
+const SHIFT_AUCTION_LOT_PATCH_EVENTS = new Set([
+  'lot_claimed',
+  'lot_released',
+  'lot_post_auction_claimed',
+]);
+// How long monitor/self snapshot refreshes are coalesced for, so a burst of
+// claims can't trigger one heavy snapshot rebuild per event and stampede the DB.
+const SHIFT_AUCTION_SNAPSHOT_REFRESH_DEBOUNCE_MS = 2500;
+
+const isSameRealtimeAuctionLot = (currentLot, incomingLot) => {
+  if (!currentLot || !incomingLot) return false;
+  if (currentLot.id != null && incomingLot.id != null && String(currentLot.id) === String(incomingLot.id)) {
+    return true;
+  }
+  const currentShiftId = normalizeSchedulePlanId(currentLot.source_schedule_shift_id);
+  const incomingShiftId = normalizeSchedulePlanId(incomingLot.source_schedule_shift_id);
+  if (!currentShiftId || !incomingShiftId || currentShiftId !== incomingShiftId) return false;
+  const currentPlanId = normalizeSchedulePlanId(currentLot.source_schedule_plan_id);
+  const incomingPlanId = normalizeSchedulePlanId(incomingLot.source_schedule_plan_id);
+  return !currentPlanId || !incomingPlanId || currentPlanId === incomingPlanId;
+};
+
+const mergeRealtimeAuctionLot = (currentLot, incomingLot, eventType, payload) => {
+  const merged = { ...currentLot, ...incomingLot, _optimistic: false };
+  if (eventType !== 'lot_post_auction_claimed') return merged;
+
+  const startTime = incomingLot.claim_start_time || incomingLot.claimed_start_time;
+  const endTime = incomingLot.claim_end_time || incomingLot.claimed_end_time;
+  const claimedBy = payload?.operator_id ?? incomingLot.claimed_by;
+  if (!startTime || !endTime || claimedBy == null) return merged;
+
+  const segment = {
+    claimed_by: Number(claimedBy),
+    claimed_by_name: payload?.operator_name || incomingLot.claimed_by_name || '',
+    start_time: String(startTime).slice(0, 5),
+    end_time: String(endTime).slice(0, 5)
+  };
+  const existingSegments = Array.isArray(currentLot.claim_segments) ? currentLot.claim_segments : [];
+  const alreadyPresent = existingSegments.some((item) => (
+    Number(item?.claimed_by) === Number(segment.claimed_by)
+    && String(item?.start_time || '').slice(0, 5) === segment.start_time
+    && String(item?.end_time || '').slice(0, 5) === segment.end_time
+  ));
+  merged.claim_segments = alreadyPresent ? existingSegments : [...existingSegments, segment];
+  return merged;
+};
 
 const toDateInputValue = (value) => {
   const normalized = toDateTimeInputValue(value);
@@ -3184,12 +3232,17 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const streamAbortRef = useRef(null);
   const snapshotRequestRef = useRef(false);
   const lastEventIdRef = useRef(0);
+  const lastLocallyPatchedEventIdRef = useRef(0);
+  const lastAppliedSnapshotEventIdRef = useRef(0);
   const snapshotEtagRef = useRef('');
   const auctionLayoutRef = useRef(null);
   const auctionTableScrollRef = useRef(null);
   const auctionDateBarScrollRef = useRef(null);
   const auctionScrollSyncRef = useRef({ ignoredNode: null, ignoredLeft: 0 });
   const auctionMutationQueueRef = useRef(Promise.resolve());
+  const monitorRefreshTimerRef = useRef(null);
+  const snapshotRefreshPendingRef = useRef(false);
+  const fetchSnapshotRef = useRef(null);
 
   const [settings, setSettings] = useState({
     enabled: false,
@@ -3389,6 +3442,20 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
   const applySnapshot = useCallback((snapshot) => {
     const safe = snapshot || {};
+    // A snapshot is built server-side at some event id, but a slow query (e.g.
+    // when the DB pool is busy) can make it arrive AFTER newer SSE patches have
+    // already advanced the UI. Never let an older snapshot clobber realtime lot
+    // state that SSE moved forward — that made shifts visibly "jump" backwards.
+    const incomingEventId = Number(safe.last_event_id || 0);
+    // Keep the stream cursor (all received events) separate from the local-patch
+    // cursor. Admin/settings events intentionally require a snapshot; comparing
+    // them to the stream cursor could reject the very snapshot meant to apply
+    // them. Only state already patched locally must be protected from rollback.
+    const protectedEventId = Math.max(
+      lastLocallyPatchedEventIdRef.current,
+      lastAppliedSnapshotEventIdRef.current
+    );
+    const isStaleRealtime = incomingEventId < protectedEventId;
     const ids = (safe.selected_operator_ids || []).map(normalizeOperatorId).filter(Boolean);
     const periods = Array.isArray(safe.available_periods) ? safe.available_periods : [];
     const selectedSchedulePlanId = normalizeSchedulePlanId(
@@ -3418,21 +3485,23 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       post_auction_active: Boolean(safe.post_auction_active)
     });
     setNotifyPostClaimEnabled(Boolean(safe.notify_post_claim_enabled));
-    setLots(Array.isArray(safe.lots) ? safe.lots : []);
-    setMyDayOffs(Array.isArray(safe.my_day_offs) ? safe.my_day_offs.filter(Boolean) : []);
-    setMyBlockedDates(Array.isArray(safe.my_blocked_dates) ? safe.my_blocked_dates.filter((item) => (typeof item === 'string' ? item : item?.date)) : []);
-    setMyWorkShifts(Array.isArray(safe.my_work_shifts) ? safe.my_work_shifts : []);
-    const nextEventId = Number(safe.last_event_id || 0);
-    lastEventIdRef.current = nextEventId;
-    setLastEventId(nextEventId);
+    if (!isStaleRealtime) {
+      setLots(Array.isArray(safe.lots) ? safe.lots : []);
+      setMyDayOffs(Array.isArray(safe.my_day_offs) ? safe.my_day_offs.filter(Boolean) : []);
+      setMyBlockedDates(Array.isArray(safe.my_blocked_dates) ? safe.my_blocked_dates.filter((item) => (typeof item === 'string' ? item : item?.date)) : []);
+      setMyWorkShifts(Array.isArray(safe.my_work_shifts) ? safe.my_work_shifts : []);
+      setClaimJournal(Array.isArray(safe.claim_journal) ? safe.claim_journal : []);
+      setParticipantWorkloads(Array.isArray(safe.participant_workloads) ? safe.participant_workloads : []);
+      lastAppliedSnapshotEventIdRef.current = Math.max(lastAppliedSnapshotEventIdRef.current, incomingEventId);
+      lastEventIdRef.current = Math.max(lastEventIdRef.current, incomingEventId);
+      setLastEventId((current) => Math.max(current, incomingEventId));
+    }
     setDraftEnabled(Boolean(safe.enabled));
     setDraftNote(safe.launch_note || '');
     setDraftStartsAt(toDateTimeInputValue(safe.starts_at));
     setDraftEndsAt(toDateTimeInputValue(safe.ends_at));
     setSelectedIds(new Set(ids));
     setAvailablePeriods(periods);
-    setClaimJournal(Array.isArray(safe.claim_journal) ? safe.claim_journal : []);
-    setParticipantWorkloads(Array.isArray(safe.participant_workloads) ? safe.participant_workloads : []);
     setDraftSchedulePlanId((current) => {
       const restartablePeriods = periods.filter((period) => period?.can_restart !== false);
       const periodIds = new Set(restartablePeriods.map((period) => normalizeSchedulePlanId(period?.id)).filter(Boolean));
@@ -3477,7 +3546,12 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
   const fetchSnapshot = useCallback(async ({ silent = false } = {}) => {
     if (!apiRoot || !user?.id) return;
-    if (snapshotRequestRef.current) return;
+    if (snapshotRequestRef.current) {
+      // Do not lose an event-triggered refresh just because another snapshot is
+      // in flight. One trailing request is enough to converge to the newest state.
+      snapshotRefreshPendingRef.current = true;
+      return;
+    }
     snapshotRequestRef.current = true;
     if (!silent) setIsLoading(true);
     try {
@@ -3496,6 +3570,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     } finally {
       snapshotRequestRef.current = false;
       if (!silent) setIsLoading(false);
+      if (snapshotRefreshPendingRef.current) {
+        snapshotRefreshPendingRef.current = false;
+        window.setTimeout(() => fetchSnapshotRef.current?.({ silent: true }), 0);
+      }
     }
   }, [apiRoot, applySnapshot, buildHeaders, notify, user?.id]);
 
@@ -3547,20 +3625,44 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [monitorTab, canMonitor]);
 
+  const scheduleSnapshotRefresh = useCallback(() => {
+    if (monitorRefreshTimerRef.current) return;
+    monitorRefreshTimerRef.current = window.setTimeout(() => {
+      monitorRefreshTimerRef.current = null;
+      fetchSnapshot({ silent: true });
+    }, SHIFT_AUCTION_SNAPSHOT_REFRESH_DEBOUNCE_MS);
+  }, [fetchSnapshot]);
+
   const handleRealtimeEvent = useCallback((event) => {
     const eventType = String(event?.event_type || '');
     const payload = event?.payload || {};
-    if ((eventType === 'lot_claimed' || eventType === 'lot_released') && payload.lot?.id) {
-      setLots((currentLots) => currentLots.map((lot) => (
-        Number(lot.id) === Number(payload.lot.id)
-          ? { ...lot, ...payload.lot, _optimistic: false }
+    if (SHIFT_AUCTION_LOT_PATCH_EVENTS.has(eventType) && payload.lot?.id) {
+      // Apply the single lot from the event payload — instant, zero extra
+      // requests. The full snapshot (workload aggregates, journal, my own
+      // schedule) is refreshed only when it actually concerns this viewer, and
+      // even then it is debounced so a claim storm cannot stampede the DB.
+      const eventId = Number(event?.id || 0);
+      lastLocallyPatchedEventIdRef.current = Math.max(lastLocallyPatchedEventIdRef.current, eventId);
+      const patchLot = (lot) => (
+        isSameRealtimeAuctionLot(lot, payload.lot)
+          ? mergeRealtimeAuctionLot(lot, payload.lot, eventType, payload)
           : lot
-      )));
-      if (canMonitor) fetchSnapshot({ silent: true });
+      );
+      setLots((currentLots) => currentLots.map(patchLot));
+      // Historical post-auction lots use string ids such as `preview-123` and
+      // live in a separate collection. Match by id or source plan/shift.
+      setPeriodPreviewLots((currentLots) => currentLots.map(patchLot));
+      const affectsMe = Number(payload.operator_id) === Number(user?.id)
+        || Number(payload.lot.claimed_by) === Number(user?.id);
+      if (canMonitor || affectsMe) scheduleSnapshotRefresh();
       return;
     }
 
     if ((eventType === 'day_off_selected' || eventType === 'day_off_removed') && Number(payload.operator_id) === Number(user?.id)) {
+      lastLocallyPatchedEventIdRef.current = Math.max(
+        lastLocallyPatchedEventIdRef.current,
+        Number(event?.id || 0)
+      );
       setMyDayOffs(Array.isArray(payload.my_day_offs) ? payload.my_day_offs.filter(Boolean) : []);
       return;
     }
@@ -3570,14 +3672,19 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     }
 
     fetchSnapshot({ silent: true });
-  }, [canMonitor, fetchSnapshot, user?.id]);
+  }, [canMonitor, fetchSnapshot, scheduleSnapshotRefresh, user?.id]);
 
-  const fetchSnapshotRef = useRef(fetchSnapshot);
   const handleRealtimeEventRef = useRef(handleRealtimeEvent);
   const buildHeadersRef = useRef(buildHeaders);
   useEffect(() => { fetchSnapshotRef.current = fetchSnapshot; }, [fetchSnapshot]);
   useEffect(() => { handleRealtimeEventRef.current = handleRealtimeEvent; }, [handleRealtimeEvent]);
   useEffect(() => { buildHeadersRef.current = buildHeaders; }, [buildHeaders]);
+  useEffect(() => () => {
+    if (monitorRefreshTimerRef.current) {
+      window.clearTimeout(monitorRefreshTimerRef.current);
+      monitorRefreshTimerRef.current = null;
+    }
+  }, []);
 
   useEffect(() => {
     fetchSnapshotRef.current?.();
