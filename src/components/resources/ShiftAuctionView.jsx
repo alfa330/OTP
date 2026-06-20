@@ -4617,7 +4617,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       return;
     }
     const confirmed = window.confirm(
-      `Начать аукцион заново для недели ${formatAuctionPeriodLabel(selectedDraftPeriod)}? Все выбранные смены и выходные будут очищены.`
+      `Начать аукцион заново для недели ${formatAuctionPeriodLabel(selectedDraftPeriod)}?\n\n`
+      + 'Будут очищены только выбранные смены и выходные этой недели. Прошлые опубликованные периоды не изменятся. '
+      + 'Режим добора для нового запуска будет выключен.'
     );
     if (!confirmed) return;
     setIsRestarting(true);
