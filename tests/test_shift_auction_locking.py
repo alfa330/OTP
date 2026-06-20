@@ -128,6 +128,37 @@ class ShiftAuctionLockingTests(unittest.TestCase):
         ]
         self.assertEqual(len(publish_loops), 1)
 
+    def test_restart_is_scoped_to_selected_period_and_resets_topup(self):
+        source = ast.get_source_segment(
+            DATABASE_PATH.read_text(encoding="utf-8-sig"),
+            _method("restart_shift_auction_test"),
+        )
+
+        self.assertIn("topup_started_at = NULL", source)
+        self.assertIn("topup_started_by = NULL", source)
+        self.assertIn("event_type IN ('day_off_selected', 'day_off_removed')", source)
+        self.assertIn("BETWEEN %s AND %s", source)
+        self.assertIn("source_schedule_plan_id', '')::INTEGER = %s", source)
+        self.assertNotIn("DELETE FROM shift_auction_published_periods", source)
+        self.assertNotIn("DELETE FROM shift_auction_historical_claims", source)
+        self.assertNotIn("DELETE FROM work_shifts", source)
+
+    def test_new_auction_run_does_not_inherit_topup(self):
+        update_source = ast.get_source_segment(
+            DATABASE_PATH.read_text(encoding="utf-8-sig"),
+            _method("update_shift_auction_test_access"),
+        )
+        control_source = ast.get_source_segment(
+            DATABASE_PATH.read_text(encoding="utf-8-sig"),
+            _method("control_shift_auction_test"),
+        )
+
+        self.assertIn("should_reset_topup", update_source)
+        self.assertIn("topup_started_at = CASE WHEN %s THEN NULL", update_source)
+        self.assertIn("topup_started_by = CASE WHEN %s THEN NULL", update_source)
+        self.assertIn("topup_started_at = NULL", control_source)
+        self.assertIn("topup_started_by = NULL", control_source)
+
 
 if __name__ == "__main__":
     unittest.main()

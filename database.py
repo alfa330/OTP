@@ -5691,13 +5691,14 @@ class Database:
                 saved_shift_rows = cursor.fetchall() or []
 
             cursor.execute("""
-                SELECT selected_schedule_plan_id
+                SELECT selected_schedule_plan_id, enabled
                 FROM shift_auction_test_access
                 WHERE id = 1
                 FOR UPDATE
             """)
             current_settings_row = cursor.fetchone()
             current_selected_plan_id = current_settings_row[0] if current_settings_row else None
+            current_enabled = bool(current_settings_row[1]) if current_settings_row and len(current_settings_row) > 1 else False
 
             valid_ids = []
             if normalized_ids:
@@ -5728,6 +5729,13 @@ class Database:
                 )
 
             next_selected_plan_id = selected_plan_id if selected_plan_id is not None else current_selected_plan_id
+            # Top-up belongs to one auction run, not to the singleton settings
+            # row forever. Reset it whenever another period is loaded or a
+            # disabled auction is started again.
+            should_reset_topup = bool(
+                should_refresh_lots
+                or (bool(enabled) and not current_enabled)
+            )
             cursor.execute("""
                 UPDATE shift_auction_test_access
                 SET enabled = %s,
@@ -5739,6 +5747,8 @@ class Database:
                     finished_at = CASE WHEN %s THEN NULL ELSE finished_at END,
                     published_to_work_schedules_at = CASE WHEN %s THEN NULL ELSE published_to_work_schedules_at END,
                     published_to_work_schedules_by = CASE WHEN %s THEN NULL ELSE published_to_work_schedules_by END,
+                    topup_started_at = CASE WHEN %s THEN NULL ELSE topup_started_at END,
+                    topup_started_by = CASE WHEN %s THEN NULL ELSE topup_started_by END,
                     updated_by = %s,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = 1
@@ -5752,6 +5762,8 @@ class Database:
                 should_refresh_lots,
                 should_refresh_lots,
                 should_refresh_lots,
+                should_reset_topup,
+                should_reset_topup,
                 updated_by,
             ))
 
@@ -5806,6 +5818,7 @@ class Database:
                 "selected_operator_ids": valid_ids,
                 "selected_schedule_plan_id": next_selected_plan_id,
                 "lots_refreshed": should_refresh_lots,
+                "topup_reset": should_reset_topup,
                 "date_from": selected_period_row[1].strftime('%Y-%m-%d') if selected_period_row and selected_period_row[1] else None,
                 "date_to": selected_period_row[2].strftime('%Y-%m-%d') if selected_period_row and selected_period_row[2] else None,
             })
@@ -5879,6 +5892,8 @@ class Database:
                     UPDATE shift_auction_test_access
                     SET paused_at = NULL,
                         finished_at = %s,
+                        topup_started_at = NULL,
+                        topup_started_by = NULL,
                         updated_by = %s,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = 1
@@ -5904,7 +5919,8 @@ class Database:
         now = datetime.now()
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT enabled, starts_at, ends_at, paused_at, finished_at, topup_started_at
+                SELECT enabled, starts_at, ends_at, paused_at, finished_at,
+                       topup_started_at, selected_schedule_plan_id
                 FROM shift_auction_test_access
                 WHERE id = 1
                 FOR UPDATE
@@ -5914,6 +5930,7 @@ class Database:
                 raise ValueError("AUCTION_NOT_AVAILABLE")
             current_status = self._get_shift_auction_test_status(row[0], row[1], row[2], row[3], row[4])
             current_topup_started_at = row[5]
+            selected_schedule_plan_id = row[6]
 
             if enable:
                 if current_status != 'open':
@@ -5933,6 +5950,7 @@ class Database:
                 topup_started_at = started_at_row[0] if started_at_row else now
                 event = self._insert_shift_auction_test_event(cursor, "auction_topup_started", {
                     "topup_started_at": topup_started_at.isoformat() if topup_started_at else None,
+                    "plan_id": selected_schedule_plan_id,
                     "updated_by": updated_by,
                 })
             else:
@@ -5948,6 +5966,7 @@ class Database:
                 """, (updated_by,))
                 event = self._insert_shift_auction_test_event(cursor, "auction_topup_stopped", {
                     "stopped_at": now.isoformat(),
+                    "plan_id": selected_schedule_plan_id,
                     "updated_by": updated_by,
                 })
 
@@ -7841,6 +7860,8 @@ class Database:
                     finished_at = NULL,
                     published_to_work_schedules_at = NULL,
                     published_to_work_schedules_by = NULL,
+                    topup_started_at = NULL,
+                    topup_started_by = NULL,
                     updated_by = %s,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = 1
@@ -7850,6 +7871,11 @@ class Database:
                 WHERE event_type = 'lot_claimed'
                   AND NULLIF(payload->'lot'->>'source_schedule_plan_id', '')::INTEGER = %s
             """, (int(period_row[0]),))
+            cursor.execute("""
+                DELETE FROM shift_auction_test_events
+                WHERE event_type IN ('day_off_selected', 'day_off_removed')
+                  AND NULLIF(payload->>'date', '')::DATE BETWEEN %s AND %s
+            """, (period_row[1], period_row[2]))
             cursor.execute("DELETE FROM shift_auction_test_day_offs")
             cursor.execute("DELETE FROM shift_auction_test_lots")
             execute_values(
@@ -7879,6 +7905,7 @@ class Database:
                 "count": len(saved_shift_rows),
                 "date_from": period_row[1].strftime('%Y-%m-%d'),
                 "date_to": period_row[2].strftime('%Y-%m-%d'),
+                "topup_reset": True,
                 "updated_by": updated_by,
             })
         return {
