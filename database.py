@@ -9582,9 +9582,10 @@ class Database:
 
     def admin_add_shift_auction_lot(self, admin_id, shift_date, start_time, end_time, rate_min):
         """
-        Супервайзер/админ добавляет дополнительную смену в активный аукцион (кнопка «+»
-        в сетке по группе ставки). Ставка берётся из группы, длина смены фиксирована
-        для этой ставки (или ночная 20:00→08:00). Лот создаётся доступным
+        Супервайзер/админ добавляет дополнительную смену в текущий аукцион (кнопка «+»
+        в сетке по группе ставки), в том числе после его закрытия. Ставка берётся из
+        группы, длина смены фиксирована для этой ставки (или ночная 20:00→08:00).
+        Лот создаётся доступным
         (status='available') и помечается added_by — его видно другим цветом в сетке и
         в генерации графиков, и его можно забрать как обычную смену.
 
@@ -9624,9 +9625,15 @@ class Database:
         if duration != expected_duration:
             raise ValueError("INVALID_DURATION")
 
+        # A closed auction may still contain future shifts, but a manager must never
+        # be able to add a lot whose start moment has already passed.
+        shift_start_dt = datetime.combine(date_obj, start_obj)
+        if shift_start_dt <= datetime.now():
+            raise ValueError("SHIFT_ALREADY_STARTED")
+
         with self._get_cursor() as cursor:
-            # Shifts may be added while the auction is being prepared, running or paused
-            # — but not once it is finished/disabled.
+            # Shifts may be added while the auction is being prepared, running, paused
+            # or closed. A disabled auction has no active context to add them to.
             cursor.execute("""
                 SELECT enabled, starts_at, ends_at, paused_at, finished_at
                 FROM shift_auction_test_access WHERE id = 1
@@ -9634,7 +9641,7 @@ class Database:
             settings_row = cursor.fetchone()
             if not settings_row:
                 raise ValueError("AUCTION_NOT_AVAILABLE")
-            if self._get_shift_auction_test_status(*settings_row[:5]) in ("closed", "disabled"):
+            if self._get_shift_auction_test_status(*settings_row[:5]) == "disabled":
                 raise ValueError("AUCTION_NOT_OPEN")
 
             # The "+" button only appears for dates already present in the grid, so the

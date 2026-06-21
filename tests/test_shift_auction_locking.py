@@ -162,6 +162,24 @@ class ShiftAuctionLockingTests(unittest.TestCase):
         self.assertIn("topup_started_at = NULL", control_source)
         self.assertIn("topup_started_by = NULL", control_source)
 
+    def test_manual_lot_can_be_added_after_auction_closes(self):
+        source = ast.get_source_segment(
+            DATABASE_PATH.read_text(encoding="utf-8-sig"),
+            _method("admin_add_shift_auction_lot"),
+        )
+
+        self.assertIn('== "disabled"', source)
+        self.assertNotIn('in ("closed", "disabled")', source)
+
+    def test_manual_lot_rejects_a_start_time_that_has_passed(self):
+        source = ast.get_source_segment(
+            DATABASE_PATH.read_text(encoding="utf-8-sig"),
+            _method("admin_add_shift_auction_lot"),
+        )
+
+        self.assertIn("datetime.combine(date_obj, start_obj)", source)
+        self.assertIn('raise ValueError("SHIFT_ALREADY_STARTED")', source)
+
 
 if __name__ == "__main__":
     unittest.main()

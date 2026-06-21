@@ -4814,6 +4814,14 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       notify('Укажите время начала смены', 'error');
       return;
     }
+    const shiftStartMs = getLotStartDateTimeMs({
+      shift_date: addShiftTarget.date,
+      start_time: start
+    });
+    if (shiftStartMs === null || shiftStartMs <= Date.now()) {
+      notify('Нельзя добавить смену: дата и время начала уже прошли', 'error');
+      return;
+    }
     setIsAddingShift(true);
     try {
       const response = await axios.post(
@@ -5624,7 +5632,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                   })}
                                 </tr>
                               ))}
-                              {canMonitor && isViewingActivePeriod && runtimeStatus !== 'closed' && runtimeStatus !== 'disabled' ? (
+                              {canMonitor && isViewingActivePeriod && runtimeStatus !== 'disabled' ? (
                                 <tr key={`${group.id}-add`}>
                                   {lotDates.map((date) => (
                                     <td
