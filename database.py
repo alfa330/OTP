@@ -504,7 +504,7 @@ SCHEDULE_AUTO_FLAG_ALLOWED = {
     SCHEDULE_AUTO_FLAG_CONFIRMED,
     SCHEDULE_AUTO_FLAG_REJECTED
 }
-SCHEDULE_AUTO_WORK_STATUS_KEYS = {'готов', 'занят', 'занята', 'перезвон'}
+SCHEDULE_AUTO_WORK_STATUS_KEYS = {'готов', 'занят', 'занята', 'перезвон', 'зарезервировано'}
 SCHEDULE_AUTO_TALK_STATUS_KEYS = {'занят', 'занята'}
 SCHEDULE_AUTO_BREAK_STATUS_KEYS = {'перерыв', 'авто'}
 SCHEDULE_AUTO_NO_PHONE_STATUS_KEY = 'без телефона'

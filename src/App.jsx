@@ -9945,10 +9945,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             'готов': 'Готов',
             'занят': 'Занят',
             'занята': 'Занята',
+            'зарезервировано': 'Зарезервировано',
             'перезвон': 'Перезвон',
             'перерыв': 'Перерыв',
             'авто': 'Авто',
             'вышел': 'Вышел',
+            'выключен': 'Выключен',
+            'нет на месте': 'Нет на месте',
             'тренинг': 'Тренинг',
             'training': 'Training',
             'study': 'Тренинг',
@@ -10097,6 +10100,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 case 'отключен':
                 case 'отключена':
                 case 'отключено':
+                case 'выключен':
+                case 'нет на месте':
                     return byKey({
                         chip: 'border-slate-300 bg-slate-100 text-slate-700',
                         row: 'border-slate-200 bg-slate-100/70 text-slate-700',
@@ -10153,6 +10158,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
             const PLANNER_IMPORTED_WORK_STATUS_KEYS = new Set([
             'готов', 'занят', 'занята', 'перезвон',
+            // Oktell A_UserStateHistory.State = 6 (оператор занят/зарезервирован под звонок).
+            'зарезервировано',
             'online', 'holiday', 'онлайн', 'закрытие чатов'
             ]);
             const PLANNER_IMPORTED_BREAK_STATUS_KEYS = new Set([
@@ -10165,7 +10172,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             ]);
             const PLANNER_IMPORTED_NOT_ON_SHIFT_STATUS_KEYS = new Set([
             'нет статуса', 'отключен', 'отключена', 'отключено',
-            'logout', 'выход', 'выход из системы', 'отключение'
+            'logout', 'выход', 'выход из системы', 'отключение',
+            // Oktell A_UserStateHistory.State: 0 = Выключен, 3 = Нет на месте.
+            // Без этих ключей оператор вне смены считался бы фактически на смене.
+            'выключен', 'нет на месте'
             ]);
             const plannerImportedStatusCountsAsOnShift = (statusKeyRaw) => {
             const key = plannerStatusNormalizeKey(statusKeyRaw);
@@ -12817,6 +12827,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const addDirection = (value) => {
                     const label = String(value || '').trim();
                     if (!label) return;
+                    // Группировка только по операторским направлениям: чат-менеджеры
+                    // (статусы Chat2Desk) в почасовом факте смен не учитываются.
+                    if (isChatManagerDirection(label)) return;
                     const key = plannerNormalizeDirectionKey(label);
                     if (!key || byKey.has(key)) return;
                     byKey.set(key, { key, label });
@@ -26878,7 +26891,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             const directionKey = plannerNormalizeDirectionKey(directionLabel);
                             return effectiveGroupingDirectionSet.has(directionKey);
                         };
-                        const operatorsForGrouping = (Array.isArray(operators) ? operators : []).filter(operatorMatchesGroupingDirections);
+                        // Группировка считает только операторов (статусы Oktell). Чат-менеджеры
+                        // живут на статусах Chat2Desk и в почасовом факте смен не участвуют.
+                        const operatorIsChatManagerForGrouping = (op) => {
+                            const modelCode = String(op?.calculation_model_code || op?.calculationModelCode || '').trim().toLowerCase();
+                            if (modelCode === 'chat_manager') return true;
+                            return isChatManagerDirection(op?.direction || op?.direction_name || '');
+                        };
+                        const operatorsForGrouping = (Array.isArray(operators) ? operators : [])
+                            .filter(op => !operatorIsChatManagerForGrouping(op) && operatorMatchesGroupingDirections(op));
                         const toggleGroupingDirectionKey = (directionKeyRaw) => {
                             const directionKey = plannerNormalizeDirectionKey(directionKeyRaw);
                             if (!directionKey || !availableGroupingDirectionKeys.has(directionKey)) return;
