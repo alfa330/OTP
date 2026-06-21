@@ -9635,7 +9635,7 @@ class Database:
             # Shifts may be added while the auction is being prepared, running, paused
             # or closed. A disabled auction has no active context to add them to.
             cursor.execute("""
-                SELECT enabled, starts_at, ends_at, paused_at, finished_at
+                SELECT enabled, starts_at, ends_at, paused_at, finished_at, selected_schedule_plan_id
                 FROM shift_auction_test_access WHERE id = 1
             """)
             settings_row = cursor.fetchone()
@@ -9643,6 +9643,7 @@ class Database:
                 raise ValueError("AUCTION_NOT_AVAILABLE")
             if self._get_shift_auction_test_status(*settings_row[:5]) == "disabled":
                 raise ValueError("AUCTION_NOT_OPEN")
+            plan_id = int(settings_row[5]) if settings_row[5] is not None else None
 
             # The "+" button only appears for dates already present in the grid, so the
             # new shift must land on one of the auction's existing lot dates.
@@ -9653,22 +9654,55 @@ class Database:
             if date_obj not in existing_dates:
                 raise ValueError("DATE_OUT_OF_RANGE")
 
-            cursor.execute("""
-                INSERT INTO shift_auction_test_lots (
-                    shift_date, start_time, end_time, rate_min, breaks,
-                    status, added_by, added_at
-                )
-                VALUES (%s, %s, %s, %s, '[]'::jsonb, 'available', %s, CURRENT_TIMESTAMP)
-                RETURNING id
-            """, (date_obj, start_obj, end_obj, rate_value, admin_id_int))
-            new_row = cursor.fetchone()
-            new_lot_id = int(new_row[0]) if new_row else None
-
             admin_name = ""
             if admin_id_int is not None:
                 cursor.execute("SELECT name FROM users WHERE id = %s", (admin_id_int,))
                 name_row = cursor.fetchone()
                 admin_name = (name_row[0] or "") if name_row else ""
+
+            # Back the lot with a real saved-shift row in the auction's plan so it behaves
+            # EXACTLY like a normal auction shift: partial/post-auction (добор) claims,
+            # "кто какую часть взял" segment display, admin partial assign and publish +
+            # historical claims all key on (plan_id, source_schedule_shift_id). Without a
+            # source shift, post_auction_claim_lot treats every claim as taking the WHOLE
+            # shift, so partial доборы are impossible. A template-seeded auction has no
+            # plan — then we fall back to a plain source-less lot (whole-shift claim only).
+            source_shift_id = None
+            if plan_id is not None:
+                overnight = end_min >= 24 * 60
+                label = f"{start_obj.strftime('%H:%M')}-{end_obj.strftime('%H:%M')}"
+                client_shift_id = (
+                    f"auction-added-{admin_id_int}-{date_obj.isoformat()}"
+                    f"-{start_obj.strftime('%H%M')}-{end_obj.strftime('%H%M')}"
+                )[:180]
+                cursor.execute("""
+                    INSERT INTO resource_saved_schedule_shifts (
+                        plan_id, client_shift_id, shift_date, start_minute, end_minute,
+                        start_time, end_time, duration_minutes, rate_min, label,
+                        template_id, source, tone, overnight, breaks, meta
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, '', 'auction-added', '', %s, '[]'::jsonb, %s)
+                    RETURNING id
+                """, (
+                    plan_id, client_shift_id, date_obj, start_min, end_min,
+                    start_obj, end_obj, duration, rate_value, label, overnight,
+                    Json({"addedBy": admin_id_int, "addedByName": admin_name})
+                ))
+                shift_row = cursor.fetchone()
+                source_shift_id = int(shift_row[0]) if shift_row else None
+
+            cursor.execute("""
+                INSERT INTO shift_auction_test_lots (
+                    shift_date, start_time, end_time, rate_min, breaks,
+                    source_schedule_plan_id, source_schedule_shift_id,
+                    status, added_by, added_at
+                )
+                VALUES (%s, %s, %s, %s, '[]'::jsonb, %s, %s, 'available', %s, CURRENT_TIMESTAMP)
+                RETURNING id
+            """, (date_obj, start_obj, end_obj, rate_value,
+                  (plan_id if source_shift_id else None), source_shift_id, admin_id_int))
+            new_row = cursor.fetchone()
+            new_lot_id = int(new_row[0]) if new_row else None
 
             event_payload = {
                 "lot_id": new_lot_id,
@@ -9676,6 +9710,8 @@ class Database:
                 "start_time": start_obj.strftime('%H:%M'),
                 "end_time": end_obj.strftime('%H:%M'),
                 "rate_min": rate_value,
+                "source_schedule_plan_id": (plan_id if source_shift_id else None),
+                "source_schedule_shift_id": source_shift_id,
                 "added_by": admin_id_int,
                 "added_by_name": admin_name,
             }
