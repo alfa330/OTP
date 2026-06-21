@@ -1611,7 +1611,6 @@ const EvaluationModal = ({
 
     const currentDir = directions?.find(d => d.id === selectedDirId) || directions?.[0] || null;
     const criteria = currentDir?.criteria || [];
-    const monthsRu = ['янв.','февр.','мар.','апр.','май','июн.','июл.','авг.','сент.','окт.','ноя.','дек.'];
 
     useEffect(() => {
         if (!isOpen || !isCalibrationAddCallMode) return;
@@ -1722,9 +1721,7 @@ const EvaluationModal = ({
                 setActualDuration(null); setDurationMismatch(false);
                 setPhoneNumber(existingEvaluation.phoneNumber || '');
                 const date = new Date(existingEvaluation.appeal_date);
-                setAppealDate(initDir?.hasFileUpload
-                    ? `${date.getDate().toString().padStart(2,'0')}-${(date.getMonth()+1).toString().padStart(2,'0')}-${date.getFullYear()} ${date.getHours().toString().padStart(2,'0')}:${date.getMinutes().toString().padStart(2,'0')}:${date.getSeconds().toString().padStart(2,'0')}`
-                    : `${date.getDate()} ${monthsRu[date.getMonth()]} ${date.getHours().toString().padStart(2,'0')}:${date.getMinutes().toString().padStart(2,'0')}`);
+                setAppealDate(`${date.getDate().toString().padStart(2,'0')}-${(date.getMonth()+1).toString().padStart(2,'0')}-${date.getFullYear()} ${date.getHours().toString().padStart(2,'0')}:${date.getMinutes().toString().padStart(2,'0')}:${date.getSeconds().toString().padStart(2,'0')}`);
                 setScores(initDir?.criteria?.map(()=>'Correct') || []);
                 setComments(initDir?.criteria?.map(()=>'') || []);
                 setCommentVisible(initDir?.criteria?.map(()=>false) || []);
@@ -1764,9 +1761,7 @@ const EvaluationModal = ({
                 setActualDuration(null); setDurationMismatch(false);
                 if (existingEvaluation.appeal_date) {
                     const date = new Date(existingEvaluation.appeal_date);
-                    setAppealDate(initDir?.hasFileUpload
-                        ? `${date.getDate().toString().padStart(2,'0')}-${(date.getMonth()+1).toString().padStart(2,'0')}-${date.getFullYear()} ${date.getHours().toString().padStart(2,'0')}:${date.getMinutes().toString().padStart(2,'0')}:${date.getSeconds().toString().padStart(2,'0')}`
-                        : `${date.getDate()} ${monthsRu[date.getMonth()]} ${date.getHours().toString().padStart(2,'0')}:${date.getMinutes().toString().padStart(2,'0')}`);
+                    setAppealDate(`${date.getDate().toString().padStart(2,'0')}-${(date.getMonth()+1).toString().padStart(2,'0')}-${date.getFullYear()} ${date.getHours().toString().padStart(2,'0')}:${date.getMinutes().toString().padStart(2,'0')}:${date.getSeconds().toString().padStart(2,'0')}`);
                 } else setAppealDate('');
                 setPhoneError('');
             }
@@ -1821,45 +1816,24 @@ const EvaluationModal = ({
     };
 
     const fmtDate = (input) => {
-        const hf = currentDir?.hasFileUpload;
-        if (hf) {
-            let d = input.replace(/\D/g,'').slice(0,14);
-            let f = '';
-            if (d.length > 0) f += d.slice(0,2);
-            if (d.length > 2) f += '-' + d.slice(2,4);
-            if (d.length > 4) f += '-' + d.slice(4,8);
-            if (d.length > 8) f += ' ' + d.slice(8,10);
-            if (d.length > 10) f += ':' + d.slice(10,12);
-            if (d.length > 12) f += ':' + d.slice(12,14);
-            return f;
-        } else {
-            const hasMonth = monthsRu.some(m => input.toLowerCase().includes(m.toLowerCase()));
-            if (hasMonth) return input;
-            let d = input.replace(/\D/g,'');
-            if (d.length <= 2) return d;
-            if (d.length <= 4) { const m = parseInt(d.slice(2,4)); return m>=1&&m<=12 ? d.slice(0,2)+' '+monthsRu[m-1] : d.slice(0,2); }
-            if (d.length <= 6) { const m = parseInt(d.slice(2,4)); return m>=1&&m<=12 ? d.slice(0,2)+' '+monthsRu[m-1]+' '+d.slice(4,6) : d.slice(0,2)+' '+d.slice(4,6); }
-            const m = parseInt(d.slice(2,4));
-            return m>=1&&m<=12 ? d.slice(0,2)+' '+monthsRu[m-1]+' '+d.slice(4,6)+':'+d.slice(6,8) : d.slice(0,2)+' '+d.slice(4,6)+':'+d.slice(6,8);
-        }
+        let d = input.replace(/\D/g,'').slice(0,14);
+        let f = '';
+        if (d.length > 0) f += d.slice(0,2);
+        if (d.length > 2) f += '-' + d.slice(2,4);
+        if (d.length > 4) f += '-' + d.slice(4,8);
+        if (d.length > 8) f += ' ' + d.slice(8,10);
+        if (d.length > 10) f += ':' + d.slice(10,12);
+        if (d.length > 12) f += ':' + d.slice(12,14);
+        return f;
     };
 
     const getAppealDateISO = () => {
         if (!appealDate) return null;
-        const hf = currentDir?.hasFileUpload;
-        if (hf) {
-            let d = appealDate.replace(/\D/g,'');
-            const isRe = existingEvaluation?.id != null;
-            if (isRe) { if (d.length < 12) return null; const s = d.length>=14 ? d.slice(12,14) : '00'; return `${d.slice(4,8)}-${d.slice(2,4)}-${d.slice(0,2)}T${d.slice(8,10)}:${d.slice(10,12)}:${s}`; }
-            if (d.length !== 14) return null;
-            return `${d.slice(4,8)}-${d.slice(2,4)}-${d.slice(0,2)}T${d.slice(8,10)}:${d.slice(10,12)}:${d.slice(12,14)}`;
-        } else {
-            const m = appealDate.trim().match(/^(\d{1,2})\s+([а-яё]+\.?)\s+(\d{1,2}):(\d{2})$/i);
-            if (!m) return null;
-            const mi = monthsRu.findIndex(x => x.replace(/\./,'').toLowerCase() === m[2].toLowerCase().replace(/\./,''));
-            if (mi === -1) return null;
-            return `${new Date().getFullYear()}-${String(mi+1).padStart(2,'0')}-${m[1].padStart(2,'0')}T${m[3].padStart(2,'0')}:${m[4]}:00`;
-        }
+        let d = appealDate.replace(/\D/g,'');
+        const isRe = existingEvaluation?.id != null;
+        if (isRe) { if (d.length < 12) return null; const s = d.length>=14 ? d.slice(12,14) : '00'; return `${d.slice(4,8)}-${d.slice(2,4)}-${d.slice(0,2)}T${d.slice(8,10)}:${d.slice(10,12)}:${s}`; }
+        if (d.length !== 14) return null;
+        return `${d.slice(4,8)}-${d.slice(2,4)}-${d.slice(0,2)}T${d.slice(8,10)}:${d.slice(10,12)}:${d.slice(12,14)}`;
     };
 
     const handleDirChange = (id) => {
@@ -2118,7 +2092,7 @@ const EvaluationModal = ({
                                 type="text"
                                 value={appealDate}
                                 onChange={e => setAppealDate(fmtDate(e.target.value))}
-                                placeholder={currentDir?.hasFileUpload ? 'DD-MM-YYYY HH:MM:SS' : 'DD месяц HH:MM'}
+                                placeholder="DD-MM-YYYY HH:MM:SS"
                                 readOnly={isLocked}
                                 style={{fontFamily: 'var(--font-mono)'}}
                             />
