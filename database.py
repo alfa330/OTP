@@ -2320,6 +2320,11 @@ class Database:
             # Links a "remainder" lot (the unclaimed leftover of a partial post-auction
             # claim) back to the lot it was split from, so admin unclaim can reconcile them.
             cursor.execute("ALTER TABLE shift_auction_test_lots ADD COLUMN IF NOT EXISTS remainder_of_lot_id INTEGER NULL;")
+            # Manually-added lots (supervisor/admin add an extra shift via the "+" button
+            # in the auction grid). added_by lets the UI show a distinct colour and
+            # "кто добавил" both in the auction grid and in the schedule planner.
+            cursor.execute("ALTER TABLE shift_auction_test_lots ADD COLUMN IF NOT EXISTS added_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL;")
+            cursor.execute("ALTER TABLE shift_auction_test_lots ADD COLUMN IF NOT EXISTS added_at TIMESTAMP NULL;")
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS shift_auction_test_day_offs (
                     operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -4838,6 +4843,8 @@ class Database:
             "claim_start_time": row[17].strftime('%H:%M') if len(row) > 17 and row[17] else None,
             "claim_end_time": row[18].strftime('%H:%M') if len(row) > 18 and row[18] else None,
             "claim_segments": row[19] if len(row) > 19 and isinstance(row[19], list) else [],
+            "added_by": row[20] if len(row) > 20 else None,
+            "added_by_name": (row[21] or "") if len(row) > 21 else "",
         }
 
     def _get_shift_auction_operator_work_shifts_tx(self, cursor, operator_id, lot_dates=None):
@@ -4977,11 +4984,14 @@ class Database:
                       AND hc.source_schedule_shift_id = l.source_schedule_shift_id
                       AND hc.claimed_start_time IS NOT NULL
                       AND hc.claimed_end_time IS NOT NULL
-                ), '[]'::jsonb) AS claim_segments
+                ), '[]'::jsonb) AS claim_segments,
+                l.added_by,
+                added_user.name AS added_by_name
             FROM shift_auction_test_lots l
             LEFT JOIN users u ON u.id = l.claimed_by
             LEFT JOIN directions claimed_dir ON claimed_dir.id = u.direction_id
             LEFT JOIN resource_saved_schedule_shifts source_shift ON source_shift.id = l.source_schedule_shift_id
+            LEFT JOIN users added_user ON added_user.id = l.added_by
             ORDER BY l.shift_date, l.start_time, l.id
         """)
         lot_rows = cursor.fetchall() or []
@@ -5079,6 +5089,7 @@ class Database:
             structural_events = {
                 "settings_updated",
                 "lots_seeded",
+                "lot_added",
                 "auction_published",
                 "auction_paused",
                 "auction_resumed",
@@ -6155,6 +6166,13 @@ class Database:
     # other operators. Matches the frontend's >=15-min availability filter.
     POST_AUCTION_MIN_REMAINDER_MINUTES = 15
 
+    # Canonical shift length (minutes) per auction rate. When a supervisor/admin
+    # adds an extra shift via the "+" button, the start time is free but the
+    # length is fixed by the rate, so the segment "соответствует ставке". The
+    # night shift (20:00→08:00) is validated separately as a fixed 12h window.
+    SHIFT_AUCTION_RATE_SHIFT_MINUTES = {1.0: 540, 0.75: 390, 0.5: 240}
+    SHIFT_AUCTION_NIGHT_SHIFT_MINUTES = 720
+
     @staticmethod
     def _break_overlaps_minute_range(brk, range_start_min, range_end_min):
         """True if a break {start,end} (in minutes, night-wrap aware) overlaps a range."""
@@ -6709,11 +6727,17 @@ class Database:
                     source_shift.start_minute AS source_start_minute,
                     source_shift.end_minute AS source_end_minute,
                     l.post_claim_start_time,
-                    l.post_claim_end_time
+                    l.post_claim_end_time,
+                    -- Keep column positions aligned with the serializer: row[19] is
+                    -- claim_segments (unused here), row[20]/row[21] are added_by info.
+                    '[]'::jsonb AS claim_segments,
+                    l.added_by,
+                    added_user.name AS added_by_name
                 FROM shift_auction_test_lots l
                 LEFT JOIN users u ON u.id = l.claimed_by
                 LEFT JOIN directions claimed_dir ON claimed_dir.id = u.direction_id
                 LEFT JOIN resource_saved_schedule_shifts source_shift ON source_shift.id = l.source_schedule_shift_id
+                LEFT JOIN users added_user ON added_user.id = l.added_by
                 ORDER BY l.shift_date, l.start_time, l.id
             """)
             lot_rows = cursor.fetchall() or []
@@ -7689,12 +7713,15 @@ class Database:
                     cdir.name AS claimed_by_direction,
                     s.start_minute, s.end_minute,
                     l.post_claim_start_time,
-                    l.post_claim_end_time
+                    l.post_claim_end_time,
+                    l.added_by,
+                    added_user.name AS added_by_name
                 FROM shift_auction_test_lots l
                 LEFT JOIN users u ON u.id = l.claimed_by
                 LEFT JOIN directions cdir ON cdir.id = u.direction_id
                 LEFT JOIN resource_saved_schedule_shifts s
                     ON s.id = l.source_schedule_shift_id
+                LEFT JOIN users added_user ON added_user.id = l.added_by
                 WHERE l.shift_date BETWEEN %s::date - INTERVAL '1 day' AND %s::date
                 ORDER BY l.shift_date, l.start_time, l.end_time, l.id
             """, (date_obj, date_obj))
@@ -7722,6 +7749,8 @@ class Database:
                     "source_end_minute": int(row[16]) if row[16] is not None else None,
                     "claim_start_time": row[17].strftime('%H:%M') if row[17] else None,
                     "claim_end_time": row[18].strftime('%H:%M') if row[18] else None,
+                    "added_by": row[19] if len(row) > 19 else None,
+                    "added_by_name": (row[20] or "") if len(row) > 20 else "",
                 })
 
             if lots:
@@ -9549,6 +9578,109 @@ class Database:
             **event_payload,
             "claimed_at": claimed_at.isoformat() if claimed_at else None,
             "event": event,
+        }
+
+    def admin_add_shift_auction_lot(self, admin_id, shift_date, start_time, end_time, rate_min):
+        """
+        Супервайзер/админ добавляет дополнительную смену в активный аукцион (кнопка «+»
+        в сетке по группе ставки). Ставка берётся из группы, длина смены фиксирована
+        для этой ставки (или ночная 20:00→08:00). Лот создаётся доступным
+        (status='available') и помечается added_by — его видно другим цветом в сетке и
+        в генерации графиков, и его можно забрать как обычную смену.
+
+        Лот не привязан к saved-shift (source_schedule_* = NULL) — ведёт себя так же,
+        как seed-шаблонные лоты: claim идёт по lot_id, публикация берёт все claimed-лоты.
+        """
+        try:
+            admin_id_int = int(admin_id) if admin_id is not None else None
+        except Exception:
+            admin_id_int = None
+
+        try:
+            rate_value = round(float(rate_min), 2)
+        except Exception:
+            raise ValueError("INVALID_RATE")
+
+        if hasattr(shift_date, 'strftime'):
+            date_obj = shift_date
+        else:
+            try:
+                date_obj = datetime.strptime(str(shift_date), '%Y-%m-%d').date()
+            except Exception:
+                raise ValueError("INVALID_DATE")
+
+        start_obj = self._normalize_schedule_time(start_time, "start_time")
+        end_obj = self._normalize_schedule_time(end_time, "end_time")
+        start_min, end_min = self._schedule_interval_minutes(start_obj, end_obj)
+        duration = end_min - start_min
+
+        is_night = (start_obj.strftime('%H:%M') == '20:00' and end_obj.strftime('%H:%M') == '08:00')
+        if is_night:
+            expected_duration = self.SHIFT_AUCTION_NIGHT_SHIFT_MINUTES
+        else:
+            expected_duration = self.SHIFT_AUCTION_RATE_SHIFT_MINUTES.get(rate_value)
+        if expected_duration is None:
+            raise ValueError("INVALID_RATE")
+        if duration != expected_duration:
+            raise ValueError("INVALID_DURATION")
+
+        with self._get_cursor() as cursor:
+            # Shifts may be added while the auction is being prepared, running or paused
+            # — but not once it is finished/disabled.
+            cursor.execute("""
+                SELECT enabled, starts_at, ends_at, paused_at, finished_at
+                FROM shift_auction_test_access WHERE id = 1
+            """)
+            settings_row = cursor.fetchone()
+            if not settings_row:
+                raise ValueError("AUCTION_NOT_AVAILABLE")
+            if self._get_shift_auction_test_status(*settings_row[:5]) in ("closed", "disabled"):
+                raise ValueError("AUCTION_NOT_OPEN")
+
+            # The "+" button only appears for dates already present in the grid, so the
+            # new shift must land on one of the auction's existing lot dates.
+            cursor.execute("SELECT DISTINCT shift_date FROM shift_auction_test_lots")
+            existing_dates = {row[0] for row in (cursor.fetchall() or []) if row and row[0]}
+            if not existing_dates:
+                raise ValueError("AUCTION_NO_LOTS")
+            if date_obj not in existing_dates:
+                raise ValueError("DATE_OUT_OF_RANGE")
+
+            cursor.execute("""
+                INSERT INTO shift_auction_test_lots (
+                    shift_date, start_time, end_time, rate_min, breaks,
+                    status, added_by, added_at
+                )
+                VALUES (%s, %s, %s, %s, '[]'::jsonb, 'available', %s, CURRENT_TIMESTAMP)
+                RETURNING id
+            """, (date_obj, start_obj, end_obj, rate_value, admin_id_int))
+            new_row = cursor.fetchone()
+            new_lot_id = int(new_row[0]) if new_row else None
+
+            admin_name = ""
+            if admin_id_int is not None:
+                cursor.execute("SELECT name FROM users WHERE id = %s", (admin_id_int,))
+                name_row = cursor.fetchone()
+                admin_name = (name_row[0] or "") if name_row else ""
+
+            event_payload = {
+                "lot_id": new_lot_id,
+                "shift_date": date_obj.strftime('%Y-%m-%d'),
+                "start_time": start_obj.strftime('%H:%M'),
+                "end_time": end_obj.strftime('%H:%M'),
+                "rate_min": rate_value,
+                "added_by": admin_id_int,
+                "added_by_name": admin_name,
+            }
+            event = self._insert_shift_auction_test_event(cursor, "lot_added", event_payload)
+
+        return {
+            **event_payload,
+            "event": event,
+            "snapshot": self.get_shift_auction_test_snapshot(
+                current_user_id=admin_id_int,
+                include_admin_fields=True
+            ),
         }
 
     def get_admin_post_claim_notify_recipients(self):

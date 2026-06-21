@@ -379,11 +379,29 @@ const formatCountdown = (targetValue, nowMs) => {
 };
 
 const AUCTION_RATE_GROUPS = [
-  { id: 'rate-1', title: 'Ставка 1' },
-  { id: 'rate-0.75', title: 'Ставка 0.75' },
-  { id: 'rate-0.5', title: 'Ставка 0.5' },
-  { id: 'night-20-08', title: 'Ночные 20*08' }
+  { id: 'rate-1', title: 'Ставка 1', rate: 1, shiftMinutes: 540 },
+  { id: 'rate-0.75', title: 'Ставка 0.75', rate: 0.75, shiftMinutes: 390 },
+  { id: 'rate-0.5', title: 'Ставка 0.5', rate: 0.5, shiftMinutes: 240 },
+  { id: 'night-20-08', title: 'Ночные 20*08', rate: 1, shiftMinutes: 720, night: true }
 ];
+
+// Wrap minutes into a 24h "HH:MM" clock value (so 20:00 + 12h → 08:00).
+const auctionMinutesToClock = (minutes) => {
+  const total = ((Math.round(Number(minutes) || 0) % (24 * 60)) + 24 * 60) % (24 * 60);
+  const hh = Math.floor(total / 60);
+  const mm = total % 60;
+  return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+};
+
+// End time of a manually-added shift: the length is fixed by the rate group, so the
+// supervisor only picks the start. Night group is the fixed 20:00→08:00 window.
+const computeAuctionEndTime = (startValue, group) => {
+  if (!group) return '';
+  if (group.night) return '08:00';
+  const duration = Number(group.shiftMinutes);
+  if (!Number.isFinite(duration) || duration <= 0) return '';
+  return auctionMinutesToClock(clockToMinutes(startValue) + duration);
+};
 
 const normalizeClockValue = (value) => {
   const raw = String(value || '').trim();
@@ -631,6 +649,10 @@ const AuctionLotCell = ({
 
   const isLotClaimed = lot.status === 'claimed';
   const lotClaimedByCurrentUser = Number(lot.claimed_by) === Number(userId);
+  // Manually-added shift (supervisor/admin "+"): violet tint + marker so it stands
+  // out from auto-seeded lots, and the title shows who added it.
+  const isAddedLot = Boolean(lot.added_by);
+  const addedToneStyle = { backgroundColor: '#ede9fe', borderColor: '#c4b5fd', color: '#5b21b6' };
   const minRate = Number(lot.rate_min || 0);
   const lotActionKey = getAuctionLotActionKey(lot);
   const isClaiming = claimingLotIds instanceof Set && claimingLotIds.has(lotActionKey);
@@ -671,7 +693,7 @@ const AuctionLotCell = ({
     : compactLabel;
 
   const title = `${label}${minRate ? ` · ставка ${formatRate(minRate)}`
-    : ''} · в норму ${formatAuctionHours(netMinutes)} ч${breakMinutes ? ` · перерыв ${formatAuctionHours(breakMinutes)} ч` : ''}${breaksLabel ? ` (${breaksLabel})` : ''}${claimBlockReason ? ` · ${claimBlockReason}` : ''}${lot.claimed_by_name ? ` · ${lot.claimed_by_name}` : ''}${postAuctionTakeable ? ` · доступно после аукциона${postAuctionSegment && !postAuctionSegment.isFull ? `: ${postAuctionSegment.start_time}–${postAuctionSegment.end_time}` : ''}` : ''}${formatPostAuctionClaimTitleSuffix(lot)}`;
+    : ''} · в норму ${formatAuctionHours(netMinutes)} ч${breakMinutes ? ` · перерыв ${formatAuctionHours(breakMinutes)} ч` : ''}${breaksLabel ? ` (${breaksLabel})` : ''}${claimBlockReason ? ` · ${claimBlockReason}` : ''}${lot.claimed_by_name ? ` · ${lot.claimed_by_name}` : ''}${postAuctionTakeable ? ` · доступно после аукциона${postAuctionSegment && !postAuctionSegment.isFull ? `: ${postAuctionSegment.start_time}–${postAuctionSegment.end_time}` : ''}` : ''}${formatPostAuctionClaimTitleSuffix(lot)}${isAddedLot ? ` · добавил ${lot.added_by_name || '—'}` : ''}`;
 
   if (postAuctionTakeable) {
     return (
@@ -717,8 +739,8 @@ const AuctionLotCell = ({
         onClick={() => onClaimLot(lot.id)}
         disabled={!canClaim || isClaiming || blocked}
         title={title}
-        style={blocked ? undefined : startToneStyle}
-        className={`flex h-6 w-full min-w-0 items-center justify-center overflow-hidden rounded border px-1 text-[10px] font-semibold tabular-nums transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-1 disabled:cursor-not-allowed sm:h-8 sm:px-2 sm:text-xs ${
+        style={blocked ? undefined : (isAddedLot ? addedToneStyle : startToneStyle)}
+        className={`relative flex h-6 w-full min-w-0 items-center justify-center overflow-hidden rounded border px-1 text-[10px] font-semibold tabular-nums transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-1 disabled:cursor-not-allowed sm:h-8 sm:px-2 sm:text-xs ${
           blocked
             ? 'border-slate-200 bg-slate-50 text-slate-400'
             : 'hover:brightness-95'
@@ -726,6 +748,9 @@ const AuctionLotCell = ({
       >
         <span className="truncate sm:hidden">{isClaiming ? '...' : compactLabel}</span>
         <span className="hidden truncate sm:inline">{isClaiming ? '...' : label}</span>
+        {isAddedLot && !blocked ? (
+          <span className="pointer-events-none absolute left-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-violet-600 ring-1 ring-white" title="Добавленная смена" />
+        ) : null}
       </button>
     );
   }
@@ -736,12 +761,17 @@ const AuctionLotCell = ({
     tone = 'border-slate-200 bg-slate-100 text-slate-400';
   } else if (postAuctionActive && (lot.status === 'available' || lot.status === 'cancelled') && !hasStarted) {
     tone = 'text-orange-900 hover:brightness-95';
+  } else if (isAddedLot) {
+    // Colour comes from addedToneStyle (violet); don't force white text.
+    tone = 'hover:brightness-95';
   } else {
     tone = 'text-white hover:brightness-95';
   }
 
   const isOpenPostStyle = !isLotClaimed && postAuctionActive && (lot.status === 'available' || lot.status === 'cancelled') && !hasStarted;
-  const styleToUse = isLotClaimed ? undefined : (isOpenPostStyle ? postAuctionToneStyle : startToneStyle);
+  const styleToUse = isLotClaimed
+    ? undefined
+    : (isOpenPostStyle ? postAuctionToneStyle : (isAddedLot ? addedToneStyle : startToneStyle));
 
   const detailClickable = canManage && typeof onShowDetail === 'function';
   // Single-lot model: a partially-taken shift stays one lot carrying claim_segments
@@ -772,6 +802,12 @@ const AuctionLotCell = ({
         <span
           className="pointer-events-none absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-white ring-1 ring-orange-600"
           title={isLotClaimed ? 'Смена разобрана по частям несколькими операторами' : 'Часть смены уже взята другим оператором'}
+        />
+      ) : null}
+      {isAddedLot ? (
+        <span
+          className="pointer-events-none absolute left-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-violet-600 ring-1 ring-white"
+          title={`Добавленная смена · ${lot.added_by_name || '—'}`}
         />
       ) : null}
     </>
@@ -3310,6 +3346,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [monitorTab, setMonitorTab] = useState('monitoring');
   const [drilldownOperatorId, setDrilldownOperatorId] = useState(null);
   const [shiftDetailLot, setShiftDetailLot] = useState(null);
+  // Supervisor/admin "add a shift" modal (the "+" button under each rate group).
+  const [addShiftTarget, setAddShiftTarget] = useState(null);
+  const [addShiftStart, setAddShiftStart] = useState('09:00');
+  const [isAddingShift, setIsAddingShift] = useState(false);
   const [journalEntries, setJournalEntries] = useState([]);
   const [journalPage, setJournalPage] = useState(1);
   const [journalPerPage] = useState(50);
@@ -4753,6 +4793,53 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     }
   }, [apiRoot, applySnapshot, buildHeaders, canManage, isPublishingAuction, notify]);
 
+  const openAddShiftModal = useCallback((group, date) => {
+    if (!group || !date) return;
+    setAddShiftStart(group.night ? '20:00' : '09:00');
+    setAddShiftTarget({
+      groupId: group.id,
+      title: group.title,
+      rate: group.rate,
+      night: Boolean(group.night),
+      shiftMinutes: group.shiftMinutes,
+      date
+    });
+  }, []);
+
+  const handleSubmitAddShift = useCallback(async () => {
+    if (!addShiftTarget || !apiRoot || isAddingShift) return;
+    const start = addShiftTarget.night ? '20:00' : addShiftStart;
+    const end = computeAuctionEndTime(start, addShiftTarget);
+    if (!start || !end) {
+      notify('Укажите время начала смены', 'error');
+      return;
+    }
+    setIsAddingShift(true);
+    try {
+      const response = await axios.post(
+        `${apiRoot}/api/shift_auction/admin/add_lot`,
+        {
+          shift_date: addShiftTarget.date,
+          start_time: start,
+          end_time: end,
+          rate_min: addShiftTarget.rate
+        },
+        { headers: buildHeaders({ 'Content-Type': 'application/json' }) }
+      );
+      if (response?.data?.snapshot) {
+        applySnapshot(response.data.snapshot);
+      } else {
+        await fetchSnapshot({ silent: true });
+      }
+      notify(`Смена ${start}–${end} добавлена`);
+      setAddShiftTarget(null);
+    } catch (error) {
+      notify(error?.response?.data?.error || 'Не удалось добавить смену', 'error');
+    } finally {
+      setIsAddingShift(false);
+    }
+  }, [addShiftTarget, addShiftStart, apiRoot, applySnapshot, buildHeaders, fetchSnapshot, isAddingShift, notify]);
+
   const handleExportAuctionReport = useCallback(async () => {
     if (!canManage || !apiRoot || isExportingAuctionReport) return;
     setIsExportingAuctionReport(true);
@@ -5537,6 +5624,26 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                   })}
                                 </tr>
                               ))}
+                              {canMonitor && isViewingActivePeriod && runtimeStatus !== 'closed' && runtimeStatus !== 'disabled' ? (
+                                <tr key={`${group.id}-add`}>
+                                  {lotDates.map((date) => (
+                                    <td
+                                      key={`${group.id}-add-${date}`}
+                                      style={auctionDayColumnStyle}
+                                      className={`border-b border-r border-slate-200 p-px align-top last:border-r-0 sm:p-1 ${activeDayDate === date ? 'bg-blue-50/40' : 'bg-white'}`}
+                                    >
+                                      <button
+                                        type="button"
+                                        onClick={() => openAddShiftModal(group, date)}
+                                        title={`Добавить смену · ${group.title} · ${formatDateLabel(date)}`}
+                                        className="flex h-6 w-full items-center justify-center rounded border border-dashed border-violet-300 bg-violet-50 text-violet-600 transition hover:bg-violet-100 hover:text-violet-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 sm:h-8"
+                                      >
+                                        <Plus size={14} />
+                                      </button>
+                                    </td>
+                                  ))}
+                                </tr>
+                              ) : null}
                             </React.Fragment>
                           ))}
                         </tbody>
@@ -6328,6 +6435,12 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                   {formatDateLabel(shiftDetailData.date)} · {shiftDetailData.claimedCount} взято
                   {shiftDetailData.freeMinutes > 0 ? ` · свободно ${formatAuctionHours(shiftDetailData.freeMinutes)} ч` : ''}
                 </div>
+                {shiftDetailLot?.added_by ? (
+                  <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-semibold text-violet-700">
+                    <span className="h-1.5 w-1.5 rounded-full bg-violet-600" />
+                    Добавил: {shiftDetailLot.added_by_name || '—'}
+                  </div>
+                ) : null}
               </div>
               <button
                 type="button"
@@ -6397,6 +6510,87 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                   )
                 ))}
               </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {addShiftTarget ? (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/50 px-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="add-shift-title"
+          onClick={() => { if (!isAddingShift) setAddShiftTarget(null); }}
+        >
+          <div
+            className="w-full max-w-sm overflow-hidden rounded-2xl bg-white shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3 border-b border-slate-200/70 px-4 py-3.5">
+              <div className="min-w-0">
+                <h3 id="add-shift-title" className="truncate text-[15px] font-semibold tracking-tight text-slate-900">
+                  Добавить смену
+                </h3>
+                <div className="mt-0.5 truncate text-xs text-slate-500">
+                  {formatDateLabel(addShiftTarget.date)} · {addShiftTarget.title}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => { if (!isAddingShift) setAddShiftTarget(null); }}
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200 hover:text-slate-700 active:scale-95"
+                title="Закрыть"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="space-y-3 px-4 py-4">
+              <div className="rounded-lg bg-violet-50 px-3 py-2 text-xs text-violet-700">
+                Ставка <span className="font-semibold">{formatRate(addShiftTarget.rate)}</span> · длина смены фиксирована
+                {addShiftTarget.shiftMinutes ? ` (${formatAuctionHours(addShiftTarget.shiftMinutes)} ч)` : ''}. Укажите только время начала.
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <label className="block">
+                  <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Начало</span>
+                  <input
+                    type="time"
+                    value={addShiftTarget.night ? '20:00' : addShiftStart}
+                    disabled={addShiftTarget.night || isAddingShift}
+                    step={300}
+                    onChange={(event) => setAddShiftStart(normalizeClockValue(event.target.value))}
+                    className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-sm tabular-nums text-slate-900 focus:border-violet-400 focus:outline-none focus:ring-2 focus:ring-violet-100 disabled:bg-slate-50 disabled:text-slate-400"
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Конец</span>
+                  <input
+                    type="text"
+                    value={computeAuctionEndTime(addShiftTarget.night ? '20:00' : addShiftStart, addShiftTarget) || '—'}
+                    readOnly
+                    className="w-full cursor-default rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5 text-sm tabular-nums text-slate-500"
+                  />
+                </label>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-slate-200/70 px-4 py-3">
+              <button
+                type="button"
+                onClick={() => setAddShiftTarget(null)}
+                disabled={isAddingShift}
+                className="inline-flex h-9 items-center rounded-md border border-slate-200 px-3 text-sm font-medium text-slate-600 transition hover:bg-slate-50 disabled:opacity-50"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={handleSubmitAddShift}
+                disabled={isAddingShift}
+                className="inline-flex h-9 items-center gap-1.5 rounded-md bg-violet-600 px-3 text-sm font-semibold text-white transition hover:bg-violet-700 disabled:opacity-60"
+              >
+                <Plus size={15} />
+                {isAddingShift ? 'Добавляю…' : 'Добавить'}
+              </button>
             </div>
           </div>
         </div>

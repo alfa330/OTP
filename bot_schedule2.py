@@ -3752,6 +3752,10 @@ def _shift_auction_test_error_response(error):
         "MISSING_TARGET": ("Не указан лот или смена", 400),
         "CLAIM_NOT_FOUND": ("Эта смена не найдена среди ваших взятых", 404),
         "CANCEL_WINDOW_EXPIRED": ("Отменить смену можно только в течение 10 минут после того, как вы её взяли", 409),
+        "INVALID_DURATION": ("Длина смены не соответствует ставке", 400),
+        "INVALID_RATE": ("Некорректная ставка смены", 400),
+        "INVALID_DATE": ("Некорректная дата смены", 400),
+        "DATE_OUT_OF_RANGE": ("Этот день не входит в текущую неделю аукциона", 409),
     })
     message, status = mapping.get(code, ("Ошибка аукциона смен", 400))
     return jsonify({"error": message, "code": code}), status
@@ -3900,6 +3904,35 @@ def api_shift_auction_admin_claim_for_operator():
         return _shift_auction_test_error_response(error)
     except Exception as error:
         logging.error(f"admin_claim_shift_for_operator API error: {error}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/shift_auction/admin/add_lot', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_shift_auction_admin_add_lot():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        requester_role = _normalize_user_role(requester[3])
+        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role)):
+            return jsonify({"error": "Not allowed"}), 403
+        payload = request.get_json(silent=True) or {}
+        result = db.admin_add_shift_auction_lot(
+            admin_id=requester_id,
+            shift_date=payload.get('shift_date') or payload.get('date'),
+            start_time=payload.get('start_time'),
+            end_time=payload.get('end_time'),
+            rate_min=payload.get('rate_min'),
+        )
+        return jsonify({"status": "success", **result}), 200
+    except ValueError as error:
+        return _shift_auction_test_error_response(error)
+    except Exception as error:
+        logging.error(f"admin_add_shift_auction_lot API error: {error}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 

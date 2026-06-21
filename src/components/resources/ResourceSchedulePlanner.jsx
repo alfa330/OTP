@@ -1074,11 +1074,16 @@ const PlannerDayRow = ({
                   const isLocked = isAuctionShift || isLockedPlannerShift(shift);
                   const isIncidentUplift = shift.isIncidentUplift || shift.source === 'incident_uplift' || shift.tone === 'emerald';
                   const isAuctionClaimed = isAuctionShift && shift.auctionStatus === 'claimed';
+                  const isAddedAuctionShift = isAuctionShift && shift.isAdded;
                   const isSelected = selectedShiftKey === `${sourceDayIndex}-${shift.id}`;
                   const inactiveShiftClass = isAuctionShift
-                    ? (isAuctionClaimed
-                        ? 'z-20 cursor-default border-emerald-400 bg-emerald-100 text-emerald-900'
-                        : 'z-20 cursor-default border-blue-300 bg-blue-50 text-blue-700 border-dashed')
+                    ? (isAddedAuctionShift
+                        ? (isAuctionClaimed
+                            ? 'z-20 cursor-default border-violet-400 bg-violet-100 text-violet-900'
+                            : 'z-20 cursor-default border-violet-300 bg-violet-50 text-violet-700 border-dashed')
+                        : isAuctionClaimed
+                          ? 'z-20 cursor-default border-emerald-400 bg-emerald-100 text-emerald-900'
+                          : 'z-20 cursor-default border-blue-300 bg-blue-50 text-blue-700 border-dashed')
                     : isLockedPlannerShift(shift)
                     ? 'z-20 cursor-default border-slate-300 bg-slate-200 text-slate-700'
                     : isIncidentUplift
@@ -1110,7 +1115,7 @@ const PlannerDayRow = ({
                               isAuctionClaimed
                                 ? `Взято: ${shift.claimedBy || '—'}`
                                 : 'Свободно (никто ещё не выбрал)'
-                            }`
+                            }${isAddedAuctionShift ? ` · добавил: ${shift.addedBy || '—'}` : ''}`
                           : `${formatTime(start)}-${formatTime(end)} · ${formatDurationHours(duration)} · ${shift.label}${isIncidentUplift ? ' · доп. смена под прирост' : ''}${isLocked ? ' · реальная смена из графика работы' : ''}`
                       }
                     >
@@ -1139,7 +1144,7 @@ const PlannerDayRow = ({
                       <span className="relative z-10 min-w-0 flex-1 truncate">
                         {formatTime(start)}-{formatTime(end)}
                         {isAuctionShift
-                          ? <> · <span className={isAuctionClaimed ? 'font-bold' : 'italic'}>{shift.label}</span></>
+                          ? <> · <span className={isAuctionClaimed ? 'font-bold' : 'italic'}>{shift.label}{isAddedAuctionShift ? ' · доп.' : ''}</span></>
                           : <> · {formatDurationHours(duration)}</>
                         }
                       </span>
@@ -1766,6 +1771,8 @@ const ResourceSchedulePlanner = ({
         source: 'auction',
         auctionStatus: status,
         claimedBy: lot.claimed_by_name || '',
+        addedBy: lot.added_by_name || '',
+        isAdded: Boolean(lot.added_by),
         label: status === 'claimed'
           ? (lot.claimed_by_name || 'Занято')
           : 'Свободно'
