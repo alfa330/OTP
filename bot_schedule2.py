@@ -274,6 +274,10 @@ OKTELL_RESOURCE_FIELDS = [
 # Oktell: пул звонков на оценку («Деление звонков»). Случайная выборка записанных
 # операторских звонков -> существующий пул imported_calls (как /api/admin/shuffle).
 OKTELL_EVAL_SAMPLE_PER_OPERATOR = _env_int('OKTELL_EVAL_SAMPLE_PER_OPERATOR', 5, minimum=1, maximum=500)
+# Норма-распределение: верхняя граница случайной выборки на оператора за запрос и размер батча
+# операторов (батч×CAP должно быть < 1000 — лимита прокси).
+OKTELL_EVAL_CAP_PER_OPERATOR = _env_int('OKTELL_EVAL_CAP_PER_OPERATOR', 40, minimum=1, maximum=200)
+OKTELL_EVAL_OPERATOR_BATCH = _env_int('OKTELL_EVAL_OPERATOR_BATCH', 24, minimum=1, maximum=100)
 
 if not API_TOKEN:
     raise Exception("Переменная окружения BOT_TOKEN обязательна.")
@@ -14861,21 +14865,20 @@ def sync_eval_calls_oktell():
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
-        if not (_is_admin_role(importer[3]) or _is_supervisor_role(importer[3])):
-            return jsonify({"error": "Only admins or supervisors can sync evaluation calls"}), 403
+        if not (_is_admin_role(importer[3]) or _headed_department_id(importer_id) is not None):
+            return jsonify({"error": "Только администратор или глава отдела может запускать распределение"}), 403
 
         payload = request.get_json(silent=True) or {}
         month = payload.get('month') or request.args.get('month') or None
         date_from = payload.get('date_from') or payload.get('start_date') or None
         date_to = payload.get('date_to') or payload.get('end_date') or None
-        sample = payload.get('sample_per_operator') or request.args.get('sample_per_operator') or None
 
         result = sync_oktell_evaluation_calls(
             month=month,
             date_from=date_from,
             date_to=date_to,
-            sample_per_operator=sample,
             triggered_by='manual',
+            force=True,
             importer_id=importer_id
         )
         status = result.get('status')
@@ -20249,139 +20252,194 @@ def sync_oktell_resource_hours(day=None, date_from=None, date_to=None, triggered
             pass
 
 
-# === Oktell: пул звонков на оценку («Деление звонков») ==========================================
-# Случайная выборка записанных операторских звонков (A_Stat_Connections_1x1, ConnectionType=1,
-# IsRecorded=1, реальный оператор) -> существующий пул imported_calls через
-# db.import_calls_from_distribution. external_id = conn_id (ключ записи). Оператор матчится
-# умным матчингом (чат-менеджеры исключаются), в payload отдаётся каноничный users.name.
+# === Oktell: распределение звонков на оценку («Деление звонков») ================================
+# Норма-ориентированный добор: на каждого оператора (операторская модель) держим в пуле
+# imported_calls ровно NORM(op, месяц-звонка) случайных ПОДХОДЯЩИХ (фильтр длительности из
+# настроек) записанных звонков из A_Stat_Connections_1x1. Норма берётся из существующей
+# get_operator_call_evaluation_targets_for_month (зависит от часов -> запускать ПОСЛЕ синка
+# статусов). По месяцу звонка (граница месяца). Чат-менеджеры исключаются. Аудио не трогаем.
 OKTELL_EVAL_SYNC_LOCK = threading.Lock()
 
 
-def _oktell_eval_target_period(month=None, date_from=None, date_to=None):
-    """Возвращает (range_from:date, range_to:date, month_str). По умолчанию — текущий месяц."""
+def _oktell_eval_active_months(month=None, date_from=None, date_to=None):
+    """Список месяцев 'YYYY-MM'. month -> один; диапазон -> охваченные; по умолчанию —
+    текущий месяц (+ предыдущий, если сегодня <= 5 числа — для граничных звонков)."""
+    def _months_between(a, b):
+        res = []
+        y, mo = a.year, a.month
+        while (y, mo) <= (b.year, b.month):
+            res.append(f"{y:04d}-{mo:02d}")
+            mo += 1
+            if mo > 12:
+                mo = 1
+                y += 1
+        return res
+    if month:
+        mm = str(month).strip()
+        if not re.match(r'^\d{4}-\d{2}$', mm):
+            raise ValueError("month must be in YYYY-MM format")
+        return [mm]
     if date_from or date_to:
         start = _oktell_parse_date(date_from or date_to)
         end = _oktell_parse_date(date_to or date_from)
         if start is None or end is None:
             raise ValueError("date_from and date_to must be in YYYY-MM-DD format")
         if end < start:
-            raise ValueError("date_to must be greater than or equal to date_from")
-        if (end - start).days + 1 > 92:
-            raise ValueError("Период не может быть больше 92 дней")
-        return start, end, start.strftime('%Y-%m')
-    m = str(month or '').strip() or datetime.now().strftime('%Y-%m')
-    try:
-        y, mo = int(m[:4]), int(m[5:7])
-        start = dt_date(y, mo, 1)
-        end = dt_date(y + (mo // 12), (mo % 12) + 1, 1) - timedelta(days=1)
-    except Exception:
-        raise ValueError("month must be in YYYY-MM format")
-    return start, end, f"{y:04d}-{mo:02d}"
+            start, end = end, start
+        return _months_between(start, end)
+    today = datetime.now().date()
+    months = [today.strftime('%Y-%m')]
+    if today.day <= 5:
+        months.append((today.replace(day=1) - timedelta(days=1)).strftime('%Y-%m'))
+    return months
 
 
-def _oktell_eval_sample_sql(date_from_compact, date_to_excl_compact, sample_n):
-    n = int(sample_n)
+def _oktell_eval_month_bounds(month_str):
+    y, mo = int(month_str[:4]), int(month_str[5:7])
+    start = dt_date(y, mo, 1)
+    end_excl = dt_date(y + (mo // 12), (mo % 12) + 1, 1)
+    return start.strftime('%Y%m%d'), end_excl.strftime('%Y%m%d')
+
+
+def _oktell_eval_duration_clause(min_d, max_d):
+    clause = f"AND DATEDIFF(second, s.TimeAnswer, s.TimeStop) >= {int(min_d or 0)} "
+    if max_d and int(max_d) > 0:
+        clause += f"AND DATEDIFF(second, s.TimeAnswer, s.TimeStop) <= {int(max_d)} "
+    return clause
+
+
+def _oktell_eval_operators_sql(mstart, mnext, min_d, max_d):
+    # Операторы с подходящими записанными звонками за месяц + сколько доступно.
     return (
-        "SELECT q.operator_name, q.phone, q.dt_raw, q.talk_sec, q.conn_id, q.chain_id, q.available FROM ("
-        "SELECT oi.Name AS operator_name, "
+        "SELECT LOWER(CONVERT(varchar(36), s.AUserId)) AS auserid, oi.Name AS operator_name, COUNT(*) AS available "
+        "FROM oktell.dbo.A_Stat_Connections_1x1 s "
+        "JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo oi ON oi.Id = s.AUserId "
+        f"WHERE s.TimeStart >= '{mstart}' AND s.TimeStart < '{mnext}' "
+        "AND s.ConnectionType = 1 AND s.IsRecorded = 1 AND s.TimeStop IS NOT NULL "
+        + _oktell_eval_duration_clause(min_d, max_d) +
+        "GROUP BY s.AUserId, oi.Name"
+    )
+
+
+def _oktell_eval_sample_sql(mstart, mnext, auserids, cap, min_d, max_d):
+    ids = ", ".join("'" + str(a).replace("'", "") + "'" for a in auserids)
+    return (
+        "SELECT q.auserid, q.conn_id, q.phone, q.dt_raw, q.talk_sec FROM ("
+        "SELECT LOWER(CONVERT(varchar(36), s.AUserId)) AS auserid, LOWER(CONVERT(varchar(36), s.Id)) AS conn_id, "
         "CASE WHEN LEN(s.BOutNumber) >= 10 THEN s.BOutNumber WHEN LEN(s.AOutNumber) >= 10 THEN s.AOutNumber "
         "ELSE COALESCE(NULLIF(s.BOutNumber, ''), s.AOutNumber) END AS phone, "
         "CONVERT(varchar(10), s.TimeStart, 104) + ' ' + CONVERT(varchar(8), s.TimeStart, 108) AS dt_raw, "
         "DATEDIFF(second, s.TimeAnswer, s.TimeStop) AS talk_sec, "
-        "LOWER(CONVERT(varchar(36), s.Id)) AS conn_id, LOWER(CONVERT(varchar(36), s.IdChain)) AS chain_id, "
-        "ROW_NUMBER() OVER (PARTITION BY s.AUserId ORDER BY NEWID()) AS rn, "
-        "COUNT(*) OVER (PARTITION BY s.AUserId) AS available "
+        "ROW_NUMBER() OVER (PARTITION BY s.AUserId ORDER BY NEWID()) AS rn "
         "FROM oktell.dbo.A_Stat_Connections_1x1 s "
-        "JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo oi ON oi.Id = s.AUserId "
-        f"WHERE s.TimeStart >= '{date_from_compact}' AND s.TimeStart < '{date_to_excl_compact}' "
-        "AND s.ConnectionType = 1 AND s.IsRecorded = 1 AND s.TimeStop IS NOT NULL"
-        f") q WHERE q.rn <= {n} ORDER BY q.operator_name, q.dt_raw"
+        f"WHERE s.TimeStart >= '{mstart}' AND s.TimeStart < '{mnext}' "
+        "AND s.ConnectionType = 1 AND s.IsRecorded = 1 AND s.TimeStop IS NOT NULL "
+        f"AND s.AUserId IN ({ids}) "
+        + _oktell_eval_duration_clause(min_d, max_d) +
+        f") q WHERE q.rn <= {int(cap)} ORDER BY q.auserid"
     )
 
 
-def sync_oktell_evaluation_calls(month=None, date_from=None, date_to=None, sample_per_operator=None,
-                                 triggered_by='manual', importer_id=None):
-    """Тянет случайную выборку записанных операторских звонков из Oktell и кладёт в пул
-    imported_calls (раздел «Деление звонков»). Возвращает сводку."""
+def sync_oktell_evaluation_calls(month=None, date_from=None, date_to=None, triggered_by='scheduler',
+                                 force=False, importer_id=None):
+    """Норма-ориентированное распределение звонков на оценку. На каждого оператора добирает
+    пул imported_calls до NORM(op, месяц) случайными подходящими записанными звонками. По месяцу
+    звонка (граница месяца обрабатывается отдельными месяцами). force=True игнорирует флаг enabled."""
     if not _oktell_api_ready():
-        logging.warning("Oktell eval sync skipped: OKTELL_IP/OKTELL_API_TOKEN is not set")
         return {'status': 'skipped', 'reason': 'missing_token'}
-
-    try:
-        sample_n = max(1, int(sample_per_operator or OKTELL_EVAL_SAMPLE_PER_OPERATOR))
-    except Exception:
-        sample_n = OKTELL_EVAL_SAMPLE_PER_OPERATOR
-    range_from, range_to, month_str = _oktell_eval_target_period(month, date_from, date_to)
+    settings = db.get_call_distribution_settings()
+    if not force and not settings.get('enabled', True):
+        logging.info("Eval distribution skipped: disabled")
+        return {'status': 'skipped', 'reason': 'disabled'}
+    min_d = int(settings.get('min_duration_sec') or 0)
+    max_d = int(settings.get('max_duration_sec') or 0)
+    cap = OKTELL_EVAL_CAP_PER_OPERATOR
+    months = _oktell_eval_active_months(month, date_from, date_to)
 
     if not OKTELL_EVAL_SYNC_LOCK.acquire(blocking=False):
-        logging.warning("Oktell eval sync skipped: another eval sync is already running")
         return {'status': 'skipped', 'reason': 'locked'}
 
     started = time.time()
     try:
         operator_lookup = _status_import_build_operator_lookup(exclude_chat_managers=True)
-        rows = _oktell_query(_oktell_eval_sample_sql(
-            range_from.strftime('%Y%m%d'), (range_to + timedelta(days=1)).strftime('%Y%m%d'), sample_n))
-
-        by_op = {}
-        for r in rows:
-            by_op.setdefault(str(r.get('operator_name') or '').strip(), []).append(r)
-
-        distribution = []
-        matched_ops = 0
-        total_calls = 0
-        unmatched_operators = []
-        for op_name, op_rows in by_op.items():
-            matches = _status_import_resolve_operator_matches(op_name, operator_lookup)
-            if len(matches) != 1:
-                unmatched_operators.append(op_name)
+        per_month = []
+        grand_added = 0
+        grand_ops = 0
+        for mstr in months:
+            mstart, mnext = _oktell_eval_month_bounds(mstr)
+            # 1) операторы с подходящими записанными звонками за месяц
+            op_rows = _oktell_query(_oktell_eval_operators_sql(mstart, mnext, min_d, max_d))
+            # 2) матчинг -> OTP оператор (операторская модель, чат-менеджеры исключены)
+            matched = []  # (auserid, otp_id, otp_name, available)
+            for r in op_rows:
+                nm = str(r.get('operator_name') or '').strip()
+                m = _status_import_resolve_operator_matches(nm, operator_lookup)
+                if len(m) != 1:
+                    continue
+                matched.append((str(r.get('auserid')), int(m[0]['id']),
+                                m[0].get('name') or nm, int(r.get('available') or 0)))
+            if not matched:
+                per_month.append({'month': mstr, 'operators': 0, 'added': 0})
                 continue
-            otp_name = matches[0].get('name') or op_name
-            available = int(op_rows[0].get('available') or len(op_rows))
-            calls = [{
-                'id': r.get('conn_id'),
-                'datetimeRaw': r.get('dt_raw'),
-                'phone': r.get('phone'),
-                'durationSec': r.get('talk_sec'),
-            } for r in op_rows]
-            distribution.append({
-                'operator': otp_name,
-                'desired': min(sample_n, available),
-                'available': available,
-                'calls': calls,
-            })
-            matched_ops += 1
-            total_calls += len(calls)
-
-        import_result = {'imported': 0, 'updated': 0, 'skipped': 0, 'errors': [], 'missing_operators': []}
-        if distribution:
-            import_result = db.import_calls_from_distribution(
-                {'month': month_str, 'distribution': distribution}, importer_id=importer_id)
-
-        logging.info(
-            "Oktell eval sync %s..%s month=%s operators=%s calls=%s unmatched=%s",
-            range_from.strftime('%Y-%m-%d'), range_to.strftime('%Y-%m-%d'),
-            month_str, matched_ops, total_calls, len(unmatched_operators)
-        )
+            # 3) норма (по часам месяца mstr) и существующий пул -> сколько добрать
+            targets = db.get_operator_call_evaluation_targets_for_month([x[1] for x in matched], mstr) or {}
+            existing = db.get_imported_call_keys_for_month(mstr)
+            need_by_auserid = {}
+            auserid_to_op = {}
+            for auserid, otp_id, otp_name, available in matched:
+                norm = int((targets.get(otp_id) or {}).get('required_calls') or 0)
+                have = len(existing.get(otp_id, set()))
+                need = max(0, min(norm, available) - have)
+                if need > 0:
+                    need_by_auserid[auserid] = need
+                    auserid_to_op[auserid] = (otp_id, otp_name, available, norm)
+            # 4) выборка случайных звонков батчами операторов (под лимит прокси)
+            sampled = {}
+            au_list = list(need_by_auserid.keys())
+            for i in range(0, len(au_list), OKTELL_EVAL_OPERATOR_BATCH):
+                batch = au_list[i:i + OKTELL_EVAL_OPERATOR_BATCH]
+                for row in _oktell_query(_oktell_eval_sample_sql(mstart, mnext, batch, cap, min_d, max_d)):
+                    sampled.setdefault(str(row.get('auserid')), []).append(row)
+            # 5) собрать распределение (исключая уже лежащие в пуле; добор до NORM)
+            distribution = []
+            month_added = 0
+            for auserid, need in need_by_auserid.items():
+                otp_id, otp_name, available, norm = auserid_to_op[auserid]
+                ex = existing.get(otp_id, set())
+                chosen = [c for c in sampled.get(auserid, []) if str(c.get('conn_id')) not in ex][:need]
+                if not chosen:
+                    continue
+                distribution.append({
+                    'operator': otp_name,
+                    'desired': min(norm, available),
+                    'available': available,
+                    'calls': [{'id': c.get('conn_id'), 'datetimeRaw': c.get('dt_raw'),
+                               'phone': c.get('phone'), 'durationSec': c.get('talk_sec')} for c in chosen],
+                })
+                month_added += len(chosen)
+            if distribution:
+                db.import_calls_from_distribution({'month': mstr, 'distribution': distribution}, importer_id=importer_id)
+            grand_added += month_added
+            grand_ops += len(distribution)
+            per_month.append({'month': mstr, 'operators': len(distribution), 'added': month_added})
+            logging.info("Eval distribution month=%s operators=%s added=%s", mstr, len(distribution), month_added)
         return {
             'status': 'success',
             'triggered_by': triggered_by,
-            'month': month_str,
-            'date_from': range_from.strftime('%Y-%m-%d'),
-            'date_to': range_to.strftime('%Y-%m-%d'),
-            'sample_per_operator': sample_n,
-            'operators': matched_ops,
-            'calls': total_calls,
-            'unmatched_operators': unmatched_operators,
-            'import': import_result,
+            'months': months,
+            'operators': grand_ops,
+            'added': grand_added,
+            'per_month': per_month,
+            'min_duration_sec': min_d,
+            'max_duration_sec': max_d,
             'elapsed_seconds': round(time.time() - started, 2),
         }
     except Exception as exc:
-        logging.exception("Oktell eval sync failed")
+        logging.exception("Oktell eval distribution failed")
         return {
             'status': 'failed',
             'triggered_by': triggered_by,
-            'month': month_str,
+            'months': months,
             'error': str(exc),
             'elapsed_seconds': round(time.time() - started, 2),
         }
@@ -34056,12 +34114,22 @@ async def run_chat2desk_operator_statuses_sync_async(triggered_by='scheduler'):
 
 
 async def run_oktell_operator_statuses_sync_async(triggered_by='scheduler'):
-    # Ночной прогон: полный предыдущий день (по умолчанию sync тянет вчера).
+    # Ночной прогон статусов (вчера), затем распределение звонков на оценку: норма зависит
+    # от пересчитанных часов, поэтому делим ПОСЛЕ синхронизации статусов.
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(
+    res = await loop.run_in_executor(
         executor_pool,
         lambda: sync_oktell_operator_statuses(triggered_by=triggered_by)
     )
+    try:
+        dist = await loop.run_in_executor(
+            executor_pool,
+            lambda: sync_oktell_evaluation_calls(triggered_by='scheduler-after-status')
+        )
+        logging.info("Post-status eval distribution: %s", (dist or {}).get('status'))
+    except Exception:
+        logging.exception("Post-status eval distribution failed")
+    return res
 
 
 async def run_oktell_operator_statuses_today_sync_async(triggered_by='scheduler-intraday'):
