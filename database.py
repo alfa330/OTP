@@ -13925,6 +13925,27 @@ class Database:
                 out.setdefault(int(op_id), set()).add(str(ext))
         return out
 
+    def get_imported_calls_status_counts_by_operator(self, month: str) -> dict:
+        """{operator_id: {total, evaluated, not_evaluated, skipped}} за месяц (для статус-таблицы)."""
+        out = {}
+        with self._get_cursor() as cur:
+            cur.execute("""
+                SELECT operator_id,
+                       COUNT(*) AS total,
+                       COUNT(*) FILTER (WHERE status = 'evaluated') AS evaluated,
+                       COUNT(*) FILTER (WHERE status = 'not_evaluated') AS not_evaluated,
+                       COUNT(*) FILTER (WHERE status = 'skipped') AS skipped
+                FROM imported_calls
+                WHERE month = %s AND operator_id IS NOT NULL
+                GROUP BY operator_id
+            """, (month,))
+            for r in cur.fetchall():
+                out[int(r[0])] = {
+                    "total": int(r[1] or 0), "evaluated": int(r[2] or 0),
+                    "not_evaluated": int(r[3] or 0), "skipped": int(r[4] or 0),
+                }
+        return out
+
     def list_imported_calls(self, month: str, status: Optional[str] = None, operator_name: Optional[str] = None, limit: int = 200):
         q = "SELECT id, external_id, operator_name, operator_id, datetime_raw, phone_number, phone_normalized, duration_sec, desired, available, status, evaluated_at, evaluated_by, notes FROM imported_calls WHERE month = %s"
         params = [month]
