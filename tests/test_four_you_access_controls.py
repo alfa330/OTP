@@ -9,6 +9,7 @@ class FourYouAccessControlTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app_source = (ROOT / "src" / "App.jsx").read_text(encoding="utf-8-sig")
+        cls.department_views_source = (ROOT / "src" / "utils" / "departmentViews.js").read_text(encoding="utf-8-sig")
         cls.api_source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
         cls.db_source = (ROOT / "database.py").read_text(encoding="utf-8-sig")
         cls.lenta_source = (ROOT / "src" / "components" / "four_you" / "lenta.jsx").read_text(encoding="utf-8-sig")
@@ -29,6 +30,14 @@ class FourYouAccessControlTests(unittest.TestCase):
         self.assertIn("requester_role == 'super_admin' and requester_id == FOUR_YOU_ADMIN_USER_ID", self.api_source)
         self.assertIn("requester_id == int(viewer_user_id)", self.api_source)
         self.assertNotIn("тукеев", self.api_source.lower())
+
+    def test_viewer_bypasses_only_the_department_guard_for_four_you(self):
+        self.assertIn("const FOUR_YOU_VIEWER_USER_ID = 241;", self.department_views_source)
+        self.assertIn(
+            "if (viewKey === 'four_you' && Number(user?.id) === FOUR_YOU_VIEWER_USER_ID) return true;",
+            self.department_views_source,
+        )
+        self.assertNotIn("'four_you'", self.department_views_source.split("export const DEPARTMENT_VIEW_ALLOWLIST", 1)[1].split("};", 1)[0])
 
     def test_every_image_route_requires_authenticated_guard(self):
         list_route = "@app.route('/api/four_you/images', methods=['GET', 'POST', 'OPTIONS'])\n@require_auth"
