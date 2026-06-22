@@ -14903,6 +14903,45 @@ def sync_eval_calls_oktell():
         logging.error(f"Error syncing Oktell evaluation calls: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
+
+@app.route('/api/call_distribution/settings', methods=['GET', 'PUT', 'OPTIONS'])
+@require_api_key
+def call_distribution_settings_endpoint():
+    """Настройки распределения звонков на оценку («Деление звонков»).
+    GET — админ/глава отдела/супервайзер (СВ read-only); PUT — только админ/глава (с аудитом)."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        role = requester[3]
+        is_admin = _is_admin_role(role)
+        is_head = _headed_department_id(requester_id) is not None
+        is_sv = _is_supervisor_role(role)
+        if not (is_admin or is_head or is_sv):
+            return jsonify({"error": "Forbidden"}), 403
+        can_edit = bool(is_admin or is_head)
+
+        if request.method == 'GET':
+            return jsonify({
+                "status": "success",
+                "settings": db.get_call_distribution_settings(),
+                "can_edit": can_edit
+            }), 200
+
+        if not can_edit:
+            return jsonify({"error": "Только администратор или глава отдела может менять настройки"}), 403
+        payload = request.get_json(silent=True) or {}
+        settings = db.update_call_distribution_settings(payload, user_id=requester_id)
+        return jsonify({"status": "success", "settings": settings}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error in call_distribution settings: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
 @app.route('/api/call_evaluation', methods=['POST'])
 @require_api_key
 def receive_call_evaluation():

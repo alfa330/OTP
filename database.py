@@ -2213,6 +2213,32 @@ class Database:
                 VALUES (1)
                 ON CONFLICT (id) DO NOTHING;
             """)
+            # Настройки распределения звонков на оценку («Деление звонков»): фильтр длительности
+            # + флаг автораспределения. Singleton + аудит (кто/когда), история изменений отдельно.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS call_distribution_settings (
+                    id INTEGER PRIMARY KEY DEFAULT 1,
+                    min_duration_sec INTEGER NOT NULL DEFAULT 0,
+                    max_duration_sec INTEGER NOT NULL DEFAULT 3600,
+                    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    CONSTRAINT call_distribution_settings_singleton CHECK (id = 1)
+                );
+            """)
+            cursor.execute("""
+                INSERT INTO call_distribution_settings (id)
+                VALUES (1)
+                ON CONFLICT (id) DO NOTHING;
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS call_distribution_settings_history (
+                    id SERIAL PRIMARY KEY,
+                    changed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    changed_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    settings JSONB NOT NULL DEFAULT '{}'::jsonb
+                );
+            """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS resource_saved_schedule_plans (
                     id SERIAL PRIMARY KEY,
@@ -13836,6 +13862,55 @@ class Database:
             "errors": errors,
             "missing_operators": list(missing_operators)
         }
+
+    def get_call_distribution_settings(self) -> dict:
+        with self._get_cursor() as cur:
+            cur.execute("""
+                SELECT s.min_duration_sec, s.max_duration_sec, s.enabled, s.updated_by, s.updated_at, u.name
+                FROM call_distribution_settings s
+                LEFT JOIN users u ON u.id = s.updated_by
+                WHERE s.id = 1
+            """)
+            r = cur.fetchone()
+        if not r:
+            return {"min_duration_sec": 0, "max_duration_sec": 3600, "enabled": True,
+                    "updated_by": None, "updated_by_name": None, "updated_at": None}
+        return {
+            "min_duration_sec": int(r[0] or 0),
+            "max_duration_sec": int(r[1] or 0),
+            "enabled": bool(r[2]),
+            "updated_by": r[3],
+            "updated_by_name": r[5],
+            "updated_at": r[4].isoformat() if r[4] else None,
+        }
+
+    def update_call_distribution_settings(self, payload: dict, user_id: Optional[int] = None) -> dict:
+        current = self.get_call_distribution_settings()
+        min_d = current["min_duration_sec"]
+        max_d = current["max_duration_sec"]
+        enabled = current["enabled"]
+        payload = payload or {}
+        if payload.get('min_duration_sec') is not None:
+            min_d = max(0, int(payload['min_duration_sec']))
+        if payload.get('max_duration_sec') is not None:
+            max_d = max(0, int(payload['max_duration_sec']))
+        if payload.get('enabled') is not None:
+            enabled = bool(payload['enabled'])
+        if max_d and min_d and max_d < min_d:
+            raise ValueError("max_duration_sec must be >= min_duration_sec")
+        snapshot = json.dumps({"min_duration_sec": min_d, "max_duration_sec": max_d, "enabled": enabled})
+        with self._get_cursor() as cur:
+            cur.execute("""
+                UPDATE call_distribution_settings
+                SET min_duration_sec = %s, max_duration_sec = %s, enabled = %s,
+                    updated_by = %s, updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                WHERE id = 1
+            """, (min_d, max_d, enabled, user_id))
+            cur.execute("""
+                INSERT INTO call_distribution_settings_history (changed_by, settings)
+                VALUES (%s, %s::jsonb)
+            """, (user_id, snapshot))
+        return self.get_call_distribution_settings()
 
     def list_imported_calls(self, month: str, status: Optional[str] = None, operator_name: Optional[str] = None, limit: int = 200):
         q = "SELECT id, external_id, operator_name, operator_id, datetime_raw, phone_number, phone_normalized, duration_sec, desired, available, status, evaluated_at, evaluated_by, notes FROM imported_calls WHERE month = %s"
