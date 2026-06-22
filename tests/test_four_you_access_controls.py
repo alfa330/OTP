@@ -20,7 +20,8 @@ class FourYouAccessControlTests(unittest.TestCase):
         self.assertIn("Number(userLike?.id) === FOUR_YOU_ADMIN_USER_ID", self.app_source)
         self.assertIn("Number(userLike?.id) === FOUR_YOU_VIEWER_USER_ID", self.app_source)
         self.assertIn("normalizeRole(userLike?.role) === 'super_admin'", self.app_source)
-        self.assertIn('title="Раздел временно недоступен"', self.app_source)
+        self.assertNotIn('title="Раздел временно недоступен"', self.app_source)
+        self.assertIn("onClick={(e) => handleSidebarViewNavigation(e, 'four_you')}", self.app_source)
 
     def test_backend_access_is_bound_to_id_and_admin_role(self):
         self.assertIn("FOUR_YOU_ADMIN_USER_ID = int(os.getenv('FOUR_YOU_ADMIN_USER_ID', '2'))", self.api_source)
