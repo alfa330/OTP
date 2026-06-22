@@ -1590,20 +1590,29 @@ def _headed_department_id(requester_id):
     """
     if not requester_id:
         return None
-    cache = getattr(g, '_headed_dept_cache', None)
-    if cache is None:
-        cache = {}
-        try:
+    # Кэш живёт в контексте Flask-запроса. Когда функцию вызывают вне него —
+    # например, из обработчика Telegram-бота в executor-потоке — любое обращение
+    # к `g` бросает RuntimeError («Working outside of application context»).
+    # В этом случае работаем без кэша, напрямую из БД, чтобы не уронить вызов
+    # (иначе RuntimeError всплывал как «запрос уже обработан» при approve/reject).
+    cache = None
+    try:
+        cache = getattr(g, '_headed_dept_cache', None)
+        if cache is None:
+            cache = {}
             g._headed_dept_cache = cache
-        except Exception:
-            pass
-    if requester_id in cache:
+    except RuntimeError:
+        cache = None
+    except Exception:
+        cache = None
+    if cache is not None and requester_id in cache:
         return cache[requester_id]
     try:
         dept = db.headed_department_id_for_user(requester_id)
     except Exception:
         dept = None
-    cache[requester_id] = dept
+    if cache is not None:
+        cache[requester_id] = dept
     return dept
 
 

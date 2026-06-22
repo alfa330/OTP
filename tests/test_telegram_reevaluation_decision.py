@@ -50,6 +50,32 @@ def _load_comment_setter(database):
     return namespace["_set_reevaluation_decision_comment"]
 
 
+def _load_function(name, namespace):
+    node = _function_node(name)
+    exec(compile(ast.Module(body=[node], type_ignores=[]), str(BOT_PATH), "exec"), namespace)
+    return namespace[name]
+
+
+class _DeptDatabase:
+    def __init__(self, dept_id):
+        self.dept_id = dept_id
+        self.calls = 0
+
+    def headed_department_id_for_user(self, requester_id):
+        self.calls += 1
+        return self.dept_id
+
+
+class _OutsideContextG:
+    """Имитация Flask `g` вне контекста приложения: любой доступ бросает RuntimeError."""
+
+    def __getattr__(self, name):
+        raise RuntimeError("Working outside of application context")
+
+    def __setattr__(self, name, value):
+        raise RuntimeError("Working outside of application context")
+
+
 class TelegramReevaluationDecisionTests(unittest.TestCase):
     def test_button_click_resolves_before_comment_state_is_created(self):
         node = _function_node("_prompt_reevaluation_decision_comment")
@@ -121,6 +147,30 @@ class TelegramReevaluationDecisionTests(unittest.TestCase):
         setter = _load_comment_setter(database)
 
         self.assertFalse(setter(1, "approved", "Комментарий"))
+
+    def test_headed_department_id_survives_outside_flask_context(self):
+        # Регрессия: approve/reject из Telegram-бота выполняется в executor-потоке,
+        # где обращение к Flask `g` бросает RuntimeError. Раньше это всплывало как
+        # «запрос уже обработан». Функция должна отработать через БД и не падать.
+        database = _DeptDatabase(7)
+        fn = _load_function("_headed_department_id", {"g": _OutsideContextG(), "db": database})
+
+        self.assertEqual(fn(2), 7)
+        self.assertEqual(database.calls, 1)
+        # falsy requester_id — ранний выход, без обращения к g/БД
+        self.assertIsNone(fn(0))
+        self.assertEqual(database.calls, 1)
+
+    def test_headed_department_id_caches_within_flask_context(self):
+        class _CtxG:
+            pass
+
+        database = _DeptDatabase(5)
+        fn = _load_function("_headed_department_id", {"g": _CtxG(), "db": database})
+
+        self.assertEqual(fn(2), 5)
+        self.assertEqual(fn(2), 5)
+        self.assertEqual(database.calls, 1)  # второй вызов берётся из кэша в g
 
 
 if __name__ == "__main__":
