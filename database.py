@@ -13912,6 +13912,19 @@ class Database:
             """, (user_id, snapshot))
         return self.get_call_distribution_settings()
 
+    def get_imported_call_keys_for_month(self, month: str) -> dict:
+        """{operator_id: set(external_id)} за месяц — чтобы добор пула не дублировал звонки."""
+        out = {}
+        with self._get_cursor() as cur:
+            cur.execute(
+                "SELECT operator_id, external_id FROM imported_calls "
+                "WHERE month = %s AND operator_id IS NOT NULL AND external_id IS NOT NULL",
+                (month,)
+            )
+            for op_id, ext in cur.fetchall():
+                out.setdefault(int(op_id), set()).add(str(ext))
+        return out
+
     def list_imported_calls(self, month: str, status: Optional[str] = None, operator_name: Optional[str] = None, limit: int = 200):
         q = "SELECT id, external_id, operator_name, operator_id, datetime_raw, phone_number, phone_normalized, duration_sec, desired, available, status, evaluated_at, evaluated_by, notes FROM imported_calls WHERE month = %s"
         params = [month]
