@@ -83,6 +83,21 @@ SHIFT_AUCTION_PARTICIPANT_CACHE = {"expires_at": 0.0, "ids": frozenset()}
 SHIFT_AUCTION_PARTICIPANT_CACHE_LOCK = threading.Lock()
 
 PROXY_STATUS_VALUES = ('lost', 'returned_to_hr', 'not_received', 'on_hand')
+
+
+def _coerce_four_you_annotations(value):
+    """JSONB may come back as a dict (psycopg2 auto-parse) or a str — normalise to dict."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
 PROXY_STATUS_LABELS = {
     'lost': 'Утерян',
     'returned_to_hr': 'Сдан в HR',
@@ -856,6 +871,20 @@ class Database:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_four_you_images_order
                 ON four_you_images(sort_order, created_at, id);
+            """)
+            # Совместная разметка фото (рисунок/стикеры/текст/комментарии/фон).
+            # Не-деструктивный JSONB-оверлей; реальные изображения не меняются.
+            cursor.execute("""
+                ALTER TABLE four_you_images
+                ADD COLUMN IF NOT EXISTS annotations JSONB NOT NULL DEFAULT '{}'::jsonb;
+            """)
+            cursor.execute("""
+                ALTER TABLE four_you_images
+                ADD COLUMN IF NOT EXISTS annotations_updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP;
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_four_you_images_ann_updated
+                ON four_you_images(annotations_updated_at);
             """)
             # ──────────────────────────────────────────────────────────────
             # ГРУППЫ: историческая принадлежность операторов и СВ по датам +
@@ -33047,7 +33076,9 @@ class Database:
                     display_file_size,
                     uploaded_by,
                     sort_order,
-                    created_at
+                    created_at,
+                    annotations,
+                    annotations_updated_at
                 FROM four_you_images
                 ORDER BY sort_order ASC, created_at ASC, id ASC
             """)
@@ -33066,6 +33097,51 @@ class Database:
                     "uploaded_by": int(row[10]),
                     "sort_order": int(row[11] or 0),
                     "created_at": row[12].isoformat() if row[12] else None,
+                    "annotations": _coerce_four_you_annotations(row[13]),
+                    "annotations_updated_at": row[14].isoformat() if row[14] else None,
+                }
+                for row in cursor.fetchall()
+            ]
+
+    def set_four_you_annotations(self, image_id: str, data: dict):
+        """Сохранить JSONB-разметку фото. Возвращает (annotations, annotations_updated_at) или None."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE four_you_images
+                SET annotations = %s::jsonb,
+                    annotations_updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                RETURNING annotations, annotations_updated_at
+            """, (json.dumps(data or {}, ensure_ascii=False), str(image_id)))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return {
+                "annotations": _coerce_four_you_annotations(row[0]),
+                "annotations_updated_at": row[1].isoformat() if row[1] else None,
+            }
+
+    def list_four_you_annotations_changed_since(self, since_iso):
+        """Лёгкий поллинг: разметка, изменившаяся после момента since_iso (ISO-строка или None)."""
+        with self._get_cursor() as cursor:
+            if since_iso:
+                cursor.execute("""
+                    SELECT id, annotations, annotations_updated_at
+                    FROM four_you_images
+                    WHERE annotations_updated_at > %s::timestamp
+                    ORDER BY annotations_updated_at ASC
+                """, (since_iso,))
+            else:
+                cursor.execute("""
+                    SELECT id, annotations, annotations_updated_at
+                    FROM four_you_images
+                    ORDER BY annotations_updated_at ASC
+                """)
+            return [
+                {
+                    "id": str(row[0]),
+                    "annotations": _coerce_four_you_annotations(row[1]),
+                    "annotations_updated_at": row[2].isoformat() if row[2] else None,
                 }
                 for row in cursor.fetchall()
             ]

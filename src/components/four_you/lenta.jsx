@@ -1,6 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import FaIcon from '../common/FaIcon';
+import AnnotationLayer from './AnnotationLayer';
+import Backgrounds from './Backgrounds';
+import PhotoEditor from './PhotoEditor';
+import { normalizeAnnotations, hasVisibleAnnotations, userName } from './annotations';
 import './lenta.css';
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -64,6 +68,13 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const selectedMixRef = useRef(0);
     const hoverMixRef = useRef([]);
     const needsRenderRef = useRef(true);
+    const loopRef = useRef(false);          // бесконечная прокрутка (когда фото достаточно)
+    const countRef = useRef(0);
+    const revealRef = useRef({});           // id → 0..1: появление «съезжанием» к середине
+    const loadedRef = useRef({});           // id → true когда фото декодировано
+    const revealActiveRef = useRef(false);  // идёт ли сейчас появление
+    const pollCursorRef = useRef('');       // курсор поллинга разметки (annotations_updated_at)
+    const editingIdRef = useRef(null);      // id фото, открытого в редакторе (его не трогает поллинг)
 
     const [images, setImages] = useState([]);
     const [activeIndex, setActiveIndex] = useState(null);
@@ -76,6 +87,9 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const [selectMode, setSelectMode] = useState(false);
     const [selectedIds, setSelectedIds] = useState(() => new Set());
     const [isBulkDeleting, setIsBulkDeleting] = useState(false);
+    const [editorOpen, setEditorOpen] = useState(false);
+
+    countRef.current = images.length;
 
     const authHeaders = useCallback(() => withAccessTokenHeader({
         'X-User-Id': String(user?.id || ''),
@@ -93,6 +107,11 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
             setImages(rows);
             setCanUpload(Boolean(response?.data?.can_upload));
             hoverMixRef.current = new Array(rows.length).fill(0);
+            pollCursorRef.current = rows.reduce(
+                (max, row) => (row.annotations_updated_at && (!max || row.annotations_updated_at > max)
+                    ? row.annotations_updated_at : max),
+                '',
+            );
             targetRef.current = PARAMS.step * 2.8;
             scrollRef.current = targetRef.current;
         } catch (requestError) {
@@ -147,7 +166,15 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const openCard = useCallback((index) => {
         activeIndexRef.current = index;
         expandedRef.current = true;
-        targetRef.current = index * PARAMS.step;
+        if (loopRef.current && countRef.current > 0) {
+            // Прокрутка к ближайшей «копии» карточки в зацикленной ленте — без длинного отката.
+            const period = countRef.current * PARAMS.step;
+            const baseTarget = index * PARAMS.step;
+            const k = Math.round((scrollRef.current - baseTarget) / period);
+            targetRef.current = baseTarget + k * period;
+        } else {
+            targetRef.current = index * PARAMS.step;
+        }
         setActiveIndex(index);
         setCardClasses();
     }, [setCardClasses]);
@@ -163,6 +190,8 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
         const lastZ = new Array(images.length).fill(null);
         const lastDisplay = new Array(images.length).fill('');
 
+        const computeCull = () => Math.ceil((window.innerWidth * 0.5 + 470) / PARAMS.dirX) + 2;
+
         const getRailScreenCenter = () => {
             const rect = railRef.current.getBoundingClientRect();
             return { x: rect.left + rect.width * 0.5, y: rect.top + rect.height * 0.5 };
@@ -172,20 +201,25 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
             const scene = sceneRef.current;
             const rail = railRef.current;
             if (!scene || !rail) return;
-            const max = (images.length - 1) * PARAMS.step;
+            const n = images.length;
             const activeFloat = scrollRef.current / PARAMS.step;
             const railCenter = getRailScreenCenter();
             const hasActive = activeIndexRef.current !== null;
-            // Окно видимости: карточки, ушедшие за край экрана, не рисуем.
-            // Радиус считается от ширины окна, поэтому ни одна ВИДИМАЯ карточка
-            // не выпадает — геометрия и анимация на экране не меняются.
-            const cullRadius = Math.ceil((window.innerWidth * 0.5 + 470) / PARAMS.dirX) + 2;
+            // Окно видимости: карточки за краем экрана не рисуем (геометрия видимых не меняется).
+            const cullRadius = computeCull();
+            const loop = loopRef.current;
             const sceneRect = hasActive ? scene.getBoundingClientRect() : null;
+            let stillRevealing = false;
 
-            for (let index = 0; index < images.length; index += 1) {
+            for (let index = 0; index < n; index += 1) {
                 const card = cardRefs.current[index];
                 if (!card) continue;
-                const distance = index - activeFloat;
+                // Зацикливание: дистанцию заворачиваем в (-n/2, n/2], шов всегда за окном видимости.
+                let distance = index - activeFloat;
+                if (loop) {
+                    distance = ((distance % n) + n) % n;
+                    if (distance > n / 2) distance -= n;
+                }
                 const absoluteDistance = Math.abs(distance);
                 const isActive = activeIndexRef.current === index;
 
@@ -233,7 +267,7 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
                         scale = lerp(1, PARAMS.selectedScale, sm);
                         opacity = 1;
                     } else {
-                        const leftSide = index < activeIndexRef.current;
+                        const leftSide = distance < 0;
                         const targetX = leftSide ? PARAMS.leftDownX : PARAMS.rightUpX;
                         const targetY = leftSide ? PARAMS.leftDownY : PARAMS.rightUpY;
                         const localOpen = smooth(expandMixRef.current);
@@ -241,6 +275,32 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
                         y = lerp(baseY, targetY, localOpen);
                         z = lerp(baseZ, PARAMS.splitZ, localOpen);
                         opacity = lerp(opacity, 0, localOpen);
+                    }
+                }
+
+                // Появление: пока фото карточки не загрузилось, держим её за своей
+                // стороной (reveal=0, прозрачно); после загрузки reveal едет 0→1 и
+                // карточка «съезжает» к центру вместе с уже готовой картинкой.
+                if (!isActive) {
+                    const id = images[index].id;
+                    let reveal = revealRef.current[id] === undefined ? 0 : revealRef.current[id];
+                    // Двигаем появление только для ВИДИМЫХ (прошедших куллинг) и уже
+                    // загруженных карточек: ушедшая за экран и возвращённая карточка
+                    // корректно «въезжает» со своей стороны, когда снова видна.
+                    if (reveal < 1 && loadedRef.current[id]) {
+                        reveal = Math.min(1, reveal + 0.035);
+                        revealRef.current[id] = reveal;
+                        if (reveal < 1) stillRevealing = true;
+                    }
+                    if (reveal < 1) {
+                        const r = smooth(reveal);
+                        const leftSide = distance < 0;
+                        const sx = leftSide ? PARAMS.leftDownX : PARAMS.rightUpX;
+                        const sy = leftSide ? PARAMS.leftDownY : PARAMS.rightUpY;
+                        x = lerp(sx, x, r);
+                        y = lerp(sy, y, r);
+                        z = lerp(PARAMS.splitZ, z, r);
+                        opacity *= r;
                     }
                 }
 
@@ -254,14 +314,22 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 if (lastZ[index] !== zIndex) { card.style.zIndex = String(zIndex); lastZ[index] = zIndex; }
             }
 
-            const progress = max <= 0 ? 0 : (scrollRef.current / max) * 100;
+            revealActiveRef.current = stillRevealing;
+
+            let progress;
+            if (loop) {
+                const position = (((scrollRef.current / PARAMS.step) % n) + n) % n;
+                progress = (position / n) * 100;
+            } else {
+                const max = (n - 1) * PARAMS.step;
+                progress = max <= 0 ? 0 : (scrollRef.current / max) * 100;
+            }
             if (progressRef.current) progressRef.current.style.width = `${clamp(progress, 0, 100)}%`;
         };
 
-        // Лента «в покое»: ничего не движется и не нужно перерисовывать.
-        // Наведение считается завершённым, когда hoverMix дошёл до своей цели
-        // (статично приподнятая карточка тоже «в покое» — кадры не тратим).
+        // Лента «в покое»: ничего не движется — тяжёлую отрисовку пропускаем.
         const isSettled = () => {
+            if (revealActiveRef.current) return false;
             if (scrollRef.current !== targetRef.current) return false;
             const expandTarget = expandedRef.current ? 1 : 0;
             if (expandMixRef.current !== expandTarget || selectedMixRef.current !== expandTarget) return false;
@@ -274,8 +342,10 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
         };
 
         const animate = () => {
+            const cullRadius = computeCull();
+            loopRef.current = images.length >= 2 * cullRadius;
             const max = (images.length - 1) * PARAMS.step;
-            targetRef.current = clamp(targetRef.current, 0, max);
+            if (!loopRef.current) targetRef.current = clamp(targetRef.current, 0, max);
             scrollRef.current = lerp(scrollRef.current, targetRef.current, 0.11);
             if (Math.abs(scrollRef.current - targetRef.current) < 0.025) scrollRef.current = targetRef.current;
 
@@ -296,8 +366,6 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 railRef.current.style.transform = `translate3d(0,0,0) rotateX(${PARAMS.railRotX}deg) rotateY(${PARAMS.railRotY}deg) rotateZ(${PARAMS.railRotZ}deg)`;
             }
 
-            // Тяжёлую отрисовку 34 карточек делаем только когда что-то реально
-            // движется (или помечено к перерисовке) — в покое кадр почти бесплатный.
             if (needsRenderRef.current || !isSettled()) {
                 setCardClasses();
                 updateCards();
@@ -326,6 +394,51 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, [closeCard]);
+
+    // Near-real-time синхронизация разметки между двумя пользователями: лёгкий
+    // поллинг «что изменилось после курсора» (+ при возврате фокуса на вкладку).
+    useEffect(() => {
+        let stopped = false;
+        let inFlight = false;
+        const poll = async () => {
+            if (stopped || inFlight || typeof document !== 'undefined' && document.hidden) return;
+            inFlight = true;
+            try {
+                const since = pollCursorRef.current || '';
+                const response = await axios.get(`${apiBaseUrl}/api/four_you/annotations/poll`, {
+                    headers: authHeaders(),
+                    params: since ? { since } : {},
+                });
+                if (stopped) return;
+                const items = Array.isArray(response?.data?.items) ? response.data.items : [];
+                if (items.length) {
+                    const byId = new Map(items.map((item) => [item.id, item]));
+                    let cursor = pollCursorRef.current || '';
+                    items.forEach((item) => {
+                        if (item.annotations_updated_at && (!cursor || item.annotations_updated_at > cursor)) {
+                            cursor = item.annotations_updated_at;
+                        }
+                    });
+                    pollCursorRef.current = cursor;
+                    setImages((prev) => prev.map((img) => (byId.has(img.id) && img.id !== editingIdRef.current
+                        ? { ...img, annotations: byId.get(img.id).annotations, annotations_updated_at: byId.get(img.id).annotations_updated_at }
+                        : img)));
+                }
+            } catch (pollError) {
+                /* поллинг тихий — не мешаем работе при сетевых сбоях */
+            } finally {
+                inFlight = false;
+            }
+        };
+        const interval = window.setInterval(poll, 3000);
+        const onFocus = () => poll();
+        window.addEventListener('focus', onFocus);
+        return () => {
+            stopped = true;
+            window.clearInterval(interval);
+            window.removeEventListener('focus', onFocus);
+        };
+    }, [apiBaseUrl, authHeaders]);
 
     const handleWheel = (event) => {
         if (expandedRef.current) return;
@@ -364,7 +477,10 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
         if (card) {
             const index = Number(card.dataset.lentaCardIndex);
             if (expandedRef.current && activeIndexRef.current === index) closeCard();
-            else openCard(index);
+            else {
+                if (images[index]) revealRef.current[images[index].id] = 1;
+                openCard(index);
+            }
         } else if (expandedRef.current) {
             closeCard();
         }
@@ -493,10 +609,37 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
         }
     };
 
+    const saveAnnotations = async (annotations) => {
+        const image = activeIndex == null ? null : images[activeIndex];
+        if (!image) return;
+        try {
+            const response = await axios.put(
+                `${apiBaseUrl}/api/four_you/images/${encodeURIComponent(image.id)}/annotations`,
+                { annotations },
+                { headers: authHeaders() },
+            );
+            const saved = response?.data?.annotations || annotations;
+            const ts = response?.data?.annotations_updated_at;
+            if (ts && (!pollCursorRef.current || ts > pollCursorRef.current)) pollCursorRef.current = ts;
+            setImages((prev) => prev.map((img) => (img.id === image.id
+                ? { ...img, annotations: saved, annotations_updated_at: ts || img.annotations_updated_at }
+                : img)));
+            editingIdRef.current = null;
+            setEditorOpen(false);
+            showToast?.('Разметка сохранена', 'success');
+        } catch (saveError) {
+            showToast?.(saveError?.response?.data?.error || 'Не удалось сохранить разметку', 'error');
+            throw saveError;
+        }
+    };
+
+    const activeImage = activeIndex == null ? null : images[activeIndex];
+    const activeBackground = activeImage ? (activeImage.annotations?.background || 'none') : 'none';
+
     return (
         <section
             ref={sceneRef}
-            className="lenta-scene"
+            className={`lenta-scene${activeBackground !== 'none' ? ` lenta-scene--bg lenta-scene--bg-${activeBackground}` : ''}`}
             aria-label="4 You"
             onWheel={handleWheel}
             onPointerDown={handlePointerDown}
@@ -504,6 +647,8 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
             onPointerUp={handlePointerUp}
             onPointerCancel={cancelPointer}
         >
+            <Backgrounds bg={activeBackground} />
+
             {canUpload && (
                 <div className="lenta-admin-controls" data-lenta-control>
                     {!selectMode ? (
@@ -576,6 +721,17 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
                                 decoding="async"
                                 fetchPriority={index < 2 ? 'high' : 'auto'}
                                 draggable="false"
+                                onLoad={() => {
+                                    loadedRef.current[image.id] = true;
+                                    revealActiveRef.current = true;
+                                    needsRenderRef.current = true;
+                                }}
+                                onError={() => {
+                                    // даже если фото не загрузилось — показываем карточку (не зависаем невидимой)
+                                    loadedRef.current[image.id] = true;
+                                    revealActiveRef.current = true;
+                                    needsRenderRef.current = true;
+                                }}
                             />
                             {activeIndex === index && (
                                 <img
@@ -589,6 +745,9 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
                                     onLoad={(event) => event.currentTarget.classList.add('is-ready')}
                                 />
                             )}
+                            {hasVisibleAnnotations(image.annotations) && (
+                                <AnnotationLayer annotations={normalizeAnnotations(image.annotations)} />
+                            )}
                             {canUpload && selectMode && (
                                 <span
                                     className={`lenta-card-check ${selectedIds.has(image.id) ? 'is-checked' : ''}`}
@@ -597,18 +756,39 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
                                     <i className="lenta-check-mark">{selectedIds.has(image.id) ? '✓' : ''}</i>
                                 </span>
                             )}
-                            {canUpload && !selectMode && activeIndex === index && (
-                                <button
-                                    type="button"
-                                    className="lenta-card-delete"
-                                    data-lenta-control
-                                    onClick={(event) => { event.stopPropagation(); deleteActiveImage(); }}
-                                    disabled={Boolean(deletingId)}
-                                    title="Удалить это фото"
-                                >
-                                    <FaIcon className={`fas ${deletingId ? 'fa-spinner fa-spin' : 'fa-trash-alt'}`} />
-                                    <span>{deletingId ? 'Удаление…' : 'Удалить фото'}</span>
-                                </button>
+                            {!selectMode && activeIndex === index && image.annotations?.comments?.length > 0 && (
+                                <div className="lenta-card-comments" data-lenta-control>
+                                    {image.annotations.comments.slice(-4).map((c, ci) => (
+                                        <div key={ci} className="lenta-comment-line">
+                                            <b>{userName(c.by)}</b> {c.text}
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                            {!selectMode && activeIndex === index && (
+                                <div className="lenta-card-actions" data-lenta-control>
+                                    <button
+                                        type="button"
+                                        className="lenta-card-action"
+                                        onClick={(event) => { event.stopPropagation(); editingIdRef.current = image.id; setEditorOpen(true); }}
+                                        title="Декорировать фото"
+                                    >
+                                        <FaIcon className="fas fa-pencil" />
+                                        <span>Декор</span>
+                                    </button>
+                                    {canUpload && (
+                                        <button
+                                            type="button"
+                                            className="lenta-card-action is-danger"
+                                            onClick={(event) => { event.stopPropagation(); deleteActiveImage(); }}
+                                            disabled={Boolean(deletingId)}
+                                            title="Удалить это фото"
+                                        >
+                                            <FaIcon className={`fas ${deletingId ? 'fa-spinner fa-spin' : 'fa-trash-alt'}`} />
+                                            <span>{deletingId ? 'Удаление…' : 'Удалить'}</span>
+                                        </button>
+                                    )}
+                                </div>
                             )}
                         </article>
                     ))}
@@ -616,6 +796,16 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
             )}
 
             <div className="lenta-progress" aria-hidden="true"><span ref={progressRef} /></div>
+
+            {editorOpen && activeImage && (
+                <PhotoEditor
+                    image={activeImage}
+                    annotations={activeImage.annotations}
+                    user={user}
+                    onSave={saveAnnotations}
+                    onClose={() => { editingIdRef.current = null; setEditorOpen(false); }}
+                />
+            )}
         </section>
     );
 };
