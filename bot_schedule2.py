@@ -2086,6 +2086,10 @@ FOUR_YOU_MAX_FILES_PER_UPLOAD = int(os.getenv('FOUR_YOU_MAX_FILES_PER_UPLOAD', '
 FOUR_YOU_MAX_FILE_SIZE_BYTES = int(os.getenv('FOUR_YOU_MAX_FILE_SIZE_BYTES', str(15 * 1024 * 1024)))
 FOUR_YOU_MAX_IMAGE_PIXELS = int(os.getenv('FOUR_YOU_MAX_IMAGE_PIXELS', str(40_000_000)))
 FOUR_YOU_UPLOAD_FOLDER = (os.getenv('FOUR_YOU_UPLOAD_FOLDER') or 'FourYou/').strip()
+# Совместная разметка фото 4 You (рисунок/стикеры/текст/комментарии/фон).
+FOUR_YOU_ANN_MAX_BYTES = int(os.getenv('FOUR_YOU_ANN_MAX_BYTES', str(512 * 1024)))
+FOUR_YOU_ANN_FONTS = frozenset({'inter', 'script', 'serif', 'mono', 'display', 'round'})
+FOUR_YOU_ANN_BACKGROUNDS = frozenset({'none', 'hearts', 'aurora', 'bokeh', 'stars', 'sunset'})
 TASK_TAG_LABELS = {
     'task': 'Задача',
     'problem': 'Проблема',
@@ -3090,6 +3094,8 @@ def _four_you_image_payload(image_row):
         "width": int(image_row.get("width") or 0),
         "height": int(image_row.get("height") or 0),
         "created_at": image_row.get("created_at"),
+        "annotations": image_row.get("annotations") or {},
+        "annotations_updated_at": image_row.get("annotations_updated_at"),
     }
 
 
@@ -3108,6 +3114,110 @@ def _delete_four_you_blobs(image_row):
             client.bucket(bucket_name).blob(blob_path).delete()
         except Exception:
             logging.warning("Failed to delete 4 You blob %s/%s", bucket_name, blob_path, exc_info=True)
+
+
+_FOUR_YOU_HEX_RE = re.compile(r'^#[0-9a-fA-F]{3,8}$')
+
+
+def _four_you_num(value, lo, hi, default):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if number != number:  # NaN
+        return default
+    return max(lo, min(hi, number))
+
+
+def _four_you_color(value, fallback='#ffffff'):
+    text = str(value or '').strip()
+    return text if _FOUR_YOU_HEX_RE.match(text) else fallback
+
+
+def _sanitize_four_you_annotations(raw):
+    """Защита хранимой/расшариваемой разметки: типы, диапазоны координат 0..1,
+    белые списки шрифтов/фонов и лимиты количества. Текст не парсится как HTML —
+    фронт рендерит его как текст (React экранирует), здесь лишь ограничиваем длину."""
+    if not isinstance(raw, dict):
+        return {'strokes': [], 'stickers': [], 'texts': [], 'comments': [], 'background': 'none'}
+
+    strokes = []
+    for stroke in (raw.get('strokes') or [])[:200]:
+        if not isinstance(stroke, dict):
+            continue
+        points = []
+        for point in (stroke.get('points') or [])[:1200]:
+            if isinstance(point, (list, tuple)) and len(point) >= 2:
+                points.append([
+                    round(_four_you_num(point[0], 0, 1, 0), 4),
+                    round(_four_you_num(point[1], 0, 1, 0), 4),
+                ])
+        if points:
+            strokes.append({
+                'color': _four_you_color(stroke.get('color')),
+                # width нормализована к ширине фото (доля 0..1), чтобы линия масштабировалась.
+                'width': round(_four_you_num(stroke.get('width'), 0.0008, 0.15, 0.006), 5),
+                'points': points,
+            })
+
+    stickers = []
+    for sticker in (raw.get('stickers') or [])[:120]:
+        if not isinstance(sticker, dict):
+            continue
+        emoji = str(sticker.get('emoji') or '')[:12]
+        if not emoji.strip():
+            continue
+        stickers.append({
+            'emoji': emoji,
+            'x': round(_four_you_num(sticker.get('x'), -0.2, 1.2, 0.5), 4),
+            'y': round(_four_you_num(sticker.get('y'), -0.2, 1.2, 0.5), 4),
+            'size': round(_four_you_num(sticker.get('size'), 0.02, 0.6, 0.12), 4),
+            'rot': round(_four_you_num(sticker.get('rot'), -360, 360, 0), 2),
+        })
+
+    texts = []
+    for item in (raw.get('texts') or [])[:60]:
+        if not isinstance(item, dict):
+            continue
+        text_value = str(item.get('text') or '')[:200]
+        if not text_value.strip():
+            continue
+        font = str(item.get('font') or 'inter')
+        texts.append({
+            'text': text_value,
+            'x': round(_four_you_num(item.get('x'), -0.2, 1.2, 0.5), 4),
+            'y': round(_four_you_num(item.get('y'), -0.2, 1.2, 0.5), 4),
+            'size': round(_four_you_num(item.get('size'), 0.02, 0.4, 0.06), 4),
+            'rot': round(_four_you_num(item.get('rot'), -360, 360, 0), 2),
+            'font': font if font in FOUR_YOU_ANN_FONTS else 'inter',
+            'color': _four_you_color(item.get('color')),
+        })
+
+    comments = []
+    for comment in (raw.get('comments') or [])[:300]:
+        if not isinstance(comment, dict):
+            continue
+        comment_text = str(comment.get('text') or '')[:600]
+        if not comment_text.strip():
+            continue
+        try:
+            author = int(comment.get('by') or 0)
+        except (TypeError, ValueError):
+            author = 0
+        comments.append({
+            'by': author,
+            'text': comment_text,
+            'at': str(comment.get('at') or '')[:40],
+        })
+
+    background = str(raw.get('background') or 'none')
+    return {
+        'strokes': strokes,
+        'stickers': stickers,
+        'texts': texts,
+        'comments': comments,
+        'background': background if background in FOUR_YOU_ANN_BACKGROUNDS else 'none',
+    }
 
 
 def _resolve_avatar_target_user(requester, requester_id, target_user_id):
@@ -5497,6 +5607,48 @@ def delete_four_you_images_batch():
         "can_upload": True,
         "images": [_four_you_image_payload(row) for row in rows],
     }), 200
+
+
+@app.route('/api/four_you/images/<image_id>/annotations', methods=['PUT', 'POST', 'OPTIONS'])
+@require_auth
+def save_four_you_annotations(image_id):
+    # Разметку (рисунок/стикеры/текст/комментарии/фон) могут менять ОБА — Руслан и Адия
+    # (require_upload=False ⇒ достаточно доступа к просмотру). Загрузка/удаление фото — только Руслан.
+    requester_id, _, guard_response, guard_status = _four_you_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    try:
+        normalized_image_id = str(uuid.UUID(str(image_id)))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Некорректный идентификатор изображения"}), 400
+
+    payload = request.get_json(silent=True) or {}
+    raw = payload.get('annotations') if isinstance(payload.get('annotations'), dict) else payload
+    sanitized = _sanitize_four_you_annotations(raw)
+    sanitized['updated_by'] = int(requester_id or 0)
+    try:
+        serialized_len = len(json.dumps(sanitized, ensure_ascii=False).encode('utf-8'))
+    except Exception:
+        serialized_len = 0
+    if serialized_len > FOUR_YOU_ANN_MAX_BYTES:
+        return jsonify({"error": "Слишком большой объём разметки, упростите рисунок"}), 413
+
+    saved = db.set_four_you_annotations(normalized_image_id, sanitized)
+    if saved is None:
+        return jsonify({"error": "Изображение не найдено"}), 404
+    return jsonify({"status": "success", "id": normalized_image_id, **saved}), 200
+
+
+@app.route('/api/four_you/annotations/poll', methods=['GET', 'OPTIONS'])
+@require_auth
+def four_you_annotations_poll():
+    # Лёгкий поллинг разметки для near-real-time синхронизации между двумя пользователями.
+    _, _, guard_response, guard_status = _four_you_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    since = (request.args.get('since') or '').strip() or None
+    items = db.list_four_you_annotations_changed_since(since)
+    return jsonify({"status": "success", "items": items}), 200
 
 
 @app.route('/api/average_scores', methods=['GET'])

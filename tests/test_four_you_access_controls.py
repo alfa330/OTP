@@ -93,5 +93,40 @@ class FourYouAccessControlTests(unittest.TestCase):
         self.assertIn("lenta-card-photo-hi.is-ready", self.lenta_css)
 
 
+    def test_annotations_storage_and_routes(self):
+        self.assertIn(
+            "ADD COLUMN IF NOT EXISTS annotations JSONB NOT NULL DEFAULT '{}'::jsonb",
+            self.db_source,
+        )
+        self.assertIn("def set_four_you_annotations", self.db_source)
+        self.assertIn("def list_four_you_annotations_changed_since", self.db_source)
+        self.assertIn(
+            "@app.route('/api/four_you/images/<image_id>/annotations', methods=['PUT', 'POST', 'OPTIONS'])",
+            self.api_source,
+        )
+        self.assertIn(
+            "@app.route('/api/four_you/annotations/poll', methods=['GET', 'OPTIONS'])",
+            self.api_source,
+        )
+        self.assertIn("def save_four_you_annotations(image_id):", self.api_source)
+        self.assertIn("_sanitize_four_you_annotations", self.api_source)
+        # Разметку правят ОБА (require_upload=False в гарде), а не только super_admin.
+        self.assertIn("requester_id, _, guard_response, guard_status = _four_you_route_guard()", self.api_source)
+
+    def test_collab_editing_frontend_present(self):
+        root_components = ROOT / "src" / "components" / "four_you"
+        editor = (root_components / "PhotoEditor.jsx").read_text(encoding="utf-8-sig")
+        (root_components / "AnnotationLayer.jsx").read_text(encoding="utf-8-sig")
+        (root_components / "Backgrounds.jsx").read_text(encoding="utf-8-sig")
+        for token in ("Рисунок", "Стикеры", "Текст", "Коммент", "Фон"):
+            self.assertIn(token, editor)
+        self.assertIn("annotations/poll", self.lenta_source)        # near-real-time поллинг
+        self.assertIn("PhotoEditor", self.lenta_source)             # редактор подключён
+        self.assertIn("revealRef", self.lenta_source)               # появление по загрузке фото
+        self.assertIn("loadedRef.current[image.id] = true", self.lenta_source)
+        self.assertIn("loopRef.current = images.length >= 2 * cullRadius", self.lenta_source)  # зацикливание
+        self.assertIn("fy-bg-hearts", self.lenta_css)               # анимированный фон «сердечки»
+
+
 if __name__ == "__main__":
     unittest.main()
