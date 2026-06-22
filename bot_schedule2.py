@@ -14945,6 +14945,78 @@ def call_distribution_settings_endpoint():
         logging.error(f"Error in call_distribution settings: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
+
+@app.route('/api/call_distribution/status', methods=['GET', 'OPTIONS'])
+@require_api_key
+def call_distribution_status():
+    """Статус распределения по операторам за месяц: норма / в пуле / оценено / не оценено.
+    Только операторская модель (чат-менеджеры исключены). Доступ: админ/глава/СВ."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        role = requester[3]
+        is_admin = _is_admin_role(role)
+        is_head = _headed_department_id(requester_id) is not None
+        is_sv = _is_supervisor_role(role)
+        if not (is_admin or is_head or is_sv):
+            return jsonify({"error": "Forbidden"}), 403
+
+        month = request.args.get('month') or datetime.now().strftime('%Y-%m')
+        if not re.match(r'^\d{4}-\d{2}$', str(month)):
+            return jsonify({"error": "month must be in YYYY-MM format"}), 400
+
+        # операторская модель (чат-менеджеры исключены)
+        ops = []
+        for row in (db.get_all_operators() or []):
+            try:
+                op_id = int(row[0])
+            except Exception:
+                continue
+            name = str(row[1] or '').strip()
+            direction_name = str(row[7] or '').strip() if len(row) > 7 else ''
+            calc = str(row[8] or '').strip().lower() if len(row) > 8 else ''
+            dkey = ' '.join(direction_name.lower().split())
+            if calc == 'chat_manager' or dkey in ('чат менеджер', 'chat manager'):
+                continue
+            ops.append((op_id, name))
+
+        op_ids = [o[0] for o in ops]
+        targets = db.get_operator_call_evaluation_targets_for_month(op_ids, month) or {}
+        pool = db.get_imported_calls_status_counts_by_operator(month)
+
+        operators = []
+        for op_id, name in ops:
+            norm = int((targets.get(op_id) or {}).get('required_calls') or 0)
+            pc = pool.get(op_id) or {}
+            in_pool = int(pc.get('total') or 0)
+            if norm <= 0 and in_pool <= 0:
+                continue
+            operators.append({
+                "operator_id": op_id,
+                "name": name,
+                "norm": norm,
+                "in_pool": in_pool,
+                "evaluated": int(pc.get('evaluated') or 0),
+                "not_evaluated": int(pc.get('not_evaluated') or 0),
+                "skipped": int(pc.get('skipped') or 0),
+            })
+        operators.sort(key=lambda x: x['name'])
+
+        return jsonify({
+            "status": "success",
+            "month": month,
+            "operators": operators,
+            "settings": db.get_call_distribution_settings(),
+            "can_edit": bool(is_admin or is_head)
+        }), 200
+    except Exception as e:
+        logging.error(f"call_distribution status error: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
 @app.route('/api/call_evaluation', methods=['POST'])
 @require_api_key
 def receive_call_evaluation():
