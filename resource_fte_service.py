@@ -1145,12 +1145,38 @@ def build_resource_schedule_preview(db, payload: Optional[Dict[str, Any]] = None
 def import_resource_csv(db, content: bytes, filename: str, user_id: Optional[int]) -> Dict[str, Any]:
     parsed = parse_resource_csv(content)
     content_hash = hashlib.sha256(content).hexdigest()
+    return import_resource_days(
+        db,
+        parsed["days"],
+        filename=filename,
+        headers=parsed["headers"],
+        mapped_headers=parsed.get("mapped_headers"),
+        user_id=user_id,
+        content_hash=content_hash,
+    )
+
+
+def import_resource_days(
+    db,
+    days: List[Dict[str, Any]],
+    *,
+    filename: str,
+    headers: Optional[List[str]] = None,
+    mapped_headers: Optional[Dict[str, str]] = None,
+    user_id: Optional[int] = None,
+    content_hash: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Сохраняет уже разобранные дни (без промежуточного CSV) в daily_resource_hours и
+    пересчитывает прогноз. `days` — список {report_date, rows:[<канонические почасовые dict>],
+    source_row_count}. Используется и CSV-загрузкой (parse -> days -> сюда), и живой
+    выгрузкой из Oktell (строит days напрямую)."""
+    headers = headers if headers is not None else []
     uploaded_dates = []
     upload_ids = []
 
     with db._get_cursor() as cursor:
         settings = _get_settings_tx(cursor)
-        for day in parsed["days"]:
+        for day in days:
             report_date = _parse_report_date(day["report_date"])
             uploaded_dates.append(report_date)
             schedule_fte = _shift_hourly_fte_tx(cursor, report_date, settings)
@@ -1174,8 +1200,8 @@ def import_resource_csv(db, content: bytes, filename: str, user_id: Optional[int
                 (
                     report_date,
                     filename,
-                    content_hash,
-                    Json(parsed["headers"]),
+                    content_hash or "",
+                    Json(headers),
                     int(day.get("source_row_count") or len(day["rows"])),
                     user_id,
                 ),
@@ -1204,7 +1230,7 @@ def import_resource_csv(db, content: bytes, filename: str, user_id: Optional[int
                         row["avg_lost_wait_seconds"],
                         row["avg_wait_seconds"],
                         float(schedule_fte.get(hour, 0.0)),
-                        Json(row["raw_payload"]),
+                        Json(row.get("raw_payload") or {}),
                     )
                 )
             execute_values(
@@ -1244,15 +1270,15 @@ def import_resource_csv(db, content: bytes, filename: str, user_id: Optional[int
             )
             _refresh_daily_summary_tx(cursor, report_date)
         _refresh_all_historical_forecasts_tx(cursor, settings)
-    primary_report_date = max(uploaded_dates)
-    day_payload = get_resource_day(db, primary_report_date.isoformat())
+    primary_report_date = max(uploaded_dates) if uploaded_dates else None
+    day_payload = get_resource_day(db, primary_report_date.isoformat()) if primary_report_date else None
     return {
         "upload_id": upload_ids[-1] if upload_ids else None,
         "upload_ids": upload_ids,
-        "report_date": primary_report_date.isoformat(),
+        "report_date": primary_report_date.isoformat() if primary_report_date else None,
         "uploaded_dates": [report_date.isoformat() for report_date in uploaded_dates],
         "uploaded_days_count": len(uploaded_dates),
-        "mapped_headers": parsed["mapped_headers"],
+        "mapped_headers": mapped_headers,
         "day": day_payload,
     }
 
