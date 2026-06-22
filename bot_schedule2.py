@@ -271,6 +271,10 @@ OKTELL_RESOURCE_FIELDS = [
     'avg_lost_wait_seconds',
 ]
 
+# Oktell: пул звонков на оценку («Деление звонков»). Случайная выборка записанных
+# операторских звонков -> существующий пул imported_calls (как /api/admin/shuffle).
+OKTELL_EVAL_SAMPLE_PER_OPERATOR = _env_int('OKTELL_EVAL_SAMPLE_PER_OPERATOR', 5, minimum=1, maximum=500)
+
 if not API_TOKEN:
     raise Exception("Переменная окружения BOT_TOKEN обязательна.")
 
@@ -14845,6 +14849,60 @@ def shuffle_imported_calls():
             "message": "Internal server error"
         }), 500
 
+
+@app.route('/api/eval_calls/sync_oktell', methods=['POST'])
+@require_api_key
+def sync_eval_calls_oktell():
+    """Ручная синхронизация пула звонков на оценку из Oktell («Деление звонков»):
+    случайная выборка записанных операторских звонков -> imported_calls.
+    Тело: {month: 'YYYY-MM'} или {date_from, date_to} (+ опц. sample_per_operator)."""
+    try:
+        importer_id, importer, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not (_is_admin_role(importer[3]) or _is_supervisor_role(importer[3])):
+            return jsonify({"error": "Only admins or supervisors can sync evaluation calls"}), 403
+
+        payload = request.get_json(silent=True) or {}
+        month = payload.get('month') or request.args.get('month') or None
+        date_from = payload.get('date_from') or payload.get('start_date') or None
+        date_to = payload.get('date_to') or payload.get('end_date') or None
+        sample = payload.get('sample_per_operator') or request.args.get('sample_per_operator') or None
+
+        result = sync_oktell_evaluation_calls(
+            month=month,
+            date_from=date_from,
+            date_to=date_to,
+            sample_per_operator=sample,
+            triggered_by='manual',
+            importer_id=importer_id
+        )
+        status = result.get('status')
+        if status == 'skipped':
+            reason = result.get('reason')
+            if reason == 'missing_token':
+                return jsonify({"error": "OKTELL_IP/OKTELL_API_TOKEN не задан", "sync": result}), 400
+            if reason == 'locked':
+                return jsonify({
+                    "error": "Синхронизация уже выполняется. Повторите через несколько секунд.",
+                    "sync": result
+                }), 429
+            return jsonify({"error": f"Синхронизация пропущена: {reason or 'unknown'}", "sync": result}), 400
+        if status == 'failed':
+            return jsonify({"error": result.get('error') or "Синхронизация не выполнена", "sync": result}), 502
+
+        return jsonify({
+            "status": "success",
+            "message": "Пул звонков на оценку синхронизирован из Oktell",
+            "sync": result
+        }), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error syncing Oktell evaluation calls: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
 @app.route('/api/call_evaluation', methods=['POST'])
 @require_api_key
 def receive_call_evaluation():
@@ -20148,6 +20206,149 @@ def sync_oktell_resource_hours(day=None, date_from=None, date_to=None, triggered
     finally:
         try:
             OKTELL_RESOURCE_SYNC_LOCK.release()
+        except Exception:
+            pass
+
+
+# === Oktell: пул звонков на оценку («Деление звонков») ==========================================
+# Случайная выборка записанных операторских звонков (A_Stat_Connections_1x1, ConnectionType=1,
+# IsRecorded=1, реальный оператор) -> существующий пул imported_calls через
+# db.import_calls_from_distribution. external_id = conn_id (ключ записи). Оператор матчится
+# умным матчингом (чат-менеджеры исключаются), в payload отдаётся каноничный users.name.
+OKTELL_EVAL_SYNC_LOCK = threading.Lock()
+
+
+def _oktell_eval_target_period(month=None, date_from=None, date_to=None):
+    """Возвращает (range_from:date, range_to:date, month_str). По умолчанию — текущий месяц."""
+    if date_from or date_to:
+        start = _oktell_parse_date(date_from or date_to)
+        end = _oktell_parse_date(date_to or date_from)
+        if start is None or end is None:
+            raise ValueError("date_from and date_to must be in YYYY-MM-DD format")
+        if end < start:
+            raise ValueError("date_to must be greater than or equal to date_from")
+        if (end - start).days + 1 > 92:
+            raise ValueError("Период не может быть больше 92 дней")
+        return start, end, start.strftime('%Y-%m')
+    m = str(month or '').strip() or datetime.now().strftime('%Y-%m')
+    try:
+        y, mo = int(m[:4]), int(m[5:7])
+        start = dt_date(y, mo, 1)
+        end = dt_date(y + (mo // 12), (mo % 12) + 1, 1) - timedelta(days=1)
+    except Exception:
+        raise ValueError("month must be in YYYY-MM format")
+    return start, end, f"{y:04d}-{mo:02d}"
+
+
+def _oktell_eval_sample_sql(date_from_compact, date_to_excl_compact, sample_n):
+    n = int(sample_n)
+    return (
+        "SELECT q.operator_name, q.phone, q.dt_raw, q.talk_sec, q.conn_id, q.chain_id, q.available FROM ("
+        "SELECT oi.Name AS operator_name, "
+        "CASE WHEN LEN(s.BOutNumber) >= 10 THEN s.BOutNumber WHEN LEN(s.AOutNumber) >= 10 THEN s.AOutNumber "
+        "ELSE COALESCE(NULLIF(s.BOutNumber, ''), s.AOutNumber) END AS phone, "
+        "CONVERT(varchar(10), s.TimeStart, 104) + ' ' + CONVERT(varchar(8), s.TimeStart, 108) AS dt_raw, "
+        "DATEDIFF(second, s.TimeAnswer, s.TimeStop) AS talk_sec, "
+        "LOWER(CONVERT(varchar(36), s.Id)) AS conn_id, LOWER(CONVERT(varchar(36), s.IdChain)) AS chain_id, "
+        "ROW_NUMBER() OVER (PARTITION BY s.AUserId ORDER BY NEWID()) AS rn, "
+        "COUNT(*) OVER (PARTITION BY s.AUserId) AS available "
+        "FROM oktell.dbo.A_Stat_Connections_1x1 s "
+        "JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo oi ON oi.Id = s.AUserId "
+        f"WHERE s.TimeStart >= '{date_from_compact}' AND s.TimeStart < '{date_to_excl_compact}' "
+        "AND s.ConnectionType = 1 AND s.IsRecorded = 1 AND s.TimeStop IS NOT NULL"
+        f") q WHERE q.rn <= {n} ORDER BY q.operator_name, q.dt_raw"
+    )
+
+
+def sync_oktell_evaluation_calls(month=None, date_from=None, date_to=None, sample_per_operator=None,
+                                 triggered_by='manual', importer_id=None):
+    """Тянет случайную выборку записанных операторских звонков из Oktell и кладёт в пул
+    imported_calls (раздел «Деление звонков»). Возвращает сводку."""
+    if not _oktell_api_ready():
+        logging.warning("Oktell eval sync skipped: OKTELL_IP/OKTELL_API_TOKEN is not set")
+        return {'status': 'skipped', 'reason': 'missing_token'}
+
+    try:
+        sample_n = max(1, int(sample_per_operator or OKTELL_EVAL_SAMPLE_PER_OPERATOR))
+    except Exception:
+        sample_n = OKTELL_EVAL_SAMPLE_PER_OPERATOR
+    range_from, range_to, month_str = _oktell_eval_target_period(month, date_from, date_to)
+
+    if not OKTELL_EVAL_SYNC_LOCK.acquire(blocking=False):
+        logging.warning("Oktell eval sync skipped: another eval sync is already running")
+        return {'status': 'skipped', 'reason': 'locked'}
+
+    started = time.time()
+    try:
+        operator_lookup = _status_import_build_operator_lookup(exclude_chat_managers=True)
+        rows = _oktell_query(_oktell_eval_sample_sql(
+            range_from.strftime('%Y%m%d'), (range_to + timedelta(days=1)).strftime('%Y%m%d'), sample_n))
+
+        by_op = {}
+        for r in rows:
+            by_op.setdefault(str(r.get('operator_name') or '').strip(), []).append(r)
+
+        distribution = []
+        matched_ops = 0
+        total_calls = 0
+        unmatched_operators = []
+        for op_name, op_rows in by_op.items():
+            matches = _status_import_resolve_operator_matches(op_name, operator_lookup)
+            if len(matches) != 1:
+                unmatched_operators.append(op_name)
+                continue
+            otp_name = matches[0].get('name') or op_name
+            available = int(op_rows[0].get('available') or len(op_rows))
+            calls = [{
+                'id': r.get('conn_id'),
+                'datetimeRaw': r.get('dt_raw'),
+                'phone': r.get('phone'),
+                'durationSec': r.get('talk_sec'),
+            } for r in op_rows]
+            distribution.append({
+                'operator': otp_name,
+                'desired': min(sample_n, available),
+                'available': available,
+                'calls': calls,
+            })
+            matched_ops += 1
+            total_calls += len(calls)
+
+        import_result = {'imported': 0, 'updated': 0, 'skipped': 0, 'errors': [], 'missing_operators': []}
+        if distribution:
+            import_result = db.import_calls_from_distribution(
+                {'month': month_str, 'distribution': distribution}, importer_id=importer_id)
+
+        logging.info(
+            "Oktell eval sync %s..%s month=%s operators=%s calls=%s unmatched=%s",
+            range_from.strftime('%Y-%m-%d'), range_to.strftime('%Y-%m-%d'),
+            month_str, matched_ops, total_calls, len(unmatched_operators)
+        )
+        return {
+            'status': 'success',
+            'triggered_by': triggered_by,
+            'month': month_str,
+            'date_from': range_from.strftime('%Y-%m-%d'),
+            'date_to': range_to.strftime('%Y-%m-%d'),
+            'sample_per_operator': sample_n,
+            'operators': matched_ops,
+            'calls': total_calls,
+            'unmatched_operators': unmatched_operators,
+            'import': import_result,
+            'elapsed_seconds': round(time.time() - started, 2),
+        }
+    except Exception as exc:
+        logging.exception("Oktell eval sync failed")
+        return {
+            'status': 'failed',
+            'triggered_by': triggered_by,
+            'month': month_str,
+            'error': str(exc),
+            'elapsed_seconds': round(time.time() - started, 2),
+        }
+    finally:
+        try:
+            OKTELL_EVAL_SYNC_LOCK.release()
         except Exception:
             pass
 
