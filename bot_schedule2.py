@@ -10476,6 +10476,38 @@ def _resolve_reevaluation_request(call_id, approver_user_id, decision, comment=N
     }
 
 
+def _set_reevaluation_decision_comment(call_id, decision, comment):
+    """
+    Дописать необязательный комментарий к УЖЕ принятому решению по переоценке.
+
+    Используется ботом: решение фиксируется сразу по нажатию кнопки, а комментарий
+    (если админ его ввёл) сохраняется отдельным шагом. Возвращает True, если строка
+    обновлена (решение всё ещё в том же статусе), иначе False.
+    """
+    decision_norm = str(decision or '').strip().lower()
+    if decision_norm in ('approve', 'approved'):
+        comment_column = 'sv_request_approve_comment'
+        flag_column = 'sv_request_approved'
+    elif decision_norm in ('reject', 'rejected'):
+        comment_column = 'sv_request_reject_comment'
+        flag_column = 'sv_request_rejected'
+    else:
+        return False
+
+    decision_comment = str(comment or '').strip() or None
+    if decision_comment is None:
+        return False
+
+    # comment_column/flag_column берутся только из контролируемых литералов выше,
+    # значение комментария передаётся параметром — инъекция исключена.
+    with db._get_cursor() as cursor:
+        cursor.execute(
+            f"UPDATE calls SET {comment_column} = %s WHERE id = %s AND {flag_column} = TRUE",
+            (decision_comment, call_id)
+        )
+        return cursor.rowcount > 0
+
+
 @app.route('/api/call_evaluation/dispute', methods=['POST'])
 @require_api_key
 def dispute_call_evaluation():
@@ -24546,6 +24578,14 @@ async def _resolve_call_reevaluation_request_for_telegram(call_id, approver_tg_i
     return await loop.run_in_executor(None, _resolve)
 
 
+async def _apply_call_reevaluation_comment_for_telegram(call_id, decision, comment):
+    """Сохранить необязательный комментарий к уже принятому решению (в executor-потоке)."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None, _set_reevaluation_decision_comment, call_id, decision, comment
+    )
+
+
 async def _get_call_reevaluation_status_for_telegram(call_id):
     """Вернуть текущий статус запроса на переоценку для проверки перед вводом комментария."""
     loop = asyncio.get_event_loop()
@@ -24554,10 +24594,14 @@ async def _get_call_reevaluation_status_for_telegram(call_id):
 
 async def _prompt_reevaluation_decision_comment(cq, call_id, decision, state):
     """
-    Общий первый шаг для approve/reject: проверить, что запрос ещё открыт,
-    сохранить решение в FSM и попросить администратора ввести необязательный комментарий.
+    Общий обработчик нажатия approve/reject из Telegram.
+
+    Решение фиксируется СРАЗУ по нажатию кнопки (call_id берётся из callback_data,
+    поэтому при пачке заявок ничего не теряется и не путается). После этого
+    предлагаем по желанию дописать комментарий — он применяется к уже принятому
+    решению отдельным шагом и не может «потерять» само решение.
     """
-    # Проверяем, что запрос ещё не обработан (и существует).
+    # Быстрая проверка статуса — чтобы сразу дать понятный ответ на кнопку.
     try:
         ctx = await _get_call_reevaluation_status_for_telegram(call_id)
     except Exception as e:
@@ -24569,10 +24613,15 @@ async def _prompt_reevaluation_decision_comment(cq, call_id, decision, state):
         return
     if ctx.get('sv_request_approved') or ctx.get('sv_request_rejected'):
         await cq.answer("Запрос уже обработан", show_alert=True)
+        # Снимаем устаревшие кнопки, чтобы по ним больше не нажимали.
+        try:
+            if cq.message:
+                await cq.bot.edit_message_reply_markup(
+                    chat_id=cq.message.chat.id, message_id=cq.message.message_id, reply_markup=None
+                )
+        except Exception as e:
+            logging.debug("Не удалось убрать reply_markup у обработанного запроса: %s", e)
         return
-
-    await state.set_state(ReevalDecision.waiting_comment.state)
-    await state.update_data(reval_call_id=call_id, reval_decision=decision)
 
     try:
         await cq.answer()
@@ -24588,6 +24637,17 @@ async def _prompt_reevaluation_decision_comment(cq, call_id, decision, state):
     except Exception as e:
         logging.debug("Не удалось убрать reply_markup: %s", e)
 
+    # Фиксируем решение немедленно (атомарно по нажатию кнопки).
+    resolved = await _finalize_reevaluation_decision(cq.from_user.id, call_id, decision, None, cq.bot)
+    logging.info("Call %s %s by tg_user %s (resolved=%s)", call_id, decision, cq.from_user.id, resolved)
+    if not resolved:
+        # _finalize уже сообщил администратору, что пошло не так.
+        return
+
+    # Решение применено. Предлагаем по желанию дописать комментарий.
+    await state.set_state(ReevalDecision.waiting_comment.state)
+    await state.update_data(reval_call_id=call_id, reval_decision=decision)
+
     decision_label = "одобрению" if decision == 'approved' else "отклонению"
     skip_markup = InlineKeyboardMarkup().add(
         InlineKeyboardButton("Пропустить ➡️", callback_data="reval_skip_comment")
@@ -24595,35 +24655,38 @@ async def _prompt_reevaluation_decision_comment(cq, call_id, decision, state):
     try:
         await cq.bot.send_message(
             cq.from_user.id,
-            f"💬 Напишите комментарий к <b>{decision_label}</b> запроса на переоценку "
+            f"💬 При необходимости добавьте комментарий к <b>{decision_label}</b> "
             f"(Call ID {call_id}) или нажмите «Пропустить».",
             parse_mode='HTML',
             reply_markup=skip_markup
         )
     except Exception as e:
-        logging.exception("Не удалось запросить комментарий к решению: %s", e)
-        # Фолбэк: если не смогли спросить комментарий — фиксируем решение без него.
+        logging.debug("Не удалось предложить комментарий к решению: %s", e)
+        # Решение уже зафиксировано — просто завершаем без комментария.
         await state.finish()
-        await _finalize_reevaluation_decision(cq.from_user.id, call_id, decision, None, cq.bot)
 
 
 async def _finalize_reevaluation_decision(approver_tg_id, call_id, decision, comment, bot_instance):
-    """Зафиксировать решение по запросу на переоценку и уведомить администратора о результате."""
+    """
+    Зафиксировать решение по запросу на переоценку и уведомить администратора.
+    Возвращает True при успехе, False — если решение зафиксировать не удалось
+    (об этом администратору уже отправлено сообщение).
+    """
     try:
         await _resolve_call_reevaluation_request_for_telegram(call_id, approver_tg_id, decision, comment=comment)
     except ValueError:
         await bot_instance.send_message(approver_tg_id, "❗️ Запрос не найден.")
-        return
+        return False
     except RuntimeError:
         await bot_instance.send_message(approver_tg_id, "ℹ️ Запрос уже был обработан.")
-        return
+        return False
     except PermissionError as e:
         await bot_instance.send_message(approver_tg_id, f"Access denied: {str(e)}")
-        return
+        return False
     except Exception as e:
         logging.exception("Ошибка при фиксации решения по переоценке: %s", e)
         await bot_instance.send_message(approver_tg_id, "❗️ Ошибка сервера при сохранении решения.")
-        return
+        return False
 
     if decision == 'approved':
         text = f"✅ Запрос на переоценку (Call ID {call_id}) одобрен."
@@ -24635,6 +24698,7 @@ async def _finalize_reevaluation_decision(approver_tg_id, call_id, decision, com
         await bot_instance.send_message(approver_tg_id, text)
     except Exception as e:
         logging.debug("Не удалось отправить подтверждение администратору: %s", e)
+    return True
 
 async def _approve_call_and_get_notify_row(call_id, approver_tg_id):
     """
@@ -33824,11 +33888,8 @@ async def handle_reject_reval(callback_query: types.CallbackQuery, state: FSMCon
 
 @dp.callback_query_handler(lambda c: c.data == 'reval_skip_comment', state=ReevalDecision.waiting_comment)
 async def handle_reval_skip_comment(callback_query: types.CallbackQuery, state: FSMContext):
-    """Админ решил не добавлять комментарий к решению — фиксируем без него."""
+    """Админ решил не добавлять комментарий. Решение уже зафиксировано — просто закрываем шаг."""
     cq = callback_query
-    fsm_data = await state.get_data()
-    call_id = fsm_data.get('reval_call_id')
-    decision = fsm_data.get('reval_decision')
     await state.finish()
 
     try:
@@ -33843,15 +33904,10 @@ async def handle_reval_skip_comment(callback_query: types.CallbackQuery, state: 
     except Exception as e:
         logging.debug("Не удалось убрать reply_markup у запроса комментария: %s", e)
 
-    if not call_id or not decision:
-        return
-    await _finalize_reevaluation_decision(cq.from_user.id, int(call_id), decision, None, cq.bot)
-    logging.info("Call %s %s by tg_user %s (no comment)", call_id, decision, cq.from_user.id)
-
 
 @dp.message_handler(state=ReevalDecision.waiting_comment, content_types=types.ContentTypes.TEXT)
 async def handle_reval_decision_comment(message: types.Message, state: FSMContext):
-    """Админ ввёл комментарий к решению по запросу на переоценку — фиксируем с комментарием."""
+    """Админ ввёл комментарий — дописываем его к уже принятому решению по переоценке."""
     fsm_data = await state.get_data()
     call_id = fsm_data.get('reval_call_id')
     decision = fsm_data.get('reval_decision')
@@ -33860,8 +33916,21 @@ async def handle_reval_decision_comment(message: types.Message, state: FSMContex
     if not call_id or not decision:
         return
     comment = (message.text or '').strip() or None
-    await _finalize_reevaluation_decision(message.from_user.id, int(call_id), decision, comment, message.bot)
-    logging.info("Call %s %s by tg_user %s (with comment=%s)", call_id, decision, message.from_user.id, bool(comment))
+    if not comment:
+        return
+    try:
+        saved = await _apply_call_reevaluation_comment_for_telegram(int(call_id), decision, comment)
+    except Exception as e:
+        logging.exception("Не удалось сохранить комментарий к решению по переоценке: %s", e)
+        saved = False
+    logging.info("Call %s %s comment by tg_user %s (saved=%s)", call_id, decision, message.from_user.id, saved)
+    try:
+        if saved:
+            await message.reply("💬 Комментарий сохранён.")
+        else:
+            await message.reply("ℹ️ Не удалось сохранить комментарий: решение по запросу изменилось.")
+    except Exception as e:
+        logging.debug("Не удалось подтвердить сохранение комментария: %s", e)
 
 
 if __name__ == '__main__':
