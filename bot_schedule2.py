@@ -53,6 +53,7 @@ from resource_fte_service import (
     get_resource_settings,
     get_resource_shift_templates,
     import_resource_csv,
+    import_resource_days,
     recalculate_resource_forecast,
     update_resource_settings,
 )
@@ -255,6 +256,20 @@ OKTELL_CALLS_NIGHTLY_HOUR = _env_int('OKTELL_CALLS_NIGHTLY_HOUR', 5, minimum=0, 
 OKTELL_CALLS_NIGHTLY_MINUTE = _env_int('OKTELL_CALLS_NIGHTLY_MINUTE', 25, minimum=0, maximum=59)
 OKTELL_CALLS_INTRADAY_HOURS = (os.getenv('OKTELL_CALLS_INTRADAY_HOURS') or '11,14,17,20,23').strip()
 OKTELL_CALLS_INTRADAY_MINUTE = _env_int('OKTELL_CALLS_INTRADAY_MINUTE', 20, minimum=0, maximum=59)
+
+# Oktell: часовая статистика входящих звонков (раздел «Расчёт ресурсов»).
+OKTELL_RESOURCE_SYNC_ENABLED = _env_bool('OKTELL_RESOURCE_SYNC_ENABLED', True)
+OKTELL_RESOURCE_MAX_RANGE_DAYS = _env_int('OKTELL_RESOURCE_MAX_RANGE_DAYS', 31, minimum=1, maximum=92)
+OKTELL_RESOURCE_CHUNK_DAYS = _env_int('OKTELL_RESOURCE_CHUNK_DAYS', 7, minimum=1, maximum=31)
+# Только ночной прогон: импорт пересчитывает все исторические прогнозы (тяжело для внутридневного).
+OKTELL_RESOURCE_NIGHTLY_HOUR = _env_int('OKTELL_RESOURCE_NIGHTLY_HOUR', 5, minimum=0, maximum=23)
+OKTELL_RESOURCE_NIGHTLY_MINUTE = _env_int('OKTELL_RESOURCE_NIGHTLY_MINUTE', 40, minimum=0, maximum=59)
+OKTELL_RESOURCE_FIELDS = [
+    'report_date', 'hour', 'received_calls', 'accepted_calls', 'talk_time_seconds',
+    'avg_talk_seconds', 'success_wait_seconds', 'avg_success_wait_seconds', 'total_time_seconds',
+    'greeting_abandoned', 'greeting_time_seconds', 'queue_abandoned', 'queue_wait_seconds',
+    'avg_lost_wait_seconds',
+]
 
 if not API_TOKEN:
     raise Exception("Переменная окружения BOT_TOKEN обязательна.")
@@ -3509,6 +3524,68 @@ def api_resource_fte_upload():
             return jsonify({"error": "CSV file is empty"}), 400
         payload = import_resource_csv(db, content, filename, requester_id)
         return jsonify({"status": "success", **payload}), 200
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/sync_oktell', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_sync_oktell():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    try:
+        payload = request.get_json(silent=True) or {}
+        target_day = payload.get('date') or None
+        target_from = payload.get('date_from') or payload.get('start_date') or None
+        target_to = payload.get('date_to') or payload.get('end_date') or None
+        if target_day and _oktell_parse_date(target_day) is None:
+            return jsonify({"error": "date must be in YYYY-MM-DD format"}), 400
+        if target_day and (target_from or target_to):
+            return jsonify({"error": "Use either date or date_from/date_to, not both"}), 400
+        if target_from or target_to:
+            start_day = _oktell_parse_date(target_from)
+            end_day = _oktell_parse_date(target_to or target_from)
+            if start_day is None or end_day is None:
+                return jsonify({"error": "date_from and date_to must be in YYYY-MM-DD format"}), 400
+            if end_day < start_day:
+                return jsonify({"error": "date_to must be greater than or equal to date_from"}), 400
+            if (end_day - start_day).days + 1 > OKTELL_RESOURCE_MAX_RANGE_DAYS:
+                return jsonify({"error": f"Период синхронизации ресурсов Oktell не может быть больше {OKTELL_RESOURCE_MAX_RANGE_DAYS} дней"}), 400
+            target_from = start_day.strftime('%Y-%m-%d')
+            target_to = end_day.strftime('%Y-%m-%d')
+
+        result = sync_oktell_resource_hours(
+            day=target_day,
+            date_from=target_from,
+            date_to=target_to,
+            triggered_by='manual',
+            force=True,
+            user_id=requester_id
+        )
+        status = result.get('status')
+        if status == 'skipped':
+            reason = result.get('reason')
+            if reason == 'missing_token':
+                return jsonify({"error": "OKTELL_IP/OKTELL_API_TOKEN не задан", "sync": result}), 400
+            if reason == 'locked':
+                return jsonify({
+                    "error": "Синхронизация ресурсов уже выполняется. Повторите через несколько секунд.",
+                    "sync": result
+                }), 429
+            return jsonify({"error": f"Синхронизация ресурсов Oktell пропущена: {reason or 'unknown'}", "sync": result}), 400
+        if status == 'failed':
+            return jsonify({"error": result.get('error') or "Синхронизация ресурсов Oktell не выполнена", "sync": result}), 502
+
+        return jsonify({
+            "status": "success",
+            "message": "Часовая статистика синхронизирована из Oktell",
+            "sync": result
+        }), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
     except Exception as error:
         return _resource_fte_error_response(error)
 
@@ -19830,6 +19907,219 @@ def sync_oktell_operator_calls(day=None, date_from=None, date_to=None, triggered
             pass
 
 
+# === Oktell: часовая статистика входящих звонков (Расчёт ресурсов) ==============================
+# Плоский (single SELECT) аналог отчёта «Статистика входящих почасово, группировка по датам» над
+# oktell.dbo.Call_Systems_hst (route='incoming'). Время — в секундах (resource_fte принимает их).
+# Кормим строки напрямую в resource_fte_service.import_resource_days (без промежуточного CSV).
+OKTELL_RESOURCE_SYNC_LOCK = threading.Lock()
+_OKTELL_GREETING_ABANDON = 'Бросили трубку на приветствии'
+_OKTELL_FAILED_CALL = 'Неудачный звонок'
+
+
+def _oktell_resource_sync_enabled():
+    return bool(OKTELL_RESOURCE_SYNC_ENABLED)
+
+
+def _oktell_resource_target_days(day=None, date_from=None, date_to=None):
+    if day:
+        d = _oktell_parse_date(day)
+        if d is None:
+            raise ValueError("date must be in YYYY-MM-DD format")
+        return [d]
+    if date_from or date_to:
+        start = _oktell_parse_date(date_from or date_to)
+        end = _oktell_parse_date(date_to or date_from)
+        if start is None or end is None:
+            raise ValueError("date_from and date_to must be in YYYY-MM-DD format")
+        if end < start:
+            raise ValueError("date_to must be greater than or equal to date_from")
+        span = (end - start).days + 1
+        if span > OKTELL_RESOURCE_MAX_RANGE_DAYS:
+            raise ValueError(f"Период синхронизации ресурсов Oktell не может быть больше {OKTELL_RESOURCE_MAX_RANGE_DAYS} дней")
+        return [start + timedelta(days=i) for i in range(span)]
+    today = datetime.now().date()
+    return [today - timedelta(days=1)]
+
+
+def _oktell_resource_hourly_sql(date_from_compact, date_to_excl_compact):
+    grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
+    fail = _OKTELL_FAILED_CALL.replace("'", "''")
+    return (
+        "SELECT CONVERT(varchar(10), t.dt_insert, 23) AS report_date, "
+        "DATEPART(HOUR, t.dt_insert) AS hour, "
+        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (13,19,5) THEN 1 ELSE 0 END) AS received_calls, "
+        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN 1 ELSE 0 END) AS accepted_calls, "
+        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN t.total_length ELSE 0 END) AS talk_time_seconds, "
+        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN t.LenQueue ELSE 0 END) AS success_wait_seconds, "
+        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (13,19,5) THEN t.total_length ELSE 0 END) AS total_time_seconds, "
+        f"SUM(CASE WHEN t.result_call = N'{grt}' THEN 1 ELSE 0 END) AS greeting_abandoned, "
+        f"SUM(CASE WHEN t.result_call = N'{grt}' THEN t.total_length ELSE 0 END) AS greeting_time_seconds, "
+        f"SUM(CASE WHEN t.call_result IN (13,19) AND t.result_call NOT IN (N'{grt}', N'{fail}') THEN 1 ELSE 0 END) AS queue_abandoned, "
+        f"SUM(CASE WHEN t.call_result IN (13,19) AND t.result_call NOT IN (N'{grt}', N'{fail}') THEN t.total_length ELSE 0 END) AS queue_wait_seconds, "
+        f"SUM(CASE WHEN t.call_result IN (13,19) AND t.result_call NOT IN (N'{grt}', N'{fail}') THEN t.LenQueue ELSE 0 END) AS lost_lenqueue_seconds "
+        "FROM oktell.dbo.Call_Systems_hst t "
+        f"WHERE t.dt_insert >= '{date_from_compact}' AND t.dt_insert < '{date_to_excl_compact}' "
+        f"AND t.taxi_park <> '' AND t.route = 'incoming' AND t.result_call <> N'{fail}' "
+        "GROUP BY CONVERT(varchar(10), t.dt_insert, 23), DATEPART(HOUR, t.dt_insert)"
+    )
+
+
+def _oktell_fetch_resource_hours(range_from, range_to):
+    """Список dict (одна строка = дата+час) за период. Тянем окнами по
+    OKTELL_RESOURCE_CHUNK_DAYS дней; при упоре в лимит прокси (1000) — по одному дню."""
+    rows = []
+
+    def _window(a, b):
+        page = _oktell_query(_oktell_resource_hourly_sql(
+            a.strftime('%Y%m%d'), (b + timedelta(days=1)).strftime('%Y%m%d')))
+        if len(page) >= OKTELL_API_PAGE_SIZE and a < b:
+            d = a
+            while d <= b:
+                rows.extend(_oktell_query(_oktell_resource_hourly_sql(
+                    d.strftime('%Y%m%d'), (d + timedelta(days=1)).strftime('%Y%m%d'))))
+                d += timedelta(days=1)
+        else:
+            rows.extend(page)
+
+    cur = range_from
+    while cur <= range_to:
+        chunk_end = min(range_to, cur + timedelta(days=OKTELL_RESOURCE_CHUNK_DAYS - 1))
+        _window(cur, chunk_end)
+        cur = chunk_end + timedelta(days=1)
+    return rows
+
+
+def _oktell_resource_row(raw):
+    """Сырые суммы Oktell -> канонический почасовой dict для daily_resource_hours
+    (как у _parse_resource_csv_row; средние = сумма/счётчик, как в исходном отчёте)."""
+    def _i(v):
+        try:
+            return int(v or 0)
+        except Exception:
+            return 0
+
+    def _sec(v):
+        try:
+            return int(round(float(v or 0)))
+        except Exception:
+            return 0
+
+    received = max(0, _i(raw.get('received_calls')))
+    accepted = max(0, _i(raw.get('accepted_calls')))
+    lost = max(0, received - accepted)
+    talk = _sec(raw.get('talk_time_seconds'))
+    success_wait = _sec(raw.get('success_wait_seconds'))
+    total_time = _sec(raw.get('total_time_seconds'))
+    greeting_ab = max(0, _i(raw.get('greeting_abandoned')))
+    greeting_time = _sec(raw.get('greeting_time_seconds'))
+    queue_ab = max(0, _i(raw.get('queue_abandoned')))
+    queue_wait = _sec(raw.get('queue_wait_seconds'))
+    try:
+        lost_lenqueue = float(raw.get('lost_lenqueue_seconds') or 0)
+    except Exception:
+        lost_lenqueue = 0.0
+    avg_wait_den = accepted + queue_ab
+    return {
+        'hour': max(0, min(23, _i(raw.get('hour')))),
+        'received_calls': received,
+        'accepted_calls': accepted,
+        'lost_calls': lost,
+        'no_answer_rate': (lost / received) if received > 0 else 0,
+        'talk_time_seconds': talk,
+        'avg_talk_seconds': (talk / accepted) if accepted > 0 else 0,
+        'success_wait_seconds': success_wait,
+        'avg_success_wait_seconds': (success_wait / accepted) if accepted > 0 else 0,
+        'total_time_seconds': total_time,
+        'greeting_abandoned': greeting_ab,
+        'greeting_time_seconds': greeting_time,
+        'queue_abandoned': queue_ab,
+        'queue_wait_seconds': queue_wait,
+        'avg_lost_wait_seconds': (lost_lenqueue / queue_ab) if queue_ab > 0 else 0,
+        'avg_wait_seconds': ((success_wait + queue_wait) / avg_wait_den) if avg_wait_den > 0 else 0,
+        'raw_payload': {
+            'source': 'oktell_call_systems_hst',
+            'report_date': raw.get('report_date'),
+            'hour': raw.get('hour'),
+            'received_calls': received,
+            'accepted_calls': accepted,
+            'talk_time_seconds': talk,
+        },
+    }
+
+
+def sync_oktell_resource_hours(day=None, date_from=None, date_to=None, triggered_by='scheduler', force=False, user_id=None):
+    """Синхронизирует часовую статистику входящих из Oktell в daily_resource_hours и
+    пересчитывает прогноз ресурсов (через resource_fte_service.import_resource_days)."""
+    if not force and not _oktell_resource_sync_enabled():
+        logging.info("Oktell resource sync skipped: disabled")
+        return {'status': 'skipped', 'reason': 'disabled'}
+    if not _oktell_api_ready():
+        logging.warning("Oktell resource sync skipped: OKTELL_IP/OKTELL_API_TOKEN is not set")
+        return {'status': 'skipped', 'reason': 'missing_token'}
+
+    target_days = _oktell_resource_target_days(day, date_from=date_from, date_to=date_to)
+    range_from = target_days[0]
+    range_to = target_days[-1]
+
+    if not OKTELL_RESOURCE_SYNC_LOCK.acquire(blocking=False):
+        logging.warning("Oktell resource sync skipped: another resource sync is already running")
+        return {'status': 'skipped', 'reason': 'locked'}
+
+    started = time.time()
+    try:
+        raw_rows = _oktell_fetch_resource_hours(range_from, range_to)
+        days_map = {}
+        for raw in raw_rows:
+            rd = str(raw.get('report_date') or '').strip()
+            if not rd:
+                continue
+            days_map.setdefault(rd, []).append(_oktell_resource_row(raw))
+        days = [
+            {'report_date': rd, 'rows': rows, 'source_row_count': len(rows)}
+            for rd, rows in sorted(days_map.items())
+        ]
+        total_hours = sum(len(d['rows']) for d in days)
+        uploaded_dates = []
+        if days:
+            result = import_resource_days(
+                db, days,
+                filename='oktell_sync',
+                headers=list(OKTELL_RESOURCE_FIELDS),
+                mapped_headers=None,
+                user_id=user_id,
+            )
+            uploaded_dates = result.get('uploaded_dates') or []
+        logging.info(
+            "Oktell resource sync %s..%s: days=%s hours=%s",
+            range_from.strftime('%Y-%m-%d'), range_to.strftime('%Y-%m-%d'), len(days), total_hours
+        )
+        return {
+            'status': 'success',
+            'triggered_by': triggered_by,
+            'date_from': range_from.strftime('%Y-%m-%d'),
+            'date_to': range_to.strftime('%Y-%m-%d'),
+            'days_count': len(days),
+            'hours_count': total_hours,
+            'uploaded_dates': uploaded_dates,
+            'elapsed_seconds': round(time.time() - started, 2),
+        }
+    except Exception as exc:
+        logging.exception("Oktell resource sync failed")
+        return {
+            'status': 'failed',
+            'triggered_by': triggered_by,
+            'date_from': range_from.strftime('%Y-%m-%d'),
+            'date_to': range_to.strftime('%Y-%m-%d'),
+            'error': str(exc),
+            'elapsed_seconds': round(time.time() - started, 2),
+        }
+    finally:
+        try:
+            OKTELL_RESOURCE_SYNC_LOCK.release()
+        except Exception:
+            pass
+
+
 def _ws_time_to_minutes(value):
     if value is None:
         return 0
@@ -33496,6 +33786,15 @@ async def run_oktell_operator_calls_today_sync_async(triggered_by='scheduler-int
         return sync_oktell_operator_calls(day=today, triggered_by=triggered_by)
     return await loop.run_in_executor(executor_pool, _run)
 
+
+async def run_oktell_resource_sync_async(triggered_by='scheduler'):
+    # Ночной прогон часовой статистики входящих: полный предыдущий день.
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        executor_pool,
+        lambda: sync_oktell_resource_hours(triggered_by=triggered_by)
+    )
+
 # === Главный запуск =============================================================================================
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('reject_reval:'))
 async def handle_reject_reval(callback_query: types.CallbackQuery, state: FSMContext):
@@ -33714,6 +34013,24 @@ if __name__ == '__main__':
         )
     else:
         logging.info("Oktell calls sync is disabled by OKTELL_CALLS_SYNC_ENABLED")
+
+    # Синхронизация часовой статистики входящих из Oktell в «Расчёт ресурсов». Только ночью —
+    # импорт пересчитывает все исторические прогнозы, это тяжело для внутридневного запуска.
+    if _oktell_resource_sync_enabled():
+        scheduler.add_job(
+            run_oktell_resource_sync_async,
+            CronTrigger(
+                hour=OKTELL_RESOURCE_NIGHTLY_HOUR,
+                minute=OKTELL_RESOURCE_NIGHTLY_MINUTE,
+                timezone=ZoneInfo(OKTELL_SYNC_TIMEZONE)
+            ),
+            id='oktell_resource_hours_nightly',
+            misfire_grace_time=3600,
+            max_instances=1,
+            coalesce=True
+        )
+    else:
+        logging.info("Oktell resource sync is disabled by OKTELL_RESOURCE_SYNC_ENABLED")
 
     # Ретеншн сырых событий статусов: удаляем operator_status_events старше горизонта хранения
     # (STATUS_EVENTS_RETENTION_DAYS, по умолчанию 120 дней). Сегменты (источник отчётов) не трогаем;

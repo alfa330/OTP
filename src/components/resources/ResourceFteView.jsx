@@ -1582,6 +1582,15 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
   const [callsChartMode, setCallsChartMode] = useState('losses');
   const [loadedDateCache, setLoadedDateCache] = useState([]);
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
+  const _yesterdayIso = () => {
+    const d = new Date();
+    d.setDate(d.getDate() - 1);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  };
+  const [isOktellSyncModalOpen, setIsOktellSyncModalOpen] = useState(false);
+  const [oktellSyncFrom, setOktellSyncFrom] = useState(_yesterdayIso);
+  const [oktellSyncTo, setOktellSyncTo] = useState(_yesterdayIso);
+  const [isOktellSyncing, setIsOktellSyncing] = useState(false);
   const [isOperatorDetailsOpen, setIsOperatorDetailsOpen] = useState(false);
   const [operatorAvailabilityDetailsByKey, setOperatorAvailabilityDetailsByKey] = useState({});
   const [isOperatorDetailsLoading, setIsOperatorDetailsLoading] = useState(false);
@@ -2155,6 +2164,43 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
     }
   };
 
+  const handleOktellSync = async () => {
+    const s = String(oktellSyncFrom || '').trim();
+    const e = String(oktellSyncTo || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s) || !/^\d{4}-\d{2}-\d{2}$/.test(e)) {
+      notify('Выберите период синхронизации', 'error');
+      return;
+    }
+    if (e < s) {
+      notify('Дата окончания должна быть не раньше даты начала', 'error');
+      return;
+    }
+    const days = Math.round((new Date(`${e}T00:00:00`) - new Date(`${s}T00:00:00`)) / 86400000) + 1;
+    if (!Number.isFinite(days) || days < 1 || days > 31) {
+      notify('Период синхронизации не может быть больше 31 дня', 'error');
+      return;
+    }
+    setIsOktellSyncing(true);
+    try {
+      const response = await axios.post(
+        `${apiRoot}/api/resource_fte/sync_oktell`,
+        s === e ? { date: s } : { date_from: s, date_to: e },
+        { headers: buildHeaders() }
+      );
+      const sync = response.data?.sync || {};
+      notify(`${response.data?.message || 'Синхронизировано из Oktell'} (дней ${sync.days_count ?? 0}, часов ${sync.hours_count ?? 0})`);
+      setIsOktellSyncModalOpen(false);
+      const uploaded = Array.isArray(sync.uploaded_dates) ? sync.uploaded_dates : [];
+      if (uploaded.length) setSelectedDate(uploaded[uploaded.length - 1]);
+      await fetchOverview();
+    } catch (error) {
+      const data = error?.response?.data || {};
+      notify(data.error || 'Не удалось синхронизировать данные из Oktell', 'error');
+    } finally {
+      setIsOktellSyncing(false);
+    }
+  };
+
   const handleRecalculate = async () => {
     setIsRecalculating(true);
     try {
@@ -2332,6 +2378,23 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                 <UploadCloud size={17} className="shrink-0 text-blue-600" />
               </button>
             </div>
+            <div className="w-full sm:w-[240px]">
+              <button
+                type="button"
+                onClick={() => {
+                  setOktellSyncFrom(_yesterdayIso());
+                  setOktellSyncTo(_yesterdayIso());
+                  setIsOktellSyncModalOpen(true);
+                }}
+                className="flex h-14 w-full items-center justify-between gap-3 rounded-xl border-2 border-slate-200 bg-white px-4 text-left text-sm shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
+              >
+                <span className="min-w-0">
+                  <span className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Из телефонии</span>
+                  <span className="block truncate font-semibold text-slate-900">Синхронизация с Oktell</span>
+                </span>
+                <RefreshCw size={17} className={`shrink-0 text-sky-600 ${isOktellSyncing ? 'animate-spin' : ''}`} />
+              </button>
+            </div>
             <button
               type="button"
               onClick={fetchOverview}
@@ -2428,6 +2491,63 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
               </button>
             </div>
           </form>
+        </div>
+      )}
+
+      {isOktellSyncModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl border-2 border-slate-200 bg-white px-5 py-7 shadow-2xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-2 text-base font-semibold text-slate-950">
+                  <RefreshCw size={19} className="text-sky-600" />
+                  Синхронизация с Oktell
+                </div>
+                <p className="mt-1 text-sm text-slate-500">Часовая статистика входящих за выбранный период (до 31 дня). Прогноз пересчитается автоматически.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsOktellSyncModalOpen(false)}
+                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border-2 border-slate-200 text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="mt-6">
+              <CalendarPicker
+                mode="range"
+                label="Период синхронизации"
+                startValue={oktellSyncFrom}
+                endValue={oktellSyncTo}
+                onRangeChange={(start, end) => {
+                  setOktellSyncFrom(start);
+                  setOktellSyncTo(end);
+                }}
+                loadedDates={loadedReportDates}
+                hint="точка = есть отчет"
+              />
+            </div>
+
+            <div className="mt-7 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <button
+                type="button"
+                onClick={() => setIsOktellSyncModalOpen(false)}
+                className="inline-flex h-12 items-center justify-center rounded-xl border-2 border-slate-200 bg-white px-5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={handleOktellSync}
+                disabled={isOktellSyncing}
+                className="inline-flex h-12 items-center justify-center gap-2 rounded-xl bg-sky-600 px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-sky-300"
+              >
+                <RefreshCw size={16} className={isOktellSyncing ? 'animate-spin' : ''} />
+                {isOktellSyncing ? 'Синхронизация...' : 'Синхронизировать'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
