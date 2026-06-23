@@ -7866,6 +7866,80 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [operatorSearch, setOperatorSearch] = useState('');
             const [selectedOperatorsForShuffle, setSelectedOperatorsForShuffle] = useState(new Set());
 
+            // ====== «Деление звонков»: норма-распределение из Oktell (новый экран) ======
+            const cdIsAdmin = isAdminLikeRoleFn(user?.role);
+            const cdIsHead = isDepartmentHead(user);
+            const cdCanEdit = cdIsAdmin || cdIsHead;
+            const [cdSettings, setCdSettings] = useState(null);
+            const [cdDraft, setCdDraft] = useState({ min_duration_sec: 0, max_duration_sec: 3600, enabled: true });
+            const [cdRows, setCdRows] = useState([]);
+            const [cdLoading, setCdLoading] = useState(false);
+            const [cdSaving, setCdSaving] = useState(false);
+            const [cdRunning, setCdRunning] = useState(false);
+            const [cdError, setCdError] = useState('');
+            const [cdRunResult, setCdRunResult] = useState(null);
+            const cdToast = (m, t) => { try { (typeof showToast === 'function' ? showToast : fallbackToast)(m, t); } catch (_) {} };
+            const cdHeaders = () => withAccessTokenHeader(user?.id ? { 'X-User-Id': user.id } : {});
+            const loadCdStatus = async (mn = selectedMonth) => {
+                if (!user?.id || typeof axios === 'undefined') return;
+                setCdLoading(true); setCdError('');
+                try {
+                    const r = await axios.get(`${API_BASE_URL}/api/call_distribution/status?month=${encodeURIComponent(mn)}`, { headers: cdHeaders() });
+                    const d = r.data || {};
+                    setCdRows(Array.isArray(d.operators) ? d.operators : []);
+                    if (d.settings) {
+                        setCdSettings(d.settings);
+                        setCdDraft({
+                            min_duration_sec: d.settings.min_duration_sec ?? 0,
+                            max_duration_sec: d.settings.max_duration_sec ?? 3600,
+                            enabled: d.settings.enabled !== false,
+                        });
+                    }
+                } catch (e) {
+                    setCdError(e?.response?.data?.error || 'Не удалось загрузить данные распределения');
+                } finally {
+                    setCdLoading(false);
+                }
+            };
+            const saveCdSettings = async () => {
+                if (!cdCanEdit || cdSaving) return;
+                const minD = Math.max(0, Number(cdDraft.min_duration_sec) || 0);
+                const maxD = Math.max(0, Number(cdDraft.max_duration_sec) || 0);
+                if (maxD && minD && maxD < minD) {
+                    const m = 'Макс. длительность должна быть не меньше минимальной';
+                    setCdError(m); cdToast(m, 'error');
+                    return;
+                }
+                setCdSaving(true); setCdError('');
+                try {
+                    const body = { min_duration_sec: minD, max_duration_sec: maxD, enabled: !!cdDraft.enabled };
+                    const r = await axios.put(`${API_BASE_URL}/api/call_distribution/settings`, body, { headers: cdHeaders() });
+                    if (r.data?.settings) setCdSettings(r.data.settings);
+                    cdToast('Настройки сохранены', 'success');
+                } catch (e) {
+                    const m = e?.response?.data?.error || 'Не удалось сохранить настройки';
+                    setCdError(m); cdToast(m, 'error');
+                } finally {
+                    setCdSaving(false);
+                }
+            };
+            const runCdDistribution = async () => {
+                if (!cdCanEdit || cdRunning) return;
+                setCdRunning(true); setCdError(''); setCdRunResult(null);
+                try {
+                    const r = await axios.post(`${API_BASE_URL}/api/eval_calls/sync_oktell`, { month: selectedMonth }, { headers: cdHeaders() });
+                    setCdRunResult(r.data?.sync || null);
+                    cdToast(r.data?.message || 'Распределение выполнено', 'success');
+                    await loadCdStatus(selectedMonth);
+                } catch (e) {
+                    const m = e?.response?.data?.error || 'Не удалось запустить распределение';
+                    setCdError(m); cdToast(m, 'error');
+                } finally {
+                    setCdRunning(false);
+                }
+            };
+            useEffect(() => { loadCdStatus(selectedMonth); }, [selectedMonth, user?.id]);
+
             // --- helper / logic functions are kept unchanged (omitted here for brevity in the file preview) ---
             // To keep the canvas file compact but functional I've inlined the original functions from your
             // version (parseCSVText, normalizeRow, recomputeOperatorMap, countAnyCallsForDisplayName, etc.)
@@ -8944,6 +9018,244 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const totalInsufficientCount = insufficientOperators.length;
             const hasActiveFilters = !selectedStatuses.includes('all') || !selectedDirections.includes('all') || !selectedHireMonths.includes('all') || onlyWithCsv;
 
+            // ====== Новый экран «Деление звонков» (Oktell, норма-распределение) ======
+            const cdTotals = cdRows.reduce((a, r) => ({
+                norm: a.norm + (Number(r.norm) || 0),
+                pool: a.pool + (Number(r.in_pool) || 0),
+                ev: a.ev + (Number(r.evaluated) || 0),
+            }), { norm: 0, pool: 0, ev: 0 });
+            const cdUpdatedAtLabel = (() => {
+                const t = cdSettings?.updated_at;
+                if (!t) return '';
+                try { return new Date(t).toLocaleString('ru-RU', { dateStyle: 'medium', timeStyle: 'short' }); }
+                catch (_) { return String(t); }
+            })();
+            return (
+              <div className="min-h-[60vh] bg-gradient-to-b from-slate-50 to-slate-100/60 px-4 py-6 sm:px-6">
+                <div className="mx-auto max-w-5xl space-y-5">
+
+                  {/* Header */}
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-500 to-blue-600 text-white shadow-lg shadow-blue-500/20">
+                        <FaIcon className="fa-solid fa-shuffle text-lg" />
+                      </div>
+                      <div>
+                        <h3 className="text-xl font-bold tracking-tight text-slate-900">Деление звонков</h3>
+                        <p className="text-[13px] text-slate-500">Случайный отбор звонков на оценку по норме прослушки · Oktell</p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <select
+                        value={selectedMonth}
+                        onChange={(e) => setSelectedMonth(e.target.value)}
+                        className="h-10 rounded-xl border border-slate-200 bg-white/80 px-3 text-sm font-medium text-slate-700 shadow-sm outline-none backdrop-blur transition focus:border-blue-300 focus:ring-4 focus:ring-blue-100"
+                      >
+                        {getMonthOptions()}
+                      </select>
+                      <button
+                        onClick={() => loadCdStatus(selectedMonth)}
+                        disabled={cdLoading}
+                        className="inline-flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white/80 px-3.5 text-sm font-semibold text-slate-700 shadow-sm backdrop-blur transition hover:bg-white disabled:opacity-60"
+                      >
+                        <FaIcon className={`fa-solid fa-arrows-rotate text-slate-400 ${cdLoading ? 'fa-spin' : ''}`} />
+                        Обновить
+                      </button>
+                    </div>
+                  </div>
+
+                  {cdError && (
+                    <div className="flex items-start gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                      <FaIcon className="fa-solid fa-circle-exclamation mt-0.5" />
+                      <span>{cdError}</span>
+                    </div>
+                  )}
+
+                  {!cdCanEdit && (
+                    <div className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white/70 px-4 py-2.5 text-[13px] text-slate-500 backdrop-blur">
+                      <FaIcon className="fa-solid fa-eye text-slate-400" />
+                      Режим просмотра. Настройку параметров и запуск распределения выполняет администратор или глава отдела.
+                    </div>
+                  )}
+
+                  {/* Settings + Run */}
+                  <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+
+                    {/* Settings card */}
+                    <div className="rounded-3xl border border-white/70 bg-white/90 p-5 shadow-[0_12px_40px_rgba(15,23,42,0.06)] ring-1 ring-slate-900/5 backdrop-blur-xl">
+                      <div className="mb-4 flex items-center gap-2.5">
+                        <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-slate-100 text-slate-500">
+                          <FaIcon className="fa-solid fa-sliders text-sm" />
+                        </span>
+                        <h4 className="text-sm font-semibold text-slate-900">Параметры отбора</h4>
+                      </div>
+
+                      <div className="space-y-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <div className="text-sm font-medium text-slate-700">Автораспределение</div>
+                            <div className="text-xs text-slate-400">Ночью, после синхронизации статусов</div>
+                          </div>
+                          <button
+                            type="button"
+                            disabled={!cdCanEdit}
+                            onClick={() => setCdDraft((d) => ({ ...d, enabled: !d.enabled }))}
+                            className={`relative h-7 w-12 flex-shrink-0 rounded-full transition-colors ${cdDraft.enabled ? 'bg-emerald-500' : 'bg-slate-300'} ${cdCanEdit ? '' : 'cursor-not-allowed opacity-60'}`}
+                            aria-pressed={cdDraft.enabled}
+                          >
+                            <span className={`absolute top-0.5 h-6 w-6 rounded-full bg-white shadow transition-all ${cdDraft.enabled ? 'left-[1.625rem]' : 'left-0.5'}`} />
+                          </button>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-3">
+                          <label className="block">
+                            <span className="mb-1 block text-xs font-medium text-slate-500">Мин. длительность, сек</span>
+                            <input
+                              type="number" min="0" disabled={!cdCanEdit}
+                              value={cdDraft.min_duration_sec}
+                              onChange={(e) => setCdDraft((d) => ({ ...d, min_duration_sec: e.target.value }))}
+                              className="h-10 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 text-sm font-semibold text-slate-800 outline-none transition focus:border-blue-300 focus:bg-white focus:ring-4 focus:ring-blue-100 disabled:opacity-60"
+                            />
+                          </label>
+                          <label className="block">
+                            <span className="mb-1 block text-xs font-medium text-slate-500">Макс. длительность, сек</span>
+                            <input
+                              type="number" min="0" disabled={!cdCanEdit}
+                              value={cdDraft.max_duration_sec}
+                              onChange={(e) => setCdDraft((d) => ({ ...d, max_duration_sec: e.target.value }))}
+                              className="h-10 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 text-sm font-semibold text-slate-800 outline-none transition focus:border-blue-300 focus:bg-white focus:ring-4 focus:ring-blue-100 disabled:opacity-60"
+                            />
+                          </label>
+                        </div>
+
+                        <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                          <div className="text-xs text-slate-400">
+                            {cdUpdatedAtLabel
+                              ? (<>Изменено: <span className="font-medium text-slate-500">{cdSettings?.updated_by_name || '—'}</span> · {cdUpdatedAtLabel}</>)
+                              : 'Ещё не настраивалось'}
+                          </div>
+                          {cdCanEdit && (
+                            <button
+                              onClick={saveCdSettings}
+                              disabled={cdSaving || cdLoading}
+                              className="inline-flex h-10 items-center gap-2 rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 disabled:opacity-60"
+                            >
+                              <FaIcon className={`fa-solid ${cdSaving ? 'fa-spinner fa-spin' : 'fa-check'} text-xs`} />
+                              Сохранить
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Run card */}
+                    <div className="flex flex-col rounded-3xl border border-white/70 bg-white/90 p-5 shadow-[0_12px_40px_rgba(15,23,42,0.06)] ring-1 ring-slate-900/5 backdrop-blur-xl">
+                      <div className="mb-4 flex items-center gap-2.5">
+                        <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-sky-100 text-sky-600">
+                          <FaIcon className="fa-solid fa-bolt text-sm" />
+                        </span>
+                        <h4 className="text-sm font-semibold text-slate-900">Запуск распределения</h4>
+                      </div>
+
+                      <p className="text-[13px] leading-5 text-slate-500">
+                        Доберёт пул каждого оператора до его нормы за <span className="font-semibold text-slate-700">{selectedMonth}</span> случайными записанными звонками. Уже распределённые и оценённые звонки не дублируются.
+                      </p>
+
+                      <div className="mt-3 grid grid-cols-3 gap-2">
+                        <div className="rounded-2xl bg-slate-50 px-3 py-2 text-center">
+                          <div className="text-[11px] text-slate-400">Норма</div>
+                          <div className="text-lg font-bold tabular-nums text-slate-800">{cdTotals.norm}</div>
+                        </div>
+                        <div className="rounded-2xl bg-slate-50 px-3 py-2 text-center">
+                          <div className="text-[11px] text-slate-400">В пуле</div>
+                          <div className="text-lg font-bold tabular-nums text-blue-600">{cdTotals.pool}</div>
+                        </div>
+                        <div className="rounded-2xl bg-slate-50 px-3 py-2 text-center">
+                          <div className="text-[11px] text-slate-400">Оценено</div>
+                          <div className="text-lg font-bold tabular-nums text-emerald-600">{cdTotals.ev}</div>
+                        </div>
+                      </div>
+
+                      {cdCanEdit && (
+                        <button
+                          onClick={runCdDistribution}
+                          disabled={cdRunning || cdLoading}
+                          className="mt-4 inline-flex h-11 w-full items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-blue-600 to-indigo-600 text-sm font-semibold text-white shadow-lg shadow-blue-500/20 transition hover:from-blue-700 hover:to-indigo-700 disabled:opacity-60"
+                        >
+                          <FaIcon className={`fa-solid ${cdRunning ? 'fa-spinner fa-spin' : 'fa-shuffle'}`} />
+                          {cdRunning ? 'Распределяем…' : 'Запустить распределение'}
+                        </button>
+                      )}
+
+                      {cdRunResult && (
+                        <div className="mt-3 rounded-2xl border border-emerald-100 bg-emerald-50 px-3.5 py-2.5 text-[13px] text-emerald-700">
+                          Добавлено <b>{cdRunResult.added ?? 0}</b> звонков для <b>{cdRunResult.operators ?? 0}</b> операторов
+                          {Array.isArray(cdRunResult.months) && cdRunResult.months.length ? ` (${cdRunResult.months.join(', ')})` : ''}.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Status table */}
+                  <div className="overflow-hidden rounded-3xl border border-white/70 bg-white/90 shadow-[0_12px_40px_rgba(15,23,42,0.06)] ring-1 ring-slate-900/5 backdrop-blur-xl">
+                    <div className="flex items-center justify-between border-b border-slate-100 px-5 py-3.5">
+                      <h4 className="text-sm font-semibold text-slate-900">По операторам · {selectedMonth}</h4>
+                      <span className="text-xs text-slate-400">{cdRows.length} операторов</span>
+                    </div>
+
+                    {cdLoading ? (
+                      <div className="px-5 py-12 text-center text-sm text-slate-400">
+                        <FaIcon className="fa-solid fa-spinner fa-spin mr-2" />Загрузка…
+                      </div>
+                    ) : cdRows.length === 0 ? (
+                      <div className="px-5 py-12 text-center text-sm text-slate-400">
+                        <FaIcon className="fa-solid fa-inbox mr-2 text-slate-300" />Нет данных за {selectedMonth}
+                      </div>
+                    ) : (
+                      <div className="max-h-[52vh] overflow-auto">
+                        <table className="w-full text-sm">
+                          <thead className="sticky top-0 z-10 bg-slate-50/90 backdrop-blur">
+                            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-400">
+                              <th className="px-5 py-2.5 font-semibold">Оператор</th>
+                              <th className="px-3 py-2.5 text-center font-semibold">Норма</th>
+                              <th className="px-3 py-2.5 text-center font-semibold">В пуле</th>
+                              <th className="px-3 py-2.5 text-center font-semibold">Оценено</th>
+                              <th className="w-44 px-5 py-2.5 font-semibold">Прогресс</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {cdRows.map((r) => {
+                              const norm = Number(r.norm) || 0;
+                              const inPool = Number(r.in_pool) || 0;
+                              const pct = norm > 0 ? Math.min(100, Math.round((inPool / norm) * 100)) : (inPool > 0 ? 100 : 0);
+                              const full = norm > 0 && inPool >= norm;
+                              return (
+                                <tr key={r.operator_id} className="transition-colors hover:bg-slate-50/70">
+                                  <td className="px-5 py-2.5 font-medium text-slate-800">{r.name}</td>
+                                  <td className="px-3 py-2.5 text-center tabular-nums text-slate-600">{norm}</td>
+                                  <td className="px-3 py-2.5 text-center font-semibold tabular-nums text-blue-600">{inPool}</td>
+                                  <td className="px-3 py-2.5 text-center tabular-nums text-emerald-600">{Number(r.evaluated) || 0}</td>
+                                  <td className="px-5 py-2.5">
+                                    <div className="flex items-center gap-2">
+                                      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-100">
+                                        <div className={`h-full rounded-full transition-all ${full ? 'bg-emerald-500' : 'bg-blue-500'}`} style={{ width: `${pct}%` }} />
+                                      </div>
+                                      <span className="w-9 text-right text-[11px] tabular-nums text-slate-400">{pct}%</span>
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+
+                </div>
+              </div>
+            );
+            // ↓↓↓ Прежний CSV-экран ниже заменён новым выше и больше не отображается ↓↓↓
             return (
                 <div className="bg-gray-50 min-h-[60vh]">
 
