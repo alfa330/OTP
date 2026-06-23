@@ -768,6 +768,28 @@ def resolve_it_ticket_profile(department_code: object = None, department_name: o
     return IT_TICKET_DEFAULT_PROFILE
 
 
+def resolve_it_ticket_profile_strict(department_code: object = None, department_name: object = None) -> "Optional[str]":
+    """Строгое сопоставление отдел→профиль ДЛЯ ПРОВЕРКИ ПРАВ (без fallback на 'op').
+
+    Возвращает 'op'/'szov' только при однозначном совпадении, иначе None — чтобы
+    глава непрофильного отдела (или отдела, который не удалось сопоставить) НЕ получал
+    прав на редактирование/закрепление чужого профиля. Не использовать для UI-дефолта —
+    для него есть нестрогий resolve_it_ticket_profile.
+    """
+    code = str(department_code or "").strip().lower()
+    name = str(department_name or "").strip().lower()
+    if code == "op":
+        return "op"
+    if code == "szov":
+        return "szov"
+    haystack = f"{code} {name}"
+    if any(marker in haystack for marker in ("сзов", "szov", "сзв", "забот")):
+        return "szov"
+    if "продаж" in name:
+        return "op"
+    return None
+
+
 def get_pool():
     global POOL, POOL_SEMAPHORE
     if POOL is None:
@@ -1865,6 +1887,22 @@ class Database:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_it_tickets_created_at
                 ON it_tickets(created_at);
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS it_ticket_instructions (
+                    profile VARCHAR(16) PRIMARY KEY,
+                    instructions TEXT NOT NULL DEFAULT '',
+                    updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS it_ticket_pinned_channels (
+                    profile VARCHAR(16) PRIMARY KEY,
+                    channel_id INTEGER REFERENCES it_ticket_channels(id) ON DELETE SET NULL,
+                    pinned_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    pinned_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
             """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS user_history (
@@ -18735,6 +18773,172 @@ class Database:
                     'created_at': row[11].strftime('%Y-%m-%d %H:%M:%S') if row[11] else None,
                 })
             return items
+
+    # ─── IT-ticket AI instructions ─────────────────────────────────────────────
+    IT_TICKET_INSTRUCTION_PROFILES = ('common', 'op', 'szov')
+
+    @staticmethod
+    def _row_to_it_instruction(row, profile):
+        if not row:
+            return {
+                'profile': profile,
+                'instructions': '',
+                'updated_by': None,
+                'updated_by_name': None,
+                'updated_at': None,
+            }
+        return {
+            'profile': row[0],
+            'instructions': row[1] or '',
+            'updated_by': int(row[2]) if row[2] is not None else None,
+            'updated_by_name': row[3],
+            'updated_at': row[4].strftime('%Y-%m-%d %H:%M:%S') if row[4] else None,
+        }
+
+    def get_it_ticket_instructions(self, profile=None):
+        """Возвращает инструкции к ИИ. Без profile — список по всем профилям
+        (common/op/szov) с пустыми значениями по умолчанию для отсутствующих."""
+        with self._get_cursor() as cursor:
+            if profile is not None:
+                cursor.execute(
+                    """
+                    SELECT i.profile, i.instructions, i.updated_by, u.name, i.updated_at
+                    FROM it_ticket_instructions i
+                    LEFT JOIN users u ON u.id = i.updated_by
+                    WHERE i.profile = %s
+                    """,
+                    (str(profile).strip().lower(),),
+                )
+                return self._row_to_it_instruction(cursor.fetchone(), str(profile).strip().lower())
+            cursor.execute(
+                """
+                SELECT i.profile, i.instructions, i.updated_by, u.name, i.updated_at
+                FROM it_ticket_instructions i
+                LEFT JOIN users u ON u.id = i.updated_by
+                """
+            )
+            existing = {r[0]: r for r in cursor.fetchall()}
+            return [self._row_to_it_instruction(existing.get(p), p) for p in self.IT_TICKET_INSTRUCTION_PROFILES]
+
+    def set_it_ticket_instructions(self, profile, instructions, updated_by):
+        profile_norm = str(profile or '').strip().lower()
+        if profile_norm not in self.IT_TICKET_INSTRUCTION_PROFILES:
+            raise ValueError("Unknown instruction profile")
+        text = str(instructions or '').strip()
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO it_ticket_instructions (profile, instructions, updated_by, updated_at)
+                VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (profile) DO UPDATE SET
+                    instructions = EXCLUDED.instructions,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = CURRENT_TIMESTAMP
+                RETURNING profile, instructions, updated_by, updated_at
+                """,
+                (profile_norm, text, updated_by),
+            )
+            row = cursor.fetchone()
+            name = None
+            if row and row[2] is not None:
+                cursor.execute("SELECT name FROM users WHERE id = %s", (int(row[2]),))
+                user_row = cursor.fetchone()
+                name = user_row[0] if user_row else None
+            return {
+                'profile': row[0],
+                'instructions': row[1] or '',
+                'updated_by': int(row[2]) if row[2] is not None else None,
+                'updated_by_name': name,
+                'updated_at': row[3].strftime('%Y-%m-%d %H:%M:%S') if row[3] else None,
+            }
+
+    def get_combined_it_ticket_instructions(self, profile):
+        """Текст инструкций для инъекции в промпт: общие (common) + выбранный профиль."""
+        prof = profile if profile in ('op', 'szov') else 'op'
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "SELECT profile, instructions FROM it_ticket_instructions WHERE profile IN ('common', %s)",
+                (prof,),
+            )
+            rows = {r[0]: (r[1] or '').strip() for r in cursor.fetchall()}
+        parts = []
+        if rows.get('common'):
+            parts.append(rows['common'])
+        if rows.get(prof):
+            parts.append(rows[prof])
+        return "\n".join(parts).strip()
+
+    # ─── IT-ticket pinned channels (закрепляет админ / глава отдела) ────────────
+    def get_it_ticket_pinned_channels(self):
+        """Карта профиль→закреплённый канал с информацией, кто и когда закрепил."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT p.profile, p.channel_id, c.title, c.chat_id, c.is_active,
+                       p.pinned_by, u.name, p.pinned_at
+                FROM it_ticket_pinned_channels p
+                LEFT JOIN it_ticket_channels c ON c.id = p.channel_id
+                LEFT JOIN users u ON u.id = p.pinned_by
+                """
+            )
+            result = {}
+            for row in cursor.fetchall():
+                result[row[0]] = {
+                    'profile': row[0],
+                    'channel_id': int(row[1]) if row[1] is not None else None,
+                    'channel_title': row[2],
+                    'channel_chat_id': int(row[3]) if row[3] is not None else None,
+                    'channel_is_active': bool(row[4]) if row[4] is not None else None,
+                    'pinned_by': int(row[5]) if row[5] is not None else None,
+                    'pinned_by_name': row[6],
+                    'pinned_at': row[7].strftime('%Y-%m-%d %H:%M:%S') if row[7] else None,
+                }
+            return result
+
+    def get_it_ticket_pinned_channel(self, profile):
+        """Закреплённый АКТИВНЫЙ канал (полная запись) для профиля или None."""
+        prof = profile if profile in ('op', 'szov') else 'op'
+        cols = ', '.join(f"c.{col}" for col in self._IT_CHANNEL_COLUMNS.split(', '))
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT {cols}
+                FROM it_ticket_pinned_channels p
+                JOIN it_ticket_channels c ON c.id = p.channel_id
+                WHERE p.profile = %s AND c.is_active = TRUE
+                """,
+                (prof,),
+            )
+            return self._row_to_it_channel(cursor.fetchone())
+
+    def set_it_ticket_pinned_channel(self, profile, channel_id, pinned_by):
+        prof = str(profile or '').strip().lower()
+        if prof not in ('op', 'szov'):
+            raise ValueError("Unknown pin profile")
+        ch_id = None
+        if channel_id is not None and str(channel_id).strip() != '':
+            ch_id = int(channel_id)
+        with self._get_cursor() as cursor:
+            if ch_id is not None:
+                cursor.execute("SELECT id, is_active FROM it_ticket_channels WHERE id = %s", (ch_id,))
+                row = cursor.fetchone()
+                if not row:
+                    raise ValueError("Channel not found")
+                if not bool(row[1]):
+                    raise ValueError("Channel is inactive")
+            cursor.execute(
+                """
+                INSERT INTO it_ticket_pinned_channels (profile, channel_id, pinned_by, pinned_at)
+                VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (profile) DO UPDATE SET
+                    channel_id = EXCLUDED.channel_id,
+                    pinned_by = EXCLUDED.pinned_by,
+                    pinned_at = CURRENT_TIMESTAMP
+                RETURNING profile
+                """,
+                (prof, ch_id, pinned_by),
+            )
+        return self.get_it_ticket_pinned_channels().get(prof)
 
     def create_operator_technical_issues(
         self,

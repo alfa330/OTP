@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 import httpx
@@ -396,8 +397,20 @@ def _extract_json_block(raw_text: str):
     return cleaned
 
 
-async def _call_gemini_json(full_prompt: str, timeout: float = 90.0) -> dict | None:
-    """Вызывает Gemini и возвращает распарсенный JSON-объект (или None при ошибке)."""
+# Коды ответа Gemini, при которых имеет смысл повторить запрос (перегрузка / временный сбой)
+GEMINI_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+
+async def _call_gemini_json(full_prompt: str, timeout: float = 35.0, attempts: int = 3) -> dict | None:
+    """Вызывает Gemini и возвращает распарсенный JSON-объект.
+
+    Устойчив к временной перегрузке модели (503 «high demand»), 429 и таймаутам —
+    делает несколько попыток с экспоненциальной задержкой. Возвращает:
+      - dict с результатом при успехе;
+      - {'error': <code>} для понятных клиенту ошибок (ai_unavailable / ai_timeout /
+        ai_blocked / json_parse_error);
+      - None при невосстановимой/неожиданной ошибке.
+    """
     if not GEMINI_API_KEY:
         logger.error("Gemini API key is not configured.")
         return None
@@ -411,14 +424,28 @@ async def _call_gemini_json(full_prompt: str, timeout: float = 90.0) -> dict | N
         "generationConfig": {**generation_config, "maxOutputTokens": 8192},
         "safetySettings": safety_settings,
     }
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(api_url, json=payload)
+
+    last_status = None
+    for attempt in range(1, attempts + 1):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(api_url, json=payload)
+
+            if response.status_code in GEMINI_RETRYABLE_STATUS:
+                last_status = response.status_code
+                logger.warning(
+                    f"IT-ticket Gemini {response.status_code} (попытка {attempt}/{attempts})"
+                )
+                if attempt < attempts:
+                    await asyncio.sleep(min(2 ** attempt, 8))
+                    continue
+                return {"error": "ai_unavailable", "status": response.status_code}
+
             response.raise_for_status()
             result = response.json()
             if "candidates" not in result or not result["candidates"]:
                 logger.error("Gemini response empty or blocked (IT ticket).")
-                return None
+                return {"error": "ai_blocked"}
             candidate = result["candidates"][0]
             raw_text = candidate.get("content", {}).get("parts", [{}])[0].get("text", "")
             cleaned = _extract_json_block(raw_text)
@@ -427,12 +454,24 @@ async def _call_gemini_json(full_prompt: str, timeout: float = 90.0) -> dict | N
             except json.JSONDecodeError as e:
                 logger.error(f"IT-ticket JSON parse error: {e}. Cleaned: {cleaned[:500]}")
                 return {"error": "json_parse_error", "raw_response": raw_text}
-    except httpx.HTTPStatusError as e:
-        logger.error(f"IT-ticket HTTP error: {e.response.status_code} - {e.response.text}")
-        return None
-    except Exception as e:
-        logger.exception(f"Unexpected error while contacting Gemini (IT ticket): {e}")
-        return None
+
+        except (httpx.TimeoutException, httpx.TransportError) as e:
+            last_status = 'timeout'
+            logger.warning(
+                f"IT-ticket Gemini network/timeout (попытка {attempt}/{attempts}): {e!r}"
+            )
+            if attempt < attempts:
+                await asyncio.sleep(min(2 ** attempt, 8))
+                continue
+            return {"error": "ai_timeout"}
+        except httpx.HTTPStatusError as e:
+            logger.error(f"IT-ticket HTTP error: {e.response.status_code} - {e.response.text[:300]}")
+            return None
+        except Exception as e:
+            logger.exception(f"Unexpected error while contacting Gemini (IT ticket): {e}")
+            return None
+
+    return {"error": "ai_unavailable", "status": last_status}
 
 
 def _it_catalog_block(profile: str) -> str:
@@ -472,8 +511,25 @@ async def generate_it_ticket_with_ai(mode: str, payload: dict) -> dict | None:
     answers = payload.get("answers") if isinstance(payload.get("answers"), dict) else {}
     context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
 
+    # Дополнительные инструкции от админа/главы отдела (актуальные изменения),
+    # которые могут быть не отражены в мастер-промпте. При конфликте — приоритетнее.
+    try:
+        extra_instructions = db.get_combined_it_ticket_instructions(profile) or ""
+    except Exception:
+        logger.exception("Failed to load IT-ticket admin instructions")
+        extra_instructions = ""
+
+    instructions_block = (
+        "---АКТУАЛЬНЫЕ ИНСТРУКЦИИ ОТ АДМИНИСТРАТОРА / ГЛАВЫ ОТДЕЛА---\n"
+        "Эти инструкции добавлены вручную и описывают недавние изменения. "
+        "При конфликте с общими правилами выше — следуй ИМ.\n"
+        f"{extra_instructions if extra_instructions else '(инструкций нет)'}\n"
+        "---КОНЕЦ ИНСТРУКЦИЙ---\n"
+    )
+
     full_prompt = (
         f"{MASTER_PROMPT_IT_TICKET}\n"
+        f"{instructions_block}"
         f"---INPUT---\n"
         f"MODE: {mode}\n"
         f"PROFILE: {profile}\n"

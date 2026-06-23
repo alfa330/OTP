@@ -1924,6 +1924,7 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
                 buildHeaders={buildHeaders}
                 notify={notify}
                 canManageChannels={isAdminLikeRole(role)}
+                canEditInstructions={isAdminLikeRole(role) || isDepartmentHead(user)}
             />
 
             <div className="mt-6 space-y-4">
