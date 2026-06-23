@@ -145,7 +145,8 @@ import {
     XCircle,
     Archive,
     Boxes,
-    RotateCcw
+    RotateCcw,
+    Zap
 } from 'lucide-react';
 
 const TOKEN_TO_ICON = {
@@ -161,6 +162,7 @@ const TOKEN_TO_ICON = {
     'fa-ban': 'XCircle',
     'fa-bars': 'Menu',
     'fa-bell': 'Bell',
+    'fa-bolt': 'Zap',
     'fa-book': 'BookOpen',
     'fa-briefcase': 'Briefcase',
     'fa-building': 'Building2',
@@ -513,7 +515,8 @@ const ICON_COMPONENTS = {
     XCircle,
     Archive,
     Boxes,
-    RotateCcw
+    RotateCcw,
+    Zap
 };
 
 const FA_META_TOKENS = new Set([
