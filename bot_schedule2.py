@@ -38,6 +38,9 @@ from concurrent.futures import ThreadPoolExecutor
 from database import (
     db,
     TECHNICAL_ISSUE_REASONS,
+    IT_TICKET_CATALOG,
+    IT_TICKET_DEFAULT_PROFILE,
+    resolve_it_ticket_profile,
     SHIFT_AUCTION_TEST_EVENT_NOTIFY_CHANNEL,
     PROXY_STATUS_LABELS,
     normalize_proxy_status_value,
@@ -70,7 +73,7 @@ from urllib.parse import quote, urlparse, parse_qs
 from zoneinfo import ZoneInfo
 from zipfile import ZipFile
 from xml.etree import ElementTree as ET
-from ai_feed_back_service import generate_monthly_feedback_with_ai, generate_birthday_greeting_with_ai
+from ai_feed_back_service import generate_monthly_feedback_with_ai, generate_birthday_greeting_with_ai, generate_it_ticket_with_ai
 from recruiting_parser import crawl_resumes_as_dicts
 try:
     from PIL import Image, ImageOps, ImageDraw, ImageFont
@@ -16880,6 +16883,414 @@ def update_technical_issue_batch(issue_id):
     except Exception as e:
         logging.error(f"Error updating technical issue batch {issue_id}: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error"}), 500
+
+
+# ─── IT-ticket assistant (заявки в IT-отдел) ────────────────────────────────────
+
+IT_TICKET_PRIORITY_LABELS = {
+    'low': 'Низкий',
+    'medium': 'Средний',
+    'high': 'Высокий',
+    'critical': 'Критический',
+}
+
+
+def _it_ticket_authorize(require_admin=False):
+    """Авторизация для маршрутов IT-тикетов.
+
+    Возвращает (requester_id, requester, role, error). error — кортеж (response, code) или None.
+    """
+    requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+    if not requester_id:
+        return None, None, None, (jsonify({"error": "Unauthorized"}), 401)
+    try:
+        requester_id = int(requester_id)
+    except (TypeError, ValueError):
+        return None, None, None, (jsonify({"error": "Invalid user id"}), 400)
+    requester = db.get_user(id=requester_id)
+    if not requester:
+        return None, None, None, (jsonify({"error": "User not found"}), 404)
+    role = _normalize_management_role(requester[3])
+    is_admin = _is_admin_role(role)
+    allowed = is_admin or _is_supervisor_role(role) or (_headed_department_id(requester_id) is not None)
+    if require_admin and not is_admin:
+        return None, None, None, (jsonify({"error": "Only admin can manage IT-ticket channels"}), 403)
+    if not allowed:
+        return None, None, None, (jsonify({"error": "Forbidden"}), 403)
+    return requester_id, requester, role, None
+
+
+def _resolve_it_ticket_profile_for_requester(requester_id):
+    try:
+        dept_id = _headed_department_id(requester_id) or _department_scope_id_for_requester(requester_id)
+        if dept_id:
+            dept = db.get_department_by_id(int(dept_id))
+            if dept:
+                return resolve_it_ticket_profile(dept.get('code'), dept.get('name')), dept
+    except Exception:
+        logging.debug("IT-ticket profile resolution failed", exc_info=True)
+    return IT_TICKET_DEFAULT_PROFILE, None
+
+
+def _tg_get_chat(chat_id):
+    token = os.getenv('BOT_TOKEN')
+    if not token:
+        return None, "BOT_TOKEN не настроен"
+    try:
+        resp = requests.get(
+            f"https://api.telegram.org/bot{token}/getChat",
+            params={"chat_id": chat_id},
+            timeout=10,
+        )
+        data = resp.json()
+        if not data.get("ok"):
+            return None, data.get("description") or f"HTTP {resp.status_code}"
+        return data.get("result") or {}, None
+    except Exception as e:
+        return None, str(e)
+
+
+def _tg_send_message(chat_id, text, parse_mode='HTML'):
+    token = os.getenv('BOT_TOKEN')
+    if not token:
+        return None, "BOT_TOKEN не настроен"
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    try:
+        resp = requests.post(url, json=payload, timeout=15)
+        data = resp.json()
+        if not data.get("ok"):
+            return None, data.get("description") or f"HTTP {resp.status_code}"
+        return data.get("result") or {}, None
+    except Exception as e:
+        return None, str(e)
+
+
+def _it_channel_public(channel, is_admin=False):
+    """Урезает данные канала для не-админов (скрываем chat_id/служебное)."""
+    if not channel:
+        return None
+    public = {
+        'id': channel.get('id'),
+        'title': channel.get('title') or f"Чат {channel.get('chat_id')}",
+        'chat_type': channel.get('chat_type'),
+        'username': channel.get('username'),
+        'is_active': channel.get('is_active'),
+    }
+    if is_admin:
+        public.update({
+            'chat_id': channel.get('chat_id'),
+            'source': channel.get('source'),
+            'added_by': channel.get('added_by'),
+            'last_seen_at': channel.get('last_seen_at'),
+            'created_at': channel.get('created_at'),
+        })
+    return public
+
+
+@app.route('/api/it_tickets/catalog', methods=['GET'])
+@require_api_key
+def it_ticket_catalog():
+    try:
+        requester_id, requester, role, err = _it_ticket_authorize()
+        if err:
+            return err
+        profile, dept = _resolve_it_ticket_profile_for_requester(requester_id)
+        return jsonify({
+            "status": "success",
+            "default_profile": profile,
+            "department": {"code": (dept or {}).get('code'), "name": (dept or {}).get('name')} if dept else None,
+            "catalog": IT_TICKET_CATALOG,
+            "priorities": IT_TICKET_PRIORITY_LABELS,
+        }), 200
+    except Exception as e:
+        logging.error(f"Error fetching IT-ticket catalog: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/it_tickets/channels', methods=['GET', 'OPTIONS'])
+@require_api_key
+def it_ticket_channels_list():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    try:
+        requester_id, requester, role, err = _it_ticket_authorize()
+        if err:
+            return err
+        is_admin = _is_admin_role(role)
+        include_all = is_admin and str(request.args.get('all') or '').strip() in ('1', 'true', 'yes')
+        channels = db.list_it_ticket_channels(active_only=not include_all)
+        items = [_it_channel_public(ch, is_admin=is_admin) for ch in channels]
+        return jsonify({"status": "success", "items": items, "can_manage": is_admin}), 200
+    except Exception as e:
+        logging.error(f"Error listing IT-ticket channels: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/it_tickets/channels', methods=['POST'])
+@require_api_key
+def it_ticket_channels_add():
+    try:
+        requester_id, requester, role, err = _it_ticket_authorize(require_admin=True)
+        if err:
+            return err
+        payload = request.get_json(silent=True) or {}
+        raw_chat_id = payload.get('chat_id')
+        if raw_chat_id is None or str(raw_chat_id).strip() == '':
+            return jsonify({"error": "Укажите chat_id чата/канала"}), 400
+        chat_id_str = str(raw_chat_id).strip()
+        try:
+            chat_id = int(chat_id_str)
+        except ValueError:
+            return jsonify({"error": "chat_id должен быть числом (например, -1001234567890)"}), 400
+
+        chat, chat_err = _tg_get_chat(chat_id)
+        if chat is None:
+            return jsonify({"error": f"Бот не видит этот чат: {chat_err}. Убедитесь, что бот добавлен в чат."}), 400
+
+        title = chat.get('title') or chat.get('username') or chat.get('first_name')
+        item = db.add_it_ticket_channel(
+            chat_id=chat_id,
+            title=title,
+            chat_type=chat.get('type'),
+            username=chat.get('username'),
+            added_by=requester_id,
+            source='manual',
+        )
+        return jsonify({"status": "success", "item": _it_channel_public(item, is_admin=True)}), 201
+    except Exception as e:
+        logging.error(f"Error adding IT-ticket channel: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/it_tickets/channels/<int:channel_id>', methods=['PATCH', 'DELETE', 'OPTIONS'])
+@require_api_key
+def it_ticket_channel_modify(channel_id):
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    try:
+        requester_id, requester, role, err = _it_ticket_authorize(require_admin=True)
+        if err:
+            return err
+        if request.method == 'DELETE':
+            ok = db.delete_it_ticket_channel(channel_id)
+            if not ok:
+                return jsonify({"error": "Канал не найден"}), 404
+            return jsonify({"status": "success", "message": "Канал удалён"}), 200
+        payload = request.get_json(silent=True) or {}
+        is_active = payload.get('is_active')
+        if is_active is None:
+            return jsonify({"error": "Передайте is_active"}), 400
+        item = db.set_it_ticket_channel_active(channel_id, bool(is_active))
+        if not item:
+            return jsonify({"error": "Канал не найден"}), 404
+        return jsonify({"status": "success", "item": _it_channel_public(item, is_admin=True)}), 200
+    except Exception as e:
+        logging.error(f"Error modifying IT-ticket channel {channel_id}: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/it_tickets/channels/<int:channel_id>/test', methods=['POST'])
+@require_api_key
+def it_ticket_channel_test(channel_id):
+    try:
+        requester_id, requester, role, err = _it_ticket_authorize(require_admin=True)
+        if err:
+            return err
+        channel = db.get_it_ticket_channel(channel_id)
+        if not channel:
+            return jsonify({"error": "Канал не найден"}), 404
+        text = (
+            "🎫 <b>Проверка канала IT-заявок</b>\n"
+            f"Бот успешно отправляет сообщения в этот чат.\n"
+            f"<i>Инициатор: {html.escape(str(requester[2] or ''))}</i>"
+        )
+        result, send_err = _tg_send_message(channel['chat_id'], text, parse_mode='HTML')
+        if result is None:
+            return jsonify({"error": f"Не удалось отправить тестовое сообщение: {send_err}"}), 502
+        return jsonify({"status": "success", "message_id": result.get('message_id')}), 200
+    except Exception as e:
+        logging.error(f"Error testing IT-ticket channel {channel_id}: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/it_tickets/ai', methods=['POST'])
+@require_api_key
+def it_ticket_ai_assist():
+    try:
+        requester_id, requester, role, err = _it_ticket_authorize()
+        if err:
+            return err
+        payload = request.get_json(silent=True) or {}
+        mode = str(payload.get('mode') or 'draft').strip().lower()
+        if mode not in ('draft', 'finalize'):
+            mode = 'draft'
+
+        profile = str(payload.get('profile') or '').strip().lower()
+        if profile not in IT_TICKET_CATALOG:
+            profile, _dept = _resolve_it_ticket_profile_for_requester(requester_id)
+
+        _resolved_profile, dept = _resolve_it_ticket_profile_for_requester(requester_id)
+        try:
+            now_text = datetime.now(ZoneInfo('Asia/Almaty')).strftime('%Y-%m-%d %H:%M')
+        except Exception:
+            now_text = datetime.now().strftime('%Y-%m-%d %H:%M')
+
+        ai_payload = {
+            "profile": profile,
+            "category": payload.get('category'),
+            "subcategory": payload.get('subcategory'),
+            "description": payload.get('description'),
+            "fields": payload.get('fields') if isinstance(payload.get('fields'), dict) else {},
+            "answers": payload.get('answers') if isinstance(payload.get('answers'), dict) else {},
+            "context": {
+                "reporter_name": requester[2],
+                "role": requester[3],
+                "department": (dept or {}).get('name'),
+                "now": now_text,
+            },
+        }
+
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = None
+        if loop and loop.is_running():
+            fut = asyncio.run_coroutine_threadsafe(
+                generate_it_ticket_with_ai(mode, ai_payload), loop
+            )
+            result = fut.result(timeout=120)
+        else:
+            result = asyncio.run(generate_it_ticket_with_ai(mode, ai_payload))
+
+        if result is None:
+            return jsonify({"status": "error", "error": "ai_failed"}), 502
+        if isinstance(result, dict) and result.get('error'):
+            return jsonify({"status": "error", "error": result.get('error')}), 200
+        return jsonify({"status": "success", "result": result}), 200
+    except Exception as e:
+        logging.error(f"Error in IT-ticket AI assist: {e}", exc_info=True)
+        return jsonify({"status": "error", "error": "Internal server error"}), 500
+
+
+@app.route('/api/it_tickets/send', methods=['POST'])
+@require_api_key
+def it_ticket_send():
+    try:
+        requester_id, requester, role, err = _it_ticket_authorize()
+        if err:
+            return err
+        payload = request.get_json(silent=True) or {}
+
+        channel_id = payload.get('channel_id')
+        try:
+            channel_id = int(channel_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Выберите канал для отправки"}), 400
+        channel = db.get_it_ticket_channel(channel_id)
+        if not channel or not channel.get('is_active'):
+            return jsonify({"error": "Канал не найден или отключён"}), 400
+
+        body = str(payload.get('body') or '').strip()
+        if not body:
+            return jsonify({"error": "Пустой текст заявки"}), 400
+
+        profile = str(payload.get('profile') or '').strip().lower()
+        if profile not in IT_TICKET_CATALOG:
+            profile = IT_TICKET_DEFAULT_PROFILE
+        category = str(payload.get('category') or '').strip()
+        subcategory = str(payload.get('subcategory') or '').strip()
+        priority = str(payload.get('priority') or '').strip().lower()
+        if priority not in IT_TICKET_PRIORITY_LABELS:
+            priority = 'medium'
+        title = str(payload.get('title') or '').strip()[:480]
+        fields = payload.get('fields') if isinstance(payload.get('fields'), dict) else {}
+
+        _resolved_profile, dept = _resolve_it_ticket_profile_for_requester(requester_id)
+        try:
+            now_text = datetime.now(ZoneInfo('Asia/Almaty')).strftime('%d.%m.%Y %H:%M')
+        except Exception:
+            now_text = datetime.now().strftime('%d.%m.%Y %H:%M')
+
+        cat_line_parts = [p for p in [category, subcategory] if p]
+        cat_line = " → ".join(cat_line_parts)
+        priority_label = IT_TICKET_PRIORITY_LABELS.get(priority, priority)
+        header_lines = ["🎫 <b>Заявка в IT-отдел</b>"]
+        if cat_line:
+            header_lines.append(f"<b>Тема:</b> {html.escape(cat_line)}")
+        header_lines.append(f"<b>Приоритет:</b> {html.escape(priority_label)}")
+        sig_parts = [str(requester[2] or '')]
+        if (dept or {}).get('name'):
+            sig_parts.append(dept['name'])
+        sig_parts.append(now_text)
+        footer = " · ".join([p for p in sig_parts if p])
+
+        message_text = (
+            "\n".join(header_lines)
+            + "\n\n" + body.strip()
+            + f"\n\n<i>Отправил: {html.escape(footer)}</i>"
+        )
+        message_text = message_text[:4050]
+
+        result, send_err = _tg_send_message(channel['chat_id'], message_text, parse_mode='HTML')
+        if result is None:
+            # Повтор без HTML-разметки (на случай некорректных тегов в тексте)
+            plain = re.sub(r'<[^>]+>', '', message_text)
+            result, send_err = _tg_send_message(channel['chat_id'], plain, parse_mode=None)
+        if result is None:
+            try:
+                db.record_it_ticket(
+                    profile=profile, category=category, subcategory=subcategory, priority=priority,
+                    title=title, body=body, fields=fields, channel_id=channel.get('id'),
+                    channel_chat_id=channel.get('chat_id'), channel_title=channel.get('title'),
+                    telegram_message_id=None, status='failed',
+                    created_by=requester_id, created_by_name=requester[2],
+                )
+            except Exception:
+                logging.debug("Failed to record failed IT ticket", exc_info=True)
+            return jsonify({"error": f"Не удалось отправить заявку в Telegram: {send_err}"}), 502
+
+        message_id = result.get('message_id')
+        ticket = db.record_it_ticket(
+            profile=profile, category=category, subcategory=subcategory, priority=priority,
+            title=title, body=body, fields=fields, channel_id=channel.get('id'),
+            channel_chat_id=channel.get('chat_id'), channel_title=channel.get('title'),
+            telegram_message_id=message_id, status='sent',
+            created_by=requester_id, created_by_name=requester[2],
+        )
+        return jsonify({
+            "status": "success",
+            "ticket_id": ticket.get('id'),
+            "message_id": message_id,
+            "channel_title": channel.get('title'),
+        }), 201
+    except Exception as e:
+        logging.error(f"Error sending IT ticket: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/it_tickets', methods=['GET'])
+@require_api_key
+def it_ticket_history():
+    try:
+        requester_id, requester, role, err = _it_ticket_authorize()
+        if err:
+            return err
+        try:
+            limit = max(1, min(int(request.args.get('limit', 50)), 200))
+        except (TypeError, ValueError):
+            limit = 50
+        try:
+            offset = max(0, int(request.args.get('offset', 0)))
+        except (TypeError, ValueError):
+            offset = 0
+        items = db.list_it_tickets(limit=limit, offset=offset)
+        return jsonify({"status": "success", "items": items}), 200
+    except Exception as e:
+        logging.error(f"Error listing IT tickets: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
 
 
 def _recruiting_now_iso():
@@ -34474,8 +34885,47 @@ async def handle_reval_decision_comment(message: types.Message, state: FSMContex
         logging.debug("Не удалось подтвердить сохранение комментария: %s", e)
 
 
+def _register_it_ticket_chat_discovery():
+    """Авто-обнаружение чатов/каналов для IT-заявок.
+
+    Когда бота добавляют в группу/канал, мы запоминаем чат, чтобы супервайзер
+    мог выбрать его в интерфейсе. Регистрация защищена на случай отсутствия
+    обработчика my_chat_member в установленной версии aiogram.
+    """
+    handler_decorator = getattr(dp, 'my_chat_member_handler', None)
+    if not callable(handler_decorator):
+        logging.warning("aiogram my_chat_member_handler недоступен — авто-обнаружение IT-каналов отключено")
+        return
+
+    @handler_decorator()
+    async def _on_my_chat_member_update(update):
+        try:
+            chat = getattr(update, 'chat', None)
+            new_member = getattr(update, 'new_chat_member', None)
+            new_status = getattr(new_member, 'status', None) if new_member else None
+            if chat is None or getattr(chat, 'type', None) not in ('group', 'supergroup', 'channel'):
+                return
+            loop = asyncio.get_event_loop()
+            if new_status in ('member', 'administrator', 'creator'):
+                await loop.run_in_executor(
+                    executor_pool, db.record_discovered_chat,
+                    chat.id, getattr(chat, 'title', None), getattr(chat, 'type', None), getattr(chat, 'username', None),
+                )
+                logging.info(f"IT-ticket: бот добавлен в чат {chat.id} ({getattr(chat, 'title', '')})")
+            elif new_status in ('left', 'kicked'):
+                await loop.run_in_executor(
+                    executor_pool, db.deactivate_it_ticket_channel_by_chat_id, chat.id,
+                )
+                logging.info(f"IT-ticket: бот удалён из чата {chat.id}")
+        except Exception as e:
+            logging.error(f"Ошибка обработки my_chat_member для IT-заявок: {e}", exc_info=True)
+
+
+_register_it_ticket_chat_discovery()
+
+
 if __name__ == '__main__':
-    
+
     # Запускаем Flask в отдельном потоке
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()

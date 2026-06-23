@@ -583,6 +583,191 @@ TECHNICAL_ISSUE_REASONS: List[str] = [
 ]
 TECHNICAL_ISSUE_REASONS_SET = set(TECHNICAL_ISSUE_REASONS)
 
+# ─── IT-ticket catalog ─────────────────────────────────────────────────────────
+# Каталог тематик заявок в IT-отдел. Источник — согласованные документы
+# «Типы заявок в IT отдел от ОП» и «Типы заявок в IT отдел СЗоВ».
+# Профиль выбирается автоматически по отделу супервайзера (см. resolve_it_ticket_profile).
+
+IT_TICKET_CATALOG: Dict[str, Dict[str, Any]] = {
+    "op": {
+        "label": "Отдел продаж (ОП)",
+        "categories": [
+            {
+                "name": "Рабочие места сотрудников",
+                "items": [
+                    "Медленная работа компьютера",
+                    "Замена или подключение оборудования (монитор, гарнитура, клавиатура, мышь)",
+                    "Настройка нового рабочего места",
+                    "Недостаточно свободной памяти на ПК",
+                    "Проблемы со входом в Windows",
+                    "Блокировка учётной записи Windows",
+                ],
+            },
+            {
+                "name": "Телефония",
+                "items": [
+                    "Массовый сбой телефонии",
+                    "Ошибка авторизации",
+                    "Проблемы со звуком (не слышно клиента / оператора)",
+                    "Плохое качество связи (эхо, шумы, прерывания)",
+                    "Не меняются статусы оператора",
+                    "Не работает перевод звонков",
+                    "Не записываются разговоры",
+                    "Не отображается карточка клиента",
+                    "Неактивен внутренний номер",
+                ],
+            },
+            {
+                "name": "Сетевые и интернет-проблемы",
+                "items": [
+                    "Отсутствует доступ в интернет",
+                    "Нестабильное интернет-соединение",
+                    "Проблемы доступа с сетевыми папками и ресурсами",
+                    "Не работает принтер",
+                ],
+            },
+            {
+                "name": "Корпоративные системы и доступы",
+                "items": [
+                    "Ускорить процесс создания учётных записей новым сотрудникам",
+                    "Удаление учётных записей уволенных сотрудников",
+                    "Предоставление доступа к корпоративному чату",
+                    "Предоставление доступа к Wiki",
+                    "Настройка сайтов у операторов и СВ",
+                ],
+            },
+            {
+                "name": "Платрум",
+                "items": [
+                    "Создание учётной записи сотрудника",
+                    "Удаление учётной записи сотрудника",
+                ],
+            },
+            {
+                "name": "Почта и коммуникации",
+                "items": [
+                    "Создание корпоративной почты",
+                    "Сброс пароля электронной почты",
+                    "Настройка почты на устройстве",
+                ],
+            },
+            {
+                "name": "Программное обеспечение",
+                "items": [
+                    "Установка программного обеспечения",
+                    "Обновление программного обеспечения",
+                    "Удаление программного обеспечения",
+                    "Ошибки в работе программ",
+                ],
+            },
+        ],
+    },
+    "szov": {
+        "label": "СЗоВ",
+        "categories": [
+            {
+                "name": "Рабочие места сотрудников",
+                "items": [
+                    "Проблемы со входом в Windows",
+                    "Блокировка учётной записи Windows",
+                    "Недостаточно свободной памяти на ПК",
+                    "Настройка нового рабочего места",
+                    "Замена или подключение оборудования (мышь, клавиатура, монитор, гарнитура)",
+                ],
+            },
+            {
+                "name": "Телефония и Oktell",
+                "items": [
+                    "Не поступают звонки в Oktell",
+                    "Ошибка авторизации в Oktell",
+                    "Не работает веб-телефон Oktell",
+                    "Не работают наушники/гарнитура",
+                    "Проблемы со статусами операторов",
+                    "Ошибки маршрутизации звонков",
+                ],
+            },
+            {
+                "name": "Сетевые и интернет-проблемы",
+                "items": [
+                    "Отсутствует доступ в интернет",
+                    "Нестабильное интернет-соединение",
+                    "Проблемы с сетевыми папками и ресурсами",
+                ],
+            },
+            {
+                "name": "Корпоративные системы и доступы",
+                "items": [
+                    "Создание учётных записей новым сотрудникам",
+                    "Удаление учётных записей уволенных сотрудников",
+                    "Предоставление доступа к корпоративному чату",
+                    "Предоставление доступа к Wiki",
+                ],
+            },
+            {
+                "name": "Платрум",
+                "items": [
+                    "Создание учётной записи сотрудника",
+                    "Удаление учётной записи сотрудника",
+                ],
+            },
+            {
+                "name": "Принтеры и периферия",
+                "items": [
+                    "Проблемы с принтером",
+                    "Настройка принтера",
+                ],
+            },
+            {
+                "name": "Face ID и СКУД",
+                "items": [
+                    "Подключение доступа к Face ID",
+                    "Удаление доступа",
+                    "Обновление данных сотрудника в СКУД",
+                    "Проблемы с проходом через систему контроля доступа",
+                ],
+            },
+            {
+                "name": "Почта и коммуникации",
+                "items": [
+                    "Создание корпоративной почты",
+                    "Сброс пароля электронной почты",
+                    "Настройка почты на устройстве",
+                ],
+            },
+            {
+                "name": "Программное обеспечение",
+                "items": [
+                    "Установка программного обеспечения",
+                    "Обновление программного обеспечения",
+                    "Удаление программного обеспечения",
+                    "Ошибки в работе программ",
+                ],
+            },
+        ],
+    },
+}
+
+IT_TICKET_DEFAULT_PROFILE = "op"
+
+
+def resolve_it_ticket_profile(department_code: object = None, department_name: object = None) -> str:
+    """Определяет профиль каталога (op|szov) по отделу супервайзера.
+
+    Эвристика по коду/названию отдела. Если ничего не совпало — профиль по умолчанию.
+    Фронтенд может переопределить профиль вручную (актуально для админов без отдела).
+    """
+    code = str(department_code or "").strip().lower()
+    name = str(department_name or "").strip().lower()
+    haystack = f"{code} {name}"
+    szov_markers = ("szov", "сзов", "сзв", "забот", "care", "tez")
+    if any(marker in haystack for marker in szov_markers):
+        return "szov"
+    op_markers = ("op", "sales", "прод", "оп ", "колл", "call")
+    if code == "op" or any(marker in haystack for marker in op_markers):
+        return "op"
+    return IT_TICKET_DEFAULT_PROFILE
+
+
 def get_pool():
     global POOL, POOL_SEMAPHORE
     if POOL is None:
@@ -1638,6 +1823,49 @@ class Database:
                 );
             """)
 
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS it_ticket_channels (
+                    id SERIAL PRIMARY KEY,
+                    chat_id BIGINT NOT NULL UNIQUE,
+                    title VARCHAR(255),
+                    chat_type VARCHAR(32),
+                    username VARCHAR(255),
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    source VARCHAR(16) NOT NULL DEFAULT 'manual',
+                    added_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_seen_at TIMESTAMP
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_it_ticket_channels_active
+                ON it_ticket_channels(is_active);
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS it_tickets (
+                    id SERIAL PRIMARY KEY,
+                    profile VARCHAR(16) NOT NULL DEFAULT 'op',
+                    category VARCHAR(255),
+                    subcategory VARCHAR(255),
+                    priority VARCHAR(16),
+                    title VARCHAR(500),
+                    body TEXT NOT NULL,
+                    fields JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    channel_id INTEGER REFERENCES it_ticket_channels(id) ON DELETE SET NULL,
+                    channel_chat_id BIGINT,
+                    channel_title VARCHAR(255),
+                    telegram_message_id BIGINT,
+                    status VARCHAR(16) NOT NULL DEFAULT 'sent',
+                    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    created_by_name VARCHAR(255),
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_it_tickets_created_at
+                ON it_tickets(created_at);
+            """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS user_history (
                     id SERIAL PRIMARY KEY,
@@ -18330,6 +18558,183 @@ class Database:
                 'updated_by_name': updated_by_name,
                 'updated_at': row[3].strftime('%Y-%m-%d %H:%M:%S') if row[3] else None
             }
+
+    # ─── IT-ticket channels & tickets ──────────────────────────────────────────
+    _IT_CHANNEL_COLUMNS = (
+        "id, chat_id, title, chat_type, username, is_active, source, "
+        "added_by, created_at, updated_at, last_seen_at"
+    )
+
+    @staticmethod
+    def _row_to_it_channel(row):
+        if not row:
+            return None
+        return {
+            'id': int(row[0]),
+            'chat_id': int(row[1]),
+            'title': row[2],
+            'chat_type': row[3],
+            'username': row[4],
+            'is_active': bool(row[5]),
+            'source': row[6],
+            'added_by': int(row[7]) if row[7] is not None else None,
+            'created_at': row[8].strftime('%Y-%m-%d %H:%M:%S') if row[8] else None,
+            'updated_at': row[9].strftime('%Y-%m-%d %H:%M:%S') if row[9] else None,
+            'last_seen_at': row[10].strftime('%Y-%m-%d %H:%M:%S') if row[10] else None,
+        }
+
+    def list_it_ticket_channels(self, active_only=True):
+        cols = self._IT_CHANNEL_COLUMNS
+        with self._get_cursor() as cursor:
+            if active_only:
+                cursor.execute(
+                    f"SELECT {cols} FROM it_ticket_channels "
+                    f"WHERE is_active = TRUE ORDER BY title NULLS LAST, id"
+                )
+            else:
+                cursor.execute(
+                    f"SELECT {cols} FROM it_ticket_channels "
+                    f"ORDER BY is_active DESC, title NULLS LAST, id"
+                )
+            return [self._row_to_it_channel(r) for r in cursor.fetchall()]
+
+    def get_it_ticket_channel(self, channel_id):
+        cols = self._IT_CHANNEL_COLUMNS
+        with self._get_cursor() as cursor:
+            cursor.execute(f"SELECT {cols} FROM it_ticket_channels WHERE id = %s", (int(channel_id),))
+            return self._row_to_it_channel(cursor.fetchone())
+
+    def add_it_ticket_channel(self, chat_id, title=None, chat_type=None, username=None,
+                              added_by=None, source='manual'):
+        """Ручное добавление / повторная активация канала (помечает is_active=TRUE)."""
+        cols = self._IT_CHANNEL_COLUMNS
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                f"""
+                INSERT INTO it_ticket_channels
+                    (chat_id, title, chat_type, username, is_active, source, added_by, last_seen_at)
+                VALUES (%s, %s, %s, %s, TRUE, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (chat_id) DO UPDATE SET
+                    title = COALESCE(EXCLUDED.title, it_ticket_channels.title),
+                    chat_type = COALESCE(EXCLUDED.chat_type, it_ticket_channels.chat_type),
+                    username = COALESCE(EXCLUDED.username, it_ticket_channels.username),
+                    is_active = TRUE,
+                    added_by = COALESCE(it_ticket_channels.added_by, EXCLUDED.added_by),
+                    updated_at = CURRENT_TIMESTAMP,
+                    last_seen_at = CURRENT_TIMESTAMP
+                RETURNING {cols}
+                """,
+                (int(chat_id), title, chat_type, username, source, added_by),
+            )
+            return self._row_to_it_channel(cursor.fetchone())
+
+    def record_discovered_chat(self, chat_id, title=None, chat_type=None, username=None):
+        """Авто-обнаружение: бот добавлен в чат. Записывает/обновляет канал (active)."""
+        cols = self._IT_CHANNEL_COLUMNS
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                f"""
+                INSERT INTO it_ticket_channels
+                    (chat_id, title, chat_type, username, is_active, source, last_seen_at)
+                VALUES (%s, %s, %s, %s, TRUE, 'auto', CURRENT_TIMESTAMP)
+                ON CONFLICT (chat_id) DO UPDATE SET
+                    title = COALESCE(EXCLUDED.title, it_ticket_channels.title),
+                    chat_type = COALESCE(EXCLUDED.chat_type, it_ticket_channels.chat_type),
+                    username = COALESCE(EXCLUDED.username, it_ticket_channels.username),
+                    is_active = TRUE,
+                    updated_at = CURRENT_TIMESTAMP,
+                    last_seen_at = CURRENT_TIMESTAMP
+                RETURNING {cols}
+                """,
+                (int(chat_id), title, chat_type, username),
+            )
+            return self._row_to_it_channel(cursor.fetchone())
+
+    def set_it_ticket_channel_active(self, channel_id, is_active):
+        cols = self._IT_CHANNEL_COLUMNS
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                f"""
+                UPDATE it_ticket_channels
+                SET is_active = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                RETURNING {cols}
+                """,
+                (bool(is_active), int(channel_id)),
+            )
+            return self._row_to_it_channel(cursor.fetchone())
+
+    def deactivate_it_ticket_channel_by_chat_id(self, chat_id):
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "UPDATE it_ticket_channels SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP "
+                "WHERE chat_id = %s",
+                (int(chat_id),),
+            )
+
+    def delete_it_ticket_channel(self, channel_id):
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM it_ticket_channels WHERE id = %s RETURNING id",
+                (int(channel_id),),
+            )
+            return cursor.fetchone() is not None
+
+    def record_it_ticket(self, *, profile, category, subcategory, priority, title, body,
+                         fields, channel_id, channel_chat_id, channel_title,
+                         telegram_message_id, status, created_by, created_by_name):
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO it_tickets
+                    (profile, category, subcategory, priority, title, body, fields,
+                     channel_id, channel_chat_id, channel_title, telegram_message_id,
+                     status, created_by, created_by_name)
+                VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, created_at
+                """,
+                (
+                    profile, category, subcategory, priority, title, body,
+                    json.dumps(fields or {}, ensure_ascii=False),
+                    channel_id, channel_chat_id, channel_title, telegram_message_id,
+                    status, created_by, created_by_name,
+                ),
+            )
+            row = cursor.fetchone()
+            return {
+                'id': int(row[0]),
+                'created_at': row[1].strftime('%Y-%m-%d %H:%M:%S') if row[1] else None,
+            }
+
+    def list_it_tickets(self, limit=50, offset=0):
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, profile, category, subcategory, priority, title, body,
+                       channel_title, telegram_message_id, status, created_by_name, created_at
+                FROM it_tickets
+                ORDER BY created_at DESC
+                LIMIT %s OFFSET %s
+                """,
+                (int(limit), int(offset)),
+            )
+            items = []
+            for row in cursor.fetchall():
+                items.append({
+                    'id': int(row[0]),
+                    'profile': row[1],
+                    'category': row[2],
+                    'subcategory': row[3],
+                    'priority': row[4],
+                    'title': row[5],
+                    'body': row[6],
+                    'channel_title': row[7],
+                    'telegram_message_id': int(row[8]) if row[8] is not None else None,
+                    'status': row[9],
+                    'created_by_name': row[10],
+                    'created_at': row[11].strftime('%Y-%m-%d %H:%M:%S') if row[11] else None,
+                })
+            return items
 
     def create_operator_technical_issues(
         self,
