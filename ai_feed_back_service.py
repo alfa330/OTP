@@ -2,7 +2,7 @@ import json
 import re
 import httpx
 from loguru import logger
-from database import db
+from database import db, IT_TICKET_CATALOG
 from collections import defaultdict
 import os
 from datetime import datetime, date
@@ -322,6 +322,183 @@ async def generate_birthday_greeting_with_ai(user_payload: dict, for_date: str) 
         logger.exception(f"Unexpected error while contacting Gemini: {e}")
         return None
 
+
+# ─── IT-ticket assistant ───────────────────────────────────────────────────────
+
+MASTER_PROMPT_IT_TICKET = """ТЫ — ассистент, который помогает супервайзеру колл-центра составить грамотную заявку (тикет) в IT-отдел.
+Твоя цель — собрать всю информацию, нужную IT-специалисту, чтобы он сразу понял суть проблемы и приступил к решению без лишних уточнений.
+
+Тебе передаются:
+- PROFILE: профиль каталога (op = Отдел продаж, szov = СЗоВ)
+- CATALOG: список категорий и типовых проблем для этого профиля
+- CATEGORY / SUBCATEGORY: выбранная категория и подкатегория (могут быть пустыми)
+- DESCRIPTION: свободное описание проблемы от супервайзера (может быть кратким)
+- FIELDS: уже заполненные поля формы (объект ключ→значение)
+- ANSWERS: ответы на ранее заданные уточняющие вопросы (объект)
+- CONTEXT: кто создаёт заявку (имя, роль, отдел/направление, текущие дата и время)
+- MODE: draft | finalize
+
+ОБЩИЕ ПРАВИЛА:
+- Пиши по-русски, кратко и по делу, без воды.
+- НЕ выдумывай факты. Если данных нет — задай вопрос или пропусти поле.
+- Опирайся на CATALOG: подбирай категорию/подкатегорию из него.
+
+ЕСЛИ MODE = draft:
+1. Определи наиболее подходящие category и subcategory из CATALOG (если они не заданы).
+2. Сформируй компактную форму form.fields — набор полей, которые нужно заполнить именно под эту проблему.
+   Каждое поле: key (латиница, snake_case), label (рус.), type (text|textarea|select|date|time|number),
+   required (bool), placeholder, options (массив строк только для type=select), hint (короткая подсказка).
+   Включай только релевантные поля (обычно 3–7). Примеры: номер рабочего места/ПК, ФИО или логин сотрудника,
+   когда началось, как часто повторяется, массовость (сколько человек затронуто), что уже пробовали,
+   ссылка/скриншот. Предзаполни value поля, если оно явно следует из DESCRIPTION.
+3. Сформируй questions — 1–4 уточняющих вопроса ТОЛЬКО про недостающую информацию. Если всего достаточно — пустой массив.
+4. priority: low|medium|high|critical — оцени по влиянию (массовость, простой в работе, блокировка).
+5. ticket — предварительный черновик (title, summary, markdown).
+6. status = "draft".
+
+ЕСЛИ MODE = finalize:
+1. Если для понятной IT-отделу заявки критически не хватает данных — верни status="need_more_info"
+   и questions (1–3 конкретных вопроса). Иначе status="ready".
+2. При status="ready" составь финальный тикет ticket:
+   - title: короткий заголовок (до 90 символов)
+   - summary: 1–2 предложения сути
+   - markdown: готовый ТЕКСТ заявки для отправки в Telegram. Используй ТОЛЬКО эти HTML-теги Telegram:
+     <b>…</b>, <i>…</i>, <code>…</code>. Никаких *, #, markdown-разметки, <br>, <ul>, <p> и т.п.
+     Переносы строк — обычным символом новой строки. Структура (заголовки выделяй <b>):
+     Категория, Приоритет, Кто сообщил, Описание, Детали, Шаги воспроизведения, Что уже проверено, Желаемый результат.
+     Включай только заполненные разделы.
+
+ФОРМАТ ОТВЕТА — СТРОГО ОДИН JSON-объект, без markdown-ограждений и текста вокруг:
+{
+  "status": "draft" | "need_more_info" | "ready",
+  "profile": "op" | "szov",
+  "category": "<категория>",
+  "subcategory": "<подкатегория>",
+  "priority": "low" | "medium" | "high" | "critical",
+  "questions": [ {"id": "q1", "question": "<вопрос>", "why": "<зачем это IT-отделу>"} ],
+  "form": { "fields": [ {"key": "...", "label": "...", "type": "text", "required": false, "placeholder": "", "options": [], "hint": "", "value": ""} ] },
+  "ticket": { "title": "...", "summary": "...", "markdown": "..." }
+}
+"""
+
+
+def _extract_json_block(raw_text: str):
+    json_match = re.search(r'```json\s*(\{.*\})\s*```', raw_text, re.DOTALL)
+    if json_match:
+        cleaned = json_match.group(1)
+    else:
+        start = raw_text.find('{')
+        end = raw_text.rfind('}')
+        if start != -1 and end != -1 and end > start:
+            cleaned = raw_text[start:end + 1]
+        else:
+            cleaned = raw_text
+    return cleaned
+
+
+async def _call_gemini_json(full_prompt: str, timeout: float = 90.0) -> dict | None:
+    """Вызывает Gemini и возвращает распарсенный JSON-объект (или None при ошибке)."""
+    if not GEMINI_API_KEY:
+        logger.error("Gemini API key is not configured.")
+        return None
+
+    api_url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    )
+    payload = {
+        "contents": [{"parts": [{"text": full_prompt}]}],
+        "generationConfig": {**generation_config, "maxOutputTokens": 8192},
+        "safetySettings": safety_settings,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(api_url, json=payload)
+            response.raise_for_status()
+            result = response.json()
+            if "candidates" not in result or not result["candidates"]:
+                logger.error("Gemini response empty or blocked (IT ticket).")
+                return None
+            candidate = result["candidates"][0]
+            raw_text = candidate.get("content", {}).get("parts", [{}])[0].get("text", "")
+            cleaned = _extract_json_block(raw_text)
+            try:
+                return json.loads(cleaned)
+            except json.JSONDecodeError as e:
+                logger.error(f"IT-ticket JSON parse error: {e}. Cleaned: {cleaned[:500]}")
+                return {"error": "json_parse_error", "raw_response": raw_text}
+    except httpx.HTTPStatusError as e:
+        logger.error(f"IT-ticket HTTP error: {e.response.status_code} - {e.response.text}")
+        return None
+    except Exception as e:
+        logger.exception(f"Unexpected error while contacting Gemini (IT ticket): {e}")
+        return None
+
+
+def _it_catalog_block(profile: str) -> str:
+    prof = profile if profile in IT_TICKET_CATALOG else "op"
+    cat = IT_TICKET_CATALOG.get(prof, {})
+    lines = [f"PROFILE_LABEL: {cat.get('label', prof)}"]
+    for entry in cat.get("categories", []):
+        lines.append(f"- {entry.get('name')}:")
+        for item in entry.get("items", []):
+            lines.append(f"    • {item}")
+    return "\n".join(lines)
+
+
+async def generate_it_ticket_with_ai(mode: str, payload: dict) -> dict | None:
+    """Помощник по составлению IT-тикета.
+
+    mode='draft'    — подобрать категорию, сгенерировать форму и уточняющие вопросы.
+    mode='finalize' — собрать финальный тикет или вернуть недостающие вопросы.
+    """
+    if not isinstance(payload, dict):
+        return None
+    if not GEMINI_API_KEY:
+        logger.error("Gemini API key is not configured.")
+        return None
+
+    mode = (mode or "draft").strip().lower()
+    if mode not in ("draft", "finalize"):
+        mode = "draft"
+
+    profile = str(payload.get("profile") or "op").strip().lower()
+    if profile not in IT_TICKET_CATALOG:
+        profile = "op"
+    category = str(payload.get("category") or "").strip()
+    subcategory = str(payload.get("subcategory") or "").strip()
+    description = str(payload.get("description") or "").strip()
+    fields = payload.get("fields") if isinstance(payload.get("fields"), dict) else {}
+    answers = payload.get("answers") if isinstance(payload.get("answers"), dict) else {}
+    context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+
+    full_prompt = (
+        f"{MASTER_PROMPT_IT_TICKET}\n"
+        f"---INPUT---\n"
+        f"MODE: {mode}\n"
+        f"PROFILE: {profile}\n"
+        f"CATALOG:\n{_it_catalog_block(profile)}\n"
+        f"CATEGORY: {category}\n"
+        f"SUBCATEGORY: {subcategory}\n"
+        f"DESCRIPTION: {description}\n"
+        f"FIELDS: {json.dumps(fields, ensure_ascii=False)}\n"
+        f"ANSWERS: {json.dumps(answers, ensure_ascii=False)}\n"
+        f"CONTEXT: {json.dumps(context, ensure_ascii=False)}\n"
+        f"---END INPUT---\n"
+        f"ВЕРНИ СТРОГО ОДИН JSON-ОБЪЕКТ ПО ШАБЛОНУ."
+    )
+
+    result = await _call_gemini_json(full_prompt)
+    if isinstance(result, dict) and not result.get("error"):
+        result.setdefault("profile", profile)
+        if category:
+            result.setdefault("category", category)
+        if subcategory:
+            result.setdefault("subcategory", subcategory)
+    return result
+
+
+async def _legacy_monthly_feedback_continuation(operator_id, month):
     # Сначала проверяем кэш
     cached_feedback = db.get_ai_feedback_cache(operator_id, month)
     if cached_feedback:
