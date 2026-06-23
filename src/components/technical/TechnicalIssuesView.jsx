@@ -43,8 +43,98 @@ const MONTHS_RU = [
 const DAYS_SHORT = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
 const MASS_KEYWORDS = ['массовая', 'массовый', 'массовое'];
 const WORKPLACE_MIN = 1;
-const WORKPLACE_MAX = 30;
-const WORKPLACE_NUMBERS = Array.from({ length: WORKPLACE_MAX }, (_, idx) => WORKPLACE_MIN + idx);
+const WORKPLACE_MAX = 200; // расширено: у отдела продаж РМ нумеруются до 97 (3 кабинета, 28–97)
+
+// ─── Раскладки кабинетов (РМ) по отделам ───────────────────────────────────────
+// Координаты — абсолютные пиксели внутри холста кабинета (как у текущей раскладки).
+const SEAT_W = 72;
+const SEAT_H = 56;
+const SEAT_GAP = 3;
+const SEAT_STEP_X = SEAT_W + SEAT_GAP; // 75
+const SEAT_STEP_Y = SEAT_H + SEAT_GAP; // 59
+
+// group: 'support' — тех-поддержка (текущая раскладка 1–30, один кабинет);
+//        'sales'   — отдел продаж (ОП), 3 кабинета, РМ 28–97.
+const WORKPLACE_CABINETS = [
+    {
+        id: 'support',
+        group: 'support',
+        name: 'Тех поддержка',
+        floor: '',
+        width: 290 + 7 * SEAT_STEP_X + 20,
+        height: 148 + 2 * SEAT_STEP_Y + 90 + SEAT_STEP_Y + 20,
+        blocks: [
+            { left: 290, top: 10, rows: [[27, 26, 25, 24, 23, 22]] },
+            { left: 10, top: 148, rows: [[30, 29, 28]] },
+            { left: 290, top: 148, rows: [[15, 16, 17, 18, 19, 20, 21], [14, 13, 12, 11, 10, 9, 8]] },
+            { left: 290, top: 148 + 2 * SEAT_STEP_Y + 90, rows: [[1, 2, 3, 4, 5, 6, 7]] },
+        ],
+    },
+    {
+        id: 'op17',
+        group: 'sales',
+        name: 'ОП',
+        floor: '17 этаж',
+        width: 300 + 6 * SEAT_STEP_X + 30,
+        height: 480,
+        blocks: [
+            { left: 300, top: 0, rows: [[70, 71, 72, 73, 74, 75]] },
+            { left: 300, top: 120, rows: [[81, 80, 79, 78, 77, 76], [82, 83, 84, 85, 86, 87]] },
+            { left: 300, top: 300, rows: [[93, 92, 91, 90, 89, 88]] },
+        ],
+        // Угловые (повёрнутые) РМ слева-внизу по диагонали.
+        freeSeats: [
+            { n: 97, left: 20, top: 295, rotate: -33 },
+            { n: 96, left: 68, top: 338, rotate: -33 },
+            { n: 95, left: 116, top: 381, rotate: -33 },
+            { n: 94, left: 200, top: 400, rotate: -33 },
+        ],
+    },
+    {
+        id: 'op2',
+        group: 'sales',
+        name: 'ОП 2',
+        floor: '18 этаж',
+        width: 20 + 6 * SEAT_STEP_X + 40 + SEAT_STEP_X + 20,
+        height: 40 + 2 * SEAT_STEP_Y + 70 + SEAT_STEP_Y + 30,
+        blocks: [
+            { left: 20, top: 40, rows: [[65, 64, 63, 62, 61, 60], [54, 55, 56, 57, 58, 59]] },
+            { left: 20, top: 40 + 2 * SEAT_STEP_Y + 70, rows: [[53, 52, 51, 50, 49, 48]] },
+            { left: 20 + 6 * SEAT_STEP_X + 40, top: 20, rows: [[66], [67], [68], [69]] },
+        ],
+    },
+    {
+        id: 'op3',
+        group: 'sales',
+        name: 'ОП 3 (Честный)',
+        floor: '18 этаж',
+        width: 20 + 8 * SEAT_STEP_X + 20,
+        height: 40 + 2 * SEAT_STEP_Y + 70 + SEAT_STEP_Y + 30,
+        blocks: [
+            { left: 20, top: 40, rows: [[47, 46, 45, 44, 43, 42], [36, 37, 38, 39, 40, 41]] },
+            { left: 20, top: 40 + 2 * SEAT_STEP_Y + 70, rows: [[35, 34, 33, 32, 31, 30, 29, 28]] },
+        ],
+    },
+];
+
+const cabinetSeatNumbers = (cabinet) => {
+    const out = [];
+    (cabinet?.blocks || []).forEach((b) => (b.rows || []).forEach((r) => r.forEach((n) => {
+        if (typeof n === 'number') out.push(n);
+    })));
+    (cabinet?.freeSeats || []).forEach((s) => { if (typeof s?.n === 'number') out.push(s.n); });
+    return out;
+};
+
+const cabinetLabel = (cabinet) => (cabinet?.floor ? `${cabinet.name} · ${cabinet.floor}` : cabinet?.name || '');
+
+const visibleCabinetsFor = ({ isAdmin, departmentCode }) => {
+    if (isAdmin) return WORKPLACE_CABINETS;
+    if (String(departmentCode || '').toLowerCase() === 'op') {
+        return WORKPLACE_CABINETS.filter((c) => c.group === 'sales');
+    }
+    return WORKPLACE_CABINETS.filter((c) => c.group === 'support');
+};
 
 const INPUT_CLASS =
     'mt-1 w-full rounded-lg border border-blue-200 bg-white px-3 py-2 text-sm text-gray-800 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-blue-400';
@@ -681,7 +771,7 @@ const CustomMultiSelect = memo(function CustomMultiSelect({ items, selectedIds, 
 const AddIssueModal = memo(function AddIssueModal({
     isOpen, onClose, onSubmit, submitting,
     editingIssue,
-    reasons, visibleOperators, visibleDirections,
+    reasons, visibleOperators, visibleDirections, workplaceOptions = [],
     createDate, setCreateDate,
     createStartTime, setCreateStartTime,
     createEndTime, setCreateEndTime,
@@ -779,10 +869,14 @@ const AddIssueModal = memo(function AddIssueModal({
                                     className={INPUT_CLASS}
                                 >
                                     <option value="">Не указано</option>
-                                    {WORKPLACE_NUMBERS.map((num) => (
-                                        <option key={`create-workplace-${num}`} value={num}>
-                                            РМ {num}
-                                        </option>
+                                    {workplaceOptions.map((grp) => (
+                                        <optgroup key={grp.id} label={grp.label}>
+                                            {grp.numbers.map((num) => (
+                                                <option key={`create-workplace-${num}`} value={num}>
+                                                    РМ {num}
+                                                </option>
+                                            ))}
+                                        </optgroup>
                                     ))}
                                 </select>
                             </label>
@@ -981,8 +1075,10 @@ const SeatBlock = memo(function SeatBlock({ rows, style, ...cellProps }) {
         >
             {rows.map((seats, i) => (
                 <div key={i} style={{ display: 'flex', gap: CELL_GAP }}>
-                    {seats.map((n) => (
-                        <WorkplaceSeat key={n} seatNumber={n} {...cellProps} />
+                    {seats.map((n, j) => (
+                        n === null || n === undefined
+                            ? <div key={`gap-${i}-${j}`} style={{ width: CELL_W, height: CELL_H }} />
+                            : <WorkplaceSeat key={n} seatNumber={n} {...cellProps} />
                     ))}
                 </div>
             ))}
@@ -990,31 +1086,46 @@ const SeatBlock = memo(function SeatBlock({ rows, style, ...cellProps }) {
     );
 });
 
-const WorkplaceVisualizationBlock = memo(function WorkplaceVisualizationBlock({
+// Холст одного кабинета — рисует его блоки и «свободные» (повёрнутые) РМ.
+const CabinetCanvas = memo(function CabinetCanvas({
+    cabinet,
     itemsByNumber,
     maxIncidents,
     selectedWorkplace,
     onSelectWorkplace,
 }) {
     const props = { itemsByNumber, maxIncidents, selectedWorkplace, onSelectWorkplace };
-    const W = MAIN_LEFT + 7 * (CELL_W + CELL_GAP) + 20;
-    const H = MIDDLE_TOP + 2 * (CELL_H + CELL_GAP) + 96 + CELL_H + 20;
+    const W = cabinet?.width || 600;
+    const H = cabinet?.height || 400;
 
     return (
-        <div className="rounded-xl border border-slate-300 bg-slate-50/80 p-3 overflow-x-auto">
+        <div className="rounded-xl border border-slate-300 bg-slate-50/80 p-3 overflow-auto">
             <div style={{ position: 'relative', width: W, height: H, minWidth: W }}>
-                <SeatBlock rows={[[27, 26, 25, 24, 23, 22]]} style={{ left: MAIN_LEFT, top: 10 }} {...props} />
-                <SeatBlock rows={[[30, 29, 28]]} style={{ left: 10, top: MIDDLE_TOP }} {...props} />
-                <SeatBlock
-                    rows={[[15, 16, 17, 18, 19, 20, 21], [14, 13, 12, 11, 10, 9, 8]]}
-                    style={{ left: MAIN_LEFT, top: MIDDLE_TOP }}
-                    {...props}
-                />
-                <SeatBlock
-                    rows={[[1, 2, 3, 4, 5, 6, 7]]}
-                    style={{ left: MAIN_LEFT, top: MIDDLE_TOP + 2 * (CELL_H + CELL_GAP) + 90 }}
-                    {...props}
-                />
+                {(cabinet?.blocks || []).map((b, i) => (
+                    <SeatBlock
+                        key={`block-${i}`}
+                        rows={b.rows}
+                        style={{
+                            left: b.left,
+                            top: b.top,
+                            ...(b.rotate ? { transform: `rotate(${b.rotate}deg)`, transformOrigin: 'top left' } : {}),
+                        }}
+                        {...props}
+                    />
+                ))}
+                {(cabinet?.freeSeats || []).map((s) => (
+                    <div
+                        key={`free-${s.n}`}
+                        style={{
+                            position: 'absolute',
+                            left: s.left,
+                            top: s.top,
+                            ...(s.rotate ? { transform: `rotate(${s.rotate}deg)`, transformOrigin: 'top left' } : {}),
+                        }}
+                    >
+                        <WorkplaceSeat seatNumber={s.n} {...props} />
+                    </div>
+                ))}
             </div>
         </div>
     );
@@ -1022,6 +1133,8 @@ const WorkplaceVisualizationBlock = memo(function WorkplaceVisualizationBlock({
 
 const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({
     rows,
+    cabinets,
+    seatUniverse,
     workplaceSettingsMap,
     canManageSupervisorFlags,
     updatingWorkplaceNumber,
@@ -1029,6 +1142,17 @@ const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({
 }) {
     const [selectedWorkplace, setSelectedWorkplace] = useState(null);
     const [detailsWorkplace, setDetailsWorkplace] = useState(null);
+    const [selectedCabinetId, setSelectedCabinetId] = useState(() => cabinets?.[0]?.id || null);
+
+    useEffect(() => {
+        if (!cabinets || cabinets.length === 0) { setSelectedCabinetId(null); return; }
+        setSelectedCabinetId((prev) => (cabinets.some((c) => c.id === prev) ? prev : cabinets[0].id));
+    }, [cabinets]);
+
+    const selectedCabinet = useMemo(
+        () => (cabinets || []).find((c) => c.id === selectedCabinetId) || (cabinets || [])[0] || null,
+        [cabinets, selectedCabinetId],
+    );
 
     const workplaceStats = useMemo(() => {
         const buckets = new Map();
@@ -1052,7 +1176,11 @@ const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({
             entry.rows.push(row);
         }
 
-        const items = WORKPLACE_NUMBERS.map((num) => {
+        const numberSet = new Set(Array.isArray(seatUniverse) ? seatUniverse : []);
+        for (const key of buckets.keys()) numberSet.add(key);
+        const allNumbers = [...numberSet].sort((a, b) => a - b);
+
+        const items = allNumbers.map((num) => {
             const entry = buckets.get(num);
             const setting = workplaceSettingsMap?.get(num);
             const base = entry || {
@@ -1094,7 +1222,7 @@ const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({
             totalIncidents,
             topItems,
         };
-    }, [rows, workplaceSettingsMap]);
+    }, [rows, workplaceSettingsMap, seatUniverse]);
 
     const selectedEntry = useMemo(() => {
         if (selectedWorkplace === null) return null;
@@ -1148,12 +1276,39 @@ const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({
                 </div>
 
                 <div className="p-5 space-y-4">
-                    <WorkplaceVisualizationBlock
-                        itemsByNumber={workplaceStats.itemsByNumber}
-                        maxIncidents={workplaceStats.maxIncidents}
-                        selectedWorkplace={selectedWorkplace}
-                        onSelectWorkplace={openWorkplaceDetails}
-                    />
+                    {cabinets && cabinets.length > 1 && (
+                        <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="mr-1 text-xs font-semibold uppercase tracking-wide text-slate-500">Кабинет:</span>
+                            {cabinets.map((c) => (
+                                <button
+                                    key={c.id}
+                                    type="button"
+                                    onClick={() => setSelectedCabinetId(c.id)}
+                                    className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
+                                        selectedCabinetId === c.id
+                                            ? 'bg-rose-600 text-white shadow'
+                                            : 'border border-rose-200 bg-rose-50 text-rose-800 hover:bg-rose-100'
+                                    }`}
+                                >
+                                    {c.name}{c.floor ? ` · ${c.floor}` : ''}
+                                </button>
+                            ))}
+                        </div>
+                    )}
+
+                    {selectedCabinet ? (
+                        <CabinetCanvas
+                            cabinet={selectedCabinet}
+                            itemsByNumber={workplaceStats.itemsByNumber}
+                            maxIncidents={workplaceStats.maxIncidents}
+                            selectedWorkplace={selectedWorkplace}
+                            onSelectWorkplace={openWorkplaceDetails}
+                        />
+                    ) : (
+                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
+                            Нет доступной раскладки кабинета.
+                        </div>
+                    )}
 
                     {workplaceStats.topItems.length > 0 && (
                         <div className="rounded-lg border border-rose-200 bg-rose-50/40 p-3">
@@ -1540,6 +1695,25 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
     const canDelete = isAdminLikeRole(role) || isSupervisorRole(role);
     const canManageWorkplaceSupervisorFlags = isAdminLikeRole(role);
 
+    // ── РМ: набор кабинетов по отделу (тех-поддержка / отдел продаж) ──
+    const departmentCode = String(user?.department_code ?? user?.departmentCode ?? '').toLowerCase();
+    const visibleCabinets = useMemo(
+        () => visibleCabinetsFor({ isAdmin: isAdminLikeRole(role), departmentCode }),
+        [role, departmentCode],
+    );
+    const workplaceOptions = useMemo(
+        () => visibleCabinets.map((c) => ({
+            id: c.id,
+            label: cabinetLabel(c),
+            numbers: [...new Set(cabinetSeatNumbers(c))].sort((a, b) => a - b),
+        })),
+        [visibleCabinets],
+    );
+    const seatUniverse = useMemo(
+        () => [...new Set(visibleCabinets.flatMap(cabinetSeatNumbers))].sort((a, b) => a - b),
+        [visibleCabinets],
+    );
+
     const showToastRef = useRef(showToast);
     useEffect(() => { showToastRef.current = showToast; }, [showToast]);
 
@@ -1904,6 +2078,7 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
                 reasons={reasons}
                 visibleOperators={visibleOperators}
                 visibleDirections={visibleDirections}
+                workplaceOptions={workplaceOptions}
                 createDate={createDate}          setCreateDate={setCreateDate}
                 createStartTime={createStartTime} setCreateStartTime={setCreateStartTime}
                 createEndTime={createEndTime}     setCreateEndTime={setCreateEndTime}
@@ -2025,10 +2200,14 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
                                 className={INPUT_CLASS}
                             >
                                 <option value="">Все РМ</option>
-                                {WORKPLACE_NUMBERS.map((num) => (
-                                    <option key={`filter-workplace-${num}`} value={num}>
-                                        РМ {num}
-                                    </option>
+                                {workplaceOptions.map((grp) => (
+                                    <optgroup key={grp.id} label={grp.label}>
+                                        {grp.numbers.map((num) => (
+                                            <option key={`filter-workplace-${num}`} value={num}>
+                                                РМ {num}
+                                            </option>
+                                        ))}
+                                    </optgroup>
                                 ))}
                             </select>
                         </label>
@@ -2176,6 +2355,8 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
                         ) : (
                             <WorkplaceAnalyticsPanel
                                 rows={rows}
+                                cabinets={visibleCabinets}
+                                seatUniverse={seatUniverse}
                                 workplaceSettingsMap={workplaceSettingsMap}
                                 canManageSupervisorFlags={canManageWorkplaceSupervisorFlags}
                                 updatingWorkplaceNumber={updatingWorkplaceNumber}

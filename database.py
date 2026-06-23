@@ -583,6 +583,10 @@ TECHNICAL_ISSUE_REASONS: List[str] = [
 ]
 TECHNICAL_ISSUE_REASONS_SET = set(TECHNICAL_ISSUE_REASONS)
 
+# Верхняя граница номера РМ. Раньше было 30 (раскладка тех-поддержки 1–30);
+# расширено до 200, т.к. у отдела продаж РМ нумеруются до 97 (3 кабинета, 28–97).
+TECHNICAL_ISSUE_WORKPLACE_MAX = 200
+
 # ─── IT-ticket catalog ─────────────────────────────────────────────────────────
 # Каталог тематик заявок в IT-отдел. Источник — согласованные документы
 # «Типы заявок в IT отдел от ОП» и «Типы заявок в IT отдел СЗоВ».
@@ -1825,11 +1829,32 @@ class Database:
             """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS technical_issue_workplace_settings (
-                    workplace_number INTEGER PRIMARY KEY CHECK (workplace_number BETWEEN 1 AND 30),
+                    workplace_number INTEGER PRIMARY KEY CHECK (workplace_number BETWEEN 1 AND 200),
                     for_supervisor BOOLEAN NOT NULL DEFAULT FALSE,
                     updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
                     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
+            """)
+            # Расширяем верхнюю границу РМ (раньше было 1..30) до 1..200 — у отдела
+            # продаж РМ нумеруются до 97. На существующих БД пересоздаём CHECK.
+            # Имя CHECK-констрейнта не угадываем: дропаем все CHECK на таблице и ставим новый.
+            cursor.execute("""
+                DO $$
+                DECLARE c text;
+                BEGIN
+                    FOR c IN
+                        SELECT conname FROM pg_constraint
+                        WHERE conrelid = 'technical_issue_workplace_settings'::regclass
+                          AND contype = 'c'
+                    LOOP
+                        EXECUTE format(
+                            'ALTER TABLE technical_issue_workplace_settings DROP CONSTRAINT %I', c
+                        );
+                    END LOOP;
+                    ALTER TABLE technical_issue_workplace_settings
+                        ADD CONSTRAINT technical_issue_workplace_settings_workplace_number_check
+                        CHECK (workplace_number BETWEEN 1 AND 200);
+                END $$;
             """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operator_offline_activities (
@@ -18230,10 +18255,10 @@ class Database:
         try:
             number = int(value)
         except (TypeError, ValueError):
-            raise ValueError(f"Invalid '{field_name}'. Use integer in range 1..30")
+            raise ValueError(f"Invalid '{field_name}'. Use integer in range 1..{TECHNICAL_ISSUE_WORKPLACE_MAX}")
 
-        if number < 1 or number > 30:
-            raise ValueError(f"Field '{field_name}' must be in range 1..30")
+        if number < 1 or number > TECHNICAL_ISSUE_WORKPLACE_MAX:
+            raise ValueError(f"Field '{field_name}' must be in range 1..{TECHNICAL_ISSUE_WORKPLACE_MAX}")
 
         return number
 
