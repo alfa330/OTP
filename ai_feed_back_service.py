@@ -399,79 +399,110 @@ def _extract_json_block(raw_text: str):
 
 # Коды ответа Gemini, при которых имеет смысл повторить запрос (перегрузка / временный сбой)
 GEMINI_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+# 404 = модель недоступна для ключа → пробуем следующую модель в цепочке
+GEMINI_FALLBACK_STATUS = GEMINI_RETRYABLE_STATUS | {404}
+
+# Цепочка моделей: если первая перегружена / недоступна / таймаутит — берём следующую.
+# У моделей раздельные пулы мощностей, поэтому перегрузка одной не означает перегрузку всех.
+DEFAULT_GEMINI_MODEL_CHAIN = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-flash-lite"]
 
 
-async def _call_gemini_json(full_prompt: str, timeout: float = 35.0, attempts: int = 3) -> dict | None:
-    """Вызывает Gemini и возвращает распарсенный JSON-объект.
+def _gemini_model_chain():
+    """Цепочка моделей; можно переопределить через env GEMINI_MODEL_CHAIN (через запятую)."""
+    raw = os.getenv("GEMINI_MODEL_CHAIN", "")
+    models = [m.strip() for m in raw.split(",") if m.strip()] if raw else []
+    return models or list(DEFAULT_GEMINI_MODEL_CHAIN)
 
-    Устойчив к временной перегрузке модели (503 «high demand»), 429 и таймаутам —
-    делает несколько попыток с экспоненциальной задержкой. Возвращает:
+
+async def _gemini_generate_once(model: str, payload: dict, timeout: float, attempts: int):
+    """Запрос к одной модели (с ретраями внутри). Возвращает (result, try_next).
+
+    try_next=True → имеет смысл попробовать следующую модель цепочки (перегрузка/таймаут/404).
+    result: распарсенный dict при успехе; {'error': <code>} или None при ошибке.
+    """
+    api_url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{model}:generateContent?key={GEMINI_API_KEY}"
+    )
+    for attempt in range(1, attempts + 1):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(api_url, json=payload)
+
+            if response.status_code in GEMINI_FALLBACK_STATUS:
+                logger.warning(
+                    f"IT-ticket Gemini {model} → {response.status_code} (попытка {attempt}/{attempts})"
+                )
+                if attempt < attempts and response.status_code in GEMINI_RETRYABLE_STATUS:
+                    await asyncio.sleep(min(2 ** attempt, 6))
+                    continue
+                return {"error": "ai_unavailable", "status": response.status_code}, True
+
+            response.raise_for_status()
+            result = response.json()
+            if "candidates" not in result or not result["candidates"]:
+                logger.error(f"Gemini {model}: пустой/заблокированный ответ (IT ticket).")
+                return {"error": "ai_blocked"}, False
+            candidate = result["candidates"][0]
+            raw_text = candidate.get("content", {}).get("parts", [{}])[0].get("text", "")
+            cleaned = _extract_json_block(raw_text)
+            try:
+                return json.loads(cleaned), False
+            except json.JSONDecodeError as e:
+                logger.error(f"IT-ticket JSON parse error ({model}): {e}. Cleaned: {cleaned[:300]}")
+                return {"error": "json_parse_error", "raw_response": raw_text}, False
+
+        except (httpx.TimeoutException, httpx.TransportError) as e:
+            logger.warning(
+                f"IT-ticket Gemini {model} network/timeout (попытка {attempt}/{attempts}): {e!r}"
+            )
+            if attempt < attempts:
+                await asyncio.sleep(min(2 ** attempt, 6))
+                continue
+            return {"error": "ai_timeout"}, True
+        except httpx.HTTPStatusError as e:
+            # Неретраебельная ошибка (например, 400) — общая для всех моделей, дальше не идём
+            logger.error(f"IT-ticket HTTP error ({model}): {e.response.status_code} - {e.response.text[:300]}")
+            return None, False
+        except Exception as e:
+            logger.exception(f"Unexpected error contacting Gemini ({model}, IT ticket): {e}")
+            return None, False
+
+    return {"error": "ai_unavailable"}, True
+
+
+async def _call_gemini_json(full_prompt: str, timeout: float = 30.0, attempts: int = 1) -> dict | None:
+    """Вызывает Gemini с ЦЕПОЧКОЙ моделей (fallback при перегрузке/таймауте/404).
+
+    Если первая модель отвечает 503 «high demand» / 429 / таймаутит / 404 — берётся
+    следующая модель из цепочки. Возвращает:
       - dict с результатом при успехе;
       - {'error': <code>} для понятных клиенту ошибок (ai_unavailable / ai_timeout /
         ai_blocked / json_parse_error);
-      - None при невосстановимой/неожиданной ошибке.
+      - None при невосстановимой/неожиданной ошибке (например, 400).
     """
     if not GEMINI_API_KEY:
         logger.error("Gemini API key is not configured.")
         return None
 
-    api_url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
-    )
     payload = {
         "contents": [{"parts": [{"text": full_prompt}]}],
         "generationConfig": {**generation_config, "maxOutputTokens": 8192},
         "safetySettings": safety_settings,
     }
 
-    last_status = None
-    for attempt in range(1, attempts + 1):
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(api_url, json=payload)
-
-            if response.status_code in GEMINI_RETRYABLE_STATUS:
-                last_status = response.status_code
-                logger.warning(
-                    f"IT-ticket Gemini {response.status_code} (попытка {attempt}/{attempts})"
-                )
-                if attempt < attempts:
-                    await asyncio.sleep(min(2 ** attempt, 8))
-                    continue
-                return {"error": "ai_unavailable", "status": response.status_code}
-
-            response.raise_for_status()
-            result = response.json()
-            if "candidates" not in result or not result["candidates"]:
-                logger.error("Gemini response empty or blocked (IT ticket).")
-                return {"error": "ai_blocked"}
-            candidate = result["candidates"][0]
-            raw_text = candidate.get("content", {}).get("parts", [{}])[0].get("text", "")
-            cleaned = _extract_json_block(raw_text)
-            try:
-                return json.loads(cleaned)
-            except json.JSONDecodeError as e:
-                logger.error(f"IT-ticket JSON parse error: {e}. Cleaned: {cleaned[:500]}")
-                return {"error": "json_parse_error", "raw_response": raw_text}
-
-        except (httpx.TimeoutException, httpx.TransportError) as e:
-            last_status = 'timeout'
-            logger.warning(
-                f"IT-ticket Gemini network/timeout (попытка {attempt}/{attempts}): {e!r}"
-            )
-            if attempt < attempts:
-                await asyncio.sleep(min(2 ** attempt, 8))
-                continue
-            return {"error": "ai_timeout"}
-        except httpx.HTTPStatusError as e:
-            logger.error(f"IT-ticket HTTP error: {e.response.status_code} - {e.response.text[:300]}")
-            return None
-        except Exception as e:
-            logger.exception(f"Unexpected error while contacting Gemini (IT ticket): {e}")
-            return None
-
-    return {"error": "ai_unavailable", "status": last_status}
+    chain = _gemini_model_chain()
+    last_error = {"error": "ai_unavailable"}
+    for idx, model in enumerate(chain):
+        result, try_next = await _gemini_generate_once(model, payload, timeout, attempts)
+        if not try_next:
+            return result
+        if isinstance(result, dict) and result.get("error"):
+            last_error = result
+        if idx + 1 < len(chain):
+            logger.warning(f"IT-ticket: переключаюсь на следующую модель после {model}")
+            await asyncio.sleep(0.5)
+    return last_error
 
 
 def _it_catalog_block(profile: str) -> str:
