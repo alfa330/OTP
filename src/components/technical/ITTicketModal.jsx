@@ -584,7 +584,7 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                 @keyframes itTicketIn { from { opacity:0; transform: scale(0.97) translateY(10px); } to { opacity:1; transform: scale(1) translateY(0); } }
             `}</style>
             <div
-                className="flex w-full max-w-3xl flex-col overflow-hidden rounded-3xl border border-white/60 bg-slate-50 shadow-2xl"
+                className="flex w-full max-w-5xl flex-col overflow-hidden rounded-3xl border border-white/60 bg-slate-50 shadow-2xl"
                 style={{ maxHeight: '94vh', animation: 'itTicketIn .22s ease' }}
             >
                 {/* Header */}
@@ -609,235 +609,262 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                 </div>
 
                 {/* Body */}
-                <div className="flex-1 space-y-4 overflow-y-auto p-5">
+                <div className="flex-1 overflow-y-auto p-5">
                     {loadingCatalog ? (
                         <div className="flex items-center gap-2 p-6 text-sm text-slate-500">
                             <FaIcon className="fas fa-spinner fa-spin text-indigo-500" style={{ width: '1em', height: '1em' }} />
                             Загрузка каталога…
                         </div>
                     ) : (
-                        <>
-                            {/* Profile + category */}
-                            <div className={CARD_CLASS}>
-                                <div className="flex flex-wrap items-center justify-between gap-2">
-                                    <span className={LABEL_CLASS}>Профиль (определён по отделу)</span>
-                                    <div className="inline-flex rounded-xl bg-slate-100 p-0.5">
-                                        {['op', 'szov'].map((p) => (
+                        <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+                            {/* ── ЛЕВАЯ КОЛОНКА — составление ── */}
+                            <div className="space-y-4">
+                                {/* Profile + category + description */}
+                                <div className={CARD_CLASS}>
+                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                        <span className={LABEL_CLASS}>Профиль (по отделу)</span>
+                                        <div className="inline-flex rounded-xl bg-slate-100 p-0.5">
+                                            {['op', 'szov'].map((p) => (
+                                                <button
+                                                    key={p}
+                                                    type="button"
+                                                    onClick={() => { setProfile(p); setCategoryName(''); setSubcategory(''); resetAfterCategoryChange(); }}
+                                                    className={`rounded-lg px-3 py-1 text-xs font-semibold transition ${profile === p ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                                                >
+                                                    {profileLabel(p)}{p === defaultProfile ? ' •' : ''}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                    <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                        <label className="block">
+                                            <span className={LABEL_CLASS}>Категория</span>
+                                            <select
+                                                value={categoryName}
+                                                onChange={(e) => { setCategoryName(e.target.value); setSubcategory(''); resetAfterCategoryChange(); }}
+                                                className={FIELD_CLASS}
+                                            >
+                                                <option value="">— выберите категорию —</option>
+                                                {categories.map((c) => (
+                                                    <option key={c.name} value={c.name}>{c.name}</option>
+                                                ))}
+                                            </select>
+                                        </label>
+                                        <label className="block">
+                                            <span className={LABEL_CLASS}>Тип проблемы</span>
+                                            <select
+                                                value={subcategory}
+                                                onChange={(e) => setSubcategory(e.target.value)}
+                                                className={FIELD_CLASS}
+                                                disabled={subItems.length === 0}
+                                            >
+                                                <option value="">{subItems.length ? '— выберите тип —' : 'сначала выберите категорию'}</option>
+                                                {subItems.map((it, i) => (
+                                                    <option key={`${categoryName}-${i}`} value={it}>{it}</option>
+                                                ))}
+                                            </select>
+                                        </label>
+                                    </div>
+
+                                    <label className="mt-3 block">
+                                        <span className={LABEL_CLASS}>Опишите проблему своими словами</span>
+                                        <textarea
+                                            value={description}
+                                            onChange={(e) => setDescription(e.target.value)}
+                                            rows={3}
+                                            placeholder="Например: у оператора на РМ 12 со вчерашнего дня нет звука в Oktell, перезагрузка не помогла"
+                                            className={FIELD_CLASS}
+                                        />
+                                    </label>
+
+                                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => callAi('draft')}
+                                            disabled={aiBusy}
+                                            className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold text-white transition ${aiBusy ? 'bg-indigo-400' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+                                        >
+                                            <FaIcon className={`fas ${aiMode === 'draft' ? 'fa-spinner fa-spin' : 'fa-sparkles'}`} style={{ width: '0.9em', height: '0.9em' }} />
+                                            {aiMode === 'draft' ? 'ИИ думает…' : 'Сформировать с ИИ'}
+                                        </button>
+                                        <span className="text-[12px] text-slate-400">Подберёт поля и задаст вопросы, если чего-то не хватает</span>
+                                    </div>
+                                </div>
+
+                                {/* AI clarifying questions */}
+                                {questions.length > 0 && (
+                                    <div className="rounded-2xl border border-amber-200 bg-amber-50/70 p-4">
+                                        <div className="flex items-center gap-2 text-sm font-bold text-amber-800">
+                                            <FaIcon className="fas fa-circle-question" style={{ width: '1em', height: '1em' }} />
+                                            Уточняющие вопросы от ИИ
+                                        </div>
+                                        <div className="mt-3 space-y-3">
+                                            {questions.map((q, i) => (
+                                                <label key={q.id || `q-${i}`} className="block">
+                                                    <span className="text-[13px] font-medium text-amber-900">{q.question}</span>
+                                                    {q.why && <span className="block text-[11px] text-amber-700/70">{q.why}</span>}
+                                                    <input
+                                                        type="text"
+                                                        value={answers[q.id || `q-${i}`] ?? ''}
+                                                        onChange={(e) => setAnswer(q.id || `q-${i}`, e.target.value)}
+                                                        className={FIELD_CLASS}
+                                                        placeholder="Ваш ответ (можно пропустить)"
+                                                    />
+                                                </label>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* AI-generated form fields */}
+                                {aiFields.length > 0 && (
+                                    <div className={CARD_CLASS}>
+                                        <div className="flex items-center gap-2 text-sm font-bold text-slate-700">
+                                            <FaIcon className="fas fa-list text-indigo-500" style={{ width: '1em', height: '1em' }} />
+                                            Детали заявки
+                                        </div>
+                                        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                            {aiFields.map((f) => (
+                                                <DynamicField key={f.key} field={f} value={fieldValues[f.key]} onChange={setFieldValue} />
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Continue CTA — собрать готовый текст с учётом ответов */}
+                                {(questions.length > 0 || aiFields.length > 0) && (
+                                    <div className="rounded-2xl border border-indigo-200 bg-indigo-50/60 p-3">
+                                        <button
+                                            type="button"
+                                            onClick={() => callAi('finalize')}
+                                            disabled={aiBusy}
+                                            className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold text-white transition ${aiBusy ? 'bg-indigo-400' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+                                        >
+                                            <FaIcon className={`fas ${aiMode === 'finalize' ? 'fa-spinner fa-spin' : (composed ? 'fa-rotate' : 'fa-circle-check')}`} style={{ width: '0.95em', height: '0.95em' }} />
+                                            {aiMode === 'finalize' ? 'Собираю заявку…' : (composed ? 'Пересобрать заявку с ИИ' : 'Продолжить — собрать заявку')}
+                                        </button>
+                                        <p className="mt-1.5 text-center text-[11px] text-indigo-500/80">
+                                            ИИ учтёт ответы и детали и соберёт готовый текст справа
+                                        </p>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* ── ПРАВАЯ КОЛОНКА — готовый тикет ── */}
+                            <div className="space-y-4">
+                                {/* Priority */}
+                                <div className={CARD_CLASS}>
+                                    <span className={LABEL_CLASS}>Приоритет</span>
+                                    <div className="mt-2 flex flex-wrap gap-2">
+                                        {PRIORITY_ORDER.map((p) => (
                                             <button
                                                 key={p}
                                                 type="button"
-                                                onClick={() => { setProfile(p); setCategoryName(''); setSubcategory(''); resetAfterCategoryChange(); }}
-                                                className={`rounded-lg px-3 py-1 text-xs font-semibold transition ${profile === p ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                                                onClick={() => setPriority(p)}
+                                                className={`rounded-full border px-3 py-1 text-xs font-semibold transition ${priority === p ? PRIORITY_META[p].cls : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50'}`}
                                             >
-                                                {profileLabel(p)}{p === defaultProfile ? ' •' : ''}
+                                                {PRIORITY_META[p].label}
                                             </button>
                                         ))}
                                     </div>
                                 </div>
 
-                                <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-                                    <label className="block">
-                                        <span className={LABEL_CLASS}>Категория</span>
-                                        <select
-                                            value={categoryName}
-                                            onChange={(e) => { setCategoryName(e.target.value); setSubcategory(''); resetAfterCategoryChange(); }}
-                                            className={FIELD_CLASS}
-                                        >
-                                            <option value="">— выберите категорию —</option>
-                                            {categories.map((c) => (
-                                                <option key={c.name} value={c.name}>{c.name}</option>
-                                            ))}
-                                        </select>
-                                    </label>
-                                    <label className="block">
-                                        <span className={LABEL_CLASS}>Тип проблемы</span>
-                                        <select
-                                            value={subcategory}
-                                            onChange={(e) => setSubcategory(e.target.value)}
-                                            className={FIELD_CLASS}
-                                            disabled={subItems.length === 0}
-                                        >
-                                            <option value="">{subItems.length ? '— выберите тип —' : 'сначала выберите категорию'}</option>
-                                            {subItems.map((it, i) => (
-                                                <option key={`${categoryName}-${i}`} value={it}>{it}</option>
-                                            ))}
-                                        </select>
-                                    </label>
-                                </div>
-
-                                <label className="mt-3 block">
-                                    <span className={LABEL_CLASS}>Опишите проблему своими словами</span>
-                                    <textarea
-                                        value={description}
-                                        onChange={(e) => setDescription(e.target.value)}
-                                        rows={3}
-                                        placeholder="Например: у оператора на РМ 12 со вчерашнего дня нет звука в Oktell, перезагрузка не помогла"
-                                        className={FIELD_CLASS}
-                                    />
-                                </label>
-
-                                <div className="mt-3 flex flex-wrap items-center gap-2">
-                                    <button
-                                        type="button"
-                                        onClick={() => callAi('draft')}
-                                        disabled={aiBusy}
-                                        className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold text-white transition ${aiBusy ? 'bg-indigo-400' : 'bg-indigo-600 hover:bg-indigo-700'}`}
-                                    >
-                                        <FaIcon className={`fas ${aiMode === 'draft' ? 'fa-spinner fa-spin' : 'fa-sparkles'}`} style={{ width: '0.9em', height: '0.9em' }} />
-                                        {aiMode === 'draft' ? 'ИИ думает…' : 'Сформировать с ИИ'}
-                                    </button>
-                                    <span className="text-[12px] text-slate-400">ИИ подберёт поля и задаст вопросы, если чего-то не хватает</span>
-                                </div>
-                            </div>
-
-                            {/* AI clarifying questions */}
-                            {questions.length > 0 && (
-                                <div className="rounded-2xl border border-amber-200 bg-amber-50/70 p-4">
-                                    <div className="flex items-center gap-2 text-sm font-bold text-amber-800">
-                                        <FaIcon className="fas fa-circle-question" style={{ width: '1em', height: '1em' }} />
-                                        Уточняющие вопросы от ИИ
-                                    </div>
-                                    <div className="mt-3 space-y-3">
-                                        {questions.map((q, i) => (
-                                            <label key={q.id || `q-${i}`} className="block">
-                                                <span className="text-[13px] font-medium text-amber-900">{q.question}</span>
-                                                {q.why && <span className="block text-[11px] text-amber-700/70">{q.why}</span>}
-                                                <input
-                                                    type="text"
-                                                    value={answers[q.id || `q-${i}`] ?? ''}
-                                                    onChange={(e) => setAnswer(q.id || `q-${i}`, e.target.value)}
-                                                    className={FIELD_CLASS}
-                                                    placeholder="Ваш ответ"
-                                                />
-                                            </label>
-                                        ))}
-                                    </div>
-                                </div>
-                            )}
-
-                            {/* AI-generated form fields */}
-                            {aiFields.length > 0 && (
+                                {/* Preview / final text */}
                                 <div className={CARD_CLASS}>
-                                    <div className="flex items-center gap-2 text-sm font-bold text-slate-700">
-                                        <FaIcon className="fas fa-list text-indigo-500" style={{ width: '1em', height: '1em' }} />
-                                        Детали заявки
-                                    </div>
-                                    <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-                                        {aiFields.map((f) => (
-                                            <DynamicField key={f.key} field={f} value={fieldValues[f.key]} onChange={setFieldValue} />
-                                        ))}
-                                    </div>
-                                </div>
-                            )}
-
-                            {/* Priority */}
-                            <div className={CARD_CLASS}>
-                                <span className={LABEL_CLASS}>Приоритет</span>
-                                <div className="mt-2 flex flex-wrap gap-2">
-                                    {PRIORITY_ORDER.map((p) => (
+                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                        <span className={LABEL_CLASS}>
+                                            Текст заявки {composed && <span className="text-emerald-600">· готово</span>}
+                                        </span>
                                         <button
-                                            key={p}
                                             type="button"
-                                            onClick={() => setPriority(p)}
-                                            className={`rounded-full border px-3 py-1 text-xs font-semibold transition ${priority === p ? PRIORITY_META[p].cls : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50'}`}
+                                            onClick={() => callAi('finalize')}
+                                            disabled={aiBusy}
+                                            className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition ${aiBusy ? 'border-slate-200 text-slate-400' : 'border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100'}`}
                                         >
-                                            {PRIORITY_META[p].label}
+                                            <FaIcon className={`fas ${aiMode === 'finalize' ? 'fa-spinner fa-spin' : 'fa-sparkles'}`} style={{ width: '0.8em', height: '0.8em' }} />
+                                            {aiMode === 'finalize' ? 'Оформляю…' : 'Оформить с ИИ'}
                                         </button>
-                                    ))}
+                                    </div>
+                                    <textarea
+                                        value={previewText}
+                                        onChange={(e) => setPreviewText(e.target.value)}
+                                        rows={14}
+                                        placeholder="Здесь появится готовый текст заявки. Можно отредактировать вручную перед отправкой."
+                                        className={FIELD_CLASS + ' font-mono text-[12.5px] leading-relaxed'}
+                                    />
+                                    <p className="mt-1 text-[11px] text-slate-400">Разметка Telegram: &lt;b&gt;жирный&lt;/b&gt;, &lt;i&gt;курсив&lt;/i&gt;, &lt;code&gt;код&lt;/code&gt;.</p>
+                                </div>
+
+                                {/* Channel (закрепляет админ / глава отдела) */}
+                                <div className={CARD_CLASS}>
+                                    <div className="flex items-center justify-between gap-2">
+                                        <span className={LABEL_CLASS}>Канал · «{profileLabel(profile)}»</span>
+                                        <button type="button" onClick={() => { loadChannels(); refreshMeta(); }} className="text-[12px] font-medium text-indigo-600 hover:text-indigo-700">
+                                            <FaIcon className="fas fa-rotate" style={{ width: '0.8em', height: '0.8em' }} /> Обновить
+                                        </button>
+                                    </div>
+
+                                    {channelReady ? (
+                                        <div className="mt-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2">
+                                            <div className="flex items-center gap-2 text-sm font-semibold text-emerald-800">
+                                                <FaIcon className="fas fa-paper-plane" style={{ width: '0.9em', height: '0.9em' }} />
+                                                {activePin.channel_title || 'Канал закреплён'}
+                                            </div>
+                                            <div className="mt-0.5 text-[11px] text-emerald-700/80">
+                                                {activePin.pinned_by_name
+                                                    ? `Закрепил: ${activePin.pinned_by_name}${activePin.pinned_at ? ` · ${activePin.pinned_at}` : ''}`
+                                                    : 'Закреплено'}
+                                            </div>
+                                        </div>
+                                    ) : activePin?.channel_id ? (
+                                        <div className="mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] text-amber-800">
+                                            Закреплённый канал отключён. {canPin ? 'Выберите активный канал ниже.' : 'Обратитесь к админу или главе отдела.'}
+                                        </div>
+                                    ) : (
+                                        <div className="mt-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-[12px] text-rose-600">
+                                            Канал ещё не закреплён. {canPin ? 'Выберите и закрепите канал ниже.' : 'Отправка недоступна — канал закрепляет админ или глава отдела.'}
+                                        </div>
+                                    )}
+
+                                    {canPin && (
+                                        <div className="mt-3 space-y-2">
+                                            <span className={LABEL_CLASS}>Закрепить канал для этого профиля</span>
+                                            <div className="flex flex-wrap gap-2">
+                                                <select
+                                                    value={pinDraftId}
+                                                    onChange={(e) => setPinDraftId(e.target.value)}
+                                                    className={FIELD_CLASS + ' mt-0 flex-1'}
+                                                >
+                                                    <option value="">— не закреплён —</option>
+                                                    {activeChannels.map((c) => (
+                                                        <option key={c.id} value={c.id}>{c.title || `Чат ${c.chat_id || c.id}`}</option>
+                                                    ))}
+                                                </select>
+                                                <button
+                                                    type="button"
+                                                    onClick={pinChannel}
+                                                    disabled={pinning || String(activePin?.channel_id || '') === String(pinDraftId || '')}
+                                                    className={`shrink-0 inline-flex items-center gap-2 rounded-xl px-4 text-sm font-semibold text-white transition ${(pinning || String(activePin?.channel_id || '') === String(pinDraftId || '')) ? 'bg-indigo-300' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+                                                >
+                                                    <FaIcon className={`fas ${pinning ? 'fa-spinner fa-spin' : 'fa-paperclip'}`} style={{ width: '0.85em', height: '0.85em' }} />
+                                                    {pinning ? 'Сохранение…' : 'Закрепить'}
+                                                </button>
+                                            </div>
+                                            {activeChannels.length === 0 && (
+                                                <p className="text-[12px] text-rose-500">
+                                                    Нет активных каналов. {canManage ? 'Добавьте канал ниже или добавьте бота в группу.' : 'Добавьте бота в нужную группу — он появится здесь автоматически.'}
+                                                </p>
+                                            )}
+                                        </div>
+                                    )}
                                 </div>
                             </div>
 
-                            {/* Preview / final text */}
-                            <div className={CARD_CLASS}>
-                                <div className="flex flex-wrap items-center justify-between gap-2">
-                                    <span className={LABEL_CLASS}>Текст заявки {composed && <span className="text-emerald-600">· готово</span>}</span>
-                                    <button
-                                        type="button"
-                                        onClick={() => callAi('finalize')}
-                                        disabled={aiBusy}
-                                        className={`inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${aiBusy ? 'border-slate-200 text-slate-400' : 'border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100'}`}
-                                    >
-                                        <FaIcon className={`fas ${aiMode === 'finalize' ? 'fa-spinner fa-spin' : 'fa-circle-check'}`} style={{ width: '0.85em', height: '0.85em' }} />
-                                        {aiMode === 'finalize' ? 'Оформляю…' : 'Проверить и оформить с ИИ'}
-                                    </button>
-                                </div>
-                                <textarea
-                                    value={previewText}
-                                    onChange={(e) => setPreviewText(e.target.value)}
-                                    rows={8}
-                                    placeholder="Здесь появится готовый текст заявки. Можно отредактировать вручную перед отправкой."
-                                    className={FIELD_CLASS + ' font-mono text-[12.5px] leading-relaxed'}
-                                />
-                                <p className="mt-1 text-[11px] text-slate-400">Допустима простая разметка Telegram: &lt;b&gt;жирный&lt;/b&gt;, &lt;i&gt;курсив&lt;/i&gt;, &lt;code&gt;код&lt;/code&gt;.</p>
-                            </div>
-
-                            {/* Channel (закрепляет админ / глава отдела) */}
-                            <div className={CARD_CLASS}>
-                                <div className="flex items-center justify-between gap-2">
-                                    <span className={LABEL_CLASS}>Канал для отправки · профиль «{profileLabel(profile)}»</span>
-                                    <button type="button" onClick={() => { loadChannels(); refreshMeta(); }} className="text-[12px] font-medium text-indigo-600 hover:text-indigo-700">
-                                        <FaIcon className="fas fa-rotate" style={{ width: '0.8em', height: '0.8em' }} /> Обновить
-                                    </button>
-                                </div>
-
-                                {/* Текущий закреплённый канал (видно всем) */}
-                                {channelReady ? (
-                                    <div className="mt-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2">
-                                        <div className="flex items-center gap-2 text-sm font-semibold text-emerald-800">
-                                            <FaIcon className="fas fa-paper-plane" style={{ width: '0.9em', height: '0.9em' }} />
-                                            {activePin.channel_title || 'Канал закреплён'}
-                                        </div>
-                                        <div className="mt-0.5 text-[11px] text-emerald-700/80">
-                                            {activePin.pinned_by_name
-                                                ? `Закрепил: ${activePin.pinned_by_name}${activePin.pinned_at ? ` · ${activePin.pinned_at}` : ''}`
-                                                : 'Закреплено'}
-                                        </div>
-                                    </div>
-                                ) : activePin?.channel_id ? (
-                                    <div className="mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] text-amber-800">
-                                        Закреплённый канал отключён. {canPin ? 'Выберите активный канал ниже.' : 'Обратитесь к админу или главе отдела.'}
-                                    </div>
-                                ) : (
-                                    <div className="mt-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-[12px] text-rose-600">
-                                        Канал ещё не закреплён. {canPin ? 'Выберите и закрепите канал ниже.' : 'Отправка недоступна — канал закрепляет админ или глава отдела.'}
-                                    </div>
-                                )}
-
-                                {/* Закрепление канала (админ / глава отдела) */}
-                                {canPin && (
-                                    <div className="mt-3 space-y-2">
-                                        <span className={LABEL_CLASS}>Закрепить канал для этого профиля</span>
-                                        <div className="flex flex-wrap gap-2">
-                                            <select
-                                                value={pinDraftId}
-                                                onChange={(e) => setPinDraftId(e.target.value)}
-                                                className={FIELD_CLASS + ' mt-0 flex-1'}
-                                            >
-                                                <option value="">— не закреплён —</option>
-                                                {activeChannels.map((c) => (
-                                                    <option key={c.id} value={c.id}>{c.title || `Чат ${c.chat_id || c.id}`}</option>
-                                                ))}
-                                            </select>
-                                            <button
-                                                type="button"
-                                                onClick={pinChannel}
-                                                disabled={pinning || String(activePin?.channel_id || '') === String(pinDraftId || '')}
-                                                className={`shrink-0 inline-flex items-center gap-2 rounded-xl px-4 text-sm font-semibold text-white transition ${(pinning || String(activePin?.channel_id || '') === String(pinDraftId || '')) ? 'bg-indigo-300' : 'bg-indigo-600 hover:bg-indigo-700'}`}
-                                            >
-                                                <FaIcon className={`fas ${pinning ? 'fa-spinner fa-spin' : 'fa-paperclip'}`} style={{ width: '0.85em', height: '0.85em' }} />
-                                                {pinning ? 'Сохранение…' : 'Закрепить'}
-                                            </button>
-                                        </div>
-                                        {activeChannels.length === 0 && (
-                                            <p className="text-[12px] text-rose-500">
-                                                Нет активных каналов. {canManage ? 'Добавьте канал ниже или добавьте бота в группу.' : 'Добавьте бота в нужную группу — он появится здесь автоматически.'}
-                                            </p>
-                                        )}
-                                    </div>
-                                )}
-
-                                {canManage && (
-                                    <div className="mt-3">
+                            {/* ── Конфигурация (админ / глава отдела) — на всю ширину ── */}
+                            {(canManage || canEditInstructions) && (
+                                <div className="space-y-4 lg:col-span-2">
+                                    {canManage && (
                                         <ChannelManager
                                             apiBaseUrl={apiBaseUrl}
                                             buildHeaders={buildHeaders}
@@ -845,19 +872,17 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                                             channels={channels}
                                             onChannelsChanged={() => { loadChannels(); refreshMeta(); }}
                                         />
-                                    </div>
-                                )}
-                            </div>
-
-                            {/* AI instructions (admin / department head) */}
-                            {canEditInstructions && (
-                                <InstructionsEditor
-                                    apiBaseUrl={apiBaseUrl}
-                                    buildHeaders={buildHeaders}
-                                    notify={toast}
-                                />
+                                    )}
+                                    {canEditInstructions && (
+                                        <InstructionsEditor
+                                            apiBaseUrl={apiBaseUrl}
+                                            buildHeaders={buildHeaders}
+                                            notify={toast}
+                                        />
+                                    )}
+                                </div>
                             )}
-                        </>
+                        </div>
                     )}
                 </div>
 
