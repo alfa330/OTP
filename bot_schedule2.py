@@ -41,6 +41,7 @@ from database import (
     IT_TICKET_CATALOG,
     IT_TICKET_DEFAULT_PROFILE,
     resolve_it_ticket_profile,
+    resolve_it_ticket_profile_strict,
     SHIFT_AUCTION_TEST_EVENT_NOTIFY_CHANNEL,
     PROXY_STATUS_LABELS,
     normalize_proxy_status_value,
@@ -16932,6 +16933,52 @@ def _resolve_it_ticket_profile_for_requester(requester_id):
     return IT_TICKET_DEFAULT_PROFILE, None
 
 
+def _strict_it_ticket_profile_for_requester(requester_id):
+    """СТРОГИЙ профиль главы отдела для проверки прав (op/szov или None).
+
+    В отличие от _resolve_it_ticket_profile_for_requester (который для UI-дефолта
+    откатывается на 'op'), здесь без fallback: если отдел не сопоставляется однозначно
+    с IT-профилем — возвращаем None, чтобы глава непрофильного отдела не получил прав
+    на чужой профиль.
+    """
+    try:
+        dept_id = _headed_department_id(requester_id) or _department_scope_id_for_requester(requester_id)
+        if dept_id:
+            dept = db.get_department_by_id(int(dept_id))
+            if dept:
+                return resolve_it_ticket_profile_strict(dept.get('code'), dept.get('name'))
+    except Exception:
+        logging.debug("strict IT-ticket profile resolution failed", exc_info=True)
+    return None
+
+
+def _it_ticket_can_edit_instructions(requester_id, role):
+    """Инструкции к ИИ редактируют только админы и главы профильных отделов."""
+    if _is_admin_role(role):
+        return True
+    return _strict_it_ticket_profile_for_requester(requester_id) in ('op', 'szov')
+
+
+def _it_ticket_editable_profiles(requester_id, role):
+    """Какие профили инструкций может редактировать запросивший.
+
+    Админ — общие + оба профиля. Глава отдела — ТОЛЬКО профиль своего отдела
+    (строгое сопоставление; непрофильный отдел → []). Общие инструкции — только админ.
+    """
+    if _is_admin_role(role):
+        return ['common', 'op', 'szov']
+    profile = _strict_it_ticket_profile_for_requester(requester_id)
+    return [profile] if profile in ('op', 'szov') else []
+
+
+def _it_ticket_pinnable_profiles(requester_id, role):
+    """Кто может закреплять канал: админ — оба профиля, глава отдела — только свой (строго)."""
+    if _is_admin_role(role):
+        return ['op', 'szov']
+    profile = _strict_it_ticket_profile_for_requester(requester_id)
+    return [profile] if profile in ('op', 'szov') else []
+
+
 def _tg_get_chat(chat_id):
     token = os.getenv('BOT_TOKEN')
     if not token:
@@ -16998,15 +17045,71 @@ def it_ticket_catalog():
         if err:
             return err
         profile, dept = _resolve_it_ticket_profile_for_requester(requester_id)
+        pinned_raw = db.get_it_ticket_pinned_channels()
+        # Скрываем chat_id из публичного ответа — клиенту он не нужен
+        pinned = {}
+        for prof_key, info in (pinned_raw or {}).items():
+            if not info:
+                continue
+            pinned[prof_key] = {
+                'channel_id': info.get('channel_id'),
+                'channel_title': info.get('channel_title'),
+                'channel_is_active': info.get('channel_is_active'),
+                'pinned_by_name': info.get('pinned_by_name'),
+                'pinned_at': info.get('pinned_at'),
+            }
         return jsonify({
             "status": "success",
             "default_profile": profile,
             "department": {"code": (dept or {}).get('code'), "name": (dept or {}).get('name')} if dept else None,
             "catalog": IT_TICKET_CATALOG,
             "priorities": IT_TICKET_PRIORITY_LABELS,
+            "pinned": pinned,
+            "pinnable_profiles": _it_ticket_pinnable_profiles(requester_id, role),
         }), 200
     except Exception as e:
         logging.error(f"Error fetching IT-ticket catalog: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/it_tickets/pinned', methods=['PUT', 'POST'])
+@require_api_key
+def it_ticket_pin_channel():
+    try:
+        requester_id, requester, role, err = _it_ticket_authorize()
+        if err:
+            return err
+        payload = request.get_json(silent=True) or {}
+        profile = str(payload.get('profile') or '').strip().lower()
+        if profile not in ('op', 'szov'):
+            return jsonify({"error": "Неизвестный профиль"}), 400
+        if profile not in _it_ticket_pinnable_profiles(requester_id, role):
+            return jsonify({"error": "Закреплять канал может только админ или глава отдела (для своего профиля)"}), 403
+
+        channel_id = payload.get('channel_id')
+        if channel_id is not None and str(channel_id).strip() != '':
+            channel = db.get_it_ticket_channel(channel_id)
+            if not channel:
+                return jsonify({"error": "Канал не найден"}), 404
+            if not channel.get('is_active'):
+                return jsonify({"error": "Нельзя закрепить отключённый канал"}), 400
+
+        item = db.set_it_ticket_pinned_channel(profile, channel_id, requester_id)
+        # Прячем chat_id из ответа
+        if item:
+            item = {
+                'profile': item.get('profile'),
+                'channel_id': item.get('channel_id'),
+                'channel_title': item.get('channel_title'),
+                'channel_is_active': item.get('channel_is_active'),
+                'pinned_by_name': item.get('pinned_by_name'),
+                'pinned_at': item.get('pinned_at'),
+            }
+        return jsonify({"status": "success", "item": item}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error pinning IT-ticket channel: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 
@@ -17161,7 +17264,8 @@ def it_ticket_ai_assist():
             fut = asyncio.run_coroutine_threadsafe(
                 generate_it_ticket_with_ai(mode, ai_payload), loop
             )
-            result = fut.result(timeout=120)
+            # Запас под повторные попытки к Gemini (3 × 35с + бэкофф)
+            result = fut.result(timeout=150)
         else:
             result = asyncio.run(generate_it_ticket_with_ai(mode, ai_payload))
 
@@ -17184,15 +17288,6 @@ def it_ticket_send():
             return err
         payload = request.get_json(silent=True) or {}
 
-        channel_id = payload.get('channel_id')
-        try:
-            channel_id = int(channel_id)
-        except (TypeError, ValueError):
-            return jsonify({"error": "Выберите канал для отправки"}), 400
-        channel = db.get_it_ticket_channel(channel_id)
-        if not channel or not channel.get('is_active'):
-            return jsonify({"error": "Канал не найден или отключён"}), 400
-
         body = str(payload.get('body') or '').strip()
         if not body:
             return jsonify({"error": "Пустой текст заявки"}), 400
@@ -17200,6 +17295,13 @@ def it_ticket_send():
         profile = str(payload.get('profile') or '').strip().lower()
         if profile not in IT_TICKET_CATALOG:
             profile = IT_TICKET_DEFAULT_PROFILE
+
+        # Канал берётся из закреплённого админом/главой отдела для профиля,
+        # а не выбирается отправителем — так гарантируется единый адрес заявок.
+        channel = db.get_it_ticket_pinned_channel(profile)
+        if not channel:
+            return jsonify({"error": "Канал для отправки не закреплён. Обратитесь к администратору или главе отдела."}), 400
+
         category = str(payload.get('category') or '').strip()
         subcategory = str(payload.get('subcategory') or '').strip()
         priority = str(payload.get('priority') or '').strip().lower()
@@ -17290,6 +17392,63 @@ def it_ticket_history():
         return jsonify({"status": "success", "items": items}), 200
     except Exception as e:
         logging.error(f"Error listing IT tickets: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/it_tickets/instructions', methods=['GET', 'OPTIONS'])
+@require_api_key
+def it_ticket_instructions_list():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    try:
+        requester_id, requester, role, err = _it_ticket_authorize()
+        if err:
+            return err
+        if not _it_ticket_can_edit_instructions(requester_id, role):
+            return jsonify({"error": "Только админ или глава отдела могут просматривать инструкции"}), 403
+        editable = _it_ticket_editable_profiles(requester_id, role)
+        items = db.get_it_ticket_instructions()
+        return jsonify({
+            "status": "success",
+            "items": items,
+            "editable_profiles": editable,
+        }), 200
+    except Exception as e:
+        logging.error(f"Error listing IT-ticket instructions: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/it_tickets/instructions', methods=['PUT', 'POST'])
+@require_api_key
+def it_ticket_instructions_update():
+    try:
+        requester_id, requester, role, err = _it_ticket_authorize()
+        if err:
+            return err
+        if not _it_ticket_can_edit_instructions(requester_id, role):
+            return jsonify({"error": "Только админ или глава отдела могут редактировать инструкции"}), 403
+
+        payload = request.get_json(silent=True) or {}
+        profile = str(payload.get('profile') or '').strip().lower()
+        if profile not in ('common', 'op', 'szov'):
+            return jsonify({"error": "Неизвестный профиль инструкций"}), 400
+
+        editable = _it_ticket_editable_profiles(requester_id, role)
+        if profile not in editable:
+            return jsonify({"error": "Недостаточно прав для редактирования этого профиля"}), 403
+
+        instructions = payload.get('instructions')
+        if instructions is None:
+            return jsonify({"error": "Передайте текст инструкций"}), 400
+        if len(str(instructions)) > 8000:
+            return jsonify({"error": "Слишком длинный текст инструкций (макс. 8000 символов)"}), 400
+
+        item = db.set_it_ticket_instructions(profile, instructions, requester_id)
+        return jsonify({"status": "success", "item": item}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error updating IT-ticket instructions: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 

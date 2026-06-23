@@ -16,6 +16,16 @@ const PRIORITY_META = {
 };
 const PRIORITY_ORDER = ['low', 'medium', 'high', 'critical'];
 
+// Понятные сообщения для кодов ошибок ИИ от бэкенда
+const AI_ERROR_MESSAGES = {
+    ai_unavailable: 'Сервис ИИ (Google Gemini) сейчас перегружен. Подождите 10–20 секунд и нажмите ещё раз — либо заполните поля и отправьте заявку вручную.',
+    ai_timeout: 'ИИ слишком долго отвечает (перегрузка). Попробуйте ещё раз — либо отправьте заявку вручную.',
+    ai_blocked: 'ИИ не смог сформировать ответ. Уточните описание и попробуйте снова.',
+    json_parse_error: 'ИИ вернул некорректный ответ. Попробуйте ещё раз.',
+    ai_failed: 'Сервис ИИ временно недоступен. Попробуйте позже — либо отправьте заявку вручную.',
+};
+const aiErrorText = (code) => AI_ERROR_MESSAGES[code] || 'ИИ не смог обработать запрос. Попробуйте ещё раз или заполните заявку вручную.';
+
 // ─── Dynamic field renderer ─────────────────────────────────────────────────
 const DynamicField = memo(function DynamicField({ field, value, onChange }) {
     const type = String(field?.type || 'text').toLowerCase();
@@ -191,8 +201,152 @@ const ChannelManager = memo(function ChannelManager({
     );
 });
 
+// ─── AI instructions editor (admin / department head) ──────────────────────────
+const INSTRUCTION_PROFILE_LABELS = {
+    common: 'Общие (все профили)',
+    op: 'Отдел продаж (ОП)',
+    szov: 'СЗоВ',
+};
+
+const InstructionsEditor = memo(function InstructionsEditor({ apiBaseUrl, buildHeaders, notify }) {
+    const [open, setOpen] = useState(false);
+    const [loading, setLoading] = useState(false);
+    const [items, setItems] = useState([]);
+    const [editable, setEditable] = useState([]);
+    const [activeProfile, setActiveProfile] = useState('');
+    const [draft, setDraft] = useState('');
+    const [saving, setSaving] = useState(false);
+    const loadedRef = useRef(false);
+
+    const load = useCallback(async () => {
+        setLoading(true);
+        try {
+            const res = await axios.get(`${apiBaseUrl}/api/it_tickets/instructions`, { headers: buildHeaders() });
+            const its = Array.isArray(res?.data?.items) ? res.data.items : [];
+            const ed = Array.isArray(res?.data?.editable_profiles) ? res.data.editable_profiles : [];
+            setItems(its);
+            setEditable(ed);
+            setActiveProfile((prev) => (prev && ed.includes(prev)) ? prev : (ed[0] || ''));
+        } catch (err) {
+            notify(err?.response?.data?.error || 'Не удалось загрузить инструкции', 'error');
+        } finally {
+            setLoading(false);
+        }
+    }, [apiBaseUrl, buildHeaders, notify]);
+
+    const toggleOpen = useCallback(() => {
+        setOpen((o) => {
+            const next = !o;
+            if (next && !loadedRef.current) { loadedRef.current = true; load(); }
+            return next;
+        });
+    }, [load]);
+
+    useEffect(() => {
+        if (!activeProfile) { setDraft(''); return; }
+        const found = items.find((i) => i.profile === activeProfile);
+        setDraft(found?.instructions || '');
+    }, [activeProfile, items]);
+
+    const meta = useMemo(() => items.find((i) => i.profile === activeProfile), [items, activeProfile]);
+
+    const save = useCallback(async () => {
+        if (!activeProfile) return;
+        setSaving(true);
+        try {
+            const res = await axios.put(`${apiBaseUrl}/api/it_tickets/instructions`,
+                { profile: activeProfile, instructions: draft }, { headers: buildHeaders() });
+            const item = res?.data?.item;
+            if (item) {
+                setItems((prev) => [...prev.filter((i) => i.profile !== item.profile), item]);
+            }
+            notify('Инструкции сохранены', 'success');
+        } catch (err) {
+            notify(err?.response?.data?.error || 'Не удалось сохранить инструкции', 'error');
+        } finally {
+            setSaving(false);
+        }
+    }, [apiBaseUrl, buildHeaders, draft, activeProfile, notify]);
+
+    const dirty = (meta?.instructions || '') !== draft;
+
+    return (
+        <div className={CARD_CLASS}>
+            <button
+                type="button"
+                onClick={toggleOpen}
+                className="flex w-full items-center justify-between text-sm font-semibold text-slate-700"
+            >
+                <span className="flex items-center gap-2">
+                    <FaIcon className="fas fa-lightbulb text-amber-500" style={{ width: '0.95em', height: '0.95em' }} />
+                    Инструкции для ИИ
+                    <span className="text-[11px] font-normal text-slate-400">актуальные изменения для бота</span>
+                </span>
+                <FaIcon className="fas fa-chevron-down text-slate-400"
+                    style={{ width: '0.8em', height: '0.8em', transform: open ? 'rotate(180deg)' : 'none', transition: 'transform .2s' }} />
+            </button>
+
+            {open && (
+                <div className="mt-3 space-y-3">
+                    <p className="text-[12px] text-slate-500">
+                        Эти заметки добавляются к промпту ИИ и имеют приоритет при конфликте с базовыми правилами. Удобно фиксировать недавние изменения (например, новый софт, переименование систем, новые РМ).
+                    </p>
+                    {loading ? (
+                        <div className="flex items-center gap-2 text-sm text-slate-500">
+                            <FaIcon className="fas fa-spinner fa-spin text-indigo-500" style={{ width: '1em', height: '1em' }} />
+                            Загрузка…
+                        </div>
+                    ) : editable.length === 0 ? (
+                        <div className="text-[12px] text-slate-400">Нет доступных для редактирования профилей.</div>
+                    ) : (
+                        <>
+                            {editable.length > 1 && (
+                                <div className="inline-flex flex-wrap gap-1 rounded-xl bg-slate-100 p-0.5">
+                                    {editable.map((p) => (
+                                        <button
+                                            key={p}
+                                            type="button"
+                                            onClick={() => setActiveProfile(p)}
+                                            className={`rounded-lg px-3 py-1 text-xs font-semibold transition ${activeProfile === p ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                                        >
+                                            {INSTRUCTION_PROFILE_LABELS[p] || p}
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
+                            <textarea
+                                value={draft}
+                                onChange={(e) => setDraft(e.target.value)}
+                                rows={6}
+                                maxLength={8000}
+                                placeholder={`Например: «С 01.06 телефония Oktell заменена на X — все заявки по звонкам направлять как «${INSTRUCTION_PROFILE_LABELS[activeProfile] || ''}». Добавлены РМ 31–35.»`}
+                                className={FIELD_CLASS + ' text-[12.5px] leading-relaxed'}
+                            />
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                                <span className="text-[11px] text-slate-400">
+                                    {meta?.updated_at ? `Обновлено: ${meta.updated_by_name || '—'} · ${meta.updated_at}` : 'Ещё не заполнялось'}
+                                    {` · ${draft.length}/8000`}
+                                </span>
+                                <button
+                                    type="button"
+                                    onClick={save}
+                                    disabled={saving || !dirty}
+                                    className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold text-white transition ${(saving || !dirty) ? 'bg-indigo-300' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+                                >
+                                    <FaIcon className={`fas ${saving ? 'fa-spinner fa-spin' : 'fa-save'}`} style={{ width: '0.85em', height: '0.85em' }} />
+                                    {saving ? 'Сохранение…' : 'Сохранить'}
+                                </button>
+                            </div>
+                        </>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+});
+
 // ─── Main modal ─────────────────────────────────────────────────────────────
-const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canManageChannels }) => {
+const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canManageChannels, canEditInstructions }) => {
     const [catalog, setCatalog] = useState(null);
     const [defaultProfile, setDefaultProfile] = useState('op');
     const [profile, setProfile] = useState('op');
@@ -210,8 +364,11 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
     const [composed, setComposed] = useState(false);
 
     const [channels, setChannels] = useState([]);
-    const [channelId, setChannelId] = useState('');
     const [canManage, setCanManage] = useState(Boolean(canManageChannels));
+    const [pinned, setPinned] = useState({});           // { op: {...}, szov: {...} }
+    const [pinnableProfiles, setPinnableProfiles] = useState([]);
+    const [pinDraftId, setPinDraftId] = useState('');
+    const [pinning, setPinning] = useState(false);
 
     const [loadingCatalog, setLoadingCatalog] = useState(false);
     const [aiMode, setAiMode] = useState(null); // 'draft' | 'finalize' | null
@@ -232,6 +389,21 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
         }
     }, [apiBaseUrl, buildHeaders, canManageChannels, toast]);
 
+    const applyMeta = useCallback((data) => {
+        setPinned(data?.pinned || {});
+        setPinnableProfiles(Array.isArray(data?.pinnable_profiles) ? data.pinnable_profiles : []);
+    }, []);
+
+    // Перечитываем мета-данные (закреплённые каналы), не сбрасывая выбор пользователя
+    const refreshMeta = useCallback(async () => {
+        try {
+            const res = await axios.get(`${apiBaseUrl}/api/it_tickets/catalog`, { headers: buildHeaders() });
+            applyMeta(res?.data);
+        } catch {
+            /* тихо игнорируем — основное состояние уже загружено */
+        }
+    }, [apiBaseUrl, buildHeaders, applyMeta]);
+
     useEffect(() => {
         if (!isOpen) return;
         let alive = true;
@@ -244,6 +416,7 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                 const dp = res?.data?.default_profile || 'op';
                 setDefaultProfile(dp);
                 setProfile(dp);
+                applyMeta(res?.data);
             } catch (err) {
                 if (alive) toast(err?.response?.data?.error || 'Не удалось загрузить каталог', 'error');
             } finally {
@@ -252,7 +425,7 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
         })();
         loadChannels();
         return () => { alive = false; };
-    }, [isOpen, apiBaseUrl, buildHeaders, toast, loadChannels]);
+    }, [isOpen, apiBaseUrl, buildHeaders, toast, loadChannels, applyMeta]);
 
     // ── Esc to close ──
     useEffect(() => {
@@ -278,6 +451,29 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
     }, []);
 
     const activeChannels = useMemo(() => channels.filter((c) => c.is_active), [channels]);
+
+    const activePin = useMemo(() => pinned?.[profile] || null, [pinned, profile]);
+    const channelReady = Boolean(activePin?.channel_id && activePin?.channel_is_active);
+    const canPin = useMemo(() => pinnableProfiles.includes(profile), [pinnableProfiles, profile]);
+
+    // выпадающий список закрепления держим в синхроне с активным профилем
+    useEffect(() => {
+        setPinDraftId(activePin?.channel_id ? String(activePin.channel_id) : '');
+    }, [activePin]);
+
+    const pinChannel = useCallback(async () => {
+        setPinning(true);
+        try {
+            const channel_id = pinDraftId ? Number(pinDraftId) : null;
+            await axios.put(`${apiBaseUrl}/api/it_tickets/pinned`, { profile, channel_id }, { headers: buildHeaders() });
+            toast(channel_id ? 'Канал закреплён' : 'Канал откреплён', 'success');
+            await refreshMeta();
+        } catch (err) {
+            toast(err?.response?.data?.error || 'Не удалось закрепить канал', 'error');
+        } finally {
+            setPinning(false);
+        }
+    }, [apiBaseUrl, buildHeaders, profile, pinDraftId, refreshMeta, toast]);
 
     const setFieldValue = useCallback((key, value) => {
         setFieldValues((prev) => ({ ...prev, [key]: value }));
@@ -305,7 +501,7 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
             }, { headers: buildHeaders() });
 
             if (res?.data?.status !== 'success') {
-                toast('ИИ не смог обработать запрос', 'error');
+                toast(aiErrorText(res?.data?.error), 'error');
                 return;
             }
             const result = res.data.result || {};
@@ -342,7 +538,7 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                 toast('Черновик сформирован — заполните поля и оформите заявку', 'success');
             }
         } catch (err) {
-            toast(err?.response?.data?.error || 'Ошибка обращения к ИИ', 'error');
+            toast(aiErrorText(err?.response?.data?.error), 'error');
         } finally {
             setAiMode(null);
         }
@@ -352,7 +548,7 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
     const handleSend = useCallback(async () => {
         const body = (previewText || '').trim() || description.trim();
         if (!body) { toast('Пустой текст заявки. Опишите проблему или оформите её с ИИ', 'error'); return; }
-        if (!channelId) { toast('Выберите канал для отправки', 'error'); return; }
+        if (!channelReady) { toast('Канал не закреплён. Обратитесь к админу или главе отдела', 'error'); return; }
         setSending(true);
         try {
             const res = await axios.post(`${apiBaseUrl}/api/it_tickets/send`, {
@@ -363,7 +559,6 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                 title: ticketTitle,
                 body,
                 fields: fieldValues,
-                channel_id: Number(channelId),
             }, { headers: buildHeaders() });
             toast(`Заявка отправлена${res?.data?.channel_title ? ` в «${res.data.channel_title}»` : ''}`, 'success');
             onClose();
@@ -372,7 +567,7 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
         } finally {
             setSending(false);
         }
-    }, [apiBaseUrl, buildHeaders, previewText, description, channelId, profile, categoryName, subcategory, priority, ticketTitle, fieldValues, toast, onClose]);
+    }, [apiBaseUrl, buildHeaders, previewText, description, channelReady, profile, categoryName, subcategory, priority, ticketTitle, fieldValues, toast, onClose]);
 
     if (!isOpen) return null;
 
@@ -576,28 +771,69 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                                 <p className="mt-1 text-[11px] text-slate-400">Допустима простая разметка Telegram: &lt;b&gt;жирный&lt;/b&gt;, &lt;i&gt;курсив&lt;/i&gt;, &lt;code&gt;код&lt;/code&gt;.</p>
                             </div>
 
-                            {/* Channel */}
+                            {/* Channel (закрепляет админ / глава отдела) */}
                             <div className={CARD_CLASS}>
                                 <div className="flex items-center justify-between gap-2">
-                                    <span className={LABEL_CLASS}>Канал для отправки</span>
-                                    <button type="button" onClick={loadChannels} className="text-[12px] font-medium text-indigo-600 hover:text-indigo-700">
+                                    <span className={LABEL_CLASS}>Канал для отправки · профиль «{profileLabel(profile)}»</span>
+                                    <button type="button" onClick={() => { loadChannels(); refreshMeta(); }} className="text-[12px] font-medium text-indigo-600 hover:text-indigo-700">
                                         <FaIcon className="fas fa-rotate" style={{ width: '0.8em', height: '0.8em' }} /> Обновить
                                     </button>
                                 </div>
-                                <select
-                                    value={channelId}
-                                    onChange={(e) => setChannelId(e.target.value)}
-                                    className={FIELD_CLASS}
-                                >
-                                    <option value="">— выберите канал —</option>
-                                    {activeChannels.map((c) => (
-                                        <option key={c.id} value={c.id}>{c.title || `Чат ${c.chat_id || c.id}`}</option>
-                                    ))}
-                                </select>
-                                {activeChannels.length === 0 && (
-                                    <p className="mt-1 text-[12px] text-rose-500">
-                                        Нет доступных каналов. {canManage ? 'Добавьте канал ниже или добавьте бота в группу.' : 'Обратитесь к администратору.'}
-                                    </p>
+
+                                {/* Текущий закреплённый канал (видно всем) */}
+                                {channelReady ? (
+                                    <div className="mt-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2">
+                                        <div className="flex items-center gap-2 text-sm font-semibold text-emerald-800">
+                                            <FaIcon className="fas fa-paper-plane" style={{ width: '0.9em', height: '0.9em' }} />
+                                            {activePin.channel_title || 'Канал закреплён'}
+                                        </div>
+                                        <div className="mt-0.5 text-[11px] text-emerald-700/80">
+                                            {activePin.pinned_by_name
+                                                ? `Закрепил: ${activePin.pinned_by_name}${activePin.pinned_at ? ` · ${activePin.pinned_at}` : ''}`
+                                                : 'Закреплено'}
+                                        </div>
+                                    </div>
+                                ) : activePin?.channel_id ? (
+                                    <div className="mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] text-amber-800">
+                                        Закреплённый канал отключён. {canPin ? 'Выберите активный канал ниже.' : 'Обратитесь к админу или главе отдела.'}
+                                    </div>
+                                ) : (
+                                    <div className="mt-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-[12px] text-rose-600">
+                                        Канал ещё не закреплён. {canPin ? 'Выберите и закрепите канал ниже.' : 'Отправка недоступна — канал закрепляет админ или глава отдела.'}
+                                    </div>
+                                )}
+
+                                {/* Закрепление канала (админ / глава отдела) */}
+                                {canPin && (
+                                    <div className="mt-3 space-y-2">
+                                        <span className={LABEL_CLASS}>Закрепить канал для этого профиля</span>
+                                        <div className="flex flex-wrap gap-2">
+                                            <select
+                                                value={pinDraftId}
+                                                onChange={(e) => setPinDraftId(e.target.value)}
+                                                className={FIELD_CLASS + ' mt-0 flex-1'}
+                                            >
+                                                <option value="">— не закреплён —</option>
+                                                {activeChannels.map((c) => (
+                                                    <option key={c.id} value={c.id}>{c.title || `Чат ${c.chat_id || c.id}`}</option>
+                                                ))}
+                                            </select>
+                                            <button
+                                                type="button"
+                                                onClick={pinChannel}
+                                                disabled={pinning || String(activePin?.channel_id || '') === String(pinDraftId || '')}
+                                                className={`shrink-0 inline-flex items-center gap-2 rounded-xl px-4 text-sm font-semibold text-white transition ${(pinning || String(activePin?.channel_id || '') === String(pinDraftId || '')) ? 'bg-indigo-300' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+                                            >
+                                                <FaIcon className={`fas ${pinning ? 'fa-spinner fa-spin' : 'fa-paperclip'}`} style={{ width: '0.85em', height: '0.85em' }} />
+                                                {pinning ? 'Сохранение…' : 'Закрепить'}
+                                            </button>
+                                        </div>
+                                        {activeChannels.length === 0 && (
+                                            <p className="text-[12px] text-rose-500">
+                                                Нет активных каналов. {canManage ? 'Добавьте канал ниже или добавьте бота в группу.' : 'Добавьте бота в нужную группу — он появится здесь автоматически.'}
+                                            </p>
+                                        )}
+                                    </div>
                                 )}
 
                                 {canManage && (
@@ -607,33 +843,50 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                                             buildHeaders={buildHeaders}
                                             notify={toast}
                                             channels={channels}
-                                            onChannelsChanged={loadChannels}
+                                            onChannelsChanged={() => { loadChannels(); refreshMeta(); }}
                                         />
                                     </div>
                                 )}
                             </div>
+
+                            {/* AI instructions (admin / department head) */}
+                            {canEditInstructions && (
+                                <InstructionsEditor
+                                    apiBaseUrl={apiBaseUrl}
+                                    buildHeaders={buildHeaders}
+                                    notify={toast}
+                                />
+                            )}
                         </>
                     )}
                 </div>
 
                 {/* Footer */}
-                <div className="shrink-0 flex items-center justify-end gap-3 border-t border-slate-200 bg-white/80 px-6 py-4">
-                    <button
-                        type="button"
-                        onClick={() => { if (!sending) onClose(); }}
-                        className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
-                    >
-                        Отмена
-                    </button>
-                    <button
-                        type="button"
-                        onClick={handleSend}
-                        disabled={sending || aiBusy}
-                        className={`inline-flex items-center gap-2 rounded-xl px-5 py-2 text-sm font-semibold text-white shadow-sm transition ${sending ? 'bg-emerald-400' : 'bg-emerald-600 hover:bg-emerald-700'}`}
-                    >
-                        <FaIcon className={`fas ${sending ? 'fa-spinner fa-spin' : 'fa-paper-plane'}`} style={{ width: '0.9em', height: '0.9em' }} />
-                        {sending ? 'Отправка…' : 'Отправить тикет'}
-                    </button>
+                <div className="shrink-0 flex items-center justify-between gap-3 border-t border-slate-200 bg-white/80 px-6 py-4">
+                    <span className="text-[11px] text-slate-400">
+                        {channelReady
+                            ? <>Заявка уйдёт в «{activePin?.channel_title || 'закреплённый канал'}»</>
+                            : 'Канал не закреплён — отправка недоступна'}
+                    </span>
+                    <div className="flex items-center gap-3">
+                        <button
+                            type="button"
+                            onClick={() => { if (!sending) onClose(); }}
+                            className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
+                        >
+                            Отмена
+                        </button>
+                        <button
+                            type="button"
+                            onClick={handleSend}
+                            disabled={sending || aiBusy || !channelReady}
+                            title={!channelReady ? 'Канал закрепляет админ или глава отдела' : undefined}
+                            className={`inline-flex items-center gap-2 rounded-xl px-5 py-2 text-sm font-semibold text-white shadow-sm transition ${(sending || !channelReady) ? 'bg-emerald-400 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700'}`}
+                        >
+                            <FaIcon className={`fas ${sending ? 'fa-spinner fa-spin' : 'fa-paper-plane'}`} style={{ width: '0.9em', height: '0.9em' }} />
+                            {sending ? 'Отправка…' : 'Отправить тикет'}
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>
