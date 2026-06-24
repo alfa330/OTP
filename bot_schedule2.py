@@ -17284,6 +17284,7 @@ def it_ticket_ai_assist():
             "description": payload.get('description'),
             "fields": payload.get('fields') if isinstance(payload.get('fields'), dict) else {},
             "answers": payload.get('answers') if isinstance(payload.get('answers'), dict) else {},
+            "mass_context": str(payload.get('mass_context') or '').strip()[:600],
             "context": {
                 "reporter_name": requester[2],
                 "role": requester[3],

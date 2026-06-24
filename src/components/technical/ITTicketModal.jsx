@@ -1,6 +1,7 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import FaIcon from '../common/FaIcon';
+import { SEAT_W, SEAT_H, cabinetSeatNumbers, cabinetLabel, CabinetMap } from './workplaceLayout';
 
 // ─── Styling tokens (clean macOS/iOS look) ─────────────────────────────────────
 const FIELD_CLASS =
@@ -26,8 +27,165 @@ const AI_ERROR_MESSAGES = {
 };
 const aiErrorText = (code) => AI_ERROR_MESSAGES[code] || 'ИИ не смог обработать запрос. Попробуйте ещё раз или заполните заявку вручную.';
 
+// ─── Workplace (РМ) visual picker ─────────────────────────────────────────────
+// Показывает схему кабинетов (как в «Аналитика РМ»); супервайзер кликом выбирает
+// рабочие места. Значение поля — читаемая строка «РМ a, b (Кабинет)».
+const seatKey = (cabinetId, n) => `${cabinetId}:${n}`;
+
+// Восстанавливаем выбор из текущего значения (best-effort): берём все числа из строки
+// и привязываем каждое к первому кабинету, где такой номер РМ существует.
+const initSelectedFromValue = (value, cabinets) => {
+    const set = new Set();
+    const text = String(value || '');
+    if (!text.trim() || !Array.isArray(cabinets) || cabinets.length === 0) return set;
+    const numbers = (text.match(/\d+/g) || []).map((x) => Number(x)).filter((n) => Number.isFinite(n));
+    if (numbers.length === 0) return set;
+    const seatIndex = cabinets.map((c) => ({ id: c.id, seats: new Set(cabinetSeatNumbers(c)) }));
+    for (const n of numbers) {
+        const hit = seatIndex.find((c) => c.seats.has(n));
+        if (hit) set.add(seatKey(hit.id, n));
+    }
+    return set;
+};
+
+const buildWorkplaceValue = (selectedSet, cabinets) => {
+    const list = Array.isArray(cabinets) ? cabinets : [];
+    const parts = [];
+    for (const cab of list) {
+        const nums = [];
+        for (const key of selectedSet) {
+            const [cid, ns] = String(key).split(':');
+            if (cid === cab.id) {
+                const n = Number(ns);
+                if (Number.isFinite(n)) nums.push(n);
+            }
+        }
+        if (nums.length === 0) continue;
+        nums.sort((a, b) => a - b);
+        parts.push(`РМ ${nums.join(', ')} (${cabinetLabel(cab)})`);
+    }
+    return parts.join('; ');
+};
+
+const PickerSeat = memo(function PickerSeat({ n, selected, onToggle }) {
+    return (
+        <button
+            type="button"
+            onClick={() => onToggle(n)}
+            className={`flex items-center justify-center rounded-sm border text-[15px] font-medium transition-all hover:-translate-y-0.5 ${
+                selected
+                    ? 'border-indigo-600 bg-indigo-600 text-white shadow-md ring-2 ring-indigo-300'
+                    : 'border-slate-300 bg-white text-slate-600 hover:border-indigo-300 hover:bg-indigo-50'
+            }`}
+            style={{ width: SEAT_W, height: SEAT_H, flexShrink: 0 }}
+            title={`РМ ${n}${selected ? ' — выбрано' : ''}`}
+        >
+            {n}
+        </button>
+    );
+});
+
+const WorkplacePicker = memo(function WorkplacePicker({ cabinets, value, onChange }) {
+    const list = useMemo(() => (Array.isArray(cabinets) ? cabinets : []), [cabinets]);
+    const [activeId, setActiveId] = useState(() => list[0]?.id || null);
+    const [selected, setSelected] = useState(() => initSelectedFromValue(value, list));
+
+    useEffect(() => {
+        if (!list.length) { setActiveId(null); return; }
+        setActiveId((prev) => (list.some((c) => c.id === prev) ? prev : list[0].id));
+    }, [list]);
+
+    const active = useMemo(
+        () => list.find((c) => c.id === activeId) || list[0] || null,
+        [list, activeId],
+    );
+
+    // Зеркало выбора в ref — чтобы toggle читал актуальное состояние и вызывал
+    // onChange ровно один раз вне updater'а (без сюрпризов StrictMode).
+    const selectedRef = useRef(selected);
+    selectedRef.current = selected;
+
+    const toggle = useCallback((n) => {
+        if (!active) return;
+        const key = seatKey(active.id, n);
+        const next = new Set(selectedRef.current);
+        if (next.has(key)) next.delete(key); else next.add(key);
+        setSelected(next);
+        onChange(buildWorkplaceValue(next, list));
+    }, [active, list, onChange]);
+
+    const clearAll = useCallback(() => {
+        setSelected(new Set());
+        onChange('');
+    }, [onChange]);
+
+    if (list.length === 0) {
+        // Нет доступной раскладки — деградируем до обычного текстового ввода.
+        return (
+            <input
+                type="text"
+                value={value ?? ''}
+                onChange={(e) => onChange(e.target.value)}
+                placeholder="Напр.: РМ 16 СЗоВ"
+                className={FIELD_CLASS}
+            />
+        );
+    }
+
+    const summary = buildWorkplaceValue(selected, list);
+
+    return (
+        <div className="mt-1 rounded-xl border border-slate-200 bg-white p-2.5 shadow-sm">
+            {list.length > 1 && (
+                <div className="mb-2 flex flex-wrap gap-1.5">
+                    {list.map((c) => (
+                        <button
+                            key={c.id}
+                            type="button"
+                            onClick={() => setActiveId(c.id)}
+                            className={`rounded-lg px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+                                activeId === c.id
+                                    ? 'bg-indigo-600 text-white shadow'
+                                    : 'border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
+                            }`}
+                        >
+                            {cabinetLabel(c)}
+                        </button>
+                    ))}
+                </div>
+            )}
+            {active ? (
+                <CabinetMap
+                    cabinet={active}
+                    renderSeat={(n) => (
+                        <PickerSeat n={n} selected={selected.has(seatKey(active.id, n))} onToggle={toggle} />
+                    )}
+                />
+            ) : (
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-500">
+                    Нет доступной раскладки кабинета.
+                </div>
+            )}
+            <div className="mt-2 flex items-center justify-between gap-2">
+                <span className="text-[12px] text-slate-500">
+                    {summary ? <><span className="font-semibold text-slate-700">Выбрано:</span> {summary}</> : 'Кликните по местам на схеме'}
+                </span>
+                {selected.size > 0 && (
+                    <button
+                        type="button"
+                        onClick={clearAll}
+                        className="shrink-0 rounded-lg border border-slate-200 px-2 py-1 text-[11px] font-semibold text-slate-500 hover:bg-slate-50"
+                    >
+                        Очистить
+                    </button>
+                )}
+            </div>
+        </div>
+    );
+});
+
 // ─── Dynamic field renderer ─────────────────────────────────────────────────
-const DynamicField = memo(function DynamicField({ field, value, onChange }) {
+const DynamicField = memo(function DynamicField({ field, value, onChange, cabinets }) {
     const type = String(field?.type || 'text').toLowerCase();
     const common = {
         value: value ?? '',
@@ -41,7 +199,13 @@ const DynamicField = memo(function DynamicField({ field, value, onChange }) {
                 {field?.label || field?.key}
                 {field?.required && <span className="text-rose-500"> *</span>}
             </span>
-            {type === 'textarea' ? (
+            {type === 'workplace' ? (
+                <WorkplacePicker
+                    cabinets={cabinets}
+                    value={value}
+                    onChange={(val) => onChange(field.key, val)}
+                />
+            ) : type === 'textarea' ? (
                 <textarea {...common} rows={3} />
             ) : type === 'select' && Array.isArray(field?.options) && field.options.length > 0 ? (
                 <select {...common}>
@@ -519,7 +683,7 @@ const CatalogEditor = memo(function CatalogEditor({ apiBaseUrl, buildHeaders, no
 });
 
 // ─── Main modal ─────────────────────────────────────────────────────────────
-const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canManageChannels, canEditInstructions, canEditCatalog }) => {
+const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canManageChannels, canEditInstructions, canEditCatalog, workplaceCabinets }) => {
     const [catalog, setCatalog] = useState(null);
     const [defaultProfile, setDefaultProfile] = useState('op');
     const [profile, setProfile] = useState('op');
@@ -653,6 +817,55 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
         setFieldValues((prev) => ({ ...prev, [key]: value }));
     }, []);
 
+    // Масштаб ситуации для оценки приоритета: сколько РМ затронуто относительно
+    // размера кабинета/отдела (по выбранным на схеме РМ в полях type=workplace).
+    const buildMassContext = useCallback(() => {
+        const cabs = Array.isArray(workplaceCabinets) ? workplaceCabinets : [];
+        if (cabs.length === 0) return '';
+        const idx = cabs.map((c) => ({ cab: c, seats: new Set(cabinetSeatNumbers(c)) }));
+        const deptTotal = idx.reduce((s, o) => s + o.seats.size, 0);
+
+        const wpFields = (aiFields || []).filter((f) => String(f?.type || '').toLowerCase() === 'workplace');
+        const numbers = new Set();
+        wpFields.forEach((f) => {
+            const v = String(fieldValues[f.key] ?? '');
+            (v.match(/\d+/g) || []).forEach((x) => {
+                const n = Number(x);
+                if (Number.isFinite(n)) numbers.add(n);
+            });
+        });
+
+        if (numbers.size === 0) {
+            return deptTotal > 0
+                ? `В зоне ответственности супервайзера ~${deptTotal} РМ. Конкретные РМ на схеме не выбраны — оцени массовость по описанию.`
+                : '';
+        }
+
+        const perCab = new Map();
+        let totalAffected = 0;
+        numbers.forEach((n) => {
+            const hit = idx.find((o) => o.seats.has(n));
+            if (hit) {
+                perCab.set(hit.cab.id, (perCab.get(hit.cab.id) || 0) + 1);
+                totalAffected += 1;
+            }
+        });
+        if (totalAffected === 0) {
+            return deptTotal > 0 ? `В зоне ответственности супервайзера ~${deptTotal} РМ.` : '';
+        }
+        const deptPct = deptTotal > 0 ? Math.round((totalAffected / deptTotal) * 100) : 0;
+        const parts = [];
+        idx.forEach((o) => {
+            const aff = perCab.get(o.cab.id) || 0;
+            if (aff > 0) {
+                const cap = o.seats.size;
+                const p = cap > 0 ? Math.round((aff / cap) * 100) : 0;
+                parts.push(`${cabinetLabel(o.cab)} — ${aff}/${cap} РМ (${p}%)`);
+            }
+        });
+        return `В зоне ответственности супервайзера ~${deptTotal} РМ. Затронуто ${totalAffected} РМ (~${deptPct}% отдела). По кабинетам: ${parts.join('; ')}.`;
+    }, [workplaceCabinets, aiFields, fieldValues]);
+
     // ── AI calls ──
     const callAi = useCallback(async (mode) => {
         if (!description.trim() && !categoryName) {
@@ -668,6 +881,7 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                 subcategory,
                 description,
                 fields: fieldValues,
+                mass_context: buildMassContext(),
             }, { headers: buildHeaders() });
 
             if (res?.data?.status !== 'success') {
@@ -735,7 +949,7 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
         } finally {
             setAiMode(null);
         }
-    }, [apiBaseUrl, buildHeaders, profile, categoryName, subcategory, description, fieldValues, previewText, toast, catalog]);
+    }, [apiBaseUrl, buildHeaders, profile, categoryName, subcategory, description, fieldValues, previewText, toast, catalog, buildMassContext]);
 
     // ── send ──
     const handleSend = useCallback(async () => {
@@ -901,9 +1115,19 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                                         </div>
                                         <p className="mt-1 text-[12px] text-slate-400">Заполните поля (особенно отмеченные *) — ИИ соберёт из них готовый тикет.</p>
                                         <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-                                            {aiFields.map((f) => (
-                                                <DynamicField key={f.key} field={f} value={fieldValues[f.key]} onChange={setFieldValue} />
-                                            ))}
+                                            {aiFields.map((f) => {
+                                                const isWide = ['workplace', 'textarea'].includes(String(f?.type || '').toLowerCase());
+                                                return (
+                                                    <div key={f.key} className={isWide ? 'sm:col-span-2' : ''}>
+                                                        <DynamicField
+                                                            field={f}
+                                                            value={fieldValues[f.key]}
+                                                            onChange={setFieldValue}
+                                                            cabinets={workplaceCabinets}
+                                                        />
+                                                    </div>
+                                                );
+                                            })}
                                         </div>
                                     </div>
                                 )}
