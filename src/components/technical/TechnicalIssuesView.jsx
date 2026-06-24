@@ -3,6 +3,13 @@ import axios from 'axios';
 import FaIcon from '../common/FaIcon';
 import ITTicketModal from './ITTicketModal';
 import {
+    WORKPLACE_CABINETS,
+    cabinetSeatNumbers,
+    cabinetLabel,
+    visibleCabinetsFor,
+    CabinetMap,
+} from './workplaceLayout';
+import {
     normalizeRole,
     isAdminLikeRole,
     isSupervisorRole,
@@ -43,101 +50,11 @@ const MONTHS_RU = [
 const DAYS_SHORT = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
 const MASS_KEYWORDS = ['массовая', 'массовый', 'массовое'];
 const WORKPLACE_MIN = 1;
-const WORKPLACE_MAX = 200; // расширено: у отдела продаж РМ нумеруются до 97 (3 кабинета, 28–97)
+const WORKPLACE_MAX = 200; // расширено: у отдела продаж РМ нумеруются до 98 (3 кабинета, 28–98)
 
-// ─── Раскладки кабинетов (РМ) по отделам ───────────────────────────────────────
-// Координаты — абсолютные пиксели внутри холста кабинета (как у текущей раскладки).
-const SEAT_W = 72;
-const SEAT_H = 56;
-const SEAT_GAP = 3;
-const SEAT_STEP_X = SEAT_W + SEAT_GAP; // 75
-const SEAT_STEP_Y = SEAT_H + SEAT_GAP; // 59
-
-// group: 'support' — тех-поддержка (текущая раскладка 1–30, один кабинет);
-//        'sales'   — отдел продаж (ОП), 3 кабинета, РМ 28–97.
-const WORKPLACE_CABINETS = [
-    {
-        id: 'support',
-        group: 'support',
-        name: 'Тех поддержка',
-        floor: '',
-        width: 290 + 7 * SEAT_STEP_X + 20,
-        height: 148 + 2 * SEAT_STEP_Y + 90 + SEAT_STEP_Y + 20,
-        blocks: [
-            { left: 290, top: 10, rows: [[27, 26, 25, 24, 23, 22]] },
-            { left: 10, top: 148, rows: [[30, 29, 28]] },
-            { left: 290, top: 148, rows: [[15, 16, 17, 18, 19, 20, 21], [14, 13, 12, 11, 10, 9, 8]] },
-            { left: 290, top: 148 + 2 * SEAT_STEP_Y + 90, rows: [[1, 2, 3, 4, 5, 6, 7]] },
-        ],
-    },
-    {
-        id: 'op17',
-        group: 'sales',
-        name: 'ОП',
-        floor: '17 этаж',
-        width: 380 + 6 * SEAT_STEP_X + 30,
-        height: 480,
-        blocks: [
-            { left: 380, top: 0, rows: [[70, 71, 72, 73, 74, 75]] },
-            { left: 380, top: 120, rows: [[81, 80, 79, 78, 77, 76], [82, 83, 84, 85, 86, 87]] },
-            // Нижний ряд начинается с 94 (выступает влево), далее 93..88
-            { left: 305, top: 300, rows: [[94, 93, 92, 91, 90, 89, 88]] },
-        ],
-        // Угловые РМ слева-внизу: плотный параллельный столбик 98–97–96 (+42°);
-        // 95 — чуть более вертикально (+32°), его левый-верхний угол на уровне
-        // правого-верхнего угла 96, почти вплотную к 94.
-        freeSeats: [
-            { n: 98, left: 64, top: 140, rotate: 42 },
-            { n: 97, left: 118, top: 188, rotate: 42 },
-            { n: 96, left: 172, top: 236, rotate: 42 },
-            { n: 95, left: 242, top: 274, rotate: 32 },
-        ],
-    },
-    {
-        id: 'op2',
-        group: 'sales',
-        name: 'ОП 2',
-        floor: '18 этаж',
-        width: 20 + 6 * SEAT_STEP_X + 40 + SEAT_STEP_X + 20,
-        height: 40 + 2 * SEAT_STEP_Y + 70 + SEAT_STEP_Y + 30,
-        blocks: [
-            { left: 20, top: 40, rows: [[65, 64, 63, 62, 61, 60], [54, 55, 56, 57, 58, 59]] },
-            { left: 20, top: 40 + 2 * SEAT_STEP_Y + 70, rows: [[53, 52, 51, 50, 49, 48]] },
-            { left: 20 + 6 * SEAT_STEP_X + 40, top: 20, rows: [[66], [67], [68], [69]] },
-        ],
-    },
-    {
-        id: 'op3',
-        group: 'sales',
-        name: 'ОП 3 (Честный)',
-        floor: '18 этаж',
-        width: 20 + 8 * SEAT_STEP_X + 20,
-        height: 40 + 2 * SEAT_STEP_Y + 70 + SEAT_STEP_Y + 30,
-        blocks: [
-            { left: 20, top: 40, rows: [[47, 46, 45, 44, 43, 42], [36, 37, 38, 39, 40, 41]] },
-            { left: 20, top: 40 + 2 * SEAT_STEP_Y + 70, rows: [[35, 34, 33, 32, 31, 30, 29, 28]] },
-        ],
-    },
-];
-
-const cabinetSeatNumbers = (cabinet) => {
-    const out = [];
-    (cabinet?.blocks || []).forEach((b) => (b.rows || []).forEach((r) => r.forEach((n) => {
-        if (typeof n === 'number') out.push(n);
-    })));
-    (cabinet?.freeSeats || []).forEach((s) => { if (typeof s?.n === 'number') out.push(s.n); });
-    return out;
-};
-
-const cabinetLabel = (cabinet) => (cabinet?.floor ? `${cabinet.name} · ${cabinet.floor}` : cabinet?.name || '');
-
-const visibleCabinetsFor = ({ isAdmin, departmentCode }) => {
-    if (isAdmin) return WORKPLACE_CABINETS;
-    if (String(departmentCode || '').toLowerCase() === 'op') {
-        return WORKPLACE_CABINETS.filter((c) => c.group === 'sales');
-    }
-    return WORKPLACE_CABINETS.filter((c) => c.group === 'support');
-};
+// Раскладки кабинетов (WORKPLACE_CABINETS, cabinetSeatNumbers, cabinetLabel,
+// visibleCabinetsFor, CabinetMap) вынесены в общий модуль ./workplaceLayout,
+// чтобы переиспользоваться и здесь (аналитика РМ), и в окне IT-тикета.
 
 const INPUT_CLASS =
     'mt-1 w-full rounded-lg border border-blue-200 bg-white px-3 py-2 text-sm text-gray-800 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-blue-400';
@@ -1114,9 +1031,6 @@ const REASON_COLORS = [
 
 const CELL_W = 72;
 const CELL_H = 56;
-const CELL_GAP = 3;
-const MAIN_LEFT = 290;
-const MIDDLE_TOP = 148;
 
 const getWorkplaceTileStyle = (count, maxCount) => {
     if (!count || count <= 0 || maxCount <= 0) {
@@ -1168,78 +1082,6 @@ const WorkplaceSeat = memo(function WorkplaceSeat({
                 <span className="text-[11px] font-medium mt-1 leading-none opacity-90">{incidents}</span>
             )}
         </button>
-    );
-});
-
-const SeatBlock = memo(function SeatBlock({ rows, style, ...cellProps }) {
-    return (
-        <div
-            style={{
-                position: 'absolute',
-                display: 'inline-flex',
-                flexDirection: 'column',
-                gap: CELL_GAP,
-                border: '1.5px solid #64748b',
-                borderRadius: 4,
-                padding: 3,
-                ...(style || {}),
-            }}
-        >
-            {rows.map((seats, i) => (
-                <div key={i} style={{ display: 'flex', gap: CELL_GAP }}>
-                    {seats.map((n, j) => (
-                        n === null || n === undefined
-                            ? <div key={`gap-${i}-${j}`} style={{ width: CELL_W, height: CELL_H }} />
-                            : <WorkplaceSeat key={n} seatNumber={n} {...cellProps} />
-                    ))}
-                </div>
-            ))}
-        </div>
-    );
-});
-
-// Холст одного кабинета — рисует его блоки и «свободные» (повёрнутые) РМ.
-const CabinetCanvas = memo(function CabinetCanvas({
-    cabinet,
-    itemsByNumber,
-    maxIncidents,
-    selectedWorkplace,
-    onSelectWorkplace,
-}) {
-    const props = { itemsByNumber, maxIncidents, selectedWorkplace, onSelectWorkplace };
-    const W = cabinet?.width || 600;
-    const H = cabinet?.height || 400;
-
-    return (
-        <div className="rounded-xl border border-slate-300 bg-slate-50/80 p-3 overflow-auto">
-            <div style={{ position: 'relative', width: W, height: H, minWidth: W }}>
-                {(cabinet?.blocks || []).map((b, i) => (
-                    <SeatBlock
-                        key={`block-${i}`}
-                        rows={b.rows}
-                        style={{
-                            left: b.left,
-                            top: b.top,
-                            ...(b.rotate ? { transform: `rotate(${b.rotate}deg)`, transformOrigin: 'top left' } : {}),
-                        }}
-                        {...props}
-                    />
-                ))}
-                {(cabinet?.freeSeats || []).map((s) => (
-                    <div
-                        key={`free-${s.n}`}
-                        style={{
-                            position: 'absolute',
-                            left: s.left,
-                            top: s.top,
-                            ...(s.rotate ? { transform: `rotate(${s.rotate}deg)`, transformOrigin: 'top left' } : {}),
-                        }}
-                    >
-                        <WorkplaceSeat seatNumber={s.n} {...props} />
-                    </div>
-                ))}
-            </div>
-        </div>
     );
 });
 
@@ -1416,12 +1258,17 @@ const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({
                     )}
 
                     {selectedCabinet ? (
-                        <CabinetCanvas
+                        <CabinetMap
                             cabinet={selectedCabinet}
-                            itemsByNumber={workplaceStats.itemsByNumber}
-                            maxIncidents={workplaceStats.maxIncidents}
-                            selectedWorkplace={selectedWorkplace}
-                            onSelectWorkplace={openWorkplaceDetails}
+                            renderSeat={(n) => (
+                                <WorkplaceSeat
+                                    seatNumber={n}
+                                    itemsByNumber={workplaceStats.itemsByNumber}
+                                    maxIncidents={workplaceStats.maxIncidents}
+                                    selectedWorkplace={selectedWorkplace}
+                                    onSelectWorkplace={openWorkplaceDetails}
+                                />
+                            )}
                         />
                     ) : (
                         <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
@@ -2220,6 +2067,7 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
                 canManageChannels={isAdminLikeRole(role)}
                 canEditInstructions={isAdminLikeRole(role) || isDepartmentHead(user)}
                 canEditCatalog={isAdminLikeRole(role) || isDepartmentHead(user)}
+                workplaceCabinets={visibleCabinets}
             />
 
             <div className="mt-6 space-y-4">
