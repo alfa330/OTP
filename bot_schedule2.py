@@ -17066,7 +17066,7 @@ def it_ticket_catalog():
             "priorities": IT_TICKET_PRIORITY_LABELS,
             "pinned": pinned,
             "pinnable_profiles": _it_ticket_pinnable_profiles(requester_id, role),
-            "can_edit_catalog": _is_admin_role(role),
+            "catalog_editable_profiles": _it_ticket_pinnable_profiles(requester_id, role),
         }), 200
     except Exception as e:
         logging.error(f"Error fetching IT-ticket catalog: {e}", exc_info=True)
@@ -17077,14 +17077,29 @@ def it_ticket_catalog():
 @require_api_key
 def it_ticket_catalog_update():
     try:
-        requester_id, requester, role, err = _it_ticket_authorize(require_admin=True)
+        requester_id, requester, role, err = _it_ticket_authorize()
         if err:
             return err
+        # Какие профили вправе менять: админ — оба, глава отдела — только свой
+        editable = _it_ticket_pinnable_profiles(requester_id, role)
+        if not editable:
+            return jsonify({"error": "Редактировать каталог может админ или глава отдела"}), 403
+
         payload = request.get_json(silent=True) or {}
         catalog = payload.get('catalog')
         if not isinstance(catalog, dict):
             return jsonify({"error": "Передайте каталог объектом"}), 400
-        saved = db.set_it_ticket_catalog(catalog, requester_id)
+
+        # Мёржим: меняем только разрешённые профили, остальные берём из текущего каталога
+        current = db.get_it_ticket_catalog()
+        merged = {}
+        for prof in ('op', 'szov'):
+            if prof in editable and isinstance(catalog.get(prof), dict):
+                merged[prof] = catalog[prof]
+            else:
+                merged[prof] = current.get(prof)
+
+        saved = db.set_it_ticket_catalog(merged, requester_id)
         return jsonify({"status": "success", "catalog": saved}), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
