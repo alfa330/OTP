@@ -17355,10 +17355,14 @@ def it_ticket_send():
         cat_line_parts = [p for p in [category, subcategory] if p]
         cat_line = " → ".join(cat_line_parts)
         priority_label = IT_TICKET_PRIORITY_LABELS.get(priority, priority)
-        header_lines = ["🎫 <b>Заявка в IT-отдел</b>"]
+        priority_emoji = {'low': '🟢', 'medium': '🟡', 'high': '🟠', 'critical': '🔴'}.get(priority, '⚪')
+
+        # Шапка: заголовок, затем приоритет/тема — с воздухом между блоками для читабельности
+        header_lines = [f"🎫 <b>Заявка в IT-отдел</b>", ""]
+        header_lines.append(f"{priority_emoji} <b>Приоритет:</b> {html.escape(priority_label)}")
         if cat_line:
-            header_lines.append(f"<b>Тема:</b> {html.escape(cat_line)}")
-        header_lines.append(f"<b>Приоритет:</b> {html.escape(priority_label)}")
+            header_lines.append(f"🗂 <b>Тема:</b> {html.escape(cat_line)}")
+
         sig_parts = [str(requester[2] or '')]
         if (dept or {}).get('name'):
             sig_parts.append(dept['name'])
@@ -17368,7 +17372,7 @@ def it_ticket_send():
         message_text = (
             "\n".join(header_lines)
             + "\n\n" + body.strip()
-            + f"\n\n<i>Отправил: {html.escape(footer)}</i>"
+            + f"\n\n<i>🙍 Отправил: {html.escape(footer)}</i>"
         )
         message_text = message_text[:4050]
 
