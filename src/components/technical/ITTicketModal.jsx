@@ -508,8 +508,6 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
 
     const [aiFields, setAiFields] = useState([]);
     const [fieldValues, setFieldValues] = useState({});
-    const [questions, setQuestions] = useState([]);
-    const [answers, setAnswers] = useState({});
     const [priority, setPriority] = useState('medium');
     const [previewText, setPreviewText] = useState('');
     const [ticketTitle, setTicketTitle] = useState('');
@@ -600,7 +598,7 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
     }, [categories, categoryName]);
 
     const resetAfterCategoryChange = useCallback(() => {
-        setAiFields([]); setFieldValues({}); setQuestions([]); setAnswers({});
+        setAiFields([]); setFieldValues({});
         setComposed(false); setPreviewText(''); setTicketTitle(''); setCategoryNote('');
     }, []);
 
@@ -632,9 +630,6 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
     const setFieldValue = useCallback((key, value) => {
         setFieldValues((prev) => ({ ...prev, [key]: value }));
     }, []);
-    const setAnswer = useCallback((key, value) => {
-        setAnswers((prev) => ({ ...prev, [key]: value }));
-    }, []);
 
     // ── AI calls ──
     const callAi = useCallback(async (mode) => {
@@ -651,7 +646,6 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                 subcategory,
                 description,
                 fields: fieldValues,
-                answers,
             }, { headers: buildHeaders() });
 
             if (res?.data?.status !== 'success') {
@@ -698,7 +692,6 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                     return next;
                 });
             }
-            setQuestions(Array.isArray(result?.questions) ? result.questions : []);
 
             const ticketMd = result?.ticket?.markdown || result?.ticket?.summary || '';
             if (result?.ticket?.title) setTicketTitle(result.ticket.title);
@@ -709,18 +702,18 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                 toast('Заявка готова — проверьте текст и отправьте', 'success');
             } else if (result.status === 'need_more_info') {
                 setComposed(false);
-                toast('ИИ задал уточняющие вопросы — заполните их', 'info');
+                toast('Заполните обязательные поля (отмечены *) и нажмите ещё раз', 'info');
             } else {
                 // draft
                 if (ticketMd && !previewText.trim()) setPreviewText(ticketMd);
-                toast('Черновик сформирован — заполните поля и оформите заявку', 'success');
+                toast('Черновик сформирован — заполните детали и оформите заявку', 'success');
             }
         } catch (err) {
             toast(aiErrorText(err?.response?.data?.error), 'error');
         } finally {
             setAiMode(null);
         }
-    }, [apiBaseUrl, buildHeaders, profile, categoryName, subcategory, description, fieldValues, answers, previewText, toast, catalog]);
+    }, [apiBaseUrl, buildHeaders, profile, categoryName, subcategory, description, fieldValues, previewText, toast, catalog]);
 
     // ── send ──
     const handleSend = useCallback(async () => {
@@ -877,38 +870,14 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                                     </div>
                                 </div>
 
-                                {/* AI clarifying questions */}
-                                {questions.length > 0 && (
-                                    <div className="rounded-2xl border border-amber-200 bg-amber-50/70 p-4">
-                                        <div className="flex items-center gap-2 text-sm font-bold text-amber-800">
-                                            <FaIcon className="fas fa-circle-question" style={{ width: '1em', height: '1em' }} />
-                                            Уточняющие вопросы от ИИ
-                                        </div>
-                                        <div className="mt-3 space-y-3">
-                                            {questions.map((q, i) => (
-                                                <label key={q.id || `q-${i}`} className="block">
-                                                    <span className="text-[13px] font-medium text-amber-900">{q.question}</span>
-                                                    {q.why && <span className="block text-[11px] text-amber-700/70">{q.why}</span>}
-                                                    <input
-                                                        type="text"
-                                                        value={answers[q.id || `q-${i}`] ?? ''}
-                                                        onChange={(e) => setAnswer(q.id || `q-${i}`, e.target.value)}
-                                                        className={FIELD_CLASS}
-                                                        placeholder="Ваш ответ (можно пропустить)"
-                                                    />
-                                                </label>
-                                            ))}
-                                        </div>
-                                    </div>
-                                )}
-
-                                {/* AI-generated form fields */}
+                                {/* AI-generated form fields (единый блок: и детали, и уточнения) */}
                                 {aiFields.length > 0 && (
                                     <div className={CARD_CLASS}>
                                         <div className="flex items-center gap-2 text-sm font-bold text-slate-700">
                                             <FaIcon className="fas fa-list text-indigo-500" style={{ width: '1em', height: '1em' }} />
                                             Детали заявки
                                         </div>
+                                        <p className="mt-1 text-[12px] text-slate-400">Заполните поля (особенно отмеченные *) — ИИ соберёт из них готовый тикет.</p>
                                         <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
                                             {aiFields.map((f) => (
                                                 <DynamicField key={f.key} field={f} value={fieldValues[f.key]} onChange={setFieldValue} />
@@ -917,8 +886,8 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                                     </div>
                                 )}
 
-                                {/* Continue CTA — собрать готовый текст с учётом ответов */}
-                                {(questions.length > 0 || aiFields.length > 0) && (
+                                {/* Continue CTA — собрать готовый текст из деталей */}
+                                {aiFields.length > 0 && (
                                     <div className="rounded-2xl border border-indigo-200 bg-indigo-50/60 p-3">
                                         <button
                                             type="button"
