@@ -1941,6 +1941,16 @@ class Database:
                     pinned_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+            # Редактируемый каталог тематик заявок (одна строка). Если пусто —
+            # используется дефолт IT_TICKET_CATALOG. Редактирует админ.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS it_ticket_catalog (
+                    id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+                    data JSONB NOT NULL,
+                    updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS user_history (
                     id SERIAL PRIMARY KEY,
@@ -18925,6 +18935,79 @@ class Database:
         if rows.get(prof):
             parts.append(rows[prof])
         return "\n".join(parts).strip()
+
+    # ─── IT-ticket catalog (редактируемые категории/типы; админ) ────────────────
+    @staticmethod
+    def _sanitize_it_ticket_catalog(data):
+        """Приводит каталог к безопасной структуре. Профили op/szov; для отсутствующих
+        или пустых берётся дефолт IT_TICKET_CATALOG."""
+        result = {}
+        src = data if isinstance(data, dict) else {}
+        for profile, default in IT_TICKET_CATALOG.items():
+            entry = src.get(profile) if isinstance(src.get(profile), dict) else {}
+            label = str(entry.get('label') or default.get('label') or profile).strip()[:120]
+            categories = []
+            seen_cats = set()
+            raw_categories = entry.get('categories')
+            for cat in (raw_categories if isinstance(raw_categories, list) else []):
+                if not isinstance(cat, dict):
+                    continue
+                name = str(cat.get('name') or '').strip()[:200]
+                if not name or name.lower() in seen_cats:
+                    continue
+                seen_cats.add(name.lower())
+                items = []
+                seen_items = set()
+                raw_items = cat.get('items')
+                for it in (raw_items if isinstance(raw_items, list) else []):
+                    text = str(it or '').strip()[:300]
+                    if not text or text.lower() in seen_items:
+                        continue
+                    seen_items.add(text.lower())
+                    items.append(text)
+                    if len(items) >= 100:
+                        break
+                categories.append({'name': name, 'items': items})
+                if len(categories) >= 100:
+                    break
+            # Пустой профиль → дефолт, чтобы каталог никогда не оказался пустым.
+            # Глубокая копия: не делим списки items с модульной константой IT_TICKET_CATALOG.
+            if not categories:
+                categories = [
+                    {'name': c.get('name'), 'items': list(c.get('items') or [])}
+                    for c in default.get('categories', [])
+                ]
+            result[profile] = {'label': label, 'categories': categories}
+        return result
+
+    def get_it_ticket_catalog(self):
+        """Действующий каталог: из БД, если задан, иначе дефолт IT_TICKET_CATALOG."""
+        try:
+            with self._get_cursor() as cursor:
+                cursor.execute("SELECT data FROM it_ticket_catalog WHERE id = 1")
+                row = cursor.fetchone()
+            if row and isinstance(row[0], dict):
+                return self._sanitize_it_ticket_catalog(row[0])
+        except Exception:
+            logging.exception("Failed to load IT-ticket catalog; using default")
+        # Возвращаем копию дефолта
+        return self._sanitize_it_ticket_catalog(IT_TICKET_CATALOG)
+
+    def set_it_ticket_catalog(self, data, updated_by):
+        sanitized = self._sanitize_it_ticket_catalog(data)
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO it_ticket_catalog (id, data, updated_by, updated_at)
+                VALUES (1, %s::jsonb, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (id) DO UPDATE SET
+                    data = EXCLUDED.data,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (json.dumps(sanitized, ensure_ascii=False), updated_by),
+            )
+        return sanitized
 
     # ─── IT-ticket pinned channels (закрепляет админ / глава отдела) ────────────
     def get_it_ticket_pinned_channels(self):
