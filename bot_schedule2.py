@@ -17062,13 +17062,34 @@ def it_ticket_catalog():
             "status": "success",
             "default_profile": profile,
             "department": {"code": (dept or {}).get('code'), "name": (dept or {}).get('name')} if dept else None,
-            "catalog": IT_TICKET_CATALOG,
+            "catalog": db.get_it_ticket_catalog(),
             "priorities": IT_TICKET_PRIORITY_LABELS,
             "pinned": pinned,
             "pinnable_profiles": _it_ticket_pinnable_profiles(requester_id, role),
+            "can_edit_catalog": _is_admin_role(role),
         }), 200
     except Exception as e:
         logging.error(f"Error fetching IT-ticket catalog: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/it_tickets/catalog', methods=['PUT', 'POST'])
+@require_api_key
+def it_ticket_catalog_update():
+    try:
+        requester_id, requester, role, err = _it_ticket_authorize(require_admin=True)
+        if err:
+            return err
+        payload = request.get_json(silent=True) or {}
+        catalog = payload.get('catalog')
+        if not isinstance(catalog, dict):
+            return jsonify({"error": "Передайте каталог объектом"}), 400
+        saved = db.set_it_ticket_catalog(catalog, requester_id)
+        return jsonify({"status": "success", "catalog": saved}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error updating IT-ticket catalog: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 

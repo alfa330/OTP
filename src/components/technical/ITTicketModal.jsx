@@ -345,13 +345,151 @@ const InstructionsEditor = memo(function InstructionsEditor({ apiBaseUrl, buildH
     );
 });
 
+// ─── CatalogEditor (редактирование категорий и типов проблем — админ) ──────────
+const CatalogEditor = memo(function CatalogEditor({ apiBaseUrl, buildHeaders, notify, catalog, onSaved }) {
+    const [open, setOpen] = useState(false);
+    const [draft, setDraft] = useState(null);
+    const [activeProfile, setActiveProfile] = useState('op');
+    const [saving, setSaving] = useState(false);
+
+    useEffect(() => {
+        if (open && catalog && !draft) {
+            try { setDraft(JSON.parse(JSON.stringify(catalog))); } catch { setDraft(null); }
+        }
+    }, [open, catalog, draft]);
+
+    // Сбрасываем черновик при сворачивании — при повторном открытии берём свежий каталог
+    useEffect(() => {
+        if (!open) setDraft(null);
+    }, [open]);
+
+    const profiles = draft ? Object.keys(draft) : [];
+    const cats = (draft && draft[activeProfile] && draft[activeProfile].categories) || [];
+    const profLabel = (p) => (draft && draft[p] && draft[p].label) || (p === 'szov' ? 'СЗоВ' : 'ОП');
+
+    const update = (mutator) => setDraft((prev) => {
+        const next = JSON.parse(JSON.stringify(prev));
+        mutator(next);
+        return next;
+    });
+    const setCatName = (ci, v) => update((d) => { d[activeProfile].categories[ci].name = v; });
+    const delCat = (ci) => update((d) => { d[activeProfile].categories.splice(ci, 1); });
+    const addCat = () => update((d) => { d[activeProfile].categories.push({ name: 'Новая категория', items: [] }); });
+    const setItem = (ci, ii, v) => update((d) => { d[activeProfile].categories[ci].items[ii] = v; });
+    const delItem = (ci, ii) => update((d) => { d[activeProfile].categories[ci].items.splice(ii, 1); });
+    const addItem = (ci) => update((d) => { d[activeProfile].categories[ci].items.push(''); });
+
+    const save = useCallback(async () => {
+        if (!draft) return;
+        setSaving(true);
+        try {
+            const res = await axios.put(`${apiBaseUrl}/api/it_tickets/catalog`, { catalog: draft }, { headers: buildHeaders() });
+            const saved = res?.data?.catalog;
+            if (saved) { setDraft(JSON.parse(JSON.stringify(saved))); if (onSaved) onSaved(saved); }
+            notify('Каталог сохранён', 'success');
+        } catch (err) {
+            notify(err?.response?.data?.error || 'Не удалось сохранить каталог', 'error');
+        } finally {
+            setSaving(false);
+        }
+    }, [apiBaseUrl, buildHeaders, draft, onSaved, notify]);
+
+    return (
+        <div className={CARD_CLASS}>
+            <button type="button" onClick={() => setOpen((o) => !o)} className="flex w-full items-center justify-between text-sm font-semibold text-slate-700">
+                <span className="flex items-center gap-2">
+                    <FaIcon className="fas fa-list text-indigo-500" style={{ width: '0.95em', height: '0.95em' }} />
+                    Категории и типы проблем
+                    <span className="text-[11px] font-normal text-slate-400">редактирование каталога</span>
+                </span>
+                <FaIcon className="fas fa-chevron-down text-slate-400" style={{ width: '0.8em', height: '0.8em', transform: open ? 'rotate(180deg)' : 'none', transition: 'transform .2s' }} />
+            </button>
+
+            {open && (
+                <div className="mt-3 space-y-3">
+                    {!draft ? (
+                        <div className="text-[12px] text-slate-400">Загрузка каталога…</div>
+                    ) : (
+                        <>
+                            <div className="inline-flex flex-wrap gap-1 rounded-xl bg-slate-100 p-0.5">
+                                {profiles.map((p) => (
+                                    <button key={p} type="button" onClick={() => setActiveProfile(p)}
+                                        className={`rounded-lg px-3 py-1 text-xs font-semibold transition ${activeProfile === p ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
+                                        {profLabel(p)}
+                                    </button>
+                                ))}
+                            </div>
+
+                            <div className="space-y-3">
+                                {cats.map((c, ci) => (
+                                    <div key={ci} className="rounded-xl border border-slate-200 bg-slate-50/60 p-2.5">
+                                        <div className="flex items-center gap-2">
+                                            <input
+                                                type="text"
+                                                value={c.name}
+                                                onChange={(e) => setCatName(ci, e.target.value)}
+                                                placeholder="Название категории"
+                                                className={FIELD_CLASS + ' mt-0 flex-1 font-semibold'}
+                                            />
+                                            <button type="button" title="Удалить категорию" onClick={() => delCat(ci)}
+                                                className="shrink-0 rounded-lg border border-rose-200 bg-white p-2 text-rose-400 hover:bg-rose-50">
+                                                <FaIcon className="fas fa-trash" style={{ width: '0.8em', height: '0.8em' }} />
+                                            </button>
+                                        </div>
+                                        <div className="mt-2 space-y-1.5 pl-2">
+                                            {(c.items || []).map((it, ii) => (
+                                                <div key={ii} className="flex items-center gap-2">
+                                                    <span className="text-slate-300">•</span>
+                                                    <input
+                                                        type="text"
+                                                        value={it}
+                                                        onChange={(e) => setItem(ci, ii, e.target.value)}
+                                                        placeholder="Тип проблемы"
+                                                        className={FIELD_CLASS + ' mt-0 flex-1 text-[13px]'}
+                                                    />
+                                                    <button type="button" title="Удалить тип" onClick={() => delItem(ci, ii)}
+                                                        className="shrink-0 rounded-lg border border-slate-200 bg-white p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-500">
+                                                        <FaIcon className="fas fa-times" style={{ width: '0.75em', height: '0.75em' }} />
+                                                    </button>
+                                                </div>
+                                            ))}
+                                            <button type="button" onClick={() => addItem(ci)}
+                                                className="text-[12px] font-medium text-indigo-600 hover:text-indigo-700">
+                                                <FaIcon className="fas fa-plus" style={{ width: '0.7em', height: '0.7em' }} /> Добавить тип
+                                            </button>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                                <button type="button" onClick={addCat}
+                                    className="inline-flex items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 hover:bg-indigo-100">
+                                    <FaIcon className="fas fa-plus" style={{ width: '0.8em', height: '0.8em' }} /> Добавить категорию
+                                </button>
+                                <button type="button" onClick={save} disabled={saving}
+                                    className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold text-white transition ${saving ? 'bg-indigo-300' : 'bg-indigo-600 hover:bg-indigo-700'}`}>
+                                    <FaIcon className={`fas ${saving ? 'fa-spinner fa-spin' : 'fa-save'}`} style={{ width: '0.85em', height: '0.85em' }} />
+                                    {saving ? 'Сохранение…' : 'Сохранить каталог'}
+                                </button>
+                            </div>
+                            <p className="text-[11px] text-slate-400">Пустые названия не сохраняются. Изменения сразу применяются к форме и подсказкам ИИ.</p>
+                        </>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+});
+
 // ─── Main modal ─────────────────────────────────────────────────────────────
-const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canManageChannels, canEditInstructions }) => {
+const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canManageChannels, canEditInstructions, canEditCatalog }) => {
     const [catalog, setCatalog] = useState(null);
     const [defaultProfile, setDefaultProfile] = useState('op');
     const [profile, setProfile] = useState('op');
     const [categoryName, setCategoryName] = useState('');
     const [subcategory, setSubcategory] = useState('');
+    const [categoryNote, setCategoryNote] = useState(''); // пояснение ИИ при автокоррекции темы
     const [description, setDescription] = useState('');
 
     const [aiFields, setAiFields] = useState([]);
@@ -447,7 +585,7 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
 
     const resetAfterCategoryChange = useCallback(() => {
         setAiFields([]); setFieldValues({}); setQuestions([]); setAnswers({});
-        setComposed(false); setPreviewText(''); setTicketTitle('');
+        setComposed(false); setPreviewText(''); setTicketTitle(''); setCategoryNote('');
     }, []);
 
     const activeChannels = useMemo(() => channels.filter((c) => c.is_active), [channels]);
@@ -505,8 +643,32 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                 return;
             }
             const result = res.data.result || {};
-            if (result.category && !categoryName) setCategoryName(result.category);
-            if (result.subcategory && !subcategory) setSubcategory(result.subcategory);
+            // ИИ может скорректировать тему. Применяем ТОЛЬКО значения, которые реально
+            // есть в действующем каталоге (с приведением регистра/пробелов к точной строке),
+            // иначе <select> покажет пустоту при «исправленном» баннере.
+            const adjusted = Boolean(result.category_adjusted);
+            const norm = (s) => String(s || '').trim().toLowerCase();
+            const catObjs = Array.isArray(catalog?.[profile]?.categories) ? catalog[profile].categories : [];
+            const findCat = (name) => (name ? catObjs.find((c) => norm(c.name) === norm(name)) : null);
+
+            let appliedCategory = categoryName;
+            const catMatch = findCat(result.category);
+            if (catMatch && (adjusted || !categoryName)) { appliedCategory = catMatch.name; setCategoryName(catMatch.name); }
+
+            let subApplied = false;
+            if (result.subcategory) {
+                const owner = findCat(appliedCategory);
+                const items = Array.isArray(owner?.items) ? owner.items : [];
+                const subMatch = items.find((it) => norm(it) === norm(result.subcategory));
+                if (subMatch && (adjusted || !subcategory)) { setSubcategory(subMatch); subApplied = true; }
+            }
+
+            if (adjusted && (catMatch || subApplied) && result.category_adjustment_note) {
+                setCategoryNote(String(result.category_adjustment_note));
+                toast(`ИИ скорректировал тему: ${result.category_adjustment_note}`, 'info');
+            } else {
+                setCategoryNote('');
+            }
             if (result.priority && PRIORITY_META[result.priority]) setPriority(result.priority);
 
             const fields = Array.isArray(result?.form?.fields) ? result.form.fields : [];
@@ -542,7 +704,7 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
         } finally {
             setAiMode(null);
         }
-    }, [apiBaseUrl, buildHeaders, profile, categoryName, subcategory, description, fieldValues, answers, previewText, toast]);
+    }, [apiBaseUrl, buildHeaders, profile, categoryName, subcategory, description, fieldValues, answers, previewText, toast, catalog]);
 
     // ── send ──
     const handleSend = useCallback(async () => {
@@ -666,6 +828,13 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                                             </select>
                                         </label>
                                     </div>
+
+                                    {categoryNote && (
+                                        <div className="mt-3 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] text-amber-800">
+                                            <FaIcon className="fas fa-sparkles text-amber-500 shrink-0" style={{ width: '0.9em', height: '0.9em', marginTop: 1 }} />
+                                            <span><b>ИИ скорректировал тему:</b> {categoryNote}</span>
+                                        </div>
+                                    )}
 
                                     <label className="mt-3 block">
                                         <span className={LABEL_CLASS}>Опишите проблему своими словами</span>
@@ -862,8 +1031,17 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                             </div>
 
                             {/* ── Конфигурация (админ / глава отдела) — на всю ширину ── */}
-                            {(canManage || canEditInstructions) && (
+                            {(canManage || canEditInstructions || canEditCatalog) && (
                                 <div className="space-y-4 lg:col-span-2">
+                                    {canEditCatalog && (
+                                        <CatalogEditor
+                                            apiBaseUrl={apiBaseUrl}
+                                            buildHeaders={buildHeaders}
+                                            notify={toast}
+                                            catalog={catalog}
+                                            onSaved={(c) => setCatalog(c)}
+                                        />
+                                    )}
                                     {canManage && (
                                         <ChannelManager
                                             apiBaseUrl={apiBaseUrl}
