@@ -714,10 +714,10 @@ const WorkplaceSearchSelect = memo(function WorkplaceSearchSelect({ value, onCha
             </button>
 
             {open && (
-                <div className="absolute top-full left-0 right-0 z-50 mt-1 rounded-xl border border-blue-100 bg-white shadow-2xl overflow-hidden">
+                <div className="absolute top-full left-0 z-50 mt-1 w-full min-w-[300px] max-w-[90vw] rounded-xl border border-blue-100 bg-white shadow-2xl overflow-hidden">
                     <div className="p-2 border-b border-blue-50">
-                        <div className="flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50/60 px-2 py-1.5">
-                            <FaIcon className="fas fa-search text-blue-300" style={{ width: '0.8em', height: '0.8em' }} />
+                        <div className="flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50/60 px-2 py-2">
+                            <FaIcon className="fas fa-search text-blue-300" style={{ width: '0.85em', height: '0.85em' }} />
                             <input
                                 ref={searchRef}
                                 type="text"
@@ -745,7 +745,7 @@ const WorkplaceSearchSelect = memo(function WorkplaceSearchSelect({ value, onCha
                                     <div className="sticky top-0 bg-white px-3 pt-2 pb-1 text-[11px] font-bold uppercase tracking-wide text-blue-400">
                                         {g.label}
                                     </div>
-                                    <div className="grid grid-cols-4 gap-1 px-2 pb-2 sm:grid-cols-6">
+                                    <div className="grid grid-cols-6 gap-1.5 px-2 pb-2.5">
                                         {g.numbers.map((n) => {
                                             const sel = String(n) === valueStr;
                                             return (
@@ -753,7 +753,7 @@ const WorkplaceSearchSelect = memo(function WorkplaceSearchSelect({ value, onCha
                                                     key={`${g.id}-${n}`}
                                                     type="button"
                                                     onClick={() => select(n)}
-                                                    className={`rounded-md border px-1.5 py-1 text-xs font-semibold transition-colors ${sel ? 'border-blue-600 bg-blue-600 text-white' : 'border-blue-100 bg-blue-50/50 text-blue-800 hover:bg-blue-100'}`}
+                                                    className={`rounded-md border py-1.5 text-xs font-semibold transition-colors ${sel ? 'border-blue-600 bg-blue-600 text-white' : 'border-blue-100 bg-blue-50/50 text-blue-800 hover:bg-blue-100'}`}
                                                 >
                                                     {n}
                                                 </button>
@@ -926,7 +926,7 @@ const AddIssueModal = memo(function AddIssueModal({
             onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
         >
             <div
-                className="w-full max-w-2xl rounded-2xl bg-white shadow-2xl border border-blue-100 flex flex-col"
+                className="w-full max-w-3xl rounded-2xl bg-white shadow-2xl border border-blue-100 flex flex-col"
                 style={{ maxHeight: '92vh', animation: 'modalIn .2s ease' }}
             >
                 {/* Header */}
@@ -950,7 +950,7 @@ const AddIssueModal = memo(function AddIssueModal({
                     <form id="add-issue-form" onSubmit={onSubmit} className="p-6 space-y-5">
 
                         {/* Date + time row */}
-                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                             <label className="block">
                                 <span className={LABEL_CLASS}>Дата проблемы</span>
                                 <input
@@ -981,16 +981,18 @@ const AddIssueModal = memo(function AddIssueModal({
                                     required
                                 />
                             </label>
-                            <label className="block">
-                                <span className={LABEL_CLASS}>Рабочее место</span>
-                                <WorkplaceSearchSelect
-                                    value={createWorkplaceNumber}
-                                    onChange={setCreateWorkplaceNumber}
-                                    groups={workplaceOptions}
-                                    placeholder="Не указано — найдите РМ"
-                                />
-                            </label>
                         </div>
+
+                        {/* РМ — отдельной строкой на всю ширину, чтобы поиск/сетка не были сжаты */}
+                        <label className="block">
+                            <span className={LABEL_CLASS}>Рабочее место</span>
+                            <WorkplaceSearchSelect
+                                value={createWorkplaceNumber}
+                                onChange={setCreateWorkplaceNumber}
+                                groups={workplaceOptions}
+                                placeholder="Не указано — найдите РМ"
+                            />
+                        </label>
 
                         {createWorkplaceForSupervisor && (
                             <div className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-medium text-indigo-800">
