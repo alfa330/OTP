@@ -1827,6 +1827,18 @@ class Database:
                 ALTER TABLE operator_technical_issues
                 ADD COLUMN IF NOT EXISTS requested_end_time TIME;
             """)
+            # Офис РМ: 'support' (Тех поддержка, РМ 1–30) или 'sales' (Отдел продаж, 28–97).
+            # Нужен, т.к. номера 28–30 есть у обоих и иначе счётчики смешиваются.
+            cursor.execute("""
+                ALTER TABLE operator_technical_issues
+                ADD COLUMN IF NOT EXISTS workplace_office VARCHAR(16);
+            """)
+            # Все существующие инциденты принадлежат Тех поддержке (ТП).
+            cursor.execute("""
+                UPDATE operator_technical_issues
+                SET workplace_office = 'support'
+                WHERE workplace_office IS NULL AND workplace_number IS NOT NULL;
+            """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS technical_issue_workplace_settings (
                     workplace_number INTEGER PRIMARY KEY CHECK (workplace_number BETWEEN 1 AND 200),
@@ -18239,6 +18251,27 @@ class Database:
                 continue
         raise ValueError(f"Invalid '{field_name}' format. Use HH:MM")
 
+    @staticmethod
+    def _workplace_office_for_code(code):
+        """Группа кабинетов РМ по коду отдела: 'op' → отдел продаж, иначе тех поддержка."""
+        return 'sales' if str(code or '').strip().lower() == 'op' else 'support'
+
+    def _get_operator_offices_tx(self, cursor, operator_ids):
+        """{operator_id: 'support'|'sales'} по отделу каждого оператора."""
+        ids = [int(o) for o in (operator_ids or []) if o is not None]
+        if not ids:
+            return {}
+        cursor.execute(
+            """
+            SELECT u.id, d.code
+            FROM users u
+            LEFT JOIN departments d ON d.id = u.department_id
+            WHERE u.id = ANY(%s)
+            """,
+            (ids,),
+        )
+        return {int(r[0]): self._workplace_office_for_code(r[1]) for r in cursor.fetchall()}
+
     def _parse_technical_issue_workplace_number(self, value, field_name='workplace_number', required=False):
         if value is None:
             if required:
@@ -19024,9 +19057,11 @@ class Database:
 
             batch_id = str(uuid.uuid4())
             for_supervisor = self._get_technical_issue_workplace_flag_tx(cursor, workplace_number_int)
+            operator_offices = self._get_operator_offices_tx(cursor, eligible_operator_ids)
             issue_values = []
 
             for operator_id in eligible_operator_ids:
+                office = operator_offices.get(int(operator_id), 'support')
                 day_chunks = self._split_absolute_minutes_intervals_by_day(
                     overlaps_by_operator.get(operator_id) or [],
                     issue_date_obj
@@ -19046,7 +19081,8 @@ class Database:
                         workplace_number_int,
                         for_supervisor,
                         Json(selected_direction_ids),
-                        requester_id_int
+                        requester_id_int,
+                        office
                     ))
 
             if not issue_values:
@@ -19069,7 +19105,8 @@ class Database:
                         workplace_number,
                         for_supervisor,
                         direction_ids,
-                        created_by
+                        created_by,
+                        workplace_office
                     )
                     VALUES %s
                 """,
@@ -19209,8 +19246,10 @@ class Database:
                 raise ValueError("No selected operators have shifts in the specified time range")
 
             for_supervisor = self._get_technical_issue_workplace_flag_tx(cursor, workplace_number_int)
+            operator_offices = self._get_operator_offices_tx(cursor, eligible_operator_ids)
             issue_values = []
             for operator_id in eligible_operator_ids:
+                office = operator_offices.get(int(operator_id), 'support')
                 day_chunks = self._split_absolute_minutes_intervals_by_day(
                     overlaps_by_operator.get(operator_id) or [],
                     issue_date_obj
@@ -19230,7 +19269,8 @@ class Database:
                         workplace_number_int,
                         for_supervisor,
                         Json(selected_direction_ids),
-                        int(source_row[2])
+                        int(source_row[2]),
+                        office
                     ))
 
             if not issue_values:
@@ -19258,6 +19298,7 @@ class Database:
                         for_supervisor,
                         direction_ids,
                         created_by,
+                        workplace_office,
                         created_at
                     )
                     VALUES %s
@@ -19429,7 +19470,8 @@ class Database:
                         ) AS batch_operator_count,
                         ti.requested_issue_date,
                         ti.requested_start_time,
-                        ti.requested_end_time
+                        ti.requested_end_time,
+                        ti.workplace_office
                     {base_sql}
                     {where_sql}
                     ORDER BY ti.issue_date DESC, ti.start_time DESC, ti.created_at DESC, ti.id DESC
@@ -19477,7 +19519,8 @@ class Database:
                     'batch_operator_count': int(row[20] or 0),
                     'requested_issue_date': row[21].strftime('%Y-%m-%d') if row[21] else None,
                     'requested_start_time': row[22].strftime('%H:%M') if row[22] else None,
-                    'requested_end_time': row[23].strftime('%H:%M') if row[23] else None
+                    'requested_end_time': row[23].strftime('%H:%M') if row[23] else None,
+                    'workplace_office': row[24] or 'support'
                 })
 
             return {

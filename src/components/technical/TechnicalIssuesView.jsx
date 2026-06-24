@@ -653,6 +653,123 @@ const CustomReasonDropdown = memo(function CustomReasonDropdown({ value, onChang
     );
 });
 
+// ─── WorkplaceSearchSelect (искабельный выбор РМ, сгруппирован по кабинетам) ────
+
+const WorkplaceSearchSelect = memo(function WorkplaceSearchSelect({ value, onChange, groups = [], placeholder = 'Не указано', emptyLabel = 'Не указано' }) {
+    const [open, setOpen] = useState(false);
+    const [search, setSearch] = useState('');
+    const ref = useRef(null);
+    const searchRef = useRef(null);
+
+    useEffect(() => {
+        if (!open) return;
+        const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+        document.addEventListener('mousedown', handler);
+        return () => document.removeEventListener('mousedown', handler);
+    }, [open]);
+
+    useEffect(() => { if (open && searchRef.current) searchRef.current.focus(); }, [open]);
+
+    const q = search.trim().toLowerCase();
+    const filteredGroups = useMemo(() => {
+        if (!q) return groups;
+        return groups
+            .map((g) => {
+                const labelHit = String(g.label || '').toLowerCase().includes(q);
+                const numbers = labelHit ? g.numbers : g.numbers.filter((n) => String(n).includes(q));
+                return { ...g, numbers };
+            })
+            .filter((g) => g.numbers.length > 0);
+    }, [groups, q]);
+
+    const valueStr = value === null || value === undefined ? '' : String(value);
+    const select = (num) => { onChange(num === '' ? '' : String(num)); setOpen(false); setSearch(''); };
+
+    return (
+        <div ref={ref} className="relative mt-1">
+            <button
+                type="button"
+                onClick={() => setOpen((o) => !o)}
+                className={`flex w-full items-center gap-2 rounded-lg border px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-400 transition-colors ${
+                    valueStr ? 'border-blue-300 bg-white text-gray-800' : 'border-blue-200 bg-white text-gray-400'
+                }`}
+            >
+                <FaIcon className="fas fa-desktop text-blue-400 shrink-0" style={{ width: '0.85em', height: '0.85em' }} />
+                <span className="flex-1 text-left truncate">{valueStr ? `РМ ${valueStr}` : placeholder}</span>
+                {valueStr && (
+                    <span
+                        role="button"
+                        tabIndex={0}
+                        onClick={(e) => { e.stopPropagation(); onChange(''); }}
+                        className="shrink-0 text-gray-300 hover:text-red-400 cursor-pointer"
+                        title="Очистить"
+                    >
+                        <FaIcon className="fas fa-times" style={{ width: '0.75em', height: '0.75em' }} />
+                    </span>
+                )}
+                <FaIcon
+                    className="fas fa-chevron-down text-gray-300 shrink-0"
+                    style={{ width: '0.8em', height: '0.8em', transform: open ? 'rotate(180deg)' : 'none', transition: 'transform .2s' }}
+                />
+            </button>
+
+            {open && (
+                <div className="absolute top-full left-0 right-0 z-50 mt-1 rounded-xl border border-blue-100 bg-white shadow-2xl overflow-hidden">
+                    <div className="p-2 border-b border-blue-50">
+                        <div className="flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50/60 px-2 py-1.5">
+                            <FaIcon className="fas fa-search text-blue-300" style={{ width: '0.8em', height: '0.8em' }} />
+                            <input
+                                ref={searchRef}
+                                type="text"
+                                inputMode="numeric"
+                                value={search}
+                                onChange={(e) => setSearch(e.target.value)}
+                                placeholder="Поиск по номеру РМ..."
+                                className="flex-1 bg-transparent text-sm text-gray-700 focus:outline-none"
+                            />
+                        </div>
+                    </div>
+                    <div className="max-h-60 overflow-y-auto py-1">
+                        <div
+                            onClick={() => select('')}
+                            className={`flex items-center gap-2 px-3 py-1.5 text-sm cursor-pointer transition-colors ${!valueStr ? 'bg-blue-100 text-blue-800 font-semibold' : 'text-gray-500 hover:bg-blue-50'}`}
+                        >
+                            <span className="w-4 shrink-0 text-center">{!valueStr && <FaIcon className="fas fa-check text-blue-600" style={{ width: '0.75em', height: '0.75em' }} />}</span>
+                            <span>{emptyLabel}</span>
+                        </div>
+                        {filteredGroups.length === 0 ? (
+                            <div className="px-3 py-3 text-sm text-gray-400 text-center">Ничего не найдено</div>
+                        ) : (
+                            filteredGroups.map((g) => (
+                                <div key={g.id}>
+                                    <div className="sticky top-0 bg-white px-3 pt-2 pb-1 text-[11px] font-bold uppercase tracking-wide text-blue-400">
+                                        {g.label}
+                                    </div>
+                                    <div className="grid grid-cols-4 gap-1 px-2 pb-2 sm:grid-cols-6">
+                                        {g.numbers.map((n) => {
+                                            const sel = String(n) === valueStr;
+                                            return (
+                                                <button
+                                                    key={`${g.id}-${n}`}
+                                                    type="button"
+                                                    onClick={() => select(n)}
+                                                    className={`rounded-md border px-1.5 py-1 text-xs font-semibold transition-colors ${sel ? 'border-blue-600 bg-blue-600 text-white' : 'border-blue-100 bg-blue-50/50 text-blue-800 hover:bg-blue-100'}`}
+                                                >
+                                                    {n}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            ))
+                        )}
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+});
+
 // ─── CustomMultiSelect ────────────────────────────────────────────────────────
 
 const CustomMultiSelect = memo(function CustomMultiSelect({ items, selectedIds, onChange, placeholder = 'Выбрать...', emptyText = 'Нет элементов' }) {
@@ -866,22 +983,12 @@ const AddIssueModal = memo(function AddIssueModal({
                             </label>
                             <label className="block">
                                 <span className={LABEL_CLASS}>Рабочее место</span>
-                                <select
+                                <WorkplaceSearchSelect
                                     value={createWorkplaceNumber}
-                                    onChange={(e) => setCreateWorkplaceNumber(e.target.value)}
-                                    className={INPUT_CLASS}
-                                >
-                                    <option value="">Не указано</option>
-                                    {workplaceOptions.map((grp) => (
-                                        <optgroup key={grp.id} label={grp.label}>
-                                            {grp.numbers.map((num) => (
-                                                <option key={`create-workplace-${num}`} value={num}>
-                                                    РМ {num}
-                                                </option>
-                                            ))}
-                                        </optgroup>
-                                    ))}
-                                </select>
+                                    onChange={setCreateWorkplaceNumber}
+                                    groups={workplaceOptions}
+                                    placeholder="Не указано — найдите РМ"
+                                />
                             </label>
                         </div>
 
@@ -1160,7 +1267,14 @@ const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({
     const workplaceStats = useMemo(() => {
         const buckets = new Map();
 
-        for (const row of rows) {
+        // Считаем только инциденты офиса выбранного кабинета (ТП vs ОП),
+        // чтобы совпадающие номера РМ 28–30 не смешивались между отделами.
+        const office = selectedCabinet?.group || null;
+        const scopedRows = office
+            ? rows.filter((r) => (r?.workplace_office || 'support') === office)
+            : rows;
+
+        for (const row of scopedRows) {
             const workplaceNumber = normalizeWorkplaceNumber(row?.workplace_number);
             if (workplaceNumber === null) continue;
 
@@ -1225,7 +1339,7 @@ const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({
             totalIncidents,
             topItems,
         };
-    }, [rows, workplaceSettingsMap, seatUniverse]);
+    }, [rows, workplaceSettingsMap, seatUniverse, selectedCabinet]);
 
     const selectedEntry = useMemo(() => {
         if (selectedWorkplace === null) return null;
@@ -2197,22 +2311,13 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
 
                         <label className="block">
                             <span className={LABEL_CLASS}>Рабочее место</span>
-                            <select
+                            <WorkplaceSearchSelect
                                 value={filterDraft.workplaceNumber}
-                                onChange={(e) => updateDraft('workplaceNumber', e.target.value)}
-                                className={INPUT_CLASS}
-                            >
-                                <option value="">Все РМ</option>
-                                {workplaceOptions.map((grp) => (
-                                    <optgroup key={grp.id} label={grp.label}>
-                                        {grp.numbers.map((num) => (
-                                            <option key={`filter-workplace-${num}`} value={num}>
-                                                РМ {num}
-                                            </option>
-                                        ))}
-                                    </optgroup>
-                                ))}
-                            </select>
+                                onChange={(val) => updateDraft('workplaceNumber', val)}
+                                groups={workplaceOptions}
+                                placeholder="Все РМ"
+                                emptyLabel="Все РМ"
+                            />
                         </label>
                     </div>
 
