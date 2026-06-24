@@ -350,6 +350,7 @@ const CatalogEditor = memo(function CatalogEditor({ apiBaseUrl, buildHeaders, no
     const [open, setOpen] = useState(false);
     const [draft, setDraft] = useState(null);
     const [activeProfile, setActiveProfile] = useState('');
+    const [expandedCat, setExpandedCat] = useState(null);
     const [saving, setSaving] = useState(false);
 
     useEffect(() => {
@@ -374,6 +375,9 @@ const CatalogEditor = memo(function CatalogEditor({ apiBaseUrl, buildHeaders, no
         if (profiles.length && !profiles.includes(activeProfile)) setActiveProfile(profiles[0]);
     }, [profiles, activeProfile]);
 
+    // Аккордеон: открыта максимум одна категория; сворачиваем при смене профиля.
+    useEffect(() => { setExpandedCat(null); }, [activeProfile]);
+
     const cats = (draft && draft[activeProfile] && draft[activeProfile].categories) || [];
     const profLabel = (p) => (draft && draft[p] && draft[p].label) || (p === 'szov' ? 'СЗоВ' : 'ОП');
 
@@ -382,9 +386,10 @@ const CatalogEditor = memo(function CatalogEditor({ apiBaseUrl, buildHeaders, no
         mutator(next);
         return next;
     });
+    const toggleCat = (ci) => setExpandedCat((prev) => (prev === ci ? null : ci));
     const setCatName = (ci, v) => update((d) => { d[activeProfile].categories[ci].name = v; });
-    const delCat = (ci) => update((d) => { d[activeProfile].categories.splice(ci, 1); });
-    const addCat = () => update((d) => { d[activeProfile].categories.push({ name: 'Новая категория', items: [] }); });
+    const delCat = (ci) => { update((d) => { d[activeProfile].categories.splice(ci, 1); }); setExpandedCat(null); };
+    const addCat = () => { const idx = cats.length; update((d) => { d[activeProfile].categories.push({ name: 'Новая категория', items: [] }); }); setExpandedCat(idx); };
     const setItem = (ci, ii, v) => update((d) => { d[activeProfile].categories[ci].items[ii] = v; });
     const delItem = (ci, ii) => update((d) => { d[activeProfile].categories[ci].items.splice(ii, 1); });
     const addItem = (ci) => update((d) => { d[activeProfile].categories[ci].items.push(''); });
@@ -434,46 +439,63 @@ const CatalogEditor = memo(function CatalogEditor({ apiBaseUrl, buildHeaders, no
                             </div>
                             )}
 
-                            <div className="space-y-3">
-                                {cats.map((c, ci) => (
-                                    <div key={ci} className="rounded-xl border border-slate-200 bg-slate-50/60 p-2.5">
-                                        <div className="flex items-center gap-2">
-                                            <input
-                                                type="text"
-                                                value={c.name}
-                                                onChange={(e) => setCatName(ci, e.target.value)}
-                                                placeholder="Название категории"
-                                                className={FIELD_CLASS + ' mt-0 flex-1 font-semibold'}
-                                            />
-                                            <button type="button" title="Удалить категорию" onClick={() => delCat(ci)}
-                                                className="shrink-0 rounded-lg border border-rose-200 bg-white p-2 text-rose-400 hover:bg-rose-50">
-                                                <FaIcon className="fas fa-trash" style={{ width: '0.8em', height: '0.8em' }} />
-                                            </button>
-                                        </div>
-                                        <div className="mt-2 space-y-1.5 pl-2">
-                                            {(c.items || []).map((it, ii) => (
-                                                <div key={ii} className="flex items-center gap-2">
-                                                    <span className="text-slate-300">•</span>
-                                                    <input
-                                                        type="text"
-                                                        value={it}
-                                                        onChange={(e) => setItem(ci, ii, e.target.value)}
-                                                        placeholder="Тип проблемы"
-                                                        className={FIELD_CLASS + ' mt-0 flex-1 text-[13px]'}
-                                                    />
-                                                    <button type="button" title="Удалить тип" onClick={() => delItem(ci, ii)}
-                                                        className="shrink-0 rounded-lg border border-slate-200 bg-white p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-500">
-                                                        <FaIcon className="fas fa-times" style={{ width: '0.75em', height: '0.75em' }} />
-                                                    </button>
-                                                </div>
-                                            ))}
-                                            <button type="button" onClick={() => addItem(ci)}
-                                                className="text-[12px] font-medium text-indigo-600 hover:text-indigo-700">
-                                                <FaIcon className="fas fa-plus" style={{ width: '0.7em', height: '0.7em' }} /> Добавить тип
-                                            </button>
-                                        </div>
+                            <div className="space-y-2">
+                                {cats.length === 0 && (
+                                    <div className="rounded-xl border border-dashed border-slate-300 bg-white px-3 py-3 text-center text-[12px] text-slate-400">
+                                        Пока нет категорий. Добавьте первую ниже.
                                     </div>
-                                ))}
+                                )}
+                                {cats.map((c, ci) => {
+                                    const isOpen = expandedCat === ci;
+                                    const count = (c.items || []).length;
+                                    return (
+                                        <div key={ci} className={`overflow-hidden rounded-xl border bg-white transition-colors ${isOpen ? 'border-indigo-200 shadow-sm' : 'border-slate-200'}`}>
+                                            {/* Свёрнутая строка категории */}
+                                            <div className="flex items-center">
+                                                <button type="button" onClick={() => toggleCat(ci)} className="flex min-w-0 flex-1 items-center gap-2.5 px-3 py-2.5 text-left">
+                                                    <FaIcon className="fas fa-chevron-down text-slate-400 shrink-0"
+                                                        style={{ width: '0.75em', height: '0.75em', transform: isOpen ? 'rotate(0deg)' : 'rotate(-90deg)', transition: 'transform .2s' }} />
+                                                    <span className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-700">{c.name || 'Без названия'}</span>
+                                                    <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-500">{count}</span>
+                                                </button>
+                                                <button type="button" title="Удалить категорию" onClick={() => delCat(ci)}
+                                                    className="mr-1.5 shrink-0 rounded-lg p-2 text-slate-300 transition-colors hover:bg-rose-50 hover:text-rose-500">
+                                                    <FaIcon className="fas fa-trash" style={{ width: '0.8em', height: '0.8em' }} />
+                                                </button>
+                                            </div>
+
+                                            {/* Раскрытая часть */}
+                                            {isOpen && (
+                                                <div className="space-y-3 border-t border-slate-100 bg-slate-50/60 px-3 py-3">
+                                                    <label className="block">
+                                                        <span className={LABEL_CLASS}>Название категории</span>
+                                                        <input type="text" value={c.name} onChange={(e) => setCatName(ci, e.target.value)}
+                                                            placeholder="Название категории" className={FIELD_CLASS} />
+                                                    </label>
+                                                    <div>
+                                                        <span className={LABEL_CLASS}>Типы проблем</span>
+                                                        <div className="mt-1 space-y-1.5">
+                                                            {(c.items || []).map((it, ii) => (
+                                                                <div key={ii} className="flex items-center gap-2">
+                                                                    <input type="text" value={it} onChange={(e) => setItem(ci, ii, e.target.value)}
+                                                                        placeholder="Тип проблемы" className={FIELD_CLASS + ' mt-0 flex-1 text-[13px]'} />
+                                                                    <button type="button" title="Удалить тип" onClick={() => delItem(ci, ii)}
+                                                                        className="shrink-0 rounded-lg border border-slate-200 bg-white p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-500">
+                                                                        <FaIcon className="fas fa-times" style={{ width: '0.75em', height: '0.75em' }} />
+                                                                    </button>
+                                                                </div>
+                                                            ))}
+                                                            <button type="button" onClick={() => addItem(ci)}
+                                                                className="text-[12px] font-medium text-indigo-600 hover:text-indigo-700">
+                                                                <FaIcon className="fas fa-plus" style={{ width: '0.7em', height: '0.7em' }} /> Добавить тип
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    );
+                                })}
                             </div>
 
                             <div className="flex flex-wrap items-center justify-between gap-2">
