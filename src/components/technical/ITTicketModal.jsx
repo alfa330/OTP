@@ -346,10 +346,10 @@ const InstructionsEditor = memo(function InstructionsEditor({ apiBaseUrl, buildH
 });
 
 // ─── CatalogEditor (редактирование категорий и типов проблем — админ) ──────────
-const CatalogEditor = memo(function CatalogEditor({ apiBaseUrl, buildHeaders, notify, catalog, onSaved }) {
+const CatalogEditor = memo(function CatalogEditor({ apiBaseUrl, buildHeaders, notify, catalog, editableProfiles = [], onSaved }) {
     const [open, setOpen] = useState(false);
     const [draft, setDraft] = useState(null);
-    const [activeProfile, setActiveProfile] = useState('op');
+    const [activeProfile, setActiveProfile] = useState('');
     const [saving, setSaving] = useState(false);
 
     useEffect(() => {
@@ -363,7 +363,17 @@ const CatalogEditor = memo(function CatalogEditor({ apiBaseUrl, buildHeaders, no
         if (!open) setDraft(null);
     }, [open]);
 
-    const profiles = draft ? Object.keys(draft) : [];
+    // Глава отдела правит только свой профиль; админ — все доступные.
+    const profiles = useMemo(() => {
+        if (!draft) return [];
+        const allowed = Array.isArray(editableProfiles) ? editableProfiles : [];
+        return Object.keys(draft).filter((p) => allowed.includes(p));
+    }, [draft, editableProfiles]);
+
+    useEffect(() => {
+        if (profiles.length && !profiles.includes(activeProfile)) setActiveProfile(profiles[0]);
+    }, [profiles, activeProfile]);
+
     const cats = (draft && draft[activeProfile] && draft[activeProfile].categories) || [];
     const profLabel = (p) => (draft && draft[p] && draft[p].label) || (p === 'szov' ? 'СЗоВ' : 'ОП');
 
@@ -409,8 +419,11 @@ const CatalogEditor = memo(function CatalogEditor({ apiBaseUrl, buildHeaders, no
                 <div className="mt-3 space-y-3">
                     {!draft ? (
                         <div className="text-[12px] text-slate-400">Загрузка каталога…</div>
+                    ) : profiles.length === 0 ? (
+                        <div className="text-[12px] text-slate-400">Нет доступных для редактирования профилей.</div>
                     ) : (
                         <>
+                            {profiles.length > 1 && (
                             <div className="inline-flex flex-wrap gap-1 rounded-xl bg-slate-100 p-0.5">
                                 {profiles.map((p) => (
                                     <button key={p} type="button" onClick={() => setActiveProfile(p)}
@@ -419,6 +432,7 @@ const CatalogEditor = memo(function CatalogEditor({ apiBaseUrl, buildHeaders, no
                                     </button>
                                 ))}
                             </div>
+                            )}
 
                             <div className="space-y-3">
                                 {cats.map((c, ci) => (
@@ -507,6 +521,7 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
     const [pinnableProfiles, setPinnableProfiles] = useState([]);
     const [pinDraftId, setPinDraftId] = useState('');
     const [pinning, setPinning] = useState(false);
+    const [catalogEditableProfiles, setCatalogEditableProfiles] = useState([]);
 
     const [loadingCatalog, setLoadingCatalog] = useState(false);
     const [aiMode, setAiMode] = useState(null); // 'draft' | 'finalize' | null
@@ -530,6 +545,7 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
     const applyMeta = useCallback((data) => {
         setPinned(data?.pinned || {});
         setPinnableProfiles(Array.isArray(data?.pinnable_profiles) ? data.pinnable_profiles : []);
+        setCatalogEditableProfiles(Array.isArray(data?.catalog_editable_profiles) ? data.catalog_editable_profiles : []);
     }, []);
 
     // Перечитываем мета-данные (закреплённые каналы), не сбрасывая выбор пользователя
@@ -1033,12 +1049,13 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                             {/* ── Конфигурация (админ / глава отдела) — на всю ширину ── */}
                             {(canManage || canEditInstructions || canEditCatalog) && (
                                 <div className="space-y-4 lg:col-span-2">
-                                    {canEditCatalog && (
+                                    {canEditCatalog && catalogEditableProfiles.length > 0 && (
                                         <CatalogEditor
                                             apiBaseUrl={apiBaseUrl}
                                             buildHeaders={buildHeaders}
                                             notify={toast}
                                             catalog={catalog}
+                                            editableProfiles={catalogEditableProfiles}
                                             onSaved={(c) => setCatalog(c)}
                                         />
                                     )}
