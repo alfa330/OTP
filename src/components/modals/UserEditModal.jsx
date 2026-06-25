@@ -2161,6 +2161,28 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         </div>
                         )}
 
+                            {(isAdminLikeRequester || isDeptScoped) && (
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Отдел</label>
+                                <CustomSelect
+                                value={editedUser?.department_id || (isDeptScoped ? requesterScopeDeptId : "")}
+                                onChange={handleDepartmentChange}
+                                disabled={isLoading || isDeptScoped}
+                                placeholder="По умолчанию (СЗоВ)"
+                                options={isDeptScoped
+                                    ? (departments || []).filter((dep) => Number(dep.id) === Number(requesterScopeDeptId)).map((dep) => ({ value: dep.id, label: dep.name }))
+                                    : [
+                                        { value: "", label: "По умолчанию (СЗоВ)" },
+                                        ...(departments || []).filter(d => d.is_active !== false).map((dep) => ({ value: dep.id, label: dep.name })),
+                                    ]
+                                }
+                                />
+                                <p className="mt-1 text-xs text-slate-500">
+                                    {isDeptScoped ? 'Отдел сотрудника закреплён за вашим отделом.' : 'Отдел определяет доступные сотруднику разделы.'}
+                                </p>
+                            </div>
+                            )}
+
                             {canShowOperatorRateControls && (
                                 <div className="grid grid-cols-1 gap-4">
                                 {isAdminLikeRequester && isOperatorDraft(editedUser) && (
