@@ -20072,7 +20072,8 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
     # исходного прихода заявки, поэтому переданная/подхваченная позже заявка вешает на
     # оператора многочасовой «ответ» и завышает среднее в десятки раз. Если request_stats
     # не передан (старые вызовы/тесты) — откатываемся на reply_rows.
-    response_source_rows = request_stats_rows if request_stats_rows is not None else reply_rows
+    using_request_stats = request_stats_rows is not None
+    response_source_rows = request_stats_rows if using_request_stats else reply_rows
     metrics_by_key = {}
     unmatched_names = {}
     unmatched_seen = set()
@@ -20177,12 +20178,23 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
     if chat_count_agg:
         update_fields.add('chats_count')
 
+    response_metric_keys = set()
     for (op_id, metric_day), bucket in response_agg.items():
         if bucket['count'] <= 0:
             continue
         metric = metric_for(op_id, metric_day)
         metric['avg_response_time_seconds'] = round(bucket['sum'] / bucket['count'], 2)
-    if response_agg:
+        response_metric_keys.add((op_id, metric_day))
+    if using_request_stats:
+        # request_stats is authoritative for response time. If an operator is present in
+        # operator_stats for the day but has no valid reaction_time in request_stats, the
+        # stored response time must be cleared instead of preserving an older import.
+        for op_id, metric_day in chat_count_agg.keys():
+            if (op_id, metric_day) not in response_metric_keys:
+                metric = metric_for(op_id, metric_day)
+                metric['avg_response_time_seconds'] = None
+        update_fields.update(CHAT_REPORT_TYPE_FIELDS[CHAT_REPORT_TYPE_RESPONSE])
+    elif response_agg:
         update_fields.update(CHAT_REPORT_TYPE_FIELDS[CHAT_REPORT_TYPE_RESPONSE])
 
     for (op_id, metric_day), bucket in score_agg.items():
