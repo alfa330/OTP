@@ -1,5 +1,6 @@
 ﻿node_modules/
 dist/
+microsip_dnd_shield/
 .vite/
 .env
 .env.codex.local
