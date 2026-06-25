@@ -26,8 +26,10 @@ def _chat_report_namespace():
         "CHAT2DESK_AUTH_SCHEME",
         "CHAT2DESK_SYNC_TIMEZONE",
         "CHAT2DESK_STATISTICS_REPORT_REPLIES",
+        "CHAT2DESK_STATISTICS_REPORT_REQUEST_STATS",
         "CHAT2DESK_STATISTICS_REPORT_RATING",
         "CHAT2DESK_STATISTICS_REPORT_OPERATOR_STATS",
+        "_KZ_TO_RU_FOLD",
     }
     wanted_functions = {
         "_env_bool",
@@ -76,11 +78,13 @@ def _chat_report_namespace():
         elif isinstance(node, ast.FunctionDef) and node.name in wanted_functions:
             selected.append(node)
 
+    import logging as _logging
     namespace = {
         "csv": csv,
         "json": json,
         "os": os,
         "re": re,
+        "logging": _logging,
         "datetime": datetime,
         "timedelta": timedelta,
         "StringIO": StringIO,
@@ -317,6 +321,37 @@ class ChatReportImportTests(unittest.TestCase):
         self.assertEqual(d10_after_surge["score_count"], 2)
         self.assertEqual(d10_after_surge["avg_score"], 4.0)
         self.assertEqual(res2["excluded_surge_rows"], 1)
+
+    def test_response_time_uses_request_stats_not_operator_replies(self):
+        """Время ответа считается по request_stats (одна строка на заявку), а не по
+        operator_replies, который завышает reaction_time для переданных заявок.
+        Также проверяем, что на working_reaction_time не откатываемся."""
+        build = self.ns["_chat2desk_build_metrics_from_statistics_rows"]
+        operator_name = OPERATORS[1][1]
+        # request_stats: настоящие значения reaction_time -> среднее 40
+        request_stats = [
+            {"operator_name": operator_name, "request_start": "2026-06-10 10:00:00", "reaction_time": "30"},
+            {"operator_name": operator_name, "request_start": "2026-06-10 10:05:00", "reaction_time": "50"},
+            # пустой reaction_time, но есть working_reaction_time — строка должна быть исключена
+            {"operator_name": operator_name, "request_start": "2026-06-10 10:10:00",
+             "reaction_time": "", "working_reaction_time": "9999"},
+            # рейтинговая строка без оператора/реакции — игнорируется
+            {"operator_name": "", "request_start": "2026-06-10 10:11:00", "reaction_time": "", "request_type": "rating"},
+        ]
+        # operator_replies со «взорванным» reaction_time — НЕ должен учитываться
+        inflated_replies = [
+            {"operator_name": operator_name, "request_start": "2026-06-10 09:00:00", "reaction_time": "18000"},
+        ]
+
+        res = build("2026-06-10", inflated_replies, [], self.lookup, self.index,
+                    request_stats_rows=request_stats)
+        self.assertEqual(res["detected_type"], "response_time")
+        self.assertEqual(res["update_fields"], ["avg_response_time_seconds"])
+        self.assertEqual(res["api_rows"]["request_stats"], 4)
+        by_key = {(m["operator_id"], m["day"]): m for m in res["metrics"]}
+        d10 = by_key[(2, "2026-06-10")]
+        # (30 + 50) / 2 = 40 — без 18000 (operator_replies) и без 9999 (working_reaction_time)
+        self.assertEqual(d10["avg_response_time_seconds"], 40.0)
 
     def test_chat2desk_operator_stats_imports_chat_count(self):
         build = self.ns["_chat2desk_build_metrics_from_statistics_rows"]
