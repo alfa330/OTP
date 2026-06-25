@@ -19720,6 +19720,7 @@ def _chat_report_parse(header, data_rows, operator_lookup, operator_token_index,
 
 
 CHAT2DESK_STATISTICS_REPORT_REPLIES = 'operator_replies'
+CHAT2DESK_STATISTICS_REPORT_REQUEST_STATS = 'request_stats'
 CHAT2DESK_STATISTICS_REPORT_RATING = 'rating'
 CHAT2DESK_STATISTICS_REPORT_OPERATOR_STATS = 'operator_stats'
 CHAT2DESK_STATISTICS_REPORT_OPERATOR_EVENTS = 'operator_events'
@@ -20040,7 +20041,8 @@ def _chat2desk_low_rating_payload(row, op_id, operator_name, metric_day, score):
 def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_rows,
                                                   operator_lookup, operator_token_index,
                                                   operator_stats_rows=None,
-                                                  surge_windows=None, preview_limit=None):
+                                                  surge_windows=None, preview_limit=None,
+                                                  request_stats_rows=None):
     preview_limit_value = STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
     if preview_limit is not None:
         try:
@@ -20050,12 +20052,19 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
 
     target_tz = _chat2desk_sync_timezone()
     windows = _chat_report_parse_surge_windows(surge_windows)
+    # Время ответа считаем по отчёту request_stats (одна строка на заявку, привязана
+    # к фактическому обработчику с настоящим reaction_time). operator_replies для этого
+    # непригоден: он даёт строку на каждый сегмент оператора и меряет reaction_time от
+    # исходного прихода заявки, поэтому переданная/подхваченная позже заявка вешает на
+    # оператора многочасовой «ответ» и завышает среднее в десятки раз. Если request_stats
+    # не передан (старые вызовы/тесты) — откатываемся на reply_rows.
+    response_source_rows = request_stats_rows if request_stats_rows is not None else reply_rows
     metrics_by_key = {}
     unmatched_names = {}
     unmatched_seen = set()
     excluded_surge = 0
     low_ratings = []
-    source_rows = sum(1 for row in (reply_rows or []) if _chat2desk_row_is_nonempty(row))
+    source_rows = sum(1 for row in (response_source_rows or []) if _chat2desk_row_is_nonempty(row))
     source_rows += sum(1 for row in (rating_rows or []) if _chat2desk_row_is_nonempty(row))
     source_rows += sum(1 for row in (operator_stats_rows or []) if _chat2desk_row_is_nonempty(row))
 
@@ -20075,25 +20084,25 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
         unmatched_names[key] = unmatched_names.get(key, 0) + 1
 
     response_agg = {}
-    for row_index, row in enumerate(reply_rows or []):
+    for row_index, row in enumerate(response_source_rows or []):
         if not isinstance(row, dict) or not _chat2desk_row_is_nonempty(row):
             continue
         raw_name = _chat2desk_row_first(row, 'operator_name', 'operator', 'name')
         start_value = _chat2desk_row_first(row, 'request_start', 'reply_start', 'created_at')
         start_dt = _chat2desk_parse_datetime(start_value, target_tz=target_tz)
+        # Только reaction_time: так же, как считает веб-отчёт request_stats. На working_reaction_time
+        # не откатываемся — иначе в среднее попадут строки, которых нет в отчёте-эталоне.
         reaction = _chat_metrics_parse_number(_chat2desk_row_first(row, 'reaction_time'))
-        if reaction is None:
-            reaction = _chat_metrics_parse_number(_chat2desk_row_first(row, 'working_reaction_time'))
         if not raw_name or start_dt is None or reaction is None:
             if raw_name:
-                note_unmatched(raw_name, f"reply:{row_index}")
+                note_unmatched(raw_name, f"response:{row_index}")
             continue
         if _chat_report_in_surge(start_dt, windows):
             excluded_surge += 1
             continue
         op_id, _ = _chat_report_resolve_operator(raw_name, operator_lookup, operator_token_index)
         if op_id is None:
-            note_unmatched(raw_name, f"reply:{row_index}")
+            note_unmatched(raw_name, f"response:{row_index}")
             continue
         metric_day = start_dt.date().strftime('%Y-%m-%d')
         bucket = response_agg.setdefault((op_id, metric_day), {'sum': 0.0, 'count': 0})
@@ -20222,6 +20231,7 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
         'excluded_surge_rows': int(excluded_surge),
         'api_rows': {
             CHAT2DESK_STATISTICS_REPORT_REPLIES: len(reply_rows or []),
+            CHAT2DESK_STATISTICS_REPORT_REQUEST_STATS: len(request_stats_rows or []),
             CHAT2DESK_STATISTICS_REPORT_RATING: len(rating_rows or []),
             CHAT2DESK_STATISTICS_REPORT_OPERATOR_STATS: len(operator_stats_rows or []),
         },
@@ -20239,18 +20249,21 @@ def _chat2desk_saved_surge_windows_for_day(day_obj):
 
 
 def _chat2desk_build_daily_metrics(day_str, operator_lookup, operator_token_index, surge_windows=None):
-    reply_rows = _chat2desk_statistics_get(CHAT2DESK_STATISTICS_REPORT_REPLIES, day_str)
+    # Время ответа берём из request_stats (см. _chat2desk_build_metrics_from_statistics_rows).
+    # operator_replies больше не тянем — он давал завышенное среднее.
+    request_stats_rows = _chat2desk_statistics_get(CHAT2DESK_STATISTICS_REPORT_REQUEST_STATS, day_str)
     rating_rows = _chat2desk_statistics_get(CHAT2DESK_STATISTICS_REPORT_RATING, day_str)
     operator_stats_rows = _chat2desk_statistics_get(CHAT2DESK_STATISTICS_REPORT_OPERATOR_STATS, day_str)
     return _chat2desk_build_metrics_from_statistics_rows(
         day_str,
-        reply_rows,
+        None,
         rating_rows,
         operator_lookup,
         operator_token_index,
         operator_stats_rows=operator_stats_rows,
         surge_windows=surge_windows,
-        preview_limit=STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
+        preview_limit=STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT,
+        request_stats_rows=request_stats_rows
     )
 
 
