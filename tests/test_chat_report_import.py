@@ -353,6 +353,53 @@ class ChatReportImportTests(unittest.TestCase):
         # (30 + 50) / 2 = 40 — без 18000 (operator_replies) и без 9999 (working_reaction_time)
         self.assertEqual(d10["avg_response_time_seconds"], 40.0)
 
+    def test_request_stats_missing_response_clears_stale_value(self):
+        build = self.ns["_chat2desk_build_metrics_from_statistics_rows"]
+        operator_name = OPERATORS[0][1]
+        other_operator_name = OPERATORS[1][1]
+        request_stats = [
+            {
+                "operator_name": other_operator_name,
+                "request_start": "2026-06-13 10:00:00",
+                "reaction_time": "30",
+            },
+            {
+                "operator_name": "",
+                "request_start": "2026-06-13 04:47:13",
+                "reaction_time": "",
+                "request_id": "74362227",
+            },
+        ]
+        operator_stats = [
+            {
+                "operator_name": operator_name,
+                "date": "2026-06-13",
+                "requests_took_part": 0,
+                "requests_replied_first": 0,
+            },
+            {
+                "operator_name": other_operator_name,
+                "date": "2026-06-13",
+                "requests_took_part": 1,
+                "requests_replied_first": 1,
+            },
+        ]
+
+        res = build(
+            "2026-06-13",
+            [{"operator_name": operator_name, "request_start": "2026-06-13 04:47:13", "reaction_time": "224750"}],
+            [],
+            self.lookup,
+            self.index,
+            operator_stats_rows=operator_stats,
+            request_stats_rows=request_stats,
+        )
+        self.assertIn("avg_response_time_seconds", res["update_fields"])
+        by_key = {(m["operator_id"], m["day"]): m for m in res["metrics"]}
+        self.assertIsNone(by_key[(1, "2026-06-13")]["avg_response_time_seconds"])
+        self.assertEqual(by_key[(1, "2026-06-13")]["chats_count"], 0)
+        self.assertEqual(by_key[(2, "2026-06-13")]["avg_response_time_seconds"], 30.0)
+
     def test_chat2desk_operator_stats_imports_chat_count(self):
         build = self.ns["_chat2desk_build_metrics_from_statistics_rows"]
         operator_name = OPERATORS[1][1]
