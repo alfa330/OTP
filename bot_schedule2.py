@@ -6034,7 +6034,21 @@ def get_admin_users():
         if requester_role == 'sv' or headed_dept_id is not None:
             scope_dept = _department_scope_id_for_requester(requester_id)
             if scope_dept is not None:
-                users = [u for u in users if u.get('department_id') == scope_dept]
+                if requester_role == 'sv' and headed_dept_id is None:
+                    # СВ видит сотрудников своего отдела И всех, кого ведёт сам
+                    # (supervisor_id == СВ), даже если у оператора другой/пустой отдел.
+                    # Иначе такие операторы выпадают из полного списка, фронт берёт
+                    # «тонкую» проекцию svData.operators без HR-полей, и при открытии
+                    # карточки данные выглядят «слетевшими».
+                    def _supervised_by_requester(u):
+                        sup = u.get('supervisor_id')
+                        try:
+                            return sup is not None and int(sup) == int(requester_id)
+                        except (TypeError, ValueError):
+                            return False
+                    users = [u for u in users if u.get('department_id') == scope_dept or _supervised_by_requester(u)]
+                else:
+                    users = [u for u in users if u.get('department_id') == scope_dept]
         return jsonify({"status": "success", "users": users}), 200
     except Exception as e:
         logging.error(f"Error fetching users: {e}")

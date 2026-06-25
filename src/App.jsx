@@ -43214,7 +43214,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             <div className="flex space-x-2">
                                                                 <button
                                                                 onClick={() => {
-                                                                    setUserToEdit({ ...op, supervisor_id: op?.supervisor_id ?? user?.id });
+                                                                    const fullOp = (Array.isArray(adminUsers) ? adminUsers : []).find((cand) => Number(cand?.id) === Number(op?.id)) || op;
+                                                                    setUserToEdit({ ...fullOp, supervisor_id: fullOp?.supervisor_id ?? user?.id });
                                                                     setShowUserEditModal(true);
                                                                 }}
                                                                 className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200 flex items-center gap-1"
@@ -43274,7 +43275,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             <div className="flex space-x-2">
                                                                 <button
                                                                 onClick={() => {
-                                                                    setUserToEdit({ ...op, supervisor_id: op?.supervisor_id ?? user?.id });
+                                                                    const fullOp = (Array.isArray(adminUsers) ? adminUsers : []).find((cand) => Number(cand?.id) === Number(op?.id)) || op;
+                                                                    setUserToEdit({ ...fullOp, supervisor_id: fullOp?.supervisor_id ?? user?.id });
                                                                     setShowUserEditModal(true);
                                                                 }}
                                                                 className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200 flex items-center gap-1"
