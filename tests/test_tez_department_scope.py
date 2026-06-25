@@ -231,5 +231,92 @@ class TezDepartmentBackendScopeTests(unittest.TestCase):
         self.assertIn("_ensure_call_access_for_requester(previous_call.get(\"operator_id\"), requester, requester_id)", receive_eval)
 
 
+class DepartmentHeadWriteScopeTests(unittest.TestCase):
+    """Глава отдела (админ-роль + headed_department_id) НЕ должна считаться
+    глобальным админом на write/assign-эндпоинтах: иначе её действия утекают
+    в чужие отделы, а созданные ею операторы уходят в СЗоВ и пропадают из её списка."""
+
+    def test_add_user_forces_headed_department_for_scoped_head(self):
+        add_user = _function_source(BOT_PATH, "add_user")
+        # Отдел нового сотрудника берётся из клиента только для ГЛОБАЛЬНОГО админа;
+        # глава отдела/СВ принудительно получают свой отдел (requester_dept_id).
+        self.assertIn("if _is_global_admin_requester(requester_role, requester_id):", add_user)
+        self.assertIn("department_id = requester_dept_id", add_user)
+        self.assertIn(
+            "requester_dept_id = requester_headed_dept if requester_headed_dept is not None else db.get_user_department_id(requester_id)",
+            add_user,
+        )
+
+    def test_admin_update_user_does_not_short_circuit_scope_for_head(self):
+        admin_update_user = _function_source(BOT_PATH, "admin_update_user")
+        self.assertIn(
+            "if not _is_global_admin_requester(requester_role, requester_id) and not _requester_can_access_target_user(",
+            admin_update_user,
+        )
+        self.assertIn(
+            "if field == 'department_id' and not _is_global_admin_requester(requester_role, requester_id):",
+            admin_update_user,
+        )
+
+    def test_department_head_assignment_endpoints_require_global_admin(self):
+        set_head = _function_source(BOT_PATH, "api_admin_set_department_head")
+        head_history = _function_source(BOT_PATH, "api_admin_department_head_history")
+        self.assertIn("if not _is_global_admin_requester(requester_role, requester_id):", set_head)
+        self.assertIn("if not _is_global_admin_requester(requester_role, requester_id):", head_history)
+
+    def test_group_write_endpoints_are_department_scoped(self):
+        scope_helper = _function_source(BOT_PATH, "_ensure_group_in_requester_scope")
+        create_group = _function_source(BOT_PATH, "create_group_endpoint")
+        add_operator = _function_source(BOT_PATH, "add_group_operator_endpoint")
+        add_supervisor = _function_source(BOT_PATH, "add_group_supervisor_endpoint")
+        archive_group = _function_source(BOT_PATH, "archive_group_endpoint")
+        rename_group = _function_source(BOT_PATH, "rename_group_endpoint")
+        reuse_group = _function_source(BOT_PATH, "reuse_group_endpoint")
+        group_members = _function_source(BOT_PATH, "group_members_endpoint")
+        recompute = _function_source(BOT_PATH, "recompute_month_snapshot_endpoint")
+
+        self.assertIn("if _is_global_admin_requester(role, requester_id):", scope_helper)
+        self.assertIn("grp.get('department_id') != headed_dept", scope_helper)
+        self.assertIn(
+            "department_id = data.get('department_id') if _is_global_admin_requester(role, requester_id) else headed_dept",
+            create_group,
+        )
+        self.assertIn("_ensure_group_in_requester_scope(group_id, rid, _role)", add_operator)
+        self.assertIn("_ensure_group_in_requester_scope(group_id, rid, _role)", add_supervisor)
+        self.assertIn("_ensure_group_in_requester_scope(group_id, _rid, _role)", archive_group)
+        self.assertIn("_ensure_group_in_requester_scope(group_id, _rid, _role)", rename_group)
+        self.assertIn("_ensure_group_in_requester_scope(group_id, _rid, _role)", reuse_group)
+        self.assertIn("_ensure_group_in_requester_scope(group_id, _rid, _role)", group_members)
+        # Тяжёлый глобальный пересчёт снимков — только глобальный админ (главам запрещено).
+        self.assertIn("if not _is_global_admin_requester(role, requester_id):", recompute)
+
+    def test_work_schedule_break_endpoints_scope_department_head(self):
+        save_rules = _function_source(BOT_PATH, "save_work_schedule_break_rules")
+        recalc = _function_source(BOT_PATH, "recalculate_work_schedule_breaks")
+        self.assertIn("if not _is_global_admin_requester(role, requester_id):", save_rules)
+        self.assertIn(
+            "elif not _is_global_admin_requester(_normalize_user_role(user_data[3]), requester_id):",
+            recalc,
+        )
+
+    def test_call_division_is_department_scoped(self):
+        status = _function_source(BOT_PATH, "call_distribution_status")
+        sync_endpoint = _function_source(BOT_PATH, "sync_eval_calls_oktell")
+        worker = _function_source(BOT_PATH, "sync_oktell_evaluation_calls")
+        settings = _function_source(BOT_PATH, "call_distribution_settings_endpoint")
+
+        self.assertIn(
+            "scope_dept = None if _is_global_admin_requester(role, requester_id) else _department_scope_id_for_requester(requester_id)",
+            status,
+        )
+        self.assertIn("if scope_member_ids is not None and op_id not in scope_member_ids:", status)
+        self.assertIn("department_id=scope_dept", sync_endpoint)
+        self.assertIn("def sync_oktell_evaluation_calls(", worker)
+        self.assertIn("department_id=None", worker)
+        self.assertIn("allowed_operator_ids", worker)
+        self.assertIn("db.get_department_member_ids(department_id)", worker)
+        self.assertIn("can_edit = _is_global_admin_requester(role, requester_id)", settings)
+
+
 if __name__ == "__main__":
     unittest.main()

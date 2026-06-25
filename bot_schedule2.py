@@ -6188,10 +6188,10 @@ def admin_update_user():
             return jsonify({"error": "Only admins can update users"}), 403
         if target_role in ('admin', 'super_admin') and requester_role != 'super_admin':
             return jsonify({"error": "Only super admins can update admin users"}), 403
-        if field == 'department_id' and requester_role not in ('super_admin', 'admin'):
+        if field == 'department_id' and not _is_global_admin_requester(requester_role, requester_id):
             return jsonify({"error": "Only admins can reassign a user's department"}), 403
         scoped_target_roles = ('operator', 'trainee', 'trainer', 'sv') if headed_dept_id is not None else ('operator', 'trainee')
-        if not _is_admin_role(requester_role) and not _requester_can_access_target_user(
+        if not _is_global_admin_requester(requester_role, requester_id) and not _requester_can_access_target_user(
             requester,
             requester_id,
             target_user,
@@ -6502,7 +6502,7 @@ def api_admin_set_department_head(department_id):
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
         requester_role = _normalize_user_role(requester[3])
-        if not _is_admin_role(requester_role):
+        if not _is_global_admin_requester(requester_role, requester_id):
             return jsonify({"error": "Only admins can assign a department head"}), 403
 
         department = db.get_department_by_id(department_id)
@@ -6543,7 +6543,7 @@ def api_admin_department_head_history(department_id):
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
         requester_role = _normalize_user_role(requester[3])
-        if not _is_admin_role(requester_role):
+        if not _is_global_admin_requester(requester_role, requester_id):
             return jsonify({"error": "Forbidden"}), 403
         if not db.get_department_by_id(department_id):
             return jsonify({"error": "Department not found"}), 404
@@ -11179,10 +11179,13 @@ def add_user():
         if role != 'operator':
             sip_number = None
 
-        # Отдел: админ выбирает любой; СВ/глава отдела создают строго в своём отделе.
+        # Отдел: только глобальный админ/супер-админ выбирает любой отдел.
+        # СВ и глава отдела (даже с админ-ролью) создают строго в своём отделе —
+        # выбор клиента игнорируем, иначе оператор может уйти в чужой отдел/СЗоВ
+        # и пропасть из скоупа главы (см. get_admin_users).
         requester_dept_id = requester_headed_dept if requester_headed_dept is not None else db.get_user_department_id(requester_id)
         department_id = None
-        if _is_admin_role(requester_role):
+        if _is_global_admin_requester(requester_role, requester_id):
             department_raw = data.get('department_id')
             if department_raw not in [None, '']:
                 try:
@@ -11370,6 +11373,19 @@ def _ensure_group_manager():
     return requester_id, role, None
 
 
+def _ensure_group_in_requester_scope(group_id, requester_id, role):
+    """Изоляция отделов: глава отдела управляет только группами своего отдела.
+    Глобальный админ/супер-админ — любыми группами. Возвращает (resp, code) при
+    отказе, иначе None."""
+    if _is_global_admin_requester(role, requester_id):
+        return None
+    headed_dept = db.headed_department_id_for_user(requester_id)
+    grp = db.get_group(group_id)
+    if not grp or headed_dept is None or grp.get('department_id') != headed_dept:
+        return jsonify({"error": "Forbidden: group is not in your department"}), 403
+    return None
+
+
 @app.route('/api/groups', methods=['GET'])
 @require_api_key
 def list_groups_endpoint():
@@ -11417,7 +11433,7 @@ def recompute_month_snapshot_endpoint():
         if guard_err:
             resp, code = guard_err
             return resp, code
-        if not _is_admin_role(role):
+        if not _is_global_admin_requester(role, requester_id):
             return jsonify({"error": "Only admins can recompute month snapshots"}), 403
         data = request.get_json(silent=True) or {}
         month = str(data.get('month') or '').strip()
@@ -11480,7 +11496,7 @@ def create_group_endpoint():
             return jsonify({"error": "name is required"}), 400
         direction_id = data.get('direction_id')
         headed_dept = db.headed_department_id_for_user(requester_id)
-        department_id = data.get('department_id') if _is_admin_role(role) else headed_dept
+        department_id = data.get('department_id') if _is_global_admin_requester(role, requester_id) else headed_dept
         # Подсказки: архивные группы того же отдела/направления (если не force).
         if not data.get('force'):
             suggestions = db.get_group_suggestions(department_id=department_id, direction_id=direction_id)
@@ -11512,6 +11528,10 @@ def archive_group_endpoint(group_id):
         if guard_err:
             resp, code = guard_err
             return resp, code
+        scope_err = _ensure_group_in_requester_scope(group_id, _rid, _role)
+        if scope_err:
+            resp, code = scope_err
+            return resp, code
         data = request.get_json(silent=True) or {}
         group = db.archive_group(group_id, end_date=data.get('end_date'))
         return jsonify({"status": "success", "group": group}), 200
@@ -11528,6 +11548,10 @@ def reuse_group_endpoint(group_id):
         if guard_err:
             resp, code = guard_err
             return resp, code
+        scope_err = _ensure_group_in_requester_scope(group_id, _rid, _role)
+        if scope_err:
+            resp, code = scope_err
+            return resp, code
         group = db.reuse_archived_group(group_id)
         return jsonify({"status": "success", "group": group}), 200
     except Exception as e:
@@ -11542,6 +11566,10 @@ def rename_group_endpoint(group_id):
         _rid, _role, guard_err = _ensure_group_manager()
         if guard_err:
             resp, code = guard_err
+            return resp, code
+        scope_err = _ensure_group_in_requester_scope(group_id, _rid, _role)
+        if scope_err:
+            resp, code = scope_err
             return resp, code
         data = request.get_json(silent=True) or {}
         name = (data.get('name') or '').strip()
@@ -11561,6 +11589,10 @@ def add_group_operator_endpoint(group_id):
         rid, _role, guard_err = _ensure_group_manager()
         if guard_err:
             resp, code = guard_err
+            return resp, code
+        scope_err = _ensure_group_in_requester_scope(group_id, rid, _role)
+        if scope_err:
+            resp, code = scope_err
             return resp, code
         data = request.get_json() or {}
         operator_id = data.get('operator_id')
@@ -11585,6 +11617,10 @@ def group_members_endpoint(group_id):
         _rid, _role, guard_err = _ensure_group_manager()
         if guard_err:
             resp, code = guard_err
+            return resp, code
+        scope_err = _ensure_group_in_requester_scope(group_id, _rid, _role)
+        if scope_err:
+            resp, code = scope_err
             return resp, code
         members = db.get_group_members(group_id)
         return jsonify({
@@ -11611,6 +11647,10 @@ def reassign_operator_history_endpoint(operator_id):
         from_date = data.get('from_date')
         if not before_group_id or not from_date:
             return jsonify({"error": "before_group_id and from_date are required"}), 400
+        scope_err = _ensure_group_in_requester_scope(int(before_group_id), _rid, _role)
+        if scope_err:
+            resp, code = scope_err
+            return resp, code
         result = db.reassign_operator_history(operator_id, int(before_group_id), from_date)
         return jsonify({"status": "success", **result}), 200
     except Exception as e:
@@ -11625,6 +11665,10 @@ def add_group_supervisor_endpoint(group_id):
         rid, _role, guard_err = _ensure_group_manager()
         if guard_err:
             resp, code = guard_err
+            return resp, code
+        scope_err = _ensure_group_in_requester_scope(group_id, rid, _role)
+        if scope_err:
+            resp, code = scope_err
             return resp, code
         data = request.get_json() or {}
         supervisor_id = data.get('supervisor_id')
@@ -15038,13 +15082,17 @@ def sync_eval_calls_oktell():
         date_from = payload.get('date_from') or payload.get('start_date') or None
         date_to = payload.get('date_to') or payload.get('end_date') or None
 
+        # Изоляция отделов: глава отдела распределяет звонки только своим операторам;
+        # глобальный админ/супер-админ — по всем отделам.
+        scope_dept = None if _is_global_admin_requester(importer[3], importer_id) else _department_scope_id_for_requester(importer_id)
         result = sync_oktell_evaluation_calls(
             month=month,
             date_from=date_from,
             date_to=date_to,
             triggered_by='manual',
             force=True,
-            importer_id=importer_id
+            importer_id=importer_id,
+            department_id=scope_dept
         )
         status = result.get('status')
         if status == 'skipped':
@@ -15090,7 +15138,9 @@ def call_distribution_settings_endpoint():
         is_sv = _is_supervisor_role(role)
         if not (is_admin or is_head or is_sv):
             return jsonify({"error": "Forbidden"}), 403
-        can_edit = bool(is_admin or is_head)
+        # Настройки распределения — глобальный синглтон (общий для всех отделов),
+        # поэтому менять их может только глобальный админ/супер-админ, не глава отдела.
+        can_edit = _is_global_admin_requester(role, requester_id)
 
         if request.method == 'GET':
             return jsonify({
@@ -15134,12 +15184,19 @@ def call_distribution_status():
         if not re.match(r'^\d{4}-\d{2}$', str(month)):
             return jsonify({"error": "month must be in YYYY-MM format"}), 400
 
+        # Изоляция отделов: глава отдела и СВ видят только операторов своего отдела;
+        # глобальный админ/супер-админ — всех.
+        scope_dept = None if _is_global_admin_requester(role, requester_id) else _department_scope_id_for_requester(requester_id)
+        scope_member_ids = db.get_department_member_ids(scope_dept) if scope_dept is not None else None
+
         # операторская модель (чат-менеджеры исключены)
         ops = []
         for row in (db.get_all_operators() or []):
             try:
                 op_id = int(row[0])
             except Exception:
+                continue
+            if scope_member_ids is not None and op_id not in scope_member_ids:
                 continue
             name = str(row[1] or '').strip()
             direction_name = str(row[7] or '').strip() if len(row) > 7 else ''
@@ -21185,7 +21242,7 @@ def _oktell_eval_sample_sql(mstart, mnext, auserids, cap, min_d, max_d):
 
 
 def sync_oktell_evaluation_calls(month=None, date_from=None, date_to=None, triggered_by='scheduler',
-                                 force=False, importer_id=None):
+                                 force=False, importer_id=None, department_id=None):
     """Норма-ориентированное распределение звонков на оценку. На каждого оператора добирает
     пул imported_calls до NORM(op, месяц) случайными подходящими записанными звонками. По месяцу
     звонка (граница месяца обрабатывается отдельными месяцами). force=True игнорирует флаг enabled."""
@@ -21206,6 +21263,11 @@ def sync_oktell_evaluation_calls(month=None, date_from=None, date_to=None, trigg
     started = time.time()
     try:
         operator_lookup = _status_import_build_operator_lookup(exclude_chat_managers=True)
+        # Изоляция отделов: при запуске главой отдела распределяем звонки только
+        # операторам её отдела (department_id=None — глобальный прогон планировщика/админа).
+        allowed_operator_ids = (
+            db.get_department_member_ids(department_id) if department_id is not None else None
+        )
         per_month = []
         grand_added = 0
         grand_ops = 0
@@ -21220,7 +21282,10 @@ def sync_oktell_evaluation_calls(month=None, date_from=None, date_to=None, trigg
                 m = _status_import_resolve_operator_matches(nm, operator_lookup)
                 if len(m) != 1:
                     continue
-                matched.append((str(r.get('auserid')), int(m[0]['id']),
+                otp_id = int(m[0]['id'])
+                if allowed_operator_ids is not None and otp_id not in allowed_operator_ids:
+                    continue
+                matched.append((str(r.get('auserid')), otp_id,
                                 m[0].get('name') or nm, int(r.get('available') or 0)))
             if not matched:
                 per_month.append({'month': mstr, 'operators': 0, 'added': 0})
@@ -22388,7 +22453,7 @@ def save_work_schedule_break_rules():
         # только для направлений своего отдела (не может затронуть чужой отдел).
         role = _normalize_user_role(user_data[3])
         scope_dept = None
-        if not _is_admin_role(role):
+        if not _is_global_admin_requester(role, requester_id):
             scope_dept = _headed_department_id(requester_id) or db.get_user_department_id(requester_id)
             if scope_dept is None:
                 return jsonify({"error": "Forbidden"}), 403
@@ -22469,7 +22534,7 @@ def recalculate_work_schedule_breaks():
                     continue
                 seen_operator_ids.add(target_id)
                 operator_ids.append(target_id)
-        elif not _is_admin_role(user_data[3]):
+        elif not _is_global_admin_requester(_normalize_user_role(user_data[3]), requester_id):
             return jsonify({"error": "operator_ids are required for scoped manager requests"}), 400
 
         result = db.recalculate_work_schedule_breaks(
