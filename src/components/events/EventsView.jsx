@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import FaIcon from '../common/FaIcon';
-import CustomSelect from '../ui/CustomSelect';
 
 /* ──────────────────────────────────────────────────────────────────────
  * Раздел «Ивенты»: общедоступная лента постов с фото/видео, лайками и
@@ -77,15 +76,32 @@ const Avatar = ({ name, url, size = 36 }) => {
     );
 };
 
+const pluralDepartments = (n) => {
+    const mod10 = n % 10;
+    const mod100 = n % 100;
+    if (mod10 === 1 && mod100 !== 11) return 'отдел';
+    if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return 'отдела';
+    return 'отделов';
+};
+
 const DepartmentBadge = ({ event }) => {
-    const all = event.department_id == null;
+    const ids = event.department_ids || [];
+    const names = event.department_names || [];
+    const all = ids.length === 0;
+    let label;
+    if (all) label = 'Все отделы';
+    else if (ids.length === 1) label = names[0] || 'Отдел';
+    else label = `${ids.length} ${pluralDepartments(ids.length)}`;
     return (
-        <span className={cls(
-            'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium',
-            all ? 'bg-blue-50 text-blue-600' : 'bg-slate-100 text-slate-600',
-        )}>
+        <span
+            title={all ? 'Все отделы' : names.join(', ')}
+            className={cls(
+                'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium',
+                all ? 'bg-blue-50 text-blue-600' : 'bg-slate-100 text-slate-600',
+            )}
+        >
             <FaIcon className={all ? 'fas fa-globe' : 'fas fa-building'} />
-            {all ? 'Все отделы' : (event.department_name || 'Отдел')}
+            {label}
         </span>
     );
 };
@@ -888,20 +904,89 @@ const captureVideoPoster = (file) => new Promise((resolve) => {
     video.src = url;
 });
 
+/* ── Мульти-выбор отделов-получателей (пустой набор = все отделы) ───── */
+const DepartmentMultiSelect = ({ departments = [], value = [], onChange }) => {
+    const [open, setOpen] = useState(false);
+    const selected = useMemo(() => new Set(value.map(Number)), [value]);
+    const nameById = useMemo(() => {
+        const m = new Map();
+        (departments || []).forEach((d) => m.set(Number(d.id), d.name));
+        return m;
+    }, [departments]);
+    let summary;
+    if (!value.length) summary = 'Все отделы';
+    else if (value.length === 1) summary = nameById.get(Number(value[0])) || 'Отдел';
+    else summary = `${value.length} ${pluralDepartments(value.length)}`;
+    const toggleDept = (id) => {
+        const n = Number(id);
+        if (selected.has(n)) onChange(value.filter((v) => Number(v) !== n));
+        else onChange([...value, n]);
+    };
+    const Check = ({ on, round }) => (
+        <span className={cls(
+            'w-4 h-4 flex items-center justify-center border flex-shrink-0',
+            round ? 'rounded-full' : 'rounded',
+            on ? 'border-blue-600 bg-blue-600 text-white' : 'border-gray-300',
+        )}>
+            {on && <FaIcon className="fas fa-check" style={{ fontSize: '0.6em' }} />}
+        </span>
+    );
+    return (
+        <div className="border border-gray-200 rounded-lg overflow-hidden">
+            <button
+                type="button"
+                onClick={() => setOpen((o) => !o)}
+                className="w-full px-3 py-2.5 text-sm bg-white flex items-center justify-between gap-2 hover:bg-slate-50 transition-colors"
+            >
+                <span className="flex items-center gap-2 text-slate-700 min-w-0">
+                    <FaIcon className={value.length ? 'fas fa-building' : 'fas fa-globe'} />
+                    <span className="truncate">{summary}</span>
+                </span>
+                <FaIcon className={cls('fas fa-chevron-down text-gray-400 transition-transform', open && 'rotate-180')} />
+            </button>
+            {open && (
+                <div className="max-h-56 overflow-y-auto border-t border-gray-100 ios-modal-scroll">
+                    <button
+                        type="button"
+                        onClick={() => onChange([])}
+                        className={cls('w-full px-3 py-2 text-sm flex items-center gap-2 hover:bg-slate-50 text-left', !value.length && 'bg-blue-50/60')}
+                    >
+                        <Check on={!value.length} round />
+                        <FaIcon className="fas fa-globe text-blue-500" /> Все отделы
+                    </button>
+                    {(departments || []).map((d) => {
+                        const checked = selected.has(Number(d.id));
+                        return (
+                            <button
+                                key={d.id}
+                                type="button"
+                                onClick={() => toggleDept(d.id)}
+                                className={cls('w-full px-3 py-2 text-sm flex items-center gap-2 hover:bg-slate-50 text-left', checked && 'bg-blue-50/40')}
+                            >
+                                <Check on={checked} />
+                                <FaIcon className="fas fa-building text-slate-400" />
+                                <span className="truncate">{d.name}</span>
+                            </button>
+                        );
+                    })}
+                    {(departments || []).length === 0 && (
+                        <div className="px-3 py-2 text-sm text-gray-400">Нет доступных отделов</div>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+};
+
 /* ── Модалка создания поста ────────────────────────────────────────── */
 const EventComposerModal = ({ apiRoot, authHeaders, canTargetAll, departments = [], notify, onClose, onCreated }) => {
     const [title, setTitle] = useState('');
     const [body, setBody] = useState('');
-    const deptOptions = useMemo(() => {
-        const options = [];
-        if (canTargetAll) options.push({ value: 'all', label: 'Все отделы' });
-        (departments || []).forEach((d) => options.push({ value: String(d.id), label: d.name }));
-        return options;
-    }, [canTargetAll, departments]);
-    // Привязанный публикатор НЕ должен дефолтиться в 'all' (это бы показало
-    // «глобус/Все отделы» и затем отклонилось сервером). Берём его отдел, иначе ''.
-    const [department, setDepartment] = useState(() => (
-        canTargetAll ? 'all' : (departments?.[0]?.id != null ? String(departments[0].id) : '')
+    // Выбранные отделы-получатели (id). Пустой массив => «Все отделы».
+    // Глобальный админ выбирает любой набор; привязанный публикатор жёстко
+    // ограничен своим единственным отделом.
+    const [selectedDeptIds, setSelectedDeptIds] = useState(() => (
+        canTargetAll ? [] : (departments?.[0]?.id != null ? [Number(departments[0].id)] : [])
     ));
     const [items, setItems] = useState([]); // {id, file, type, previewUrl, poster?:{blob,width,height,duration}}
     const [processing, setProcessing] = useState(false);
@@ -998,7 +1083,7 @@ const EventComposerModal = ({ apiRoot, authHeaders, canTargetAll, departments = 
             const form = new FormData();
             form.append('title', title.trim());
             form.append('body', trimmedBody);
-            form.append('department_id', department);
+            form.append('department_ids', JSON.stringify(selectedDeptIds));
             const meta = [];
             items.forEach((it) => {
                 form.append('media', it.file, it.file.name);
@@ -1036,7 +1121,7 @@ const EventComposerModal = ({ apiRoot, authHeaders, canTargetAll, departments = 
             setSubmitting(false);
             setProgress(0);
         }
-    }, [apiRoot, authHeaders, body, department, items, notify, onClose, onCreated, submitting, title]);
+    }, [apiRoot, authHeaders, body, selectedDeptIds, items, notify, onClose, onCreated, submitting, title]);
 
     return (
         <div
@@ -1092,17 +1177,16 @@ const EventComposerModal = ({ apiRoot, authHeaders, canTargetAll, departments = 
 
                     <div>
                         <label className="block text-xs font-medium text-gray-500 mb-1">Кому виден</label>
-                        {deptOptions.length > 1 ? (
-                            <CustomSelect
-                                value={department}
-                                onChange={setDepartment}
-                                options={deptOptions}
-                                placeholder="Выберите отдел"
+                        {canTargetAll ? (
+                            <DepartmentMultiSelect
+                                departments={departments}
+                                value={selectedDeptIds}
+                                onChange={setSelectedDeptIds}
                             />
                         ) : (
                             <div className="px-3 py-2.5 text-sm border border-gray-200 rounded-lg bg-slate-50 text-slate-600 flex items-center gap-2">
-                                <FaIcon className={department === 'all' ? 'fas fa-globe' : 'fas fa-building'} />
-                                {deptOptions[0]?.label || 'Ваш отдел'}
+                                <FaIcon className="fas fa-building" />
+                                {departments?.[0]?.name || 'Ваш отдел'}
                             </div>
                         )}
                     </div>

@@ -3180,15 +3180,19 @@ def _events_viewer_scope(requester_id, role):
     return is_global, viewer_dept
 
 
-def _events_can_view(event_department_id, is_global, viewer_dept):
-    if is_global or event_department_id is None:
+def _events_can_view(event_department_ids, is_global, viewer_dept):
+    """Видимость поста: глобальным — всё; пост без отделов — всем; иначе отдел
+    зрителя должен быть среди получателей. event_department_ids — список (или [])."""
+    if is_global or not event_department_ids:
         return True
-    return viewer_dept is not None and int(event_department_id) == int(viewer_dept)
+    if viewer_dept is None:
+        return False
+    return int(viewer_dept) in {int(d) for d in event_department_ids}
 
 
-def _events_is_moderator_for(requester_id, role, event_department_id, viewer_scope=_EVENTS_UNSET):
+def _events_is_moderator_for(requester_id, role, event_department_ids, viewer_scope=_EVENTS_UNSET):
     """Модератор поста: глобальный админ — везде; админ-глава/СВ/глава отдела —
-    только в своём отделе (для постов своего отдела, не для постов «всем»).
+    только если их отдел среди получателей поста (не для постов «всем»).
 
     viewer_scope можно передать заранее (на странице с множеством постов/
     комментариев), чтобы не дёргать _department_scope_id_for_requester на каждый
@@ -3198,35 +3202,50 @@ def _events_is_moderator_for(requester_id, role, event_department_id, viewer_sco
         return True
     if _is_admin_role(role) or role == 'sv' or _headed_department_id(requester_id) is not None:
         scope = viewer_scope if viewer_scope is not _EVENTS_UNSET else _department_scope_id_for_requester(requester_id)
-        return (event_department_id is not None and scope is not None
-                and int(event_department_id) == int(scope))
+        if scope is None or not event_department_ids:
+            return False
+        return int(scope) in {int(d) for d in event_department_ids}
     return False
 
 
-def _events_resolve_target_department(role, requester_id, requested_raw):
-    """Возвращает (department_id, error). department_id=None => виден всем отделам.
-    Глобальный админ выбирает любой отдел или «всем»; остальные публикаторы
-    жёстко привязаны к своему отделу (без рассылки «всем»)."""
+def _events_resolve_target_departments(role, requester_id, requested_raw):
+    """Возвращает (department_ids, error). Пустой список => виден всем отделам.
+    Глобальный админ выбирает любой набор отделов или «всем» (пустой); остальные
+    публикаторы жёстко привязаны к своему отделу (без рассылки «всем»)."""
     role = _normalize_user_role(role)
-    wants_all = requested_raw in (None, '', 'all', 'null')
-    requested_id = None
-    if not wants_all:
+    # requested_raw — JSON-массив id (или 'all'/''/None/[] => «всем»).
+    requested_ids = []
+    if isinstance(requested_raw, list):
+        candidates = requested_raw
+    elif requested_raw in (None, '', 'all', 'null', '[]'):
+        candidates = []
+    else:
         try:
-            requested_id = int(requested_raw)
+            parsed = json.loads(requested_raw)
+            candidates = parsed if isinstance(parsed, list) else [parsed]
+        except (TypeError, ValueError):
+            candidates = [requested_raw]
+    for c in candidates:
+        try:
+            cid = int(c)
         except (TypeError, ValueError):
             return None, "Некорректный отдел"
+        if cid not in requested_ids:
+            requested_ids.append(cid)
+
     if _is_global_admin_requester(role, requester_id):
-        if wants_all:
-            return None, None
-        dept = db.get_department_by_id(requested_id)
-        if not dept or not dept.get('is_active', True):
-            return None, "Отдел не найден"
-        return requested_id, None
+        if not requested_ids:
+            return [], None  # всем
+        for cid in requested_ids:
+            dept = db.get_department_by_id(cid)
+            if not dept or not dept.get('is_active', True):
+                return None, "Отдел не найден"
+        return requested_ids, None
     # Привязанный публикатор (СВ / глава отдела / админ-глава): только свой отдел.
     scope = _department_scope_id_for_requester(requester_id)
     if scope is None:
         return None, "У вас не задан отдел для публикации"
-    return int(scope), None
+    return [int(scope)], None
 
 
 def _events_publish_options(role, requester_id):
@@ -3251,7 +3270,7 @@ def _events_can_delete_post(event, requester_id, role, viewer_scope=_EVENTS_UNSE
     author_id = event.get("author_id")
     if author_id is not None and requester_id is not None and int(author_id) == int(requester_id):
         return True
-    return _events_is_moderator_for(requester_id, role, event.get("department_id"), viewer_scope)
+    return _events_is_moderator_for(requester_id, role, event.get("department_ids") or [], viewer_scope)
 
 
 def _events_media_payload(media):
@@ -3285,6 +3304,13 @@ def _events_media_payload(media):
 
 
 def _events_event_payload(event, requester_id=None, role=None, viewer_scope=_EVENTS_UNSET):
+    department_ids = event.get("department_ids") or []
+    department_names = event.get("department_names") or []
+    legacy_department_name = None
+    if department_names:
+        legacy_department_name = department_names[0]
+        if len(department_names) > 1:
+            legacy_department_name = f"{legacy_department_name} +{len(department_names) - 1}"
     return {
         "id": event.get("id"),
         "author_id": event.get("author_id"),
@@ -3292,8 +3318,10 @@ def _events_event_payload(event, requester_id=None, role=None, viewer_scope=_EVE
         "author_avatar_url": _build_avatar_signed_url(
             event.get("author_avatar_bucket"), event.get("author_avatar_blob_path")
         ),
-        "department_id": event.get("department_id"),
-        "department_name": event.get("department_name"),
+        "department_ids": department_ids,
+        "department_names": department_names,
+        "department_id": department_ids[0] if department_ids else None,
+        "department_name": legacy_department_name,
         "title": event.get("title"),
         "body": event.get("body"),
         "created_at": event.get("created_at"),
@@ -3306,7 +3334,7 @@ def _events_event_payload(event, requester_id=None, role=None, viewer_scope=_EVE
 
 
 def _events_comment_payload(comment, requester_id=None, role=None,
-                            event_author_id=None, event_department_id=None, moderator=None):
+                            event_author_id=None, event_department_ids=None, moderator=None):
     # moderator (bool) можно передать заранее: для всех комментов одного поста
     # модераторский статус одинаков, считаем его один раз в роуте (а не на каждый).
     can_delete = False
@@ -3317,7 +3345,7 @@ def _events_comment_payload(comment, requester_id=None, role=None,
         elif event_author_id is not None and int(event_author_id) == int(requester_id):
             can_delete = True
         elif (moderator if moderator is not None
-              else _events_is_moderator_for(requester_id, role, event_department_id)):
+              else _events_is_moderator_for(requester_id, role, event_department_ids or [])):
             can_delete = True
     return {
         "id": comment.get("id"),
@@ -5930,8 +5958,14 @@ def api_events():
 
     title = str(request.form.get('title') or '').strip()[:EVENTS_TITLE_MAX_CHARS]
     body = str(request.form.get('body') or '').strip()[:EVENTS_BODY_MAX_CHARS]
-    target_dept, dept_error = _events_resolve_target_department(
-        role, requester_id, request.form.get('department_id')
+    # department_ids — JSON-массив id ([] / 'all' => виден всем отделам).
+    requested_departments = (
+        request.form.get('department_ids')
+        if 'department_ids' in request.form
+        else request.form.get('department_id')
+    )
+    target_dept_ids, dept_error = _events_resolve_target_departments(
+        role, requester_id, requested_departments
     )
     if dept_error:
         return jsonify({"error": dept_error}), 400
@@ -5974,7 +6008,7 @@ def api_events():
     try:
         client = get_gcs_client() if media_files else None
         bucket = client.bucket(bucket_name) if client else None
-        created_event_id = db.create_event(requester_id, target_dept, title, body)
+        created_event_id = db.create_event(requester_id, title, body, target_dept_ids)
 
         for index, file_storage in enumerate(media_files):
             meta = media_meta[index] if index < len(media_meta) else {}
@@ -6108,12 +6142,12 @@ def api_event_like(event_id):
         message, status_code = auth_error
         return jsonify({"error": message}), status_code
     role = _normalize_user_role(requester[3])
-    info = db.get_event_author_and_dept(event_id)
+    info = db.get_event_author_and_departments(event_id)
     if not info:
         return jsonify({"error": "Ивент не найден"}), 404
-    _author_id, dept_id = info
+    _author_id, dept_ids = info
     is_global, viewer_dept = _events_viewer_scope(requester_id, role)
-    if not _events_can_view(dept_id, is_global, viewer_dept):
+    if not _events_can_view(dept_ids, is_global, viewer_dept):
         return jsonify({"error": "Ивент не найден"}), 404
     result = db.toggle_event_like(event_id, requester_id)
     return jsonify({"status": "success", **result}), 200
@@ -6127,12 +6161,12 @@ def api_event_comments(event_id):
         message, status_code = auth_error
         return jsonify({"error": message}), status_code
     role = _normalize_user_role(requester[3])
-    info = db.get_event_author_and_dept(event_id)
+    info = db.get_event_author_and_departments(event_id)
     if not info:
         return jsonify({"error": "Ивент не найден"}), 404
-    event_author_id, dept_id = info
+    event_author_id, dept_ids = info
     is_global, viewer_dept = _events_viewer_scope(requester_id, role)
-    if not _events_can_view(dept_id, is_global, viewer_dept):
+    if not _events_can_view(dept_ids, is_global, viewer_dept):
         return jsonify({"error": "Ивент не найден"}), 404
 
     if request.method == 'GET':
@@ -6147,11 +6181,11 @@ def api_event_comments(event_id):
             limit = 20
         result = db.list_event_comments(event_id, before_id, limit)
         # Модераторский статус одинаков для всех комментов поста — считаем 1 раз.
-        viewer_is_moderator = _events_is_moderator_for(requester_id, role, dept_id, viewer_dept)
+        viewer_is_moderator = _events_is_moderator_for(requester_id, role, dept_ids, viewer_dept)
         return jsonify({
             "status": "success",
             "comments": [
-                _events_comment_payload(c, requester_id, role, event_author_id, dept_id, viewer_is_moderator)
+                _events_comment_payload(c, requester_id, role, event_author_id, dept_ids, viewer_is_moderator)
                 for c in result["comments"]
             ],
             "has_more": result["has_more"],
@@ -6165,7 +6199,7 @@ def api_event_comments(event_id):
     comment = db.add_event_comment(event_id, requester_id, body)
     return jsonify({
         "status": "success",
-        "comment": _events_comment_payload(comment, requester_id, role, event_author_id, dept_id),
+        "comment": _events_comment_payload(comment, requester_id, role, event_author_id, dept_ids),
     }), 201
 
 
@@ -6180,15 +6214,15 @@ def api_event_comment_delete(event_id, comment_id):
     comment = db.get_event_comment(comment_id)
     if not comment or int(comment["event_id"]) != int(event_id):
         return jsonify({"error": "Комментарий не найден"}), 404
-    info = db.get_event_author_and_dept(event_id)
+    info = db.get_event_author_and_departments(event_id)
     if not info:
         return jsonify({"error": "Ивент не найден"}), 404
-    event_author_id, dept_id = info
+    event_author_id, dept_ids = info
     owner = comment.get("user_id")
     allowed = (
         (owner is not None and int(owner) == int(requester_id))
         or (event_author_id is not None and int(event_author_id) == int(requester_id))
-        or _events_is_moderator_for(requester_id, role, dept_id)
+        or _events_is_moderator_for(requester_id, role, dept_ids)
     )
     if not allowed:
         return jsonify({"error": "Недостаточно прав"}), 403
@@ -6204,13 +6238,13 @@ def api_event_delete(event_id):
         message, status_code = auth_error
         return jsonify({"error": message}), status_code
     role = _normalize_user_role(requester[3])
-    info = db.get_event_author_and_dept(event_id)
+    info = db.get_event_author_and_departments(event_id)
     if not info:
         return jsonify({"error": "Ивент не найден"}), 404
-    author_id, dept_id = info
+    author_id, dept_ids = info
     can_delete = (
         (author_id is not None and int(author_id) == int(requester_id))
-        or _events_is_moderator_for(requester_id, role, dept_id)
+        or _events_is_moderator_for(requester_id, role, dept_ids)
     )
     if not can_delete:
         return jsonify({"error": "Недостаточно прав"}), 403
