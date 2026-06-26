@@ -2237,11 +2237,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     if (cancelled) return;
                     if (groupsResp.data?.status === 'success') {
                         const nextGroups = Array.isArray(groupsResp.data.groups) ? groupsResp.data.groups : [];
-                        setGroupsList(
-                            hoursDepartmentScopeId != null
-                                ? nextGroups.filter((group) => Number(group?.department_id ?? group?.departmentId) === Number(hoursDepartmentScopeId))
-                                : nextGroups
-                        );
+                        const scopedGroups = hoursDepartmentScopeId != null
+                            ? nextGroups.filter((group) => Number(group?.department_id ?? group?.departmentId) === Number(hoursDepartmentScopeId))
+                            : nextGroups;
+                        setGroupsList(scopedGroups);
+                        // Для СВ по умолчанию открываем ЕГО собственную группу (а не плоский
+                        // режим «по СВ»). Группы отдела остаются в селекторе для переключения.
+                        if (user?.role === 'sv') {
+                            const ownGroup = scopedGroups.find(g =>
+                                g.status !== 'archived' &&
+                                Array.isArray(g.supervisors) &&
+                                g.supervisors.some(s => String(s?.id) === String(user.id))
+                            );
+                            if (ownGroup) {
+                                setSelectedGroupId(prev => prev || String(ownGroup.id));
+                            }
+                        }
                     }
                     if (modelsResp.data?.status === 'success') setCalcModelMetrics(modelsResp.data.calculation_model_metrics || {});
                 } catch (e) {
@@ -5367,20 +5378,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         className="min-w-[240px]"
                     />
                     )}
-
-                    <HoursCustomSelect
-                        value={selectedSvId || ''}
-                        onChange={(v) => { setSelectedSvId(v); setSelectedGroupId(''); }}
-                        options={(svList || [])
-                            .filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status)
-                            .map(sv => ({ value: String(sv.id), label: sv.name }))}
-                        placeholder="Выберите супервайзера"
-                        leadIcon="fa-user-tie"
-                        searchable
-                        disabled={reportScope === 'all'}
-                        ariaLabel="Супервайзер"
-                        className="min-w-[240px]"
-                    />
                 </div>
 
                     <RateChangeReportToggle user={user} showToast={showToast} />
@@ -6345,7 +6342,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         }}
                         disabled={isDayUploadDisabled}
                         className={`text-xs font-semibold px-2 py-1 rounded ${isDayUploadDisabled ? 'text-gray-400 cursor-not-allowed' : 'hover:bg-gray-100'}`}
-                        title={isChatModel ? 'Для чат-группы отчёты загружаются через Метрики → Отчёты' : (isAdminWithoutSupervisorSelected ? 'Сначала выберите супервайзера' : 'Загрузить файл на выбранный день')}
+                        title={isChatModel ? 'Для чат-группы отчёты загружаются через Метрики → Отчёты' : (isAdminWithoutSupervisorSelected ? 'Сначала выберите группу' : 'Загрузить файл на выбранный день')}
                         >
                         {formatHeaderLabel(day)}
                         </button>
@@ -6417,7 +6414,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     {isLoading ? (
                     <div className="p-4 text-gray-600">Загрузка данных...</div>
                     ) : isAdminWithoutSupervisorSelected ? (
-                    <div className="p-4 text-gray-600">Супервайзер не выбран.</div>
+                    <div className="p-4 text-gray-600">Выберите группу.</div>
                     ) : filteredOperators.length === 0 ? (
                     <div className="p-4 text-gray-600">Операторы не найдены.</div>
                     ) : (
