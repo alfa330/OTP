@@ -1,19 +1,22 @@
-import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 
 /*
  * Аккуратный кастомный select (вместо нативного <select>).
  * Раскрывающийся список рендерится в портал (document.body) с fixed-позицией,
- * чтобы не обрезался скроллом/overflow модалки. Закрывается по клику вне,
- * скроллу, ресайзу и Esc.
+ * чтобы не обрезался скроллом/overflow модалки. Закрывается по клику вне и Esc.
+ * При скролле страницы/модалки позиция пересчитывается (список «приклеен» к кнопке);
+ * скролл ВНУТРИ самого списка его не закрывает.
  *
  * Props:
- *   value        — текущее значение (примитив)
- *   onChange(v)  — вызывается со значением выбранной опции (НЕ event)
- *   options      — [{ value, label, disabled? }]
- *   placeholder  — текст, когда ничего не выбрано
- *   disabled     — заблокирован
- *   className    — класс на обёртку (для ширины/отступов)
+ *   value             — текущее значение (примитив)
+ *   onChange(v)       — вызывается со значением выбранной опции (НЕ event)
+ *   options           — [{ value, label, disabled? }]
+ *   placeholder       — текст, когда ничего не выбрано
+ *   disabled          — заблокирован
+ *   className         — класс на обёртку (для ширины/отступов)
+ *   searchable        — показывать строку поиска (также включается авто для длинных списков)
+ *   searchPlaceholder — плейсхолдер строки поиска
  */
 export default function CustomSelect({
   value,
@@ -22,11 +25,17 @@ export default function CustomSelect({
   placeholder = 'Выберите...',
   disabled = false,
   className = '',
+  searchable = false,
+  searchPlaceholder = 'Поиск…',
 }) {
   const [open, setOpen] = useState(false);
   const [coords, setCoords] = useState(null);
+  const [query, setQuery] = useState('');
   const btnRef = useRef(null);
   const popRef = useRef(null);
+  const searchRef = useRef(null);
+
+  const showSearch = searchable;
 
   const recompute = () => {
     const el = btnRef.current;
@@ -48,27 +57,54 @@ export default function CustomSelect({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
+  // Сброс поиска при каждом открытии + фокус на строке поиска.
+  useEffect(() => {
+    if (!open) { setQuery(''); return; }
+    if (showSearch) {
+      const id = requestAnimationFrame(() => searchRef.current?.focus());
+      return () => cancelAnimationFrame(id);
+    }
+    return undefined;
+  }, [open, showSearch]);
+
   useEffect(() => {
     if (!open) return undefined;
-    const close = () => setOpen(false);
     const onDoc = (e) => {
       if (btnRef.current?.contains(e.target) || popRef.current?.contains(e.target)) return;
       setOpen(false);
     };
+    // Скролл внутри списка не закрывает; внешний — пересчитывает позицию, чтобы
+    // список оставался «приклеен» к кнопке.
+    const onScroll = (e) => {
+      if (popRef.current && (popRef.current === e.target || popRef.current.contains(e.target))) return;
+      recompute();
+    };
     const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
     document.addEventListener('mousedown', onDoc);
-    window.addEventListener('scroll', close, true);
-    window.addEventListener('resize', close);
+    window.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', recompute);
     document.addEventListener('keydown', onKey);
     return () => {
       document.removeEventListener('mousedown', onDoc);
-      window.removeEventListener('scroll', close, true);
-      window.removeEventListener('resize', close);
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', recompute);
       document.removeEventListener('keydown', onKey);
     };
   }, [open]);
 
   const selected = options.find((o) => String(o.value) === String(value ?? ''));
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!showSearch || !q) return options;
+    return options.filter((o) => String(o.label ?? '').toLowerCase().includes(q));
+  }, [options, query, showSearch]);
+
+  const pick = (o) => {
+    if (o.disabled) return;
+    onChange?.(o.value);
+    setOpen(false);
+  };
 
   return (
     <div className={className}>
@@ -106,33 +142,51 @@ export default function CustomSelect({
             maxHeight: coords.maxHeight,
             zIndex: 99999,
           }}
-          className="overflow-auto rounded-xl border border-gray-200 bg-white shadow-xl py-1 animate-[fadeIn_.12s_ease]"
+          className="flex flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl animate-[fadeIn_.12s_ease]"
         >
-          {options.length === 0 ? (
-            <div className="px-3 py-2 text-sm text-gray-400">Нет вариантов</div>
-          ) : (
-            options.map((o) => {
-              const isSel = String(o.value) === String(value ?? '');
-              return (
-                <button
-                  key={String(o.value)}
-                  type="button"
-                  disabled={o.disabled}
-                  onClick={() => { if (o.disabled) return; onChange?.(o.value); setOpen(false); }}
-                  className={`w-full flex items-center justify-between gap-2 px-3 py-2 text-left text-sm transition-colors ${
-                    isSel ? 'bg-blue-50 text-blue-700' : 'text-gray-700 hover:bg-gray-50'
-                  } ${o.disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
-                >
-                  <span className="truncate">{o.label}</span>
-                  {isSel && (
-                    <svg width="14" height="14" viewBox="0 0 20 20" fill="none" className="shrink-0">
-                      <path d="M5 10l3 3 7-7" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                  )}
-                </button>
-              );
-            })
+          {showSearch && (
+            <div className="shrink-0 border-b border-gray-100 p-1.5">
+              <input
+                ref={searchRef}
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') { e.preventDefault(); if (filtered.length) pick(filtered[0]); }
+                }}
+                placeholder={searchPlaceholder}
+                className="w-full rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-sm text-gray-900 outline-none focus:border-blue-400 focus:bg-white"
+              />
+            </div>
           )}
+
+          <div className="min-h-0 overflow-auto py-1">
+            {filtered.length === 0 ? (
+              <div className="px-3 py-2 text-sm text-gray-400">{query ? 'Ничего не найдено' : 'Нет вариантов'}</div>
+            ) : (
+              filtered.map((o) => {
+                const isSel = String(o.value) === String(value ?? '');
+                return (
+                  <button
+                    key={String(o.value)}
+                    type="button"
+                    disabled={o.disabled}
+                    onClick={() => pick(o)}
+                    className={`w-full flex items-center justify-between gap-2 px-3 py-2 text-left text-sm transition-colors ${
+                      isSel ? 'bg-blue-50 text-blue-700' : 'text-gray-700 hover:bg-gray-50'
+                    } ${o.disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                  >
+                    <span className="truncate">{o.label}</span>
+                    {isSel && (
+                      <svg width="14" height="14" viewBox="0 0 20 20" fill="none" className="shrink-0">
+                        <path d="M5 10l3 3 7-7" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    )}
+                  </button>
+                );
+              })
+            )}
+          </div>
         </div>,
         document.body
       )}

@@ -16,6 +16,10 @@ const FALLBACK_MODELS = [
 ];
 const EMPTY_FORM = { name: '', department_id: '', direction_id: '', calculation_model_code: 'operator' };
 
+// Уволенные не должны попадать в селекторы добавления и в активный состав.
+const FIRED_STATUSES = new Set(['fired', 'dismissal']);
+const isFiredStatus = (u) => FIRED_STATUSES.has(String(u?.status || '').toLowerCase());
+
 // Человекочитаемая подпись месяца: "2026-05" -> "Май 2026"
 const MONTHS_RU_NOM = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
 const monthLabelRu = (ym) => {
@@ -129,12 +133,12 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     };
 
     const operatorsList = useMemo(
-        () => (users || []).filter((u) => ['operator', 'trainee'].includes(normalizeRole(u.role)) && sameGroupDept(u)),
+        () => (users || []).filter((u) => ['operator', 'trainee'].includes(normalizeRole(u.role)) && !isFiredStatus(u) && sameGroupDept(u)),
         // eslint-disable-next-line react-hooks/exhaustive-deps
         [users, membersDeptId]
     );
     const supervisorsList = useMemo(
-        () => (supervisors || []).filter((s) => ['sv', 'supervisor'].includes(normalizeRole(s.role)) && sameGroupDept(s)),
+        () => (supervisors || []).filter((s) => ['sv', 'supervisor'].includes(normalizeRole(s.role)) && !isFiredStatus(s) && sameGroupDept(s)),
         // eslint-disable-next-line react-hooks/exhaustive-deps
         [supervisors, membersDeptId]
     );
@@ -333,8 +337,7 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     const memberSvIds = new Set((members.supervisors || []).map((s) => s.id));
 
     // Деление состава по статусу: уволенные отдельно от активных.
-    const FIRED_STATUSES = new Set(['fired', 'dismissal']);
-    const isFiredMember = (o) => FIRED_STATUSES.has(String(o.status || '').toLowerCase());
+    const isFiredMember = (o) => isFiredStatus(o);
     const opsActive = (members.operators || []).filter((o) => !isFiredMember(o));
     const opsFired = (members.operators || []).filter((o) => isFiredMember(o));
 
@@ -619,9 +622,11 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                                 <div className="flex items-center gap-2">
                                     <CustomSelect
                                         className="flex-1"
+                                        searchable
                                         value={addSvId}
                                         onChange={(v) => setAddSvId(v)}
                                         placeholder="+ добавить супервайзера…"
+                                        searchPlaceholder="Поиск супервайзера…"
                                         options={supervisorsList.filter((s) => !memberSvIds.has(s.id)).map((s) => ({ value: String(s.id), label: s.name }))}
                                     />
                                     <button className={iosBtnSecondary} onClick={addSupervisor} disabled={!addSvId || memberBusy}>Добавить</button>
@@ -651,9 +656,11 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                                 <div className="flex items-center gap-2">
                                     <CustomSelect
                                         className="flex-1"
+                                        searchable
                                         value={addOpId}
                                         onChange={(v) => setAddOpId(v)}
                                         placeholder="+ добавить оператора…"
+                                        searchPlaceholder="Поиск оператора…"
                                         options={operatorsList.filter((o) => !memberOpIds.has(o.id)).map((o) => ({ value: String(o.id), label: o.name }))}
                                     />
                                     <button className={iosBtnSecondary} onClick={addOperator} disabled={!addOpId || memberBusy}>Добавить</button>
