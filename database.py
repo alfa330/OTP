@@ -1099,10 +1099,13 @@ class Database:
             """)
             # ──────────────────────────────────────────────────────────────
             # ИВЕНТЫ ("Ивенты"): общедоступная лента постов с медиа (фото/видео),
-            # лайками и комментариями. Виден всем ролям. Пост таргетируется на
-            # отдел: department_id IS NULL => виден всем отделам; иначе только
-            # своему отделу. Сами файлы лежат в закрытом GCS (как 4 You / LMS) —
-            # в таблицах храним только bucket+blob_path, отдаём signed URL.
+            # лайками и комментариями. Виден всем ролям. Таргетинг по отделам —
+            # многие-ко-многим через event_departments: НЕТ строк => виден всем
+            # отделам; есть строки => виден только перечисленным отделам.
+            # (events.department_id — legacy single-target, больше не используется;
+            #  оставлен для совместимости, данные перенесены в event_departments.)
+            # Файлы лежат в закрытом GCS (как 4 You / LMS) — в таблицах только
+            # bucket+blob_path, клиенту отдаём signed URL.
             # ──────────────────────────────────────────────────────────────
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS events (
@@ -1119,9 +1122,23 @@ class Database:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_events_id_desc ON events(id DESC);
             """)
+            # Отделы-получатели поста (M:N). Пустой набор => пост виден всем.
             cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_events_dept_id_desc
-                ON events(department_id, id DESC);
+                CREATE TABLE IF NOT EXISTS event_departments (
+                    event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+                    department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+                    PRIMARY KEY (event_id, department_id)
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_event_departments_dept
+                ON event_departments(department_id, event_id);
+            """)
+            # Бэкфилл из legacy events.department_id (идемпотентно, разово по факту).
+            cursor.execute("""
+                INSERT INTO event_departments (event_id, department_id)
+                SELECT id, department_id FROM events WHERE department_id IS NOT NULL
+                ON CONFLICT DO NOTHING;
             """)
             # Медиа поста (несколько фото/видео, порядок sort_order). Для image:
             # blob_path = display-WebP, preview_* = preview-WebP. Для video:
@@ -34079,18 +34096,21 @@ class Database:
     # ──────────────────────────────────────────────────────────────────
     def _event_row_basic(self, row):
         """row: id, author_id, author_name, avatar_bucket, avatar_blob_path,
-        department_id, department_name, title, body, created_at."""
+        legacy_department_id, legacy_department_name, title, body, created_at.
+        Отделы догружаются в _attach_event_aggregates."""
         return {
             "id": int(row[0]),
             "author_id": int(row[1]) if row[1] is not None else None,
             "author_name": row[2] or "Пользователь",
             "author_avatar_bucket": row[3],
             "author_avatar_blob_path": row[4],
-            "department_id": int(row[5]) if row[5] is not None else None,
-            "department_name": row[6],
+            "_legacy_department_id": int(row[5]) if row[5] is not None else None,
+            "_legacy_department_name": row[6],
             "title": row[7],
             "body": row[8] or "",
             "created_at": row[9].isoformat() if row[9] else None,
+            "department_ids": [],
+            "department_names": [],
             "media": [],
             "like_count": 0,
             "comment_count": 0,
@@ -34098,12 +34118,29 @@ class Database:
         }
 
     def _attach_event_aggregates(self, cursor, events, viewer_id=None):
-        """Догружает медиа, счётчики лайков/комментов и факт лайка зрителя
-        для уже выбранной страницы постов — батч-запросами (без N+1)."""
+        """Догружает отделы-получатели, медиа, счётчики лайков/комментов и факт
+        лайка зрителя для выбранной страницы постов — батч-запросами (без N+1)."""
         by_id = {ev["id"]: ev for ev in events}
         event_ids = list(by_id.keys())
         if not event_ids:
             return
+        # Отделы-получатели (M:N). Пустой набор => пост виден всем.
+        cursor.execute("""
+            SELECT ed.event_id, ed.department_id, d.name
+            FROM event_departments ed
+            LEFT JOIN departments d ON d.id = ed.department_id
+            WHERE ed.event_id = ANY(%s::bigint[])
+            ORDER BY ed.event_id, d.name
+        """, (event_ids,))
+        for r in cursor.fetchall():
+            ev = by_id.get(r[0])
+            if ev:
+                ev["department_ids"].append(int(r[1]))
+                ev["department_names"].append(r[2] or "Отдел")
+        for ev in events:
+            if not ev["department_ids"] and ev.get("_legacy_department_id") is not None:
+                ev["department_ids"].append(int(ev["_legacy_department_id"]))
+                ev["department_names"].append(ev.get("_legacy_department_name") or "Отдел")
         cursor.execute("""
             SELECT event_id, id, media_type, bucket, blob_path,
                    preview_bucket, preview_blob_path, mime_type,
@@ -34163,8 +34200,17 @@ class Database:
         conditions = []
         params = []
         if not is_global:
-            conditions.append("(e.department_id IS NULL OR e.department_id = %s)")
-            params.append(viewer_department_id)
+            # Виден, если у поста нет привязки к отделам (для всех) ИЛИ отдел
+            # зрителя есть среди получателей. Legacy fallback по e.department_id
+            # оставлен, чтобы старые посты не пропали, если бэкфилл ещё не прошёл.
+            conditions.append("""(
+                (
+                    NOT EXISTS (SELECT 1 FROM event_departments ed WHERE ed.event_id = e.id)
+                    AND (e.department_id IS NULL OR e.department_id = %s)
+                )
+                OR EXISTS (SELECT 1 FROM event_departments ed WHERE ed.event_id = e.id AND ed.department_id = %s)
+            )""")
+            params.extend([viewer_department_id, viewer_department_id])
         if before_id:
             conditions.append("e.id < %s")
             params.append(int(before_id))
@@ -34205,22 +34251,35 @@ class Database:
             self._attach_event_aggregates(cursor, [ev], viewer_id)
             return ev
 
-    def get_event_author_and_dept(self, event_id):
-        """(author_id, department_id) или None — для проверки прав/видимости."""
+    def get_event_author_and_departments(self, event_id):
+        """(author_id, [department_id, ...]) или None. Пустой список => виден всем."""
         with self._get_cursor() as cursor:
-            cursor.execute(
-                "SELECT author_id, department_id FROM events WHERE id = %s",
-                (int(event_id),),
-            )
+            cursor.execute("SELECT author_id, department_id FROM events WHERE id = %s", (int(event_id),))
             row = cursor.fetchone()
             if not row:
                 return None
-            return (
-                int(row[0]) if row[0] is not None else None,
-                int(row[1]) if row[1] is not None else None,
+            author_id = int(row[0]) if row[0] is not None else None
+            legacy_department_id = int(row[1]) if row[1] is not None else None
+            cursor.execute(
+                "SELECT department_id FROM event_departments WHERE event_id = %s",
+                (int(event_id),),
             )
+            dept_ids = [int(r[0]) for r in cursor.fetchall()]
+            if not dept_ids and legacy_department_id is not None:
+                dept_ids = [legacy_department_id]
+            return (author_id, dept_ids)
 
-    def create_event(self, author_id, department_id, title, body):
+    def create_event(self, author_id, title, body, department_ids=None):
+        """Создаёт пост и привязывает его к отделам (пустой список => виден всем)."""
+        dept_ids = []
+        for d in (department_ids or []):
+            try:
+                d = int(d)
+            except (TypeError, ValueError):
+                continue
+            if d not in dept_ids:
+                dept_ids.append(d)
+        legacy_department_id = dept_ids[0] if len(dept_ids) == 1 else None
         with self._get_cursor() as cursor:
             cursor.execute("""
                 INSERT INTO events (author_id, department_id, title, body)
@@ -34228,11 +34287,18 @@ class Database:
                 RETURNING id
             """, (
                 int(author_id) if author_id is not None else None,
-                int(department_id) if department_id is not None else None,
+                legacy_department_id,
                 (title or None),
                 (body or ""),
             ))
-            return int(cursor.fetchone()[0])
+            event_id = int(cursor.fetchone()[0])
+            for d in dept_ids:
+                cursor.execute(
+                    "INSERT INTO event_departments (event_id, department_id) "
+                    "VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                    (event_id, d),
+                )
+            return event_id
 
     def add_event_media(self, event_id, media):
         with self._get_cursor() as cursor:
@@ -34397,8 +34463,14 @@ class Database:
                 conditions.append("e.created_at > %s")
                 params.append(last_seen)
             if not is_global:
-                conditions.append("(e.department_id IS NULL OR e.department_id = %s)")
-                params.append(viewer_department_id)
+                conditions.append("""(
+                    (
+                        NOT EXISTS (SELECT 1 FROM event_departments ed WHERE ed.event_id = e.id)
+                        AND (e.department_id IS NULL OR e.department_id = %s)
+                    )
+                    OR EXISTS (SELECT 1 FROM event_departments ed WHERE ed.event_id = e.id AND ed.department_id = %s)
+                )""")
+                params.extend([viewer_department_id, viewer_department_id])
             cursor.execute(
                 f"SELECT COUNT(*) FROM events e WHERE {' AND '.join(conditions)}",
                 tuple(params),
