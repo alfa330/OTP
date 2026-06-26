@@ -161,9 +161,18 @@ ROLE_HIERARCHY = {
 
 CALCULATION_MODEL_OPERATOR = 'operator'
 CALCULATION_MODEL_CHAT_MANAGER = 'chat_manager'
+# Модели отдела TEZ (направления «Оператор Линия TEZ» и «Оператор ОП TEZ»).
+# Часы обеих моделей считаются из посегментной выгрузки статусов TEZ
+# (active/work in crm = работа, break in work = перерыв, inactive = игнор),
+# поэтому они делят один статус-профиль (_status_profile_for_calculation_model).
+CALCULATION_MODEL_TEZ_LINE = 'tez_line'
+CALCULATION_MODEL_TEZ_OP = 'tez_op'
+CALCULATION_MODEL_TEZ_CODES = {CALCULATION_MODEL_TEZ_LINE, CALCULATION_MODEL_TEZ_OP}
 CALCULATION_MODEL_ALLOWED = {
     CALCULATION_MODEL_OPERATOR,
-    CALCULATION_MODEL_CHAT_MANAGER
+    CALCULATION_MODEL_CHAT_MANAGER,
+    CALCULATION_MODEL_TEZ_LINE,
+    CALCULATION_MODEL_TEZ_OP
 }
 CALCULATION_MODEL_DESCRIPTIONS = {
     CALCULATION_MODEL_OPERATOR: {
@@ -175,6 +184,16 @@ CALCULATION_MODEL_DESCRIPTIONS = {
         'code': CALCULATION_MODEL_CHAT_MANAGER,
         'name': 'Модель чат-менеджера',
         'description': 'Чат-модель: рабочие часы по Chat2Desk-статусам, чаты в час, средняя оценка, время ответа, формула зарплаты чат-менеджера.'
+    },
+    CALCULATION_MODEL_TEZ_LINE: {
+        'code': CALCULATION_MODEL_TEZ_LINE,
+        'name': 'TEZ — Линия (тех поддержка)',
+        'description': 'TEZ-модель «Линия/ТП»: рабочие часы по выгрузке статусов TEZ (active/work in crm), качество, надбавка за стаж.'
+    },
+    CALCULATION_MODEL_TEZ_OP: {
+        'code': CALCULATION_MODEL_TEZ_OP,
+        'name': 'TEZ — ОП',
+        'description': 'TEZ-модель «ОП»: рабочие часы по выгрузке статусов TEZ, качество и месячный план (% выполнения по сделкам).'
     }
 }
 
@@ -215,6 +234,8 @@ def get_calculation_model_catalog() -> List[Dict[str, str]]:
     return [
         dict(CALCULATION_MODEL_DESCRIPTIONS[CALCULATION_MODEL_OPERATOR]),
         dict(CALCULATION_MODEL_DESCRIPTIONS[CALCULATION_MODEL_CHAT_MANAGER]),
+        dict(CALCULATION_MODEL_DESCRIPTIONS[CALCULATION_MODEL_TEZ_LINE]),
+        dict(CALCULATION_MODEL_DESCRIPTIONS[CALCULATION_MODEL_TEZ_OP]),
     ]
 
 
@@ -270,6 +291,10 @@ CALCULATION_MODEL_METRICS = {
         _calc_metric('response_time', 'Время ответа', 'сек', 'import', 'chat_manager_daily_metrics.avg_response_time_seconds'),
         _calc_metric('transfers', 'Переводы чатов', '', 'import', 'chat_manager_daily_metrics.transfer_chat_count'),
     ] + _CALC_METRICS_TAIL,
+    # TEZ-модели: часы/перерыв считаются авто из выгрузки статусов TEZ
+    # (active+work in crm = работа, break in work = перерыв), остальное — общий хвост.
+    CALCULATION_MODEL_TEZ_LINE: _CALC_METRICS_HEAD + _CALC_METRICS_TAIL,
+    CALCULATION_MODEL_TEZ_OP: _CALC_METRICS_HEAD + _CALC_METRICS_TAIL,
 }
 
 
@@ -531,6 +556,11 @@ CHAT_MANAGER_TRAINING_STATUS_KEYS = {'study', 'training', 'тренинг'}
 CHAT_MANAGER_LOGIN_STATUS_KEYS = {'login', 'вход', 'подключение'}
 CHAT_MANAGER_LOGOUT_STATUS_KEYS = {'logout', 'выход', 'отключение'}
 CHAT_MANAGER_ACTION_STATUS_KEYS = {'transfer chat', 'take chat', 'передача чата', 'взятие чата'}
+# Статусы посегментной выгрузки TEZ (общие для моделей tez_line/tez_op):
+# active + work in crm = рабочее время, break in work = перерыв, inactive = офлайн (игнор).
+TEZ_WORK_STATUS_KEYS = {'active', 'work in crm', 'работа в crm'}
+TEZ_BREAK_STATUS_KEYS = {'break in work'}
+TEZ_IGNORED_STATUS_KEYS = {'inactive'}
 SCHEDULE_STATUS_KEY_LABELS = {
     'готов': 'Готов',
     'занят': 'Занят',
@@ -554,7 +584,12 @@ SCHEDULE_STATUS_KEY_LABELS = {
     'login': 'Вход в систему',
     'logout': 'Выход из системы',
     'transfer chat': 'Передача чата',
-    'take chat': 'Взятие чата'
+    'take chat': 'Взятие чата',
+    'active': 'Активен',
+    'work in crm': 'Работа в CRM',
+    'работа в crm': 'Работа в CRM',
+    'break in work': 'Перерыв',
+    'inactive': 'Неактивен'
 }
 SCHEDULE_AUTO_FINE_RATE_PER_MINUTE = float(os.getenv('SCHEDULE_AUTO_FINE_RATE_PER_MINUTE', '50'))
 
@@ -1811,6 +1846,26 @@ class Database:
                 UPDATE chat_manager_daily_metrics
                 SET raw_score_count = score_count
                 WHERE raw_score_count IS NULL AND score_count IS NOT NULL;
+            """)
+            # Месячный план для модели TEZ ОП: цель (план успешек/сделок) и факт
+            # вносит СВ/глава отдела вручную; % выполнения = факт/цель участвует в ЗП.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS operator_monthly_plans (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    year INTEGER NOT NULL,
+                    month INTEGER NOT NULL,
+                    plan_target NUMERIC(12,2) NOT NULL DEFAULT 0,
+                    plan_fact NUMERIC(12,2) NOT NULL DEFAULT 0,
+                    updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(operator_id, year, month)
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_operator_monthly_plans_operator_period
+                ON operator_monthly_plans(operator_id, year, month);
             """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS chat_manager_low_rating_reviews (
@@ -12606,6 +12661,76 @@ class Database:
 
         return self.get_chat_metric_surge_windows(month_start.strftime('%Y-%m'))
 
+    def _operator_monthly_plan_row_to_dict(self, row):
+        target = float(row[3] or 0)
+        fact = float(row[4] or 0)
+        completion = (fact / target * 100.0) if target > 0 else 0.0
+        return {
+            'operator_id': int(row[0]),
+            'year': int(row[1]),
+            'month': int(row[2]),
+            'plan_target': target,
+            'plan_fact': fact,
+            'completion_percent': round(completion, 2),
+            'updated_by': int(row[5]) if row[5] is not None else None,
+            'updated_at': row[6].isoformat() if hasattr(row[6], 'isoformat') else (str(row[6]) if row[6] else None),
+        }
+
+    def get_operator_monthly_plan(self, operator_id, year, month):
+        """Месячный план оператора (TEZ ОП): цель/факт/%. None — если не задан."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT operator_id, year, month, plan_target, plan_fact, updated_by, updated_at
+                FROM operator_monthly_plans
+                WHERE operator_id = %s AND year = %s AND month = %s
+                """,
+                (int(operator_id), int(year), int(month))
+            )
+            row = cursor.fetchone()
+        return self._operator_monthly_plan_row_to_dict(row) if row else None
+
+    def get_operator_monthly_plans_for_operators(self, operator_ids, year, month):
+        """Планы за период для набора операторов: {operator_id: dict}."""
+        ids = [int(x) for x in (operator_ids or []) if x is not None]
+        if not ids:
+            return {}
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT operator_id, year, month, plan_target, plan_fact, updated_by, updated_at
+                FROM operator_monthly_plans
+                WHERE year = %s AND month = %s AND operator_id = ANY(%s)
+                """,
+                (int(year), int(month), ids)
+            )
+            rows = cursor.fetchall()
+        return {int(r[0]): self._operator_monthly_plan_row_to_dict(r) for r in rows}
+
+    def upsert_operator_monthly_plan(self, operator_id, year, month, plan_target, plan_fact, updated_by=None):
+        """Создать/обновить месячный план оператора (upsert по operator_id+year+month)."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO operator_monthly_plans
+                    (operator_id, year, month, plan_target, plan_fact, updated_by, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (operator_id, year, month) DO UPDATE SET
+                    plan_target = EXCLUDED.plan_target,
+                    plan_fact = EXCLUDED.plan_fact,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = CURRENT_TIMESTAMP
+                RETURNING operator_id, year, month, plan_target, plan_fact, updated_by, updated_at
+                """,
+                (
+                    int(operator_id), int(year), int(month),
+                    float(plan_target or 0), float(plan_fact or 0),
+                    int(updated_by) if updated_by is not None else None
+                )
+            )
+            row = cursor.fetchone()
+        return self._operator_monthly_plan_row_to_dict(row) if row else None
+
     def save_chat_manager_daily_metrics(self, metrics, imported_by=None, preserve_missing=False, update_fields=None):
         """Сохраняет дневные метрики чат-менеджеров (upsert по (operator_id, day)).
 
@@ -22558,6 +22683,18 @@ class Database:
                 'training': CHAT_MANAGER_TRAINING_STATUS_KEYS,
                 'late_start': CHAT_MANAGER_WORK_STATUS_KEYS | CHAT_MANAGER_LOGIN_STATUS_KEYS,
                 'ignored': CHAT_MANAGER_NON_WORK_STATUS_KEYS | CHAT_MANAGER_LOGOUT_STATUS_KEYS | CHAT_MANAGER_ACTION_STATUS_KEYS,
+            }
+        if code in CALCULATION_MODEL_TEZ_CODES:
+            # Обе TEZ-модели (Линия/ТП и ОП) считают часы из посегментной выгрузки TEZ:
+            # active + work in crm = работа, break in work = перерыв, inactive = офлайн (игнор).
+            return {
+                'code': code,
+                'work': TEZ_WORK_STATUS_KEYS,
+                'talk': set(),
+                'break': TEZ_BREAK_STATUS_KEYS,
+                'training': {SCHEDULE_AUTO_TRAINING_STATUS_KEY, 'training', 'study'},
+                'late_start': TEZ_WORK_STATUS_KEYS,
+                'ignored': TEZ_IGNORED_STATUS_KEYS,
             }
         return {
             'code': CALCULATION_MODEL_OPERATOR,

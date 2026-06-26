@@ -19189,7 +19189,12 @@ def _status_import_parse_datetime(value):
         '%Y/%m/%d %H:%M:%S',
         '%Y/%m/%d %H:%M',
         '%Y-%m-%dT%H:%M:%S',
-        '%Y-%m-%dT%H:%M'
+        '%Y-%m-%dT%H:%M',
+        # Формат посегментной выгрузки TEZ: "HH:MM DD-MM-YYYY".
+        '%H:%M %d-%m-%Y',
+        '%H:%M:%S %d-%m-%Y',
+        '%H:%M %d.%m.%Y',
+        '%H:%M:%S %d.%m.%Y'
     )
     for fmt in formats:
         try:
@@ -19690,6 +19695,254 @@ def _status_import_parse_xlsx(raw_bytes, operator_lookup, max_source_rows=None, 
         max_source_rows=max_source_rows,
         invalid_rows_preview_limit=invalid_rows_preview_limit
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# ПОСЕГМЕНТНАЯ ВЫГРУЗКА СТАТУСОВ TEZ.
+# Формат: одна строка = готовый интервал
+#   internal number;employee name;started at;stopped at;seconds in status;status
+# Статусы: active / work in crm = работа, break in work = перерыв, inactive = офлайн.
+# В отличие от событийного Chat2Desk-импорта, здесь есть явные start/stop, поэтому
+# сегменты строим напрямую (а не между событиями) — иначе терялся бы последний
+# сегмент и операторы с единственной строкой за период.
+# ──────────────────────────────────────────────────────────────────────────
+TEZ_STATUS_IMPORT_MAP = {
+    'active': ('active', 'work'),
+    'work in crm': ('work in crm', 'work'),
+    'работа в crm': ('work in crm', 'work'),
+    'break in work': ('break in work', 'break'),
+    'inactive': ('inactive', 'ignore'),
+}
+
+
+def _status_import_resolve_tez_status(raw_status):
+    key = _status_import_normalize_key(raw_status)
+    mapped = TEZ_STATUS_IMPORT_MAP.get(key)
+    if mapped:
+        return {'key': mapped[0], 'kind': mapped[1]}
+    # Неизвестный статус не теряем: сохраняем как обычный сегмент, но в рабочие
+    # часы он не попадёт (статус-профиль TEZ его не относит к work/break).
+    return {'key': key, 'kind': 'status'}
+
+
+def _status_import_header_is_tez(normalized_header):
+    cols = set(normalized_header or [])
+    return (
+        'internalnumber' in cols
+        and 'startedat' in cols
+        and 'stoppedat' in cols
+        and 'status' in cols
+    )
+
+
+def _status_import_parse_tez_rows(rows, operator_lookup, max_source_rows=None, invalid_rows_preview_limit=None):
+    """Посегментный парсер выгрузки статусов TEZ.
+
+    `rows` — итерируемое списков ячеек (первая непустая строка — заголовок).
+    Возвращает тот же контракт, что и `_status_import_build_status_events`
+    (`events`/`segments` + счётчики), чтобы `db.save_operator_status_import`
+    и авто-пересчёт часов работали без изменений.
+    """
+    preview_limit_value = STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
+    if invalid_rows_preview_limit is not None:
+        try:
+            preview_limit_value = max(1, int(invalid_rows_preview_limit))
+        except Exception:
+            preview_limit_value = STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
+
+    max_rows_value = None
+    if max_source_rows is not None:
+        try:
+            max_rows_value = int(max_source_rows)
+        except Exception:
+            max_rows_value = None
+        if max_rows_value is not None and max_rows_value <= 0:
+            max_rows_value = None
+
+    row_list = list(rows)
+    header = None
+    header_index = 0
+    for i, candidate in enumerate(row_list):
+        if any(str(cell or '').strip() for cell in candidate):
+            header = candidate
+            header_index = i
+            break
+    if not header:
+        raise ValueError("Файл пустой")
+
+    normalized_header = [_status_import_normalize_header(h) for h in header]
+
+    def _find_col(candidates):
+        for candidate in candidates:
+            if candidate in normalized_header:
+                return normalized_header.index(candidate)
+        return None
+
+    operator_col = _find_col(['employeename', 'operatorname', 'employee', 'name', 'fio', 'фио', 'сотрудник', 'оператор'])
+    start_col = _find_col(['startedat', 'startat', 'start', 'начало'])
+    stop_col = _find_col(['stoppedat', 'stopat', 'stop', 'endat', 'end', 'конец'])
+    status_col = _find_col(['status', 'statusname', 'state', 'статус', 'состояние'])
+
+    if operator_col is None or start_col is None or stop_col is None or status_col is None:
+        raise ValueError("CSV TEZ должен содержать колонки employee name;started at;stopped at;status")
+
+    def _cell(cols, idx):
+        if idx is None or idx < 0 or idx >= len(cols):
+            return ''
+        return str(cols[idx] or '').strip()
+
+    source_rows = 0
+    valid_events = 0
+    invalid_rows_count = 0
+    invalid_rows_preview = []
+    ignored_events_count = 0
+    zero_or_negative_transitions = 0
+    events_by_operator = {}
+    segments_by_operator = {}
+    matched_operator_ids = set()
+
+    def _push_invalid(row_num, reason, operator_name, status_name, started, stopped):
+        nonlocal invalid_rows_count
+        invalid_rows_count += 1
+        if len(invalid_rows_preview) >= preview_limit_value:
+            return
+        invalid_rows_preview.append({
+            'row': int(row_num),
+            'reason': str(reason or '').strip() or 'Некорректная строка',
+            'operator_name': str(operator_name or '').strip(),
+            'state_name': str(status_name or '').strip(),
+            'state_note': '',
+            'time_change': f"{started} → {stopped}".strip()
+        })
+
+    seen = 0
+    for offset, cols in enumerate(row_list[header_index + 1:]):
+        if not any(str(cell or '').strip() for cell in cols):
+            continue
+        seen += 1
+        if max_rows_value is not None and seen > max_rows_value:
+            raise OverflowError(f"Лимит строк CSV превышен ({max_rows_value})")
+        source_rows += 1
+        row_num = header_index + 2 + offset
+
+        operator_name = _cell(cols, operator_col)
+        status_name = _cell(cols, status_col)
+        started_raw = _cell(cols, start_col)
+        stopped_raw = _cell(cols, stop_col)
+
+        if not operator_name or not status_name or not started_raw or not stopped_raw:
+            _push_invalid(row_num, 'Отсутствуют обязательные поля', operator_name, status_name, started_raw, stopped_raw)
+            continue
+
+        start_dt = _status_import_parse_datetime(started_raw)
+        end_dt = _status_import_parse_datetime(stopped_raw)
+        if not start_dt or not end_dt:
+            _push_invalid(row_num, 'Некорректный формат даты/времени', operator_name, status_name, started_raw, stopped_raw)
+            continue
+
+        valid_events += 1
+
+        operator_matches = _status_import_resolve_operator_matches(operator_name, operator_lookup)
+        if len(operator_matches) != 1:
+            _push_invalid(
+                row_num,
+                'Оператор не найден' if len(operator_matches) == 0 else 'Найдено несколько операторов с таким именем',
+                operator_name, status_name, started_raw, stopped_raw
+            )
+            continue
+
+        resolved = _status_import_resolve_tez_status(status_name)
+        status_key = resolved['key']
+        kind = resolved['kind']
+
+        if kind == 'ignore':
+            ignored_events_count += 1
+            continue
+        if end_dt <= start_dt:
+            zero_or_negative_transitions += 1
+            continue
+
+        operator_id = int(operator_matches[0]['id'])
+        matched_operator_ids.add(operator_id)
+
+        events_by_operator.setdefault(operator_id, []).append({
+            'operator_id': operator_id,
+            'event_at': start_dt,
+            'status_key': status_key,
+            'state_note': '',
+            'source_row': int(row_num),
+            'event_kind': 'status'
+        })
+
+        for part in _status_import_split_segment_by_day(start_dt, end_dt):
+            segments_by_operator.setdefault(operator_id, []).append({
+                'operator_id': operator_id,
+                'status_date': part['date'].strftime('%Y-%m-%d'),
+                'start_at': part['start'],
+                'end_at': part['end'],
+                'duration_sec': int(part['duration_sec']),
+                'status_key': status_key,
+                'state_note': ''
+            })
+
+    events_for_db = []
+    for op_id, ev_list in events_by_operator.items():
+        ev_list.sort(key=lambda ev: (ev['event_at'], int(ev.get('source_row') or 0)))
+        events_for_db.extend(ev_list)
+    segments = []
+    for op_id, seg_list in segments_by_operator.items():
+        segments.extend(seg_list)
+
+    return {
+        'source_rows': int(source_rows),
+        'valid_events': int(valid_events),
+        'matched_events': len(events_for_db),
+        'invalid_rows_count': int(invalid_rows_count),
+        'invalid_rows_preview': invalid_rows_preview,
+        'parse_errors_count': 0,
+        'operators_count': len(matched_operator_ids),
+        'action_events_count': 0,
+        'ignored_events_count': int(ignored_events_count),
+        'open_tail_events': 0,
+        'zero_or_negative_transitions': int(zero_or_negative_transitions),
+        'events': events_for_db,
+        'segments': segments,
+        'chat_metrics': []
+    }
+
+
+def _status_import_parse_tez_csv(csv_text, operator_lookup, max_source_rows=None, invalid_rows_preview_limit=None):
+    if not isinstance(csv_text, str):
+        raise ValueError("CSV text is required")
+    try:
+        dialect = csv.Sniffer().sniff(csv_text[:4096], delimiters=';,\t')
+    except Exception:
+        dialect = csv.excel()
+        dialect.delimiter = ';'
+    reader = csv.reader(StringIO(csv_text), dialect)
+    return _status_import_parse_tez_rows(
+        reader,
+        operator_lookup,
+        max_source_rows=max_source_rows,
+        invalid_rows_preview_limit=invalid_rows_preview_limit
+    )
+
+
+def _status_import_csv_text_is_tez(csv_text):
+    """Определить по заголовку, что CSV — посегментная выгрузка TEZ."""
+    if not isinstance(csv_text, str) or not csv_text.strip():
+        return False
+    try:
+        dialect = csv.Sniffer().sniff(csv_text[:4096], delimiters=';,\t')
+    except Exception:
+        dialect = csv.excel()
+        dialect.delimiter = ';'
+    reader = csv.reader(StringIO(csv_text), dialect)
+    for candidate in reader:
+        if any(str(cell or '').strip() for cell in candidate):
+            normalized = [_status_import_normalize_header(h) for h in candidate]
+            return _status_import_header_is_tez(normalized)
+    return False
 
 
 def _chat_metrics_parse_date(value, default_date=None):
@@ -24335,12 +24588,23 @@ def import_work_schedules_statuses_csv():
         # own Chat2Desk sync and must never be matched (or replaced) by this import.
         operator_lookup = _status_import_build_operator_lookup(exclude_chat_managers=True)
         if file_ext in ('.xlsx', '.xlsm'):
-            parsed = _status_import_parse_xlsx(
-                raw_bytes,
-                operator_lookup,
-                max_source_rows=STATUS_IMPORT_MAX_SOURCE_ROWS,
-                invalid_rows_preview_limit=STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
-            )
+            xlsx_rows = _status_import_xlsx_rows(raw_bytes)
+            header_row = next((r for r in xlsx_rows if any(str(c or '').strip() for c in r)), [])
+            normalized_header = [_status_import_normalize_header(h) for h in header_row]
+            if _status_import_header_is_tez(normalized_header):
+                parsed = _status_import_parse_tez_rows(
+                    xlsx_rows,
+                    operator_lookup,
+                    max_source_rows=STATUS_IMPORT_MAX_SOURCE_ROWS,
+                    invalid_rows_preview_limit=STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
+                )
+            else:
+                parsed = _status_import_parse_xlsx(
+                    raw_bytes,
+                    operator_lookup,
+                    max_source_rows=STATUS_IMPORT_MAX_SOURCE_ROWS,
+                    invalid_rows_preview_limit=STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
+                )
         else:
             csv_text = None
             for enc in ('utf-8-sig', 'cp1251'):
@@ -24351,12 +24615,20 @@ def import_work_schedules_statuses_csv():
                     continue
             if csv_text is None:
                 return jsonify({"error": "Не удалось декодировать CSV (поддерживаются UTF-8 и CP1251)"}), 400
-            parsed = _status_import_parse_csv(
-                csv_text,
-                operator_lookup,
-                max_source_rows=STATUS_IMPORT_MAX_SOURCE_ROWS,
-                invalid_rows_preview_limit=STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
-            )
+            if _status_import_csv_text_is_tez(csv_text):
+                parsed = _status_import_parse_tez_csv(
+                    csv_text,
+                    operator_lookup,
+                    max_source_rows=STATUS_IMPORT_MAX_SOURCE_ROWS,
+                    invalid_rows_preview_limit=STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
+                )
+            else:
+                parsed = _status_import_parse_csv(
+                    csv_text,
+                    operator_lookup,
+                    max_source_rows=STATUS_IMPORT_MAX_SOURCE_ROWS,
+                    invalid_rows_preview_limit=STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
+                )
 
         if not parsed.get('events'):
             return jsonify({
