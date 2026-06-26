@@ -2787,6 +2787,10 @@ class Database:
             cursor.execute("ALTER TABLE shift_auction_test_access ADD COLUMN IF NOT EXISTS published_to_work_schedules_by INTEGER NULL;")
             cursor.execute("ALTER TABLE shift_auction_test_access ADD COLUMN IF NOT EXISTS topup_started_at TIMESTAMP NULL;")
             cursor.execute("ALTER TABLE shift_auction_test_access ADD COLUMN IF NOT EXISTS topup_started_by INTEGER NULL;")
+            # Early-access ("избранная группа") start moment. Participants flagged
+            # with early_access can claim/release from this time instead of the
+            # main starts_at; ends_at stays shared. NULL => no early window.
+            cursor.execute("ALTER TABLE shift_auction_test_access ADD COLUMN IF NOT EXISTS favored_starts_at TIMESTAMP NULL;")
             cursor.execute("""
                 INSERT INTO shift_auction_test_access (id)
                 VALUES (1)
@@ -2799,6 +2803,8 @@ class Database:
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+            # Marks a participant as part of the early-access ("избранная") group.
+            cursor.execute("ALTER TABLE shift_auction_test_participants ADD COLUMN IF NOT EXISTS early_access BOOLEAN NOT NULL DEFAULT FALSE;")
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS shift_auction_test_lots (
                     id SERIAL PRIMARY KEY,
@@ -5327,6 +5333,21 @@ class Database:
             return "closed"
         return "open"
 
+    def _shift_auction_effective_starts_at(self, starts_at, favored_starts_at, is_favored):
+        """Start moment that gates a given operator.
+
+        Favored ("избранная") participants open at ``favored_starts_at`` — but never
+        later than the main ``starts_at`` (a misconfigured later favored time must not
+        disadvantage them, so we take the earlier of the two). Everyone else, and any
+        run without an early window, uses the main ``starts_at``.
+        """
+        if not is_favored or not favored_starts_at:
+            return starts_at
+        if not starts_at:
+            # Main group has no scheduled start (already open) → favored too.
+            return None
+        return min(starts_at, favored_starts_at)
+
     def _serialize_shift_auction_lot_row(self, row):
         return {
             "id": row[0],
@@ -5443,7 +5464,8 @@ class Database:
                 d.name AS direction_name,
                 u.supervisor_id,
                 s.name AS supervisor_name,
-                p.created_at
+                p.created_at,
+                COALESCE(p.early_access, FALSE) AS early_access
             FROM shift_auction_test_participants p
             JOIN users u ON u.id = p.operator_id
             LEFT JOIN directions d ON d.id = u.direction_id
@@ -6084,7 +6106,8 @@ class Database:
                     d.name AS direction_name,
                     u.supervisor_id,
                     s.name AS supervisor_name,
-                    p.created_at
+                    p.created_at,
+                    COALESCE(p.early_access, FALSE) AS early_access
                 FROM shift_auction_test_participants p
                 JOIN users u ON u.id = p.operator_id
                 LEFT JOIN directions d ON d.id = u.direction_id
@@ -6092,9 +6115,16 @@ class Database:
                 ORDER BY u.name
             """)
             participant_rows = cursor.fetchall() or []
+            cursor.execute("SELECT favored_starts_at FROM shift_auction_test_access WHERE id = 1")
+            favored_row = cursor.fetchone()
+            favored_starts_at = favored_row[0] if favored_row else None
             selected_period_row = self._get_shift_auction_period_row_tx(cursor, settings_row[6])
 
         selected_operator_ids = [int(row[0]) for row in participant_rows if row and row[0] is not None]
+        favored_operator_ids = [
+            int(row[0]) for row in participant_rows
+            if row and row[0] is not None and len(row) > 10 and row[10]
+        ]
         current_id = None
         try:
             current_id = int(current_user_id) if current_user_id is not None else None
@@ -6106,6 +6136,8 @@ class Database:
             "launch_note": settings_row[1] or "",
             "starts_at": settings_row[2].isoformat() if settings_row and settings_row[2] else None,
             "ends_at": settings_row[3].isoformat() if settings_row and settings_row[3] else None,
+            "favored_starts_at": favored_starts_at.isoformat() if favored_starts_at else None,
+            "favored_operator_ids": favored_operator_ids,
             "paused_at": settings_row[4].isoformat() if settings_row and settings_row[4] else None,
             "finished_at": settings_row[5].isoformat() if settings_row and settings_row[5] else None,
             "selected_schedule_plan_id": settings_row[6] if settings_row else None,
@@ -6138,7 +6170,8 @@ class Database:
                     "direction": row[6] or "",
                     "supervisor_id": row[7],
                     "supervisor_name": row[8] or "",
-                    "selected_at": row[9].isoformat() if row[9] else None
+                    "selected_at": row[9].isoformat() if row[9] else None,
+                    "early_access": bool(row[10]) if len(row) > 10 else False
                 }
                 for row in participant_rows
             ],
@@ -6165,9 +6198,13 @@ class Database:
         starts_at=None,
         ends_at=None,
         schedule_plan_id=None,
+        favored_starts_at=None,
+        favored_operator_ids=None,
     ):
         if starts_at and ends_at and ends_at <= starts_at:
             raise ValueError("AUCTION_END_BEFORE_START")
+        if favored_starts_at and ends_at and ends_at <= favored_starts_at:
+            raise ValueError("AUCTION_FAVORED_START_AFTER_END")
         normalized_ids = []
         seen = set()
         for raw_id in (operator_ids or []):
@@ -6178,6 +6215,18 @@ class Database:
             if operator_id > 0 and operator_id not in seen:
                 seen.add(operator_id)
                 normalized_ids.append(operator_id)
+
+        favored_requested = set()
+        for raw_id in (favored_operator_ids or []):
+            try:
+                favored_id = int(raw_id)
+            except Exception:
+                continue
+            if favored_id > 0:
+                favored_requested.add(favored_id)
+        # No favored operators ⇒ no early window to persist.
+        if not favored_requested:
+            favored_starts_at = None
 
         selected_period_row = None
         selected_plan_id = None
@@ -6229,6 +6278,14 @@ class Database:
                 """, (normalized_ids,))
                 valid_ids = [int(row[0]) for row in (cursor.fetchall() or [])]
 
+            # Favored operators must survive participant validation. Keying off the
+            # validated set (not the raw request) keeps the stored favored_starts_at
+            # from lingering as a no-op early window when every favored id was dropped.
+            favored_valid = [operator_id for operator_id in valid_ids if operator_id in favored_requested]
+            favored_valid_set = set(favored_valid)
+            if not favored_valid:
+                favored_starts_at = None
+
             should_refresh_lots = False
             if selected_plan_id is not None:
                 cursor.execute("""
@@ -6265,6 +6322,7 @@ class Database:
                     launch_note = %s,
                     starts_at = %s,
                     ends_at = %s,
+                    favored_starts_at = %s,
                     selected_schedule_plan_id = %s,
                     paused_at = CASE WHEN %s THEN NULL ELSE paused_at END,
                     finished_at = CASE WHEN %s THEN NULL ELSE finished_at END,
@@ -6280,6 +6338,7 @@ class Database:
                 str(launch_note or '').strip()[:1000],
                 starts_at,
                 ends_at,
+                favored_starts_at,
                 next_selected_plan_id,
                 should_reset_run_state,
                 should_reset_run_state,
@@ -6324,11 +6383,14 @@ class Database:
 
             cursor.execute("DELETE FROM shift_auction_test_participants")
             if valid_ids:
-                rows = [(operator_id, updated_by) for operator_id in valid_ids]
+                rows = [
+                    (operator_id, updated_by, operator_id in favored_valid_set)
+                    for operator_id in valid_ids
+                ]
                 execute_values(
                     cursor,
                     """
-                    INSERT INTO shift_auction_test_participants (operator_id, added_by)
+                    INSERT INTO shift_auction_test_participants (operator_id, added_by, early_access)
                     VALUES %s
                     ON CONFLICT (operator_id) DO NOTHING
                     """,
@@ -6338,6 +6400,8 @@ class Database:
                 "enabled": bool(enabled),
                 "starts_at": starts_at.isoformat() if starts_at else None,
                 "ends_at": ends_at.isoformat() if ends_at else None,
+                "favored_starts_at": favored_starts_at.isoformat() if favored_starts_at else None,
+                "favored_operator_ids": favored_valid,
                 "selected_operator_ids": valid_ids,
                 "selected_schedule_plan_id": next_selected_plan_id,
                 "lots_refreshed": should_refresh_lots,
@@ -6358,7 +6422,7 @@ class Database:
         now = datetime.now()
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT enabled, starts_at, ends_at, paused_at, finished_at
+                SELECT enabled, starts_at, ends_at, paused_at, finished_at, favored_starts_at
                 FROM shift_auction_test_access
                 WHERE id = 1
                 FOR UPDATE
@@ -6367,10 +6431,14 @@ class Database:
             if not row:
                 raise ValueError("AUCTION_NOT_AVAILABLE")
 
-            enabled, starts_at, ends_at, paused_at, finished_at = row
+            enabled, starts_at, ends_at, paused_at, finished_at, favored_starts_at = row
+            # The auction is "live" (and therefore pausable) as soon as the earliest
+            # group can act — i.e. once the favored early window opens, not only at the
+            # main start. Resume/finish are unaffected (they key off paused_at/ends_at).
+            earliest_start = self._shift_auction_effective_starts_at(starts_at, favored_starts_at, True)
             current_status = self._get_shift_auction_test_status(
                 enabled,
-                starts_at,
+                earliest_start,
                 ends_at,
                 paused_at,
                 finished_at
@@ -7682,7 +7750,28 @@ class Database:
                 if current_id else []
             )
 
+            cursor.execute("SELECT favored_starts_at FROM shift_auction_test_access WHERE id = 1")
+            favored_row = cursor.fetchone()
+            favored_starts_at = favored_row[0] if favored_row else None
+            is_current_user_favored = False
+            if current_id:
+                cursor.execute(
+                    "SELECT COALESCE(early_access, FALSE) FROM shift_auction_test_participants WHERE operator_id = %s",
+                    (current_id,)
+                )
+                favored_flag_row = cursor.fetchone()
+                is_current_user_favored = bool(favored_flag_row and favored_flag_row[0])
+
         selected_operator_ids = [int(row[0]) for row in participant_rows if row and row[0] is not None]
+        favored_operator_ids = [
+            int(row[0]) for row in participant_rows
+            if row and row[0] is not None and len(row) > 10 and row[10]
+        ]
+        my_effective_starts_at = self._shift_auction_effective_starts_at(
+            settings_row[2] if settings_row else None,
+            favored_starts_at,
+            is_current_user_favored,
+        )
         post_auction_active = bool(
             settings_row and settings_row[10]
             and current_id is not None
@@ -7701,9 +7790,15 @@ class Database:
             "finished_at": settings_row[5].isoformat() if settings_row and settings_row[5] else None,
             "selected_schedule_plan_id": settings_row[6] if settings_row else None,
             "selected_period": self._serialize_shift_auction_period_row(selected_period_row),
+            "favored_starts_at": favored_starts_at.isoformat() if favored_starts_at else None,
+            "favored_operator_ids": favored_operator_ids,
+            "is_current_user_favored": is_current_user_favored,
+            "my_effective_starts_at": my_effective_starts_at.isoformat() if my_effective_starts_at else None,
+            # Operator-aware status: favored участники see "open" from their earlier
+            # effective start; everyone else (and managers) see the main timeline.
             "status": self._get_shift_auction_test_status(
                 bool(settings_row[0]) if settings_row else False,
-                settings_row[2] if settings_row else None,
+                my_effective_starts_at,
                 settings_row[3] if settings_row else None,
                 settings_row[4] if settings_row else None,
                 settings_row[5] if settings_row else None
@@ -7729,7 +7824,8 @@ class Database:
                     "direction": row[6] or "",
                     "supervisor_id": row[7],
                     "supervisor_name": row[8] or "",
-                    "selected_at": row[9].isoformat() if row[9] else None
+                    "selected_at": row[9].isoformat() if row[9] else None,
+                    "early_access": bool(row[10]) if len(row) > 10 else False
                 }
                 for row in participant_rows
             ],
@@ -8663,13 +8759,16 @@ class Database:
                           AND LOWER(COALESCE(role, '')) = 'operator'
                           AND COALESCE(status, '') NOT IN ('fired', 'dismissal')
                     ) AS operator_rate,
-                    s.topup_started_at
+                    s.topup_started_at,
+                    s.favored_starts_at,
+                    (SELECT COALESCE(early_access, FALSE) FROM shift_auction_test_participants WHERE operator_id = %s) AS early_access
                 FROM shift_auction_test_access s
                 WHERE s.id = 1
-            """, (operator_id, operator_id))
+            """, (operator_id, operator_id, operator_id))
             header = cursor.fetchone()
             timings["header"] = (time.perf_counter() - started_at) * 1000
-            if not header or self._get_shift_auction_test_status(header[0], header[1], header[2], header[3], header[4]) != "open":
+            effective_start = self._shift_auction_effective_starts_at(header[1], header[8], header[9]) if header else None
+            if not header or self._get_shift_auction_test_status(header[0], effective_start, header[2], header[3], header[4]) != "open":
                 raise ValueError("AUCTION_NOT_OPEN")
             if not header[5]:
                 raise ValueError("NOT_TEST_PARTICIPANT")
@@ -8830,12 +8929,15 @@ class Database:
                     s.ends_at,
                     s.paused_at,
                     s.finished_at,
-                    EXISTS(SELECT 1 FROM shift_auction_test_participants WHERE operator_id = %s) AS is_participant
+                    EXISTS(SELECT 1 FROM shift_auction_test_participants WHERE operator_id = %s) AS is_participant,
+                    s.favored_starts_at,
+                    (SELECT COALESCE(early_access, FALSE) FROM shift_auction_test_participants WHERE operator_id = %s) AS early_access
                 FROM shift_auction_test_access s
                 WHERE s.id = 1
-            """, (operator_id,))
+            """, (operator_id, operator_id))
             header = cursor.fetchone()
-            if not header or self._get_shift_auction_test_status(header[0], header[1], header[2], header[3], header[4]) != "open":
+            effective_start = self._shift_auction_effective_starts_at(header[1], header[6], header[7]) if header else None
+            if not header or self._get_shift_auction_test_status(header[0], effective_start, header[2], header[3], header[4]) != "open":
                 raise ValueError("AUCTION_NOT_OPEN")
             if not header[5]:
                 raise ValueError("NOT_TEST_PARTICIPANT")

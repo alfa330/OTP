@@ -1211,11 +1211,14 @@ const AuctionTimeField = ({
   );
 };
 
-const getAuctionRuntimeStatus = (settings, nowMs) => {
+const getAuctionRuntimeStatus = (settings, nowMs, effectiveStartsAt = undefined) => {
   if (!settings?.enabled) return 'disabled';
   if (settings.finished_at) return 'closed';
   if (settings.paused_at) return 'paused';
-  const startsAtMs = settings.starts_at ? new Date(settings.starts_at).getTime() : null;
+  // Favored ("избранная") operators carry an earlier effective start; everyone
+  // else (incl. managers) falls back to the main starts_at.
+  const startsAtRaw = effectiveStartsAt === undefined ? settings.starts_at : effectiveStartsAt;
+  const startsAtMs = startsAtRaw ? new Date(startsAtRaw).getTime() : null;
   const endsAtMs = settings.ends_at ? new Date(settings.ends_at).getTime() : null;
   if (Number.isFinite(startsAtMs) && nowMs < startsAtMs) return 'scheduled';
   if (Number.isFinite(endsAtMs) && nowMs >= endsAtMs) return 'closed';
@@ -3293,6 +3296,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     launch_note: '',
     starts_at: null,
     ends_at: null,
+    favored_starts_at: null,
+    favored_operator_ids: [],
+    is_current_user_favored: false,
+    my_effective_starts_at: null,
     paused_at: null,
     finished_at: null,
     status: 'disabled',
@@ -3318,8 +3325,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [draftNote, setDraftNote] = useState('');
   const [draftStartsAt, setDraftStartsAt] = useState('');
   const [draftEndsAt, setDraftEndsAt] = useState('');
+  const [draftFavoredStartsAt, setDraftFavoredStartsAt] = useState('');
   const [draftSchedulePlanId, setDraftSchedulePlanId] = useState('');
   const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [favoredOperatorIds, setFavoredOperatorIds] = useState(() => new Set());
   const [query, setQuery] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -3427,10 +3436,15 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     }
   }, [instructionsStorageKey]);
 
+  // The start moment that gates the current viewer: favored operators carry an
+  // earlier effective start from the server; everyone else (incl. managers) uses
+  // the main starts_at.
+  const operatorEffectiveStartsAt = settings.my_effective_starts_at || settings.starts_at;
+
   useEffect(() => {
     if (!settings.enabled) return undefined;
     if (settings.paused_at || settings.finished_at) return undefined;
-    const startsAtMs = settings.starts_at ? new Date(settings.starts_at).getTime() : null;
+    const startsAtMs = operatorEffectiveStartsAt ? new Date(operatorEffectiveStartsAt).getTime() : null;
     const endsAtMs = settings.ends_at ? new Date(settings.ends_at).getTime() : null;
     const now = Date.now();
     let nextBoundary = null;
@@ -3440,7 +3454,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     const delay = Math.max(500, nextBoundary - now + 50);
     const timer = window.setTimeout(() => setStatusVersion((value) => value + 1), delay);
     return () => window.clearTimeout(timer);
-  }, [settings.enabled, settings.ends_at, settings.finished_at, settings.paused_at, settings.starts_at, statusVersion]);
+  }, [settings.enabled, settings.ends_at, settings.finished_at, settings.paused_at, operatorEffectiveStartsAt, statusVersion]);
 
   const notify = useCallback((message, type = 'success') => {
     if (typeof showToastRef.current === 'function') showToastRef.current(message, type);
@@ -3515,6 +3529,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       launch_note: safe.launch_note || '',
       starts_at: safe.starts_at || null,
       ends_at: safe.ends_at || null,
+      favored_starts_at: safe.favored_starts_at || null,
+      favored_operator_ids: Array.isArray(safe.favored_operator_ids) ? safe.favored_operator_ids.map(normalizeOperatorId).filter(Boolean) : [],
+      is_current_user_favored: Boolean(safe.is_current_user_favored),
+      my_effective_starts_at: safe.my_effective_starts_at || null,
       paused_at: safe.paused_at || null,
       finished_at: safe.finished_at || null,
       status: safe.status || 'disabled',
@@ -3548,7 +3566,14 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     setDraftNote(safe.launch_note || '');
     setDraftStartsAt(toDateTimeInputValue(safe.starts_at));
     setDraftEndsAt(toDateTimeInputValue(safe.ends_at));
+    setDraftFavoredStartsAt(toDateTimeInputValue(safe.favored_starts_at));
     setSelectedIds(new Set(ids));
+    const favoredIdsFromSnapshot = Array.isArray(safe.favored_operator_ids)
+      ? safe.favored_operator_ids.map(normalizeOperatorId).filter(Boolean)
+      : (Array.isArray(safe.selected_operators)
+        ? safe.selected_operators.filter((op) => op?.early_access).map((op) => normalizeOperatorId(op?.id)).filter(Boolean)
+        : []);
+    setFavoredOperatorIds(new Set(favoredIdsFromSnapshot));
     setAvailablePeriods(periods);
     setDraftSchedulePlanId((current) => {
       const restartablePeriods = periods.filter((period) => period?.can_restart !== false);
@@ -3916,6 +3941,18 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
   const draftStartsAtParts = useMemo(() => splitDateTimeInputValue(draftStartsAt), [draftStartsAt]);
   const draftEndsAtParts = useMemo(() => splitDateTimeInputValue(draftEndsAt), [draftEndsAt]);
+  const draftFavoredStartsAtParts = useMemo(() => splitDateTimeInputValue(draftFavoredStartsAt), [draftFavoredStartsAt]);
+  // Favored start always rides on the main start's date; managers only pick the time.
+  const draftFavoredStartsAtForSave = useMemo(() => {
+    const favoredTime = draftFavoredStartsAtParts.time;
+    if (!favoredTime || !draftStartsAtParts.date) return null;
+    return `${draftStartsAtParts.date}T${favoredTime}`;
+  }, [draftFavoredStartsAtParts.time, draftStartsAtParts.date]);
+  // Only operators in the main selection can be marked favored.
+  const favoredSelectedIds = useMemo(
+    () => Array.from(favoredOperatorIds).filter((id) => selectedIds.has(id)),
+    [favoredOperatorIds, selectedIds]
+  );
   const selectedDraftPeriod = useMemo(
     () => restartablePeriods.find((period) => Number(period?.id) === Number(draftSchedulePlanId)) || null,
     [restartablePeriods, draftSchedulePlanId]
@@ -4194,12 +4231,12 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   }, [dayNavigationItems]);
 
   const runtimeStatus = useMemo(
-    () => getAuctionRuntimeStatus(settings, Date.now()),
+    () => getAuctionRuntimeStatus(settings, Date.now(), operatorEffectiveStartsAt),
     // statusVersion forces re-evaluation when a scheduled/open boundary is crossed
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [settings.enabled, settings.ends_at, settings.finished_at, settings.paused_at, settings.starts_at, statusVersion]
+    [settings.enabled, settings.ends_at, settings.finished_at, settings.paused_at, operatorEffectiveStartsAt, statusVersion]
   );
-  const hasStartCountdown = runtimeStatus === 'scheduled' && Boolean(settings.starts_at);
+  const hasStartCountdown = runtimeStatus === 'scheduled' && Boolean(operatorEffectiveStartsAt);
   const hasCloseCountdown = runtimeStatus === 'open' && Boolean(settings.ends_at);
   const auctionStatusLabel = runtimeStatus === 'scheduled'
     ? 'Откроется'
@@ -4229,14 +4266,14 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         ? 'выбор завершен'
         : `${settings.selected_operator_ids.length} тест.`;
   const auctionStatusDetail = hasStartCountdown
-    ? <AuctionCountdownText target={settings.starts_at} />
+    ? <AuctionCountdownText target={operatorEffectiveStartsAt} />
     : hasCloseCountdown
       ? <>до закрытия <AuctionCountdownText target={settings.ends_at} /></>
       : auctionStatusDetailText;
   const auctionStatusShortDetail = hasCloseCountdown
     ? <AuctionCountdownText target={settings.ends_at} />
     : hasStartCountdown
-      ? <AuctionCountdownText target={settings.starts_at} />
+      ? <AuctionCountdownText target={operatorEffectiveStartsAt} />
       : auctionStatusDetailText;
   const auctionStatusTone = runtimeStatus === 'open'
     ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
@@ -4629,8 +4666,39 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     if (!id) return;
     setSelectedIds((current) => {
       const next = new Set(current);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      if (next.has(id)) {
+        next.delete(id);
+        // Dropping a participant also drops their early-access flag.
+        setFavoredOperatorIds((favored) => {
+          if (!favored.has(id)) return favored;
+          const nextFavored = new Set(favored);
+          nextFavored.delete(id);
+          return nextFavored;
+        });
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }, []);
+
+  const toggleFavoredOperator = useCallback((operatorId) => {
+    const id = normalizeOperatorId(operatorId);
+    if (!id) return;
+    setFavoredOperatorIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+        // Favored implies participation — ensure the operator is selected too.
+        setSelectedIds((selected) => {
+          if (selected.has(id)) return selected;
+          const nextSelected = new Set(selected);
+          nextSelected.add(id);
+          return nextSelected;
+        });
+      }
       return next;
     });
   }, []);
@@ -4649,6 +4717,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
   const clearSelectedOperators = useCallback(() => {
     setSelectedIds(new Set());
+    setFavoredOperatorIds(new Set());
   }, []);
 
   const handleViewPeriodSelect = useCallback((period) => {
@@ -4673,8 +4742,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           launch_note: draftNote,
           starts_at: draftStartsAt || null,
           ends_at: draftEndsAt || null,
+          favored_starts_at: draftFavoredStartsAtForSave,
           schedule_plan_id: selectedDraftPeriod?.id || null,
-          operator_ids: Array.from(selectedIds)
+          operator_ids: Array.from(selectedIds),
+          favored_operator_ids: favoredSelectedIds
         },
         { headers: buildHeaders() }
       );
@@ -4685,7 +4756,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     } finally {
       setIsSaving(false);
     }
-  }, [apiRoot, buildHeaders, canManage, draftEnabled, draftEndsAt, draftNote, draftRangeInvalid, draftSchedulePlanId, draftStartsAt, fetchSnapshot, notify, selectedDraftPeriod, selectedIds]);
+  }, [apiRoot, buildHeaders, canManage, draftEnabled, draftEndsAt, draftNote, draftRangeInvalid, draftSchedulePlanId, draftStartsAt, draftFavoredStartsAtForSave, favoredSelectedIds, fetchSnapshot, notify, selectedDraftPeriod, selectedIds]);
 
   const handleRestartAuction = useCallback(async () => {
     if (!canManage || !apiRoot) return;
@@ -5533,7 +5604,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                           ? 'Аукцион временно приостановлен.'
                           : 'Сейчас аукцион закрыт.')
                     : (runtimeStatus === 'scheduled'
-                      ? <>Аукцион откроется через <AuctionCountdownText target={settings.starts_at} />.</>
+                      ? (settings.is_current_user_favored
+                        ? <>Ваш ранний доступ откроется через <AuctionCountdownText target={operatorEffectiveStartsAt} />.</>
+                        : <>Аукцион откроется через <AuctionCountdownText target={operatorEffectiveStartsAt} />.</>)
                       : runtimeStatus === 'open'
                         ? 'Нажмите “Забрать”, чтобы закрепить смену. У остальных участников она сразу станет недоступной.'
                         : runtimeStatus === 'paused'
@@ -6194,6 +6267,54 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                       </button>
                     ))}
                   </div>
+
+                  <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50/60 p-3">
+                    <div className="flex items-center gap-2 text-sm font-semibold text-amber-900">
+                      <Sparkles size={16} className="text-amber-600" />
+                      Ранний доступ для избранной группы
+                    </div>
+                    <p className="mt-1 text-xs text-amber-800">
+                      Избранные участники смогут заходить в аукцион раньше остальных. Отметьте их в списке ниже значком{' '}
+                      <Sparkles size={12} className="inline align-text-bottom text-amber-600" /> и задайте время старта (в день основного старта).
+                    </p>
+                    <div className="mt-3 grid gap-3 md:grid-cols-2">
+                      <AuctionTimeField
+                        label="Начало раннего доступа"
+                        dateValue={draftStartsAtParts.date}
+                        value={draftFavoredStartsAt}
+                        onChange={setDraftFavoredStartsAt}
+                        disabled={!draftStartsAtParts.date}
+                      />
+                      <div className="flex flex-col justify-center gap-2 text-xs text-amber-900">
+                        <div>
+                          Избранных операторов: <span className="font-semibold">{favoredSelectedIds.length}</span>
+                        </div>
+                        {draftFavoredStartsAtForSave ? (
+                          <div>
+                            Старт раннего доступа:{' '}
+                            <span className="font-semibold tabular-nums">{formatDateTimeLabel(draftFavoredStartsAtForSave)}</span>
+                          </div>
+                        ) : (
+                          <div className="text-amber-700">Время раннего доступа не задано — все стартуют одновременно.</div>
+                        )}
+                        {draftFavoredStartsAtForSave ? (
+                          <button
+                            type="button"
+                            onClick={() => setDraftFavoredStartsAt('')}
+                            className="inline-flex w-fit items-center gap-1 rounded-md border border-amber-300 bg-white px-2 py-1 font-semibold text-amber-800 transition hover:bg-amber-100"
+                          >
+                            <X size={13} /> Сбросить ранний доступ
+                          </button>
+                        ) : null}
+                        {draftFavoredStartsAtForSave && draftStartsAt && draftFavoredStartsAtForSave >= toDateTimeInputValue(draftStartsAt) ? (
+                          <div className="font-semibold text-rose-600">Раннее время не раньше основного старта — преимущества нет.</div>
+                        ) : null}
+                        {draftFavoredStartsAtForSave && favoredSelectedIds.length === 0 ? (
+                          <div className="font-semibold text-rose-600">Не отмечен ни один избранный оператор.</div>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
                 </div>
 
                 <div>
@@ -6252,6 +6373,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                   {filteredOperators.length ? (
                     filteredOperators.map((operator) => {
                       const active = selectedIds.has(operator.id);
+                      const favored = favoredOperatorIds.has(operator.id);
                       return (
                         <button
                           key={operator.id}
@@ -6269,6 +6391,32 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                               {operator.supervisor_name ? ` · ${operator.supervisor_name}` : ''}
                             </span>
                           </span>
+                          <span
+                            role="button"
+                            tabIndex={active ? 0 : -1}
+                            aria-pressed={favored}
+                            title={favored ? 'Убрать из избранной группы (ранний доступ)' : 'Дать ранний доступ (избранная группа)'}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              toggleFavoredOperator(operator.id);
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter' || event.key === ' ') {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                toggleFavoredOperator(operator.id);
+                              }
+                            }}
+                            className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border transition ${
+                              favored
+                                ? 'border-amber-300 bg-amber-100 text-amber-700'
+                                : active
+                                  ? 'border-slate-200 bg-white text-slate-300 hover:text-amber-600'
+                                  : 'border-transparent bg-transparent text-slate-200'
+                            }`}
+                          >
+                            <Sparkles size={14} />
+                          </span>
                         </button>
                       );
                     })
@@ -6283,14 +6431,33 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                   <Users size={17} className="text-blue-700" />
                   Тестовая группа
                 </div>
+                {favoredSelectedIds.length ? (
+                  <div className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-800">
+                    <Sparkles size={13} className="text-amber-600" />
+                    Ранний доступ: {favoredSelectedIds.length}
+                  </div>
+                ) : null}
                 <div className="mt-3 space-y-2">
                   {selectedOperators.length ? (
-                    selectedOperators.map((operator) => (
-                      <div key={operator.id} className="rounded-md border border-slate-200 bg-white px-3 py-2">
-                        <div className="truncate text-sm font-semibold text-slate-900">{operator.name}</div>
-                        <div className="mt-0.5 truncate text-xs text-slate-500">{operator.direction || 'Без направления'}</div>
-                      </div>
-                    ))
+                    selectedOperators.map((operator) => {
+                      const favored = favoredOperatorIds.has(operator.id);
+                      return (
+                        <div key={operator.id} className={`flex items-center gap-2 rounded-md border px-3 py-2 ${favored ? 'border-amber-200 bg-amber-50' : 'border-slate-200 bg-white'}`}>
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate text-sm font-semibold text-slate-900">{operator.name}</div>
+                            <div className="mt-0.5 truncate text-xs text-slate-500">{operator.direction || 'Без направления'}</div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => toggleFavoredOperator(operator.id)}
+                            title={favored ? 'Убрать из избранной группы (ранний доступ)' : 'Дать ранний доступ (избранная группа)'}
+                            className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border transition ${favored ? 'border-amber-300 bg-amber-100 text-amber-700' : 'border-slate-200 bg-white text-slate-300 hover:text-amber-600'}`}
+                          >
+                            <Sparkles size={14} />
+                          </button>
+                        </div>
+                      );
+                    })
                   ) : (
                     <p className="rounded-md border border-dashed border-slate-300 bg-white px-3 py-4 text-sm text-slate-500">
                       Пока никто не выбран.
