@@ -30,6 +30,7 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     const [calcModels, setCalcModels] = useState([]);
     const [departments, setDepartments] = useState([]);
     const [users, setUsers] = useState([]);
+    const [supervisors, setSupervisors] = useState([]);
     const [loading, setLoading] = useState(true);
     const [showArchived, setShowArchived] = useState(false);
     const [search, setSearch] = useState('');
@@ -92,10 +93,13 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
 
     const fetchAux = useCallback(async () => {
         try {
-            const [d, u, dep] = await Promise.all([
+            // Супервайзеров берём из /api/admin/sv_list — он, в отличие от /api/admin/users,
+            // отдаёт СВ и обычным админам/супер-админам (а не только главам отделов).
+            const [d, u, dep, sv] = await Promise.all([
                 api('/api/admin/directions'),
                 api('/api/admin/users'),
                 api('/api/admin/departments'),
+                api('/api/admin/sv_list'),
             ]);
             if (d.ok) {
                 setDirections(d.data.directions || []);
@@ -105,6 +109,7 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
             }
             if (u.ok) setUsers(u.data.users || u.data.operators || (Array.isArray(u.data) ? u.data : []));
             if (dep.ok) setDepartments(dep.data.departments || []);
+            if (sv.ok) setSupervisors(sv.data.sv_list || []);
         } catch {
             setCalcModels(FALLBACK_MODELS);
         }
@@ -114,13 +119,24 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
 
     const dirModelOf = (dir) => String(dir?.calculationModelCode || dir?.calculation_model_code || 'operator');
 
+    // Кандидаты на добавление сужаются до отдела открытой группы (как видит глава отдела).
+    // Группа без отдела — без сужения; запись без department_id в скоуп не попадает.
+    const membersDeptId = membersGroup?.department_id ?? null;
+    const sameGroupDept = (u) => {
+        if (membersDeptId == null) return true;
+        const d = u?.department_id ?? u?.departmentId;
+        return d != null && Number(d) === Number(membersDeptId);
+    };
+
     const operatorsList = useMemo(
-        () => (users || []).filter((u) => ['operator', 'trainee'].includes(normalizeRole(u.role))),
-        [users]
+        () => (users || []).filter((u) => ['operator', 'trainee'].includes(normalizeRole(u.role)) && sameGroupDept(u)),
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        [users, membersDeptId]
     );
     const supervisorsList = useMemo(
-        () => (users || []).filter((u) => ['sv', 'supervisor'].includes(normalizeRole(u.role))),
-        [users]
+        () => (supervisors || []).filter((s) => ['sv', 'supervisor'].includes(normalizeRole(s.role)) && sameGroupDept(s)),
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        [supervisors, membersDeptId]
     );
     const modelName = (code) => (calcModels.find((m) => m.code === code) || {}).name || code;
 
