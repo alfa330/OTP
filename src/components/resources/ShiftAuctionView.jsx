@@ -3266,7 +3266,10 @@ const ShiftAuctionShiftsTable = ({
 
 const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHeader, showToast, onOpenResourceGeneration, initialPeriod = null, onInitialPeriodApplied = null }) => {
   const role = normalizeRole(user?.role);
-  const canManage = isAdminLikeRole(role);
+  const departmentCode = String(user?.department_code ?? user?.departmentCode ?? '').toLowerCase();
+  // Супервайзеры СЗоВ управляют аукционом наравне с главой отдела (он — admin).
+  const isSzovSupervisor = isSupervisorRole(role) && departmentCode === 'szov';
+  const canManage = isAdminLikeRole(role) || isSzovSupervisor;
   const canMonitor = canManage || isSupervisorRole(role);
   const apiRoot = String(apiBaseUrl || '').replace(/\/+$/, '');
   const showToastRef = useRef(showToast);
