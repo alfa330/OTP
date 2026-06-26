@@ -231,6 +231,12 @@ CHAT2DESK_STATUS_SYNC_MINUTE = _env_int('CHAT2DESK_STATUS_SYNC_MINUTE', CHAT2DES
 CHAT2DESK_API_TIMEOUT_SECONDS = _env_int('CHAT2DESK_API_TIMEOUT_SECONDS', 45, minimum=5, maximum=300)
 CHAT2DESK_API_PAGE_LIMIT = _env_int('CHAT2DESK_API_PAGE_LIMIT', 200, minimum=1, maximum=200)
 CHAT2DESK_API_MAX_PAGES = _env_int('CHAT2DESK_API_MAX_PAGES', 100, minimum=1, maximum=1000)
+# operator_events отдаёт переключения статусов ВСЕХ операторов за день в порядке
+# от новых к старым. На загруженных днях событий заметно больше дефолтного потолка
+# в 20k строк (100 страниц * 200), и срез молча отбрасывает САМЫЕ СТАРЫЕ (утренние)
+# события — вовремя пришедший оператор выглядит опоздавшим на часы. Поэтому
+# синхронизация статусов листает с большим потолком, чтобы выгрузить день целиком.
+CHAT2DESK_STATUS_API_MAX_PAGES = _env_int('CHAT2DESK_STATUS_API_MAX_PAGES', 2000, minimum=1, maximum=10000)
 CHAT2DESK_OPERATOR_LOOKUP_CACHE = {}
 
 # === Oktell (операторское направление: статусы из телефонии) =====================================
@@ -1846,6 +1852,28 @@ def _rebuild_call_feedback_training_comment(cursor, training_id):
 
 def _is_supervisor_role(role: str) -> bool:
     return _normalize_user_role(role) == 'sv'
+
+
+# Отдел, чьи супервайзеры управляют аукционом смен наравне с главой отдела.
+SHIFT_AUCTION_MANAGER_DEPARTMENT_CODE = 'szov'
+
+
+def _is_shift_auction_manager(requester_id, requester_role) -> bool:
+    """Кто может управлять аукционом смен (запуск, контроль, публикация и т.п.).
+
+    Помимо админов — супервайзеры СЗоВ: им открыты те же действия, что и главе
+    отдела (admin). Соответствует фронтовому ``canManage`` в ShiftAuctionView.
+    """
+    role = _normalize_user_role(requester_role)
+    if _is_admin_role(role):
+        return True
+    if _is_supervisor_role(role) and requester_id:
+        try:
+            _, department_code = db.get_user_department(requester_id)
+        except Exception:
+            department_code = None
+        return str(department_code or '').lower() == SHIFT_AUCTION_MANAGER_DEPARTMENT_CODE
+    return False
 
 
 def _current_almaty_datetime():
@@ -4131,8 +4159,8 @@ def api_shift_auction_test_access():
             payload = db.get_shift_auction_test_access(current_user_id=requester_id)
             return jsonify({"status": "success", "test_access": payload}), 200
 
-        if not _is_admin_role(requester_role):
-            return jsonify({"error": "Only admins can manage shift auction test access"}), 403
+        if not _is_shift_auction_manager(requester_id, requester_role):
+            return jsonify({"error": "Only admins and СЗоВ supervisors can manage shift auction test access"}), 403
 
         payload = request.get_json(silent=True) or {}
         updated = db.update_shift_auction_test_access(
@@ -4463,8 +4491,8 @@ def api_shift_auction_test_restart():
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
-        if not _is_admin_role(requester[3]):
-            return jsonify({"error": "Only admins can restart shift auctions"}), 403
+        if not _is_shift_auction_manager(requester_id, requester[3]):
+            return jsonify({"error": "Only admins and СЗоВ supervisors can restart shift auctions"}), 403
         payload = request.get_json(silent=True) or {}
         result = db.restart_shift_auction_test(
             schedule_plan_id=payload.get('schedule_plan_id') or payload.get('plan_id'),
@@ -4489,8 +4517,8 @@ def api_shift_auction_test_control():
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
-        if not _is_admin_role(requester[3]):
-            return jsonify({"error": "Only admins can control shift auctions"}), 403
+        if not _is_shift_auction_manager(requester_id, requester[3]):
+            return jsonify({"error": "Only admins and СЗоВ supervisors can control shift auctions"}), 403
         payload = request.get_json(silent=True) or {}
         result = db.control_shift_auction_test(
             action=payload.get('action'),
@@ -4546,8 +4574,8 @@ def api_shift_auction_test_topup():
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
-        if not _is_admin_role(requester[3]):
-            return jsonify({"error": "Only admins can toggle shift auction top-up mode"}), 403
+        if not _is_shift_auction_manager(requester_id, requester[3]):
+            return jsonify({"error": "Only admins and СЗоВ supervisors can toggle shift auction top-up mode"}), 403
         result = db.set_shift_auction_test_topup(
             enabled=(request.method == 'POST'),
             updated_by=requester_id,
@@ -4571,8 +4599,8 @@ def api_shift_auction_test_export_excel():
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
-        if not _is_admin_role(requester[3]):
-            return jsonify({"error": "Only admins can export shift auction reports"}), 403
+        if not _is_shift_auction_manager(requester_id, requester[3]):
+            return jsonify({"error": "Only admins and СЗоВ supervisors can export shift auction reports"}), 403
 
         output, start_date_obj, end_date_obj = db.generate_shift_auction_test_excel_report()
         filename = f"shift_auction_report_{start_date_obj.strftime('%Y%m%d')}_{end_date_obj.strftime('%Y%m%d')}.xlsx"
@@ -4600,8 +4628,8 @@ def api_shift_auction_test_publish():
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
-        if not _is_admin_role(requester[3]):
-            return jsonify({"error": "Only admins can publish shift auctions"}), 403
+        if not _is_shift_auction_manager(requester_id, requester[3]):
+            return jsonify({"error": "Only admins and СЗоВ supervisors can publish shift auctions"}), 403
 
         result = db.publish_shift_auction_test_to_work_schedules(updated_by=requester_id)
         return jsonify({"status": "success", **result}), 200
@@ -4812,8 +4840,8 @@ def api_shift_auction_admin_notify_settings():
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
-        if not _is_admin_role(requester[3]):
-            return jsonify({"error": "Only admins can change auction notification settings"}), 403
+        if not _is_shift_auction_manager(requester_id, requester[3]):
+            return jsonify({"error": "Only admins and СЗоВ supervisors can change auction notification settings"}), 403
 
         if request.method == 'GET':
             enabled = db.get_admin_post_claim_notify_setting(requester_id)
@@ -20511,7 +20539,7 @@ def _chat2desk_api_error_message(response, report, day_str):
     return f"Chat2Desk statistics {report} {day_str} failed: HTTP {status_code}{suffix}"
 
 
-def _chat2desk_statistics_get(report, day_str):
+def _chat2desk_statistics_get(report, day_str, max_pages=None):
     authorization = _chat2desk_authorization_header()
     if not authorization:
         raise RuntimeError("CHAT2DESK_API_TOKEN is not set")
@@ -20526,7 +20554,17 @@ def _chat2desk_statistics_get(report, day_str):
 
     rows = []
     offset = 0
-    max_pages = _env_int('CHAT2DESK_API_MAX_PAGES', CHAT2DESK_API_MAX_PAGES, minimum=1, maximum=1000)
+    # max_pages=None — поведение по умолчанию (как было, потолок 1000). Явный max_pages
+    # позволяет вызывающему листать день целиком (потолок 10000) — нужно для отчётов,
+    # где обрезка самых старых строк искажает данные (см. operator_events). Естественный
+    # выход по короткой странице/total ниже всё равно останавливает раньше потолка.
+    if max_pages is None:
+        max_pages = _env_int('CHAT2DESK_API_MAX_PAGES', CHAT2DESK_API_MAX_PAGES, minimum=1, maximum=1000)
+    else:
+        try:
+            max_pages = max(1, min(int(max_pages), 10000))
+        except Exception:
+            max_pages = _env_int('CHAT2DESK_API_MAX_PAGES', CHAT2DESK_API_MAX_PAGES, minimum=1, maximum=1000)
     for _page_number in range(max_pages):
         params = {
             'report': report,
@@ -21069,7 +21107,13 @@ def sync_chat2desk_operator_statuses(day=None, date_from=None, date_to=None, tri
             try:
                 event_rows = _chat2desk_statistics_get(
                     CHAT2DESK_STATISTICS_REPORT_OPERATOR_EVENTS,
-                    day_str
+                    day_str,
+                    max_pages=_env_int(
+                        'CHAT2DESK_STATUS_API_MAX_PAGES',
+                        CHAT2DESK_STATUS_API_MAX_PAGES,
+                        minimum=1,
+                        maximum=10000
+                    )
                 )
                 parsed = _chat2desk_build_status_import_from_operator_events(
                     day_str,
