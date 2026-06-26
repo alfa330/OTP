@@ -4170,7 +4170,9 @@ def api_shift_auction_test_access():
             updated_by=requester_id,
             starts_at=_parse_shift_auction_test_datetime(payload.get('starts_at')),
             ends_at=_parse_shift_auction_test_datetime(payload.get('ends_at')),
-            schedule_plan_id=payload.get('schedule_plan_id') or payload.get('selected_schedule_plan_id')
+            schedule_plan_id=payload.get('schedule_plan_id') or payload.get('selected_schedule_plan_id'),
+            favored_starts_at=_parse_shift_auction_test_datetime(payload.get('favored_starts_at')),
+            favored_operator_ids=payload.get('favored_operator_ids') or [],
         )
         return jsonify({"status": "success", "test_access": updated}), 200
     except ValueError as error:
@@ -4227,6 +4229,7 @@ def _shift_auction_test_error_response(error):
     }
     mapping.update({
         "AUCTION_END_BEFORE_START": ("Время завершения должно быть позже старта", 400),
+        "AUCTION_FAVORED_START_AFTER_END": ("Ранний доступ должен начинаться раньше завершения аукциона", 400),
         "AUCTION_PERIOD_NOT_FOUND": ("Недельный план для аукциона не найден", 404),
         "AUCTION_PERIOD_NOT_WEEK": ("Для аукциона можно выбрать только полную неделю", 409),
         "AUCTION_PERIOD_EMPTY": ("В выбранном недельном плане нет смен", 409),
@@ -7461,12 +7464,14 @@ def sv_daily_hours():
 
             if group_id is not None:
                 # СВ может смотреть группы своего отдела (или те, что ведёт).
+                # Проверяем по отделу запрашивающего (requester), а не выбранного СВ:
+                # иначе проверка всегда проходила бы (группа принадлежит выбранному СВ).
                 _grp = db.get_group(group_id)
-                _sv_dept = db.get_user_department_id(supervisor_id)
+                _req_dept = db.get_user_department_id(requester_id)
                 _allowed = (
-                    (_grp and _sv_dept is not None and _grp.get('department_id') == _sv_dept)
+                    (_grp and _req_dept is not None and _grp.get('department_id') == _req_dept)
                     or db.supervisor_has_group_access_for_period(
-                        supervisor_id, group_id, _month_start, _month_end
+                        requester_id, group_id, _month_start, _month_end
                     )
                 )
                 if not _allowed:
@@ -16703,7 +16708,11 @@ def get_trainings():
                 if group.get('department_id') != headed_dept_id:
                     return jsonify({"error": "Forbidden: not your department's group"}), 403
             elif _is_supervisor_role(role):
-                if not db.supervisor_has_group_access_for_period(requester_id, group_id, period_start, period_end):
+                # СВ может смотреть группы своего отдела (как в /api/sv/daily_hours),
+                # либо те, что ведёт сам в выбранном периоде.
+                _req_dept = db.get_user_department_id(requester_id)
+                _same_dept = _req_dept is not None and group.get('department_id') == _req_dept
+                if not (_same_dept or db.supervisor_has_group_access_for_period(requester_id, group_id, period_start, period_end)):
                     return jsonify({"error": "Forbidden: not your group"}), 403
             elif role == 'operator':
                 return jsonify({"error": "Unsupported target role"}), 400
