@@ -2113,7 +2113,7 @@ AVATAR_THUMBNAIL_SUFFIX = (os.getenv('AVATAR_THUMBNAIL_SUFFIX') or '128').strip(
 AVATAR_SIGNED_URL_CACHE = {}
 AVATAR_SIGNED_URL_CACHE_LOCK = threading.Lock()
 FOUR_YOU_ADMIN_USER_ID = int(os.getenv('FOUR_YOU_ADMIN_USER_ID', '2'))
-FOUR_YOU_VIEWER_USER_ID = int(os.getenv('FOUR_YOU_VIEWER_USER_ID', '241') or 241)
+FOUR_YOU_VIEWER_USER_ID = int(os.getenv('FOUR_YOU_VIEWER_USER_ID', '0') or 0)
 FOUR_YOU_MAX_FILES_PER_UPLOAD = int(os.getenv('FOUR_YOU_MAX_FILES_PER_UPLOAD', '20'))
 FOUR_YOU_MAX_FILE_SIZE_BYTES = int(os.getenv('FOUR_YOU_MAX_FILE_SIZE_BYTES', str(15 * 1024 * 1024)))
 FOUR_YOU_MAX_IMAGE_PIXELS = int(os.getenv('FOUR_YOU_MAX_IMAGE_PIXELS', str(40_000_000)))
@@ -5902,7 +5902,7 @@ def delete_four_you_images_batch():
 @app.route('/api/four_you/images/<image_id>/annotations', methods=['PUT', 'POST', 'OPTIONS'])
 @require_auth
 def save_four_you_annotations(image_id):
-    # Разметку (рисунок/стикеры/текст/комментарии/фон) могут менять ОБА — Руслан и Адия
+    # Разметку (рисунок/стикеры/текст/комментарии/фон) могут менять пользователи с доступом к 4 You.
     # (require_upload=False ⇒ достаточно доступа к просмотру). Загрузка/удаление фото — только Руслан.
     requester_id, _, guard_response, guard_status = _four_you_route_guard()
     if guard_response is not None:
