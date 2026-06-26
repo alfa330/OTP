@@ -1098,6 +1098,90 @@ class Database:
                 ON four_you_images(annotations_updated_at);
             """)
             # ──────────────────────────────────────────────────────────────
+            # ИВЕНТЫ ("Ивенты"): общедоступная лента постов с медиа (фото/видео),
+            # лайками и комментариями. Виден всем ролям. Пост таргетируется на
+            # отдел: department_id IS NULL => виден всем отделам; иначе только
+            # своему отделу. Сами файлы лежат в закрытом GCS (как 4 You / LMS) —
+            # в таблицах храним только bucket+blob_path, отдаём signed URL.
+            # ──────────────────────────────────────────────────────────────
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS events (
+                    id BIGSERIAL PRIMARY KEY,
+                    author_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    department_id INTEGER REFERENCES departments(id) ON DELETE CASCADE,
+                    title VARCHAR(255),
+                    body TEXT NOT NULL DEFAULT '',
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+            """)
+            # Лента листается id-курсором (id монотонен по времени создания).
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_events_id_desc ON events(id DESC);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_events_dept_id_desc
+                ON events(department_id, id DESC);
+            """)
+            # Медиа поста (несколько фото/видео, порядок sort_order). Для image:
+            # blob_path = display-WebP, preview_* = preview-WebP. Для video:
+            # blob_path = исходный mp4/webm, preview_* = WebP-постер (кадр).
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS event_media (
+                    id BIGSERIAL PRIMARY KEY,
+                    event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+                    media_type VARCHAR(16) NOT NULL CHECK (media_type IN ('image', 'video')),
+                    bucket VARCHAR(255) NOT NULL,
+                    blob_path TEXT NOT NULL,
+                    preview_bucket VARCHAR(255),
+                    preview_blob_path TEXT,
+                    mime_type VARCHAR(100),
+                    width INTEGER NOT NULL DEFAULT 0,
+                    height INTEGER NOT NULL DEFAULT 0,
+                    file_size BIGINT NOT NULL DEFAULT 0,
+                    duration_seconds NUMERIC(10,2),
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_event_media_event
+                ON event_media(event_id, sort_order, id);
+            """)
+            # Лайки: одна строка = один пользователь лайкнул пост.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS event_likes (
+                    event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    PRIMARY KEY (event_id, user_id)
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_event_likes_user ON event_likes(user_id);
+            """)
+            # Комментарии (плоский список).
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS event_comments (
+                    id BIGSERIAL PRIMARY KEY,
+                    event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+                    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    body TEXT NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_event_comments_event
+                ON event_comments(event_id, id);
+            """)
+            # Отметка "просмотрено" для бейджа новых постов в сайдбаре.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS event_reads (
+                    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    last_seen_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+            """)
+            # ──────────────────────────────────────────────────────────────
             # ГРУППЫ: историческая принадлежность операторов и СВ по датам +
             # модель расчёта на уровне группы. Это источник истины принадлежности
             # вместо текущего users.supervisor_id/direction_id (те остаются как
@@ -33988,6 +34072,338 @@ class Database:
                 }
                 for row in cursor.fetchall()
             ]
+
+    # ──────────────────────────────────────────────────────────────────
+    # ИВЕНТЫ (раздел «Ивенты»): посты с медиа, лайки, комментарии, бейдж.
+    # Buckets/blob_path хранятся в таблицах; signed URL строит роут-слой.
+    # ──────────────────────────────────────────────────────────────────
+    def _event_row_basic(self, row):
+        """row: id, author_id, author_name, avatar_bucket, avatar_blob_path,
+        department_id, department_name, title, body, created_at."""
+        return {
+            "id": int(row[0]),
+            "author_id": int(row[1]) if row[1] is not None else None,
+            "author_name": row[2] or "Пользователь",
+            "author_avatar_bucket": row[3],
+            "author_avatar_blob_path": row[4],
+            "department_id": int(row[5]) if row[5] is not None else None,
+            "department_name": row[6],
+            "title": row[7],
+            "body": row[8] or "",
+            "created_at": row[9].isoformat() if row[9] else None,
+            "media": [],
+            "like_count": 0,
+            "comment_count": 0,
+            "liked": False,
+        }
+
+    def _attach_event_aggregates(self, cursor, events, viewer_id=None):
+        """Догружает медиа, счётчики лайков/комментов и факт лайка зрителя
+        для уже выбранной страницы постов — батч-запросами (без N+1)."""
+        by_id = {ev["id"]: ev for ev in events}
+        event_ids = list(by_id.keys())
+        if not event_ids:
+            return
+        cursor.execute("""
+            SELECT event_id, id, media_type, bucket, blob_path,
+                   preview_bucket, preview_blob_path, mime_type,
+                   width, height, duration_seconds, sort_order
+            FROM event_media
+            WHERE event_id = ANY(%s::bigint[])
+            ORDER BY event_id, sort_order, id
+        """, (event_ids,))
+        for r in cursor.fetchall():
+            ev = by_id.get(r[0])
+            if not ev:
+                continue
+            ev["media"].append({
+                "id": int(r[1]),
+                "type": r[2],
+                "bucket": r[3],
+                "blob_path": r[4],
+                "preview_bucket": r[5],
+                "preview_blob_path": r[6],
+                "mime_type": r[7],
+                "width": int(r[8] or 0),
+                "height": int(r[9] or 0),
+                "duration_seconds": float(r[10]) if r[10] is not None else None,
+                "sort_order": int(r[11] or 0),
+            })
+        cursor.execute("""
+            SELECT event_id, COUNT(*) FROM event_likes
+            WHERE event_id = ANY(%s::bigint[]) GROUP BY event_id
+        """, (event_ids,))
+        for r in cursor.fetchall():
+            ev = by_id.get(r[0])
+            if ev:
+                ev["like_count"] = int(r[1] or 0)
+        if viewer_id:
+            cursor.execute("""
+                SELECT event_id FROM event_likes
+                WHERE user_id = %s AND event_id = ANY(%s::bigint[])
+            """, (viewer_id, event_ids))
+            for r in cursor.fetchall():
+                ev = by_id.get(r[0])
+                if ev:
+                    ev["liked"] = True
+        cursor.execute("""
+            SELECT event_id, COUNT(*) FROM event_comments
+            WHERE event_id = ANY(%s::bigint[]) GROUP BY event_id
+        """, (event_ids,))
+        for r in cursor.fetchall():
+            ev = by_id.get(r[0])
+            if ev:
+                ev["comment_count"] = int(r[1] or 0)
+
+    def list_events(self, viewer_id, viewer_department_id=None, is_global=False,
+                    before_id=None, limit=12):
+        """Лента постов, видимых зрителю, id-курсором (новые сверху).
+        Возвращает {events, has_more, next_before}."""
+        limit = max(1, min(int(limit or 12), 50))
+        conditions = []
+        params = []
+        if not is_global:
+            conditions.append("(e.department_id IS NULL OR e.department_id = %s)")
+            params.append(viewer_department_id)
+        if before_id:
+            conditions.append("e.id < %s")
+            params.append(int(before_id))
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        with self._get_cursor() as cursor:
+            cursor.execute(f"""
+                SELECT e.id, e.author_id, u.name, u.avatar_bucket, u.avatar_blob_path,
+                       e.department_id, d.name, e.title, e.body, e.created_at
+                FROM events e
+                LEFT JOIN users u ON u.id = e.author_id
+                LEFT JOIN departments d ON d.id = e.department_id
+                {where}
+                ORDER BY e.id DESC
+                LIMIT %s
+            """, (*params, limit + 1))
+            rows = cursor.fetchall()
+            has_more = len(rows) > limit
+            rows = rows[:limit]
+            events = [self._event_row_basic(r) for r in rows]
+            self._attach_event_aggregates(cursor, events, viewer_id)
+        next_before = events[-1]["id"] if (events and has_more) else None
+        return {"events": events, "has_more": has_more, "next_before": next_before}
+
+    def get_event(self, event_id, viewer_id=None):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT e.id, e.author_id, u.name, u.avatar_bucket, u.avatar_blob_path,
+                       e.department_id, d.name, e.title, e.body, e.created_at
+                FROM events e
+                LEFT JOIN users u ON u.id = e.author_id
+                LEFT JOIN departments d ON d.id = e.department_id
+                WHERE e.id = %s
+            """, (int(event_id),))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            ev = self._event_row_basic(row)
+            self._attach_event_aggregates(cursor, [ev], viewer_id)
+            return ev
+
+    def get_event_author_and_dept(self, event_id):
+        """(author_id, department_id) или None — для проверки прав/видимости."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "SELECT author_id, department_id FROM events WHERE id = %s",
+                (int(event_id),),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return (
+                int(row[0]) if row[0] is not None else None,
+                int(row[1]) if row[1] is not None else None,
+            )
+
+    def create_event(self, author_id, department_id, title, body):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO events (author_id, department_id, title, body)
+                VALUES (%s, %s, %s, %s)
+                RETURNING id
+            """, (
+                int(author_id) if author_id is not None else None,
+                int(department_id) if department_id is not None else None,
+                (title or None),
+                (body or ""),
+            ))
+            return int(cursor.fetchone()[0])
+
+    def add_event_media(self, event_id, media):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO event_media (
+                    event_id, media_type, bucket, blob_path,
+                    preview_bucket, preview_blob_path, mime_type,
+                    width, height, file_size, duration_seconds, sort_order
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                int(event_id),
+                media["media_type"],
+                media["bucket"],
+                media["blob_path"],
+                media.get("preview_bucket"),
+                media.get("preview_blob_path"),
+                media.get("mime_type"),
+                int(media.get("width") or 0),
+                int(media.get("height") or 0),
+                int(media.get("file_size") or 0),
+                media.get("duration_seconds"),
+                int(media.get("sort_order") or 0),
+            ))
+            return int(cursor.fetchone()[0])
+
+    def delete_event(self, event_id):
+        """Удаляет пост (каскадом медиа/лайки/комменты). Возвращает список
+        (bucket, blob_path) для удаления блобов из GCS, либо None если поста нет."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT bucket, blob_path, preview_bucket, preview_blob_path
+                FROM event_media WHERE event_id = %s
+            """, (int(event_id),))
+            blobs = []
+            for r in cursor.fetchall():
+                if r[0] and r[1]:
+                    blobs.append((r[0], r[1]))
+                if r[2] and r[3]:
+                    blobs.append((r[2], r[3]))
+            cursor.execute("DELETE FROM events WHERE id = %s RETURNING id", (int(event_id),))
+            return blobs if cursor.fetchone() else None
+
+    def toggle_event_like(self, event_id, user_id):
+        """Переключает лайк зрителя. Возвращает {liked, like_count}."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM event_likes WHERE event_id = %s AND user_id = %s RETURNING event_id",
+                (int(event_id), int(user_id)),
+            )
+            if cursor.fetchone():
+                liked = False
+            else:
+                cursor.execute(
+                    "INSERT INTO event_likes (event_id, user_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                    (int(event_id), int(user_id)),
+                )
+                liked = True
+            cursor.execute("SELECT COUNT(*) FROM event_likes WHERE event_id = %s", (int(event_id),))
+            return {"liked": liked, "like_count": int(cursor.fetchone()[0] or 0)}
+
+    def add_event_comment(self, event_id, user_id, body):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO event_comments (event_id, user_id, body)
+                VALUES (%s, %s, %s)
+                RETURNING id, created_at
+            """, (int(event_id), int(user_id), body))
+            row = cursor.fetchone()
+            cursor.execute(
+                "SELECT name, avatar_bucket, avatar_blob_path FROM users WHERE id = %s",
+                (int(user_id),),
+            )
+            u = cursor.fetchone()
+            return {
+                "id": int(row[0]),
+                "event_id": int(event_id),
+                "user_id": int(user_id),
+                "user_name": (u[0] if u else None) or "Пользователь",
+                "author_avatar_bucket": u[1] if u else None,
+                "author_avatar_blob_path": u[2] if u else None,
+                "body": body,
+                "created_at": row[1].isoformat() if row[1] else None,
+            }
+
+    def list_event_comments(self, event_id, before_id=None, limit=20):
+        """Комментарии поста, новые сверху, id-курсором. {comments, has_more, next_before}."""
+        limit = max(1, min(int(limit or 20), 50))
+        conditions = ["c.event_id = %s"]
+        params = [int(event_id)]
+        if before_id:
+            conditions.append("c.id < %s")
+            params.append(int(before_id))
+        with self._get_cursor() as cursor:
+            cursor.execute(f"""
+                SELECT c.id, c.user_id, u.name, u.avatar_bucket, u.avatar_blob_path,
+                       c.body, c.created_at
+                FROM event_comments c
+                LEFT JOIN users u ON u.id = c.user_id
+                WHERE {' AND '.join(conditions)}
+                ORDER BY c.id DESC
+                LIMIT %s
+            """, (*params, limit + 1))
+            rows = cursor.fetchall()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        comments = [{
+            "id": int(r[0]),
+            "user_id": int(r[1]) if r[1] is not None else None,
+            "user_name": r[2] or "Пользователь",
+            "author_avatar_bucket": r[3],
+            "author_avatar_blob_path": r[4],
+            "body": r[5] or "",
+            "created_at": r[6].isoformat() if r[6] else None,
+        } for r in rows]
+        next_before = comments[-1]["id"] if (comments and has_more) else None
+        return {"comments": comments, "has_more": has_more, "next_before": next_before}
+
+    def get_event_comment(self, comment_id):
+        """(id, event_id, user_id) или None — для проверки прав на удаление."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "SELECT id, event_id, user_id FROM event_comments WHERE id = %s",
+                (int(comment_id),),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return {
+                "id": int(row[0]),
+                "event_id": int(row[1]),
+                "user_id": int(row[2]) if row[2] is not None else None,
+            }
+
+    def delete_event_comment(self, comment_id):
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM event_comments WHERE id = %s RETURNING id",
+                (int(comment_id),),
+            )
+            return bool(cursor.fetchone())
+
+    def mark_events_seen(self, user_id):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO event_reads (user_id, last_seen_at)
+                VALUES (%s, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
+                ON CONFLICT (user_id)
+                DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at
+            """, (int(user_id),))
+
+    def count_unread_events(self, user_id, viewer_department_id=None, is_global=False):
+        """Кол-во постов новее last_seen зрителя, видимых ему, исключая свои."""
+        with self._get_cursor() as cursor:
+            cursor.execute("SELECT last_seen_at FROM event_reads WHERE user_id = %s", (int(user_id),))
+            r = cursor.fetchone()
+            last_seen = r[0] if r else None
+            conditions = ["(e.author_id IS DISTINCT FROM %s)"]
+            params = [int(user_id)]
+            if last_seen is not None:
+                conditions.append("e.created_at > %s")
+                params.append(last_seen)
+            if not is_global:
+                conditions.append("(e.department_id IS NULL OR e.department_id = %s)")
+                params.append(viewer_department_id)
+            cursor.execute(
+                f"SELECT COUNT(*) FROM events e WHERE {' AND '.join(conditions)}",
+                tuple(params),
+            )
+            return int(cursor.fetchone()[0] or 0)
 
     def save_ai_feedback_cache(self, operator_id: int, month: str, feedback_data: dict):
         """Сохранить или обновить AI фидбэк в кэше"""

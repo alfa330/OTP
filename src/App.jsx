@@ -113,6 +113,7 @@ const ShiftAuctionView = lazyWithRetry(() => import('./components/resources/Shif
 const DepartmentsView = lazyWithRetry(() => import('./components/departments/DepartmentsView'));
 const GroupsView = lazyWithRetry(() => import('./components/groups/GroupsView'));
 const FourYouView = lazyWithRetry(() => import('./components/four_you/lenta'));
+const EventsView = lazyWithRetry(() => import('./components/events/EventsView'));
 
 
 if (typeof window !== 'undefined') {
@@ -150,6 +151,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     departments: 'Departments',
     employees: 'Employees',
     evaluation: 'My evaluations',
+    events: 'Events',
     four_you: '4 You',
     hours: 'Hours',
     lms: 'LMS',
@@ -31865,6 +31867,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [resourceFteInitialView, setResourceFteInitialView] = useState('');
             const [shiftAuctionInitialPeriod, setShiftAuctionInitialPeriod] = useState(null);
             const [pendingSurveysBadgeCount, setPendingSurveysBadgeCount] = useState(0);
+            const [eventsUnreadCount, setEventsUnreadCount] = useState(0);
             const [newSvName, setNewSvName] = useState('');
             const [newTableUrl, setNewTableUrl] = useState('');
             const [isLoading, setIsLoading] = useState(false);
@@ -37628,6 +37631,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 });
             };
 
+            // Бейдж новых постов раздела «Ивенты» (виден всем ролям).
+            const fetchEventsUnreadCount = async () => {
+                if (!user?.id) {
+                    if (isMounted.current) setEventsUnreadCount(0);
+                    return;
+                }
+                const requestKey = `fetchEventsUnreadCount:${user.id}`;
+                return runSingleFlight(requestKey, async () => {
+                    try {
+                        const response = await axios.get(`${API_BASE_URL}/api/events/unread_count`, {
+                            headers: withAccessTokenHeader({ 'X-User-Id': user.id })
+                        });
+                        const count = Number(response?.data?.count);
+                        if (isMounted.current) setEventsUnreadCount(Math.max(0, Number.isFinite(count) ? count : 0));
+                    } catch (err) {
+                        // Бейдж не критичен — молча игнорируем сетевые сбои.
+                    }
+                });
+            };
+
             const debouncedFetch = useCallback(_.debounce((fn) => {
                 if (isMounted.current) {
                     try {
@@ -40055,6 +40078,29 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 fetchSurveysPendingBadgeCount();
             }, [view, user?.id, user?.role]);
 
+            // Ивенты: бейдж новых постов. Опрашиваем при загрузке пользователя,
+            // при возврате фокуса и фоном раз в 45 c; при заходе в раздел гасим.
+            const fetchEventsUnreadRef = useRef(null);
+            fetchEventsUnreadRef.current = fetchEventsUnreadCount;
+            useEffect(() => {
+                if (!user?.id) {
+                    setEventsUnreadCount(0);
+                    return undefined;
+                }
+                fetchEventsUnreadRef.current?.();
+                const timer = setInterval(() => fetchEventsUnreadRef.current?.(), 45000);
+                const onFocus = () => fetchEventsUnreadRef.current?.();
+                window.addEventListener('focus', onFocus);
+                return () => {
+                    clearInterval(timer);
+                    window.removeEventListener('focus', onFocus);
+                };
+            }, [user?.id]);
+
+            useEffect(() => {
+                if (view === 'events') setEventsUnreadCount(0);
+            }, [view]);
+
             useEffect(() => {
                 if (view !== 'evaluation') {
                     closeEvaluationMonitoringScale();
@@ -40157,6 +40203,36 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </span>
                     );
                 };
+                // Бейдж новых ивентов (rose). Раздел «Ивенты» виден всем ролям,
+                // поэтому пункт рендерится в общей части меню без departmentAllowsView.
+                const renderEventsSidebarLabelInner = () => (
+                    <span className="sidebar-text inline-flex items-center gap-2">
+                        <span>Ивенты</span>
+                        {eventsUnreadCount > 0 && (
+                            <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-semibold leading-none">
+                                {eventsUnreadCount > 99 ? '99+' : eventsUnreadCount}
+                            </span>
+                        )}
+                    </span>
+                );
+                const renderEventsSidebarCompactBadgeInner = () => {
+                    if (eventsUnreadCount <= 0) return null;
+                    return (
+                        <span className="sidebar-surveys-collapsed-badge inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-semibold leading-none">
+                            {eventsUnreadCount > 9 ? '9+' : eventsUnreadCount}
+                        </span>
+                    );
+                };
+                const renderEventsSidebarItemInner = () => (
+                    <li>
+                        <button
+                            onClick={(e) => handleSidebarViewNavigation(e, 'events')}
+                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'events' ? 'bg-blue-700' : ''}`}
+                        >
+                            <FaIcon className="fas fa-calendar-days"></FaIcon> {renderEventsSidebarCompactBadgeInner()} {renderEventsSidebarLabelInner()}
+                        </button>
+                    </li>
+                );
                 return (
                     <>
                         {/* Гамбургер кнопка для мобильных */}
@@ -40711,6 +40787,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </>
                                     )}
 
+                                    {/* «Ивенты» — общий пункт для всех ролей (вне role-веток). */}
+                                    {renderSidebarDividerInner()}
+                                    {renderEventsSidebarItemInner()}
+
                                     {canAccessFourYouSection && !canManageFourYouSection && (
                                         <li>
                                             <button
@@ -40843,6 +40923,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 isEmployeesClosing,
                 employeesDropdownPos,
                 pendingSurveysBadgeCount,
+                eventsUnreadCount,
                 selectedSvId,
                 selectedReportMonth,
                 selectedMonth,
@@ -42722,6 +42803,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     />
                                 ))}
                                 {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} departments={departments} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
+                                {( view === "events" && (
+                                    <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
+                                        <EventsView
+                                            user={user}
+                                            departments={departments}
+                                            showToast={showToast}
+                                            apiBaseUrl={API_BASE_URL}
+                                            withAccessTokenHeader={withAccessTokenHeader}
+                                            onSeen={() => setEventsUnreadCount(0)}
+                                        />
+                                    </Suspense>
+                                ))}
                                 {( view === "recruiting" && (
                                     <RecruitingView
                                         user={user}
@@ -43795,6 +43888,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     />
                                 ))}
                                 {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} departments={departments} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
+                                {( view === "events" && (
+                                    <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
+                                        <EventsView
+                                            user={user}
+                                            departments={departments}
+                                            showToast={showToast}
+                                            apiBaseUrl={API_BASE_URL}
+                                            withAccessTokenHeader={withAccessTokenHeader}
+                                            onSeen={() => setEventsUnreadCount(0)}
+                                        />
+                                    </Suspense>
+                                ))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "resource_fte" && canAccessResourceFteSection && (
                                     <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
@@ -43814,6 +43919,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <>
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
                                 {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} departments={departments} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
+                                {( view === "events" && (
+                                    <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
+                                        <EventsView
+                                            user={user}
+                                            departments={departments}
+                                            showToast={showToast}
+                                            apiBaseUrl={API_BASE_URL}
+                                            withAccessTokenHeader={withAccessTokenHeader}
+                                            onSeen={() => setEventsUnreadCount(0)}
+                                        />
+                                    </Suspense>
+                                ))}
                                 {view === 'profile' && ( 
                                   <div className="bg-white p-4 sm:p-6 lg:p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                     <h2 className="text-xl sm:text-2xl lg:text-3xl font-bold mb-4 sm:mb-6 lg:mb-8 text-gray-900 flex items-center gap-2">

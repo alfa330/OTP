@@ -318,5 +318,31 @@ class DepartmentHeadWriteScopeTests(unittest.TestCase):
         self.assertIn("can_edit = _is_global_admin_requester(role, requester_id)", settings)
 
 
+class SupervisorOperatorListCompletenessTests(unittest.TestCase):
+    """СВ должен видеть своих подопечных операторов с ПОЛНЫМИ данными в /api/admin/users,
+    иначе фронт берёт тонкую проекцию svData.operators (без HR-полей) и карточка
+    оператора открывается «пустой» при обновлении (напр. аватара)."""
+
+    def test_get_admin_users_includes_supervised_operators_for_sv(self):
+        users = _function_source(BOT_PATH, "get_admin_users")
+        self.assertIn("if requester_role == 'sv' and headed_dept_id is None:", users)
+        self.assertIn("_supervised_by_requester", users)
+        self.assertIn(
+            "u.get('department_id') == scope_dept or _supervised_by_requester(u)",
+            users,
+        )
+
+    def test_manage_operators_edit_seeds_modal_from_full_admin_users(self):
+        source = _read(APP_PATH)
+        self.assertIn(
+            "const fullOp = (Array.isArray(adminUsers) ? adminUsers : []).find((cand) => Number(cand?.id) === Number(op?.id)) || op;",
+            source,
+        )
+        self.assertIn(
+            "setUserToEdit({ ...fullOp, supervisor_id: fullOp?.supervisor_id ?? user?.id });",
+            source,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
