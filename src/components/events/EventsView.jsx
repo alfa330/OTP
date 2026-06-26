@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import FaIcon from '../common/FaIcon';
 
@@ -108,41 +108,197 @@ const DepartmentBadge = ({ event }) => {
 
 const SkeletonBlock = ({ className = '' }) => <div className={cls('sk-shimmer', className)} />;
 
-/* ── Карусель медиа (фото + видео) ─────────────────────────────────── */
+/* ── Плеер видео с кастомным контролом (линия снизу + пауза/продолжение) ─
+ * Нативный <video controls> заменён минимальным контролом: тонкая линия
+ * прогресса снизу (с возможностью перемотки) и крупная кнопка play/pause по
+ * центру. Когда слайд карусели перестаёт быть активным — видео ставится на
+ * паузу, чтобы из-за кадра не играл звук. */
+const VideoPlayer = ({ item, active = true, full = false, onLoaded }) => {
+    const videoRef = useRef(null);
+    const [playing, setPlaying] = useState(false);
+    const [progress, setProgress] = useState(0);
+
+    // Ушли на другой слайд — останавливаем воспроизведение.
+    useEffect(() => {
+        const v = videoRef.current;
+        if (!active && v && !v.paused) v.pause();
+    }, [active]);
+
+    const togglePlay = useCallback((e) => {
+        e?.stopPropagation?.();
+        const v = videoRef.current;
+        if (!v) return;
+        if (v.paused) v.play().catch(() => {}); else v.pause();
+    }, []);
+
+    const handleTimeUpdate = useCallback(() => {
+        const v = videoRef.current;
+        if (v && v.duration) setProgress(v.currentTime / v.duration);
+    }, []);
+
+    const seek = useCallback((e) => {
+        e.stopPropagation();
+        const v = videoRef.current;
+        if (!v || !v.duration) return;
+        const rect = e.currentTarget.getBoundingClientRect();
+        const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+        v.currentTime = ratio * v.duration;
+        setProgress(ratio);
+    }, []);
+
+    return (
+        <div className="relative w-full flex items-center justify-center">
+            <video
+                ref={videoRef}
+                src={item.url}
+                poster={item.poster_url || undefined}
+                playsInline
+                preload="metadata"
+                onPlay={() => setPlaying(true)}
+                onPause={() => setPlaying(false)}
+                onEnded={() => setPlaying(false)}
+                onTimeUpdate={handleTimeUpdate}
+                onLoadedMetadata={() => onLoaded?.()}
+                className={cls('w-full bg-black', full ? 'max-h-[70vh] object-contain' : 'h-full object-cover')}
+            />
+            {/* Кнопка play/pause: на паузе видна всегда, при проигрывании — по наведению */}
+            <button
+                type="button"
+                onClick={togglePlay}
+                aria-label={playing ? 'Пауза' : 'Воспроизвести'}
+                className={cls(
+                    'absolute inset-0 flex items-center justify-center transition-opacity duration-200',
+                    playing ? 'opacity-0 hover:opacity-100 focus-visible:opacity-100' : 'opacity-100',
+                )}
+            >
+                <span className="w-14 h-14 rounded-full bg-black/45 hover:bg-black/65 text-white text-lg flex items-center justify-center backdrop-blur-sm transition-colors">
+                    <FaIcon className={playing ? 'fas fa-pause' : 'fas fa-play'} style={playing ? undefined : { marginLeft: 3 }} />
+                </span>
+            </button>
+            {/* Линия прогресса снизу (тонкая, с перемоткой по клику) */}
+            <div
+                className="group/seek absolute inset-x-0 bottom-0 px-2.5 pb-2 pt-3 cursor-pointer"
+                onClick={seek}
+            >
+                <div className="h-1 w-full rounded-full bg-white/30 overflow-hidden transition-all group-hover/seek:h-1.5">
+                    <div className="h-full bg-white rounded-full" style={{ width: `${progress * 100}%` }} />
+                </div>
+            </div>
+        </div>
+    );
+};
+
+/* ── Карусель медиа (фото + видео) ─────────────────────────────────────
+ * Слайды живут в общей «ленте» (translateX) — переход плавный, без перемонтажа.
+ * В режиме full высота окна анимируется под активный слайд: даже если
+ * следующее фото/видео другого размера, контейнер плавно подстраивается, а не
+ * прыгает. В превью ленты высота фиксирована (aspect 4/3), видео показывается
+ * обложкой — реальный плеер открывается в модалке. */
 const MediaCarousel = ({ media = [], full = false, rounded = 'rounded-xl' }) => {
     const [index, setIndex] = useState(0);
+    const [height, setHeight] = useState(null);
     const safe = useMemo(() => media.filter(Boolean), [media]);
+    const slideRefs = useRef([]);
+
     useEffect(() => { setIndex(0); }, [safe.length]);
+
+    // Замеряем высоту активного слайда и фиксируем её на контейнере — переход
+    // по высоте получает что анимировать. Пока медиа не загрузилось (нет
+    // размеров) — пропускаем, чтобы окно не «схлопывалось»; домер придёт в onLoad.
+    const measure = useCallback(() => {
+        if (!full) return;
+        const el = slideRefs.current[index];
+        if (!el) return;
+        const img = el.querySelector('img');
+        if (img && !img.complete) return;
+        const vid = el.querySelector('video');
+        if (vid && vid.readyState < 1) return; // ждём HAVE_METADATA
+        const h = el.getBoundingClientRect().height;
+        if (h > 0) setHeight(h);
+    }, [full, index]);
+
+    useLayoutEffect(() => { measure(); }, [measure, safe.length]);
+
+    useEffect(() => {
+        if (!full) return undefined;
+        const onResize = () => measure();
+        window.addEventListener('resize', onResize);
+        return () => window.removeEventListener('resize', onResize);
+    }, [full, measure]);
+
+    const handleMediaLoad = useCallback((i) => {
+        if (i === index) measure();
+    }, [index, measure]);
+
     if (!safe.length) return null;
-    const item = safe[Math.min(index, safe.length - 1)];
+
     const go = (delta, e) => {
         if (e) e.stopPropagation();
         setIndex((prev) => (prev + delta + safe.length) % safe.length);
     };
-    const aspect = full ? 'max-h-[70vh]' : 'aspect-[4/3]';
+
+    const renderSlide = (item, i) => {
+        if (item.type === 'video') {
+            if (full) {
+                return (
+                    <VideoPlayer
+                        item={item}
+                        active={i === index}
+                        full
+                        onLoaded={() => handleMediaLoad(i)}
+                    />
+                );
+            }
+            // Превью в ленте: обложка + значок play, клик всплывает (открыть модалку).
+            return (
+                <div className="relative w-full h-full">
+                    {item.poster_url ? (
+                        <img src={item.poster_url} alt="" loading="lazy" decoding="async" className="w-full h-full object-cover" />
+                    ) : (
+                        <video src={item.url} muted playsInline preload="metadata" className="w-full h-full object-cover" />
+                    )}
+                    <span className="absolute inset-0 flex items-center justify-center">
+                        <span className="w-12 h-12 rounded-full bg-black/45 text-white flex items-center justify-center backdrop-blur-sm">
+                            <FaIcon className="fas fa-play" style={{ marginLeft: 2 }} />
+                        </span>
+                    </span>
+                </div>
+            );
+        }
+        return (
+            <img
+                src={full ? item.url : (item.preview_url || item.url)}
+                alt=""
+                loading="lazy"
+                decoding="async"
+                onLoad={() => handleMediaLoad(i)}
+                className={cls('w-full', full ? 'max-h-[70vh] object-contain' : 'h-full object-cover')}
+            />
+        );
+    };
+
     return (
-        <div className={cls('relative w-full bg-slate-900/95 overflow-hidden select-none', rounded, full ? '' : aspect)}>
-            <div className={cls('w-full flex items-center justify-center', full ? '' : 'h-full')}>
-                {item.type === 'video' ? (
-                    <video
-                        key={item.id}
-                        src={item.url}
-                        poster={item.poster_url || undefined}
-                        controls
-                        playsInline
-                        preload="metadata"
-                        className={cls('w-full bg-black', full ? 'max-h-[70vh]' : 'h-full object-cover')}
-                    />
-                ) : (
-                    <img
-                        key={item.id}
-                        src={full ? item.url : (item.preview_url || item.url)}
-                        alt=""
-                        loading="lazy"
-                        decoding="async"
-                        className={cls('w-full', full ? 'max-h-[70vh] object-contain' : 'h-full object-cover')}
-                    />
-                )}
+        <div
+            className={cls(
+                'relative w-full bg-slate-900/95 overflow-hidden select-none',
+                rounded,
+                full ? 'transition-[height] duration-300 ease-out' : 'aspect-[4/3]',
+            )}
+            style={full && height ? { height } : undefined}
+        >
+            <div
+                className={cls('flex items-start transition-transform duration-300 ease-out', !full && 'h-full')}
+                style={{ transform: `translateX(-${index * 100}%)` }}
+            >
+                {safe.map((item, i) => (
+                    <div
+                        key={item.id ?? i}
+                        ref={(el) => { slideRefs.current[i] = el; }}
+                        className={cls('w-full flex-shrink-0', full ? 'flex items-center justify-center' : 'h-full')}
+                    >
+                        {renderSlide(item, i)}
+                    </div>
+                ))}
             </div>
             {safe.length > 1 && (
                 <>
