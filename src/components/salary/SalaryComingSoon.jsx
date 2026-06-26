@@ -18,8 +18,7 @@ const SalaryComingSoon = ({ departmentName = '' }) => {
             COMING SOON
           </h3>
           <p className="mt-4 max-w-2xl text-base leading-7 text-slate-600 sm:text-lg">
-            Зарплатный калькулятор{departmentLabel} уже готовится. Сейчас доступная формула
-            настроена только для СЗОВ, а для этого отдела появится отдельный расчет.
+            Зарплатный калькулятор{departmentLabel} уже готовится.
           </p>
           <div className="mt-6 grid gap-3 sm:grid-cols-3">
             <div className="flex items-center gap-2 rounded-xl bg-white/80 px-3 py-2 text-sm font-medium text-slate-700">
