@@ -1389,7 +1389,7 @@ class Database:
                     sv_request_rejected_at TIMESTAMP,
                     sv_request_reject_comment TEXT,
                     sv_request_approve_comment TEXT,
-                    UNIQUE(evaluator_id, operator_id, month, phone_number, score, comment, is_draft)
+                    UNIQUE(evaluator_id, operator_id, month, phone_number, appeal_date, score, comment, is_draft)
                 );
             """)
 
@@ -1398,6 +1398,43 @@ class Database:
             cursor.execute("""
                 ALTER TABLE calls
                 ADD COLUMN IF NOT EXISTS sv_request_approve_comment TEXT;
+            """)
+
+            # Идемпотентная миграция уникального ключа оценок: добавляем appeal_date,
+            # чтобы один и тот же номер за месяц можно было оценить по разным
+            # обращениям (разная дата обращения => разные оценки).
+            # Старое ограничение имеет авто-сгенерированное имя, поэтому ищем его по
+            # точному набору колонок и удаляем, затем создаём новое именованное.
+            cursor.execute("""
+                DO $$
+                DECLARE
+                    old_con text;
+                BEGIN
+                    SELECT con.conname INTO old_con
+                    FROM pg_constraint con
+                    WHERE con.conrelid = 'calls'::regclass
+                      AND con.contype = 'u'
+                      AND (
+                          SELECT array_agg(a.attname ORDER BY a.attname)
+                          FROM unnest(con.conkey) AS k
+                          JOIN pg_attribute a
+                            ON a.attrelid = con.conrelid AND a.attnum = k
+                      ) = ARRAY['comment','evaluator_id','is_draft','month','operator_id','phone_number','score']::name[];
+
+                    IF old_con IS NOT NULL THEN
+                        EXECUTE format('ALTER TABLE calls DROP CONSTRAINT %I', old_con);
+                    END IF;
+
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conrelid = 'calls'::regclass
+                          AND conname = 'calls_unique_eval_with_appeal_date'
+                    ) THEN
+                        ALTER TABLE calls
+                        ADD CONSTRAINT calls_unique_eval_with_appeal_date
+                        UNIQUE (evaluator_id, operator_id, month, phone_number, appeal_date, score, comment, is_draft);
+                    END IF;
+                END $$;
             """)
 
             cursor.execute("""
@@ -14065,6 +14102,8 @@ class Database:
         month = month or datetime.now().strftime('%Y-%m')
         question_resolved = bool(question_resolved)
         resolved_first_contact = bool(resolved_first_contact) if question_resolved else None
+        if isinstance(appeal_date, str) and not appeal_date.strip():
+            appeal_date = None
 
         # Подготовка JSON данных один раз
         scores_json = json.dumps(scores) if scores else None
@@ -14098,17 +14137,18 @@ class Database:
                     
                     -- Проверка на существующую оценку (не черновик)
                     SELECT id, NULL AS audio_path, TRUE AS is_existing_eval, created_at
-                    FROM calls 
-                    WHERE operator_id = %s 
-                    AND month = %s 
-                    AND phone_number = %s 
+                    FROM calls
+                    WHERE operator_id = %s
+                    AND month = %s
+                    AND phone_number = %s
+                    AND appeal_date IS NOT DISTINCT FROM %s::timestamp
                     AND is_draft = FALSE
                 )
-                SELECT id, audio_path, is_existing_eval 
+                SELECT id, audio_path, is_existing_eval
                 FROM existing_data
                 ORDER BY created_at DESC
                 LIMIT 1
-            """, (evaluator_id, operator_id, month, operator_id, month, phone_number))
+            """, (evaluator_id, operator_id, month, operator_id, month, phone_number, appeal_date))
 
             existing_record = cursor.fetchone()
             old_audio_path = None
