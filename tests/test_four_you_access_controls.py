@@ -15,26 +15,27 @@ class FourYouAccessControlTests(unittest.TestCase):
         cls.lenta_source = (ROOT / "src" / "components" / "four_you" / "lenta.jsx").read_text(encoding="utf-8-sig")
         cls.lenta_css = (ROOT / "src" / "components" / "four_you" / "lenta.css").read_text(encoding="utf-8-sig")
 
-    def test_frontend_access_is_bound_to_the_two_user_ids(self):
+    def test_frontend_access_is_bound_to_admin_user_only_by_default(self):
         self.assertIn("const FOUR_YOU_ADMIN_USER_ID = 2;", self.app_source)
-        self.assertIn("const FOUR_YOU_VIEWER_USER_ID = 241;", self.app_source)
+        self.assertIn("const FOUR_YOU_VIEWER_USER_ID = 0;", self.app_source)
         self.assertIn("Number(userLike?.id) === FOUR_YOU_ADMIN_USER_ID", self.app_source)
-        self.assertIn("Number(userLike?.id) === FOUR_YOU_VIEWER_USER_ID", self.app_source)
+        self.assertIn("FOUR_YOU_VIEWER_USER_ID > 0 && Number(userLike?.id) === FOUR_YOU_VIEWER_USER_ID", self.app_source)
         self.assertIn("normalizeRole(userLike?.role) === 'super_admin'", self.app_source)
         self.assertNotIn('title="Раздел временно недоступен"', self.app_source)
         self.assertIn("onClick={(e) => handleSidebarViewNavigation(e, 'four_you')}", self.app_source)
 
     def test_backend_access_is_bound_to_id_and_admin_role(self):
         self.assertIn("FOUR_YOU_ADMIN_USER_ID = int(os.getenv('FOUR_YOU_ADMIN_USER_ID', '2'))", self.api_source)
-        self.assertIn("FOUR_YOU_VIEWER_USER_ID = int(os.getenv('FOUR_YOU_VIEWER_USER_ID', '241') or 241)", self.api_source)
+        self.assertIn("FOUR_YOU_VIEWER_USER_ID = int(os.getenv('FOUR_YOU_VIEWER_USER_ID', '0') or 0)", self.api_source)
+        self.assertIn("return FOUR_YOU_VIEWER_USER_ID if FOUR_YOU_VIEWER_USER_ID > 0 else None", self.api_source)
         self.assertIn("requester_role == 'super_admin' and requester_id == FOUR_YOU_ADMIN_USER_ID", self.api_source)
         self.assertIn("requester_id == int(viewer_user_id)", self.api_source)
         self.assertNotIn("тукеев", self.api_source.lower())
 
     def test_viewer_bypasses_only_the_department_guard_for_four_you(self):
-        self.assertIn("const FOUR_YOU_VIEWER_USER_ID = 241;", self.department_views_source)
+        self.assertIn("const FOUR_YOU_VIEWER_USER_ID = 0;", self.department_views_source)
         self.assertIn(
-            "if (viewKey === 'four_you' && Number(user?.id) === FOUR_YOU_VIEWER_USER_ID) return true;",
+            "if (viewKey === 'four_you' && FOUR_YOU_VIEWER_USER_ID > 0 && Number(user?.id) === FOUR_YOU_VIEWER_USER_ID) return true;",
             self.department_views_source,
         )
         self.assertNotIn("'four_you'", self.department_views_source.split("export const DEPARTMENT_VIEW_ALLOWLIST", 1)[1].split("};", 1)[0])
@@ -120,7 +121,7 @@ class FourYouAccessControlTests(unittest.TestCase):
         )
         self.assertIn("def save_four_you_annotations(image_id):", self.api_source)
         self.assertIn("_sanitize_four_you_annotations", self.api_source)
-        # Разметку правят ОБА (require_upload=False в гарде), а не только super_admin.
+        # Разметку правит любой пользователь с доступом к 4 You (require_upload=False в гарде), а не только uploader.
         self.assertIn("requester_id, _, guard_response, guard_status = _four_you_route_guard()", self.api_source)
 
     def test_collab_editing_frontend_present(self):

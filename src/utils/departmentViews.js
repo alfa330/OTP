@@ -38,7 +38,7 @@ const VIEW_ALIASES = {
     manage_users: 'manage_operators',
 };
 
-const FOUR_YOU_VIEWER_USER_ID = 241;
+const FOUR_YOU_VIEWER_USER_ID = 0;
 
 // Разделы, доступные всем ролям/отделам независимо от allowlist отдела.
 // «Ивенты» — общая лента компании (пункт меню тоже рендерится для всех);
@@ -99,7 +99,7 @@ export const departmentRestrictsViews = (user) => Array.isArray(allowlistFor(use
 // Разрешён ли раздел viewKey пользователю с учётом его отдела и роли.
 export const departmentAllowsView = (user, viewKey) => {
     if (UNIVERSAL_VIEWS.has(viewKey)) return true;
-    if (viewKey === 'four_you' && Number(user?.id) === FOUR_YOU_VIEWER_USER_ID) return true;
+    if (viewKey === 'four_you' && FOUR_YOU_VIEWER_USER_ID > 0 && Number(user?.id) === FOUR_YOU_VIEWER_USER_ID) return true;
     const allow = allowlistFor(user);
     if (!allow) return true; // нет ограничений
     if (allow.includes(viewKey)) return true;

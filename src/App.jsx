@@ -134,7 +134,7 @@ const ACCESS_TOKEN_STORAGE_KEY = 'otp_access_token';
 const REFRESH_TOKEN_STORAGE_KEY = 'otp_refresh_token';
 const ADMIN_SESSIONS_PAGE_SIZE = 100;
 const FOUR_YOU_ADMIN_USER_ID = 2;
-const FOUR_YOU_VIEWER_USER_ID = 241;
+const FOUR_YOU_VIEWER_USER_ID = 0;
 const DEFAULT_USERS_REPORT_OPTIONS = {
     sheetMode: 'summary_and_supervisors',
     includeFired: false,
@@ -948,7 +948,7 @@ const canManageFourYouForUser = (userLike) => (
 
 const canAccessFourYouForUser = (userLike) => (
     canManageFourYouForUser(userLike) ||
-    Number(userLike?.id) === FOUR_YOU_VIEWER_USER_ID
+    (FOUR_YOU_VIEWER_USER_ID > 0 && Number(userLike?.id) === FOUR_YOU_VIEWER_USER_ID)
 );
 
 const DEV_LETTER_ACCESS_OPERATOR_NAME = '\u041d\u0443\u0440\u0448\u043e\u0432\u0430 \u0410\u0439\u0448\u0430 \u041a\u0430\u043d\u0430\u0433\u0430\u0442\u043a\u044b\u0437\u044b';
