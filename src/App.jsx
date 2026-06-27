@@ -7,6 +7,7 @@ import jsQR from 'jsqr';
 import ToastContainer from './components/common/ToastContainer';
 import SalaryCalculationResult from './components/salary/SalaryCalculationResult';
 import SalaryComingSoon from './components/salary/SalaryComingSoon';
+import TezOpPlanPanel from './components/salary/TezOpPlanPanel';
 import TasksView, { PinnedTaskWidget } from './components/tasks/TasksView';
 import SurveysView from './components/surveys/SurveysView';
 import TechnicalIssuesView from './components/technical/TechnicalIssuesView';
@@ -108,6 +109,7 @@ const HistoryModal = lazyWithRetry(() => import('./components/modals/HistoryModa
 const UserEditModal = lazyWithRetry(() => import('./components/modals/UserEditModal'));
 const AccountAvatarModal = lazyWithRetry(() => import('./components/modals/AccountAvatarModal'));
 const SalaryCalculatorChat = lazyWithRetry(() => import('./components/salary/SalaryCalculatorChat'));
+const SalaryCalculatorTez = lazyWithRetry(() => import('./components/salary/SalaryCalculatorTez'));
 const ResourceFteView = lazyWithRetry(() => import('./components/resources/ResourceFteView'));
 const ShiftAuctionView = lazyWithRetry(() => import('./components/resources/ShiftAuctionView'));
 const DepartmentsView = lazyWithRetry(() => import('./components/departments/DepartmentsView'));
@@ -140,8 +142,9 @@ const DEFAULT_USERS_REPORT_OPTIONS = {
     includeFired: false,
     includeDismissalDetails: true
 };
-const SALARY_CALCULATOR_TYPES = new Set(['call', 'chat', 'converter']);
-const SALARY_CALCULATOR_READY_DEPARTMENT_CODES = new Set(['szov']);
+const SALARY_CALCULATOR_TYPES = new Set(['call', 'chat', 'converter', 'tez_line', 'tez_op']);
+const SALARY_CALCULATOR_READY_DEPARTMENT_CODES = new Set(['szov', 'tez']);
+const TEZ_SALARY_CALCULATOR_TYPES = new Set(['tez_line', 'tez_op']);
 const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     admin_sessions: 'Admin sessions',
     ai_feedback: 'Dos AI',
@@ -2071,6 +2074,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const [offlineActivityModalError, setOfflineActivityModalError] = useState('');
         const isHoursDepartmentHead = isDepartmentHead(user);
         const hoursDepartmentScopeId = isHoursDepartmentHead ? headedDepartmentId(user) : null;
+        // Общий план ОП TEZ: панель показываем управленцам отдела TEZ в учёте часов.
+        const isTezHoursDept = String(user?.department_code ?? user?.departmentCode ?? '').toLowerCase() === 'tez';
+        const tezPlanDeptId = hoursDepartmentScopeId ?? (user?.department_id ?? user?.departmentId ?? null);
         const [selectedSvId, setSelectedSvId] = useState(user?.role === 'sv' ? user.id : '');
         const [reportScope, setReportScope] = useState('by_sv'); // 'by_sv' or 'all' (admin only)
         const [isLoading, setIsLoading] = useState(false);
@@ -5321,6 +5327,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </div>
                     </div>
                 </div>
+            )}
+            {isTezHoursDept && tezPlanDeptId != null && (
+                <TezOpPlanPanel
+                    apiBaseUrl={API_BASE_URL}
+                    userId={user.id}
+                    departmentId={tezPlanDeptId}
+                    month={month}
+                    canEdit={true}
+                />
             )}
             <div className="mb-4 flex flex-wrap items-stretch justify-between gap-3">
                 {/* === Параметры (+ переключатель отчёта в той же линии) === */}
@@ -31973,6 +31988,31 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 ]
             );
             const hasSalaryCalculatorForDepartment = departmentHasSalaryCalculator(salaryDepartment.code);
+            // Отдел TEZ использует собственные модели калькулятора (Линия/ОП) вместо call/chat/converter.
+            const isTezSalaryDept = normalizeDepartmentCode(salaryDepartment.code) === 'tez';
+            const tezSalaryModel = calculatorType === 'tez_op' ? 'tez_op' : 'tez_line';
+            // Общий (на 1 FTE) план месяца отдела для прероллинга калькулятора ОП TEZ.
+            const [tezPlanPrefill, setTezPlanPrefill] = useState(null);
+            const salaryDepartmentId = user?.department_id ?? user?.departmentId ?? user?.headed_department_id ?? user?.headedDepartmentId ?? null;
+            useEffect(() => {
+                if (!isTezSalaryDept || tezSalaryModel !== 'tez_op' || !user?.id || salaryDepartmentId == null) {
+                    setTezPlanPrefill(null);
+                    return;
+                }
+                let cancelled = false;
+                const now = new Date();
+                axios.get(`${API_BASE_URL}/api/department_plan`, {
+                    params: { department_id: salaryDepartmentId, year: now.getFullYear(), month: now.getMonth() + 1 },
+                    headers: { 'X-User-Id': user.id },
+                })
+                    .then((resp) => {
+                        if (!cancelled && resp?.data?.status === 'success') {
+                            setTezPlanPrefill(resp.data.plan || null);
+                        }
+                    })
+                    .catch(() => { if (!cancelled) setTezPlanPrefill(null); });
+                return () => { cancelled = true; };
+            }, [isTezSalaryDept, tezSalaryModel, user?.id, salaryDepartmentId]);
             const appViewAnalyticsKeyRef = useRef('');
             const [tableUrl, setTableUrl] = useState(''); // URL таблицы
             const [previewData, setPreviewData] = useState(null); // Данные предпросмотра (sheet_name, operators)
@@ -45722,26 +45762,49 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </div>
                                                 )}
                                                 <div className="grid grid-cols-3 gap-2 mb-4 sm:flex sm:flex-wrap">
-                                                    <button
-                                                        className={`w-full sm:w-auto px-3 sm:px-4 py-2 rounded text-sm font-medium ${calculatorType === 'call' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
-                                                        onClick={() => setCalculatorType('call')}
-                                                    >
-                                                        Линия
-                                                    </button>
-                                                    <button
-                                                        className={`w-full sm:w-auto px-3 sm:px-4 py-2 rounded text-sm font-medium ${calculatorType === 'chat' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
-                                                        onClick={() => setCalculatorType('chat')}
-                                                    >
-                                                        Чат
-                                                    </button>
-                                                    <button
-                                                        className={`w-full sm:w-auto px-3 sm:px-4 py-2 rounded text-sm font-medium ${calculatorType === 'converter' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
-                                                        onClick={() => setCalculatorType('converter')}
-                                                      >
-                                                        Конвертер
-                                                    </button>
+                                                    {isTezSalaryDept ? (
+                                                        <>
+                                                            <button
+                                                                className={`w-full sm:w-auto px-3 sm:px-4 py-2 rounded text-sm font-medium ${tezSalaryModel === 'tez_line' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
+                                                                onClick={() => setCalculatorType('tez_line')}
+                                                            >
+                                                                Линия TEZ
+                                                            </button>
+                                                            <button
+                                                                className={`w-full sm:w-auto px-3 sm:px-4 py-2 rounded text-sm font-medium ${tezSalaryModel === 'tez_op' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
+                                                                onClick={() => setCalculatorType('tez_op')}
+                                                            >
+                                                                ОП TEZ
+                                                            </button>
+                                                        </>
+                                                    ) : (
+                                                        <>
+                                                            <button
+                                                                className={`w-full sm:w-auto px-3 sm:px-4 py-2 rounded text-sm font-medium ${calculatorType === 'call' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
+                                                                onClick={() => setCalculatorType('call')}
+                                                            >
+                                                                Линия
+                                                            </button>
+                                                            <button
+                                                                className={`w-full sm:w-auto px-3 sm:px-4 py-2 rounded text-sm font-medium ${calculatorType === 'chat' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
+                                                                onClick={() => setCalculatorType('chat')}
+                                                            >
+                                                                Чат
+                                                            </button>
+                                                            <button
+                                                                className={`w-full sm:w-auto px-3 sm:px-4 py-2 rounded text-sm font-medium ${calculatorType === 'converter' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
+                                                                onClick={() => setCalculatorType('converter')}
+                                                              >
+                                                                Конвертер
+                                                            </button>
+                                                        </>
+                                                    )}
                                                 </div>
-                                                {calculatorType === 'call' ? (
+                                                {isTezSalaryDept ? (
+                                                    <Suspense fallback={null}>
+                                                        <SalaryCalculatorTez model={tezSalaryModel} planPrefill={tezPlanPrefill} />
+                                                    </Suspense>
+                                                ) : calculatorType === 'call' ? (
                                                     <>
                                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6 lg:gap-8">
                                                             <div className="p-4 sm:p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">

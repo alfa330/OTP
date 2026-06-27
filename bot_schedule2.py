@@ -7409,6 +7409,228 @@ def update_norm_hours():
         logging.exception("update_norm_hours error")
         return jsonify({"error": "Internal server error"}), 500
 
+
+@app.route('/api/operator_plan', methods=['GET', 'OPTIONS'])
+@require_api_key
+def get_operator_plan():
+    """Месячный план (модель TEZ ОП): цель/факт/% выполнения за месяц.
+    Оператор видит свой план; СВ/глава отдела/админ — операторов своего отдела."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    try:
+        operator_id = request.args.get('operator_id')
+        year = request.args.get('year')
+        month = request.args.get('month')
+        if not operator_id or not year or not month:
+            return jsonify({"error": "operator_id, year, month required"}), 400
+        try:
+            year_i = int(year)
+            month_i = int(month)
+        except Exception:
+            return jsonify({"error": "year and month must be integers"}), 400
+        if month_i < 1 or month_i > 12:
+            return jsonify({"error": "month must be 1..12"}), 400
+
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        target_user, scope_error = _load_target_user_with_scope(
+            requester,
+            requester_id,
+            operator_id,
+            allow_self=True,
+            supervisor_target_roles=('operator', 'trainee'),
+            not_found_message="Operator not found",
+            forbidden_message="Forbidden for this operator"
+        )
+        if scope_error:
+            message, status_code = scope_error
+            return jsonify({"error": message}), status_code
+
+        plan = db.get_operator_monthly_plan(int(target_user[0]), year_i, month_i)
+        if plan is None:
+            plan = {
+                'operator_id': int(target_user[0]),
+                'year': year_i,
+                'month': month_i,
+                'plan_target': 0.0,
+                'plan_fact': 0.0,
+                'completion_percent': 0.0,
+                'updated_by': None,
+                'updated_at': None,
+            }
+        return jsonify({"status": "success", "plan": plan}), 200
+    except Exception:
+        logging.exception("get_operator_plan error")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/operator_plan', methods=['POST'])
+@require_api_key
+def save_operator_plan():
+    """Сохранить месячный план оператора (модель TEZ ОП). Запись разрешена только
+    СВ/главе отдела/админу в рамках своего отдела (самому оператору — нельзя)."""
+    try:
+        data = request.get_json() or {}
+        operator_id = data.get("operator_id")
+        year = data.get("year")
+        month = data.get("month")
+        if not operator_id or year is None or month is None:
+            return jsonify({"error": "operator_id, year, month required"}), 400
+        try:
+            year_i = int(year)
+            month_i = int(month)
+        except Exception:
+            return jsonify({"error": "year and month must be integers"}), 400
+        if month_i < 1 or month_i > 12:
+            return jsonify({"error": "month must be 1..12"}), 400
+
+        def _num(value):
+            try:
+                parsed = float(value)
+            except Exception:
+                return 0.0
+            return parsed if parsed >= 0 else 0.0
+
+        plan_target = _num(data.get("plan_target"))
+        plan_fact = _num(data.get("plan_fact"))
+
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        # Запись плана — только управленец (СВ/глава отдела/админ), не сам оператор.
+        if not (
+            _is_admin_role(requester[3])
+            or _is_supervisor_role(requester[3])
+            or _headed_department_id(requester_id) is not None
+        ):
+            return jsonify({"error": "Forbidden"}), 403
+
+        target_user, scope_error = _load_target_user_with_scope(
+            requester,
+            requester_id,
+            operator_id,
+            allow_self=False,
+            supervisor_target_roles=('operator', 'trainee'),
+            not_found_message="Operator not found",
+            forbidden_message="Forbidden for this operator"
+        )
+        if scope_error:
+            message, status_code = scope_error
+            return jsonify({"error": message}), status_code
+
+        plan = db.upsert_operator_monthly_plan(
+            int(target_user[0]), year_i, month_i, plan_target, plan_fact, updated_by=requester_id
+        )
+        return jsonify({"status": "success", "plan": plan}), 200
+    except Exception:
+        logging.exception("save_operator_plan error")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/department_plan', methods=['GET', 'OPTIONS'])
+@require_api_key
+def get_department_plan():
+    """Общий месячный план отдела (план успешек на 1 FTE, модель TEZ ОП).
+    Читать может любой пользователь СВОЕГО отдела; глобальный админ — любой отдел."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    try:
+        department_id = request.args.get('department_id')
+        year = request.args.get('year')
+        month = request.args.get('month')
+        if not department_id or not year or not month:
+            return jsonify({"error": "department_id, year, month required"}), 400
+        try:
+            dept_i = int(department_id)
+            year_i = int(year)
+            month_i = int(month)
+        except Exception:
+            return jsonify({"error": "department_id, year, month must be integers"}), 400
+        if month_i < 1 or month_i > 12:
+            return jsonify({"error": "month must be 1..12"}), 400
+
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        role = _normalize_user_role(requester[3])
+        if not _is_global_admin_requester(role, requester_id):
+            scope = _department_scope_id_for_requester(requester_id)
+            if scope is None or int(scope) != dept_i:
+                return jsonify({"error": "Forbidden for this department"}), 403
+
+        plan = db.get_department_monthly_plan(dept_i, year_i, month_i)
+        if plan is None:
+            plan = {
+                'department_id': dept_i,
+                'year': year_i,
+                'month': month_i,
+                'plan_per_fte': 0.0,
+                'updated_by': None,
+                'updated_at': None,
+            }
+        return jsonify({"status": "success", "plan": plan}), 200
+    except Exception:
+        logging.exception("get_department_plan error")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/department_plan', methods=['POST'])
+@require_api_key
+def save_department_plan():
+    """Сохранить общий месячный план отдела. Запись — только СВ/глава отдела/админ
+    в рамках своего отдела (глобальный админ — любой отдел)."""
+    try:
+        data = request.get_json() or {}
+        department_id = data.get("department_id")
+        year = data.get("year")
+        month = data.get("month")
+        if not department_id or year is None or month is None:
+            return jsonify({"error": "department_id, year, month required"}), 400
+        try:
+            dept_i = int(department_id)
+            year_i = int(year)
+            month_i = int(month)
+        except Exception:
+            return jsonify({"error": "department_id, year, month must be integers"}), 400
+        if month_i < 1 or month_i > 12:
+            return jsonify({"error": "month must be 1..12"}), 400
+        try:
+            plan_per_fte = float(data.get("plan_per_fte"))
+        except Exception:
+            plan_per_fte = 0.0
+        if plan_per_fte < 0:
+            plan_per_fte = 0.0
+
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        role = _normalize_user_role(requester[3])
+        if not (
+            _is_admin_role(requester[3])
+            or _is_supervisor_role(requester[3])
+            or _headed_department_id(requester_id) is not None
+        ):
+            return jsonify({"error": "Forbidden"}), 403
+        if not _is_global_admin_requester(role, requester_id):
+            scope = _department_scope_id_for_requester(requester_id)
+            if scope is None or int(scope) != dept_i:
+                return jsonify({"error": "Forbidden for this department"}), 403
+
+        plan = db.upsert_department_monthly_plan(dept_i, year_i, month_i, plan_per_fte, updated_by=requester_id)
+        return jsonify({"status": "success", "plan": plan}), 200
+    except Exception:
+        logging.exception("save_department_plan error")
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/sv/daily_hours', methods=['GET'])
 @require_api_key
 def sv_daily_hours():
