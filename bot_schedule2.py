@@ -49,6 +49,7 @@ from database import (
     get_calculation_model_catalog,
     get_calculation_model_metrics,
     CALCULATION_MODEL_ALLOWED,
+    CALCULATION_MODEL_CHAT_MANAGER,
 )
 from resource_fte_service import (
     build_resource_schedule_preview,
@@ -19608,12 +19609,24 @@ def _status_import_split_segment_by_day(start_dt, end_dt):
     return result
 
 
-def _status_import_build_operator_lookup(exclude_chat_managers=False):
+def _status_import_build_operator_lookup(exclude_chat_managers=False, restrict_to_ids=None):
+    """Строит lookup «имя -> оператор(ы)» для матчинга строк импорта/синка.
+
+    restrict_to_ids — если задан, в lookup попадают ТОЛЬКО операторы с этими id.
+    Синк Oktell передаёт сюда набор операторов, у которых в периоде есть хотя бы
+    один день с операторской моделью (включая тех, кто сейчас числится
+    чат-менеджером, но был оператором до перехода), а дни фильтруются отдельно по
+    модели на каждый день (см. _oktell_operator_model_gate)."""
+    restrict = None
+    if restrict_to_ids is not None:
+        restrict = {int(v) for v in restrict_to_ids if v is not None}
     lookup = {}
     for row in (db.get_all_operators() or []):
         try:
             operator_id = int(row[0])
         except Exception:
+            continue
+        if restrict is not None and operator_id not in restrict:
             continue
         operator_name = str(row[1] or '').strip()
         direction_name = str(row[7] or '').strip() if len(row) > 7 else ''
@@ -19638,12 +19651,19 @@ def _status_import_build_operator_lookup(exclude_chat_managers=False):
     return lookup
 
 
-def _status_import_build_status_events(row_iter, operator_lookup, invalid_rows_preview_limit=None):
+def _status_import_build_status_events(row_iter, operator_lookup, invalid_rows_preview_limit=None,
+                                       operator_day_filter=None):
     """Единый конвейер построения событий/сегментов статусов операторов из УЖЕ
     разобранных строк — без промежуточного CSV.
 
     `row_iter` — итерируемое из dict с ключами:
         row_num, operator_name, state_name, state_note, time_change.
+
+    `operator_day_filter` — необязательный предикат (operator_id, 'YYYY-MM-DD') ->
+    bool. Если задан, события за дни, для которых он вернул False, отбрасываются.
+    Синк Oktell передаёт сюда проверку «в этот день оператор был в группе с
+    операторской моделью», чтобы статусы за дни после перехода человека в
+    чат-менеджеры (или иной не-операторской модели) не записывались.
 
     Через этот core идут и ручная загрузка (CSV/XLSX -> строки -> core), и живые
     выгрузки (Oktell и последующие интеграции), чтобы все источники использовали одну
@@ -19664,6 +19684,7 @@ def _status_import_build_status_events(row_iter, operator_lookup, invalid_rows_p
     source_order_stats = {}
     action_events_count = 0
     ignored_events_count = 0
+    skipped_non_operator_day = 0
     chat_metrics_by_operator_day = {}
 
     def _push_invalid(row_num, reason, operator_name, source_state_name, state_note, time_change):
@@ -19718,6 +19739,11 @@ def _status_import_build_status_events(row_iter, operator_lookup, invalid_rows_p
             continue
         operator_info = operator_matches[0]
         operator_id = int(operator_info['id'])
+        if operator_day_filter is not None and not operator_day_filter(operator_id, ts.date().strftime('%Y-%m-%d')):
+            # Этот день не относится к операторской модели для данного оператора
+            # (например, после перехода в чат-менеджеры) — статусы за него не пишем.
+            skipped_non_operator_day += 1
+            continue
         status_key = resolved.get('key') or _status_import_normalize_key(source_state_name)
         if event_kind == 'action':
             action_events_count += 1
@@ -19829,6 +19855,7 @@ def _status_import_build_status_events(row_iter, operator_lookup, invalid_rows_p
         'operators_count': len(events_by_operator),
         'action_events_count': int(action_events_count),
         'ignored_events_count': int(ignored_events_count),
+        'skipped_non_operator_day': int(skipped_non_operator_day),
         'open_tail_events': int(open_tail_events),
         'zero_or_negative_transitions': int(zero_or_negative_transitions),
         'events': events_for_db,
@@ -21833,6 +21860,42 @@ def _oktell_parse_date(value):
         return None
 
 
+def _oktell_operator_model_gate(range_from, range_to, operator_ids):
+    """Строит «операторско-дневной» гейт для синка Oktell.
+
+    Для каждого дня периода резолвит модель расчёта оператора, действующую в этот
+    день (группа, активная в день -> groups.calculation_model_code; при отсутствии
+    членства fallback на текущее направление — db.get_operator_calculation_models_as_of).
+
+    Возвращает (operator_model_op_ids, is_operator_model_day):
+      - operator_model_op_ids: множество операторов, у которых в периоде есть хотя бы
+        один день с операторской (не чат-менеджерской) моделью. Это набор для
+        restrict_to_ids в lookup: туда попадают и те, кто СЕЙЧАС числится
+        чат-менеджером, но в этот период был оператором (сценарий перехода).
+      - is_operator_model_day(operator_id, 'YYYY-MM-DD') -> bool: был ли оператор в
+        этот день на операторской модели. Этим фильтруются конкретные дни, чтобы
+        чат-дни перешедшего сотрудника не синхронизировались как операторские.
+    """
+    op_ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
+    model_by_day = {}
+    operator_model_op_ids = set()
+    day = range_from
+    while day <= range_to:
+        day_iso = day.strftime('%Y-%m-%d')
+        day_map = db.get_operator_calculation_models_as_of(op_ids, day) if op_ids else {}
+        model_by_day[day_iso] = day_map
+        for op_id, code in day_map.items():
+            if code and code != CALCULATION_MODEL_CHAT_MANAGER:
+                operator_model_op_ids.add(int(op_id))
+        day += timedelta(days=1)
+
+    def _is_operator_model_day(operator_id, day_iso):
+        code = (model_by_day.get(day_iso) or {}).get(int(operator_id))
+        return bool(code) and code != CALCULATION_MODEL_CHAT_MANAGER
+
+    return operator_model_op_ids, _is_operator_model_day
+
+
 def _oktell_query(sql):
     """Один read-only SELECT к прокси Oktell. Возвращает список dict (rows)."""
     if not _oktell_api_ready():
@@ -21935,7 +21998,15 @@ def sync_oktell_operator_statuses(day=None, date_from=None, date_to=None, trigge
 
     started = time.time()
     try:
-        operator_lookup = _status_import_build_operator_lookup(exclude_chat_managers=True)
+        # Операторско-дневной гейт: тянем и сохраняем статусы только за дни, когда
+        # оператор был в группе с операторской моделью. Так сотрудник, перешедший в
+        # чат-менеджеры (напр. с 8-го числа), всё ещё корректно синкается за свои
+        # операторские дни до перехода, а его чат-дни не трогаются.
+        all_op_ids = [int(r[0]) for r in (db.get_all_operators() or []) if r and r[0] is not None]
+        operator_model_op_ids, is_operator_model_day = _oktell_operator_model_gate(
+            range_from, range_to, all_op_ids
+        )
+        operator_lookup = _status_import_build_operator_lookup(restrict_to_ids=operator_model_op_ids)
         rows, pages = _oktell_fetch_status_rows(range_from, range_to)
 
         def _oktell_row_iter():
@@ -21955,6 +22026,7 @@ def sync_oktell_operator_statuses(day=None, date_from=None, date_to=None, trigge
             _oktell_row_iter(),
             operator_lookup,
             invalid_rows_preview_limit=STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT,
+            operator_day_filter=is_operator_model_day,
         )
         events_for_save = parsed.get('events') or []
         save_summary = {
@@ -21993,6 +22065,7 @@ def sync_oktell_operator_statuses(day=None, date_from=None, date_to=None, trigge
                         'date_to': range_to.strftime('%Y-%m-%d'),
                         'oktell_rows': len(rows),
                         'pages': int(pages),
+                        'skipped_non_operator_day': int(parsed.get('skipped_non_operator_day') or 0),
                     }
                 }
             )
@@ -22014,6 +22087,7 @@ def sync_oktell_operator_statuses(day=None, date_from=None, date_to=None, trigge
             'oktell_rows': len(rows),
             'pages': int(pages),
             'import': save_summary,
+            'skipped_non_operator_day': int(parsed.get('skipped_non_operator_day') or 0),
             'invalid_rows_preview': parsed.get('invalid_rows_preview') or [],
             'elapsed_seconds': round(time.time() - started, 2),
         }
@@ -22128,13 +22202,22 @@ def sync_oktell_operator_calls(day=None, date_from=None, date_to=None, triggered
 
     started = time.time()
     try:
-        operator_lookup = _status_import_build_operator_lookup(exclude_chat_managers=True)
+        # Операторско-дневной гейт: звонки пишем в daily_hours.calls только за дни,
+        # когда оператор был в группе с операторской моделью. Перешедший в
+        # чат-менеджеры сотрудник синкается за свои операторские дни до перехода,
+        # его чат-дни не трогаются.
+        all_op_ids = [int(r[0]) for r in (db.get_all_operators() or []) if r and r[0] is not None]
+        operator_model_op_ids, is_operator_model_day = _oktell_operator_model_gate(
+            range_from, range_to, all_op_ids
+        )
+        operator_lookup = _status_import_build_operator_lookup(restrict_to_ids=operator_model_op_ids)
         rows = _oktell_fetch_call_counts(range_from, range_to)
 
         source_rows = len(rows)
         matched_operators = set()
         updated = 0
         unmatched = 0
+        skipped_non_operator_day = 0
         unmatched_preview = []
         for r in rows:
             operator_name = str(r.get('OperatorName') or '').strip()
@@ -22157,14 +22240,18 @@ def sync_oktell_operator_calls(day=None, date_from=None, date_to=None, triggered
                     })
                 continue
             operator_id = int(matches[0]['id'])
+            if not is_operator_model_day(operator_id, day_str):
+                # День не операторский для этого оператора — звонки не пишем.
+                skipped_non_operator_day += 1
+                continue
             db.upsert_daily_calls(operator_id, day_str, calls_count)
             matched_operators.add(operator_id)
             updated += 1
 
         logging.info(
-            "Oktell calls sync %s..%s: source_rows=%s updated=%s operators=%s unmatched=%s",
+            "Oktell calls sync %s..%s: source_rows=%s updated=%s operators=%s unmatched=%s skipped_non_operator_day=%s",
             range_from.strftime('%Y-%m-%d'), range_to.strftime('%Y-%m-%d'),
-            source_rows, updated, len(matched_operators), unmatched
+            source_rows, updated, len(matched_operators), unmatched, skipped_non_operator_day
         )
         return {
             'status': 'success',
@@ -22175,6 +22262,7 @@ def sync_oktell_operator_calls(day=None, date_from=None, date_to=None, triggered
             'updated': updated,
             'operators_count': len(matched_operators),
             'unmatched': unmatched,
+            'skipped_non_operator_day': skipped_non_operator_day,
             'unmatched_preview': unmatched_preview,
             'elapsed_seconds': round(time.time() - started, 2),
         }
