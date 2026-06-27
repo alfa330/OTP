@@ -48,6 +48,7 @@ from database import (
     normalize_role_value,
     get_calculation_model_catalog,
     get_calculation_model_metrics,
+    CALCULATION_MODEL_ALLOWED,
 )
 from resource_fte_service import (
     build_resource_schedule_preview,
@@ -12448,6 +12449,93 @@ def rename_group_endpoint(group_id):
         return jsonify({"status": "success", "group": group}), 200
     except Exception as e:
         logging.error(f"Error renaming group: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/admin/groups/<int:group_id>/model', methods=['POST'])
+@require_api_key
+def change_group_model_endpoint(group_id):
+    """Сменить модель расчёта группы. Изменение журналируется и обратимо
+    (см. /model/revert) — сырьё и снимки закрытых месяцев не теряются."""
+    try:
+        rid, role, guard_err = _ensure_group_manager()
+        if guard_err:
+            resp, code = guard_err
+            return resp, code
+        scope_err = _ensure_group_in_requester_scope(group_id, rid, role)
+        if scope_err:
+            resp, code = scope_err
+            return resp, code
+        data = request.get_json(silent=True) or {}
+        model_code = (data.get('calculation_model_code') or '').strip()
+        if not model_code:
+            return jsonify({"error": "calculation_model_code is required"}), 400
+        if model_code not in CALCULATION_MODEL_ALLOWED:
+            return jsonify({"error": "Unknown calculation model"}), 400
+        result = db.change_group_model(group_id, model_code, changed_by=rid)
+        return jsonify({
+            "status": "success",
+            "group": result["group"],
+            "changed": result["changed"],
+        }), 200
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as e:
+        logging.error(f"Error changing group model: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/admin/groups/<int:group_id>/model_history', methods=['GET'])
+@require_api_key
+def group_model_history_endpoint(group_id):
+    """Журнал смены модели группы (для показа истории и кнопок отката)."""
+    try:
+        rid, role, guard_err = _ensure_group_manager()
+        if guard_err:
+            resp, code = guard_err
+            return resp, code
+        scope_err = _ensure_group_in_requester_scope(group_id, rid, role)
+        if scope_err:
+            resp, code = scope_err
+            return resp, code
+        return jsonify({
+            "status": "success",
+            "group": db.get_group(group_id),
+            "history": db.get_group_model_history(group_id),
+        }), 200
+    except Exception as e:
+        logging.error(f"Error fetching group model history: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/admin/groups/<int:group_id>/model/revert', methods=['POST'])
+@require_api_key
+def revert_group_model_endpoint(group_id):
+    """Откатить модель группы. С target_model_code — к конкретной модели; без него —
+    к модели, которая была до последнего изменения."""
+    try:
+        rid, role, guard_err = _ensure_group_manager()
+        if guard_err:
+            resp, code = guard_err
+            return resp, code
+        scope_err = _ensure_group_in_requester_scope(group_id, rid, role)
+        if scope_err:
+            resp, code = scope_err
+            return resp, code
+        data = request.get_json(silent=True) or {}
+        target = (data.get('target_model_code') or '').strip() or None
+        if target is not None and target not in CALCULATION_MODEL_ALLOWED:
+            return jsonify({"error": "Unknown calculation model"}), 400
+        result = db.revert_group_model(group_id, target_model_code=target, changed_by=rid)
+        return jsonify({
+            "status": "success",
+            "group": result["group"],
+            "changed": result["changed"],
+        }), 200
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as e:
+        logging.error(f"Error reverting group model: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 

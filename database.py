@@ -1381,6 +1381,25 @@ class Database:
             cursor.execute(
                 "ALTER TABLE group_month_snapshots ADD COLUMN IF NOT EXISTS frozen_at TIMESTAMP"
             )
+            # Журнал смены модели расчёта группы. Каждая запись = одно изменение
+            # (old -> new), позволяет откатить случайную смену модели без потери
+            # данных: сырьё (daily_hours/метрики чатов) и замороженные снимки
+            # месяцев не трогаются сменой модели, поэтому откат полностью обратим.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS group_model_change_log (
+                    id SERIAL PRIMARY KEY,
+                    group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+                    old_model_code VARCHAR(32),
+                    new_model_code VARCHAR(32) NOT NULL,
+                    changed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    is_revert BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_group_model_log_group "
+                "ON group_model_change_log(group_id, id DESC);"
+            )
             # Calls table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operator_activity_logs (
@@ -23105,6 +23124,96 @@ class Database:
                 (new_name, int(group_id)),
             )
         return self.get_group(group_id)
+
+    def change_group_model(self, group_id, new_model_code, changed_by=None, is_revert=False):
+        """Меняет модель расчёта группы с записью в журнал group_model_change_log.
+
+        Смена модели НЕ удаляет сырьё: daily_hours, метрики чатов и замороженные
+        снимки закрытых месяцев (group_operator_month_snapshots хранят свою модель
+        per-month) не трогаются — меняется только трактовка модели для живого
+        (незакрытого) периода. Поэтому изменение полностью обратимо через
+        revert_group_model. Возвращает {'group': <dict>, 'changed': bool}."""
+        group = self.get_group(group_id)
+        if not group:
+            raise ValueError("Group not found")
+        new_code = normalize_calculation_model_code(new_model_code, group.get('direction_name'))
+        if new_code not in CALCULATION_MODEL_ALLOWED:
+            raise ValueError("Unknown calculation model: {}".format(new_model_code))
+        old_code = group.get('calculation_model_code')
+        if new_code == old_code:
+            return {'group': group, 'changed': False}
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO group_model_change_log
+                    (group_id, old_model_code, new_model_code, changed_by, is_revert, created_at)
+                VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                """,
+                (int(group_id), old_code, new_code, changed_by, bool(is_revert)),
+            )
+            cursor.execute(
+                """
+                UPDATE groups SET calculation_model_code = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                """,
+                (new_code, int(group_id)),
+            )
+        return {'group': self.get_group(group_id), 'changed': True}
+
+    def get_group_model_history(self, group_id, limit=50):
+        """Журнал смены модели группы (новые сверху) для показа/отката в UI."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT l.id, l.old_model_code, l.new_model_code, l.is_revert,
+                       l.created_at, l.changed_by, u.name
+                FROM group_model_change_log l
+                LEFT JOIN users u ON u.id = l.changed_by
+                WHERE l.group_id = %s
+                ORDER BY l.id DESC
+                LIMIT %s
+                """,
+                (int(group_id), int(limit)),
+            )
+            rows = cursor.fetchall() or []
+
+        def _name(code):
+            return (CALCULATION_MODEL_DESCRIPTIONS.get(code) or {}).get('name') or code
+
+        return [
+            {
+                'id': int(r[0]),
+                'old_model_code': r[1],
+                'old_model_name': _name(r[1]) if r[1] else None,
+                'new_model_code': r[2],
+                'new_model_name': _name(r[2]) if r[2] else None,
+                'is_revert': bool(r[3]),
+                'created_at': r[4].isoformat() if r[4] else None,
+                'changed_by': r[5],
+                'changed_by_name': r[6],
+            }
+            for r in rows
+        ]
+
+    def revert_group_model(self, group_id, target_model_code=None, changed_by=None):
+        """Откат модели группы. Без target_model_code возвращает модель, которая была
+        ДО последнего изменения (old_model_code последней записи журнала)."""
+        if target_model_code is None:
+            with self._get_cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT old_model_code FROM group_model_change_log
+                    WHERE group_id = %s ORDER BY id DESC LIMIT 1
+                    """,
+                    (int(group_id),),
+                )
+                row = cursor.fetchone()
+            if not row or not row[0]:
+                raise ValueError("No model changes to revert")
+            target_model_code = row[0]
+        return self.change_group_model(
+            group_id, target_model_code, changed_by=changed_by, is_revert=True
+        )
 
     def add_operator_to_group(self, group_id, operator_id, start_date=None, assigned_by=None):
         """Добавляет оператора в группу с effective date, закрывая прошлую основную
