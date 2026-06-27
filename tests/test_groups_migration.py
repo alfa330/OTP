@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DB = (ROOT / "database.py").read_text(encoding="utf-8-sig")
 BOT = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
 APP = (ROOT / "src" / "App.jsx").read_text(encoding="utf-8-sig")
+GROUPS_VIEW = (ROOT / "src" / "components" / "groups" / "GroupsView.jsx").read_text(encoding="utf-8-sig")
 
 
 class SchemaTests(unittest.TestCase):
@@ -114,6 +115,43 @@ class CrudTests(unittest.TestCase):
             "@app.route('/api/admin/groups/<int:group_id>/members'",
         ]:
             self.assertIn(r, BOT, f"missing route: {r}")
+
+
+class ModelChangeTests(unittest.TestCase):
+    """Смена модели группы с журналом и откатом (данные не теряются)."""
+
+    def test_change_log_table_created(self):
+        self.assertIn("CREATE TABLE IF NOT EXISTS group_model_change_log", DB)
+        self.assertIn("old_model_code VARCHAR(32)", DB)
+        self.assertIn("new_model_code VARCHAR(32) NOT NULL", DB)
+        self.assertIn("is_revert BOOLEAN NOT NULL DEFAULT FALSE", DB)
+
+    def test_db_methods_exist(self):
+        for m in [
+            "def change_group_model(self, group_id, new_model_code, changed_by=None, is_revert=False)",
+            "def get_group_model_history(self, group_id, limit=50)",
+            "def revert_group_model(self, group_id, target_model_code=None, changed_by=None)",
+        ]:
+            self.assertIn(m, DB, f"missing method: {m}")
+
+    def test_change_logs_before_update(self):
+        # Изменение журналируется (INSERT в лог) и только потом меняется модель группы.
+        self.assertIn("INSERT INTO group_model_change_log", DB)
+        self.assertIn("UPDATE groups SET calculation_model_code = %s", DB)
+
+    def test_endpoints_exist(self):
+        for r in [
+            "@app.route('/api/admin/groups/<int:group_id>/model', methods=['POST'])",
+            "@app.route('/api/admin/groups/<int:group_id>/model_history', methods=['GET'])",
+            "@app.route('/api/admin/groups/<int:group_id>/model/revert', methods=['POST'])",
+        ]:
+            self.assertIn(r, BOT, f"missing route: {r}")
+
+    def test_frontend_wires_model_change(self):
+        self.assertIn("/model_history", GROUPS_VIEW)
+        self.assertIn("/model/revert", GROUPS_VIEW)
+        self.assertIn("revertModel", GROUPS_VIEW)
+        self.assertIn("submitModelChange", GROUPS_VIEW)
 
 
 class ReadPathTests(unittest.TestCase):

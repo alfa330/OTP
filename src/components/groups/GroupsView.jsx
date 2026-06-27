@@ -9,7 +9,7 @@ import {
 import CustomSelect from '../ui/CustomSelect';
 
 // Модель → тон бейджа. Источник истины моделей — каталог с бэка (calculation_models).
-const MODEL_TONE = { operator: 'blue', chat_manager: 'green' };
+const MODEL_TONE = { operator: 'blue', chat_manager: 'green', tez_line: 'amber', tez_op: 'amber' };
 const FALLBACK_MODELS = [
     { code: 'operator', name: 'Операторская модель' },
     { code: 'chat_manager', name: 'Модель чат-менеджера' },
@@ -26,6 +26,14 @@ const monthLabelRu = (ym) => {
     const m = /^(\d{4})-(\d{2})$/.exec(String(ym || ''));
     if (!m) return ym || '';
     return `${MONTHS_RU_NOM[Number(m[2]) - 1] || m[2]} ${m[1]}`;
+};
+
+// ISO → «27.06.2026, 15:40» (для журнала смены модели).
+const fmtDateTime = (iso) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 };
 
 const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
@@ -48,6 +56,13 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     // rename modal
     const [renameGroup, setRenameGroup] = useState(null);
     const [renameName, setRenameName] = useState('');
+
+    // model change / rollback modal
+    const [modelGroup, setModelGroup] = useState(null);
+    const [newModelCode, setNewModelCode] = useState('operator');
+    const [modelHistory, setModelHistory] = useState([]);
+    const [modelHistoryLoading, setModelHistoryLoading] = useState(false);
+    const [modelBusy, setModelBusy] = useState(false);
 
     // members modal
     const [membersGroup, setMembersGroup] = useState(null);
@@ -260,6 +275,73 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
         } finally { setSaving(false); }
     };
 
+    /* ─── model change / rollback ─── */
+    const openModel = async (g) => {
+        setModelGroup(g);
+        setNewModelCode(g.calculation_model_code || 'operator');
+        setModelHistory([]);
+        setModelHistoryLoading(true);
+        try {
+            const { ok, data } = await api(`/api/admin/groups/${g.id}/model_history`);
+            if (ok) setModelHistory(data.history || []);
+        } finally {
+            setModelHistoryLoading(false);
+        }
+    };
+    const closeModel = () => { setModelGroup(null); setModelHistory([]); setModelBusy(false); };
+
+    // Применяет обновлённую группу в списке и в открытой модалке.
+    const applyGroupUpdate = (grp) => {
+        if (!grp) return;
+        setGroups((prev) => prev.map((g) => (g.id === grp.id ? grp : g)));
+        setModelGroup((prev) => (prev && prev.id === grp.id ? grp : prev));
+    };
+
+    const reloadModelHistory = async (groupId) => {
+        const { ok, data } = await api(`/api/admin/groups/${groupId}/model_history`);
+        if (ok) setModelHistory(data.history || []);
+    };
+
+    const submitModelChange = async () => {
+        if (!modelGroup) return;
+        if (newModelCode === modelGroup.calculation_model_code) { closeModel(); return; }
+        setModelBusy(true);
+        try {
+            const { ok, data } = await api(`/api/admin/groups/${modelGroup.id}/model`, {
+                method: 'POST', body: { calculation_model_code: newModelCode },
+            });
+            if (ok && data.group) {
+                applyGroupUpdate(data.group);
+                showToastRef.current?.(data.changed ? 'Модель группы изменена' : 'Модель не изменилась', data.changed ? 'success' : 'info');
+                await reloadModelHistory(modelGroup.id);
+            } else {
+                showToastRef.current?.(data.error || 'Не удалось сменить модель', 'error');
+            }
+        } catch {
+            showToastRef.current?.('Ошибка сети', 'error');
+        } finally { setModelBusy(false); }
+    };
+
+    const revertModel = async (targetCode) => {
+        if (!modelGroup) return;
+        setModelBusy(true);
+        try {
+            const { ok, data } = await api(`/api/admin/groups/${modelGroup.id}/model/revert`, {
+                method: 'POST', body: targetCode ? { target_model_code: targetCode } : {},
+            });
+            if (ok && data.group) {
+                applyGroupUpdate(data.group);
+                setNewModelCode(data.group.calculation_model_code);
+                showToastRef.current?.('Модель откачена', 'success');
+                await reloadModelHistory(modelGroup.id);
+            } else {
+                showToastRef.current?.(data.error || 'Не удалось откатить модель', 'error');
+            }
+        } catch {
+            showToastRef.current?.('Ошибка сети', 'error');
+        } finally { setModelBusy(false); }
+    };
+
     /* ─── members ─── */
     const openMembers = async (group) => {
         setMembersGroup(group);
@@ -426,6 +508,9 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                                 <button className={iosBtnGhost} onClick={() => openRename(g)}>
                                     <FaIcon className="fas fa-pen" /> Переименовать
                                 </button>
+                                <button className={iosBtnGhost} onClick={() => openModel(g)}>
+                                    <FaIcon className="fas fa-calculator" /> Модель
+                                </button>
                                 {g.status === 'archived' ? (
                                     <button className={iosBtnGhost} onClick={() => setGroupArchived(g, false)}>
                                         <FaIcon className="fas fa-rotate-left" /> Вернуть
@@ -449,7 +534,7 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                 open={createOpen}
                 onClose={closeCreate}
                 title="Новая группа"
-                subtitle="Модель расчёта задаётся при создании и далее не меняется"
+                subtitle="Модель расчёта можно сменить позже кнопкой «Модель» (с возможностью отката)"
                 footer={(
                     <>
                         <button className={iosBtnSecondary} onClick={closeCreate} disabled={saving}>Отмена</button>
@@ -536,6 +621,87 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                         <input className={iosInput} value={renameName} onChange={(e) => setRenameName(e.target.value)} autoFocus />
                     </div>
                 </div>
+            </IosModal>
+
+            {/* ─── Model change / rollback modal ─── */}
+            <IosModal
+                open={!!modelGroup}
+                onClose={closeModel}
+                title={modelGroup ? `Модель расчёта: ${modelGroup.name}` : 'Модель расчёта'}
+                subtitle="Смену модели можно откатить — учёт часов и закрытые месяцы не теряются"
+                maxWidth="max-w-xl"
+                footer={(
+                    <>
+                        <button className={iosBtnSecondary} onClick={closeModel} disabled={modelBusy}>Закрыть</button>
+                        <button
+                            className={iosBtnPrimary}
+                            onClick={submitModelChange}
+                            disabled={modelBusy || !modelGroup || newModelCode === modelGroup?.calculation_model_code}
+                        >
+                            Сменить модель
+                        </button>
+                    </>
+                )}
+            >
+                {modelGroup && (
+                <div className="space-y-4">
+                    <div>
+                        <div className={iosGroupLabel}>Текущая модель</div>
+                        <IosBadge tone={MODEL_TONE[modelGroup.calculation_model_code] || 'slate'}>
+                            {modelGroup.calculation_model_name || modelName(modelGroup.calculation_model_code)}
+                        </IosBadge>
+                    </div>
+                    <div>
+                        <div className={iosGroupLabel}>Новая модель</div>
+                        <CustomSelect
+                            value={newModelCode}
+                            onChange={setNewModelCode}
+                            options={calcModels.map((m) => ({ value: m.code, label: m.name }))}
+                        />
+                    </div>
+                    {newModelCode !== modelGroup.calculation_model_code && (
+                        <div className="rounded-xl border border-amber-200 bg-amber-50/60 p-3 text-[12.5px] text-amber-700">
+                            <FaIcon className="fas fa-triangle-exclamation mr-1" />
+                            Модель влияет на метрики и расчёт зарплаты для незакрытых месяцев. Закрытые (замороженные) месяцы не изменятся. Если передумаете — изменение можно откатить ниже, данные не потеряются.
+                        </div>
+                    )}
+
+                    <section className="space-y-2">
+                        <div className={iosGroupLabel}>История изменений модели</div>
+                        {modelHistoryLoading ? (
+                            <div className="p-3 text-sm text-slate-500">Загрузка истории…</div>
+                        ) : modelHistory.length === 0 ? (
+                            <div className="p-3 text-[13px] text-slate-400">Модель ещё не меняли.</div>
+                        ) : (
+                            <div className="rounded-xl ring-1 ring-slate-200 bg-white divide-y divide-slate-100 overflow-hidden max-h-64 overflow-y-auto">
+                                {modelHistory.map((h) => (
+                                    <div key={h.id} className="flex items-center justify-between gap-2 px-3 py-2 text-[13px]">
+                                        <div className="min-w-0">
+                                            <div className="text-slate-700">
+                                                {(h.old_model_name || h.old_model_code || '—')} → <span className="font-medium">{h.new_model_name || h.new_model_code}</span>
+                                                {h.is_revert ? <span className="ml-1.5 rounded-full bg-slate-100 px-1.5 py-0.5 text-[11px] text-slate-500">откат</span> : null}
+                                            </div>
+                                            <div className="text-[11.5px] text-slate-400">
+                                                {fmtDateTime(h.created_at)}{h.changed_by_name ? ` · ${h.changed_by_name}` : ''}
+                                            </div>
+                                        </div>
+                                        {h.old_model_code && h.old_model_code !== modelGroup.calculation_model_code ? (
+                                            <button
+                                                className={`${iosBtnGhost} shrink-0`}
+                                                onClick={() => revertModel(h.old_model_code)}
+                                                disabled={modelBusy}
+                                                title={`Вернуть модель «${h.old_model_name || h.old_model_code}»`}
+                                            >
+                                                <FaIcon className="fas fa-rotate-left" /> Откатить
+                                            </button>
+                                        ) : null}
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </section>
+                </div>
+                )}
             </IosModal>
 
             {/* ─── Members modal ─── */}
