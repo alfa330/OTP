@@ -11533,6 +11533,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
 
         function ShiftPlannerViewWithCalendar({ initialOperators, user }) {
+            // Отдел TEZ грузит статусы вручную (CSV/XLSX) и не использует синки Oktell/Chat2Desk.
+            const plannerDepartmentCode = String(user?.department_code ?? user?.departmentCode ?? '').toLowerCase();
+            const isTezPlanner = plannerDepartmentCode === 'tez';
+            const isAdminLikePlanner = isAdminLikeRoleFn(user?.role);
             const plannerOperatorIdKey = useCallback((value) => String(value ?? ''), []);
             function clonePlannerOperator(op, overrides = {}) {
                 const next = { ...(op || {}), ...overrides };
@@ -22746,6 +22750,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 {excelTransferState.importing ? 'Импорт...' : 'Импорт Excel'}
                                             </button>
 
+                                            {(isTezPlanner || isAdminLikePlanner) && (
+                                            <button
+                                                onClick={() => {
+                                                    setShowPlannerTopActionsMenu(false);
+                                                    setShowPlannerStatusAnomalyModal(true);
+                                                }}
+                                                disabled={plannerStatusAnomalyLoading || plannerStatusApiSyncLoading}
+                                                className="w-full px-3 py-2 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                                                title="Загрузить файл статусов операторов (CSV/XLSX) и открыть отчёт"
+                                            >
+                                                <FaIcon className={`fas ${plannerStatusAnomalyLoading ? 'fa-spinner fa-spin' : 'fa-file-csv'}`}></FaIcon>
+                                                {plannerStatusAnomalyLoading ? 'Анализируем...' : 'Загрузить статусы операторов'}
+                                            </button>
+                                            )}
+                                            {!isTezPlanner && (
                                             <button
                                                 onClick={() => {
                                                     setShowPlannerTopActionsMenu(false);
@@ -22758,7 +22777,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <FaIcon className={`fas ${plannerOktellSyncLoading ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}`}></FaIcon>
                                                 {plannerOktellSyncLoading ? 'Синхронизация...' : 'Синхронизация с Oktell'}
                                             </button>
+                                            )}
 
+                                            {!isTezPlanner && (
                                             <button
                                                 onClick={() => {
                                                     setShowPlannerTopActionsMenu(false);
@@ -22771,7 +22792,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <FaIcon className={`fas ${plannerStatusApiSyncLoading ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}`}></FaIcon>
                                                 {plannerStatusApiSyncLoading ? 'Синхронизация...' : 'Статусы Chat2Desk'}
                                             </button>
+                                            )}
 
+                                            {!isTezPlanner && (
                                             <button
                                                 onClick={() => {
                                                     setShowPlannerTopActionsMenu(false);
@@ -22784,6 +22807,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <FaIcon className={`fas ${plannerChatMetricsImportState.loading ? 'fa-spinner fa-spin' : 'fa-arrows-rotate'}`}></FaIcon>
                                                 {plannerChatMetricsImportState.loading ? 'Синхронизация...' : 'Синхронизация Chat2Desk'}
                                             </button>
+                                            )}
 
                                             <button
                                                 onClick={() => {
@@ -28146,7 +28170,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             Загрузка статусов операторов
                                         </h3>
                                         <div className="text-sm text-slate-600 mt-1">
-                                            CSV/XLSX с колонками <span className="font-medium">Name;Event;Date</span> или <span className="font-medium">OperatorName;StateName;TimeChange</span>
+                                            {isTezPlanner ? (
+                                                <>CSV/XLSX TEZ с колонками <span className="font-medium">internal number;employee name;started at;stopped at;seconds in status;status</span></>
+                                            ) : (
+                                                <>CSV/XLSX с колонками <span className="font-medium">Name;Event;Date</span> или <span className="font-medium">OperatorName;StateName;TimeChange</span></>
+                                            )}
                                         </div>
                                         <div className="text-xs text-slate-500 mt-1">
                                             Поддерживается <span className="font-medium">StateNote</span> (для «Перерыв»: Вышел / Авто / Перезвон / Тех причина / Тренинг / пусто = Перерыв)
@@ -28181,6 +28209,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         <FaIcon className={`fas ${plannerStatusAnomalyLoading ? 'fa-spinner fa-spin' : 'fa-file-csv'}`}></FaIcon>
                                         {plannerStatusAnomalyLoading ? 'Анализируем...' : (hasAnalysis ? 'Загрузить другой файл' : 'Загрузить файл')}
                                     </button>
+                                    {!isTezPlanner && (
                                     <button
                                         type="button"
                                         onClick={syncPlannerChat2DeskStatuses}
@@ -28191,6 +28220,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         <FaIcon className={`fas ${plannerStatusApiSyncLoading ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}`}></FaIcon>
                                         {plannerStatusApiSyncLoading ? 'Синхронизация...' : 'Из Chat2Desk'}
                                     </button>
+                                    )}
                                     {hasAnalysis && (
                                         <div className="flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-1 py-1">
                                             <span className="px-2 text-xs text-slate-500 hidden md:inline">Масштаб</span>
