@@ -23430,6 +23430,21 @@ class Database:
         model_map = self._load_operator_calculation_models_tx(cursor, [operator_id], as_of=as_of)
         return model_map.get(int(operator_id), CALCULATION_MODEL_OPERATOR)
 
+    def get_operator_calculation_models_as_of(self, operator_ids, as_of):
+        """Публичная обёртка над group-aware резолвом модели расчёта на дату.
+
+        Возвращает {operator_id: model_code}, где модель берётся из группы
+        оператора, активной на `as_of` (group_operator_memberships ->
+        groups.calculation_model_code); при отсутствии членства за день — fallback
+        на текущее направление. Используется синхронизацией Oktell, чтобы тянуть и
+        сохранять операторские статы только за те дни, когда оператор был в группе
+        с операторской моделью (см. _oktell_operator_model_gate в bot_schedule2)."""
+        op_ids = [int(v) for v in (operator_ids or []) if v is not None]
+        if not op_ids:
+            return {}
+        with self._get_cursor() as cursor:
+            return dict(self._load_operator_calculation_models_tx(cursor, op_ids, as_of=as_of))
+
     def _is_smz_direction(self, direction_name):
         key = self._normalize_direction_key(direction_name)
         if not key:
