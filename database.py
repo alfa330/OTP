@@ -1867,6 +1867,22 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_operator_monthly_plans_operator_period
                 ON operator_monthly_plans(operator_id, year, month);
             """)
+            # Общий (одинаковый для всех) месячный план направления/отдела TEZ ОП:
+            # «план успешек на 1 FTE». Вносит СВ/глава в учёте часов; индивидуальный
+            # план = plan_per_fte × (норма часов / 176).
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS department_monthly_plans (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+                    year INTEGER NOT NULL,
+                    month INTEGER NOT NULL,
+                    plan_per_fte NUMERIC(12,2) NOT NULL DEFAULT 0,
+                    updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(department_id, year, month)
+                );
+            """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS chat_manager_low_rating_reviews (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -12730,6 +12746,61 @@ class Database:
             )
             row = cursor.fetchone()
         return self._operator_monthly_plan_row_to_dict(row) if row else None
+
+    def get_department_monthly_plan(self, department_id, year, month):
+        """Общий месячный план направления/отдела (план успешек на 1 FTE)."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT department_id, year, month, plan_per_fte, updated_by, updated_at
+                FROM department_monthly_plans
+                WHERE department_id = %s AND year = %s AND month = %s
+                """,
+                (int(department_id), int(year), int(month))
+            )
+            row = cursor.fetchone()
+        if not row:
+            return None
+        return {
+            'department_id': int(row[0]),
+            'year': int(row[1]),
+            'month': int(row[2]),
+            'plan_per_fte': float(row[3] or 0),
+            'updated_by': int(row[4]) if row[4] is not None else None,
+            'updated_at': row[5].isoformat() if hasattr(row[5], 'isoformat') else (str(row[5]) if row[5] else None),
+        }
+
+    def upsert_department_monthly_plan(self, department_id, year, month, plan_per_fte, updated_by=None):
+        """Создать/обновить общий месячный план отдела (upsert по department_id+year+month)."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO department_monthly_plans
+                    (department_id, year, month, plan_per_fte, updated_by, updated_at)
+                VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (department_id, year, month) DO UPDATE SET
+                    plan_per_fte = EXCLUDED.plan_per_fte,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = CURRENT_TIMESTAMP
+                RETURNING department_id, year, month, plan_per_fte, updated_by, updated_at
+                """,
+                (
+                    int(department_id), int(year), int(month),
+                    float(plan_per_fte or 0),
+                    int(updated_by) if updated_by is not None else None
+                )
+            )
+            row = cursor.fetchone()
+        if not row:
+            return None
+        return {
+            'department_id': int(row[0]),
+            'year': int(row[1]),
+            'month': int(row[2]),
+            'plan_per_fte': float(row[3] or 0),
+            'updated_by': int(row[4]) if row[4] is not None else None,
+            'updated_at': row[5].isoformat() if hasattr(row[5], 'isoformat') else (str(row[5]) if row[5] else None),
+        }
 
     def save_chat_manager_daily_metrics(self, metrics, imported_by=None, preserve_missing=False, update_fields=None):
         """Сохраняет дневные метрики чат-менеджеров (upsert по (operator_id, day)).

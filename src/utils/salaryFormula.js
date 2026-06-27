@@ -135,3 +135,119 @@ export function calculateChatSalary({
         tableData: { experience, quality: qual, avgScore: score, responseTime: respTime, chatsPerHour: cph },
     };
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// МОДЕЛИ TEZ. Формулы выведены из таблиц расчёта владельца продукта и сверены
+// со строками-примерами (совпадение до округления отображаемых входов).
+// Ставка = Оклад_FTE / Норма_FTE(176); оклад = ставка × отработанные часы.
+// ──────────────────────────────────────────────────────────────────────────
+export const TEZ_NORM_HOURS = 176;          // норма часов на 1 FTE
+export const TEZ_LINE_OKLAD = 100000;       // оклад FTE «Линия/ТП (вход/чаты)»
+export const TEZ_OP_OKLAD = 150000;         // оклад FTE «ОП»
+
+// Бонус за качество (доля к окладу), модель Линия/ТП.
+export function tezLineQualityPercent(quality) {
+    const q = parseFloat(quality) || 0;
+    if (q >= 96) return 1.0;   // 96-100 → 100%
+    if (q >= 86) return 0.8;   // 86-95  → 80%
+    if (q >= 76) return 0.6;   // 76-85  → 60%
+    if (q >= 70) return 0.4;   // 70-75  → 40%
+    return 0.2;                // 0-69   → 20%
+}
+
+// Надбавка за стаж (доля), модель Линия/ТП.
+export function tezSeniorityPercent(months) {
+    const m = parseFloat(months) || 0;
+    if (m >= 18) return 0.30;
+    if (m >= 13) return 0.25;
+    if (m >= 10) return 0.20;
+    if (m >= 6) return 0.15;
+    if (m >= 3) return 0.10;
+    return 0;                  // 0-2 мес → 0%
+}
+
+// Модель TEZ — Линия (тех поддержка / вход-чаты).
+// Итог = Оклад + Бонус_качество + Бонус_стаж − Штрафы − Удержано50% + Бонусы,
+// где Оклад = (100000/176) × часы; Бонус_качество = Оклад × кач%;
+// Бонус_стаж = (Оклад + Бонус_качество) × стаж%.
+export function calculateTezLineSalary({
+    hoursWorked = 0,
+    hoursNorm = TEZ_NORM_HOURS,
+    quality = 0,
+    experienceMonths = 0,
+    fines = 0,
+    withholding = 0,
+    bonuses = 0,
+} = {}) {
+    const hours = parseFloat(hoursWorked) || 0;
+    const norm = parseFloat(hoursNorm) || TEZ_NORM_HOURS;
+    const rate = TEZ_LINE_OKLAD / TEZ_NORM_HOURS;
+    const oklad = rate * hours;
+    const qualityPercent = tezLineQualityPercent(quality);
+    const bonusQuality = oklad * qualityPercent;
+    const seniorityPercent = tezSeniorityPercent(experienceMonths);
+    const bonusSeniority = (oklad + bonusQuality) * seniorityPercent;
+    const finesV = parseFloat(fines) || 0;
+    const withholdingV = parseFloat(withholding) || 0;
+    const bonusesV = parseFloat(bonuses) || 0;
+    const finalSalary = oklad + bonusQuality + bonusSeniority - finesV - withholdingV + bonusesV;
+    const hoursPercentage = norm > 0 ? (hours / norm) * 100 : 0;
+    return {
+        model: 'tez_line',
+        oklad,
+        qualityPercent,
+        bonusQuality,
+        seniorityPercent,
+        bonusSeniority,
+        fines: finesV,
+        withholding: withholdingV,
+        bonuses: bonusesV,
+        hoursWorked: hours,
+        hoursNorm: norm,
+        hoursPercentage,
+        finalSalary,
+    };
+}
+
+// Модель TEZ — ОП. Качество в выплату не входит (по таблице владельца).
+// Итог = Оклад + Бонус_успешки − Штрафы − Удержано50% + Бонусы,
+// где Оклад = (150000/176) × часы; % сделок = факт/цель;
+// Бонус_успешки = Оклад × % сделок.
+export function calculateTezOpSalary({
+    hoursWorked = 0,
+    hoursNorm = TEZ_NORM_HOURS,
+    planTarget = 0,
+    planFact = 0,
+    fines = 0,
+    withholding = 0,
+    bonuses = 0,
+} = {}) {
+    const hours = parseFloat(hoursWorked) || 0;
+    const norm = parseFloat(hoursNorm) || TEZ_NORM_HOURS;
+    const rate = TEZ_OP_OKLAD / TEZ_NORM_HOURS;
+    const oklad = rate * hours;
+    const target = parseFloat(planTarget) || 0;
+    const fact = parseFloat(planFact) || 0;
+    const dealPercent = target > 0 ? fact / target : 0;
+    const bonusDeals = oklad * dealPercent;
+    const finesV = parseFloat(fines) || 0;
+    const withholdingV = parseFloat(withholding) || 0;
+    const bonusesV = parseFloat(bonuses) || 0;
+    const finalSalary = oklad + bonusDeals - finesV - withholdingV + bonusesV;
+    const hoursPercentage = norm > 0 ? (hours / norm) * 100 : 0;
+    return {
+        model: 'tez_op',
+        oklad,
+        planTarget: target,
+        planFact: fact,
+        dealPercent,
+        bonusDeals,
+        fines: finesV,
+        withholding: withholdingV,
+        bonuses: bonusesV,
+        hoursWorked: hours,
+        hoursNorm: norm,
+        hoursPercentage,
+        finalSalary,
+    };
+}
