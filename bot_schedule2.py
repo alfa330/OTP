@@ -16188,6 +16188,7 @@ def call_distribution_status():
                 "name": name,
                 "norm": norm,
                 "in_pool": in_pool,
+                "pool_display": coverage,
                 "evaluated": evaluated_real,
                 "evaluated_pool": int(pc.get('evaluated') or 0),
                 "not_evaluated": pending,
