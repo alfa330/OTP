@@ -16178,8 +16178,10 @@ def call_distribution_status():
             norm = int((targets.get(op_id) or {}).get('required_calls') or 0)
             pc = pool.get(op_id) or {}
             in_pool = int(pc.get('total') or 0)
+            pending = int(pc.get('not_evaluated') or 0)
             evaluated_real = int((journal.get(op_id) or {}).get('call_count') or 0)
-            if norm <= 0 and in_pool <= 0 and evaluated_real <= 0:
+            coverage = evaluated_real + pending
+            if norm <= 0 and in_pool <= 0 and coverage <= 0:
                 continue
             operators.append({
                 "operator_id": op_id,
@@ -16188,7 +16190,9 @@ def call_distribution_status():
                 "in_pool": in_pool,
                 "evaluated": evaluated_real,
                 "evaluated_pool": int(pc.get('evaluated') or 0),
-                "not_evaluated": int(pc.get('not_evaluated') or 0),
+                "not_evaluated": pending,
+                "pending": pending,
+                "coverage": coverage,
                 "skipped": int(pc.get('skipped') or 0),
             })
         operators.sort(key=lambda x: x['name'])
@@ -22661,17 +22665,23 @@ def sync_oktell_evaluation_calls(month=None, date_from=None, date_to=None, trigg
                 per_month.append({'month': mstr, 'operators': 0, 'added': 0})
                 continue
             # 3) норма (по часам месяца mstr) и существующий пул -> сколько добрать
-            targets = db.get_operator_call_evaluation_targets_for_month([x[1] for x in matched], mstr) or {}
+            matched_op_ids = [x[1] for x in matched]
+            targets = db.get_operator_call_evaluation_targets_for_month(matched_op_ids, mstr) or {}
             existing = db.get_imported_call_keys_for_month(mstr)
+            pool_counts = db.get_imported_calls_status_counts_by_operator(mstr)
+            journal = db.get_operator_score_aggregates_for_month(mstr, matched_op_ids) or {}
             need_by_auserid = {}
             auserid_to_op = {}
             for auserid, otp_id, otp_name, available in matched:
                 norm = int((targets.get(otp_id) or {}).get('required_calls') or 0)
-                have = len(existing.get(otp_id, set()))
-                need = max(0, min(norm, available) - have)
+                target = max(0, min(norm, available))
+                pending = int((pool_counts.get(otp_id) or {}).get('not_evaluated') or 0)
+                evaluated_real = int((journal.get(otp_id) or {}).get('call_count') or 0)
+                covered = evaluated_real + pending
+                need = max(0, target - covered)
                 if need > 0:
                     need_by_auserid[auserid] = need
-                    auserid_to_op[auserid] = (otp_id, otp_name, available, norm)
+                    auserid_to_op[auserid] = (otp_id, otp_name, available, target)
             # 4) выборка случайных звонков батчами операторов (под лимит прокси)
             sampled = {}
             au_list = list(need_by_auserid.keys())
@@ -22683,14 +22693,14 @@ def sync_oktell_evaluation_calls(month=None, date_from=None, date_to=None, trigg
             distribution = []
             month_added = 0
             for auserid, need in need_by_auserid.items():
-                otp_id, otp_name, available, norm = auserid_to_op[auserid]
+                otp_id, otp_name, available, target = auserid_to_op[auserid]
                 ex = existing.get(otp_id, set())
                 chosen = [c for c in sampled.get(auserid, []) if str(c.get('conn_id')) not in ex][:need]
                 if not chosen:
                     continue
                 distribution.append({
                     'operator': otp_name,
-                    'desired': min(norm, available),
+                    'desired': target,
                     'available': available,
                     'calls': [{'id': c.get('conn_id'), 'datetimeRaw': c.get('dt_raw'),
                                'phone': c.get('phone'), 'durationSec': c.get('talk_sec')} for c in chosen],
