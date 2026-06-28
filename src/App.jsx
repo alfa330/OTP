@@ -9035,7 +9035,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // ====== Новый экран «Деление звонков» (Oktell, норма-распределение) ======
             const cdTotals = cdRows.reduce((a, r) => ({
                 norm: a.norm + (Number(r.norm) || 0),
-                pool: a.pool + (Number(r.in_pool) || 0),
+                pool: a.pool + (Number(r.pool_display ?? r.coverage ?? r.in_pool) || 0),
                 ev: a.ev + (Number(r.evaluated) || 0),
             }), { norm: 0, pool: 0, ev: 0 });
             const cdUpdatedAtLabel = (() => {
@@ -9240,11 +9240,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                           <tbody className="divide-y divide-slate-100">
                             {cdRows.map((r) => {
                               const norm = Number(r.norm) || 0;
-                              const inPool = Number(r.in_pool) || 0;
                               const evaluated = Number(r.evaluated) || 0;
                               const pending = Number(r.pending ?? r.not_evaluated) || 0;
                               const coverageRaw = r.coverage != null ? Number(r.coverage) : (evaluated + pending);
                               const coverage = Number.isFinite(coverageRaw) ? coverageRaw : (evaluated + pending);
+                              const inPool = Number(r.pool_display ?? coverage) || 0;
                               const pct = norm > 0 ? Math.min(100, Math.round((coverage / norm) * 100)) : (coverage > 0 ? 100 : 0);
                               const full = norm > 0 && coverage >= norm;
                               return (
