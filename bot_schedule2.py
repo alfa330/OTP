@@ -16167,20 +16167,27 @@ def call_distribution_status():
         op_ids = [o[0] for o in ops]
         targets = db.get_operator_call_evaluation_targets_for_month(op_ids, month) or {}
         pool = db.get_imported_calls_status_counts_by_operator(month)
+        # «Оценено» берём из РЕАЛЬНОГО журнала оценок (calls), а не только из пула
+        # распределения: оператора могли оценить по звонкам вне пула (ручной выбор из
+        # журнала), и эти оценки тоже должны отображаться. call_count = оценённые
+        # звонки (последняя версия, score IS NOT NULL) — та же логика, что в журнале.
+        journal = db.get_operator_score_aggregates_for_month(month, op_ids) or {}
 
         operators = []
         for op_id, name in ops:
             norm = int((targets.get(op_id) or {}).get('required_calls') or 0)
             pc = pool.get(op_id) or {}
             in_pool = int(pc.get('total') or 0)
-            if norm <= 0 and in_pool <= 0:
+            evaluated_real = int((journal.get(op_id) or {}).get('call_count') or 0)
+            if norm <= 0 and in_pool <= 0 and evaluated_real <= 0:
                 continue
             operators.append({
                 "operator_id": op_id,
                 "name": name,
                 "norm": norm,
                 "in_pool": in_pool,
-                "evaluated": int(pc.get('evaluated') or 0),
+                "evaluated": evaluated_real,
+                "evaluated_pool": int(pc.get('evaluated') or 0),
                 "not_evaluated": int(pc.get('not_evaluated') or 0),
                 "skipped": int(pc.get('skipped') or 0),
             })
