@@ -315,6 +315,10 @@ class DepartmentHeadWriteScopeTests(unittest.TestCase):
         self.assertIn("department_id=None", worker)
         self.assertIn("allowed_operator_ids", worker)
         self.assertIn("db.get_department_member_ids(department_id)", worker)
+        self.assertIn("pool_counts = db.get_imported_calls_status_counts_by_operator(mstr)", worker)
+        self.assertIn("journal = db.get_operator_score_aggregates_for_month(mstr, matched_op_ids) or {}", worker)
+        self.assertIn("covered = evaluated_real + pending", worker)
+        self.assertIn("need = max(0, target - covered)", worker)
         self.assertIn("can_edit = _is_global_admin_requester(role, requester_id)", settings)
 
 

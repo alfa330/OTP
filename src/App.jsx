@@ -9242,8 +9242,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                               const norm = Number(r.norm) || 0;
                               const inPool = Number(r.in_pool) || 0;
                               const evaluated = Number(r.evaluated) || 0;
-                              const pct = norm > 0 ? Math.min(100, Math.round((evaluated / norm) * 100)) : (evaluated > 0 ? 100 : 0);
-                              const full = norm > 0 && evaluated >= norm;
+                              const pending = Number(r.pending ?? r.not_evaluated) || 0;
+                              const coverageRaw = r.coverage != null ? Number(r.coverage) : (evaluated + pending);
+                              const coverage = Number.isFinite(coverageRaw) ? coverageRaw : (evaluated + pending);
+                              const pct = norm > 0 ? Math.min(100, Math.round((coverage / norm) * 100)) : (coverage > 0 ? 100 : 0);
+                              const full = norm > 0 && coverage >= norm;
                               return (
                                 <tr key={r.operator_id} className="transition-colors hover:bg-slate-50/70">
                                   <td className="px-5 py-2.5 font-medium text-slate-800">{r.name}</td>
