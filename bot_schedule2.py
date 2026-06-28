@@ -290,6 +290,9 @@ OKTELL_EVAL_SAMPLE_PER_OPERATOR = _env_int('OKTELL_EVAL_SAMPLE_PER_OPERATOR', 5,
 # операторов (батч×CAP должно быть < 1000 — лимита прокси).
 OKTELL_EVAL_CAP_PER_OPERATOR = _env_int('OKTELL_EVAL_CAP_PER_OPERATOR', 40, minimum=1, maximum=200)
 OKTELL_EVAL_OPERATOR_BATCH = _env_int('OKTELL_EVAL_OPERATOR_BATCH', 24, minimum=1, maximum=100)
+# Деление звонков питается из Oktell, а Oktell обслуживает только отдел СЗоВ —
+# поэтому экран статуса распределения ограничен операторами этого отдела.
+OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE = (os.getenv('OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE') or 'szov').strip().lower() or 'szov'
 
 if not API_TOKEN:
     raise Exception("Переменная окружения BOT_TOKEN обязательна.")
@@ -16147,12 +16150,25 @@ def call_distribution_status():
         scope_dept = None if _is_global_admin_requester(role, requester_id) else _department_scope_id_for_requester(requester_id)
         scope_member_ids = db.get_department_member_ids(scope_dept) if scope_dept is not None else None
 
+        # Деление звонков питается из Oktell, а Oktell обслуживает только отдел СЗоВ —
+        # поэтому показываем ТОЛЬКО операторов этого отдела (даже супер-админу), иначе в
+        # норму/оценки/пул затекают другие отделы (Отдел продаж, Тез КЦ), которых Oktell
+        # не касается.
+        oktell_dept_id = next(
+            (d.get('id') for d in (db.get_departments() or [])
+             if str(d.get('code') or '').strip().lower() == OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE),
+            None
+        )
+        oktell_member_ids = db.get_department_member_ids(oktell_dept_id) if oktell_dept_id else set()
+
         # операторская модель (чат-менеджеры исключены)
         ops = []
         for row in (db.get_all_operators() or []):
             try:
                 op_id = int(row[0])
             except Exception:
+                continue
+            if op_id not in oktell_member_ids:
                 continue
             if scope_member_ids is not None and op_id not in scope_member_ids:
                 continue
