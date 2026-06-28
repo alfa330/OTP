@@ -22552,16 +22552,37 @@ def _oktell_eval_duration_clause(min_d, max_d):
     return clause
 
 
+# Оператор сидит на разных сторонах соединения в зависимости от типа звонка
+# (A_Stat_Connections_1x1.ConnectionType): 1 = «изнутри наружу» (ИСХОДЯЩИЙ) — оператор
+# на A-стороне; 5 = «снаружи внутрь» (ВХОДЯЩИЙ) — оператор на B-стороне. Берём оба типа:
+# во входящем КЦ основной массив записанных разговоров — это входящие (ct=5), и раньше
+# они не попадали в выборку, потому что джойн шёл только по AUserId с ConnectionType=1.
+_OKTELL_EVAL_CONNECTION_TYPES = "(1, 5)"
+# UUID оператора: A-сторона для исходящих, B-сторона для входящих.
+_OKTELL_EVAL_OPERATOR_UID_EXPR = "CASE WHEN s.ConnectionType = 1 THEN s.AUserId ELSE s.BUserId END"
+# Номер клиента (вторая сторона): для исходящего — B, для входящего — A.
+_OKTELL_EVAL_PHONE_EXPR = (
+    "CASE WHEN s.ConnectionType = 1 "
+    "THEN CASE WHEN LEN(s.BOutNumber) >= 10 THEN s.BOutNumber WHEN LEN(s.AOutNumber) >= 10 THEN s.AOutNumber "
+    "ELSE COALESCE(NULLIF(s.BOutNumber, ''), s.AOutNumber) END "
+    "ELSE CASE WHEN LEN(s.AOutNumber) >= 10 THEN s.AOutNumber WHEN LEN(s.BOutNumber) >= 10 THEN s.BOutNumber "
+    "ELSE COALESCE(NULLIF(s.AOutNumber, ''), s.BOutNumber) END END"
+)
+
+
 def _oktell_eval_operators_sql(mstart, mnext, min_d, max_d):
-    # Операторы с подходящими записанными звонками за месяц + сколько доступно.
+    # Операторы с подходящими записанными звонками за месяц (исходящие+входящие) + сколько
+    # доступно. UUID оператора считаем в подзапросе, группируем снаружи. Джойн к OperatorInfo
+    # по операторской стороне заодно отсеивает внешнюю линию/IVR (их Id нет в каталоге).
     return (
-        "SELECT LOWER(CONVERT(varchar(36), s.AUserId)) AS auserid, oi.Name AS operator_name, COUNT(*) AS available "
+        "SELECT t.auserid, t.operator_name, COUNT(*) AS available FROM ("
+        f"SELECT LOWER(CONVERT(varchar(36), {_OKTELL_EVAL_OPERATOR_UID_EXPR})) AS auserid, oi.Name AS operator_name "
         "FROM oktell.dbo.A_Stat_Connections_1x1 s "
-        "JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo oi ON oi.Id = s.AUserId "
+        f"JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo oi ON oi.Id = {_OKTELL_EVAL_OPERATOR_UID_EXPR} "
         f"WHERE s.TimeStart >= '{mstart}' AND s.TimeStart < '{mnext}' "
-        "AND s.ConnectionType = 1 AND s.IsRecorded = 1 AND s.TimeStop IS NOT NULL "
+        f"AND s.ConnectionType IN {_OKTELL_EVAL_CONNECTION_TYPES} AND s.IsRecorded = 1 AND s.TimeStop IS NOT NULL "
         + _oktell_eval_duration_clause(min_d, max_d) +
-        "GROUP BY s.AUserId, oi.Name"
+        ") t GROUP BY t.auserid, t.operator_name"
     )
 
 
@@ -22569,16 +22590,15 @@ def _oktell_eval_sample_sql(mstart, mnext, auserids, cap, min_d, max_d):
     ids = ", ".join("'" + str(a).replace("'", "") + "'" for a in auserids)
     return (
         "SELECT q.auserid, q.conn_id, q.phone, q.dt_raw, q.talk_sec FROM ("
-        "SELECT LOWER(CONVERT(varchar(36), s.AUserId)) AS auserid, LOWER(CONVERT(varchar(36), s.Id)) AS conn_id, "
-        "CASE WHEN LEN(s.BOutNumber) >= 10 THEN s.BOutNumber WHEN LEN(s.AOutNumber) >= 10 THEN s.AOutNumber "
-        "ELSE COALESCE(NULLIF(s.BOutNumber, ''), s.AOutNumber) END AS phone, "
+        f"SELECT LOWER(CONVERT(varchar(36), {_OKTELL_EVAL_OPERATOR_UID_EXPR})) AS auserid, LOWER(CONVERT(varchar(36), s.Id)) AS conn_id, "
+        f"{_OKTELL_EVAL_PHONE_EXPR} AS phone, "
         "CONVERT(varchar(10), s.TimeStart, 104) + ' ' + CONVERT(varchar(8), s.TimeStart, 108) AS dt_raw, "
         "DATEDIFF(second, s.TimeAnswer, s.TimeStop) AS talk_sec, "
-        "ROW_NUMBER() OVER (PARTITION BY s.AUserId ORDER BY NEWID()) AS rn "
+        f"ROW_NUMBER() OVER (PARTITION BY {_OKTELL_EVAL_OPERATOR_UID_EXPR} ORDER BY NEWID()) AS rn "
         "FROM oktell.dbo.A_Stat_Connections_1x1 s "
         f"WHERE s.TimeStart >= '{mstart}' AND s.TimeStart < '{mnext}' "
-        "AND s.ConnectionType = 1 AND s.IsRecorded = 1 AND s.TimeStop IS NOT NULL "
-        f"AND s.AUserId IN ({ids}) "
+        f"AND s.ConnectionType IN {_OKTELL_EVAL_CONNECTION_TYPES} AND s.IsRecorded = 1 AND s.TimeStop IS NOT NULL "
+        f"AND {_OKTELL_EVAL_OPERATOR_UID_EXPR} IN ({ids}) "
         + _oktell_eval_duration_clause(min_d, max_d) +
         f") q WHERE q.rn <= {int(cap)} ORDER BY q.auserid"
     )
