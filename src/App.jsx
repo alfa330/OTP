@@ -28349,7 +28349,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         {plannerStatusApiSyncLoading ? 'Синхронизация...' : 'Из Chat2Desk'}
                                     </button>
                                     )}
-                                    {isTezPlanner && (
+                                    {(isTezPlanner || isAdminLikePlanner) && (
                                         <div className="flex flex-wrap items-center gap-2 rounded-lg border border-teal-200 bg-teal-50 px-2 py-1.5">
                                             <span className="text-xs font-medium text-teal-700">Binotel:</span>
                                             <input
