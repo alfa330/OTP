@@ -17811,6 +17811,24 @@ class Database:
             """)
             return cursor.fetchall()
 
+    def get_operator_sip_map(self):
+        """{operator_id: sip_number} — внутренние/SIP-номера операторов.
+        Для TEZ это совпадает с «internal number» из выгрузки Binotel, что даёт
+        надёжный матчинг по номеру (а не по имени)."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT op.user_id, op.sip_number
+                FROM operator_profiles op
+                WHERE op.sip_number IS NOT NULL AND TRIM(op.sip_number) <> ''
+            """)
+            result = {}
+            for row in cursor.fetchall():
+                try:
+                    result[int(row[0])] = str(row[1]).strip()
+                except Exception:
+                    continue
+            return result
+
     def get_week_call_stats(self, operator_id, start_date, end_date):
         with self._get_cursor() as cursor:
             query = """
