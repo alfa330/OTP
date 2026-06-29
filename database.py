@@ -12223,16 +12223,36 @@ class Database:
         per_page=12,
         viewer_id=None,
         can_finalize=False,
+        start=None,
+        end=None,
+        search=None,
+        paginate=True,
     ):
-        try:
-            year, mon = map(int, str(month or '').split('-'))
-            start = date(year, mon, 1)
-            end = date(year, mon, calendar.monthrange(year, mon)[1])
-        except Exception as exc:
-            raise ValueError("month must be in YYYY-MM format") from exc
+        def _coerce_day(value):
+            text = str(value or '').strip()
+            if not text:
+                return None
+            try:
+                return date.fromisoformat(text[:10])
+            except Exception:
+                return None
+
+        period_start = _coerce_day(start)
+        period_end = _coerce_day(end)
+        if period_start and period_end:
+            # Произвольный период (кастомный пикер). Переставляем границы при инверсии.
+            if period_start > period_end:
+                period_start, period_end = period_end, period_start
+        else:
+            try:
+                year, mon = map(int, str(month or '').split('-'))
+                period_start = date(year, mon, 1)
+                period_end = date(year, mon, calendar.monthrange(year, mon)[1])
+            except Exception as exc:
+                raise ValueError("month must be in YYYY-MM format") from exc
 
         where = ["lr.day >= %s", "lr.day <= %s"]
-        params = [start, end]
+        params = [period_start, period_end]
         if department_id not in (None, ''):
             where.append("u.department_id = %s")
             params.append(int(department_id))
@@ -12277,6 +12297,26 @@ class Database:
             all_rows = [self._low_rating_row_to_dict(row) for row in cursor.fetchall() or []]
             self._attach_low_rating_review_entries_tx(cursor, all_rows, viewer_id=viewer_id)
 
+        # Поиск среди всех оценок периода (по ФИО / телефону / таксопарку / направлению).
+        search_text = str(search or '').strip().lower()
+        if search_text:
+            search_digits = re.sub(r'\D+', '', search_text)
+
+            def _matches_search(item):
+                haystack = ' '.join(str(item.get(key) or '') for key in (
+                    'operator_name', 'phone_number', 'phone_normalized',
+                    'taxi_park', 'direction_name', 'department_name'
+                )).lower()
+                if search_text in haystack:
+                    return True
+                if search_digits:
+                    phone_digits = re.sub(r'\D+', '', str(item.get('phone_normalized') or item.get('phone_number') or ''))
+                    if phone_digits and search_digits in phone_digits:
+                        return True
+                return False
+
+            all_rows = [item for item in all_rows if _matches_search(item)]
+
         summary = {
             'total': len(all_rows),
             'pending': 0,
@@ -12311,13 +12351,21 @@ class Database:
             rows = all_rows
 
         total_filtered = len(rows)
-        total_pages = max(1, int(math.ceil(total_filtered / safe_per_page)))
-        safe_page = min(safe_page, total_pages)
-        start_idx = (safe_page - 1) * safe_per_page
-        page_rows = rows[start_idx:start_idx + safe_per_page]
+        if paginate:
+            total_pages = max(1, int(math.ceil(total_filtered / safe_per_page)))
+            safe_page = min(safe_page, total_pages)
+            start_idx = (safe_page - 1) * safe_per_page
+            page_rows = rows[start_idx:start_idx + safe_per_page]
+        else:
+            # Режим выгрузки: возвращаем все отфильтрованные строки без постраничной нарезки.
+            total_pages = 1
+            safe_page = 1
+            page_rows = rows
 
         return {
-            'month': f"{year:04d}-{mon:02d}",
+            'month': period_start.strftime('%Y-%m'),
+            'start': period_start.isoformat(),
+            'end': period_end.isoformat(),
             'rows': [
                 self._low_rating_public_item(item, viewer_id=viewer_id, can_finalize=can_finalize)
                 for item in page_rows
