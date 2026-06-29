@@ -356,10 +356,12 @@
   z-index: 0;
   pointer-events: none;
   overflow: hidden;
-  opacity: 0;
-  animation: fy-bg-in 1s ease forwards;
+  /* Прозрачность фона = насколько «раскрыта» активная карточка (selectedMix из
+     rAF-цикла, см. lenta.jsx). Так фон плавно ПОЯВЛЯЕТСЯ при открытии и так же
+     плавно ЗАТУХАЕТ, когда карточка возвращается на место — синхронно с её
+     движением (раньше он просто исчезал при размонтировании). */
+  opacity: var(--fy-bg-opacity, 0);
 }
-@keyframes fy-bg-in { to { opacity: 1; } }
 
 .fy-pt { position: absolute; will-change: transform, opacity; }
 

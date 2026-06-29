@@ -38,7 +38,7 @@ const VIEW_ALIASES = {
     manage_users: 'manage_operators',
 };
 
-const FOUR_YOU_VIEWER_USER_ID = 0;
+const FOUR_YOU_VIEWER_USER_ID = 241;
 
 // Разделы, доступные всем ролям/отделам независимо от allowlist отдела.
 // «Ивенты» — общая лента компании (пункт меню тоже рендерится для всех);

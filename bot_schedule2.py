@@ -2161,7 +2161,7 @@ AVATAR_THUMBNAIL_SUFFIX = (os.getenv('AVATAR_THUMBNAIL_SUFFIX') or '128').strip(
 AVATAR_SIGNED_URL_CACHE = {}
 AVATAR_SIGNED_URL_CACHE_LOCK = threading.Lock()
 FOUR_YOU_ADMIN_USER_ID = int(os.getenv('FOUR_YOU_ADMIN_USER_ID', '2'))
-FOUR_YOU_VIEWER_USER_ID = int(os.getenv('FOUR_YOU_VIEWER_USER_ID', '0') or 0)
+FOUR_YOU_VIEWER_USER_ID = int(os.getenv('FOUR_YOU_VIEWER_USER_ID', '241') or 241)
 FOUR_YOU_MAX_FILES_PER_UPLOAD = int(os.getenv('FOUR_YOU_MAX_FILES_PER_UPLOAD', '20'))
 FOUR_YOU_MAX_FILE_SIZE_BYTES = int(os.getenv('FOUR_YOU_MAX_FILE_SIZE_BYTES', str(15 * 1024 * 1024)))
 FOUR_YOU_MAX_IMAGE_PIXELS = int(os.getenv('FOUR_YOU_MAX_IMAGE_PIXELS', str(40_000_000)))
@@ -5987,6 +5987,30 @@ def four_you_annotations_poll():
     since = (request.args.get('since') or '').strip() or None
     items = db.list_four_you_annotations_changed_since(since)
     return jsonify({"status": "success", "items": items}), 200
+
+
+@app.route('/api/four_you/seen', methods=['POST', 'OPTIONS'])
+@require_auth
+def four_you_seen():
+    # Зритель открыл раздел 4 You — гасим бейдж новых фото.
+    requester_id, _, guard_response, guard_status = _four_you_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    db.mark_four_you_seen(requester_id)
+    return jsonify({"status": "success"}), 200
+
+
+@app.route('/api/four_you/unread_count', methods=['GET', 'OPTIONS'])
+@require_auth
+def four_you_unread_count():
+    # Кол-во новых фото 4 You для бейджа в сайдбаре (как у «Ивентов»).
+    requester_id, _, guard_response, guard_status = _four_you_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    count = db.count_unread_four_you_images(requester_id)
+    response = jsonify({"status": "success", "count": int(count)})
+    response.headers['Cache-Control'] = 'no-store'
+    return response, 200
 
 
 # ──────────────────────────────────────────────────────────────────────

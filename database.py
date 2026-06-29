@@ -1132,6 +1132,14 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_four_you_images_ann_updated
                 ON four_you_images(annotations_updated_at);
             """)
+            # Бейдж новых фото 4 You в сайдбаре: на пользователя храним «последний
+            # просмотр». Непрочитанные = фото, добавленные позже last_seen_at.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS four_you_reads (
+                    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    last_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
             # ──────────────────────────────────────────────────────────────
             # ИВЕНТЫ ("Ивенты"): общедоступная лента постов с медиа (фото/видео),
             # лайками и комментариями. Виден всем ролям. Таргетинг по отделам —
@@ -34437,6 +34445,33 @@ class Database:
                 }
                 for row in cursor.fetchall()
             ]
+
+    def mark_four_you_seen(self, user_id):
+        """Отметить, что пользователь открыл 4 You (гасит бейдж новых фото)."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO four_you_reads (user_id, last_seen_at)
+                VALUES (%s, CURRENT_TIMESTAMP)
+                ON CONFLICT (user_id)
+                DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at
+            """, (int(user_id),))
+
+    def count_unread_four_you_images(self, user_id):
+        """Кол-во фото, добавленных позже last_seen зрителя (свои загрузки не считаем)."""
+        with self._get_cursor() as cursor:
+            cursor.execute("SELECT last_seen_at FROM four_you_reads WHERE user_id = %s", (int(user_id),))
+            r = cursor.fetchone()
+            last_seen = r[0] if r else None
+            conditions = ["uploaded_by IS DISTINCT FROM %s"]
+            params = [int(user_id)]
+            if last_seen is not None:
+                conditions.append("created_at > %s")
+                params.append(last_seen)
+            cursor.execute(
+                f"SELECT COUNT(*) FROM four_you_images WHERE {' AND '.join(conditions)}",
+                tuple(params),
+            )
+            return int(cursor.fetchone()[0] or 0)
 
     def set_four_you_annotations(self, image_id: str, data: dict):
         """Сохранить JSONB-разметку фото. Возвращает (annotations, annotations_updated_at) или None."""

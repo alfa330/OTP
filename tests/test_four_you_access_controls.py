@@ -15,9 +15,9 @@ class FourYouAccessControlTests(unittest.TestCase):
         cls.lenta_source = (ROOT / "src" / "components" / "four_you" / "lenta.jsx").read_text(encoding="utf-8-sig")
         cls.lenta_css = (ROOT / "src" / "components" / "four_you" / "lenta.css").read_text(encoding="utf-8-sig")
 
-    def test_frontend_access_is_bound_to_admin_user_only_by_default(self):
+    def test_frontend_access_is_bound_to_the_two_user_ids(self):
         self.assertIn("const FOUR_YOU_ADMIN_USER_ID = 2;", self.app_source)
-        self.assertIn("const FOUR_YOU_VIEWER_USER_ID = 0;", self.app_source)
+        self.assertIn("const FOUR_YOU_VIEWER_USER_ID = 241;", self.app_source)
         self.assertIn("Number(userLike?.id) === FOUR_YOU_ADMIN_USER_ID", self.app_source)
         self.assertIn("FOUR_YOU_VIEWER_USER_ID > 0 && Number(userLike?.id) === FOUR_YOU_VIEWER_USER_ID", self.app_source)
         self.assertIn("normalizeRole(userLike?.role) === 'super_admin'", self.app_source)
@@ -26,14 +26,14 @@ class FourYouAccessControlTests(unittest.TestCase):
 
     def test_backend_access_is_bound_to_id_and_admin_role(self):
         self.assertIn("FOUR_YOU_ADMIN_USER_ID = int(os.getenv('FOUR_YOU_ADMIN_USER_ID', '2'))", self.api_source)
-        self.assertIn("FOUR_YOU_VIEWER_USER_ID = int(os.getenv('FOUR_YOU_VIEWER_USER_ID', '0') or 0)", self.api_source)
+        self.assertIn("FOUR_YOU_VIEWER_USER_ID = int(os.getenv('FOUR_YOU_VIEWER_USER_ID', '241') or 241)", self.api_source)
         self.assertIn("return FOUR_YOU_VIEWER_USER_ID if FOUR_YOU_VIEWER_USER_ID > 0 else None", self.api_source)
         self.assertIn("requester_role == 'super_admin' and requester_id == FOUR_YOU_ADMIN_USER_ID", self.api_source)
         self.assertIn("requester_id == int(viewer_user_id)", self.api_source)
         self.assertNotIn("тукеев", self.api_source.lower())
 
     def test_viewer_bypasses_only_the_department_guard_for_four_you(self):
-        self.assertIn("const FOUR_YOU_VIEWER_USER_ID = 0;", self.department_views_source)
+        self.assertIn("const FOUR_YOU_VIEWER_USER_ID = 241;", self.department_views_source)
         self.assertIn(
             "if (viewKey === 'four_you' && FOUR_YOU_VIEWER_USER_ID > 0 && Number(user?.id) === FOUR_YOU_VIEWER_USER_ID) return true;",
             self.department_views_source,
@@ -137,6 +137,23 @@ class FourYouAccessControlTests(unittest.TestCase):
         self.assertIn("loadedRef.current[image.id] = true", self.lenta_source)
         self.assertIn("loopRef.current = images.length >= 2 * cullRadius", self.lenta_source)  # зацикливание
         self.assertIn("fy-bg-hearts", self.lenta_css)               # анимированный фон «сердечки»
+
+    def test_new_photo_sidebar_badge_wiring(self):
+        # Бейдж новых фото 4 You (как у «Ивентов»): last-seen таблица + методы +
+        # роуты seen/unread_count + фронтовое состояние и сброс при открытии.
+        self.assertIn("CREATE TABLE IF NOT EXISTS four_you_reads", self.db_source)
+        self.assertIn("def mark_four_you_seen", self.db_source)
+        self.assertIn("def count_unread_four_you_images", self.db_source)
+        self.assertIn("@app.route('/api/four_you/seen', methods=['POST', 'OPTIONS'])", self.api_source)
+        self.assertIn("@app.route('/api/four_you/unread_count', methods=['GET', 'OPTIONS'])", self.api_source)
+        self.assertIn("fourYouUnreadCount", self.app_source)
+        self.assertIn("/api/four_you/unread_count", self.app_source)
+        # Открытие раздела гасит счётчик и серверный seen.
+        self.assertIn("if (view === 'four_you') setFourYouUnreadCount(0);", self.app_source)
+        self.assertIn("/api/four_you/seen", self.lenta_source)
+        # Комментарии видны на карточке и без её выбора (не только при activeIndex).
+        self.assertNotIn("activeIndex === index && image.annotations?.comments?.length > 0", self.lenta_source)
+        self.assertIn("{!selectMode && image.annotations?.comments?.length > 0 && (", self.lenta_source)
 
 
 if __name__ == "__main__":
