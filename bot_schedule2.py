@@ -1758,12 +1758,33 @@ def _load_target_user_with_scope(
     return target_user, None
 
 
+# Тренеру раздел «Графики работы» открыт только на просмотр и только по двум
+# отделам — СЗоВ и Отдел продаж (ОП). Сам доступ выдаётся в
+# _resolve_work_schedule_viewer, а состав видимых операторов ограничивается
+# этими отделами в _filter_operators_for_requester_scope.
+TRAINER_WORK_SCHEDULE_DEPARTMENT_CODES = ('szov', 'op')
+
+
+def _trainer_work_schedule_member_ids():
+    """Множество id сотрудников отделов, доступных тренеру в «Графиках работы»."""
+    allowed_codes = set(TRAINER_WORK_SCHEDULE_DEPARTMENT_CODES)
+    member_ids = set()
+    for dept in (db.get_departments() or []):
+        if str(dept.get('code') or '').strip().lower() in allowed_codes:
+            member_ids |= db.get_department_member_ids(dept.get('id'))
+    return member_ids
+
+
 def _filter_operators_for_requester_scope(requester, requester_id, operators):
     requester_role = _normalize_user_role(requester[3])
     items = list(operators or [])
-    # Видят всех: супер-админ, админы, тренер
-    if _is_global_admin_requester(requester_role, requester_id) or requester_role == 'trainer':
+    # Видят всех: супер-админ, админы
+    if _is_global_admin_requester(requester_role, requester_id):
         return items
+    # Тренер — только просмотр и только операторы отделов СЗоВ и ОП.
+    if requester_role == 'trainer':
+        member_ids = _trainer_work_schedule_member_ids()
+        return [it for it in items if _operator_item_id(it) in member_ids]
     # Супервайзер / глава отдела — только операторы своего отдела
     if _is_supervisor_role(requester_role) or _headed_department_id(requester_id) is not None:
         scope = _department_scope_id_for_requester(requester_id)
@@ -1785,6 +1806,28 @@ def _resolve_management_requester():
     ):
         return None, None, ("Forbidden", 403)
     return requester_id, requester, None
+
+
+def _resolve_work_schedule_viewer():
+    """Кто может ПРОСМАТРИВАТЬ графики работы.
+
+    Помимо управленцев (админы / супервайзеры / главы отделов, которым доступно
+    и редактирование) сюда входит роль «тренер» — но строго в режиме чтения и
+    только по отделам СЗоВ и ОП (скоуп задаётся в
+    _filter_operators_for_requester_scope). Мутационные эндпоинты графиков
+    по-прежнему идут через _resolve_management_requester и тренеру недоступны.
+    """
+    requester_id, requester, auth_error = _get_authenticated_requester()
+    if auth_error:
+        return None, None, auth_error
+    if (
+        _is_admin_role(requester[3])
+        or _is_supervisor_role(requester[3])
+        or _headed_department_id(requester_id) is not None
+        or _normalize_user_role(requester[3]) == 'trainer'
+    ):
+        return requester_id, requester, None
+    return None, None, ("Forbidden", 403)
 
 
 def _resolve_scoped_operator_for_requester(requester, requester_id, operator_id):
@@ -23707,11 +23750,13 @@ def get_operators_with_schedules():
       - include_offline_activities (optional: 1/true/yes/on, default: true)
     """
     try:
-        user_id, user_data, auth_error = _resolve_management_requester()
+        # Тренер допускается сюда в режиме просмотра (только отделы СЗоВ и ОП);
+        # запись в график идёт через _resolve_management_requester и ему закрыта.
+        user_id, user_data, auth_error = _resolve_work_schedule_viewer()
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
-        
+
         start_date = (request.args.get('start_date') or '').strip()
         end_date = (request.args.get('end_date') or '').strip()
 
