@@ -20377,6 +20377,36 @@ def _status_import_csv_text_is_tez(csv_text):
     return False
 
 
+def _tez_status_sync_importer(csv_text):
+    """Колбэк для ежедневной авто-синхронизации статусов TEZ из Binotel:
+    парсит CSV (формат TEZ) и сохраняет события/сегменты в БД тем же путём, что
+    и ручная загрузка. Чат-менеджеры из матчинга исключены (как в ручном импорте)."""
+    operator_lookup = _status_import_build_operator_lookup(exclude_chat_managers=True)
+    parsed = _status_import_parse_tez_csv(
+        csv_text,
+        operator_lookup,
+        max_source_rows=STATUS_IMPORT_MAX_SOURCE_ROWS,
+        invalid_rows_preview_limit=STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT,
+    )
+    if not parsed.get('events'):
+        return {
+            "message": "Нет валидных событий",
+            "matched_events": 0,
+            "invalid_rows_count": int(parsed.get('invalid_rows_count') or 0),
+        }
+    return db.save_operator_status_import(
+        events=parsed.get('events') or [],
+        segments=parsed.get('segments') or [],
+        imported_by=None,
+        summary={
+            'source_rows': int(parsed.get('source_rows') or 0),
+            'valid_events': int(parsed.get('valid_events') or 0),
+            'invalid_rows_count': int(parsed.get('invalid_rows_count') or 0),
+            'meta': {'api': 'tez_status_sync', 'source': 'binotel'},
+        },
+    )
+
+
 def _chat_metrics_parse_date(value, default_date=None):
     text = str(value or '').strip()
     if not text and default_date:
@@ -36691,6 +36721,20 @@ if __name__ == '__main__':
         except Exception as e:
             logging.exception(f"Error running monthly_auto_fill_norm: {e}")
 
+    async def tez_status_sync_job():
+        # Ежедневная авто-выгрузка статусов операторов TEZ из Binotel → импорт в БД.
+        # Блокирующий requests-вызов уводим в пул, чтобы не держать event loop.
+        try:
+            import tez_status_sync
+            loop = asyncio.get_event_loop()
+            summary = await loop.run_in_executor(
+                executor_pool,
+                lambda: tez_status_sync.run_sync(_tez_status_sync_importer, logger=logging.getLogger('tez_status_sync')),
+            )
+            logging.info(f"tez_status_sync result: {summary}")
+        except Exception as e:
+            logging.exception(f"Error running tez_status_sync_job: {e}")
+
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         generate_weekly_report, 
@@ -36728,6 +36772,17 @@ if __name__ == '__main__':
         run_recruiting_resumes_job_async,
         CronTrigger(hour=0, minute=10, timezone=ZoneInfo('Asia/Almaty')),
         id='recruiting_parser_daily',
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # Авто-выгрузка статусов TEZ из Binotel ежедневно в 01:00 (Asia/Almaty).
+    # Без BINOTEL_LOGIN/PASSWORD job просто no-op (см. tez_status_sync.run_sync).
+    scheduler.add_job(
+        tez_status_sync_job,
+        CronTrigger(hour=1, minute=0, timezone=ZoneInfo('Asia/Almaty')),
+        id='tez_status_sync_daily',
         misfire_grace_time=3600,
         max_instances=1,
         coalesce=True
