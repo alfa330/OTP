@@ -725,6 +725,294 @@ const RATE_SELF_OPTIONS = [
     { value: 0.5, label: '0.5', hint: 'Половина ставки' },
 ];
 
+// ─── Кастомный пикер периода (две недели/месяца, в стиле сайта) ───
+// Используется в «Низких оценках»: кнопка-триггер + модалка с двумя календарями,
+// пресетами и выбором границ периода. Полностью самодостаточный (без внешних хелперов).
+const RANGE_PICKER_MONTHS_RU = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
+const RANGE_PICKER_WEEKDAYS_RU = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+const rangePickerPad = (n) => String(n).padStart(2, '0');
+const rangePickerToKey = (d) => `${d.getFullYear()}-${rangePickerPad(d.getMonth() + 1)}-${rangePickerPad(d.getDate())}`;
+const rangePickerParseKey = (key) => {
+    const [y, m, d] = String(key || '').split('-').map(Number);
+    if (!y || !m || !d) return null;
+    const date = new Date(y, m - 1, d);
+    return Number.isNaN(date.getTime()) ? null : date;
+};
+const rangePickerAddDays = (date, n) => { const r = new Date(date); r.setDate(r.getDate() + n); return r; };
+const rangePickerWeekStart = (date) => { const day = date.getDay() || 7; const s = new Date(date); s.setDate(date.getDate() - (day - 1)); s.setHours(0, 0, 0, 0); return s; };
+const rangePickerFormatRu = (key) => {
+    const d = rangePickerParseKey(key);
+    if (!d) return '—';
+    return `${rangePickerPad(d.getDate())}.${rangePickerPad(d.getMonth() + 1)}.${d.getFullYear()}`;
+};
+const rangePickerSpanDays = (start, end) => {
+    const s = rangePickerParseKey(start);
+    const e = rangePickerParseKey(end);
+    if (!s || !e) return 0;
+    return Math.round((e - s) / 86400000) + 1;
+};
+
+const DateRangePicker = ({ value, onChange, disabled = false, buttonClassName = '', align = 'left' }) => {
+    const todayKey = rangePickerToKey(new Date());
+    const safeStart = value?.start && rangePickerParseKey(value.start) ? value.start : todayKey;
+    const safeEnd = value?.end && rangePickerParseKey(value.end) ? value.end : safeStart;
+
+    const [open, setOpen] = useState(false);
+    const [draftStart, setDraftStart] = useState(safeStart);
+    const [draftEnd, setDraftEnd] = useState(safeEnd);
+    const [activeEdge, setActiveEdge] = useState('start');
+    const [calMonth, setCalMonth] = useState(() => {
+        const base = rangePickerParseKey(safeStart) || new Date();
+        return new Date(base.getFullYear(), base.getMonth(), 1);
+    });
+
+    useEffect(() => {
+        if (!open) return;
+        const s = value?.start && rangePickerParseKey(value.start) ? value.start : todayKey;
+        const e = value?.end && rangePickerParseKey(value.end) ? value.end : s;
+        setDraftStart(s);
+        setDraftEnd(e);
+        setActiveEdge('start');
+        const base = rangePickerParseKey(s) || new Date();
+        setCalMonth(new Date(base.getFullYear(), base.getMonth(), 1));
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [open]);
+
+    const selectDay = (key) => {
+        if (activeEdge === 'start') {
+            const nextStart = key;
+            const nextEnd = key > draftEnd ? key : draftEnd;
+            setDraftStart(nextStart);
+            setDraftEnd(nextEnd);
+            setActiveEdge('end');
+            return;
+        }
+        if (key < draftStart) {
+            setDraftStart(key);
+            setDraftEnd(draftStart);
+        } else {
+            setDraftEnd(key);
+        }
+        setActiveEdge('start');
+    };
+
+    const applyPreset = (preset) => {
+        const now = new Date();
+        if (preset === 'thisMonth') {
+            const s = new Date(now.getFullYear(), now.getMonth(), 1);
+            const e = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+            setDraftStart(rangePickerToKey(s)); setDraftEnd(rangePickerToKey(e));
+        } else if (preset === 'prevMonth') {
+            const s = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+            const e = new Date(now.getFullYear(), now.getMonth(), 0);
+            setDraftStart(rangePickerToKey(s)); setDraftEnd(rangePickerToKey(e));
+            setCalMonth(new Date(s.getFullYear(), s.getMonth(), 1));
+        } else if (preset === 'last7') {
+            setDraftStart(rangePickerToKey(rangePickerAddDays(now, -6)));
+            setDraftEnd(rangePickerToKey(now));
+        } else if (preset === 'last30') {
+            setDraftStart(rangePickerToKey(rangePickerAddDays(now, -29)));
+            setDraftEnd(rangePickerToKey(now));
+        }
+        setActiveEdge('start');
+    };
+
+    const apply = () => {
+        const start = draftStart <= draftEnd ? draftStart : draftEnd;
+        const end = draftStart <= draftEnd ? draftEnd : draftStart;
+        onChange?.({ start, end });
+        setOpen(false);
+    };
+
+    const calMonths = [
+        new Date(calMonth.getFullYear(), calMonth.getMonth(), 1),
+        new Date(calMonth.getFullYear(), calMonth.getMonth() + 1, 1)
+    ];
+    const buildCells = (monthDate) => {
+        const monthStart = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1);
+        const gridStart = rangePickerWeekStart(monthStart);
+        return Array.from({ length: 42 }).map((_, idx) => {
+            const date = rangePickerAddDays(gridStart, idx);
+            const key = rangePickerToKey(date);
+            return {
+                date, key,
+                inMonth: date.getMonth() === monthStart.getMonth(),
+                isStart: key === draftStart,
+                isEnd: key === draftEnd,
+                inRange: key > draftStart && key < draftEnd,
+                isToday: key === todayKey,
+            };
+        });
+    };
+    const spanDays = rangePickerSpanDays(
+        draftStart <= draftEnd ? draftStart : draftEnd,
+        draftStart <= draftEnd ? draftEnd : draftStart
+    );
+
+    const presets = [
+        { key: 'thisMonth', label: 'Этот месяц' },
+        { key: 'prevMonth', label: 'Прошлый' },
+        { key: 'last7', label: '7 дней' },
+        { key: 'last30', label: '30 дней' },
+    ];
+
+    return (
+        <>
+            <button
+                type="button"
+                onClick={() => !disabled && setOpen(true)}
+                disabled={disabled}
+                className={buttonClassName || 'inline-flex h-9 items-center gap-2 rounded-full bg-white px-3.5 text-xs font-semibold text-slate-700 ring-1 ring-slate-200 transition hover:bg-slate-50 disabled:cursor-wait disabled:opacity-50'}
+            >
+                <FaIcon className="fas fa-calendar-alt text-slate-400" aria-hidden="true" />
+                <span className="truncate">{rangePickerFormatRu(safeStart)} — {rangePickerFormatRu(safeEnd)}</span>
+                <FaIcon className="fas fa-chevron-down text-[10px] text-slate-400" aria-hidden="true" />
+            </button>
+
+            {open && (
+                <div
+                    className="fixed inset-0 z-[150] flex items-center justify-center bg-slate-950/40 p-3 backdrop-blur-sm"
+                    onClick={() => setOpen(false)}
+                >
+                    <div
+                        className="w-[min(94vw,720px)] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="flex items-start justify-between gap-4 border-b border-slate-200 bg-slate-50 px-5 py-4">
+                            <div className="min-w-0">
+                                <h3 className="text-base font-bold text-slate-900">Выберите период</h3>
+                                <div className="mt-1 text-sm text-slate-500">{rangePickerFormatRu(draftStart)} — {rangePickerFormatRu(draftEnd)} · {spanDays} дн.</div>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setOpen(false)}
+                                className="flex h-9 w-9 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-500 shadow-sm transition hover:bg-slate-100 hover:text-slate-800"
+                                aria-label="Закрыть"
+                            >
+                                <FaIcon className="fas fa-times text-xs" aria-hidden="true" />
+                            </button>
+                        </div>
+
+                        <div className="space-y-4 px-5 py-4">
+                            <div className="grid grid-cols-2 gap-1 rounded-xl border border-slate-200 bg-slate-100 p-1 sm:grid-cols-4">
+                                {presets.map(item => (
+                                    <button
+                                        key={`range-preset-${item.key}`}
+                                        type="button"
+                                        onClick={() => applyPreset(item.key)}
+                                        className="h-9 rounded-lg text-xs font-semibold text-slate-600 transition hover:bg-white hover:text-slate-950"
+                                    >
+                                        {item.label}
+                                    </button>
+                                ))}
+                            </div>
+
+                            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                {[
+                                    { key: 'start', title: 'Начало', value: draftStart },
+                                    { key: 'end', title: 'Конец', value: draftEnd }
+                                ].map(item => {
+                                    const isActive = activeEdge === item.key;
+                                    return (
+                                        <button
+                                            key={`range-edge-${item.key}`}
+                                            type="button"
+                                            onClick={() => setActiveEdge(item.key)}
+                                            className={`rounded-xl border px-3 py-2 text-left transition ${isActive ? 'border-slate-400 bg-slate-50 ring-2 ring-slate-200' : 'border-slate-200 bg-white hover:bg-slate-50'}`}
+                                        >
+                                            <span className="block text-[11px] font-semibold uppercase tracking-wide text-slate-400">{item.title}</span>
+                                            <span className="mt-1 block text-sm font-semibold text-slate-900">{rangePickerFormatRu(item.value)}</span>
+                                        </button>
+                                    );
+                                })}
+                            </div>
+
+                            <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                                <div className="flex items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 px-3 py-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => setCalMonth(prev => new Date(prev.getFullYear(), prev.getMonth() - 1, 1))}
+                                        className="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 transition hover:bg-slate-100"
+                                        aria-label="Предыдущий месяц"
+                                    >
+                                        <FaIcon className="fas fa-angle-left" aria-hidden="true" />
+                                    </button>
+                                    <div className="text-center text-[11px] text-slate-500">
+                                        Активно: {activeEdge === 'start' ? 'начало периода' : 'конец периода'}
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={() => setCalMonth(prev => new Date(prev.getFullYear(), prev.getMonth() + 1, 1))}
+                                        className="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 transition hover:bg-slate-100"
+                                        aria-label="Следующий месяц"
+                                    >
+                                        <FaIcon className="fas fa-angle-right" aria-hidden="true" />
+                                    </button>
+                                </div>
+                                <div className="grid grid-cols-1 gap-4 p-3 md:grid-cols-2">
+                                    {calMonths.map(monthDate => (
+                                        <div key={`range-month-${monthDate.getFullYear()}-${monthDate.getMonth()}`}>
+                                            <div className="mb-2 text-sm font-semibold text-slate-800">
+                                                {RANGE_PICKER_MONTHS_RU[monthDate.getMonth()]} {monthDate.getFullYear()}
+                                            </div>
+                                            <div className="grid grid-cols-7 gap-1 text-center">
+                                                {RANGE_PICKER_WEEKDAYS_RU.map(label => (
+                                                    <div key={`range-wd-${monthDate.getMonth()}-${label}`} className="flex h-6 items-center justify-center text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                                                        {label}
+                                                    </div>
+                                                ))}
+                                                {buildCells(monthDate).map(cell => {
+                                                    const isEndpoint = cell.isStart || cell.isEnd;
+                                                    const cls = [
+                                                        'relative flex h-9 items-center justify-center rounded-lg text-sm font-semibold transition',
+                                                        cell.inMonth ? 'text-slate-700 hover:bg-slate-100' : 'text-slate-300 hover:bg-slate-50',
+                                                        cell.inRange ? 'bg-slate-100 text-slate-800' : '',
+                                                        isEndpoint ? 'bg-slate-900 text-white hover:bg-slate-800 shadow-sm' : '',
+                                                        cell.isToday && !isEndpoint ? 'ring-1 ring-slate-300' : ''
+                                                    ].filter(Boolean).join(' ');
+                                                    return (
+                                                        <button
+                                                            key={`range-day-${cell.key}`}
+                                                            type="button"
+                                                            onClick={() => selectDay(cell.key)}
+                                                            className={cls}
+                                                            title={rangePickerFormatRu(cell.key)}
+                                                        >
+                                                            {cell.date.getDate()}
+                                                        </button>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="flex items-center justify-end gap-2 border-t border-slate-200 bg-slate-50 px-5 py-4">
+                            <button
+                                type="button"
+                                onClick={() => setOpen(false)}
+                                className="h-10 rounded-lg border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+                            >
+                                Отмена
+                            </button>
+                            <button
+                                type="button"
+                                onClick={apply}
+                                className="inline-flex h-10 items-center gap-2 rounded-lg bg-slate-900 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800"
+                            >
+                                <FaIcon className="fas fa-check text-xs" aria-hidden="true" />
+                                Применить
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </>
+    );
+};
+
 // Баннер + аккуратная (iOS-style) модалка: оператор сам меняет свою ставку 1-го числа.
 // Открывается кнопкой баннера или событием 'open-self-rate-modal' (клик по ставке-маркеру).
 const RateSelfChangeCard = ({ user, currentRate, showToast, onChanged }) => {
@@ -2151,6 +2439,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const [selectedLowRatingReviewId, setSelectedLowRatingReviewId] = useState('');
         const [lowRatingReviewDraft, setLowRatingReviewDraft] = useState({ status: '', comment: '' });
         const [lowRatingFinalDraft, setLowRatingFinalDraft] = useState({ status: '', comment: '' });
+        // Кастомный период просмотра (date-range) + поиск среди всех оценок периода.
+        const monthBounds = (monthKey) => {
+            const [y, m] = String(monthKey || '').split('-').map(Number);
+            if (!y || !m) {
+                const d = new Date();
+                const yy = d.getFullYear(); const mm = d.getMonth() + 1;
+                const last = new Date(yy, mm, 0).getDate();
+                return { start: `${yy}-${String(mm).padStart(2, '0')}-01`, end: `${yy}-${String(mm).padStart(2, '0')}-${String(last).padStart(2, '0')}` };
+            }
+            const last = new Date(y, m, 0).getDate();
+            return { start: `${y}-${String(m).padStart(2, '0')}-01`, end: `${y}-${String(m).padStart(2, '0')}-${String(last).padStart(2, '0')}` };
+        };
+        const [lowRatingRange, setLowRatingRange] = useState(() => monthBounds(month));
+        const [lowRatingSearchInput, setLowRatingSearchInput] = useState('');
+        const [lowRatingSearch, setLowRatingSearch] = useState('');
+        // Открытая карточка держится отдельно от списка — чтобы можно было
+        // редактировать решение даже после того, как строка ушла из текущего фильтра.
+        const [lowRatingDetail, setLowRatingDetail] = useState(null);
+        const lowRatingDetailIdRef = useRef('');
+        const [lowRatingExporting, setLowRatingExporting] = useState(false);
         const chatMetricsInputRef = useRef(null);
 
         const [selectedTab, setSelectedTab] = useState('work_time');
@@ -2383,8 +2691,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         const lowRatingStatusClass = (status) => {
             const key = String(status || '').trim();
-            if (key === 'valid') return 'bg-emerald-50 text-emerald-700 ring-emerald-200';
-            if (key === 'invalid') return 'bg-rose-50 text-rose-700 ring-rose-200';
+            // Согласовано с заказчиком: обоснованные — красные, необоснованные (исключены) — зелёные.
+            if (key === 'valid') return 'bg-rose-50 text-rose-700 ring-rose-200';
+            if (key === 'invalid') return 'bg-emerald-50 text-emerald-700 ring-emerald-200';
             return 'bg-slate-50 text-slate-500 ring-slate-200';
         };
 
@@ -2396,8 +2705,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         };
 
         const lowRatingFinalClass = (row) => {
-            if (row?.final_status === 'invalid') return 'bg-rose-600 text-white ring-rose-600';
-            if (row?.final_status === 'valid') return 'bg-emerald-600 text-white ring-emerald-600';
+            if (row?.final_status === 'invalid') return 'bg-emerald-600 text-white ring-emerald-600';
+            if (row?.final_status === 'valid') return 'bg-rose-600 text-white ring-rose-600';
             if (row?.review_state === 'conflict') return 'bg-amber-50 text-amber-800 ring-amber-200';
             return 'bg-slate-50 text-slate-600 ring-slate-200';
         };
@@ -2534,14 +2843,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
         };
 
-        const fetchLowRatingReviews = async (targetFilter = lowRatingFilter, targetPage = lowRatingPagination.page || 1, targetMonth = lowRatingMonth) => {
-            if (!user?.id || !isChatModel) return;
-            const filterKey = String(targetFilter || 'attention');
-            const monthKey = normalizeMonthKey(targetMonth);
+        const buildLowRatingQuery = (overrides = {}) => {
+            const filterKey = String(overrides.filter ?? lowRatingFilter ?? 'attention');
+            const range = overrides.range || lowRatingRange || monthBounds(lowRatingMonth);
+            const searchValue = overrides.search !== undefined ? overrides.search : lowRatingSearch;
             const params = new URLSearchParams();
-            params.append('month', monthKey);
+            if (range?.start) params.append('start', range.start);
+            if (range?.end) params.append('end', range.end);
             params.append('status', filterKey);
-            params.append('page', String(Math.max(1, Number(targetPage || 1))));
+            const trimmedSearch = String(searchValue || '').trim();
+            if (trimmedSearch) params.append('search', trimmedSearch);
+            return params;
+        };
+
+        const fetchLowRatingReviews = async (overrides = {}) => {
+            if (!user?.id || !isChatModel) return;
+            const targetPage = Math.max(1, Number(overrides.page ?? lowRatingPagination.page ?? 1));
+            const params = buildLowRatingQuery(overrides);
+            params.append('page', String(targetPage));
             params.append('per_page', String(Number(lowRatingPagination.per_page || 10)));
             setLowRatingLoading(true);
             setLowRatingError('');
@@ -2558,11 +2877,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setLowRatingReviews(rows);
                 setLowRatingSummary(payload?.summary || emptyLowRatingSummary());
                 setLowRatingPagination(payload?.pagination || { page: 1, per_page: 10, total: rows.length, total_pages: 1 });
-                setSelectedLowRatingReviewId(prev => (
-                    rows.some(row => String(row?.id) === String(prev))
-                        ? prev
-                        : (rows[0]?.id ? String(rows[0].id) : '')
-                ));
+                setSelectedLowRatingReviewId(prev => {
+                    if (prev && rows.some(row => String(row?.id) === String(prev))) return prev;
+                    // Держим открытую карточку, даже если строка ушла из текущего фильтра (правка после сохранения).
+                    if (prev && String(prev) === String(lowRatingDetailIdRef.current)) return prev;
+                    return rows[0]?.id ? String(rows[0].id) : '';
+                });
             } catch (error) {
                 console.error('fetch low rating reviews error:', error);
                 const message = error?.message || 'Не удалось загрузить низкие оценки';
@@ -2613,12 +2933,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
                 if (payload?.review) {
                     patchLowRatingReviewInList(payload.review);
+                    setLowRatingDetail(payload.review);
+                    setSelectedLowRatingReviewId(String(payload.review.id));
                     setLowRatingReviewDraft({
                         status: payload.review.my_review_status || '',
                         comment: payload.review.my_review_comment || '',
                     });
                 }
-                await fetchLowRatingReviews(lowRatingFilter, lowRatingPagination.page);
+                await fetchLowRatingReviews();
                 await fetchDailyHoursAndTrainings();
                 fallbackToast('Решение по низкой оценке сохранено', 'success');
             } catch (error) {
@@ -2626,7 +2948,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const message = error?.message || 'Не удалось сохранить решение по низкой оценке';
                 setLowRatingError(message);
                 fallbackToast(message, 'error');
-                await fetchLowRatingReviews(lowRatingFilter, lowRatingPagination.page);
+                await fetchLowRatingReviews();
             } finally {
                 setLowRatingSavingKey('');
             }
@@ -2661,12 +2983,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
                 if (payload?.review) {
                     patchLowRatingReviewInList(payload.review);
+                    setLowRatingDetail(payload.review);
+                    setSelectedLowRatingReviewId(String(payload.review.id));
                     setLowRatingFinalDraft({
                         status: payload.review.final_status || '',
                         comment: payload.review.final_comment || '',
                     });
                 }
-                await fetchLowRatingReviews(lowRatingFilter, lowRatingPagination.page);
+                await fetchLowRatingReviews();
                 await fetchDailyHoursAndTrainings();
                 fallbackToast('Итоговое решение сохранено', 'success');
             } catch (error) {
@@ -2674,9 +2998,46 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const message = error?.message || 'Не удалось сохранить итоговое решение';
                 setLowRatingError(message);
                 fallbackToast(message, 'error');
-                await fetchLowRatingReviews(lowRatingFilter, lowRatingPagination.page);
+                await fetchLowRatingReviews();
             } finally {
                 setLowRatingSavingKey('');
+            }
+        };
+
+        const exportLowRatingReviews = async () => {
+            if (!user?.id || lowRatingExporting) return;
+            setLowRatingExporting(true);
+            try {
+                // Выгружаем весь период (+ поиск), без фильтра по статусу — чтобы лист сводки был полным.
+                const params = buildLowRatingQuery({ filter: 'all' });
+                const response = await fetch(`${API_BASE_URL}/api/chat_manager/low_rating_reviews/export?${params.toString()}`, {
+                    credentials: 'include',
+                    headers: withAccessTokenHeader({ 'X-User-Id': String(user.id) })
+                });
+                if (!response.ok) {
+                    let message = `HTTP ${response.status}`;
+                    try { const j = await response.json(); message = j.error || message; } catch (_) { /* ignore */ }
+                    throw new Error(message);
+                }
+                const blob = await response.blob();
+                const cd = response.headers.get('Content-Disposition') || response.headers.get('content-disposition') || '';
+                let filename = `low_ratings_${lowRatingRange.start}_${lowRatingRange.end}.xlsx`;
+                const match = cd.match(/filename\*?=(?:UTF-8'')?["']?([^;"']+)["']?/i);
+                if (match && match[1]) filename = decodeURIComponent(match[1]);
+                const urlBlob = window.URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = urlBlob;
+                link.download = filename;
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                window.URL.revokeObjectURL(urlBlob);
+                fallbackToast('Выгрузка сформирована', 'success');
+            } catch (error) {
+                console.error('export low rating reviews error:', error);
+                fallbackToast(error?.message || 'Не удалось сформировать выгрузку', 'error');
+            } finally {
+                setLowRatingExporting(false);
             }
         };
 
@@ -2805,7 +3166,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             setChatMetricsImportState({ loading: false, summary, error: '' });
             fallbackToast(payload?.message || 'Метрики чат-менеджеров загружены', 'success');
             await fetchDailyHoursAndTrainings();
-            if (showLowRatingReviews) await fetchLowRatingReviews(lowRatingFilter);
+            if (showLowRatingReviews) await fetchLowRatingReviews();
             if (onUploaded) onUploaded();
             } catch (error) {
             console.error('Error importing chat manager metrics csv:', error);
@@ -2866,13 +3227,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const syncedMonth = cleanStartDate.slice(0, 7);
                 if (syncedMonth && showLowRatingReviews) {
                     setLowRatingMonth(syncedMonth);
+                    setLowRatingRange(monthBounds(syncedMonth));
                     setLowRatingPagination(prev => ({ ...prev, page: 1 }));
                 }
                 if (syncedMonth && syncedMonth !== normalizeMonthKey(month)) {
                     setMonth(syncedMonth);
                 } else {
                     await fetchDailyHoursAndTrainings();
-                    if (showLowRatingReviews) await fetchLowRatingReviews(lowRatingFilter);
+                    if (showLowRatingReviews) await fetchLowRatingReviews();
                 }
                 if (onUploaded) onUploaded();
             } catch (error) {
@@ -4073,13 +4435,39 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return;
             }
             if (!showLowRatingReviews || !user?.id) return;
-            fetchLowRatingReviews(lowRatingFilter, lowRatingPagination.page);
+            fetchLowRatingReviews();
             // eslint-disable-next-line react-hooks/exhaustive-deps
-        }, [isChatModel, showLowRatingReviews, lowRatingFilter, lowRatingPagination.page, lowRatingMonth, user?.id]);
+        }, [isChatModel, showLowRatingReviews, lowRatingFilter, lowRatingPagination.page, lowRatingRange.start, lowRatingRange.end, lowRatingSearch, user?.id]);
 
-        const selectedLowRatingReview = useMemo(() => (
-            (lowRatingReviews || []).find(row => String(row?.id) === String(selectedLowRatingReviewId)) || null
-        ), [lowRatingReviews, selectedLowRatingReviewId]);
+        // Debounce ввода поиска + сброс страницы; при активном поиске показываем все статусы.
+        useEffect(() => {
+            const handle = setTimeout(() => {
+                const next = String(lowRatingSearchInput || '').trim();
+                setLowRatingSearch(prev => (prev === next ? prev : next));
+                if (next) setLowRatingFilter(prev => (prev === 'all' ? prev : 'all'));
+                setLowRatingPagination(prev => (Number(prev.page || 1) === 1 ? prev : { ...prev, page: 1 }));
+            }, 320);
+            return () => clearTimeout(handle);
+            // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, [lowRatingSearchInput]);
+
+        const selectedLowRatingReview = useMemo(() => {
+            const fromList = (lowRatingReviews || []).find(row => String(row?.id) === String(selectedLowRatingReviewId)) || null;
+            if (fromList) return fromList;
+            if (lowRatingDetail && String(lowRatingDetail.id) === String(selectedLowRatingReviewId)) return lowRatingDetail;
+            return null;
+        }, [lowRatingReviews, selectedLowRatingReviewId, lowRatingDetail]);
+
+        // Открытая строка из списка → запоминаем её как «деталь», чтобы карточка
+        // не пропадала, когда строка уходит из текущего фильтра после сохранения.
+        useEffect(() => {
+            const fromList = (lowRatingReviews || []).find(row => String(row?.id) === String(selectedLowRatingReviewId));
+            if (fromList) setLowRatingDetail(fromList);
+        }, [lowRatingReviews, selectedLowRatingReviewId]);
+
+        useEffect(() => {
+            lowRatingDetailIdRef.current = lowRatingDetail?.id ? String(lowRatingDetail.id) : '';
+        }, [lowRatingDetail]);
 
         useEffect(() => {
             if (!selectedLowRatingReview) {
@@ -5641,7 +6029,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         type="button"
                                                         onClick={(e) => {
                                                             e.stopPropagation();
-                                                            setLowRatingMonth(normalizeMonthKey(month));
+                                                            const nextMonth = normalizeMonthKey(month);
+                                                            setLowRatingMonth(nextMonth);
+                                                            setLowRatingRange(monthBounds(nextMonth));
+                                                            setLowRatingSearchInput('');
+                                                            setLowRatingSearch('');
                                                             setLowRatingPagination(prev => ({ ...prev, page: 1 }));
                                                             setShowLowRatingReviews(prev => !prev);
                                                             setPinnedGroups([]);
@@ -5941,7 +6333,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <div className="flex items-center gap-2">
                                 <button
                                     type="button"
-                                    onClick={() => fetchLowRatingReviews(lowRatingFilter, lowRatingPagination.page)}
+                                    onClick={exportLowRatingReviews}
+                                    disabled={lowRatingExporting || lowRatingLoading}
+                                    className="inline-flex h-9 items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3.5 text-xs font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100 disabled:cursor-wait disabled:opacity-60"
+                                    title="Выгрузить в Excel за выбранный период"
+                                >
+                                    <FaIcon className={`fas ${lowRatingExporting ? 'fa-spinner fa-spin' : 'fa-file-excel'}`} aria-hidden="true" />
+                                    Excel
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => fetchLowRatingReviews()}
                                     disabled={lowRatingLoading}
                                     className="inline-flex h-9 items-center gap-2 rounded-full border border-slate-200 bg-white px-3.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-wait disabled:text-slate-400"
                                 >
@@ -5962,36 +6364,35 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         <div className="border-b border-slate-200/70 bg-slate-50/80 px-5 py-3 sm:px-6">
                             <div className="flex flex-wrap items-center justify-between gap-3">
                                 <div className="flex min-w-0 flex-wrap items-center gap-2">
-                                    <button
-                                        type="button"
-                                        onClick={() => shiftLowRatingMonth(-1)}
+                                    <DateRangePicker
+                                        value={lowRatingRange}
                                         disabled={lowRatingLoading}
-                                        className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-slate-600 ring-1 ring-slate-200 transition hover:bg-slate-100 disabled:cursor-wait disabled:opacity-50"
-                                        aria-label="Предыдущий месяц"
-                                    >
-                                        <FaIcon className="fas fa-chevron-left" aria-hidden="true" />
-                                    </button>
-                                    <label className="relative flex h-9 min-w-[180px] items-center gap-2 rounded-full bg-white px-3.5 text-xs font-semibold text-slate-700 ring-1 ring-slate-200">
-                                        <FaIcon className="fas fa-calendar-alt text-slate-400" aria-hidden="true" />
-                                        <span className="min-w-0 truncate">{formatSurgeMonthLabel(lowRatingMonth)}</span>
+                                        onChange={(range) => {
+                                            setLowRatingRange(range);
+                                            setLowRatingPagination(prev => ({ ...prev, page: 1 }));
+                                        }}
+                                    />
+                                    <label className="relative flex h-9 min-w-[200px] items-center gap-2 rounded-full bg-white px-3.5 text-xs font-semibold text-slate-700 ring-1 ring-slate-200 focus-within:ring-2 focus-within:ring-slate-300">
+                                        <FaIcon className="fas fa-magnifying-glass text-slate-400" aria-hidden="true" />
                                         <input
-                                            type="month"
-                                            value={normalizeMonthKey(lowRatingMonth)}
-                                            onChange={(e) => changeLowRatingMonth(e.target.value)}
-                                            disabled={lowRatingLoading}
-                                            className="absolute inset-0 h-full w-full cursor-pointer opacity-0 disabled:cursor-wait"
-                                            aria-label="Месяц журнала низких оценок"
+                                            type="text"
+                                            value={lowRatingSearchInput}
+                                            onChange={(e) => setLowRatingSearchInput(e.target.value)}
+                                            placeholder="Поиск: оператор, телефон…"
+                                            className="min-w-0 flex-1 bg-transparent text-xs font-medium text-slate-700 outline-none placeholder:text-slate-400"
+                                            aria-label="Поиск среди оценок периода"
                                         />
+                                        {lowRatingSearchInput && (
+                                            <button
+                                                type="button"
+                                                onClick={() => setLowRatingSearchInput('')}
+                                                className="flex h-5 w-5 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+                                                aria-label="Очистить поиск"
+                                            >
+                                                <FaIcon className="fas fa-xmark text-[10px]" aria-hidden="true" />
+                                            </button>
+                                        )}
                                     </label>
-                                    <button
-                                        type="button"
-                                        onClick={() => shiftLowRatingMonth(1)}
-                                        disabled={lowRatingLoading}
-                                        className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-slate-600 ring-1 ring-slate-200 transition hover:bg-slate-100 disabled:cursor-wait disabled:opacity-50"
-                                        aria-label="Следующий месяц"
-                                    >
-                                        <FaIcon className="fas fa-chevron-right" aria-hidden="true" />
-                                    </button>
                                 </div>
                                 <div className="flex flex-wrap items-center gap-2">
                                     {LOW_RATING_FILTERS.map(filter => {
@@ -6036,7 +6437,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         <div>
                                             <div className="text-sm font-semibold text-slate-900">Журнал</div>
                                             <div className="text-xs text-slate-500">
-                                                {formatSurgeMonthLabel(lowRatingMonth)} · {Number(lowRatingPagination.total || 0)} строк
+                                                {rangePickerFormatRu(lowRatingRange.start)} — {rangePickerFormatRu(lowRatingRange.end)} · {Number(lowRatingPagination.total || 0)} строк
                                             </div>
                                         </div>
                                         {lowRatingLoading && <FaIcon className="fas fa-spinner fa-spin text-slate-400" aria-hidden="true" />}
@@ -6222,7 +6623,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <div className="mb-3 flex items-center justify-between gap-2">
                                                     <div>
                                                         <div className="text-sm font-semibold text-slate-900">Моя проверка</div>
-                                                        <div className="text-xs text-slate-500">Эти поля видит и меняет только текущий пользователь.</div>
+                                                        <div className="text-xs text-slate-500">Эти поля видит и меняет только текущий пользователь. Решение можно изменить в любой момент — даже после сохранения.</div>
                                                     </div>
                                                     {lowRatingSavingKey === `${selectedLowRatingReview.id}:review` && (
                                                         <FaIcon className="fas fa-spinner fa-spin text-slate-400" aria-hidden="true" />
@@ -6238,8 +6639,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
                                                                     active
                                                                         ? option.value === 'valid'
-                                                                            ? 'bg-emerald-600 text-white'
-                                                                            : 'bg-rose-600 text-white'
+                                                                            ? 'bg-rose-600 text-white'
+                                                                            : 'bg-emerald-600 text-white'
                                                                         : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                                                                 }`}
                                                                 onClick={() => setLowRatingReviewDraft(prev => ({ ...prev, status: option.value }))}
@@ -6263,8 +6664,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         onClick={() => saveLowRatingReview(selectedLowRatingReview)}
                                                         disabled={lowRatingSavingKey === `${selectedLowRatingReview.id}:review`}
                                                     >
-                                                        <FaIcon className={`fas ${lowRatingSavingKey === `${selectedLowRatingReview.id}:review` ? 'fa-spinner fa-spin' : 'fa-save'}`} aria-hidden="true" />
-                                                        Сохранить проверку
+                                                        <FaIcon className={`fas ${lowRatingSavingKey === `${selectedLowRatingReview.id}:review` ? 'fa-spinner fa-spin' : (selectedLowRatingReview.my_review_status ? 'fa-pen' : 'fa-save')}`} aria-hidden="true" />
+                                                        {selectedLowRatingReview.my_review_status ? 'Изменить решение' : 'Сохранить проверку'}
                                                     </button>
                                                 </div>
                                             </div>
@@ -6293,8 +6694,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
                                                                             active
                                                                                 ? option.value === 'valid'
-                                                                                    ? 'bg-emerald-600 text-white'
-                                                                                    : 'bg-rose-600 text-white'
+                                                                                    ? 'bg-rose-600 text-white'
+                                                                                    : 'bg-emerald-600 text-white'
                                                                                 : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100'
                                                                         }`}
                                                                         onClick={() => setLowRatingFinalDraft(prev => ({ ...prev, status: option.value }))}

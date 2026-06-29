@@ -25743,6 +25743,9 @@ def chat_manager_low_rating_reviews():
         status_filter = request.args.get('status') or 'attention'
         operator_id = request.args.get('operator_id') or None
         department_id = request.args.get('department_id') or None
+        start = request.args.get('start') or request.args.get('date_from') or None
+        end = request.args.get('end') or request.args.get('date_to') or None
+        search = request.args.get('search') or request.args.get('q') or None
         page = request.args.get('page') or 1
         per_page = request.args.get('per_page') or 12
         if not _is_global_admin_requester(requester_role, requester_id):
@@ -25754,7 +25757,10 @@ def chat_manager_low_rating_reviews():
             department_id=department_id,
             operator_id=operator_id,
             status=status_filter,
-            limit=request.args.get('limit') or 2000,
+            start=start,
+            end=end,
+            search=search,
+            limit=request.args.get('limit') or 5000,
             page=page,
             per_page=per_page,
             viewer_id=requester_id,
@@ -25839,6 +25845,281 @@ def update_chat_manager_low_rating_review(review_id):
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error updating chat manager low rating review: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+def _low_rating_verdict_label(row):
+    """Возвращает (текст, категория) итогового статуса строки низкой оценки."""
+    final_status = row.get('final_status')
+    if final_status == 'valid':
+        return 'Обоснованно', 'valid'
+    if final_status == 'invalid':
+        return 'Необоснованно (исключена)', 'invalid'
+    if row.get('review_state') == 'conflict':
+        return 'Спорные', 'conflict'
+    return 'На проверке', 'pending'
+
+
+def _low_rating_status_ru(status):
+    key = str(status or '').strip().lower()
+    if key == 'valid':
+        return 'Обоснованно'
+    if key == 'invalid':
+        return 'Необоснованно'
+    return 'На проверке'
+
+
+def _low_rating_fmt_dt(value):
+    text = str(value or '').strip()
+    if not text:
+        return ''
+    return text.replace('T', ' ')[:16]
+
+
+def _build_low_rating_reviews_workbook(rows, summary, period_start, period_end, status_filter, search):
+    """Строит .xlsx (лист с детализацией + лист сводки) и возвращает bytes."""
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
+    thin = Side(style='thin', color='E2E8F0')
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    header_fill = PatternFill('solid', fgColor='1F2937')
+    header_font = Font(bold=True, color='FFFFFF', size=11)
+    title_font = Font(bold=True, size=15, color='0F172A')
+    label_font = Font(bold=True, color='334155')
+    wrap = Alignment(wrap_text=True, vertical='top')
+    center = Alignment(horizontal='center', vertical='center')
+    # Согласовано с UI: необоснованные (исключены) — зелёные, обоснованные (учтены) — красные.
+    cat_fill = {
+        'valid': PatternFill('solid', fgColor='FEE2E2'),
+        'invalid': PatternFill('solid', fgColor='DCFCE7'),
+        'conflict': PatternFill('solid', fgColor='FEF3C7'),
+        'pending': PatternFill('solid', fgColor='F1F5F9'),
+    }
+    cat_font = {
+        'valid': Font(bold=True, color='B91C1C'),
+        'invalid': Font(bold=True, color='15803D'),
+        'conflict': Font(bold=True, color='B45309'),
+        'pending': Font(color='64748B'),
+    }
+    source_ru = {'consensus': 'Совпадение', 'manager': 'Руководитель', 'head': 'Руководитель'}
+
+    wb = Workbook()
+
+    # ── Лист 1: детализация ──────────────────────────────────────────────
+    ws = wb.active
+    ws.title = 'Низкие оценки'
+    headers = [
+        'Дата', 'Оператор', 'Отдел', 'Направление', 'Телефон', 'Таксопарк',
+        'Оценка', 'Итог', 'Источник итога', 'Проверок',
+        'Вердикты проверяющих', 'Комментарий итога', 'Комментарий клиента'
+    ]
+    for col_idx, title in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=title)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.border = border
+        cell.alignment = center if col_idx in (7, 10) else Alignment(vertical='center')
+
+    for r_idx, row in enumerate(rows, start=2):
+        verdict_text, verdict_cat = _low_rating_verdict_label(row)
+        entries = row.get('review_entries') or []
+        verdict_parts = []
+        for entry in entries:
+            piece = f"{entry.get('reviewer_name') or 'Проверяющий'}: {_low_rating_status_ru(entry.get('status'))}"
+            if entry.get('comment'):
+                piece += f" — {entry.get('comment')}"
+            verdict_parts.append(piece)
+        values = [
+            _low_rating_fmt_dt(row.get('rated_at') or row.get('day')),
+            row.get('operator_name') or '',
+            row.get('department_name') or '',
+            row.get('direction_name') or '',
+            row.get('phone_number') or row.get('phone_normalized') or '',
+            row.get('taxi_park') or '',
+            round(float(row.get('score') or 0), 2),
+            verdict_text,
+            source_ru.get(row.get('final_source'), '—'),
+            int(row.get('review_count') or 0),
+            '\n'.join(verdict_parts),
+            row.get('final_comment') or '',
+            row.get('client_comment') or row.get('rating_text') or '',
+        ]
+        for c_idx, value in enumerate(values, start=1):
+            cell = ws.cell(row=r_idx, column=c_idx, value=value)
+            cell.border = border
+            if c_idx in (11, 12, 13):
+                cell.alignment = wrap
+            elif c_idx in (7, 10):
+                cell.alignment = center
+            else:
+                cell.alignment = Alignment(vertical='top')
+            if c_idx == 8:
+                cell.fill = cat_fill.get(verdict_cat)
+                cell.font = cat_font.get(verdict_cat)
+
+    widths = [17, 24, 18, 18, 16, 18, 9, 22, 15, 10, 46, 30, 36]
+    for idx, width in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(idx)].width = width
+    ws.freeze_panes = 'A2'
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{max(1, len(rows) + 1)}"
+
+    # ── Лист 2: сводка ───────────────────────────────────────────────────
+    ws2 = wb.create_sheet('Сводка')
+    ws2.column_dimensions['A'].width = 26
+    for col in ('B', 'C', 'D', 'E', 'F', 'G', 'H', 'I'):
+        ws2.column_dimensions[col].width = 15
+    ws2['A1'] = 'Сводка по низким оценкам Chat2Desk'
+    ws2['A1'].font = title_font
+
+    excluded_sum = sum(float(r.get('score') or 0) for r in rows if r.get('final_status') == 'invalid')
+    info_rows = [
+        ('Период', f"{period_start} — {period_end}"),
+        ('Фильтр', str(status_filter or 'all')),
+        ('Поиск', str(search or '—')),
+        ('Сформировано', datetime.now().strftime('%Y-%m-%d %H:%M')),
+    ]
+    r = 3
+    for label, value in info_rows:
+        ws2.cell(row=r, column=1, value=label).font = label_font
+        ws2.cell(row=r, column=2, value=value)
+        r += 1
+
+    r += 1
+    metric_rows = [
+        ('Всего низких оценок', int(summary.get('total') or 0), None),
+        ('Обоснованные (учтены)', int(summary.get('valid') or 0), 'valid'),
+        ('Необоснованные (исключены)', int(summary.get('invalid') or 0), 'invalid'),
+        ('Спорные (ждут руководителя)', int(summary.get('conflict') or 0), 'conflict'),
+        ('На проверке', int(summary.get('pending') or 0), 'pending'),
+        ('Исключено баллов (Σ)', round(excluded_sum, 2), 'invalid'),
+    ]
+    for label, value, cat in metric_rows:
+        lcell = ws2.cell(row=r, column=1, value=label)
+        lcell.font = label_font
+        lcell.border = border
+        vcell = ws2.cell(row=r, column=2, value=value)
+        vcell.border = border
+        vcell.alignment = center
+        if cat:
+            vcell.fill = cat_fill.get(cat)
+            vcell.font = cat_font.get(cat)
+        r += 1
+
+    # Детализация по операторам
+    by_operator = {}
+    for row in rows:
+        key = row.get('operator_id') or row.get('operator_name')
+        agg = by_operator.get(key)
+        if agg is None:
+            agg = {
+                'name': row.get('operator_name') or '—',
+                'department': row.get('department_name') or '',
+                'total': 0, 'valid': 0, 'invalid': 0, 'pending': 0, 'conflict': 0,
+                'excluded': 0.0, 'score_sum': 0.0,
+            }
+            by_operator[key] = agg
+        agg['total'] += 1
+        agg['score_sum'] += float(row.get('score') or 0)
+        _, cat = _low_rating_verdict_label(row)
+        agg[cat] = agg.get(cat, 0) + 1
+        if row.get('final_status') == 'invalid':
+            agg['excluded'] += float(row.get('score') or 0)
+
+    r += 2
+    ws2.cell(row=r, column=1, value='Детализация по операторам').font = Font(bold=True, size=12, color='0F172A')
+    r += 1
+    op_headers = ['Оператор', 'Отдел', 'Всего', 'Обоснованно', 'Необоснованно', 'На проверке', 'Спорные', 'Σ исключ. балла', 'Средний балл']
+    for c_idx, title in enumerate(op_headers, start=1):
+        cell = ws2.cell(row=r, column=c_idx, value=title)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.border = border
+        cell.alignment = center if c_idx >= 3 else Alignment(vertical='center')
+    r += 1
+    for agg in sorted(by_operator.values(), key=lambda a: (-a['total'], a['name'])):
+        avg_score = round(agg['score_sum'] / agg['total'], 2) if agg['total'] else 0
+        op_values = [
+            agg['name'], agg['department'], agg['total'], agg['valid'], agg['invalid'],
+            agg['pending'], agg['conflict'], round(agg['excluded'], 2), avg_score
+        ]
+        for c_idx, value in enumerate(op_values, start=1):
+            cell = ws2.cell(row=r, column=c_idx, value=value)
+            cell.border = border
+            cell.alignment = center if c_idx >= 3 else Alignment(vertical='top')
+            if c_idx == 4 and agg['valid']:
+                cell.fill = cat_fill['valid']
+                cell.font = cat_font['valid']
+            if c_idx == 5 and agg['invalid']:
+                cell.fill = cat_fill['invalid']
+                cell.font = cat_font['invalid']
+        r += 1
+
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+
+@app.route('/api/chat_manager/low_rating_reviews/export', methods=['GET'])
+@require_api_key
+def export_chat_manager_low_rating_reviews():
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        requester_role = _normalize_user_role(requester[3])
+        headed_dept_id = _headed_department_id(requester_id)
+        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role) or headed_dept_id is not None):
+            return jsonify({"error": "Forbidden"}), 403
+
+        month = request.args.get('month') or datetime.now().strftime('%Y-%m')
+        status_filter = request.args.get('status') or 'all'
+        start = request.args.get('start') or request.args.get('date_from') or None
+        end = request.args.get('end') or request.args.get('date_to') or None
+        search = request.args.get('search') or request.args.get('q') or None
+        operator_id = request.args.get('operator_id') or None
+        department_id = request.args.get('department_id') or None
+        if not _is_global_admin_requester(requester_role, requester_id):
+            department_id = _department_scope_id_for_requester(requester_id)
+        role_can_finalize = _is_global_admin_requester(requester_role, requester_id) or headed_dept_id is not None
+
+        result = db.list_chat_manager_low_rating_reviews(
+            month=month,
+            department_id=department_id,
+            operator_id=operator_id,
+            status=status_filter,
+            start=start,
+            end=end,
+            search=search,
+            limit=20000,
+            viewer_id=requester_id,
+            can_finalize=role_can_finalize,
+            paginate=False,
+        )
+        rows = result.get('rows') or []
+        summary = result.get('summary') or {}
+        period_start = result.get('start') or ''
+        period_end = result.get('end') or ''
+
+        content = _build_low_rating_reviews_workbook(
+            rows, summary, period_start, period_end, status_filter, search
+        )
+        safe_start = (period_start or 'period').replace('-', '')
+        safe_end = (period_end or 'period').replace('-', '')
+        filename = f"low_ratings_{safe_start}_{safe_end}.xlsx"
+        return send_file(
+            BytesIO(content),
+            as_attachment=True,
+            download_name=filename,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error exporting chat manager low rating reviews: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 
