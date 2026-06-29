@@ -20133,17 +20133,20 @@ def _status_import_parse_xlsx(raw_bytes, operator_lookup, max_source_rows=None, 
 # ПОСЕГМЕНТНАЯ ВЫГРУЗКА СТАТУСОВ TEZ.
 # Формат: одна строка = готовый интервал
 #   internal number;employee name;started at;stopped at;seconds in status;status
-# Статусы: active / work in crm = работа, break in work = перерыв, inactive = офлайн.
+# Статусы: active / work in crm = работа, break in work = перерыв, inactive = офлайн (выход).
 # В отличие от событийного Chat2Desk-импорта, здесь есть явные start/stop, поэтому
 # сегменты строим напрямую (а не между событиями) — иначе терялся бы последний
 # сегмент и операторы с единственной строкой за период.
+# ВАЖНО: inactive («выход из системы») СОХРАНЯЕМ как сегмент (kind='status'),
+# чтобы офлайн-интервалы были видны на таймлайне; в рабочие часы он всё равно не
+# попадает — статус-профиль TEZ не относит 'inactive' к work/break.
 # ──────────────────────────────────────────────────────────────────────────
 TEZ_STATUS_IMPORT_MAP = {
     'active': ('active', 'work'),
     'work in crm': ('work in crm', 'work'),
     'работа в crm': ('work in crm', 'work'),
     'break in work': ('break in work', 'break'),
-    'inactive': ('inactive', 'ignore'),
+    'inactive': ('inactive', 'status'),
 }
 
 

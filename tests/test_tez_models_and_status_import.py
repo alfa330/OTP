@@ -86,26 +86,30 @@ class TezStatusImportParserTests(unittest.TestCase):
         parsed = self.ns["_status_import_parse_datetime"]("00:00 01-06-2026")
         self.assertEqual(parsed, datetime(2026, 6, 1, 0, 0, 0))
 
-    def test_status_mapping_work_break_ignore(self):
+    def test_status_mapping_work_break_inactive(self):
         resolve = self.ns["_status_import_resolve_tez_status"]
         self.assertEqual(resolve("active")["kind"], "work")
         self.assertEqual(resolve("work in crm")["kind"], "work")
         self.assertEqual(resolve("break in work")["kind"], "break")
-        self.assertEqual(resolve("inactive")["kind"], "ignore")
+        # inactive («выход из системы») сохраняем как сегмент (kind != ignore),
+        # чтобы офлайн был виден на таймлайне.
+        self.assertEqual(resolve("inactive")["kind"], "status")
+        self.assertEqual(resolve("inactive")["key"], "inactive")
         # хвостовые пробелы из выгрузки нормализуются
         self.assertEqual(resolve("active ")["key"], "active")
 
-    def test_segments_built_inactive_ignored_and_multiday_split(self):
+    def test_segments_built_include_inactive_and_multiday_split(self):
         parsed = self.ns["_status_import_parse_tez_csv"](SAMPLE_TEZ_CSV, self.lookup)
         self.assertEqual(parsed["source_rows"], 5)
-        self.assertEqual(parsed["ignored_events_count"], 1)  # inactive
+        # inactive больше НЕ игнорируется — он сохраняется как сегмент (офлайн).
+        self.assertEqual(parsed["ignored_events_count"], 0)
         self.assertEqual(parsed["invalid_rows_count"], 0)
         self.assertEqual(parsed["operators_count"], 1)
-        # active(1) + break(1) + crm(1) + active-многодневный(01,02,03 -> 3) = 6
-        self.assertEqual(len(parsed["segments"]), 6)
+        # inactive(1) + active(1) + break(1) + crm(1) + active-многодневный(01,02,03 -> 3) = 7
+        self.assertEqual(len(parsed["segments"]), 7)
         self.assertEqual(
             sorted({s["status_key"] for s in parsed["segments"]}),
-            ["active", "break in work", "work in crm"],
+            ["active", "break in work", "inactive", "work in crm"],
         )
         days = {s["status_date"] for s in parsed["segments"]}
         self.assertTrue({"2026-06-01", "2026-06-02", "2026-06-03"}.issubset(days))
