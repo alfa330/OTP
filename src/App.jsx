@@ -11541,6 +11541,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const plannerDepartmentCode = String(user?.department_code ?? user?.departmentCode ?? '').toLowerCase();
             const isTezPlanner = plannerDepartmentCode === 'tez';
             const isAdminLikePlanner = isAdminLikeRoleFn(user?.role);
+            // Тренер открывает «Графики работы» строго на просмотр: любые
+            // редактирующие действия скрыты, бэкенд тоже отклоняет запись.
+            // Состав операторов задаёт сервер (отделы СЗоВ и ОП), поэтому seed
+            // из общего списка пользователей для тренера не используется.
+            const plannerReadOnly = normalizeRole(user?.role) === 'trainer';
             const plannerOperatorIdKey = useCallback((value) => String(value ?? ''), []);
             function clonePlannerOperator(op, overrides = {}) {
                 const next = { ...(op || {}), ...overrides };
@@ -11618,8 +11623,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
 
             const normalizedInitialOperators = useMemo(
-                () => (Array.isArray(initialOperators) ? initialOperators.map(stripPlannerSchedulePayload) : []),
-                [initialOperators]
+                () => (
+                    plannerReadOnly
+                        ? []
+                        : (Array.isArray(initialOperators) ? initialOperators.map(stripPlannerSchedulePayload) : [])
+                ),
+                [initialOperators, plannerReadOnly]
             );
             const [viewMode, setViewMode] = useState('day');
             const [currentDate, setCurrentDate] = useState(() => new Date());
@@ -13834,6 +13843,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
 
             const openEditModal = (opId, date, editIndex = null) => {
+                if (plannerReadOnly) return;
                 const op = operators.find(o => o.id === opId);
                 const arr = op?.shifts?.[date] ?? [];
                 const isDayOff = op?.daysOff?.includes(date) ?? false;
@@ -13875,6 +13885,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
 
             const toggleDayOff = async (opId, date) => {
+                if (plannerReadOnly) return;
                 try {
                     // Отправляем на сервер
                     const response = await fetch(`${API_BASE_URL}/api/work_schedules/day_off`, {
@@ -14090,6 +14101,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
 
             const openEditModalForMultipleTargets = (targets) => {
+                if (plannerReadOnly) return;
                 const normalizedTargets = normalizeBulkTargets(targets);
                 if (normalizedTargets.length === 0) return;
                 if (normalizedTargets.length === 1) {
@@ -14449,6 +14461,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
 
             const openPlannerBreakRulesSettings = async () => {
+                if (plannerReadOnly) return;
                 setShowPlannerTopActionsMenu(false);
                 setShowBreakRulesSettingsModal(true);
                 setPlannerBreakRulesDraftByDirection(
@@ -16416,6 +16429,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
 
             const openPlannerOfflineActivityModal = ({ operatorId, date, startMin, endMin }) => {
+                if (plannerReadOnly) return;
                 const normalizedOperatorId = Number(operatorId);
                 const dayKey = String(date || '').trim();
                 const startMinutesRaw = Number(startMin);
@@ -16811,6 +16825,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             ]);
 
             const openPlannerTrainingModalForCurrentDay = (mode = 'add', preset = null) => {
+                if (plannerReadOnly) return;
                 const operatorId = Number(modalState?.opId);
                 const dayKey = String(modalState?.date || '').trim();
                 if (!Number.isFinite(operatorId) || !dayKey || isBulkSelectionModal) return;
@@ -17093,6 +17108,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
 
             const openPlannerTechStatusModalForCurrentDay = (mode = 'confirm_tech_flag', preset = null) => {
+                if (plannerReadOnly) return;
                 const operatorId = Number(modalState?.opId);
                 const dayKey = String(modalState?.date || '').trim();
                 if (!Number.isFinite(operatorId) || !dayKey || isBulkSelectionModal) return;
@@ -17300,6 +17316,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
 
             const openPlannerFineModalForCurrentDay = () => {
+                if (plannerReadOnly) return;
                 const operatorId = Number(modalState?.opId);
                 const dayKey = String(modalState?.date || '').trim();
                 if (!Number.isFinite(operatorId) || !dayKey || isBulkSelectionModal) return;
@@ -22639,6 +22656,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     <div className="flex items-center justify-between mb-3">
                         <div className="flex gap-2 items-center">
                         <h2 className="text-2xl font-semibold">Планировщик смен</h2>
+                        {plannerReadOnly && (
+                            <span className="ml-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-100 border border-slate-200 text-slate-600 text-xs font-medium" title="Раздел доступен только для просмотра">
+                                <FaIcon className="fas fa-eye text-slate-400"></FaIcon>
+                                Только просмотр
+                            </span>
+                        )}
                         <div className="flex items-center gap-1 ml-4">
                             <button onClick={() => setViewMode('day')} className={`px-3 py-1 rounded ${viewMode === 'day' ? 'bg-slate-800 text-white' : 'bg-white'}`}>День</button>
                             <button onClick={() => setViewMode('week')} className={`px-3 py-1 rounded ${viewMode === 'week' ? 'bg-slate-800 text-white' : 'bg-white'}`}>Неделя</button>
@@ -22659,6 +22682,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </span>
                                     )}
                                 </button>
+                                {!plannerReadOnly && (
                                 <button
                                     onClick={() => aggregateCurrentDayForAllOperators()}
                                     disabled={dayAggregateLoading}
@@ -22668,6 +22692,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <FaIcon className={`fas ${dayAggregateLoading ? 'fa-spinner fa-spin' : 'fa-calculator'} text-emerald-600`}></FaIcon>
                                     {dayAggregateLoading ? 'Агрегация...' : 'Агрегировать день (все)'}
                                 </button>
+                                )}
                                 <div className="ml-3 flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2 py-1">
                                     <FaIcon className="fas fa-sort-amount-down text-slate-400 text-xs"></FaIcon>
                                     <span className="text-xs text-slate-500 whitespace-nowrap">Сортировка</span>
@@ -22709,6 +22734,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 onChange={handlePlannerChatMetricsFileChange}
                             />
                             <div className="relative" ref={plannerTopActionsMenuRef}>
+                                {!plannerReadOnly && (
                                 <button
                                     type="button"
                                     onClick={() => setShowPlannerTopActionsMenu(v => !v)}
@@ -22719,8 +22745,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 >
                                     <FaIcon className="fas fa-ellipsis-v"></FaIcon>
                                 </button>
+                                )}
 
-                                {showPlannerTopActionsMenu && (
+                                {!plannerReadOnly && showPlannerTopActionsMenu && (
                                     <div className="absolute right-0 mt-2 w-[320px] rounded-2xl border border-slate-200 bg-white shadow-2xl z-[80] overflow-hidden">
                                         <div className="px-3 py-2.5 bg-gradient-to-r from-slate-50 to-slate-100 border-b border-slate-200">
                                             <div className="text-[11px] uppercase tracking-wide text-slate-500">Быстрые действия</div>
@@ -22972,6 +22999,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </div>
                     </div>
 
+                    {!plannerReadOnly && (
                     <div className="mb-2 p-2 bg-blue-50 border border-blue-200 rounded text-xs text-blue-700">
                         <FaIcon className="fas fa-info-circle mr-1"></FaIcon>
                         <strong>Совет:</strong> Удерживайте Ctrl (или Cmd на Mac) и кликайте по дням для множественного выбора
@@ -22979,6 +23007,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             • Офлайн-активность: зажмите правую кнопку и протяните по таймлайну (в обычном и в статусном режиме), затем отпустите.
                         </span>
                     </div>
+                    )}
                     {(plannerStatusAnomalyFileName || plannerStatusAnomalyError) && (
                         <div className={`mb-2 p-2 rounded text-xs border ${plannerStatusAnomalyError ? 'bg-rose-50 border-rose-200 text-rose-700' : 'bg-rose-50 border-rose-200 text-rose-800'}`}>
                             {plannerStatusAnomalyError ? (
@@ -35149,7 +35178,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 const requestedViewFromUrl = requestedViewFromLocation;
                 if (user.role === 'trainer') {
-                    const trainerAllowedViews = new Set(['surveys', 'manage_operators', 'tasks', 'lms', 'shift_auction']);
+                    const trainerAllowedViews = new Set(['surveys', 'manage_operators', 'tasks', 'lms', 'shift_auction', 'work_schedules']);
                     if (requestedViewFromUrl && trainerAllowedViews.has(requestedViewFromUrl)) {
                         setView(requestedViewFromUrl);
                         return;
@@ -35190,7 +35219,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // null, and the subsequent URL sync effect rewrites the
                 // pathname, erasing the original LMS sub-path on reload.
                 if (isAuthInitializing || !user) return;
-                if (user?.role === 'trainer' && !['surveys', 'manage_operators', 'tasks', 'lms', 'shift_auction'].includes(view)) {
+                if (user?.role === 'trainer' && !['surveys', 'manage_operators', 'tasks', 'lms', 'shift_auction', 'work_schedules'].includes(view)) {
                     setView('surveys');
                 }
                 if (view === 'lms' && !canAccessLmsSection) {
@@ -40753,6 +40782,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'manage_operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-user-edit"></FaIcon> <span className="sidebar-text">Учет сотрудников</span>
+                                                </button>
+                                            </li>
+                                            <li>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'work_schedules')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-calendar-alt" /> <span className="sidebar-text">Графики работы</span>
                                                 </button>
                                             </li>
                                             <li>
