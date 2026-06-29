@@ -136,7 +136,7 @@ const ACCESS_TOKEN_STORAGE_KEY = 'otp_access_token';
 const REFRESH_TOKEN_STORAGE_KEY = 'otp_refresh_token';
 const ADMIN_SESSIONS_PAGE_SIZE = 100;
 const FOUR_YOU_ADMIN_USER_ID = 2;
-const FOUR_YOU_VIEWER_USER_ID = 0;
+const FOUR_YOU_VIEWER_USER_ID = 241;
 const DEFAULT_USERS_REPORT_OPTIONS = {
     sheetMode: 'summary_and_supervisors',
     includeFired: false,
@@ -31943,6 +31943,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [shiftAuctionInitialPeriod, setShiftAuctionInitialPeriod] = useState(null);
             const [pendingSurveysBadgeCount, setPendingSurveysBadgeCount] = useState(0);
             const [eventsUnreadCount, setEventsUnreadCount] = useState(0);
+            const [fourYouUnreadCount, setFourYouUnreadCount] = useState(0);
             const [newSvName, setNewSvName] = useState('');
             const [newTableUrl, setNewTableUrl] = useState('');
             const [isLoading, setIsLoading] = useState(false);
@@ -37751,6 +37752,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 });
             };
 
+            // Бейдж новых фото раздела «4 You» (виден только пользователям с доступом).
+            const fetchFourYouUnreadCount = async () => {
+                if (!user?.id || !canAccessFourYouForUser(user)) {
+                    if (isMounted.current) setFourYouUnreadCount(0);
+                    return;
+                }
+                const requestKey = `fetchFourYouUnreadCount:${user.id}`;
+                return runSingleFlight(requestKey, async () => {
+                    try {
+                        const response = await axios.get(`${API_BASE_URL}/api/four_you/unread_count`, {
+                            headers: withAccessTokenHeader({ 'X-User-Id': user.id })
+                        });
+                        const count = Number(response?.data?.count);
+                        if (isMounted.current) setFourYouUnreadCount(Math.max(0, Number.isFinite(count) ? count : 0));
+                    } catch (err) {
+                        // Бейдж не критичен — молча игнорируем сетевые сбои.
+                    }
+                });
+            };
+
             const debouncedFetch = useCallback(_.debounce((fn) => {
                 if (isMounted.current) {
                     try {
@@ -40201,6 +40222,30 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (view === 'events') setEventsUnreadCount(0);
             }, [view]);
 
+            // 4 You: бейдж новых фото. Та же схема, что у «Ивентов»: опрос при
+            // загрузке пользователя, при возврате фокуса и фоном раз в 45 c;
+            // при заходе в раздел гасим (плюс серверный seen — см. FourYouView).
+            const fetchFourYouUnreadRef = useRef(null);
+            fetchFourYouUnreadRef.current = fetchFourYouUnreadCount;
+            useEffect(() => {
+                if (!user?.id || !canAccessFourYouSection) {
+                    setFourYouUnreadCount(0);
+                    return undefined;
+                }
+                fetchFourYouUnreadRef.current?.();
+                const timer = setInterval(() => fetchFourYouUnreadRef.current?.(), 45000);
+                const onFocus = () => fetchFourYouUnreadRef.current?.();
+                window.addEventListener('focus', onFocus);
+                return () => {
+                    clearInterval(timer);
+                    window.removeEventListener('focus', onFocus);
+                };
+            }, [user?.id, canAccessFourYouSection]);
+
+            useEffect(() => {
+                if (view === 'four_you') setFourYouUnreadCount(0);
+            }, [view]);
+
             useEffect(() => {
                 if (view !== 'evaluation') {
                     closeEvaluationMonitoringScale();
@@ -40901,10 +40946,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <button
                                                 type="button"
                                                 onClick={(e) => handleSidebarViewNavigation(e, 'four_you')}
-                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'four_you' ? 'bg-blue-700' : ''}`}
+                                                className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'four_you' ? 'bg-blue-700' : ''}`}
                                             >
                                                 <FaIcon className="fas fa-heart text-rose-300" />
-                                                <span className="sidebar-text">4 You</span>
+                                                {fourYouUnreadCount > 0 && (
+                                                    <span className="sidebar-surveys-collapsed-badge inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-semibold leading-none">
+                                                        {fourYouUnreadCount > 9 ? '9+' : fourYouUnreadCount}
+                                                    </span>
+                                                )}
+                                                <span className="sidebar-text inline-flex items-center gap-2">
+                                                    <span>4 You</span>
+                                                    {fourYouUnreadCount > 0 && (
+                                                        <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-semibold leading-none">
+                                                            {fourYouUnreadCount > 99 ? '99+' : fourYouUnreadCount}
+                                                        </span>
+                                                    )}
+                                                </span>
                                             </button>
                                         </li>
                                     )}
@@ -41029,6 +41086,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 employeesDropdownPos,
                 pendingSurveysBadgeCount,
                 eventsUnreadCount,
+                fourYouUnreadCount,
                 selectedSvId,
                 selectedReportMonth,
                 selectedMonth,
@@ -41320,6 +41378,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     showToast={showToast}
+                                    onSeen={() => setFourYouUnreadCount(0)}
                                 />
                             </Suspense>
                         )}

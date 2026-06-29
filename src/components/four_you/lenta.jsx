@@ -49,7 +49,7 @@ const PARAMS = Object.freeze({
     railRotZ: 0,
 });
 
-const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
+const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) => {
     const sceneRef = useRef(null);
     const railRef = useRef(null);
     const progressRef = useRef(null);
@@ -129,6 +129,17 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
         loadImages(controller.signal);
         return () => controller.abort();
     }, [loadImages]);
+
+    // Открытие раздела = «просмотрено»: гасим серверный счётчик новых фото и
+    // бейдж в сайдбаре (как в «Ивентах»). Бейдж не критичен — сбои игнорируем.
+    useEffect(() => {
+        let cancelled = false;
+        axios.post(`${apiBaseUrl}/api/four_you/seen`, {}, { headers: authHeaders() })
+            .then(() => { if (!cancelled && typeof onSeen === 'function') onSeen(); })
+            .catch(() => { /* noop */ });
+        return () => { cancelled = true; };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     useEffect(() => {
         const preloaded = images.map((item) => {
@@ -369,6 +380,13 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
             if (needsRenderRef.current || !isSettled()) {
                 setCardClasses();
                 updateCards();
+                // Фон затухает/появляется синхронно с активной карточкой: его
+                // прозрачность = selectedMix (0 закрыто → 1 открыто). expandMix
+                // (медленный) держит карточку «активной» дольше, чем длится
+                // затухание, поэтому к моменту размонтирования фон уже невидим.
+                if (sceneRef.current) {
+                    sceneRef.current.style.setProperty('--fy-bg-opacity', String(selectedMixRef.current));
+                }
                 if (isSettled()) needsRenderRef.current = false;
             }
             animationFrame = window.requestAnimationFrame(animate);
@@ -756,7 +774,7 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast }) => {
                                     <i className="lenta-check-mark">{selectedIds.has(image.id) ? '✓' : ''}</i>
                                 </span>
                             )}
-                            {!selectMode && activeIndex === index && image.annotations?.comments?.length > 0 && (
+                            {!selectMode && image.annotations?.comments?.length > 0 && (
                                 <div className="lenta-card-comments" data-lenta-control>
                                     {image.annotations.comments.slice(-4).map((c, ci) => (
                                         <div key={ci} className="lenta-comment-line">
