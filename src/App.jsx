@@ -10415,10 +10415,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 case 'взятие чата':
                 case 'transfer chat':
                 case 'передача чата':
+                case 'active':
+                case 'активен':
                     return byKey({
                         chip: 'border-sky-200 bg-sky-50 text-sky-700',
                         row: 'border-sky-100 bg-sky-50/60 text-sky-800',
                         bar: '#0ea5e9'
+                    });
+                case 'work in crm':
+                case 'работа в crm':
+                    return byKey({
+                        chip: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+                        row: 'border-emerald-100 bg-emerald-50/60 text-emerald-800',
+                        bar: '#10b981'
                     });
                 case 'holiday':
                 case 'закрытие чатов':
@@ -10432,6 +10441,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 case 'отключено':
                 case 'выключен':
                 case 'нет на месте':
+                case 'inactive':
+                case 'неактивен':
                     return byKey({
                         chip: 'border-slate-300 bg-slate-100 text-slate-700',
                         row: 'border-slate-200 bg-slate-100/70 text-slate-700',
@@ -10441,6 +10452,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 case 'авто':
                 case 'break':
                 case 'обеденный перерыв':
+                case 'break in work':
                     return byKey({
                         chip: 'border-amber-200 bg-amber-50 text-amber-800',
                         row: 'border-amber-100 bg-amber-50/60 text-amber-900',
@@ -10490,11 +10502,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             'готов', 'занят', 'занята', 'перезвон',
             // Oktell A_UserStateHistory.State = 6 (оператор занят/зарезервирован под звонок).
             'зарезервировано',
-            'online', 'holiday', 'онлайн', 'закрытие чатов'
+            'online', 'holiday', 'онлайн', 'закрытие чатов',
+            // TEZ: рабочее время = active + work in crm.
+            'active', 'work in crm', 'работа в crm'
             ]);
             const PLANNER_IMPORTED_BREAK_STATUS_KEYS = new Set([
             'перерыв', 'авто',
-            'break', 'обеденный перерыв'
+            'break', 'обеденный перерыв',
+            // TEZ: перерыв.
+            'break in work'
             ]);
             const PLANNER_IMPORTED_LATE_START_STATUS_KEYS = new Set([
             ...PLANNER_IMPORTED_WORK_STATUS_KEYS,
@@ -10505,7 +10521,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             'logout', 'выход', 'выход из системы', 'отключение',
             // Oktell A_UserStateHistory.State: 0 = Выключен, 3 = Нет на месте.
             // Без этих ключей оператор вне смены считался бы фактически на смене.
-            'выключен', 'нет на месте'
+            'выключен', 'нет на месте',
+            // TEZ: офлайн вне смены.
+            'inactive', 'неактивен'
             ]);
             const plannerImportedStatusCountsAsOnShift = (statusKeyRaw) => {
             const key = plannerStatusNormalizeKey(statusKeyRaw);
@@ -15650,17 +15668,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         throw new Error(savePayload?.error || `HTTP ${saveResponse.status}`);
                     }
 
+                    const csvHasDays = Boolean(analysis?.days?.length);
+                    const savedSegments = Number(savePayload?.import?.segments_saved || 0);
                     setPlannerStatusImportSummary({
                         ...(savePayload?.import || {}),
                         message: savePayload?.message || ''
                     });
                     setPlannerStatusAnomalyFileName(file.name || '');
-                    setPlannerStatusAnomalyAnalysis(analysis);
+                    // Если фронт-анализатор не разобрал формат (напр. посегментный TEZ),
+                    // не затеняем серверный анализ пустым CSV-анализом — показываем данные,
+                    // которые вернёт бекенд после fetch (как при перезагрузке страницы).
+                    setPlannerStatusAnomalyAnalysis(csvHasDays ? analysis : null);
                     setPlannerStatusModalFocus(null);
                     setPlannerStatusHourlyDayKey('');
                     setPlannerStatusHourlyExpandedKey('');
                     setPlannerStatusGroupingDirectionKeys([]);
-                    setPlannerStatusSpecialViewEnabled(Boolean(analysis));
+                    setPlannerStatusSpecialViewEnabled(csvHasDays || savedSegments > 0);
                     plannerLoadedStatusRangeKeysRef.current = new Set();
                     plannerLoadingStatusRangeKeysRef.current = new Set();
                     plannerActiveStatusWindowKeyRef.current = '';
