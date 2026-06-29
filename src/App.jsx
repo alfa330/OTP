@@ -11766,12 +11766,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [plannerStatusAnomalyFileName, setPlannerStatusAnomalyFileName] = useState('');
             const [plannerStatusImportSummary, setPlannerStatusImportSummary] = useState(null);
             const [plannerStatusApiSyncLoading, setPlannerStatusApiSyncLoading] = useState(false);
-            // Диапазон для ручной синхронизации статусов TEZ из Binotel (макс. 10 дней).
-            const [plannerBinotelStart, setPlannerBinotelStart] = useState(() => {
-                const d = new Date(); d.setDate(d.getDate() - 6);
-                return d.toISOString().slice(0, 10);
-            });
-            const [plannerBinotelStop, setPlannerBinotelStop] = useState(() => new Date().toISOString().slice(0, 10));
             const [plannerChatMetricsImportState, setPlannerChatMetricsImportState] = useState({
                 loading: false,
                 summary: null,
@@ -11805,6 +11799,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [plannerStatusMatchExportLoading, setPlannerStatusMatchExportLoading] = useState(false);
             const [plannerStatusMatchExportError, setPlannerStatusMatchExportError] = useState('');
             // Синхронизация статусов операторов из Oktell (период до 3 дней).
+            // Тот же модал переиспользуется для Binotel (kind='binotel', период до 10 дней).
+            const [plannerSyncKind, setPlannerSyncKind] = useState('oktell');
             const [showPlannerOktellSyncModal, setShowPlannerOktellSyncModal] = useState(false);
             const [plannerOktellSyncRange, setPlannerOktellSyncRange] = useState(() => {
                 const d = new Date();
@@ -15816,25 +15812,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             };
 
-            // === Синхронизация статусов TEZ из Binotel (по выбранному диапазону, макс. 10 дней) ===
+            // === Синхронизация статусов TEZ из Binotel (тот же модал-календарь, что у Oktell; макс. 10 дней) ===
             const syncPlannerBinotelStatuses = async () => {
-                if (!user?.id || plannerStatusApiSyncLoading || plannerStatusAnomalyLoading) return;
-                const start = String(plannerBinotelStart || '').trim();
-                const stop = String(plannerBinotelStop || '').trim();
-                if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(stop)) {
-                    emitAppToast('Укажите даты периода (с и по)', 'warning');
+                if (!user?.id || plannerOktellSyncLoading || plannerStatusApiSyncLoading) return;
+                const normalized = normalizePlannerStatusMatchExportRange(plannerOktellSyncRange);
+                if (!normalized) {
+                    setPlannerOktellSyncError('Выберите период синхронизации');
                     return;
                 }
-                if (stop < start) {
-                    emitAppToast('Дата «по» не может быть раньше «с»', 'warning');
+                const span = oktellSyncSpanDays(normalized.start, normalized.end);
+                if (span < 1 || span > BINOTEL_SYNC_MAX_DAYS) {
+                    setPlannerOktellSyncError(`Период синхронизации Binotel не может быть больше ${BINOTEL_SYNC_MAX_DAYS} дней`);
                     return;
                 }
-                const days = Math.round((new Date(`${stop}T00:00:00`) - new Date(`${start}T00:00:00`)) / 86400000) + 1;
-                if (days < 1 || days > 10) {
-                    emitAppToast('Период синхронизации Binotel не может быть больше 10 дней', 'warning');
-                    return;
-                }
-                setPlannerStatusApiSyncLoading(true);
+                setPlannerOktellSyncLoading(true);
+                setPlannerOktellSyncError('');
                 setPlannerStatusAnomalyError('');
                 setPlannerStatusImportSummary(null);
                 setPlannerStatusAnomalyOnly(false);
@@ -15843,20 +15835,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         method: 'POST',
                         credentials: 'include',
                         headers: withAccessTokenHeader({ 'Content-Type': 'application/json', 'X-User-Id': user?.id }),
-                        body: JSON.stringify({ date_from: start, date_to: stop })
+                        body: JSON.stringify({ date_from: normalized.start, date_to: normalized.end })
                     });
                     const payload = await response.json().catch(() => ({}));
                     if (!response.ok) {
                         throw new Error(payload?.error || `HTTP ${response.status}`);
                     }
                     setPlannerStatusImportSummary({ ...(payload?.import || {}), message: payload?.message || '' });
-                    setPlannerStatusAnomalyFileName(start === stop ? `Binotel ${start}` : `Binotel ${start} - ${stop}`);
+                    setPlannerStatusAnomalyFileName(normalized.start === normalized.end
+                        ? `Binotel ${normalized.start}`
+                        : `Binotel ${normalized.start} - ${normalized.end}`);
 
                     plannerLoadedStatusRangeKeysRef.current = new Set();
                     plannerLoadingStatusRangeKeysRef.current = new Set();
                     plannerActiveStatusWindowKeyRef.current = '';
-                    const rangeStart = String(plannerStatusFetchRange?.start || start || '').trim();
-                    const rangeEnd = String(plannerStatusFetchRange?.end || stop || '').trim();
+                    const rangeStart = String(plannerStatusFetchRange?.start || normalized.start || '').trim();
+                    const rangeEnd = String(plannerStatusFetchRange?.end || normalized.end || '').trim();
                     const statusData = rangeStart && rangeEnd
                         ? await fetchPlannerImportedStatusesForRange(rangeStart, rangeEnd, { force: true })
                         : null;
@@ -15870,20 +15864,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const firstDay = analysis?.days?.[0]?.dateKey || '';
                     setPlannerStatusHourlyDayKey(String(firstDay || ''));
                     setPlannerStatusAnomalyExpandedDays(firstDay ? { [firstDay]: true } : {});
+                    setShowPlannerOktellSyncModal(false);
                     setShowPlannerStatusAnomalyModal(true);
                     emitAppToast(payload?.message || 'Статусы синхронизированы из Binotel', 'success');
                 } catch (error) {
                     console.error('Error syncing Binotel operator statuses:', error);
                     const message = error?.message || 'Не удалось синхронизировать статусы из Binotel';
-                    setPlannerStatusAnomalyError(message);
+                    setPlannerOktellSyncError(message);
                     emitAppToast(message, 'error');
                 } finally {
-                    setPlannerStatusApiSyncLoading(false);
+                    setPlannerOktellSyncLoading(false);
                 }
             };
 
             // === Синхронизация статусов операторов из Oktell (телефония) ===
             const OKTELL_SYNC_MAX_DAYS = 3;
+            const BINOTEL_SYNC_MAX_DAYS = 10;
+            // Текущий лимит дней зависит от того, какой синк открыт в модале-календаре.
+            const currentSyncMaxDays = () => (plannerSyncKind === 'binotel' ? BINOTEL_SYNC_MAX_DAYS : OKTELL_SYNC_MAX_DAYS);
             const oktellSyncSpanDays = (startKey, endKey) => {
                 const s = parseDateStr(startKey);
                 const e = parseDateStr(endKey);
@@ -15909,7 +15907,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const d = new Date();
                 d.setDate(d.getDate() - 1);
                 const yesterday = todayDateStr(d);
+                setPlannerSyncKind('oktell');
                 setPlannerOktellSyncRangeDraft({ start: yesterday, end: yesterday }, 'end');
+                setShowPlannerOktellSyncModal(true);
+            };
+            const openPlannerBinotelSyncModal = () => {
+                const base = new Date();
+                const end = todayDateStr(base);
+                const start = todayDateStr(addDays(base, -(BINOTEL_SYNC_MAX_DAYS - 1)));
+                setPlannerSyncKind('binotel');
+                setPlannerOktellSyncRangeDraft({ start, end }, 'end');
                 setShowPlannerOktellSyncModal(true);
             };
             const setPlannerOktellSyncPreset = (preset) => {
@@ -15921,7 +15928,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
                 if (preset === 'last3') {
                     const end = todayDateStr(base);
-                    const start = todayDateStr(addDays(base, -(OKTELL_SYNC_MAX_DAYS - 1)));
+                    const start = todayDateStr(addDays(base, -(currentSyncMaxDays() - 1)));
                     setPlannerOktellSyncRangeDraft({ start, end }, 'end');
                     return;
                 }
@@ -15937,19 +15944,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     start: selectedDateKey,
                     end: selectedDateKey
                 };
+                const maxDays = currentSyncMaxDays();
                 if (plannerOktellSyncActiveEdge === 'start') {
                     let start = selectedDateKey;
                     let end = selectedDateKey > currentRange.end ? selectedDateKey : currentRange.end;
-                    if (oktellSyncSpanDays(start, end) > OKTELL_SYNC_MAX_DAYS) {
-                        end = todayDateStr(addDays(parseDateStr(start), OKTELL_SYNC_MAX_DAYS - 1));
+                    if (oktellSyncSpanDays(start, end) > maxDays) {
+                        end = todayDateStr(addDays(parseDateStr(start), maxDays - 1));
                     }
                     setPlannerOktellSyncRangeDraft({ start, end }, 'end');
                     return;
                 }
                 let start = selectedDateKey < currentRange.start ? selectedDateKey : currentRange.start;
                 let end = selectedDateKey < currentRange.start ? currentRange.start : selectedDateKey;
-                if (oktellSyncSpanDays(start, end) > OKTELL_SYNC_MAX_DAYS) {
-                    start = todayDateStr(addDays(parseDateStr(end), -(OKTELL_SYNC_MAX_DAYS - 1)));
+                if (oktellSyncSpanDays(start, end) > maxDays) {
+                    start = todayDateStr(addDays(parseDateStr(end), -(maxDays - 1)));
                 }
                 setPlannerOktellSyncRangeDraft({ start, end }, 'end');
             };
@@ -22880,14 +22888,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <button
                                                 onClick={() => {
                                                     setShowPlannerTopActionsMenu(false);
-                                                    setShowPlannerStatusAnomalyModal(true);
+                                                    openPlannerBinotelSyncModal();
                                                 }}
-                                                disabled={plannerStatusAnomalyLoading || plannerStatusApiSyncLoading}
-                                                className="w-full px-3 py-2 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
-                                                title="Загрузить файл статусов операторов (CSV/XLSX) и открыть отчёт"
+                                                disabled={plannerOktellSyncLoading || plannerStatusAnomalyLoading || plannerStatusApiSyncLoading}
+                                                className="w-full px-3 py-2 rounded-xl border border-teal-200 bg-teal-50 hover:bg-teal-100 text-teal-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                                                title="Скачать и импортировать статусы операторов из Binotel за выбранный период (до 10 дней)"
                                             >
-                                                <FaIcon className={`fas ${plannerStatusAnomalyLoading ? 'fa-spinner fa-spin' : 'fa-file-csv'}`}></FaIcon>
-                                                {plannerStatusAnomalyLoading ? 'Анализируем...' : 'Загрузить статусы операторов'}
+                                                <FaIcon className={`fas ${plannerOktellSyncLoading ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}`}></FaIcon>
+                                                Синхронизация с Binotel
                                             </button>
                                             )}
                                             {!isTezPlanner && (
@@ -26275,7 +26283,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const rangeLabel = normalizedRange
                             ? `${formatDateRuShort(normalizedRange.start)} - ${formatDateRuShort(normalizedRange.end)}`
                             : 'Период не выбран';
-                        const tooManyDays = dateCount > OKTELL_SYNC_MAX_DAYS;
+                        const isBinotelSync = plannerSyncKind === 'binotel';
+                        const syncMaxDays = isBinotelSync ? BINOTEL_SYNC_MAX_DAYS : OKTELL_SYNC_MAX_DAYS;
+                        const syncProviderLabel = isBinotelSync ? 'Binotel' : 'Oktell';
+                        const tooManyDays = dateCount > syncMaxDays;
                         const monthNames = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
                         const weekDayLabels = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
                         const calendarBaseMonth = plannerOktellSyncCalendarMonth instanceof Date && !Number.isNaN(plannerOktellSyncCalendarMonth.getTime())
@@ -26308,7 +26319,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const presetItems = [
                             { key: 'yesterday', label: 'Вчера' },
                             { key: 'today', label: 'Сегодня' },
-                            { key: 'last3', label: `Посл. ${OKTELL_SYNC_MAX_DAYS} дня` }
+                            { key: 'last3', label: `Посл. ${syncMaxDays} дн.` }
                         ];
                         return (
                             <div className="text-slate-900">
@@ -26317,9 +26328,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         <div className="min-w-0">
                                             <div className="inline-flex items-center gap-2 rounded-lg border border-sky-200 bg-sky-50 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-sky-700">
                                                 <FaIcon className="fas fa-cloud-arrow-down text-[10px]"></FaIcon>
-                                                Oktell
+                                                {syncProviderLabel}
                                             </div>
-                                            <h3 className="mt-3 text-lg font-bold text-slate-900">Синхронизация с Oktell</h3>
+                                            <h3 className="mt-3 text-lg font-bold text-slate-900">Синхронизация с {syncProviderLabel}</h3>
                                             <div className="mt-1 text-sm text-slate-500">{rangeLabel}</div>
                                         </div>
                                         <button
@@ -26384,7 +26395,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <FaIcon className="fas fa-angle-left"></FaIcon>
                                             </button>
                                             <div className="text-center min-w-0">
-                                                <div className="text-sm font-semibold text-slate-900">Выберите период (до {OKTELL_SYNC_MAX_DAYS} дней)</div>
+                                                <div className="text-sm font-semibold text-slate-900">Выберите период (до {syncMaxDays} дней)</div>
                                                 <div className="text-[11px] text-slate-500">
                                                     Активно: {plannerOktellSyncActiveEdge === 'start' ? 'начало периода' : 'конец периода'}
                                                 </div>
@@ -26447,7 +26458,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </div>
                                         <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
                                             <div className="text-[11px] text-slate-400">Лимит</div>
-                                            <div className="mt-0.5 text-lg font-semibold tabular-nums">{OKTELL_SYNC_MAX_DAYS}</div>
+                                            <div className="mt-0.5 text-lg font-semibold tabular-nums">{syncMaxDays}</div>
                                         </div>
                                     </div>
 
@@ -26457,7 +26468,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                     {(plannerOktellSyncError || tooManyDays) && (
                                         <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
-                                            {plannerOktellSyncError || `Период не может быть больше ${OKTELL_SYNC_MAX_DAYS} дней`}
+                                            {plannerOktellSyncError || `Период не может быть больше ${syncMaxDays} дней`}
                                         </div>
                                     )}
                                 </div>
@@ -26473,7 +26484,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </button>
                                     <button
                                         type="button"
-                                        onClick={syncPlannerOktellStatuses}
+                                        onClick={isBinotelSync ? syncPlannerBinotelStatuses : syncPlannerOktellStatuses}
                                         disabled={plannerOktellSyncLoading || !normalizedRange || dateCount <= 0 || tooManyDays}
                                         className="h-10 px-4 rounded-lg bg-slate-800 hover:bg-slate-900 text-white text-sm font-semibold shadow-sm disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-2"
                                     >
@@ -28348,36 +28359,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         <FaIcon className={`fas ${plannerStatusApiSyncLoading ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}`}></FaIcon>
                                         {plannerStatusApiSyncLoading ? 'Синхронизация...' : 'Из Chat2Desk'}
                                     </button>
-                                    )}
-                                    {(isTezPlanner || isAdminLikePlanner) && (
-                                        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-teal-200 bg-teal-50 px-2 py-1.5">
-                                            <span className="text-xs font-medium text-teal-700">Binotel:</span>
-                                            <input
-                                                type="date"
-                                                value={plannerBinotelStart}
-                                                onChange={(e) => setPlannerBinotelStart(e.target.value)}
-                                                className="text-sm border border-teal-200 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-teal-500"
-                                                aria-label="Дата с"
-                                            />
-                                            <span className="text-xs text-teal-600">—</span>
-                                            <input
-                                                type="date"
-                                                value={plannerBinotelStop}
-                                                onChange={(e) => setPlannerBinotelStop(e.target.value)}
-                                                className="text-sm border border-teal-200 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-teal-500"
-                                                aria-label="Дата по"
-                                            />
-                                            <button
-                                                type="button"
-                                                onClick={syncPlannerBinotelStatuses}
-                                                disabled={plannerStatusAnomalyLoading || plannerStatusApiSyncLoading}
-                                                className="px-3 py-1.5 rounded-lg border border-teal-300 bg-teal-100 hover:bg-teal-200 text-teal-800 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
-                                                title="Скачать и импортировать статусы из Binotel за выбранный период (макс. 10 дней)"
-                                            >
-                                                <FaIcon className={`fas ${plannerStatusApiSyncLoading ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}`}></FaIcon>
-                                                {plannerStatusApiSyncLoading ? 'Синхронизация...' : 'Синхронизировать из Binotel'}
-                                            </button>
-                                        </div>
                                     )}
                                     {hasAnalysis && (
                                         <div className="flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-1 py-1">
