@@ -35,6 +35,7 @@ def _tez_status_import_namespace():
         "_status_import_parse_tez_rows",
         "_status_import_parse_tez_csv",
         "_status_import_csv_text_is_tez",
+        "_status_import_normalize_sip",
     }
     module = ast.parse(BOT_PATH.read_text(encoding="utf-8"))
     selected = []
@@ -117,6 +118,31 @@ class TezStatusImportParserTests(unittest.TestCase):
         parsed = self.ns["_status_import_parse_tez_csv"](csv_text, self.lookup)
         self.assertEqual(parsed["invalid_rows_count"], 1)
         self.assertEqual(len(parsed["segments"]), 0)
+
+    def test_sip_matching_prefers_internal_number_over_name(self):
+        # Имя в выгрузке заведомо «не то», но внутренний номер совпадает с sip оператора.
+        csv_text = (
+            "internal number;employee name;started at;stopped at;seconds in status;status\n"
+            "903;Совсем Другое Имя;10:01 02-06-2026;12:40 02-06-2026;9491;active \n"
+        )
+        normalize_sip = self.ns["_status_import_normalize_sip"]
+        sip_lookup = {normalize_sip("903"): [{"id": 342, "name": "Саттер Аруна Бекеткызы"}]}
+        parsed = self.ns["_status_import_parse_tez_csv"](csv_text, {}, sip_lookup=sip_lookup)
+        self.assertEqual(parsed["operators_count"], 1)
+        self.assertEqual(parsed["invalid_rows_count"], 0)
+        self.assertEqual(len(parsed["segments"]), 1)
+        self.assertEqual(int(parsed["segments"][0]["operator_id"]), 342)
+        # Без sip_lookup имя не матчится → строка невалидна.
+        parsed2 = self.ns["_status_import_parse_tez_csv"](csv_text, {})
+        self.assertEqual(parsed2["invalid_rows_count"], 1)
+        self.assertEqual(len(parsed2["segments"]), 0)
+
+    def test_normalize_sip_strips_nondigits_and_leading_zeros(self):
+        normalize_sip = self.ns["_status_import_normalize_sip"]
+        self.assertEqual(normalize_sip("0903"), "903")
+        self.assertEqual(normalize_sip(" 903 "), "903")
+        self.assertEqual(normalize_sip("sip:902"), "902")
+        self.assertEqual(normalize_sip(""), "")
 
 
 class TezCalculationModelRegistryTests(unittest.TestCase):
@@ -213,6 +239,36 @@ class TezSalaryFormulaTests(unittest.TestCase):
         op = self.src[self.src.index("export function calculateTezOpSalary("):]
         self.assertIn("dealPercent", op)
         self.assertIn("bonusDeals = oklad * dealPercent", op)
+
+
+class TezBinotelSyncTests(unittest.TestCase):
+    def test_sync_module_has_login_and_code_map(self):
+        src = (ROOT / "tez_status_sync.py").read_text(encoding="utf-8")
+        self.assertIn("logining[email]", src)
+        self.assertIn("logining[password]", src)
+        self.assertIn("analyticsEmployeesOnTimeline", src)
+        self.assertIn("listOfEmployeesPresenceStates", src)
+        # presence code -> status text
+        self.assertIn("0: \"active\"", src)
+        self.assertIn("1: \"work in crm\"", src)
+        self.assertIn("3: \"break in work\"", src)
+        self.assertIn("4: \"inactive\"", src)
+        self.assertIn("def build_tez_status_csv", src)
+        self.assertIn("def run_sync", src)
+
+    def test_backend_sip_lookup_and_binotel_endpoint(self):
+        db_src = _read(DATABASE_PATH)
+        self.assertIn("def get_operator_sip_map(self):", db_src)
+        bot_src = _read(BOT_PATH)
+        self.assertIn("def _status_import_build_sip_lookup(", bot_src)
+        self.assertIn("def _status_import_normalize_sip(", bot_src)
+        self.assertIn("def sync_work_schedules_statuses_binotel():", bot_src)
+        endpoint = bot_src[bot_src.index("def sync_work_schedules_statuses_binotel():"):][:3000]
+        self.assertIn("больше 10 дней", endpoint)
+        self.assertIn("tez_status_sync", endpoint)
+        self.assertIn("_tez_status_sync_importer", endpoint)
+        # daily scheduled job registered
+        self.assertIn("tez_status_sync_daily", bot_src)
 
 
 if __name__ == "__main__":

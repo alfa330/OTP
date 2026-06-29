@@ -11766,6 +11766,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [plannerStatusAnomalyFileName, setPlannerStatusAnomalyFileName] = useState('');
             const [plannerStatusImportSummary, setPlannerStatusImportSummary] = useState(null);
             const [plannerStatusApiSyncLoading, setPlannerStatusApiSyncLoading] = useState(false);
+            // Диапазон для ручной синхронизации статусов TEZ из Binotel (макс. 10 дней).
+            const [plannerBinotelStart, setPlannerBinotelStart] = useState(() => {
+                const d = new Date(); d.setDate(d.getDate() - 6);
+                return d.toISOString().slice(0, 10);
+            });
+            const [plannerBinotelStop, setPlannerBinotelStop] = useState(() => new Date().toISOString().slice(0, 10));
             const [plannerChatMetricsImportState, setPlannerChatMetricsImportState] = useState({
                 loading: false,
                 summary: null,
@@ -15803,6 +15809,72 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 } catch (error) {
                     console.error('Error syncing Chat2Desk operator statuses:', error);
                     const message = error?.message || 'Не удалось синхронизировать статусы Chat2Desk';
+                    setPlannerStatusAnomalyError(message);
+                    emitAppToast(message, 'error');
+                } finally {
+                    setPlannerStatusApiSyncLoading(false);
+                }
+            };
+
+            // === Синхронизация статусов TEZ из Binotel (по выбранному диапазону, макс. 10 дней) ===
+            const syncPlannerBinotelStatuses = async () => {
+                if (!user?.id || plannerStatusApiSyncLoading || plannerStatusAnomalyLoading) return;
+                const start = String(plannerBinotelStart || '').trim();
+                const stop = String(plannerBinotelStop || '').trim();
+                if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(stop)) {
+                    emitAppToast('Укажите даты периода (с и по)', 'warning');
+                    return;
+                }
+                if (stop < start) {
+                    emitAppToast('Дата «по» не может быть раньше «с»', 'warning');
+                    return;
+                }
+                const days = Math.round((new Date(`${stop}T00:00:00`) - new Date(`${start}T00:00:00`)) / 86400000) + 1;
+                if (days < 1 || days > 10) {
+                    emitAppToast('Период синхронизации Binotel не может быть больше 10 дней', 'warning');
+                    return;
+                }
+                setPlannerStatusApiSyncLoading(true);
+                setPlannerStatusAnomalyError('');
+                setPlannerStatusImportSummary(null);
+                setPlannerStatusAnomalyOnly(false);
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/sync_statuses_binotel`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: withAccessTokenHeader({ 'Content-Type': 'application/json', 'X-User-Id': user?.id }),
+                        body: JSON.stringify({ date_from: start, date_to: stop })
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+                    setPlannerStatusImportSummary({ ...(payload?.import || {}), message: payload?.message || '' });
+                    setPlannerStatusAnomalyFileName(start === stop ? `Binotel ${start}` : `Binotel ${start} - ${stop}`);
+
+                    plannerLoadedStatusRangeKeysRef.current = new Set();
+                    plannerLoadingStatusRangeKeysRef.current = new Set();
+                    plannerActiveStatusWindowKeyRef.current = '';
+                    const rangeStart = String(plannerStatusFetchRange?.start || start || '').trim();
+                    const rangeEnd = String(plannerStatusFetchRange?.end || stop || '').trim();
+                    const statusData = rangeStart && rangeEnd
+                        ? await fetchPlannerImportedStatusesForRange(rangeStart, rangeEnd, { force: true })
+                        : null;
+                    const serverOperators = Array.isArray(statusData?.operators) ? statusData.operators : [];
+                    const analysis = buildPlannerStatusAnalysisFromOperators(serverOperators.length ? serverOperators : operators);
+                    setPlannerStatusAnomalyAnalysis(analysis);
+                    setPlannerStatusModalFocus(null);
+                    setPlannerStatusHourlyExpandedKey('');
+                    setPlannerStatusGroupingDirectionKeys([]);
+                    setPlannerStatusSpecialViewEnabled(Boolean(analysis?.days?.length));
+                    const firstDay = analysis?.days?.[0]?.dateKey || '';
+                    setPlannerStatusHourlyDayKey(String(firstDay || ''));
+                    setPlannerStatusAnomalyExpandedDays(firstDay ? { [firstDay]: true } : {});
+                    setShowPlannerStatusAnomalyModal(true);
+                    emitAppToast(payload?.message || 'Статусы синхронизированы из Binotel', 'success');
+                } catch (error) {
+                    console.error('Error syncing Binotel operator statuses:', error);
+                    const message = error?.message || 'Не удалось синхронизировать статусы из Binotel';
                     setPlannerStatusAnomalyError(message);
                     emitAppToast(message, 'error');
                 } finally {
@@ -28276,6 +28348,36 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         <FaIcon className={`fas ${plannerStatusApiSyncLoading ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}`}></FaIcon>
                                         {plannerStatusApiSyncLoading ? 'Синхронизация...' : 'Из Chat2Desk'}
                                     </button>
+                                    )}
+                                    {isTezPlanner && (
+                                        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-teal-200 bg-teal-50 px-2 py-1.5">
+                                            <span className="text-xs font-medium text-teal-700">Binotel:</span>
+                                            <input
+                                                type="date"
+                                                value={plannerBinotelStart}
+                                                onChange={(e) => setPlannerBinotelStart(e.target.value)}
+                                                className="text-sm border border-teal-200 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-teal-500"
+                                                aria-label="Дата с"
+                                            />
+                                            <span className="text-xs text-teal-600">—</span>
+                                            <input
+                                                type="date"
+                                                value={plannerBinotelStop}
+                                                onChange={(e) => setPlannerBinotelStop(e.target.value)}
+                                                className="text-sm border border-teal-200 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-teal-500"
+                                                aria-label="Дата по"
+                                            />
+                                            <button
+                                                type="button"
+                                                onClick={syncPlannerBinotelStatuses}
+                                                disabled={plannerStatusAnomalyLoading || plannerStatusApiSyncLoading}
+                                                className="px-3 py-1.5 rounded-lg border border-teal-300 bg-teal-100 hover:bg-teal-200 text-teal-800 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                                                title="Скачать и импортировать статусы из Binotel за выбранный период (макс. 10 дней)"
+                                            >
+                                                <FaIcon className={`fas ${plannerStatusApiSyncLoading ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}`}></FaIcon>
+                                                {plannerStatusApiSyncLoading ? 'Синхронизация...' : 'Синхронизировать из Binotel'}
+                                            </button>
+                                        </div>
                                     )}
                                     {hasAnalysis && (
                                         <div className="flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-1 py-1">
