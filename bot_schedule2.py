@@ -16120,6 +16120,122 @@ def delete_draft_evaluation(evaluation_id):
         logging.error(f"Error deleting draft evaluation: {e}")
         return jsonify({"error": f"Internal server error"}), 500
 
+
+@app.route('/api/call_evaluations/random_call', methods=['POST'])
+@require_api_key
+def fetch_random_evaluation_call():
+    """«Случайный звонок» для журнала (отдел СЗоВ / операторские направления).
+
+    Берёт из Oktell случайный записанный звонок выбранного оператора за период
+    по фильтру исход/вход, которого ещё НЕ было в оценках, и сразу кладёт его в
+    imported_calls как НЕ оценённый (status='not_evaluated'). В журнале он
+    появляется как «Не оценён» (is_imported=true). Удалить его супервайзер не
+    может — кнопка корзины и delete_draft_evaluation доступны только админам/главам
+    отделов (см. фронт и /api/call_evaluations/<id> DELETE)."""
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        requester_role = _normalize_user_role(requester[3])
+        requester_headed_dept = _headed_department_id(requester_id)
+        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role) or requester_headed_dept is not None):
+            return jsonify({"error": "Только админы, супервайзеры и главы отделов могут брать звонки на оценку"}), 403
+
+        data = request.get_json(silent=True) or {}
+        try:
+            operator_id = int(data.get('operator_id'))
+        except (TypeError, ValueError):
+            return jsonify({"error": "operator_id обязателен"}), 400
+
+        incoming = bool(data.get('incoming', True))
+        outgoing = bool(data.get('outgoing', True))
+        conn_types = _oktell_eval_connection_types_clause(incoming=incoming, outgoing=outgoing)
+        if conn_types is None:
+            return jsonify({"error": "Выберите хотя бы один тип звонка (исходящие или входящие)"}), 400
+
+        try:
+            mstart, mnext = _oktell_eval_range_bounds(data.get('date_from'), data.get('date_to'))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Укажите период (date_from, date_to в формате YYYY-MM-DD)"}), 400
+
+        operator = db.get_user(id=operator_id)
+        if not operator:
+            return jsonify({"error": "Оператор не найден"}), 404
+        if not _ensure_call_access_for_requester(operator_id, requester, requester_id):
+            return jsonify({"error": "Нет доступа к этому оператору"}), 403
+        operator_name = operator[2]
+
+        if not _oktell_api_ready():
+            return jsonify({"error": "Интеграция с Oktell недоступна"}), 503
+
+        settings = db.get_call_distribution_settings()
+        min_d = int(settings.get('min_duration_sec') or 0)
+        max_d = int(settings.get('max_duration_sec') or 0)
+
+        # 1) операторы Oktell с подходящими записями за период -> авторезолв в нашего оператора
+        operator_lookup = _status_import_build_operator_lookup(exclude_chat_managers=True)
+        try:
+            op_rows = _oktell_query(_oktell_eval_operators_sql(mstart, mnext, min_d, max_d, conn_types=conn_types))
+        except Exception:
+            logging.exception("random_call: oktell operators query failed")
+            return jsonify({"error": "Не удалось обратиться к Oktell, попробуйте ещё раз"}), 502
+        auserids = []
+        for r in op_rows:
+            nm = str(r.get('operator_name') or '').strip()
+            m = _status_import_resolve_operator_matches(nm, operator_lookup)
+            if len(m) == 1 and int(m[0]['id']) == operator_id:
+                auserids.append(str(r.get('auserid')))
+        if not auserids:
+            return jsonify({"error": "За выбранный период у оператора нет записанных звонков по этим критериям"}), 404
+
+        # 2) случайная выборка кандидатов (порядок уже рандомный — ORDER BY NEWID())
+        try:
+            sample = _oktell_query(_oktell_eval_sample_sql(mstart, mnext, auserids, 60, min_d, max_d, conn_types=conn_types))
+        except Exception:
+            logging.exception("random_call: oktell sample query failed")
+            return jsonify({"error": "Не удалось обратиться к Oktell, попробуйте ещё раз"}), 502
+
+        # 3) исключаем то, что уже в оценках/пуле, и кладём первый новый звонок
+        existing = db.get_imported_call_external_ids_for_operator(operator_id)
+        created = None
+        for c in sample:
+            conn_id = str(c.get('conn_id') or '')
+            if not conn_id or conn_id in existing:
+                continue
+            parsed = _parse_datetime_raw(c.get('dt_raw'))
+            if not parsed:
+                continue
+            month = parsed.strftime('%Y-%m')
+            new_id = db.import_single_random_call(
+                operator_id=operator_id, operator_name=operator_name,
+                external_id=conn_id, month=month, datetime_raw=c.get('dt_raw'),
+                phone=c.get('phone'), duration_sec=c.get('talk_sec'),
+                notes=f"random:{requester_id}",
+            )
+            if new_id:
+                created = {
+                    "id": new_id,
+                    "operator_id": operator_id,
+                    "operator_name": operator_name,
+                    "month": month,
+                    "datetime": c.get('dt_raw'),
+                    "phone": c.get('phone'),
+                    "duration_sec": c.get('talk_sec'),
+                    "direction": "in" if int(c.get('ct') or 0) == 5 else "out",
+                }
+                break
+            existing.add(conn_id)  # на гонке уже существует — пробуем следующего кандидата
+
+        if not created:
+            return jsonify({"error": "Новых звонков по этим критериям не осталось — все уже в оценках"}), 404
+
+        return jsonify({"status": "success", "call": created, "month": created["month"]}), 200
+    except Exception as e:
+        logging.error(f"Error fetching random evaluation call: {e}", exc_info=True)
+        return jsonify({"error": "Внутренняя ошибка сервера"}), 500
+
 @app.route('/api/audio/<int:evaluation_id>', methods=['GET'])
 @require_api_key
 def get_audio_file(evaluation_id):
@@ -23117,34 +23233,60 @@ _OKTELL_EVAL_PHONE_EXPR = (
 )
 
 
-def _oktell_eval_operators_sql(mstart, mnext, min_d, max_d):
-    # Операторы с подходящими записанными звонками за месяц (исходящие+входящие) + сколько
+def _oktell_eval_range_bounds(date_from, date_to):
+    """Границы произвольного периода для Oktell-выборки. date_to — включительно,
+    поэтому верхняя граница = date_to + 1 день. Возвращает ('YYYYMMDD', 'YYYYMMDD').
+    Бросает ValueError при неверном формате (ловится вызывающим -> 400."""
+    start = datetime.strptime(str(date_from).strip(), '%Y-%m-%d').date()
+    end = datetime.strptime(str(date_to).strip(), '%Y-%m-%d').date()
+    if end < start:
+        start, end = end, start
+    end_excl = end + timedelta(days=1)
+    return start.strftime('%Y%m%d'), end_excl.strftime('%Y%m%d')
+
+
+def _oktell_eval_connection_types_clause(incoming=True, outgoing=True):
+    """SQL-фрагмент `(...)` для `ConnectionType IN ...` по флагам исход/вход.
+    1 = исходящий, 5 = входящий. None, если не выбран ни один тип."""
+    types = []
+    if outgoing:
+        types.append('1')
+    if incoming:
+        types.append('5')
+    if not types:
+        return None
+    return "(" + ", ".join(types) + ")"
+
+
+def _oktell_eval_operators_sql(mstart, mnext, min_d, max_d, conn_types=_OKTELL_EVAL_CONNECTION_TYPES):
+    # Операторы с подходящими записанными звонками за период (исходящие+входящие) + сколько
     # доступно. UUID оператора считаем в подзапросе, группируем снаружи. Джойн к OperatorInfo
     # по операторской стороне заодно отсеивает внешнюю линию/IVR (их Id нет в каталоге).
+    # conn_types — фильтр исход/вход для «Случайного звонка»; по умолчанию оба типа (как в синке).
     return (
         "SELECT t.auserid, t.operator_name, COUNT(*) AS available FROM ("
         f"SELECT LOWER(CONVERT(varchar(36), {_OKTELL_EVAL_OPERATOR_UID_EXPR})) AS auserid, oi.Name AS operator_name "
         "FROM oktell.dbo.A_Stat_Connections_1x1 s "
         f"JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo oi ON oi.Id = {_OKTELL_EVAL_OPERATOR_UID_EXPR} "
         f"WHERE s.TimeStart >= '{mstart}' AND s.TimeStart < '{mnext}' "
-        f"AND s.ConnectionType IN {_OKTELL_EVAL_CONNECTION_TYPES} AND s.IsRecorded = 1 AND s.TimeStop IS NOT NULL "
+        f"AND s.ConnectionType IN {conn_types} AND s.IsRecorded = 1 AND s.TimeStop IS NOT NULL "
         + _oktell_eval_duration_clause(min_d, max_d) +
         ") t GROUP BY t.auserid, t.operator_name"
     )
 
 
-def _oktell_eval_sample_sql(mstart, mnext, auserids, cap, min_d, max_d):
+def _oktell_eval_sample_sql(mstart, mnext, auserids, cap, min_d, max_d, conn_types=_OKTELL_EVAL_CONNECTION_TYPES):
     ids = ", ".join("'" + str(a).replace("'", "") + "'" for a in auserids)
     return (
-        "SELECT q.auserid, q.conn_id, q.phone, q.dt_raw, q.talk_sec FROM ("
+        "SELECT q.auserid, q.conn_id, q.phone, q.dt_raw, q.talk_sec, q.ct FROM ("
         f"SELECT LOWER(CONVERT(varchar(36), {_OKTELL_EVAL_OPERATOR_UID_EXPR})) AS auserid, LOWER(CONVERT(varchar(36), s.Id)) AS conn_id, "
         f"{_OKTELL_EVAL_PHONE_EXPR} AS phone, "
         "CONVERT(varchar(10), s.TimeStart, 104) + ' ' + CONVERT(varchar(8), s.TimeStart, 108) AS dt_raw, "
-        "DATEDIFF(second, s.TimeAnswer, s.TimeStop) AS talk_sec, "
+        "DATEDIFF(second, s.TimeAnswer, s.TimeStop) AS talk_sec, s.ConnectionType AS ct, "
         f"ROW_NUMBER() OVER (PARTITION BY {_OKTELL_EVAL_OPERATOR_UID_EXPR} ORDER BY NEWID()) AS rn "
         "FROM oktell.dbo.A_Stat_Connections_1x1 s "
         f"WHERE s.TimeStart >= '{mstart}' AND s.TimeStart < '{mnext}' "
-        f"AND s.ConnectionType IN {_OKTELL_EVAL_CONNECTION_TYPES} AND s.IsRecorded = 1 AND s.TimeStop IS NOT NULL "
+        f"AND s.ConnectionType IN {conn_types} AND s.IsRecorded = 1 AND s.TimeStop IS NOT NULL "
         f"AND {_OKTELL_EVAL_OPERATOR_UID_EXPR} IN ({ids}) "
         + _oktell_eval_duration_clause(min_d, max_d) +
         f") q WHERE q.rn <= {int(cap)} ORDER BY q.auserid"

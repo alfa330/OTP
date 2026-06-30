@@ -14745,6 +14745,27 @@ class Database:
             "missing_operators": list(missing_operators)
         }
 
+    def import_single_random_call(self, *, operator_id, operator_name, external_id, month,
+                                  datetime_raw, phone, duration_sec, notes=None):
+        """Кладёт ОДИН звонок в imported_calls как НЕ оценённый (status='not_evaluated') —
+        для кнопки «Случайный звонок» в журнале. Возвращает id новой строки или None, если
+        такой звонок уже импортирован (ON CONFLICT (external_id, month))."""
+        parsed_dt = _parse_datetime_raw(datetime_raw)
+        phone_norm = _normalize_phone(phone)
+        with self._get_cursor() as cur:
+            cur.execute("""
+                INSERT INTO imported_calls
+                (external_id, operator_name, operator_id, month, datetime_raw,
+                 phone_number, phone_normalized, duration_sec, status, imported_at, notes)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'not_evaluated',
+                        CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty', %s)
+                ON CONFLICT (external_id, month) DO NOTHING
+                RETURNING id
+            """, (external_id, operator_name, operator_id, month, parsed_dt,
+                  phone, phone_norm, duration_sec, notes))
+            row = cur.fetchone()
+        return int(row[0]) if row else None
+
     def get_call_distribution_settings(self) -> dict:
         with self._get_cursor() as cur:
             cur.execute("""
@@ -14805,6 +14826,21 @@ class Database:
             )
             for op_id, ext in cur.fetchall():
                 out.setdefault(int(op_id), set()).add(str(ext))
+        return out
+
+    def get_imported_call_external_ids_for_operator(self, operator_id) -> set:
+        """Множество external_id (conn_id) всех уже импортированных звонков оператора —
+        любой месяц/статус. Нужно «Случайному звонку», чтобы не выдавать то, что уже
+        лежит в журнале/пуле (в т.ч. уже оценённое)."""
+        out = set()
+        with self._get_cursor() as cur:
+            cur.execute(
+                "SELECT external_id FROM imported_calls "
+                "WHERE operator_id = %s AND external_id IS NOT NULL",
+                (operator_id,)
+            )
+            for (ext,) in cur.fetchall():
+                out.add(str(ext))
         return out
 
     def get_imported_calls_status_counts_by_operator(self, month: str) -> dict:

@@ -1546,6 +1546,270 @@ const DateRangePicker = ({ minDate, maxDate, setFromDate, setToDate }) => {
     );
 };
 
+// ─── Custom range picker (macOS/iOS-стиль, в стиле сайта) + «Случайный звонок» ───
+const RC_MONTHS_RU = ['Январь','Февраль','Март','Апрель','Май','Июнь','Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь'];
+const RC_WEEKDAYS_RU = ['Пн','Вт','Ср','Чт','Пт','Сб','Вс'];
+const rcPad = (n) => String(n).padStart(2, '0');
+const rcToKey = (d) => `${d.getFullYear()}-${rcPad(d.getMonth() + 1)}-${rcPad(d.getDate())}`;
+const rcParseKey = (key) => {
+    const m = typeof key === 'string' && key.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return null;
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    return Number.isNaN(d.getTime()) ? null : d;
+};
+const rcAddDays = (date, n) => { const r = new Date(date); r.setDate(r.getDate() + n); return r; };
+const rcWeekStart = (date) => { const day = date.getDay() || 7; const s = new Date(date); s.setDate(date.getDate() - (day - 1)); s.setHours(0, 0, 0, 0); return s; };
+const rcFormatRu = (key) => { const d = rcParseKey(key); return d ? `${rcPad(d.getDate())}.${rcPad(d.getMonth() + 1)}.${d.getFullYear()}` : '—'; };
+const rcSpanDays = (start, end) => { const s = rcParseKey(start); const e = rcParseKey(end); return (s && e) ? Math.round((e - s) / 86400000) + 1 : 0; };
+const rcMonthStartKey = (mo) => `${mo}-01`;
+const rcMonthEndKey = (mo) => { const y = Number(mo.slice(0, 4)); const m = Number(mo.slice(5, 7)); return `${mo}-${rcPad(new Date(y, m, 0).getDate())}`; };
+
+const RcRangeCalendar = ({ value, onChange, maxKey }) => {
+    const todayKey = rcToKey(new Date());
+    const start = value?.start || todayKey;
+    const end = value?.end || start;
+    const [activeEdge, setActiveEdge] = useState('start');
+    const [calMonth, setCalMonth] = useState(() => {
+        const base = rcParseKey(start) || new Date();
+        return new Date(base.getFullYear(), base.getMonth(), 1);
+    });
+
+    const selectDay = (key) => {
+        if (maxKey && key > maxKey) return;
+        if (activeEdge === 'start') {
+            onChange?.({ start: key, end: key > end ? key : end });
+            setActiveEdge('end');
+            return;
+        }
+        if (key < start) onChange?.({ start: key, end: start });
+        else onChange?.({ start, end: key });
+        setActiveEdge('start');
+    };
+
+    const applyPreset = (preset) => {
+        const now = new Date();
+        let s; let e;
+        if (preset === 'thisMonth') { s = new Date(now.getFullYear(), now.getMonth(), 1); e = new Date(now.getFullYear(), now.getMonth() + 1, 0); }
+        else if (preset === 'prevMonth') { s = new Date(now.getFullYear(), now.getMonth() - 1, 1); e = new Date(now.getFullYear(), now.getMonth(), 0); }
+        else if (preset === 'last7') { s = rcAddDays(now, -6); e = now; }
+        else { s = rcAddDays(now, -29); e = now; }
+        if (e > now) e = now;
+        onChange?.({ start: rcToKey(s), end: rcToKey(e) });
+        setCalMonth(new Date(s.getFullYear(), s.getMonth(), 1));
+        setActiveEdge('start');
+    };
+
+    const cells = (() => {
+        const monthStart = new Date(calMonth.getFullYear(), calMonth.getMonth(), 1);
+        const gridStart = rcWeekStart(monthStart);
+        return Array.from({ length: 42 }).map((_, idx) => {
+            const date = rcAddDays(gridStart, idx);
+            const key = rcToKey(date);
+            return {
+                date, key,
+                inMonth: date.getMonth() === monthStart.getMonth(),
+                isStart: key === start, isEnd: key === end,
+                inRange: key > start && key < end,
+                isToday: key === todayKey,
+                disabled: !!(maxKey && key > maxKey),
+            };
+        });
+    })();
+
+    const presets = [
+        { key: 'thisMonth', label: 'Этот месяц' },
+        { key: 'prevMonth', label: 'Прошлый' },
+        { key: 'last7', label: '7 дней' },
+        { key: 'last30', label: '30 дней' },
+    ];
+
+    return (
+        <div>
+            <div style={{ display: 'flex', gap: 6, marginBottom: 10, flexWrap: 'wrap' }}>
+                {presets.map(p => (
+                    <button key={p.key} type="button" className="btn btn-secondary btn-sm" onClick={() => applyPreset(p.key)}>{p.label}</button>
+                ))}
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+                {[{ k: 'start', t: 'Начало', v: start }, { k: 'end', t: 'Конец', v: end }].map(item => (
+                    <button key={item.k} type="button" onClick={() => setActiveEdge(item.k)}
+                        style={{ flex: 1, textAlign: 'left', padding: '8px 12px', borderRadius: 'var(--radius)', cursor: 'pointer',
+                            border: `1px solid ${activeEdge === item.k ? 'var(--accent)' : 'var(--border-strong)'}`,
+                            background: activeEdge === item.k ? 'var(--accent-light)' : 'var(--surface)' }}>
+                        <span style={{ display: 'block', fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-3)' }}>{item.t}</span>
+                        <span style={{ display: 'block', marginTop: 2, fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>{rcFormatRu(item.v)}</span>
+                    </button>
+                ))}
+            </div>
+            <div style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', overflow: 'hidden', background: 'var(--surface)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 10px', borderBottom: '1px solid var(--border)', background: 'var(--surface-2)' }}>
+                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => setCalMonth(p => new Date(p.getFullYear(), p.getMonth() - 1, 1))} aria-label="Предыдущий месяц"><FaIcon className="fas fa-angle-left" /></button>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>{RC_MONTHS_RU[calMonth.getMonth()]} {calMonth.getFullYear()}</span>
+                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => setCalMonth(p => new Date(p.getFullYear(), p.getMonth() + 1, 1))} aria-label="Следующий месяц"><FaIcon className="fas fa-angle-right" /></button>
+                </div>
+                <div style={{ padding: '8px 10px' }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 4, marginBottom: 4 }}>
+                        {RC_WEEKDAYS_RU.map(w => (
+                            <div key={w} style={{ textAlign: 'center', fontSize: 10, fontWeight: 600, textTransform: 'uppercase', color: 'var(--text-3)' }}>{w}</div>
+                        ))}
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 4 }}>
+                        {cells.map(cell => {
+                            const endpoint = cell.isStart || cell.isEnd;
+                            return (
+                                <button key={cell.key} type="button" disabled={cell.disabled} onClick={() => selectDay(cell.key)} title={rcFormatRu(cell.key)}
+                                    style={{ height: 34, borderRadius: endpoint ? 9 : 7, border: 'none', fontSize: 13, fontWeight: 600,
+                                        cursor: cell.disabled ? 'not-allowed' : 'pointer', transition: 'background .12s, color .12s',
+                                        opacity: cell.disabled ? 0.35 : 1,
+                                        background: endpoint ? 'var(--accent)' : cell.inRange ? 'var(--accent-light)' : 'transparent',
+                                        color: endpoint ? '#fff' : cell.inMonth ? 'var(--text)' : 'var(--text-3)',
+                                        boxShadow: cell.isToday && !endpoint ? 'inset 0 0 0 1px var(--border-strong)' : 'none' }}>
+                                    {cell.date.getDate()}
+                                </button>
+                            );
+                        })}
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// Звонок берётся случайно из Oktell за период по фильтру исход/вход, которого ещё не было
+// в оценках, и сразу пишется как imported (не оценён). Супервайзер удалить его не может.
+const rcDefaultRange = (mo) => {
+    const start = rcMonthStartKey(mo);
+    const today = rcToKey(new Date());
+    let end = rcMonthEndKey(mo);
+    if (end > today) end = today;       // не уводим конец периода в будущее (текущий месяц)
+    if (end < start) end = start;
+    return { start, end };
+};
+
+const RandomCallModal = ({ isOpen, onClose, operator, userId, selectedMonth, onImported }) => {
+    const [range, setRange] = useState(() => rcDefaultRange(selectedMonth));
+    const [incoming, setIncoming] = useState(true);
+    const [outgoing, setOutgoing] = useState(true);
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState('');
+    const [results, setResults] = useState([]);
+    const importedMonthsRef = useRef(new Set());
+    const todayKey = rcToKey(new Date());
+
+    useEffect(() => {
+        if (!isOpen) return;
+        setRange(rcDefaultRange(selectedMonth));
+        setIncoming(true); setOutgoing(true); setBusy(false); setError(''); setResults([]);
+        importedMonthsRef.current = new Set();
+    }, [isOpen, selectedMonth]);
+
+    if (!isOpen) return null;
+
+    const fetchOne = async () => {
+        if (!operator || busy) return;
+        setBusy(true); setError('');
+        try {
+            const r = await authFetch(`${API_BASE_URL}/api/call_evaluations/random_call`, {
+                method: 'POST',
+                headers: { 'X-User-Id': userId, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ operator_id: operator.id, date_from: range.start, date_to: range.end, incoming, outgoing }),
+            });
+            const d = await r.json().catch(() => ({}));
+            if (r.ok && d.status === 'success' && d.call) {
+                setResults(prev => [d.call, ...prev]);
+                if (d.month) importedMonthsRef.current.add(d.month);
+                emitCallEvaluationToast('Случайный звонок добавлен в журнал', 'success');
+            } else {
+                setError(d.error || 'Не удалось получить звонок');
+            }
+        } catch (e) {
+            setError('Сетевая ошибка, попробуйте ещё раз');
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const handleClose = () => {
+        const months = importedMonthsRef.current;
+        if (months.size > 0 && typeof onImported === 'function') {
+            onImported(months, results[0]?.month || null);
+        }
+        onClose?.();
+    };
+
+    const TypeCheck = ({ checked, onToggle, label }) => (
+        <button type="button" onClick={onToggle}
+            style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderRadius: 'var(--radius)', cursor: 'pointer',
+                border: `1px solid ${checked ? 'var(--accent)' : 'var(--border-strong)'}`,
+                background: checked ? 'var(--accent-light)' : 'var(--surface)' }}>
+            <span style={{ width: 18, height: 18, flexShrink: 0, borderRadius: 5, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, color: '#fff',
+                background: checked ? 'var(--accent)' : 'transparent', border: `1px solid ${checked ? 'var(--accent)' : 'var(--border-strong)'}` }}>
+                {checked ? <FaIcon className="fas fa-check" /> : null}
+            </span>
+            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>{label}</span>
+        </button>
+    );
+
+    const span = rcSpanDays(range.start, range.end);
+
+    return (
+        <div className="modal-backdrop" onClick={handleClose}>
+            <div className="modal" style={{ maxWidth: 460 }} onClick={e => e.stopPropagation()}>
+                <div className="modal-header">
+                    <div>
+                        <h2><FaIcon className="fas fa-shuffle" /> Случайный звонок</h2>
+                        <div className="modal-header-sub">{operator?.name || '—'}</div>
+                    </div>
+                    <button className="close-btn" onClick={handleClose}><FaIcon className="fas fa-times" /></button>
+                </div>
+                <div className="modal-body">
+                    <label className="label" style={{ marginBottom: 6, display: 'block' }}>Период · {span} дн.</label>
+                    <RcRangeCalendar value={range} onChange={setRange} maxKey={todayKey} />
+
+                    <label className="label" style={{ margin: '16px 0 6px', display: 'block' }}>Тип звонка</label>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                        <TypeCheck checked={outgoing} label="Исходящие" onToggle={() => { if (outgoing && !incoming) return; setOutgoing(v => !v); }} />
+                        <TypeCheck checked={incoming} label="Входящие" onToggle={() => { if (incoming && !outgoing) return; setIncoming(v => !v); }} />
+                    </div>
+
+                    {error ? (
+                        <div style={{ marginTop: 14, padding: '10px 12px', borderRadius: 'var(--radius)', background: 'var(--accent-light)', border: '1px solid var(--border)', fontSize: 13, color: 'var(--red)' }}>
+                            <FaIcon className="fas fa-circle-exclamation" /> {error}
+                        </div>
+                    ) : null}
+
+                    {results.length > 0 ? (
+                        <div style={{ marginTop: 16 }}>
+                            <div style={{ fontSize: 12, color: 'var(--text-2)', marginBottom: 8 }}>
+                                Добавлено в журнал ({results.length}) · не оценён, удалить может только администратор:
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 200, overflowY: 'auto' }}>
+                                {results.map(c => (
+                                    <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', borderRadius: 'var(--radius)', border: '1px solid var(--border)', background: 'var(--surface-2)' }}>
+                                        <span className={`badge ${c.direction === 'in' ? 'badge-blue' : 'badge-green'}`}>
+                                            <span className="badge-dot" />{c.direction === 'in' ? 'Входящий' : 'Исходящий'}
+                                        </span>
+                                        <div style={{ minWidth: 0, flex: 1 }}>
+                                            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)', fontFamily: 'var(--font-mono)' }}>{c.phone || '—'}</div>
+                                            <div style={{ fontSize: 11, color: 'var(--text-3)' }}>{c.datetime || '—'}{c.duration_sec != null ? ` · ${Math.round(c.duration_sec)} сек` : ''}</div>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    ) : null}
+                </div>
+                <div className="modal-footer">
+                    <button className="btn btn-secondary" onClick={handleClose}>Закрыть</button>
+                    <button className="btn btn-primary" onClick={fetchOne} disabled={busy}>
+                        {busy ? <><span className="spinner" /> Поиск…</> : <><FaIcon className="fas fa-shuffle" /> {results.length > 0 ? 'Получить ещё один' : 'Получить случайный звонок'}</>}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
 // ─── Evaluation Modal ──────────────────────────────────
 const EvaluationModal = ({
     isOpen,
@@ -2462,6 +2726,7 @@ const App = ({ user, initialSelection }) => {
     const [showBatchFeedbackModal, setShowBatchFeedbackModal] = useState(false);
     const [batchModalCalls, setBatchModalCalls] = useState([]);
     const [evalModalMode, setEvalModalMode] = useState('journal');
+    const [showRandomModal, setShowRandomModal] = useState(false);
     const [evaluationTarget, setEvaluationTarget] = useState(null);
     const [isLoading, setIsLoading] = useState(false);
     const [loadingCallId, setLoadingCallId] = useState(null);
@@ -3478,6 +3743,24 @@ const App = ({ user, initialSelection }) => {
         if (!data?.isDraft) fetchEvaluations({ force: true });
     };
 
+    // После «Случайного звонка»: сбрасываем кэш затронутых месяцев и показываем результат.
+    // Если звонок попал в другой месяц (период мог его захватить) — переключаемся на него.
+    const handleRandomCallsImported = useCallback((monthsSet, lastMonth) => {
+        if (selectedOperator?.id && monthsSet && typeof monthsSet.forEach === 'function') {
+            monthsSet.forEach(mo => {
+                const key = getCallsCacheKey(selectedOperator.id, mo);
+                callsCacheRef.current.delete(key);
+                evaluationTargetCacheRef.current.delete(key);
+            });
+        }
+        const canSwitch = lastMonth && lastMonth !== selectedMonth && months.some(m => m.value === lastMonth);
+        if (canSwitch) {
+            setSelectedMonth(lastMonth); // смена месяца сама перезагрузит журнал (useEffect выше)
+        } else {
+            fetchEvaluations({ force: true });
+        }
+    }, [selectedOperator, getCallsCacheKey, months, selectedMonth, fetchEvaluations]);
+
     const handleFeedbackSaved = useCallback(async () => {
         setShowFeedbackModal(false);
         setFeedbackTargetCall(null);
@@ -3719,6 +4002,12 @@ const App = ({ user, initialSelection }) => {
     const analyticsSelectedSupervisorObj = analyticsSelectedSvId ? supervisors.find(sv => Number(sv.id) === Number(analyticsSelectedSvId)) : null;
     const analyticsSelectedSupervisorIsFired = isFiredStatus(analyticsSelectedSupervisorObj?.status);
     const selectedOperatorIsFired = isFiredStatus(selectedOperator?.status);
+    // «Случайный звонок» — только для операторской модели (отдел СЗоВ / операторские
+    // направления). Источник звонков — Oktell; у ОП (tez_op)/Линия (tez_line)/чат-менеджеров
+    // их там нет, поэтому для них кнопку не показываем.
+    const selectedOperatorDirectionMeta = (directions || []).find(d => Number(d.id) === Number(selectedOperator?.direction_id)) || null;
+    const isOperatorModelDirection = ((selectedOperatorDirectionMeta?.calculationModelCode
+        || selectedOperatorDirectionMeta?.calculation_model_code || '') === 'operator');
     const sectionTitle = activeSection === 'requests'
         ? 'Журнал запросов'
         : activeSection === 'calibration'
@@ -4656,6 +4945,17 @@ const App = ({ user, initialSelection }) => {
                         {isAdminRole && (viewMode==='extra'||hasExtra) && (
                             <button className="btn btn-secondary btn-sm" onClick={() => setViewMode(v=>v==='normal'?'extra':'normal')}>
                                 <FaIcon className={`fas fa-${viewMode==='normal'?'filter':'list'}`} /> {viewMode==='normal' ? 'Доп. оценки' : 'Основные'}
+                            </button>
+                        )}
+                        {viewMode === 'normal' && isOperatorModelDirection && (
+                            <button
+                                className={`btn btn-secondary btn-sm ${!selectedOperator ? 'disabled' : ''}`}
+                                style={{opacity:!selectedOperator?0.4:1,cursor:!selectedOperator?'not-allowed':'pointer'}}
+                                onClick={() => { if (!selectedOperator) return; setShowRandomModal(true); }}
+                                disabled={!selectedOperator}
+                                title="Взять случайный звонок из Oktell за период (исход/вход), которого ещё не было в оценках"
+                            >
+                                <FaIcon className="fas fa-shuffle" /> Случайный звонок
                             </button>
                         )}
                         {viewMode === 'normal' && (
@@ -5650,6 +5950,14 @@ const App = ({ user, initialSelection }) => {
                 submitMode={evalModalMode}
                 calibrationRoomId={activeCalibrationRoomId}
                 onCalibrationCallCreated={handleCalibrationCallCreated}
+            />
+            <RandomCallModal
+                isOpen={showRandomModal}
+                onClose={() => setShowRandomModal(false)}
+                operator={selectedOperator}
+                userId={userId}
+                selectedMonth={selectedMonth}
+                onImported={handleRandomCallsImported}
             />
             <FeedbackModal
                 isOpen={showFeedbackModal}
