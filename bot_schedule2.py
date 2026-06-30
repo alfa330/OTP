@@ -12412,6 +12412,12 @@ def get_directions():
             scope_dept = headed_dept_id or db.get_user_department_id(requester_id)
 
         directions = db.get_directions(department_id=scope_dept)
+        # Признак для кнопки «Случайный звонок» в журнале: только операторская модель
+        # И отдел, который обслуживает Oktell (СЗоВ). Так ОП/Линия и т.п. кнопку не видят.
+        for _d in directions:
+            _code = str(_d.get('department_code') or '').strip().lower()
+            _model = str(_d.get('calculation_model_code') or '').strip().lower()
+            _d['random_call_eligible'] = (_model == 'operator' and _code == OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE)
         return jsonify({
             "status": "success",
             "directions": directions,
@@ -16166,6 +16172,15 @@ def fetch_random_evaluation_call():
         if not _ensure_call_access_for_requester(operator_id, requester, requester_id):
             return jsonify({"error": "Нет доступа к этому оператору"}), 403
         operator_name = operator[2]
+
+        # «Случайный звонок» — только для отдела СЗоВ (Oktell обслуживает только его).
+        oktell_dept_id = next(
+            (d.get('id') for d in (db.get_departments() or [])
+             if str(d.get('code') or '').strip().lower() == OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE),
+            None
+        )
+        if not oktell_dept_id or db.get_user_department_id(operator_id) != oktell_dept_id:
+            return jsonify({"error": "«Случайный звонок» доступен только для операторов СЗоВ"}), 400
 
         if not _oktell_api_ready():
             return jsonify({"error": "Интеграция с Oktell недоступна"}), 503

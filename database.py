@@ -4954,17 +4954,19 @@ class Database:
         with self._get_cursor() as cursor:
             if department_id is not None:
                 cursor.execute("""
-                    SELECT id, name, has_file_upload, criteria, is_active, calculation_model_code, department_id
-                    FROM directions
-                    WHERE is_active = TRUE AND department_id = %s
-                    ORDER BY name
+                    SELECT d.id, d.name, d.has_file_upload, d.criteria, d.is_active, d.calculation_model_code, d.department_id, dep.code
+                    FROM directions d
+                    LEFT JOIN departments dep ON dep.id = d.department_id
+                    WHERE d.is_active = TRUE AND d.department_id = %s
+                    ORDER BY d.name
                 """, (department_id,))
             else:
                 cursor.execute("""
-                    SELECT id, name, has_file_upload, criteria, is_active, calculation_model_code, department_id
-                    FROM directions
-                    WHERE is_active = TRUE  -- Added filter for performance
-                    ORDER BY name
+                    SELECT d.id, d.name, d.has_file_upload, d.criteria, d.is_active, d.calculation_model_code, d.department_id, dep.code
+                    FROM directions d
+                    LEFT JOIN departments dep ON dep.id = d.department_id
+                    WHERE d.is_active = TRUE  -- Added filter for performance
+                    ORDER BY d.name
                 """)
             return [
                 {
@@ -4976,7 +4978,9 @@ class Database:
                     "calculationModelCode": normalize_calculation_model_code(row[5], row[1]),
                     "calculation_model_code": normalize_calculation_model_code(row[5], row[1]),
                     "departmentId": row[6],
-                    "department_id": row[6]
+                    "department_id": row[6],
+                    "departmentCode": row[7],
+                    "department_code": row[7]
                 } for row in cursor.fetchall()
             ]
 
