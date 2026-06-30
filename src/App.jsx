@@ -2432,8 +2432,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const [showLowRatingReviews, setShowLowRatingReviews] = useState(false);
         const [lowRatingMonth, setLowRatingMonth] = useState(month);
         const [lowRatingReviews, setLowRatingReviews] = useState([]);
-        const [lowRatingSummary, setLowRatingSummary] = useState({ total: 0, pending: 0, conflict: 0, valid: 0, invalid: 0 });
+        const [lowRatingSummary, setLowRatingSummary] = useState({ total: 0, pending: 0, conflict: 0, valid: 0, invalid: 0, unreviewed: 0 });
         const [lowRatingFilter, setLowRatingFilter] = useState('attention');
+        const [lowRatingOnlyUnreviewed, setLowRatingOnlyUnreviewed] = useState(false);
         const [lowRatingLoading, setLowRatingLoading] = useState(false);
         const [lowRatingSavingKey, setLowRatingSavingKey] = useState('');
         const [lowRatingError, setLowRatingError] = useState('');
@@ -2664,7 +2665,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             { value: 'all', label: 'Все' },
         ];
 
-        const emptyLowRatingSummary = () => ({ total: 0, pending: 0, conflict: 0, valid: 0, invalid: 0 });
+        const emptyLowRatingSummary = () => ({ total: 0, pending: 0, conflict: 0, valid: 0, invalid: 0, unreviewed: 0 });
 
         const lowRatingFilterCount = (filterValue) => {
             const summary = lowRatingSummary || {};
@@ -2849,12 +2850,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const filterKey = String(overrides.filter ?? lowRatingFilter ?? 'attention');
             const range = overrides.range || lowRatingRange || monthBounds(lowRatingMonth);
             const searchValue = overrides.search !== undefined ? overrides.search : lowRatingSearch;
+            const onlyUnreviewed = overrides.unreviewed !== undefined ? overrides.unreviewed : lowRatingOnlyUnreviewed;
             const params = new URLSearchParams();
             if (range?.start) params.append('start', range.start);
             if (range?.end) params.append('end', range.end);
             params.append('status', filterKey);
             const trimmedSearch = String(searchValue || '').trim();
             if (trimmedSearch) params.append('search', trimmedSearch);
+            if (onlyUnreviewed) params.append('unreviewed', '1');
             return params;
         };
 
@@ -4439,7 +4442,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             if (!showLowRatingReviews || !user?.id) return;
             fetchLowRatingReviews();
             // eslint-disable-next-line react-hooks/exhaustive-deps
-        }, [isChatModel, showLowRatingReviews, lowRatingFilter, lowRatingPagination.page, lowRatingRange.start, lowRatingRange.end, lowRatingSearch, user?.id]);
+        }, [isChatModel, showLowRatingReviews, lowRatingFilter, lowRatingOnlyUnreviewed, lowRatingPagination.page, lowRatingRange.start, lowRatingRange.end, lowRatingSearch, user?.id]);
 
         // Debounce ввода поиска + сброс страницы; при активном поиске показываем все статусы.
         useEffect(() => {
@@ -5419,6 +5422,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const hoursNormColClass = 'w-36 shrink-0 p-2 text-center border-r';
         const hoursSummaryColClass = 'shrink-0 p-2 text-center border-l';
         const lowRatingAttentionCount = lowRatingFilterCount('attention');
+        const lowRatingUnreviewedCount = Number(lowRatingSummary?.unreviewed || 0);
 
         return (
             <div className="bg-white p-5 rounded-xl shadow-md">
@@ -6397,6 +6401,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </label>
                                 </div>
                                 <div className="flex flex-wrap items-center gap-2">
+                                    <label
+                                        className={`inline-flex h-9 cursor-pointer select-none items-center gap-2 rounded-full px-3.5 text-xs font-semibold transition ${
+                                            lowRatingOnlyUnreviewed
+                                                ? 'bg-amber-500 text-white shadow-sm'
+                                                : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100'
+                                        }`}
+                                        title="Показывать только ещё не проверенные мной оценки"
+                                    >
+                                        <input
+                                            type="checkbox"
+                                            className="sr-only"
+                                            checked={lowRatingOnlyUnreviewed}
+                                            disabled={lowRatingLoading}
+                                            onChange={(e) => {
+                                                setLowRatingOnlyUnreviewed(e.target.checked);
+                                                setLowRatingPagination(prev => ({ ...prev, page: 1 }));
+                                            }}
+                                        />
+                                        <FaIcon className={`fas ${lowRatingOnlyUnreviewed ? 'fa-square-check' : 'fa-square'}`} aria-hidden="true" />
+                                        Не проверенные мной
+                                        {lowRatingUnreviewedCount > 0 && (
+                                            <span className={`rounded-full px-2 py-0.5 text-[11px] ${lowRatingOnlyUnreviewed ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                                                {lowRatingUnreviewedCount}
+                                            </span>
+                                        )}
+                                    </label>
                                     {LOW_RATING_FILTERS.map(filter => {
                                         const active = lowRatingFilter === filter.value;
                                         const count = lowRatingFilterCount(filter.value);

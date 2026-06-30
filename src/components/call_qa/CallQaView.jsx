@@ -13,8 +13,8 @@ import CriteriaClassification from './CriteriaClassification';
 import AdjudicationsRag from './AdjudicationsRag';
 
 /* Контейнер раздела «ИИ-оценка» (App.jsx: view === "ai_qa", только super_admin).
- * Очередь и карточка ревью тянутся с бэкенда (/api/ai-qa/*); при недоступности —
- * откат на демо-данные, чтобы интерфейс всегда был живым. */
+ * Все данные — реальные с /api/ai-qa/*. Мок-данных нет; при недоступности бэкенда
+ * показываются состояния загрузки / ошибки / пусто. */
 
 const TABS = [
     { key: 'overview',  label: 'Обзор',          Icon: Gauge },
@@ -22,12 +22,6 @@ const TABS = [
     { key: 'evals',     label: 'Оценки',         Icon: ClipboardList },
     { key: 'criteria',  label: 'Критерии',       Icon: SlidersHorizontal },
     { key: 'rag',       label: 'База разборов',  Icon: Database },
-];
-
-const MOCK_QUEUE = [
-    { id: 6099, direction: 'Яндекс Регистрация', operator: 'Ильданов А.', datetime: '29.06 11:40', reasons: ['critical', 'lowconf'] },
-    { id: 6036, direction: 'Основа', operator: 'Роман К.', datetime: '29.06 12:15', reasons: ['lowconf', 'pending'] },
-    { id: 6444, direction: 'Яндекс Регистрация', operator: 'Марай Е.', datetime: '29.06 13:02', reasons: ['pending'] },
 ];
 
 const REASON = {
@@ -59,12 +53,9 @@ function Segmented({ tab, setTab }) {
     );
 }
 
-function QueueList({ items, demo, onOpen }) {
+function QueueList({ items, onOpen }) {
     return (
         <div className="space-y-2.5">
-            {demo && (
-                <p className="px-1 text-[11.5px] text-amber-600">Демо-данные: бэкенд недоступен — показана примерная очередь.</p>
-            )}
             {items.map((c) => (
                 <button key={c.id} onClick={() => onOpen(c)}
                     className={`${iosCard} flex w-full items-center justify-between gap-3 p-3.5 text-left transition hover:ring-blue-200 active:scale-[0.995]`}>
@@ -95,33 +86,43 @@ const Spinner = ({ text }) => (
     </div>
 );
 
+const ErrorCard = ({ text, onRetry }) => (
+    <div className={`${iosCard} flex flex-col items-center gap-3 px-6 py-14 text-center`}>
+        <AlertCircle size={26} className="text-rose-500" />
+        <p className="text-[13.5px] font-medium text-slate-700">{text}</p>
+        {onRetry && <button onClick={onRetry} className={iosBtnSecondary}>Повторить</button>}
+    </div>
+);
+
 export default function CallQaView(props) {
     const { apiBaseUrl, withAccessTokenHeader, showToast } = props;
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
 
     const [tab, setTab] = useState('queue');
     const [queue, setQueue] = useState(null);      // null = загрузка
-    const [queueDemo, setQueueDemo] = useState(false);
+    const [queueErr, setQueueErr] = useState(false);
 
     const [selected, setSelected] = useState(null);
     const [callData, setCallData] = useState(null);
     const [callLoading, setCallLoading] = useState(false);
     const [callErr, setCallErr] = useState(null);
 
-    useEffect(() => {
-        if (tab !== 'queue' || queue !== null) return;
-        if (!apiBaseUrl) { setQueue(MOCK_QUEUE); setQueueDemo(true); return; }
-        let live = true;
+    const loadQueue = () => {
+        setQueue(null); setQueueErr(false);
+        if (!apiBaseUrl) { setQueueErr(true); setQueue([]); return; }
         axios.get(`${apiBaseUrl}/api/ai-qa/review-queue`, { headers: headers() })
-            .then((r) => { if (live) setQueue(r.data.items || []); })
-            .catch(() => { if (live) { setQueue(MOCK_QUEUE); setQueueDemo(true); } });
-        return () => { live = false; };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
+            .then((r) => setQueue(r.data.items || []))
+            .catch(() => { setQueue([]); setQueueErr(true); });
+    };
+
+    useEffect(() => {
+        if (tab === 'queue' && queue === null) loadQueue();
+        // eslint-disable-next-line
     }, [tab, apiBaseUrl]);
 
     const openCall = (c, refresh = false) => {
         setSelected(c); if (!refresh) setCallData(null); setCallErr(null);
-        if (!apiBaseUrl) return;                    // демо: карточка покажет свой мок
+        if (!apiBaseUrl) { setCallErr('Бэкенд недоступен'); return; }
         setCallLoading(true);
         axios.get(`${apiBaseUrl}/api/ai-qa/call/${c.id}`, { params: refresh ? { refresh: 1 } : {}, headers: headers() })
             .then((r) => setCallData(r.data.call))
@@ -133,7 +134,7 @@ export default function CallQaView(props) {
 
     const saveAdjud = (decisions) => {
         const call = callData;
-        const items = call ? call.criteria
+        const items = call ? (call.criteria || [])
             .filter((c) => c.source === 'transcript' && decisions[c.idx] && decisions[c.idx].verdict !== c.ai)
             .map((c) => ({ criterion_idx: c.idx, criterion_name: c.name, ai_verdict: c.ai,
                            correct_verdict: decisions[c.idx].verdict, reason: decisions[c.idx].reason || '',
@@ -167,7 +168,7 @@ export default function CallQaView(props) {
                 <div className="space-y-3">
                     <div className="flex items-center justify-between gap-2">
                         <button onClick={closeCall} className={iosBtnGhost}>
-                            <ChevronLeft size={16} />Назад к очереди
+                            <ChevronLeft size={16} />Назад
                         </button>
                         {callData && apiBaseUrl && (
                             <div className="flex items-center gap-2">
@@ -183,25 +184,22 @@ export default function CallQaView(props) {
                     {callLoading ? (
                         <Spinner text={`Оцениваю звонок #${selected.id} — распознавание и анализ…`} />
                     ) : callErr ? (
-                        <div className={`${iosCard} flex flex-col items-center gap-3 px-6 py-14 text-center`}>
-                            <AlertCircle size={26} className="text-rose-500" />
-                            <p className="text-[13.5px] font-medium text-slate-700">{callErr}</p>
-                            <p className="max-w-md text-[12px] text-slate-400">Проверьте ключи Soniox/Claude на сервере и доступ к записи. Можно повторить.</p>
-                            <button onClick={() => openCall(selected)} className={iosBtnSecondary}>Повторить</button>
-                        </div>
+                        <ErrorCard text={callErr} onRetry={() => openCall(selected)} />
                     ) : (
                         <CallReviewCard call={callData || undefined} onSkip={closeCall} onSave={saveAdjud} />
                     )}
                 </div>
             ) : tab === 'queue' ? (
                 queue === null ? <Spinner text="Загружаю очередь…" />
+                    : queueErr ? <ErrorCard text="Не удалось загрузить очередь" onRetry={loadQueue} />
                     : queue.length === 0 ? (
                         <div className={`${iosCard} px-6 py-14 text-center text-[13px] text-slate-400`}>Очередь пуста</div>
-                    ) : <QueueList items={queue} demo={queueDemo} onOpen={openCall} />
+                    ) : <QueueList items={queue} onOpen={openCall} />
             ) : tab === 'overview' ? (
-                <QaDashboard />
+                <QaDashboard apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader} />
             ) : tab === 'evals' ? (
-                <EvaluationsList onOpen={openCall} />
+                <EvaluationsList apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
+                                 onOpen={openCall} showToast={showToast} />
             ) : tab === 'criteria' ? (
                 <CriteriaClassification showToast={showToast} apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader} />
             ) : (

@@ -3,8 +3,7 @@ import axios from 'axios';
 import { Sparkles, Server, User2, ShieldAlert, Save, Info, Loader2 } from 'lucide-react';
 import { APPLE_FONT, iosCard, iosBtnPrimary, IosBadge } from '../ui/ios';
 
-/* Классификация критериев по источнику оценки.
- * Тянется с GET /api/ai-qa/criteria-config?direction_id=, сохраняется POST. Откат на демо. */
+/* Классификация критериев по источнику. Реальные данные: GET/POST /api/ai-qa/criteria-config. */
 
 const SOURCES = [
     { key: 'transcript', label: 'ИИ',     Icon: Sparkles, tone: 'blue' },
@@ -13,18 +12,6 @@ const SOURCES = [
 ];
 
 const DIRECTIONS = [{ id: 73, name: 'Основа' }, { id: 72, name: 'Яндекс Регистрация' }, { id: 74, name: 'Поток' }];
-
-const MOCK = [
-    { idx: 0, name: 'Приветствие', is_critical: false, source: 'transcript' },
-    { idx: 2, name: 'Персонализация', is_critical: false, source: 'transcript' },
-    { idx: 3, name: 'Идентификация клиента', is_critical: false, source: 'transcript' },
-    { idx: 6, name: 'Отработка возражений', is_critical: false, source: 'transcript' },
-    { idx: 12, name: 'Корректность оформления регистрации', is_critical: false, source: 'system_api' },
-    { idx: 15, name: 'КО_Достоверность информации', is_critical: true, source: 'transcript' },
-    { idx: 19, name: 'КО_Внесение информации в ПО', is_critical: true, source: 'system_api' },
-    { idx: 20, name: 'Сделка состоялась', is_critical: false, source: 'system_api' },
-    { idx: 21, name: 'Нет критических ошибок', is_critical: true, source: 'transcript' },
-];
 
 function SourcePicker({ value, onChange }) {
     return (
@@ -49,16 +36,16 @@ export default function CriteriaClassification(props) {
 
     const [dir, setDir] = useState(73);
     const [rows, setRows] = useState(null);   // null = загрузка
-    const [demo, setDemo] = useState(false);
+    const [err, setErr] = useState(false);
     const [dirty, setDirty] = useState(false);
     const [saving, setSaving] = useState(false);
 
     const loadDir = (id) => {
-        setDir(id); setRows(null); setDirty(false);
-        if (!apiBaseUrl) { setRows(MOCK.map((r) => ({ ...r }))); setDemo(true); return; }
+        setDir(id); setRows(null); setErr(false); setDirty(false);
+        if (!apiBaseUrl) { setRows([]); setErr(true); return; }
         axios.get(`${apiBaseUrl}/api/ai-qa/criteria-config`, { params: { direction_id: id }, headers: headers() })
-            .then((r) => { setRows(r.data.criteria || []); setDemo(false); })
-            .catch(() => { setRows(MOCK.map((x) => ({ ...x }))); setDemo(true); });
+            .then((r) => setRows(r.data.criteria || []))
+            .catch(() => { setRows([]); setErr(true); });
     };
 
     useEffect(() => { loadDir(73); /* eslint-disable-next-line */ }, [apiBaseUrl]);
@@ -75,7 +62,7 @@ export default function CriteriaClassification(props) {
     };
 
     const save = () => {
-        if (!apiBaseUrl) { showToast?.('Классификация сохранена', 'success'); setDirty(false); return; }
+        if (!apiBaseUrl) { showToast?.('Бэкенд недоступен', 'error'); return; }
         setSaving(true);
         const items = rows.map((r) => ({ criterion_idx: r.idx, eval_source: r.source }));
         axios.post(`${apiBaseUrl}/api/ai-qa/criteria-config`, { direction_id: dir, items }, { headers: headers() })
@@ -103,13 +90,15 @@ export default function CriteriaClassification(props) {
 
             <p className="flex items-start gap-1.5 px-1 text-[12px] text-slate-400">
                 <Info size={14} className="mt-0.5 shrink-0" />
-                «ПО-API» — критерий проверяется не по разговору, а по данным в системе. {demo && <span className="text-amber-600">Демо-данные.</span>}
+                «ПО-API» — критерий проверяется не по разговору, а по данным в системе.
             </p>
 
             {rows === null ? (
                 <div className={`${iosCard} flex items-center justify-center gap-2 px-6 py-12 text-slate-400`}>
                     <Loader2 size={20} className="animate-spin" />Загрузка…
                 </div>
+            ) : err ? (
+                <div className={`${iosCard} px-6 py-12 text-center text-[13px] text-slate-400`}>Не удалось загрузить критерии</div>
             ) : (
                 <div className="space-y-2">
                     {rows.map((r) => (
