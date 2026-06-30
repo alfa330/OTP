@@ -12110,6 +12110,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [plannerTrainingModalError, setPlannerTrainingModalError] = useState('');
             const [plannerTrainingsByOperator, setPlannerTrainingsByOperator] = useState({});
             const plannerLoadedTrainingMonthKeysRef = useRef(new Set());
+            const [plannerTrainingRejectionsByOperator, setPlannerTrainingRejectionsByOperator] = useState({});
+            const plannerLoadedRejectionMonthKeysRef = useRef(new Set());
             const [plannerTechStatusModalState, setPlannerTechStatusModalState] = useState({
                 open: false,
                 operatorId: null,
@@ -12821,6 +12823,39 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 mergePlannerTrainingRows(rows);
                 plannerLoadedTrainingMonthKeysRef.current.add(normalizedMonth);
             }, [API_BASE_URL, user?.id, withAccessTokenHeader, mergePlannerTrainingRows]);
+            const mergePlannerTrainingRejectionRows = useCallback((rows = []) => {
+                setPlannerTrainingRejectionsByOperator(prev => {
+                    const next = { ...(prev || {}) };
+                    for (const row of (Array.isArray(rows) ? rows : [])) {
+                        const operatorId = Number(row?.operator_id);
+                        if (!Number.isFinite(operatorId) || operatorId <= 0) continue;
+                        const key = String(operatorId);
+                        const existing = Array.isArray(next[key]) ? next[key].slice() : [];
+                        const byId = new Map(existing.map(item => [normalizeTrainingId(item?.id), item]));
+                        const rowId = normalizeTrainingId(row?.id);
+                        if (rowId) byId.set(rowId, row);
+                        else existing.push(row);
+                        next[key] = rowId ? Array.from(byId.values()) : existing;
+                    }
+                    return next;
+                });
+            }, []);
+            const fetchPlannerTrainingRejectionsForMonth = useCallback(async (monthKey, { force = false } = {}) => {
+                const normalizedMonth = String(monthKey || '').trim();
+                if (!user?.id || !/^\d{4}-\d{2}$/.test(normalizedMonth)) return;
+                if (!force && plannerLoadedRejectionMonthKeysRef.current.has(normalizedMonth)) return;
+                const response = await fetch(`${API_BASE_URL}/api/training_rejections?month=${encodeURIComponent(normalizedMonth)}`, {
+                    credentials: 'include',
+                    headers: withAccessTokenHeader({ 'X-User-Id': String(user.id) })
+                });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(payload?.error || `HTTP ${response.status}`);
+                }
+                const rows = Array.isArray(payload?.rejections) ? payload.rejections : (Array.isArray(payload) ? payload : []);
+                mergePlannerTrainingRejectionRows(rows);
+                plannerLoadedRejectionMonthKeysRef.current.add(normalizedMonth);
+            }, [API_BASE_URL, user?.id, withAccessTokenHeader, mergePlannerTrainingRejectionRows]);
             useEffect(() => {
                 const datesToLoad = [];
                 if (plannerTrainingModalState?.open && plannerTrainingModalState?.date) {
@@ -12838,6 +12873,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         fetchPlannerTrainingsForMonth(monthKey).catch(error => {
                             console.error('Error loading planner trainings:', error);
                         });
+                        fetchPlannerTrainingRejectionsForMonth(monthKey).catch(error => {
+                            console.error('Error loading planner training rejections:', error);
+                        });
                     });
             }, [
                 plannerTrainingModalState?.open,
@@ -12845,7 +12883,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 plannerOfflineActivityModalState?.open,
                 plannerOfflineActivityModalState?.activityType,
                 plannerOfflineActivityModalState?.date,
-                fetchPlannerTrainingsForMonth
+                fetchPlannerTrainingsForMonth,
+                fetchPlannerTrainingRejectionsForMonth
             ]);
             const plannerStatusRangeKey = useCallback((startDate, endDate) => {
                 const start = String(startDate || '').trim();
@@ -13457,8 +13496,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     fetchPlannerTrainingsForMonth(monthKey).catch(error => {
                         console.error('Error loading planner trainings:', error);
                     });
+                    fetchPlannerTrainingRejectionsForMonth(monthKey).catch(error => {
+                        console.error('Error loading planner training rejections:', error);
+                    });
                 });
-            }, [user?.id, visibleRange, fetchPlannerTrainingsForMonth]);
+            }, [user?.id, visibleRange, fetchPlannerTrainingsForMonth, fetchPlannerTrainingRejectionsForMonth]);
             useEffect(() => {
                 if (!user?.id) return;
                 if (user?.role === 'operator') return;
@@ -17543,23 +17585,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     }
 
                     if (isFlagConfirmMode) {
-                        const resolveResponse = await fetch(`${API_BASE_URL}/api/work_schedules/auto_flags/resolve`, {
-                            method: 'POST',
-                            credentials: 'include',
-                            headers: withAccessTokenHeader({
-                                'Content-Type': 'application/json'
-                            }),
-                            body: JSON.stringify({
-                                operator_id: operatorId,
-                                day: dayKey,
-                                flag_type: 'training',
-                                action: 'confirm'
-                            })
-                        });
-                        const resolvePayload = await resolveResponse.json().catch(() => ({}));
-                        if (!resolveResponse.ok) {
-                            throw new Error(resolvePayload?.error || `HTTP ${resolveResponse.status}`);
-                        }
+                        // День помечается подтверждённым только когда по всем интервалам принято
+                        // решение; пока есть ожидающие — остаётся «на подтверждении».
+                        const extraConfirmed = payloadIntervals
+                            .map(iv => ({ startMin: timeToMinutes(iv.startTime), endMin: timeToMinutes(iv.endTime) }))
+                            .filter(iv => Number.isFinite(iv.startMin) && Number.isFinite(iv.endMin) && iv.endMin > iv.startMin);
+                        await resolvePlannerTrainingDayFlag(operatorId, dayKey, { extraConfirmed });
                     }
 
                     await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
@@ -17599,6 +17630,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const payload = await response.json().catch(() => ({}));
                     if (!response.ok) {
                         throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+                    // Удаление подтверждающего тренинга возвращает его интервал в «ожидает» —
+                    // пересчитываем дневной флаг, чтобы он не остался «подтверждён» зря.
+                    if (modalState?.opId && String(modalState?.date || '') === String(dateKey || '')) {
+                        try {
+                            await resolvePlannerTrainingDayFlag(Number(modalState.opId), String(dateKey), { removedConfirmedIds: [id] });
+                        } catch (flagError) {
+                            console.error('Error recomputing training day flag after delete:', flagError);
+                        }
                     }
                     await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
                     if (/^\d{4}-\d{2}$/.test(monthKey)) {
@@ -18382,6 +18422,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         return (Number.isFinite(am) ? am : 0) - (Number.isFinite(bm) ? bm : 0);
                     });
             }, [isBulkSelectionModal, modalState?.opId, modalState?.date, plannerTrainingsByOperator]);
+            const modalTrainingRejections = useMemo(() => {
+                if (isBulkSelectionModal || !modalState?.opId || !modalState?.date) return [];
+                return (plannerTrainingRejectionsByOperator[String(modalState.opId)] || [])
+                    .filter(r => String(r?.date || '') === modalState.date);
+            }, [isBulkSelectionModal, modalState?.opId, modalState?.date, plannerTrainingRejectionsByOperator]);
             const modalImportedStatusTimeline = useMemo(() => {
                 if (isBulkSelectionModal) return [];
                 if (!modalState?.opId || !modalState?.date) return [];
@@ -18451,6 +18496,140 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 ),
                 [buildModalStatusSegments]
             );
+            // Перевод сохранённой записи тренинга/отклонения в интервал минут от полуночи.
+            const plannerTrainingRecordToMinutes = useCallback((record) => {
+                const startMin = timeToMinutes(record?.start_time ?? record?.startTime ?? record?.start);
+                const endMin = timeToMinutes(record?.end_time ?? record?.endTime ?? record?.end);
+                if (!Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) return null;
+                return { startMin, endMin };
+            }, []);
+            // Интервал «накрывает» сегмент, если середина сегмента попадает внутрь интервала.
+            // По середине, а не по пересечению краёв, — чтобы округление до минут не «перетекало»
+            // на соседний интервал.
+            const plannerIntervalCoversSegment = useCallback((seg, iv) => {
+                const startSec = Number(seg?.startSec);
+                const endSec = Number(seg?.endSec);
+                let midMin;
+                if (Number.isFinite(startSec) && Number.isFinite(endSec) && endSec > startSec) {
+                    midMin = (startSec + endSec) / 2 / 60;
+                } else {
+                    const s = Number(seg?.startMin);
+                    const e = Number(seg?.endMin);
+                    if (!Number.isFinite(s) || !Number.isFinite(e)) return false;
+                    midMin = (s + e) / 2;
+                }
+                return iv.startMin <= midMin && midMin < iv.endMin;
+            }, []);
+            // Статус каждого интервала тренинга по статусам: подтверждён (есть пересекающийся
+            // сохранённый тренинг), отклонён (есть пересекающееся отклонение) или ожидает.
+            // Отклонение приоритетнее — оно необратимо.
+            const modalTrainingSegmentStatusById = useMemo(() => {
+                const confirmedIvs = (modalSavedTrainings || []).map(plannerTrainingRecordToMinutes).filter(Boolean);
+                const rejectedIvs = (modalTrainingRejections || []).map(plannerTrainingRecordToMinutes).filter(Boolean);
+                const map = {};
+                for (const seg of (modalTrainingStatusSegments || [])) {
+                    const isRejected = rejectedIvs.some(iv => plannerIntervalCoversSegment(seg, iv));
+                    const isConfirmed = !isRejected && confirmedIvs.some(iv => plannerIntervalCoversSegment(seg, iv));
+                    map[seg.id] = isRejected ? 'rejected' : (isConfirmed ? 'confirmed' : 'pending');
+                }
+                return map;
+            }, [modalTrainingStatusSegments, modalSavedTrainings, modalTrainingRejections, plannerTrainingRecordToMinutes, plannerIntervalCoversSegment]);
+            const modalTrainingPendingSegments = useMemo(
+                () => (modalTrainingStatusSegments || []).filter(seg => modalTrainingSegmentStatusById[seg.id] === 'pending'),
+                [modalTrainingStatusSegments, modalTrainingSegmentStatusById]
+            );
+            // Дневной флаг тренинга из решений по интервалам:
+            // есть ожидающие → 'pending'; иначе есть подтверждённые → 'confirm'; иначе все отклонены → 'reject'.
+            const computeTrainingDayFlagAction = (segments, confirmedIvs, rejectedIvs) => {
+                let anyPending = false;
+                let anyConfirmed = false;
+                let anyRejected = false;
+                for (const seg of (segments || [])) {
+                    const isRejected = (rejectedIvs || []).some(iv => plannerIntervalCoversSegment(seg, iv));
+                    const isConfirmed = !isRejected && (confirmedIvs || []).some(iv => plannerIntervalCoversSegment(seg, iv));
+                    if (isConfirmed) anyConfirmed = true;
+                    else if (isRejected) anyRejected = true;
+                    else anyPending = true;
+                }
+                if (anyPending) return 'pending';
+                if (anyConfirmed) return 'confirm';
+                if (anyRejected) return 'reject';
+                return null;
+            };
+            // Пересчитать и сохранить дневной флаг тренинга. extra*/removed* учитывают только что
+            // сделанное действие, т.к. локальный стейт ещё не успел перезагрузиться.
+            const resolvePlannerTrainingDayFlag = async (operatorId, dayKey, { extraConfirmed = [], extraRejected = [], removedConfirmedIds = [] } = {}) => {
+                const opId = Number(operatorId);
+                const day = String(dayKey || '').trim();
+                if (!Number.isFinite(opId) || !day) return;
+                const removedSet = new Set((removedConfirmedIds || []).map(id => normalizeTrainingId(id)).filter(Boolean));
+                const confirmedIvs = (modalSavedTrainings || [])
+                    .filter(t => !removedSet.has(normalizeTrainingId(t?.id)))
+                    .map(plannerTrainingRecordToMinutes)
+                    .filter(Boolean)
+                    .concat((extraConfirmed || []).filter(Boolean));
+                const rejectedIvs = (modalTrainingRejections || [])
+                    .map(plannerTrainingRecordToMinutes)
+                    .filter(Boolean)
+                    .concat((extraRejected || []).filter(Boolean));
+                const action = computeTrainingDayFlagAction(modalTrainingStatusSegments, confirmedIvs, rejectedIvs);
+                if (!action) return;
+                const response = await fetch(`${API_BASE_URL}/api/work_schedules/auto_flags/resolve`, {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: withAccessTokenHeader({ 'Content-Type': 'application/json' }),
+                    body: JSON.stringify({ operator_id: opId, day, flag_type: 'training', action })
+                });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(payload?.error || `HTTP ${response.status}`);
+                }
+            };
+            // Отклонить один или несколько интервалов авто-тренинга (необратимо, на часы не влияет).
+            const rejectPlannerTrainingIntervals = async (intervals) => {
+                if (plannerReadOnly) return;
+                const operatorId = Number(modalState?.opId);
+                const dayKey = String(modalState?.date || '').trim();
+                if (!Number.isFinite(operatorId) || !dayKey || isBulkSelectionModal) return;
+                const apiIntervals = (Array.isArray(intervals) ? intervals : [intervals])
+                    .map(plannerIntervalToApiTimes)
+                    .filter(Boolean);
+                if (apiIntervals.length === 0) return;
+                setPlannerTrainingActionLoading(true);
+                setPlannerAutoFlagActionLoading('training:reject');
+                try {
+                    for (const interval of apiIntervals) {
+                        const response = await fetch(`${API_BASE_URL}/api/training_rejections`, {
+                            method: 'POST',
+                            credentials: 'include',
+                            headers: withAccessTokenHeader({ 'Content-Type': 'application/json' }),
+                            body: JSON.stringify({
+                                operator_id: operatorId,
+                                date: dayKey,
+                                start_time: interval.startTime,
+                                end_time: interval.endTime
+                            })
+                        });
+                        const payload = await response.json().catch(() => ({}));
+                        if (!response.ok) {
+                            throw new Error(payload?.error || `HTTP ${response.status}`);
+                        }
+                    }
+                    const extraRejected = apiIntervals
+                        .map(iv => ({ startMin: timeToMinutes(iv.startTime), endMin: timeToMinutes(iv.endTime) }))
+                        .filter(iv => Number.isFinite(iv.startMin) && Number.isFinite(iv.endMin) && iv.endMin > iv.startMin);
+                    await resolvePlannerTrainingDayFlag(operatorId, dayKey, { extraRejected });
+                    await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
+                    await fetchPlannerTrainingRejectionsForMonth(dayKey.slice(0, 7), { force: true });
+                    emitAppToast(apiIntervals.length > 1 ? 'Интервалы тренинга отклонены' : 'Интервал тренинга отклонён', 'success');
+                } catch (error) {
+                    console.error('Error rejecting training intervals:', error);
+                    emitAppToast(`Ошибка отклонения тренинга: ${error?.message || error}`, 'error');
+                } finally {
+                    setPlannerTrainingActionLoading(false);
+                    setPlannerAutoFlagActionLoading('');
+                }
+            };
             const modalTechReasonStatusSegments = useMemo(
                 () => buildModalStatusSegments(
                     (statusKey, seg) => !!seg?.isTechnicalReason || plannerStatusIsTechReasonKey(statusKey),
@@ -24979,7 +25158,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         type="button"
                                                         onClick={() => {
                                                             if (item.key === 'training') {
-                                                                const trainingIntervals = Array.isArray(modalTrainingStatusSegments) ? modalTrainingStatusSegments : [];
+                                                                const trainingIntervals = Array.isArray(modalTrainingPendingSegments) ? modalTrainingPendingSegments : [];
                                                                 if (trainingIntervals.length > 0) {
                                                                     openPlannerTrainingModalForCurrentDay('confirm_training_flag_all', {
                                                                         intervals: trainingIntervals.map(seg => ({
@@ -25012,7 +25191,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             }
                                                             resolvePlannerAutoFlag(item.key, 'confirm');
                                                         }}
-                                                        disabled={!hasMinutes || anyBusy}
+                                                        disabled={!hasMinutes || anyBusy || (item.key === 'training' && modalTrainingPendingSegments.length === 0)}
                                                         className="px-2.5 py-1 rounded-md border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
                                                     >
                                                         <FaIcon className={`fas ${busyConfirm ? 'fa-spinner fa-spin' : 'fa-check'}`}></FaIcon>
@@ -25020,8 +25199,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </button>
                                                     <button
                                                         type="button"
-                                                        onClick={() => resolvePlannerAutoFlag(item.key, 'reject')}
-                                                        disabled={!hasMinutes || anyBusy}
+                                                        onClick={() => {
+                                                            if (item.key === 'training') {
+                                                                rejectPlannerTrainingIntervals(modalTrainingPendingSegments);
+                                                                return;
+                                                            }
+                                                            resolvePlannerAutoFlag(item.key, 'reject');
+                                                        }}
+                                                        disabled={!hasMinutes || anyBusy || (item.key === 'training' && modalTrainingPendingSegments.length === 0)}
                                                         className="px-2.5 py-1 rounded-md border border-slate-300 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
                                                     >
                                                         <FaIcon className={`fas ${busyReject ? 'fa-spinner fa-spin' : 'fa-times'}`}></FaIcon>
@@ -25085,33 +25270,42 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <div className="w-full mt-1 pt-2 border-t border-slate-100">
                                                 {modalTrainingStatusSegments.length > 0 ? (
                                                     <div className="space-y-1.5">
-                                                        <div className="flex justify-end">
+                                                        <div className="flex justify-end gap-1.5">
                                                             <button
                                                                 type="button"
                                                                 onClick={() => openPlannerTrainingModalForCurrentDay('confirm_training_flag_all', {
-                                                                    intervals: modalTrainingStatusSegments.map(seg => ({
+                                                                    intervals: modalTrainingPendingSegments.map(seg => ({
                                                                         startMin: seg.startMin,
                                                                         endMin: seg.endMin,
                                                                         startSec: seg.startSec,
                                                                         endSec: seg.endSec
                                                                     }))
                                                                 })}
-                                                                disabled={plannerTrainingActionLoading || anyBusy}
+                                                                disabled={plannerTrainingActionLoading || anyBusy || modalTrainingPendingSegments.length === 0}
                                                                 className="px-2.5 py-1 rounded-md border border-teal-300 bg-white hover:bg-teal-50 text-teal-700 text-[11px] font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
                                                             >
-                                                                Подтвердить все интервалы
+                                                                Подтвердить все
+                                                            </button>
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => rejectPlannerTrainingIntervals(modalTrainingPendingSegments)}
+                                                                disabled={plannerTrainingActionLoading || anyBusy || modalTrainingPendingSegments.length === 0}
+                                                                className="px-2.5 py-1 rounded-md border border-slate-300 bg-white hover:bg-slate-100 text-slate-600 text-[11px] font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+                                                            >
+                                                                Отклонить все
                                                             </button>
                                                         </div>
                                                         {modalTrainingStatusSegments.map((seg, segIndex) => {
                                                             const startEndDisplay = plannerModalSegmentRangeText(seg);
-                                                            const intervalStatusLabel = status === 'confirmed'
+                                                            const segStatus = modalTrainingSegmentStatusById[seg.id] || 'pending';
+                                                            const intervalStatusLabel = segStatus === 'confirmed'
                                                                 ? 'Подтвержден'
-                                                                : status === 'rejected'
+                                                                : segStatus === 'rejected'
                                                                     ? 'Отклонен'
                                                                     : 'Ожидает';
-                                                            const intervalStatusClass = status === 'confirmed'
+                                                            const intervalStatusClass = segStatus === 'confirmed'
                                                                 ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-                                                                : status === 'rejected'
+                                                                : segStatus === 'rejected'
                                                                     ? 'border-slate-300 bg-slate-100 text-slate-600'
                                                                     : 'border-amber-200 bg-amber-50 text-amber-700';
                                                             return (
@@ -25125,19 +25319,37 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     <span className={`px-2 py-0.5 rounded-full border text-[10px] font-semibold ${intervalStatusClass}`}>
                                                                         {intervalStatusLabel}
                                                                     </span>
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={() => openPlannerTrainingModalForCurrentDay('confirm_training_flag', {
-                                                                            startMin: seg.startMin,
-                                                                            endMin: seg.endMin,
-                                                                            startSec: seg.startSec,
-                                                                            endSec: seg.endSec
-                                                                        })}
-                                                                        disabled={plannerTrainingActionLoading || anyBusy}
-                                                                        className="ml-auto px-2 py-1 rounded-md border border-teal-200 bg-white hover:bg-teal-50 text-teal-700 text-[11px] font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
-                                                                    >
-                                                                        Подтвердить интервал
-                                                                    </button>
+                                                                    {segStatus === 'pending' && (
+                                                                        <div className="ml-auto flex items-center gap-1.5">
+                                                                            <button
+                                                                                type="button"
+                                                                                onClick={() => openPlannerTrainingModalForCurrentDay('confirm_training_flag', {
+                                                                                    startMin: seg.startMin,
+                                                                                    endMin: seg.endMin,
+                                                                                    startSec: seg.startSec,
+                                                                                    endSec: seg.endSec
+                                                                                })}
+                                                                                disabled={plannerTrainingActionLoading || anyBusy}
+                                                                                className="px-2 py-1 rounded-md border border-teal-200 bg-white hover:bg-teal-50 text-teal-700 text-[11px] font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+                                                                            >
+                                                                                Подтвердить интервал
+                                                                            </button>
+                                                                            <button
+                                                                                type="button"
+                                                                                onClick={() => rejectPlannerTrainingIntervals(seg)}
+                                                                                disabled={plannerTrainingActionLoading || anyBusy}
+                                                                                className="px-2 py-1 rounded-md border border-slate-300 bg-white hover:bg-slate-100 text-slate-600 text-[11px] font-semibold disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+                                                                            >
+                                                                                <FaIcon className={`fas ${busyReject ? 'fa-spinner fa-spin' : 'fa-times'} text-[10px]`}></FaIcon>
+                                                                                Отклонить интервал
+                                                                            </button>
+                                                                        </div>
+                                                                    )}
+                                                                    {segStatus === 'rejected' && (
+                                                                        <span className="ml-auto text-[10px] text-slate-400 italic">
+                                                                            Отклонён — изменить нельзя
+                                                                        </span>
+                                                                    )}
                                                                 </div>
                                                             );
                                                         })}
