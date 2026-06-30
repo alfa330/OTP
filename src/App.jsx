@@ -14,6 +14,7 @@ import TechnicalIssuesView from './components/technical/TechnicalIssuesView';
 import RecruitingView from './components/recruiting/RecruitingView';
 import LmsView from './components/lms/LmsView';
 import MonitoringScaleView from './components/monitoring/MonitoringScaleView';
+import CallQaView from './components/call_qa/CallQaView';
 import FaIcon from './components/common/FaIcon';
 import AuthEntranceSplash from './components/common/AuthEntranceSplash';
 import OrazAitSplash from './components/common/OrazAitSplash';
@@ -155,6 +156,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     employees: 'Employees',
     evaluation: 'My evaluations',
     events: 'Events',
+    ai_qa: 'AI QA',
     four_you: '4 You',
     hours: 'Hours',
     lms: 'LMS',
@@ -40706,8 +40708,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 fetchSurveysPendingBadgeCount();
             }, [view, user?.id, user?.role]);
 
+            // Фоновые бейджи опрашиваем только когда вкладка реально активна:
+            // видима (Page Visibility API) и в фокусе. Если пользователь ушёл с
+            // сайта (другая вкладка/окно или окно свёрнуто) — запрос не шлём.
+            const isPageActiveForBadges = () => {
+                if (typeof document === 'undefined') return true;
+                const visible = document.visibilityState
+                    ? document.visibilityState === 'visible'
+                    : !document.hidden;
+                const focused = typeof document.hasFocus === 'function' ? document.hasFocus() : true;
+                return visible && focused;
+            };
+
             // Ивенты: бейдж новых постов. Опрашиваем при загрузке пользователя,
-            // при возврате фокуса и фоном раз в 45 c; при заходе в раздел гасим.
+            // при возврате фокуса и фоном раз в 45 c (только пока вкладка активна);
+            // при заходе в раздел гасим.
             const fetchEventsUnreadRef = useRef(null);
             fetchEventsUnreadRef.current = fetchEventsUnreadCount;
             useEffect(() => {
@@ -40716,12 +40731,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return undefined;
                 }
                 fetchEventsUnreadRef.current?.();
-                const timer = setInterval(() => fetchEventsUnreadRef.current?.(), 45000);
+                const pollIfActive = () => {
+                    if (isPageActiveForBadges()) fetchEventsUnreadRef.current?.();
+                };
+                const timer = setInterval(pollIfActive, 45000);
                 const onFocus = () => fetchEventsUnreadRef.current?.();
                 window.addEventListener('focus', onFocus);
+                document.addEventListener('visibilitychange', pollIfActive);
                 return () => {
                     clearInterval(timer);
                     window.removeEventListener('focus', onFocus);
+                    document.removeEventListener('visibilitychange', pollIfActive);
                 };
             }, [user?.id]);
 
@@ -40730,8 +40750,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [view]);
 
             // 4 You: бейдж новых фото. Та же схема, что у «Ивентов»: опрос при
-            // загрузке пользователя, при возврате фокуса и фоном раз в 45 c;
-            // при заходе в раздел гасим (плюс серверный seen — см. FourYouView).
+            // загрузке пользователя, при возврате фокуса и фоном раз в 45 c
+            // (только пока вкладка активна); при заходе в раздел гасим
+            // (плюс серверный seen — см. FourYouView).
             const fetchFourYouUnreadRef = useRef(null);
             fetchFourYouUnreadRef.current = fetchFourYouUnreadCount;
             useEffect(() => {
@@ -40740,12 +40761,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return undefined;
                 }
                 fetchFourYouUnreadRef.current?.();
-                const timer = setInterval(() => fetchFourYouUnreadRef.current?.(), 45000);
+                const pollIfActive = () => {
+                    if (isPageActiveForBadges()) fetchFourYouUnreadRef.current?.();
+                };
+                const timer = setInterval(pollIfActive, 45000);
                 const onFocus = () => fetchFourYouUnreadRef.current?.();
                 window.addEventListener('focus', onFocus);
+                document.addEventListener('visibilitychange', pollIfActive);
                 return () => {
                     clearInterval(timer);
                     window.removeEventListener('focus', onFocus);
+                    document.removeEventListener('visibilitychange', pollIfActive);
                 };
             }, [user?.id, canAccessFourYouSection]);
 
@@ -41059,6 +41085,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <FaIcon className="fas fa-sliders-h"></FaIcon> <span className="sidebar-text">Мониторинговая шкала</span>
                                                 </button>
                                             </li>
+                                            {user?.role === 'super_admin' && (
+                                                <li>
+                                                    <button
+                                                        onClick={(e) => handleSidebarViewNavigation(e, 'ai_qa')}
+                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'ai_qa' ? 'bg-blue-700' : ''}`}
+                                                    >
+                                                        <FaIcon className="fas fa-robot"></FaIcon> <span className="sidebar-text">ИИ-оценка</span>
+                                                    </button>
+                                                </li>
+                                            )}
 
                                             {renderSidebarDividerInner()}
 
@@ -43455,6 +43491,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         departments={departments}
                                         showToast={showToast}
                                         canEdit={isAdminLikeRole}
+                                    />
+                                ))}
+                                {( view === "ai_qa" && user?.role === 'super_admin' && (
+                                    <CallQaView
+                                        user={user}
+                                        showToast={showToast}
+                                        apiBaseUrl={API_BASE_URL}
+                                        withAccessTokenHeader={withAccessTokenHeader}
+                                        directions={directions}
                                     />
                                 ))}
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}

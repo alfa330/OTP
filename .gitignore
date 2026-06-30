@@ -1,5 +1,6 @@
 ﻿node_modules/
 dist/
+asr_test/
 microsip_dnd_shield/
 .vite/
 .env

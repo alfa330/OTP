@@ -35079,3 +35079,11 @@ class Database:
 
 # Initialize database
 db = Database()
+
+# call_qa: применение схемы ИИ-оценки звонков при старте (идемпотентно, защищено —
+# никогда не валит запуск; при отсутствии read-write подключения просто пропускается).
+try:
+    from call_qa.rag.migrate import apply_on_startup as _apply_call_qa_schema
+    _apply_call_qa_schema()
+except Exception:
+    logging.exception("call_qa schema init skipped")
