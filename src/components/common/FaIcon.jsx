@@ -148,6 +148,12 @@ import {
     Archive,
     Boxes,
     RotateCcw,
+    Bot,
+    Brain,
+    Cpu,
+    Database,
+    Headphones,
+    WandSparkles,
     Zap
 } from 'lucide-react';
 
@@ -371,7 +377,14 @@ const TOKEN_TO_ICON = {
     'fa-video': 'Video',
     'fa-video-slash': 'VideoOff',
     'fa-wave-square': 'Waves',
-    'fa-xmark': 'X'
+    'fa-xmark': 'X',
+    'fa-robot': 'Bot',
+    'fa-brain': 'Brain',
+    'fa-microchip': 'Cpu',
+    'fa-database': 'Database',
+    'fa-headphones': 'Headphones',
+    'fa-wand-magic-sparkles': 'WandSparkles',
+    'fa-wand-sparkles': 'WandSparkles'
 };
 
 const ICON_COMPONENTS = {
@@ -523,6 +536,12 @@ const ICON_COMPONENTS = {
     Archive,
     Boxes,
     RotateCcw,
+    Bot,
+    Brain,
+    Cpu,
+    Database,
+    Headphones,
+    WandSparkles,
     Zap
 };
 
