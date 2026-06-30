@@ -4045,6 +4045,54 @@ def api_ai_qa_adjudications():
         return jsonify({"error": str(error)}), 500
 
 
+@app.route('/api/ai-qa/random-call', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_random_call():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        from call_qa.api import random_call
+        return jsonify({"status": "success", "call": random_call()}), 200
+    except Exception as error:
+        logging.exception("ai-qa random-call failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/ai-qa/evaluations', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_evaluations():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        from call_qa.api import evaluations_list
+        return jsonify({"status": "success", "items": evaluations_list(limit=int(request.args.get('limit', 100)))}), 200
+    except Exception as error:
+        logging.exception("ai-qa evaluations failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/ai-qa/stats', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_stats():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        from call_qa.api import stats
+        return jsonify({"status": "success", **stats()}), 200
+    except Exception as error:
+        logging.exception("ai-qa stats failed")
+        return jsonify({"error": str(error)}), 500
+
+
 @app.route('/api/resource_fte/overview', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_resource_fte_overview():
@@ -26048,6 +26096,7 @@ def chat_manager_low_rating_reviews():
         search = request.args.get('search') or request.args.get('q') or None
         page = request.args.get('page') or 1
         per_page = request.args.get('per_page') or 12
+        only_unreviewed = str(request.args.get('unreviewed') or '').strip().lower() in ('1', 'true', 'yes', 'on')
         if not _is_global_admin_requester(requester_role, requester_id):
             department_id = _department_scope_id_for_requester(requester_id)
         role_can_finalize = _is_global_admin_requester(requester_role, requester_id) or headed_dept_id is not None
@@ -26064,7 +26113,8 @@ def chat_manager_low_rating_reviews():
             page=page,
             per_page=per_page,
             viewer_id=requester_id,
-            can_finalize=role_can_finalize
+            can_finalize=role_can_finalize,
+            unreviewed=only_unreviewed
         )
         return jsonify({"status": "success", **result}), 200
 

@@ -327,6 +327,8 @@ const TOKEN_TO_ICON = {
     'fa-sort': 'ListOrdered',
     'fa-sort-amount-down': 'ListOrdered',
     'fa-arrow-down-wide-short': 'ListOrdered',
+    'fa-square': 'Square',
+    'fa-square-check': 'SquareCheck',
     'fa-star': 'Star',
     'fa-star-half-alt': 'StarHalf',
     'fa-star-half-stroke': 'StarHalf',

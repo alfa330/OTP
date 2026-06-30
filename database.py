@@ -12244,6 +12244,7 @@ class Database:
         end=None,
         search=None,
         paginate=True,
+        unreviewed=False,
     ):
         def _coerce_day(value):
             text = str(value or '').strip()
@@ -12340,6 +12341,7 @@ class Database:
             'conflict': 0,
             'valid': 0,
             'invalid': 0,
+            'unreviewed': 0,
         }
         for item in all_rows:
             state = item.get('review_state')
@@ -12352,6 +12354,9 @@ class Database:
                 summary['conflict'] += 1
             else:
                 summary['pending'] += 1
+            # Сколько из «К проверке» (без финального вердикта) ещё не проверил текущий пользователь.
+            if not final_status and not item.get('my_review_status'):
+                summary['unreviewed'] += 1
 
         status_key = str(status or 'attention').strip().lower()
         if status_key in ('all', ''):
@@ -12366,6 +12371,10 @@ class Database:
             rows = [item for item in all_rows if item.get('final_status') == status_key]
         else:
             rows = all_rows
+
+        # Доп. флаг «не проверенные мной»: оставляем только строки без личного вердикта зрителя.
+        if unreviewed:
+            rows = [item for item in rows if not item.get('my_review_status')]
 
         total_filtered = len(rows)
         if paginate:

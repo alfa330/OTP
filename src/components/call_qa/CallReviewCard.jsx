@@ -8,15 +8,8 @@ import {
     APPLE_FONT, iosCard, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge,
 } from '../ui/ios';
 
-/* ──────────────────────────────────────────────────────────────────────────
- * Карточка ревью одного звонка — центральный экран взаимодействия с ИИ.
- * Слева: транскрипт с диаризацией (оператор/клиент) и подсветкой неуверенных
- * мест распознавания. Справа: критерии с вердиктом ИИ, confidence и цитатой;
- * человек подтверждает ✓ или исправляет (с причиной) → уходит в RAG.
- *
- * Данные — мок в форме будущего API-контракта (см. README в этой папке).
- * Props (когда подключат бэкенд): { call, onSave(decisions), onSkip }.
- * ────────────────────────────────────────────────────────────────────────── */
+/* Карточка ревью одного звонка — центральный экран взаимодействия с ИИ.
+ * Данные приходят только с бэкенда (props.call). Мок-данных нет. */
 
 const VERDICT = {
     Correct:   { tone: 'green', label: 'Верно',   Icon: Check },
@@ -26,7 +19,7 @@ const VERDICT = {
 };
 
 const SOURCE = {
-    transcript: { tone: 'blue',  label: 'ИИ',     Icon: Sparkles, hint: 'оценил ИИ по разговору' },
+    transcript: { tone: 'blue',  label: 'ИИ',     Icon: Sparkles },
     system_api: { tone: 'amber', label: 'ПО-API', Icon: Server,   hint: 'нужна проверка данных в ПО' },
     manual:     { tone: 'slate', label: 'Ручная', Icon: User2,    hint: 'только ручная проверка' },
 };
@@ -36,40 +29,6 @@ const HUMAN_OPTS = [
     { v: 'Incorrect', label: 'Неверно', Icon: X },
     { v: 'N/A',       label: 'N/A',     Icon: Minus },
 ];
-
-const MOCK_CALL = {
-    id: 6434,
-    direction: 'Основа',
-    operator: 'Дарина С.',
-    datetime: '29.06.2026, 14:12',
-    human_score: 97,
-    languages: { kk: 99, ru: 1 },
-    asr_mean_conf: 0.96,
-    transcript: [
-        { speaker: 'operator', seg: [{ t: 'Алло, саламатсыз ба. Менің есімім Дарина, мен сізге Яндекс Тіркеу орталығынан хабарласып тұрмын. Сіздің есіміңіз Азамат, солай ма?' }] },
-        { speaker: 'client', seg: [{ t: 'Аха.' }] },
-        { speaker: 'operator', seg: [{ t: 'Танысқаныма қуаныштымын, Азамат. Яндекс-ке тіркелгіңіз келді, ' }, { t: 'солай ', c: 0.41 }, { t: 'ма?' }] },
-        { speaker: 'client', seg: [{ t: 'Иә, иә.' }] },
-        { speaker: 'operator', seg: [{ t: 'Кім болып тіркелгіңіз келді: жүргізуші немесе курьер ретінде?' }] },
-        { speaker: 'client', seg: [{ t: 'Жүргізуші.' }] },
-        { speaker: 'operator', seg: [{ t: 'НордТакси таксопаркінің комиссиясы 0% құрайды. Тіркеу WhatsApp арқылы өтеді, керекті құжаттардың тізімін жіберемін.' }] },
-        { speaker: 'client', seg: [{ t: 'Жақсы, рақмет.' }] },
-    ],
-    criteria: [
-        { idx: 0,  name: 'Приветствие', is_critical: false, source: 'transcript', ai: 'Correct', conf: 0.95, evidence: 'Менің есімім Дарина, мен сізге Яндекс Тіркеу орталығынан хабарласып тұрмын', comment: 'Поздоровался, назвал центр и имя.' },
-        { idx: 1,  name: 'Персонализация', is_critical: false, source: 'transcript', ai: 'Correct', conf: 0.90, evidence: 'Танысқаныма қуаныштымын, Азамат.', comment: 'Обращается по имени.' },
-        { idx: 2,  name: 'Идентификация клиента', is_critical: false, source: 'transcript', ai: 'Correct', conf: 0.85, evidence: 'Сіздің есіміңіз Азамат, солай ма?', comment: 'Уточнил имя.' },
-        { idx: 4,  name: 'Выявление потребностей', is_critical: false, source: 'transcript', ai: 'N/A', conf: 0.62, evidence: '', comment: 'Явного этапа выявления нет — короткая регистрация.' },
-        { idx: 6,  name: 'Отработка возражений', is_critical: false, source: 'transcript', ai: 'N/A', conf: 0.58, evidence: '', comment: 'Возражений не было.' },
-        { idx: 14, name: 'КО_Грубость, хамство, конфликт', is_critical: true, source: 'transcript', ai: 'Correct', conf: 0.97, evidence: '', comment: 'Тон доброжелательный.' },
-        { idx: 15, name: 'КО_Достоверность информации', is_critical: true, source: 'transcript', ai: 'Correct', conf: 0.85, evidence: 'комиссиясы 0% құрайды', comment: 'Озвученные условия корректны.' },
-        { idx: 12, name: 'Корректность оформления регистрации', is_critical: false, source: 'system_api', ai: 'Pending', conf: null, evidence: '', comment: 'Нужна проверка данных в ПО.' },
-        { idx: 19, name: 'КО_Внесение информации в ПО', is_critical: true, source: 'system_api', ai: 'Pending', conf: null, evidence: '', comment: 'Нужна проверка данных в ПО.' },
-        { idx: 20, name: 'Сделка состоялась', is_critical: false, source: 'system_api', ai: 'Pending', conf: null, evidence: '', comment: 'Факт регистрации знает система.' },
-    ],
-};
-
-const confTone = (c) => (c == null ? 'slate' : c >= 0.8 ? 'green' : c >= 0.6 ? 'amber' : 'red');
 
 function ConfidenceBar({ value }) {
     if (value == null) return <span className="text-[11px] text-slate-400">—</span>;
@@ -101,7 +60,7 @@ function TranscriptLine({ line }) {
                     {isOp ? 'Оператор' : 'Клиент'}
                 </div>
                 <span>
-                    {line.seg.map((s, i) => s.c != null && s.c < 0.5
+                    {(line.seg || []).map((s, i) => s.c != null && s.c < 0.5
                         ? <mark key={i} title={`распознано неуверенно · ${Math.round(s.c * 100)}%`}
                                 className="rounded bg-amber-100 px-0.5 text-amber-800 decoration-amber-400 decoration-dotted underline">{s.t}</mark>
                         : <span key={i}>{s.t}</span>)}
@@ -155,7 +114,6 @@ function CriterionRow({ c, decision, onDecide }) {
                         </motion.div>
                     )}
 
-                    {/* Решение человека */}
                     <div className="mt-2.5 flex items-center gap-1.5">
                         <div className="flex rounded-xl bg-slate-100 p-0.5">
                             {HUMAN_OPTS.map((o) => {
@@ -188,22 +146,22 @@ function CriterionRow({ c, decision, onDecide }) {
     );
 }
 
-export default function CallReviewCard({ call = MOCK_CALL, onSave, onSkip }) {
+export default function CallReviewCard({ call, onSave, onSkip }) {
     const [decisions, setDecisions] = useState({});
+    if (!call) return null;
 
     const onDecide = (idx, verdict, reason) => {
         setDecisions((d) => ({ ...d, [idx]: { verdict, reason: reason ?? d[idx]?.reason ?? '' } }));
     };
 
     const corrections = useMemo(
-        () => call.criteria.filter((c) => c.source === 'transcript' && decisions[c.idx] && decisions[c.idx].verdict !== c.ai),
+        () => (call.criteria || []).filter((c) => c.source === 'transcript' && decisions[c.idx] && decisions[c.idx].verdict !== c.ai),
         [decisions, call.criteria],
     );
-    const pendingCount = call.criteria.filter((c) => c.source !== 'transcript').length;
+    const pendingCount = (call.criteria || []).filter((c) => c.source !== 'transcript').length;
 
     return (
         <div style={{ fontFamily: APPLE_FONT }} className="grid grid-cols-1 gap-4 lg:grid-cols-[1.05fr_1fr]">
-            {/* Левая колонка — звонок + транскрипт */}
             <div className="space-y-3">
                 <div className={`${iosCard} p-4`}>
                     <div className="flex items-start justify-between gap-3">
@@ -214,24 +172,27 @@ export default function CallReviewCard({ call = MOCK_CALL, onSave, onSkip }) {
                             </div>
                             <p className="mt-0.5 text-[12.5px] text-slate-400">{call.operator} · {call.datetime}</p>
                         </div>
-                        <div className="flex flex-col items-end gap-1.5">
-                            {call.human_score != null && (
-                                <IosBadge tone="green">Человек: {call.human_score}</IosBadge>
-                            )}
-                            <button className={iosBtnSecondary + ' !py-1.5 !px-3'}>
-                                <Headphones size={14} />Аудио
-                            </button>
-                        </div>
+                        {call.human_score != null && (
+                            <IosBadge tone="green">Человек: {call.human_score}</IosBadge>
+                        )}
                     </div>
                     <div className="mt-3 flex items-center gap-2 text-[11.5px] text-slate-400">
                         <Languages size={13} />
-                        {Object.entries(call.languages).map(([l, p]) => (
+                        {Object.entries(call.languages || {}).map(([l, p]) => (
                             <span key={l} className="rounded-md bg-slate-100 px-1.5 py-0.5 font-medium text-slate-500">
                                 {l.toUpperCase()} {p}%
                             </span>
                         ))}
-                        <span className="ml-auto">распознавание · {Math.round(call.asr_mean_conf * 100)}%</span>
+                        {call.asr_mean_conf != null && (
+                            <span className="ml-auto">распознавание · {Math.round(call.asr_mean_conf * 100)}%</span>
+                        )}
                     </div>
+                    {call.audio_url && (
+                        <div className="mt-3 flex items-center gap-2">
+                            <Headphones size={15} className="shrink-0 text-slate-400" />
+                            <audio controls preload="none" src={call.audio_url} className="h-9 w-full" />
+                        </div>
+                    )}
                 </div>
 
                 <div className={`${iosCard} flex max-h-[60vh] flex-col p-0`}>
@@ -239,7 +200,7 @@ export default function CallReviewCard({ call = MOCK_CALL, onSave, onSkip }) {
                         Транскрипт · диаризация
                     </div>
                     <div className="flex-1 space-y-2 overflow-y-auto px-4 py-3">
-                        {call.transcript.map((l, i) => <TranscriptLine key={i} line={l} />)}
+                        {(call.transcript || []).map((l, i) => <TranscriptLine key={i} line={l} />)}
                     </div>
                     <div className="border-t border-slate-100 px-4 py-2 text-[11px] text-slate-400">
                         <mark className="rounded bg-amber-100 px-1 text-amber-800">жёлтым</mark> — где ИИ не уверен в распознавании (не учитывается против оператора)
@@ -247,7 +208,6 @@ export default function CallReviewCard({ call = MOCK_CALL, onSave, onSkip }) {
                 </div>
             </div>
 
-            {/* Правая колонка — критерии + решение */}
             <div className="flex flex-col">
                 <div className="mb-2 flex items-center justify-between">
                     <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
@@ -257,12 +217,11 @@ export default function CallReviewCard({ call = MOCK_CALL, onSave, onSkip }) {
                 </div>
 
                 <div className="space-y-2.5">
-                    {call.criteria.map((c) => (
+                    {(call.criteria || []).map((c) => (
                         <CriterionRow key={c.idx} c={c} decision={decisions[c.idx]} onDecide={onDecide} />
                     ))}
                 </div>
 
-                {/* Липкий футер действий */}
                 <div className="sticky bottom-0 mt-3 flex items-center justify-between gap-2 rounded-2xl bg-white/85 px-3 py-2.5 ring-1 ring-slate-200/70 backdrop-blur-xl">
                     <span className="text-[12.5px] text-slate-500">
                         {corrections.length > 0

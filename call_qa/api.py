@@ -40,6 +40,37 @@ def _download(audio_path: str, dest: str):
     storage.Client(project=sa["project_id"], credentials=creds).bucket(bucket).blob(blob).download_to_filename(dest)
 
 
+def _signed_url(audio_path, minutes=30):
+    """Подписанная ссылка на запись в GCS (для прослушивания в браузере)."""
+    if not audio_path:
+        return None
+    try:
+        from datetime import timedelta
+        from google.oauth2 import service_account
+        from google.cloud import storage
+        sa = config.google_sa_info()
+        creds = service_account.Credentials.from_service_account_info(sa)
+        bucket, blob = audio_path.split("/", 1)
+        b = storage.Client(project=sa["project_id"], credentials=creds).bucket(bucket).blob(blob)
+        return b.generate_signed_url(version="v4", expiration=timedelta(minutes=minutes),
+                                     method="GET", response_type="audio/mpeg")
+    except Exception:
+        return None
+
+
+def _norm_verdict(v):
+    if v is None:
+        return None
+    s = str(v).strip().lower()
+    if s in {"correct", "ok", "да", "верно", "true", "1"}:
+        return "Correct"
+    if s in {"incorrect", "error", "нет", "неверно", "false", "0"}:
+        return "Incorrect"
+    if s in {"n/a", "na", "неприменимо", "-", ""}:
+        return "N/A"
+    return str(v)
+
+
 def _lines_from_tokens(toks: list[dict]) -> list[dict]:
     """Токены Soniox → диаризованные строки с сегментами (низкая уверенность помечена 'c')."""
     cnt = {}
@@ -102,6 +133,7 @@ def review_payload(call_id: int, refresh: bool = False) -> dict:
         cached = _cache_get(call_id, model)
         if cached:
             cached["_cached"] = True
+            cached["audio_url"] = _signed_url(cached.get("_audio_path"))
             return cached
     conn = config.connect_ro()
     cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
@@ -144,9 +176,11 @@ def review_payload(call_id: int, refresh: bool = False) -> dict:
         "operator": row[3] or "—", "datetime": row[4],
         "human_score": row[5], "languages": asm["languages"], "asr_mean_conf": asm["mean_conf"] or 0,
         "transcript": _lines_from_tokens(toks), "criteria": criteria,
+        "_audio_path": audio_path,
     }
     _cache_put(call_id, model, payload)
     payload["_cached"] = False
+    payload["audio_url"] = _signed_url(audio_path)
     return payload
 
 
@@ -208,3 +242,84 @@ def save_adjudications(call_id, direction_id, items, reviewer_id=None) -> int:
         )
         saved += 1
     return saved
+
+
+def random_call() -> dict:
+    """Случайный оценённый человеком звонок ОП с записью — для теста ИИ-оценки."""
+    conn = config.connect_ro()
+    cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+    cur.execute(
+        """SELECT c.id, d.name, u.name, TO_CHAR(c.created_at,'DD.MM HH24:MI'), c.score
+             FROM calls c
+             LEFT JOIN directions d ON c.direction_id = d.id
+             LEFT JOIN users u ON c.operator_id = u.id
+            WHERE c.direction_id = ANY(%s) AND c.audio_path IS NOT NULL AND c.audio_path <> ''
+              AND COALESCE(c.is_draft, FALSE) = FALSE AND c.score IS NOT NULL
+            ORDER BY random() LIMIT 1""", (config.OP_DIRECTION_IDS,))
+    row = cur.fetchone(); cur.close(); conn.close()
+    if not row:
+        raise ValueError("нет оценённых звонков ОП с записью")
+    return {"id": row[0], "direction": row[1], "operator": row[2] or "—",
+            "datetime": row[3], "human_score": row[4]}
+
+
+def evaluations_list(limit=100) -> list[dict]:
+    """Уже оценённые ИИ звонки (из кэша) — реальные данные, пусто пока ничего не оценено."""
+    try:
+        conn = config.connect_ro()
+        cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+        cur.execute(
+            """SELECT rc.call_id, d.name, u.name, TO_CHAR(rc.created_at,'DD.MM HH24:MI'), c.score
+                 FROM ai_review_cache rc
+                 JOIN calls c ON c.id = rc.call_id
+                 LEFT JOIN directions d ON c.direction_id = d.id
+                 LEFT JOIN users u ON c.operator_id = u.id
+                ORDER BY rc.created_at DESC LIMIT %s""", (limit,))
+        rows = cur.fetchall(); cur.close(); conn.close()
+        return [{"id": r[0], "direction": r[1], "operator": r[2] or "—",
+                 "datetime": r[3], "human": r[4]} for r in rows]
+    except Exception:
+        return []  # таблицы кэша ещё нет
+
+
+def stats() -> dict:
+    """Реальная статистика. Пустые места — честно null/[], без выдуманных цифр."""
+    out = {"queue": 0, "evaluated": 0, "agreement": None, "by_criterion": []}
+    try:
+        conn = config.connect_ro()
+        cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+        cur.execute(
+            """SELECT COUNT(*) FROM calls
+                WHERE direction_id = ANY(%s) AND audio_path IS NOT NULL AND audio_path <> ''
+                  AND COALESCE(is_draft, FALSE) = FALSE AND created_at > NOW() - INTERVAL '7 days'""",
+            (config.OP_DIRECTION_IDS,))
+        out["queue"] = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM ai_review_cache")
+        out["evaluated"] = cur.fetchone()[0]
+        cur.execute(
+            """SELECT rc.payload, c.scores
+                 FROM ai_review_cache rc JOIN calls c ON c.id = rc.call_id
+                WHERE c.scores IS NOT NULL LIMIT 500""")
+        match = tot = 0
+        per = {}
+        for payload, scores in cur.fetchall():
+            for crit in (payload.get("criteria") or []):
+                if crit.get("source") != "transcript":
+                    continue
+                idx, ai = crit.get("idx"), crit.get("ai")
+                hv = _norm_verdict(scores[idx]) if isinstance(scores, list) and idx is not None and idx < len(scores) else None
+                if hv and ai in ("Correct", "Incorrect", "N/A"):
+                    tot += 1
+                    d = per.setdefault(crit.get("name", str(idx)), [0, 0])
+                    d[1] += 1
+                    if hv == ai:
+                        match += 1; d[0] += 1
+        cur.close(); conn.close()
+        if tot:
+            out["agreement"] = round(100 * match / tot)
+            out["by_criterion"] = sorted(
+                [{"name": n, "v": round(100 * m / t)} for n, (m, t) in per.items() if t >= 3],
+                key=lambda x: x["v"])
+    except Exception:
+        pass
+    return out
