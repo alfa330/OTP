@@ -3943,6 +3943,108 @@ def _resource_fte_error_response(error):
     return jsonify({"error": "Internal server error"}), 500
 
 
+# ── ИИ-оценка звонков (раздел call_qa) — только super_admin ──────────────────
+def _ai_qa_guard():
+    """Возвращает (requester_id, error_response|None). Доступ только супер-админу."""
+    requester_id = getattr(g, 'user_id', None)
+    user = db.get_user(id=requester_id) if requester_id else None
+    role = _normalize_user_role(user[3]) if user else None
+    if not _is_super_admin_role(role):
+        return None, (jsonify({"error": "forbidden"}), 403)
+    return requester_id, None
+
+
+@app.route('/api/ai-qa/review-queue', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_review_queue():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        from call_qa.api import review_queue_list
+        items = review_queue_list(limit=int(request.args.get('limit', 30)))
+        return jsonify({"status": "success", "items": items}), 200
+    except Exception as error:
+        logging.exception("ai-qa review-queue failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/ai-qa/call/<int:call_id>', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_call(call_id):
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        from call_qa.api import review_payload
+        refresh = str(request.args.get('refresh', '')).lower() in ('1', 'true', 'yes')
+        return jsonify({"status": "success", "call": review_payload(call_id, refresh=refresh)}), 200
+    except Exception as error:
+        logging.exception("ai-qa call %s failed", call_id)
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/ai-qa/adjudicate', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_adjudicate():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        from call_qa.api import save_adjudications
+        body = request.get_json(force=True) or {}
+        saved = save_adjudications(body.get('call_id'), body.get('direction_id'),
+                                   body.get('items', []), reviewer_id=requester_id)
+        return jsonify({"status": "success", "saved": saved}), 200
+    except Exception as error:
+        logging.exception("ai-qa adjudicate failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/ai-qa/criteria-config', methods=['GET', 'POST', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_criteria_config():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        if request.method == 'GET':
+            from call_qa.api import criteria_config_get
+            return jsonify({"status": "success", **criteria_config_get(int(request.args.get('direction_id')))}), 200
+        from call_qa.api import criteria_config_set
+        body = request.get_json(force=True) or {}
+        n = criteria_config_set(body.get('direction_id'), body.get('items', []))
+        return jsonify({"status": "success", "saved": n}), 200
+    except Exception as error:
+        logging.exception("ai-qa criteria-config failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/ai-qa/adjudications', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_adjudications():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        from call_qa.api import adjudications_list
+        items = adjudications_list(direction=request.args.get('direction'), q=request.args.get('q'))
+        return jsonify({"status": "success", "items": items}), 200
+    except Exception as error:
+        logging.exception("ai-qa adjudications failed")
+        return jsonify({"error": str(error)}), 500
+
+
 @app.route('/api/resource_fte/overview', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_resource_fte_overview():

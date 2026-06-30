@@ -20,3 +20,5 @@ Pillow==10.4.0
 xhtml2pdf==0.2.17
 weasyprint==62.3
 waitress==3.0.0
+# call_qa (ИИ-оценка звонков): Claude и Soniox вызываются по HTTP через httpx/requests,
+# отдельные SDK не нужны. google-cloud-aiplatform (эмбеддинги/RAG) добавим вместе с pgvector.
