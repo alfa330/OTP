@@ -4002,12 +4002,11 @@ const App = ({ user, initialSelection }) => {
     const analyticsSelectedSupervisorObj = analyticsSelectedSvId ? supervisors.find(sv => Number(sv.id) === Number(analyticsSelectedSvId)) : null;
     const analyticsSelectedSupervisorIsFired = isFiredStatus(analyticsSelectedSupervisorObj?.status);
     const selectedOperatorIsFired = isFiredStatus(selectedOperator?.status);
-    // «Случайный звонок» — только для операторской модели (отдел СЗоВ / операторские
-    // направления). Источник звонков — Oktell; у ОП (tez_op)/Линия (tez_line)/чат-менеджеров
-    // их там нет, поэтому для них кнопку не показываем.
+    // «Случайный звонок» — только для отдела СЗоВ И операторской модели. Признак считает
+    // бэкенд (/api/admin/directions -> random_call_eligible: операторская модель + отдел,
+    // который обслуживает Oktell). ОП и пр. кнопку не видят — у них звонков в Oktell нет.
     const selectedOperatorDirectionMeta = (directions || []).find(d => Number(d.id) === Number(selectedOperator?.direction_id)) || null;
-    const isOperatorModelDirection = ((selectedOperatorDirectionMeta?.calculationModelCode
-        || selectedOperatorDirectionMeta?.calculation_model_code || '') === 'operator');
+    const isOperatorModelDirection = !!selectedOperatorDirectionMeta?.random_call_eligible;
     const sectionTitle = activeSection === 'requests'
         ? 'Журнал запросов'
         : activeSection === 'calibration'
