@@ -1630,6 +1630,23 @@ class Database:
                     UNIQUE(operator_id, training_date, start_time, end_time)
                 );
             """)
+            # Поинтервальное отклонение авто-тренингов: каждая запись — это конкретный
+            # интервал статус-тренинга, который проверяющий отметил как «не тренинг».
+            # Отклонение необратимо (повторно подтвердить интервал нельзя) и не влияет
+            # на расчёт часов — служит только для построчного статуса в модалке дня.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS training_interval_rejections (
+                    id SERIAL PRIMARY KEY,
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    rejection_date DATE NOT NULL,
+                    start_time TIME NOT NULL,
+                    end_time TIME NOT NULL,
+                    comment TEXT,
+                    created_by INTEGER REFERENCES users(id),
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(operator_id, rejection_date, start_time, end_time)
+                );
+            """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS call_feedbacks (
                     id SERIAL PRIMARY KEY,
@@ -18733,6 +18750,35 @@ class Database:
                     "count_in_hours": bool(row[9])
                 } for row in cursor.fetchall()
             ]
+
+    def add_training_interval_rejection(self, operator_id, rejection_date, start_time, end_time, comment, created_by):
+        """Сохранить отклонение интервала авто-тренинга. Идемпотентно: при повторе
+        возвращает id уже существующей записи."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO training_interval_rejections (operator_id, rejection_date, start_time, end_time, comment, created_by)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (operator_id, rejection_date, start_time, end_time) DO NOTHING
+                RETURNING id
+            """, (operator_id, rejection_date, start_time, end_time, comment, created_by))
+            inserted = cursor.fetchone()
+            if inserted:
+                return inserted[0]
+
+            cursor.execute("""
+                SELECT id
+                FROM training_interval_rejections
+                WHERE operator_id = %s
+                  AND rejection_date = %s
+                  AND start_time = %s
+                  AND end_time = %s
+                LIMIT 1
+            """, (operator_id, rejection_date, start_time, end_time))
+            existing = cursor.fetchone()
+            if existing:
+                return existing[0]
+
+            raise RuntimeError("Failed to persist training interval rejection")
 
     def _normalize_technical_issue_role(self, role_value):
         return normalize_role_value(role_value)

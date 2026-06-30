@@ -17776,6 +17776,204 @@ def delete_training(training_id):
         return jsonify({"error": f"Internal server error"}), 500
 
 
+@app.route('/api/training_rejections', methods=['GET'])
+@require_api_key
+def get_training_rejections():
+    """Список поинтервальных отклонений авто-тренингов. Видимость — как у /api/trainings."""
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        month = request.args.get('month')
+        period_start = None
+        period_end = None
+        if month:
+            try:
+                parsed_month = datetime.strptime(month, '%Y-%m')
+                period_start = dt_date(parsed_month.year, parsed_month.month, 1)
+                period_end = dt_date(
+                    parsed_month.year,
+                    parsed_month.month,
+                    calendar.monthrange(parsed_month.year, parsed_month.month)[1]
+                )
+            except ValueError:
+                return jsonify({"error": "Invalid month format. Use YYYY-MM"}), 400
+        else:
+            today = datetime.now().date()
+            period_start = today
+            period_end = today
+
+        group_param = request.args.get('group_id')
+        group_id = int(group_param) if group_param and str(group_param).isdigit() else None
+
+        role = _normalize_user_role(requester[3])
+        headed_dept_id = _headed_department_id(requester_id)
+        if not (_is_admin_role(role) or role in ('sv', 'operator') or headed_dept_id is not None):
+            return jsonify({"error": "Unauthorized"}), 403
+
+        query = """
+            SELECT
+                t.id,
+                t.operator_id,
+                t.rejection_date,
+                t.start_time,
+                t.end_time,
+                t.comment,
+                t.created_at,
+                cb.name as created_by_name
+            FROM training_interval_rejections t
+            JOIN users u ON t.operator_id = u.id
+            LEFT JOIN users cb ON t.created_by = cb.id
+        """
+        where_clauses = []
+        params = []
+
+        if month:
+            where_clauses.append("TO_CHAR(t.rejection_date, 'YYYY-MM') = %s")
+            params.append(month)
+
+        if group_id is not None:
+            group = db.get_group(group_id)
+            if not group:
+                return jsonify({"error": "Group not found"}), 404
+            if headed_dept_id is not None and not _is_global_admin_requester(role, requester_id):
+                if group.get('department_id') != headed_dept_id:
+                    return jsonify({"error": "Forbidden: not your department's group"}), 403
+            elif _is_supervisor_role(role):
+                _req_dept = db.get_user_department_id(requester_id)
+                _same_dept = _req_dept is not None and group.get('department_id') == _req_dept
+                if not (_same_dept or db.supervisor_has_group_access_for_period(requester_id, group_id, period_start, period_end)):
+                    return jsonify({"error": "Forbidden: not your group"}), 403
+            elif role == 'operator':
+                return jsonify({"error": "Unsupported target role"}), 400
+
+            where_clauses.append("""
+                EXISTS (
+                    SELECT 1
+                    FROM group_operator_memberships gom
+                    WHERE gom.operator_id = t.operator_id
+                      AND gom.group_id = %s
+                      AND gom.start_date <= t.rejection_date
+                      AND (gom.end_date IS NULL OR gom.end_date >= t.rejection_date)
+                )
+            """)
+            params.append(group_id)
+        elif headed_dept_id is not None and not _is_global_admin_requester(role, requester_id):
+            where_clauses.append("u.department_id = %s")
+            params.append(headed_dept_id)
+        elif role == 'operator':
+            where_clauses.append("t.operator_id = %s")
+            params.append(requester_id)
+        else:
+            user_param = request.args.get('id')
+            if user_param:
+                if not str(user_param).isdigit():
+                    return jsonify({"error": "Invalid id parameter"}), 400
+                target_user = db.get_user(id=int(user_param))
+                if not target_user:
+                    return jsonify({"error": "User not found"}), 404
+                target_role = _normalize_user_role(target_user[3])
+                if target_role == 'sv':
+                    where_clauses.append("u.supervisor_id = %s")
+                    params.append(int(target_user[0]))
+                elif target_role == 'operator':
+                    where_clauses.append("t.operator_id = %s")
+                    params.append(int(target_user[0]))
+                else:
+                    return jsonify({"error": "Unsupported target role"}), 400
+            elif _is_supervisor_role(role):
+                where_clauses.append("u.supervisor_id = %s")
+                params.append(requester_id)
+
+        if where_clauses:
+            query += " WHERE " + " AND ".join(where_clauses)
+        query += " ORDER BY t.rejection_date DESC, t.start_time DESC"
+
+        with db._get_cursor() as cursor:
+            cursor.execute(query, params)
+            rejections = [
+                {
+                    "id": row[0],
+                    "operator_id": row[1],
+                    "date": row[2].strftime('%Y-%m-%d'),
+                    "start_time": row[3].strftime('%H:%M'),
+                    "end_time": row[4].strftime('%H:%M'),
+                    "comment": row[5],
+                    "created_at": row[6].strftime('%Y-%m-%d %H:%M'),
+                    "created_by_name": row[7] if row[7] else "System",
+                }
+                for row in cursor.fetchall()
+            ]
+
+        return jsonify({"status": "success", "rejections": rejections}), 200
+    except Exception as e:
+        logging.error(f"Error fetching training rejections: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/training_rejections', methods=['POST'])
+@require_api_key
+def add_training_rejection():
+    """Отклонить один интервал авто-тренинга (необратимо, на часы не влияет)."""
+    try:
+        requester_id, user_data, auth_error = _resolve_management_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        data = request.get_json(silent=True) or {}
+        operator_id = data.get('operator_id')
+        day = data.get('date') or data.get('day')
+        start_time = data.get('start_time')
+        end_time = data.get('end_time')
+        comment = data.get('comment')
+
+        if operator_id is None or not day or not start_time or not end_time:
+            return jsonify({"error": "Missing required fields"}), 400
+
+        try:
+            day_obj = datetime.strptime(str(day), '%Y-%m-%d').date()
+        except ValueError:
+            return jsonify({"error": "Invalid date format. Use YYYY-MM-DD"}), 400
+
+        start_min = _training_time_to_minutes(start_time)
+        end_min = _training_time_to_minutes(end_time)
+        if start_min is None or end_min is None or end_min <= start_min:
+            return jsonify({"error": "Invalid interval"}), 400
+
+        target_operator, scope_error = _resolve_scoped_operator_for_requester(user_data, requester_id, operator_id)
+        if scope_error:
+            message, status_code = scope_error
+            return jsonify({"error": message}), status_code
+
+        rejection_id = db.add_training_interval_rejection(
+            operator_id=int(target_operator[0]),
+            rejection_date=day_obj,
+            start_time=start_time,
+            end_time=end_time,
+            comment=(str(comment).strip() if comment else None),
+            created_by=requester_id
+        )
+
+        return jsonify({
+            "status": "success",
+            "rejection": {
+                "id": rejection_id,
+                "operator_id": int(target_operator[0]),
+                "date": day_obj.strftime('%Y-%m-%d'),
+                "start_time": start_time,
+                "end_time": end_time
+            }
+        }), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error adding training rejection: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/technical_issues/reasons', methods=['GET'])
 @require_api_key
 def technical_issue_reasons():
