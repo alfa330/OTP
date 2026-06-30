@@ -12,6 +12,11 @@ def _rw_conn():
     return config.connect_rw()
 
 
+def _vec(v) -> str:
+    """Список float → текстовый формат pgvector '[1,2,3]' (без зависимости pgvector-python)."""
+    return "[" + ",".join(str(float(x)) for x in v) + "]"
+
+
 def save_adjudication(*, direction_id, criterion_idx, criterion_name, call_id,
                       excerpt, ai_verdict, correct_verdict, reason,
                       situation_tag=None, created_by=None) -> int:
@@ -22,9 +27,9 @@ def save_adjudication(*, direction_id, criterion_idx, criterion_name, call_id,
             """INSERT INTO qa_adjudications
                (direction_id, criterion_idx, criterion_name, call_id, excerpt,
                 ai_verdict, correct_verdict, reason, situation_tag, embedding, created_by)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector,%s) RETURNING id""",
             (direction_id, criterion_idx, criterion_name, call_id, excerpt,
-             ai_verdict, correct_verdict, reason, situation_tag, vec, created_by),
+             ai_verdict, correct_verdict, reason, situation_tag, _vec(vec), created_by),
         )
         return cur.fetchone()[0]
 
@@ -43,7 +48,7 @@ def retrieve(*, direction_id, criterion_idx, query_text=None, k=None) -> list[di
                  FROM qa_adjudications
                 WHERE direction_id=%s AND criterion_idx=%s AND embedding IS NOT NULL
                 ORDER BY embedding <=> %s::vector LIMIT %s""",
-            (qvec, direction_id, criterion_idx, qvec, k))
+            (_vec(qvec), direction_id, criterion_idx, _vec(qvec), k))
     else:
         cur.execute(
             """SELECT id, criterion_name, excerpt, ai_verdict, correct_verdict, reason, NULL
