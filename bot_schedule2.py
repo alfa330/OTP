@@ -20655,62 +20655,7 @@ def _status_import_header_is_tez(normalized_header):
     )
 
 
-def _status_import_normalize_sip(value):
-    """Нормализует внутренний/SIP-номер для матчинга: только цифры, без ведущих нулей."""
-    digits = re.sub(r'\D', '', str(value or ''))
-    if not digits:
-        return ''
-    return digits.lstrip('0') or '0'
-
-
-def _status_import_build_sip_lookup(exclude_chat_managers=False, restrict_to_ids=None):
-    """Строит lookup «внутренний номер (sip) -> оператор(ы)».
-
-    Для TEZ «internal number» из выгрузки Binotel совпадает с
-    operator_profiles.sip_number, поэтому матчинг по номеру надёжнее, чем по ФИО.
-    """
-    try:
-        sip_map = db.get_operator_sip_map() or {}
-    except Exception:
-        sip_map = {}
-    if not sip_map:
-        return {}
-    restrict = None
-    if restrict_to_ids is not None:
-        restrict = {int(v) for v in restrict_to_ids if v is not None}
-    lookup = {}
-    for row in (db.get_all_operators() or []):
-        try:
-            operator_id = int(row[0])
-        except Exception:
-            continue
-        if restrict is not None and operator_id not in restrict:
-            continue
-        sip_key = _status_import_normalize_sip(sip_map.get(operator_id))
-        if not sip_key:
-            continue
-        operator_name = str(row[1] or '').strip()
-        direction_name = str(row[7] or '').strip() if len(row) > 7 else ''
-        calculation_model_code = str(row[8] or '').strip().lower() if len(row) > 8 else ''
-        direction_key = ' '.join(direction_name.lower().split())
-        is_chat_manager = (
-            calculation_model_code == 'chat_manager'
-            or direction_key in ('чат менеджер', 'chat manager')
-        )
-        if exclude_chat_managers and is_chat_manager:
-            continue
-        lookup.setdefault(sip_key, [])
-        if not any(int(item.get('id')) == operator_id for item in lookup[sip_key]):
-            lookup[sip_key].append({
-                'id': operator_id,
-                'name': operator_name,
-                'direction_name': direction_name,
-                'calculation_model_code': calculation_model_code,
-            })
-    return lookup
-
-
-def _status_import_parse_tez_rows(rows, operator_lookup, sip_lookup=None, max_source_rows=None, invalid_rows_preview_limit=None):
+def _status_import_parse_tez_rows(rows, operator_lookup, max_source_rows=None, invalid_rows_preview_limit=None):
     """Посегментный парсер выгрузки статусов TEZ.
 
     `rows` — итерируемое списков ячеек (первая непустая строка — заголовок).
@@ -20757,7 +20702,6 @@ def _status_import_parse_tez_rows(rows, operator_lookup, sip_lookup=None, max_so
     start_col = _find_col(['startedat', 'startat', 'start', 'начало'])
     stop_col = _find_col(['stoppedat', 'stopat', 'stop', 'endat', 'end', 'конец'])
     status_col = _find_col(['status', 'statusname', 'state', 'статус', 'состояние'])
-    internal_col = _find_col(['internalnumber', 'internalno', 'number', 'sipnumber', 'sip', 'внутреннийномер', 'номер'])
 
     if operator_col is None or start_col is None or stop_col is None or status_col is None:
         raise ValueError("CSV TEZ должен содержать колонки employee name;started at;stopped at;status")
@@ -20805,7 +20749,6 @@ def _status_import_parse_tez_rows(rows, operator_lookup, sip_lookup=None, max_so
         status_name = _cell(cols, status_col)
         started_raw = _cell(cols, start_col)
         stopped_raw = _cell(cols, stop_col)
-        internal_raw = _cell(cols, internal_col)
 
         if not operator_name or not status_name or not started_raw or not stopped_raw:
             _push_invalid(row_num, 'Отсутствуют обязательные поля', operator_name, status_name, started_raw, stopped_raw)
@@ -20819,25 +20762,17 @@ def _status_import_parse_tez_rows(rows, operator_lookup, sip_lookup=None, max_so
 
         valid_events += 1
 
-        # Сначала матчим по внутреннему номеру (sip) — это надёжнее ФИО; если по
-        # номеру однозначно не нашли, откатываемся к матчингу по имени.
-        operator_info = None
-        if sip_lookup:
-            sip_key = _status_import_normalize_sip(internal_raw)
-            if sip_key:
-                sip_matches = sip_lookup.get(sip_key) or []
-                if len(sip_matches) == 1:
-                    operator_info = sip_matches[0]
-        if operator_info is None:
-            operator_matches = _status_import_resolve_operator_matches(operator_name, operator_lookup)
-            if len(operator_matches) != 1:
-                _push_invalid(
-                    row_num,
-                    'Оператор не найден' if len(operator_matches) == 0 else 'Найдено несколько операторов с таким именем',
-                    operator_name, status_name, started_raw, stopped_raw
-                )
-                continue
-            operator_info = operator_matches[0]
+        # Матчинг по ФИО: один внутренний (sip) номер может принадлежать разным
+        # операторам в разное время, поэтому матчим по имени сотрудника из выгрузки.
+        operator_matches = _status_import_resolve_operator_matches(operator_name, operator_lookup)
+        if len(operator_matches) != 1:
+            _push_invalid(
+                row_num,
+                'Оператор не найден' if len(operator_matches) == 0 else 'Найдено несколько операторов с таким именем',
+                operator_name, status_name, started_raw, stopped_raw
+            )
+            continue
+        operator_info = operator_matches[0]
 
         resolved = _status_import_resolve_tez_status(status_name)
         status_key = resolved['key']
@@ -20899,7 +20834,7 @@ def _status_import_parse_tez_rows(rows, operator_lookup, sip_lookup=None, max_so
     }
 
 
-def _status_import_parse_tez_csv(csv_text, operator_lookup, sip_lookup=None, max_source_rows=None, invalid_rows_preview_limit=None):
+def _status_import_parse_tez_csv(csv_text, operator_lookup, max_source_rows=None, invalid_rows_preview_limit=None):
     if not isinstance(csv_text, str):
         raise ValueError("CSV text is required")
     try:
@@ -20911,7 +20846,6 @@ def _status_import_parse_tez_csv(csv_text, operator_lookup, sip_lookup=None, max
     return _status_import_parse_tez_rows(
         reader,
         operator_lookup,
-        sip_lookup=sip_lookup,
         max_source_rows=max_source_rows,
         invalid_rows_preview_limit=invalid_rows_preview_limit
     )
@@ -20939,11 +20873,9 @@ def _tez_status_sync_importer(csv_text):
     парсит CSV (формат TEZ) и сохраняет события/сегменты в БД тем же путём, что
     и ручная загрузка. Чат-менеджеры из матчинга исключены (как в ручном импорте)."""
     operator_lookup = _status_import_build_operator_lookup(exclude_chat_managers=True)
-    sip_lookup = _status_import_build_sip_lookup(exclude_chat_managers=True)
     parsed = _status_import_parse_tez_csv(
         csv_text,
         operator_lookup,
-        sip_lookup=sip_lookup,
         max_source_rows=STATUS_IMPORT_MAX_SOURCE_ROWS,
         invalid_rows_preview_limit=STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT,
     )
@@ -25723,8 +25655,6 @@ def import_work_schedules_statuses_csv():
         # Manual upload is the telephony status source. Chat managers have their
         # own Chat2Desk sync and must never be matched (or replaced) by this import.
         operator_lookup = _status_import_build_operator_lookup(exclude_chat_managers=True)
-        # Для посегментного формата TEZ дополнительно матчим по внутреннему номеру (sip).
-        tez_sip_lookup = _status_import_build_sip_lookup(exclude_chat_managers=True)
         if file_ext in ('.xlsx', '.xlsm'):
             xlsx_rows = _status_import_xlsx_rows(raw_bytes)
             header_row = next((r for r in xlsx_rows if any(str(c or '').strip() for c in r)), [])
@@ -25733,7 +25663,6 @@ def import_work_schedules_statuses_csv():
                 parsed = _status_import_parse_tez_rows(
                     xlsx_rows,
                     operator_lookup,
-                    sip_lookup=tez_sip_lookup,
                     max_source_rows=STATUS_IMPORT_MAX_SOURCE_ROWS,
                     invalid_rows_preview_limit=STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
                 )
@@ -25758,7 +25687,6 @@ def import_work_schedules_statuses_csv():
                 parsed = _status_import_parse_tez_csv(
                     csv_text,
                     operator_lookup,
-                    sip_lookup=tez_sip_lookup,
                     max_source_rows=STATUS_IMPORT_MAX_SOURCE_ROWS,
                     invalid_rows_preview_limit=STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
                 )
