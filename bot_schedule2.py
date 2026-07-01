@@ -16219,10 +16219,16 @@ def fetch_random_evaluation_call():
             conn_id = str(c.get('conn_id') or '')
             if not conn_id or conn_id in existing:
                 continue
-            parsed = _parse_datetime_raw(c.get('dt_raw'))
-            if not parsed:
+            # Месяц звонка из dt_raw ('dd.mm.yyyy HH:MM[:SS]') — для тега imported_calls.month.
+            month = None
+            for _fmt in ('%d.%m.%Y %H:%M:%S', '%d.%m.%Y %H:%M'):
+                try:
+                    month = datetime.strptime(str(c.get('dt_raw')), _fmt).strftime('%Y-%m')
+                    break
+                except (ValueError, TypeError):
+                    continue
+            if not month:
                 continue
-            month = parsed.strftime('%Y-%m')
             new_id = db.import_single_random_call(
                 operator_id=operator_id, operator_name=operator_name,
                 external_id=conn_id, month=month, datetime_raw=c.get('dt_raw'),
