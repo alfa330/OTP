@@ -298,6 +298,7 @@ const TOKEN_TO_ICON = {
     'fa-percent': 'Percent',
     'fa-phone': 'Phone',
     'fa-phone-alt': 'PhoneCall',
+    'fa-phone-volume': 'PhoneCall',
     'fa-play': 'Play',
     'fa-play-circle': 'PlayCircle',
     'fa-plus': 'Plus',

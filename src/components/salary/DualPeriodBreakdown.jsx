@@ -111,18 +111,6 @@ const PeriodCard = ({ part, open, onToggle }) => {
                                         value={fmtResponse(part.respMinutes)}
                                     />
                                 )}
-                                <Tile
-                                    icon="fas fa-clipboard-check"
-                                    label="Качество"
-                                    value={num(part.quality) > 0 ? `${num(part.quality).toFixed(1)}%` : '—'}
-                                    hint="мониторинг"
-                                />
-                                <Tile
-                                    icon="fas fa-award"
-                                    label="Стаж"
-                                    value={part.experience ? part.experience : '—'}
-                                    hint="мес."
-                                />
                             </div>
                         </div>
 
