@@ -21029,16 +21029,20 @@ class Database:
         current_date=None,
         include_fired: bool = False,
         include_dismissal_details: bool = True,
-        sheet_mode: str = 'summary_and_supervisors'
+        sheet_mode: str = 'summary_and_supervisors',
+        period_month: str = None
     ):
         """
         Generates an Excel report of operators with extended profile fields:
         base data, contacts, study, corporate data, proxy/SIP, and two close contacts.
-        
+
         :param current_date: Optional, current date for filename (defaults to today).
         :param include_fired: Include operators with fired/dismissal status.
         :param include_dismissal_details: Add dismissal date/reason/comment columns when fired operators are included.
         :param sheet_mode: summary, supervisors, or summary_and_supervisors.
+        :param period_month: Optional 'YYYY-MM'. When set, exports operators who worked during that
+            calendar month (employed from hire date up to dismissal date overlapping the month),
+            regardless of their current status. Overrides include_fired.
         :return: (filename, content) or (None, None) on error.
         """
         try:
@@ -21047,19 +21051,53 @@ class Database:
             else:
                 current_date = datetime.strptime(current_date, "%Y-%m-%d").date() if isinstance(current_date, str) else current_date
 
+            # Optional calculation-month window ("расчетный месяц")
+            period_start = None
+            period_end = None
+            if period_month:
+                try:
+                    pm = str(period_month).strip()
+                    period_start = datetime.strptime(pm + '-01', '%Y-%m-%d').date()
+                    last_day = calendar.monthrange(period_start.year, period_start.month)[1]
+                    period_end = period_start.replace(day=last_day)
+                except (ValueError, TypeError):
+                    period_start = None
+                    period_end = None
+
             include_fired = bool(include_fired)
-            include_dismissal_details = bool(include_dismissal_details) and include_fired
+            if period_start and period_end:
+                # The month window itself defines who is included, and dismissal dates are
+                # meaningful context for that window, so always surface dismissal details.
+                include_dismissal_details = True
+            else:
+                include_dismissal_details = bool(include_dismissal_details) and include_fired
             sheet_mode = str(sheet_mode or 'summary_and_supervisors').strip().lower()
             if sheet_mode not in ('summary', 'supervisors', 'summary_and_supervisors'):
                 sheet_mode = 'summary_and_supervisors'
-            
-            filename = f"users_report_{current_date.strftime('%Y-%m-%d')}.xlsx"
-            
+
+            if period_start and period_end:
+                filename = f"users_report_{period_start.strftime('%Y-%m')}.xlsx"
+            else:
+                filename = f"users_report_{current_date.strftime('%Y-%m-%d')}.xlsx"
+
             # Fetch operators with all export fields
             with self._get_cursor() as cursor:
-                status_filter_sql = "" if include_fired else """
-                    AND COALESCE(NULLIF(LOWER(TRIM(u.status)), ''), 'working') NOT IN ('fired', 'dismissal')
-                """
+                if period_start and period_end:
+                    # Keep operators whose employment interval [hire_date, dismissal_date]
+                    # overlaps the selected month: hired on/before month end AND not dismissed
+                    # before the month started.
+                    status_filter_sql = f"""
+                        AND u.hire_date IS NOT NULL
+                        AND u.hire_date <= DATE '{period_end.strftime('%Y-%m-%d')}'
+                        AND (
+                            dismissal_info.dismissal_start_date IS NULL
+                            OR dismissal_info.dismissal_start_date >= DATE '{period_start.strftime('%Y-%m-%d')}'
+                        )
+                    """
+                else:
+                    status_filter_sql = "" if include_fired else """
+                        AND COALESCE(NULLIF(LOWER(TRIM(u.status)), ''), 'working') NOT IN ('fired', 'dismissal')
+                    """
                 cursor.execute(f"""
                     SELECT
                         u.name,

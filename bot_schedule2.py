@@ -15769,11 +15769,19 @@ def get_users_report():
             sheet_mode = 'summary_and_supervisors'
         include_fired = _bool_query_arg('include_fired', False)
         include_dismissal_details = _bool_query_arg('include_dismissal_details', True)
-        
+
+        period_month = str(request.args.get('period_month') or '').strip()
+        if period_month:
+            if not re.match(r'^\d{4}-\d{2}$', period_month):
+                return jsonify({"error": "Invalid period_month, expected YYYY-MM"}), 400
+        else:
+            period_month = None
+
         filename, content = db.generate_users_report(
             include_fired=include_fired,
             include_dismissal_details=include_dismissal_details,
-            sheet_mode=sheet_mode
+            sheet_mode=sheet_mode,
+            period_month=period_month
         )
         if not filename or not content:
             return jsonify({"error": "Failed to generate report"}), 500

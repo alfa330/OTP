@@ -142,7 +142,8 @@ const FOUR_YOU_VIEWER_USER_ID = 241;
 const DEFAULT_USERS_REPORT_OPTIONS = {
     sheetMode: 'summary_and_supervisors',
     includeFired: false,
-    includeDismissalDetails: true
+    includeDismissalDetails: true,
+    periodMonth: ''
 };
 const SALARY_CALCULATOR_TYPES = new Set(['call', 'chat', 'converter', 'tez_line', 'tez_op']);
 const SALARY_CALCULATOR_READY_DEPARTMENT_CODES = new Set(['szov', 'tez']);
@@ -6910,7 +6911,33 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                             const callsTotal = Number(aggr.total_calls || 0);
                             const effTotal = Number(aggr.total_efficiency_hours || 0);
-                            const effectiveCallHours = Math.max(0, regular);
+                            // КВЗ (звонки/чаты в час): делим на базовые часы ТОЛЬКО тех дней,
+                            // что относятся к модели текущего вида. Для переведённых посреди месяца
+                            // сотрудников часы «чужого» периода не попадают в знаменатель — иначе
+                            // КВЗ занижается (в чат-дни звонков нет, а часы есть, и наоборот).
+                            const effectiveCallHours = (() => {
+                                const wholeBase = Math.max(0, regular);
+                                const segs = Array.isArray(op.group_segments) ? op.group_segments : [];
+                                if (segs.length <= 1) return wholeBase; // не переведён — вся база месяца
+                                const wantChat = isChatModel;
+                                const matchSegs = segs.filter(
+                                    (s) => (String(s.calculation_model_code || '').trim() === 'chat_manager') === wantChat
+                                );
+                                // Все сегменты одной модели (или нет совпадений) — поведение не меняем.
+                                if (matchSegs.length === 0 || matchSegs.length === segs.length) return wholeBase;
+                                const daily = (op.daily && typeof op.daily === 'object') ? op.daily : {};
+                                let h = 0;
+                                for (const s of matchSegs) {
+                                    const sd = Number(s.start_day);
+                                    const ed = Number(s.end_day);
+                                    if (!Number.isFinite(sd) || !Number.isFinite(ed)) continue;
+                                    for (let day = sd; day <= ed; day++) {
+                                        const d = daily[String(day)];
+                                        if (d) h += Number(d.work_time || 0) || 0;
+                                    }
+                                }
+                                return h > 0 ? h : wholeBase; // подстраховка от нулевого знаменателя
+                            })();
 
                             // compute total fines for the operator across days
                             let finesTotal = 0;
@@ -37668,6 +37695,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             include_fired: exportOptions.includeFired ? '1' : '0',
                             include_dismissal_details: exportOptions.includeDismissalDetails ? '1' : '0'
                         });
+                        if (exportOptions.periodMonth) {
+                            params.set('period_month', exportOptions.periodMonth);
+                        }
                         const response = await axios.get(`${API_BASE_URL}/api/admin/users_report?${params.toString()}`, {
                             headers:  {'X-User-Id': user.id},
                             responseType: 'blob'
@@ -45463,9 +45493,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         perHour,
                                                         avgScore: p.avgScore,
                                                         respMinutes: p.respMinutes,
-                                                        quality: salaryQuality,
-                                                        experience: common.experience,
-                                                        partFines: 0,
                                                     };
                                                 });
                                             })();
@@ -47229,7 +47256,41 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </div>
                                         </div>
 
-                                        <div className="divide-y divide-slate-100 rounded-xl border border-slate-200 bg-white">
+                                        <div className="rounded-xl border border-slate-200 bg-white p-4">
+                                            <div className="mb-2 flex items-start justify-between gap-3">
+                                                <div>
+                                                    <div className="text-sm font-semibold text-slate-900">Расчетный месяц</div>
+                                                    <div className="text-xs text-slate-500">
+                                                        Выгрузит тех, кто работал в выбранном месяце — от даты принятия до даты увольнения внутри месяца. Оставьте пустым для текущего состава.
+                                                    </div>
+                                                </div>
+                                                {usersReportOptions.periodMonth && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setUsersReportOptions((prev) => ({ ...prev, periodMonth: '' }))}
+                                                        className="shrink-0 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
+                                                    >
+                                                        Сбросить
+                                                    </button>
+                                                )}
+                                            </div>
+                                            <input
+                                                type="month"
+                                                value={usersReportOptions.periodMonth || ''}
+                                                onChange={(event) => setUsersReportOptions((prev) => ({ ...prev, periodMonth: event.target.value }))}
+                                                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 transition focus:border-green-500 focus:outline-none focus:ring-2 focus:ring-green-100"
+                                            />
+                                        </div>
+
+                                        {usersReportOptions.periodMonth && (
+                                            <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-500">
+                                                При выбранном расчетном месяце состав определяется периодом работы, поэтому настройки ниже не применяются.
+                                            </div>
+                                        )}
+
+                                        <div className={`divide-y divide-slate-100 rounded-xl border border-slate-200 bg-white transition ${
+                                            usersReportOptions.periodMonth ? 'pointer-events-none opacity-55' : ''
+                                        }`}>
                                             <label className="flex cursor-pointer items-center justify-between gap-4 p-4">
                                                 <span>
                                                     <span className="block text-sm font-semibold text-slate-900">Добавить уволенных</span>
@@ -47289,8 +47350,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </div>
 
                                         <div className="rounded-xl border border-green-100 bg-green-50 px-4 py-3 text-sm text-green-900">
-                                            Будет выгружено: {usersReportOptions.includeFired ? 'активные и уволенные сотрудники' : 'только активные сотрудники'}.
-                                            {usersReportOptions.includeFired && usersReportOptions.includeDismissalDetails ? ' Для уволенных добавятся причины и даты увольнения.' : ''}
+                                            {usersReportOptions.periodMonth ? (
+                                                <>
+                                                    Будет выгружено: сотрудники, работавшие в {(() => {
+                                                        try {
+                                                            const label = new Date(`${usersReportOptions.periodMonth}-01T00:00:00`).toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' });
+                                                            return label;
+                                                        } catch (e) {
+                                                            return usersReportOptions.periodMonth;
+                                                        }
+                                                    })()} — от даты принятия до даты увольнения. Для уволенных добавятся причины и даты увольнения.
+                                                </>
+                                            ) : (
+                                                <>
+                                                    Будет выгружено: {usersReportOptions.includeFired ? 'активные и уволенные сотрудники' : 'только активные сотрудники'}.
+                                                    {usersReportOptions.includeFired && usersReportOptions.includeDismissalDetails ? ' Для уволенных добавятся причины и даты увольнения.' : ''}
+                                                </>
+                                            )}
                                         </div>
                                     </div>
 
