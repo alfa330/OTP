@@ -1518,6 +1518,7 @@ class Database:
                     evaluated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
                     notes TEXT
                 );
+                ALTER TABLE imported_calls ADD COLUMN IF NOT EXISTS audio_path TEXT;
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_imported_calls_external_id_month ON imported_calls (external_id, month);
                 CREATE INDEX IF NOT EXISTS idx_imported_calls_month ON imported_calls(month);
                 CREATE INDEX IF NOT EXISTS idx_imported_calls_operator_id ON imported_calls(operator_id);
@@ -10760,6 +10761,16 @@ class Database:
             r = cursor.fetchone()
             return (r[0], r[1]) if r else (None, None)
 
+    def get_user_sip_number(self, user_id):
+        """users.sip_number (внутренний номер = internalNumber в Binotel) или None."""
+        if not user_id:
+            return None
+        with self._get_cursor() as cursor:
+            cursor.execute("SELECT sip_number FROM users WHERE id = %s", (user_id,))
+            r = cursor.fetchone()
+        sip = (str(r[0]).strip() if r and r[0] is not None else "")
+        return sip or None
+
     def get_department_member_ids(self, department_id):
         """Множество id пользователей, принадлежащих отделу (для скоупа главы)."""
         if not department_id:
@@ -14525,6 +14536,23 @@ class Database:
                 if result and result[0]:
                     audio_path = result[0]
 
+            # Оценка импортированного звонка без нового файла: наследуем запись из
+            # imported_calls (для TEZ/Binotel там лежит путь к записи в GCS), чтобы
+            # у оценённого звонка сохранилась та же аудиозапись.
+            if not audio_path and not is_correction and phone_number and appeal_date:
+                cursor.execute(
+                    """
+                    SELECT audio_path FROM imported_calls
+                    WHERE phone_normalized = %s AND month = %s
+                      AND datetime_raw = %s AND audio_path IS NOT NULL
+                    LIMIT 1
+                    """,
+                    (_normalize_phone(phone_number), month, appeal_date)
+                )
+                imported_audio = cursor.fetchone()
+                if imported_audio and imported_audio[0]:
+                    audio_path = imported_audio[0]
+
             # Объединенная проверка черновика и существующей оценки
             cursor.execute("""
                 WITH existing_data AS (
@@ -14750,25 +14778,48 @@ class Database:
         }
 
     def import_single_random_call(self, *, operator_id, operator_name, external_id, month,
-                                  datetime_raw, phone, duration_sec, notes=None):
+                                  datetime_raw, phone, duration_sec, notes=None, audio_path=None):
         """Кладёт ОДИН звонок в imported_calls как НЕ оценённый (status='not_evaluated') —
         для кнопки «Случайный звонок» в журнале. Возвращает id новой строки или None, если
-        такой звонок уже импортирован (ON CONFLICT (external_id, month))."""
+        такой звонок уже импортирован (ON CONFLICT (external_id, month)).
+
+        audio_path — путь к записи в GCS (для TEZ/Binotel); может дозаписываться фоново
+        через set_imported_call_audio_path после создания строки."""
         parsed_dt = _parse_datetime_raw(datetime_raw)
         phone_norm = _normalize_phone(phone)
         with self._get_cursor() as cur:
             cur.execute("""
                 INSERT INTO imported_calls
                 (external_id, operator_name, operator_id, month, datetime_raw,
-                 phone_number, phone_normalized, duration_sec, status, imported_at, notes)
+                 phone_number, phone_normalized, duration_sec, status, imported_at, notes, audio_path)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'not_evaluated',
-                        CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty', %s)
+                        CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty', %s, %s)
                 ON CONFLICT (external_id, month) DO NOTHING
                 RETURNING id
             """, (external_id, operator_name, operator_id, month, parsed_dt,
-                  phone, phone_norm, duration_sec, notes))
+                  phone, phone_norm, duration_sec, notes, audio_path))
             row = cur.fetchone()
         return int(row[0]) if row else None
+
+    def set_imported_call_audio_path(self, imported_id, audio_path):
+        """Проставляет audio_path импортированному звонку (фоновая заливка записи в GCS)."""
+        with self._get_cursor() as cur:
+            cur.execute(
+                "UPDATE imported_calls SET audio_path = %s WHERE id = %s",
+                (audio_path, int(imported_id))
+            )
+
+    def get_imported_call_audio(self, imported_id):
+        """Возвращает {operator_id, audio_path, status} импортированного звонка или None."""
+        with self._get_cursor() as cur:
+            cur.execute(
+                "SELECT operator_id, audio_path, status FROM imported_calls WHERE id = %s",
+                (int(imported_id),)
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        return {"operator_id": row[0], "audio_path": row[1], "status": row[2]}
 
     def get_call_distribution_settings(self) -> dict:
         with self._get_cursor() as cur:
@@ -16686,7 +16737,7 @@ class Database:
                 ic.datetime_raw AS appeal_date,
                 NULL::numeric AS score,
                 NULL::text AS comment,
-                NULL::text AS audio_path,
+                ic.audio_path AS audio_path,
                 FALSE AS is_draft,
                 FALSE AS is_correction,
                 NULL::text AS evaluation_date,

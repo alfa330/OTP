@@ -603,6 +603,18 @@ const getAudioUrl = async (evalId, userId) => {
     } catch { return null; }
 };
 
+// Аудио неоценённого (импортированного) звонка — TEZ/Binotel кладёт запись в GCS.
+// Не кэшируем по общему audioUrlCache: id импортированного звонка живёт в своей
+// таблице и может пересекаться с id обычной оценки.
+const getImportedAudioUrl = async (importedId, userId) => {
+    try {
+        const r = await authFetch(`${API_BASE_URL}/api/imported_calls/${importedId}/audio`, { headers: { 'X-User-Id': userId } });
+        if (!r.ok) return null;
+        const d = await r.json();
+        return d?.url || null;
+    } catch { return null; }
+};
+
 const emitCallEvaluationToast = (message, type = 'info') => {
     const text = String(message ?? '');
     try {
@@ -1686,10 +1698,13 @@ const rcDefaultRange = (mo) => {
     return { start, end };
 };
 
-const RandomCallModal = ({ isOpen, onClose, operator, userId, selectedMonth, onImported }) => {
+const RandomCallModal = ({ isOpen, onClose, operator, userId, selectedMonth, source, onImported }) => {
+    const isBinotel = source === 'binotel'; // TEZ: min/max длительности задаются в модалке
     const [range, setRange] = useState(() => rcDefaultRange(selectedMonth));
     const [incoming, setIncoming] = useState(true);
     const [outgoing, setOutgoing] = useState(true);
+    const [minDur, setMinDur] = useState('');
+    const [maxDur, setMaxDur] = useState('');
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
     const [results, setResults] = useState([]);
@@ -1699,20 +1714,34 @@ const RandomCallModal = ({ isOpen, onClose, operator, userId, selectedMonth, onI
     useEffect(() => {
         if (!isOpen) return;
         setRange(rcDefaultRange(selectedMonth));
-        setIncoming(true); setOutgoing(true); setBusy(false); setError(''); setResults([]);
+        setIncoming(true); setOutgoing(true); setMinDur(''); setMaxDur('');
+        setBusy(false); setError(''); setResults([]);
         importedMonthsRef.current = new Set();
     }, [isOpen, selectedMonth]);
 
     if (!isOpen) return null;
 
+    const parseDur = (v) => {
+        const n = parseInt(String(v).trim(), 10);
+        return Number.isFinite(n) && n >= 0 ? n : null;
+    };
+    const minDurNum = parseDur(minDur);
+    const maxDurNum = parseDur(maxDur);
+    const durRangeInvalid = isBinotel && minDurNum != null && maxDurNum != null && maxDurNum < minDurNum;
+
     const fetchOne = async () => {
-        if (!operator || busy) return;
+        if (!operator || busy || durRangeInvalid) return;
         setBusy(true); setError('');
         try {
+            const body = { operator_id: operator.id, date_from: range.start, date_to: range.end, incoming, outgoing };
+            if (isBinotel) {
+                if (minDurNum != null) body.min_duration_sec = minDurNum;
+                if (maxDurNum != null) body.max_duration_sec = maxDurNum;
+            }
             const r = await authFetch(`${API_BASE_URL}/api/call_evaluations/random_call`, {
                 method: 'POST',
                 headers: { 'X-User-Id': userId, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ operator_id: operator.id, date_from: range.start, date_to: range.end, incoming, outgoing }),
+                body: JSON.stringify(body),
             });
             const d = await r.json().catch(() => ({}));
             if (r.ok && d.status === 'success' && d.call) {
@@ -1772,6 +1801,23 @@ const RandomCallModal = ({ isOpen, onClose, operator, userId, selectedMonth, onI
                         <TypeCheck checked={incoming} label="Входящие" onToggle={() => { if (incoming && !outgoing) return; setIncoming(v => !v); }} />
                     </div>
 
+                    {isBinotel ? (
+                        <>
+                            <label className="label" style={{ margin: '16px 0 6px', display: 'block' }}>Длительность разговора, сек (необязательно)</label>
+                            <div style={{ display: 'flex', gap: 8 }}>
+                                <input type="number" min="0" inputMode="numeric" placeholder="мин" value={minDur}
+                                    onChange={e => setMinDur(e.target.value)}
+                                    style={{ flex: 1, padding: '9px 12px', borderRadius: 'var(--radius)', border: '1px solid var(--border-strong)', background: 'var(--surface)', color: 'var(--text)', fontSize: 13 }} />
+                                <input type="number" min="0" inputMode="numeric" placeholder="макс" value={maxDur}
+                                    onChange={e => setMaxDur(e.target.value)}
+                                    style={{ flex: 1, padding: '9px 12px', borderRadius: 'var(--radius)', border: '1px solid var(--border-strong)', background: 'var(--surface)', color: 'var(--text)', fontSize: 13 }} />
+                            </div>
+                            {durRangeInvalid ? (
+                                <div style={{ marginTop: 6, fontSize: 12, color: 'var(--red)' }}>Макс. длительность должна быть не меньше мин.</div>
+                            ) : null}
+                        </>
+                    ) : null}
+
                     {error ? (
                         <div style={{ marginTop: 14, padding: '10px 12px', borderRadius: 'var(--radius)', background: 'var(--accent-light)', border: '1px solid var(--border)', fontSize: 13, color: 'var(--red)' }}>
                             <FaIcon className="fas fa-circle-exclamation" /> {error}
@@ -1801,7 +1847,7 @@ const RandomCallModal = ({ isOpen, onClose, operator, userId, selectedMonth, onI
                 </div>
                 <div className="modal-footer">
                     <button className="btn btn-secondary" onClick={handleClose}>Закрыть</button>
-                    <button className="btn btn-primary" onClick={fetchOne} disabled={busy}>
+                    <button className="btn btn-primary" onClick={fetchOne} disabled={busy || durRangeInvalid}>
                         {busy ? <><span className="spinner" /> Поиск…</> : <><FaIcon className="fas fa-shuffle" /> {results.length > 0 ? 'Получить ещё один' : 'Получить случайный звонок'}</>}
                     </button>
                 </div>
@@ -2057,6 +2103,15 @@ const EvaluationModal = ({
         if (!existingEvaluation?.id || !currentDir?.hasFileUpload || !userId || existingEvaluation?.is_imported) return;
         getAudioUrl(existingEvaluation.id, userId).then(url => { if (url) setAudioUrl(url); else setAudioError('Не удалось загрузить аудио'); });
     }, [existingEvaluation, userId, currentDir?.hasFileUpload]);
+
+    // Импортированный (неоценённый) звонок с записью в GCS (TEZ/Binotel): подгружаем
+    // аудио, чтобы СВ мог послушать прямо в модалке — файл вручную загружать не нужно.
+    useEffect(() => {
+        if (!existingEvaluation?.is_imported || !existingEvaluation?.audio_path || !existingEvaluation?.id || !userId) return;
+        let alive = true;
+        getImportedAudioUrl(existingEvaluation.id, userId).then(url => { if (alive && url) setAudioUrl(url); });
+        return () => { alive = false; };
+    }, [existingEvaluation, userId]);
 
     const handleFile = (e) => {
         const file = e.target.files[0];
@@ -2918,6 +2973,7 @@ const App = ({ user, initialSelection }) => {
         scores: ev.scores || [],
         criterionComments: ev.criterion_comments || [],
         audioUrl: null,
+        audio_path: ev.audio_path || null,
         isDraft: ev.is_draft,
         assignedMonth: ev.month,
         isCorrection: ev.is_correction || false,
@@ -4002,9 +4058,9 @@ const App = ({ user, initialSelection }) => {
     const analyticsSelectedSupervisorObj = analyticsSelectedSvId ? supervisors.find(sv => Number(sv.id) === Number(analyticsSelectedSvId)) : null;
     const analyticsSelectedSupervisorIsFired = isFiredStatus(analyticsSelectedSupervisorObj?.status);
     const selectedOperatorIsFired = isFiredStatus(selectedOperator?.status);
-    // «Случайный звонок» — только для отдела СЗоВ И операторской модели. Признак считает
-    // бэкенд (/api/admin/directions -> random_call_eligible: операторская модель + отдел,
-    // который обслуживает Oktell). ОП и пр. кнопку не видят — у них звонков в Oktell нет.
+    // «Случайный звонок»: СЗоВ (Oktell) и TEZ (Binotel) — признак считает бэкенд
+    // (/api/admin/directions -> random_call_eligible + random_call_source). Прочие
+    // отделы/направления кнопку не видят. source управляет модалкой (у TEZ — свои min/max).
     const selectedOperatorDirectionMeta = (directions || []).find(d => Number(d.id) === Number(selectedOperator?.direction_id)) || null;
     const isOperatorModelDirection = !!selectedOperatorDirectionMeta?.random_call_eligible;
     const sectionTitle = activeSection === 'requests'
@@ -5956,6 +6012,7 @@ const App = ({ user, initialSelection }) => {
                 operator={selectedOperator}
                 userId={userId}
                 selectedMonth={selectedMonth}
+                source={selectedOperatorDirectionMeta?.random_call_source || null}
                 onImported={handleRandomCallsImported}
             />
             <FeedbackModal
