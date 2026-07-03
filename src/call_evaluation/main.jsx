@@ -2884,7 +2884,8 @@ const App = ({ user, initialSelection }) => {
     const [analyticsReportModal, setAnalyticsReportModal] = useState({
         show: false,
         format: 'standard',
-        departmentId: ''
+        departmentId: '',
+        supervisorId: ''
     });
     const [analyticsReportDepartments, setAnalyticsReportDepartments] = useState([]);
     const [analyticsReportDepartmentsLoading, setAnalyticsReportDepartmentsLoading] = useState(false);
@@ -4419,12 +4420,13 @@ const App = ({ user, initialSelection }) => {
         setAnalyticsReportModal(prev => ({
             show: true,
             format: prev.format || 'standard',
-            departmentId: prev.departmentId || ''
+            departmentId: prev.departmentId || '',
+            supervisorId: prev.supervisorId || analyticsSelectedSvId || ''
         }));
         if (isGlobalAdminRole) {
             loadAnalyticsReportDepartments();
         }
-    }, [isGlobalAdminRole, loadAnalyticsReportDepartments]);
+    }, [isGlobalAdminRole, loadAnalyticsReportDepartments, analyticsSelectedSvId]);
 
     const closeAnalyticsReportModal = useCallback(() => {
         if (analyticsLoading) return;
@@ -4440,16 +4442,27 @@ const App = ({ user, initialSelection }) => {
             return;
         }
 
-        const { format = 'standard', departmentId = '' } = options;
+        const { format = 'standard', departmentId = '', supervisorId = '' } = options;
+        const normalizedFormat = format === 'dates'
+            ? 'dates'
+            : format === 'group'
+                ? 'group'
+                : 'standard';
+        if (normalizedFormat === 'group' && !supervisorId) {
+            emitCallEvaluationToast('Выберите супервайзера для выгрузки по группе', 'error');
+            return;
+        }
         setAnalyticsLoading(true);
         try {
-            const normalizedFormat = format === 'dates' ? 'dates' : 'standard';
             const query = new URLSearchParams({
                 month: analyticsMonth,
                 format: normalizedFormat
             });
             if (isGlobalAdminRole && departmentId) {
                 query.set('department_id', departmentId);
+            }
+            if (normalizedFormat === 'group') {
+                query.set('supervisor_id', String(supervisorId));
             }
             const r = await authFetch(`${API_BASE_URL}/api/admin/monthly_report?${query.toString()}`, { headers: { 'X-User-Id': userId } });
             if (!r.ok) {
@@ -4461,7 +4474,9 @@ const App = ({ user, initialSelection }) => {
             const contentDisposition = r.headers.get('content-disposition') || '';
             let filename = normalizedFormat === 'dates'
                 ? `monthly_report_dates_${analyticsMonth}.xlsx`
-                : `monthly_report_${analyticsMonth}.xlsx`;
+                : normalizedFormat === 'group'
+                    ? `journal_by_group_${analyticsMonth}.xlsx`
+                    : `monthly_report_${analyticsMonth}.xlsx`;
             const utf8NameMatch = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
             const plainNameMatch = contentDisposition.match(/filename=\"?([^\";]+)\"?/i);
             if (utf8NameMatch?.[1]) {
@@ -6227,8 +6242,59 @@ const App = ({ user, initialSelection }) => {
                                             <span className="analytics-export-format-desc">ФИО и дни месяца, несколько оценок в день через запятую.</span>
                                         </span>
                                     </button>
+                                    <button
+                                        type="button"
+                                        className={`analytics-export-format ${analyticsReportModal.format === 'group' ? 'active' : ''}`}
+                                        onClick={() => setAnalyticsReportModal(prev => ({ ...prev, format: 'group' }))}
+                                        disabled={analyticsLoading}
+                                    >
+                                        <span className="analytics-export-format-icon"><FaIcon className="fas fa-users" /></span>
+                                        <span className="analytics-export-format-text">
+                                            <span className="analytics-export-format-title">По группе (по листам)</span>
+                                            <span className="analytics-export-format-desc">Отдельный лист на каждого оператора выбранного СВ — как в Журнале.</span>
+                                        </span>
+                                    </button>
                                 </div>
                             </div>
+
+                            {analyticsReportModal.format === 'group' && (
+                                <div className="field" style={{ marginTop: 12, marginBottom: 0 }}>
+                                    <label className="label">Супервайзер (группа)</label>
+                                    <select
+                                        value={analyticsReportModal.supervisorId}
+                                        onChange={(e) => setAnalyticsReportModal(prev => ({
+                                            ...prev,
+                                            supervisorId: e.target.value
+                                        }))}
+                                        className="select"
+                                        disabled={analyticsLoading}
+                                    >
+                                        <option value="">Выберите супервайзера</option>
+                                        {orderedSupervisors
+                                            .filter(sv => {
+                                                if (!isGlobalAdminRole) return true;
+                                                const deptId = analyticsReportModal.departmentId;
+                                                if (!deptId) return true;
+                                                if (sv.department_id == null) return true;
+                                                return String(sv.department_id) === String(deptId);
+                                            })
+                                            .map(sv => (
+                                                <option
+                                                    key={sv.id}
+                                                    value={sv.id}
+                                                    className={isFiredStatus(sv?.status) ? 'option-fired' : ''}
+                                                    style={isFiredStatus(sv?.status) ? { color: 'var(--text-3)' } : undefined}
+                                                >
+                                                    {sv.name}
+                                                </option>
+                                            ))}
+                                    </select>
+                                    <div className="analytics-export-scope-note" style={{ marginTop: 8 }}>
+                                        <FaIcon className="fas fa-layer-group" />
+                                        <span>На каждого оператора группы — отдельный лист с журналом оценок за месяц.</span>
+                                    </div>
+                                </div>
+                            )}
                         </div>
                         <div className="modal-footer">
                             <button className="btn btn-secondary" onClick={closeAnalyticsReportModal} disabled={analyticsLoading}>Отмена</button>
@@ -6237,9 +6303,10 @@ const App = ({ user, initialSelection }) => {
                                 onClick={() => analyticsGenerateReport({
                                     confirmed: true,
                                     format: analyticsReportModal.format,
-                                    departmentId: analyticsReportModal.departmentId
+                                    departmentId: analyticsReportModal.departmentId,
+                                    supervisorId: analyticsReportModal.supervisorId
                                 })}
-                                disabled={analyticsLoading}
+                                disabled={analyticsLoading || (analyticsReportModal.format === 'group' && !analyticsReportModal.supervisorId)}
                             >
                                 {analyticsLoading ? <><span className="spinner" /> Выгрузка...</> : <><FaIcon className="fas fa-download" /> Скачать</>}
                             </button>
