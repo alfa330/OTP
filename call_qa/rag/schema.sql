@@ -1,6 +1,6 @@
 -- call_qa: схема для AI-оценок и базы разборов (RAG на pgvector).
 -- Применять к РАБОЧЕЙ (read-write) БД. dim = 768 (Vertex text-multilingual-embedding-002).
--- На Render: для существующей БД pgvector включают через support; для новых — сразу.
+-- pgvector 0.8.0 доступен и TRUSTED на этой БД (PG 16) — владелец БД включает его без суперюзера.
 
 CREATE EXTENSION IF NOT EXISTS vector;
 
@@ -55,11 +55,9 @@ CREATE TABLE IF NOT EXISTS qa_adjudications (
     correct_verdict  text NOT NULL,             -- что правильно (человек)
     reason           text NOT NULL,             -- почему — это и есть «правило»
     situation_tag    text,                      -- короткий тег ситуации (для фильтра)
-    embedding        vector(768),               -- для семантического retrieval (v2)
+    embedding        vector(768),               -- эмбеддинг для семантического поиска (может быть NULL)
     use_count        integer NOT NULL DEFAULT 0,-- сколько раз подтянулась в оценки
     created_by       integer,                   -- users.id ревьюера
     created_at       timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_adj_dir_crit ON qa_adjudications (direction_id, criterion_idx);
--- Векторный индекс (косинус). Создавать после накопления данных:
--- CREATE INDEX idx_adj_vec ON qa_adjudications USING hnsw (embedding vector_cosine_ops);
