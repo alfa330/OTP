@@ -11,6 +11,8 @@ import {
 /* Карточка ревью одного звонка — центральный экран взаимодействия с ИИ.
  * Данные приходят только с бэкенда (props.call). Мок-данных нет. */
 
+const scoreTone = (s) => (s == null ? 'slate' : s >= 70 ? 'green' : s >= 50 ? 'amber' : 'red');
+
 const VERDICT = {
     Correct:   { tone: 'green', label: 'Верно',   Icon: Check },
     Incorrect: { tone: 'red',   label: 'Неверно', Icon: X },
@@ -172,9 +174,14 @@ export default function CallReviewCard({ call, onSave, onSkip }) {
                             </div>
                             <p className="mt-0.5 text-[12.5px] text-slate-400">{call.operator} · {call.datetime}</p>
                         </div>
-                        {call.human_score != null && (
-                            <IosBadge tone="green">Человек: {call.human_score}</IosBadge>
-                        )}
+                        <div className="flex flex-col items-end gap-1.5">
+                            {call.ai_score != null && (
+                                <IosBadge tone={scoreTone(call.ai_score)}><Sparkles size={11} />ИИ: {Math.round(call.ai_score)}</IosBadge>
+                            )}
+                            {call.human_score != null && (
+                                <IosBadge tone={scoreTone(call.human_score)}><User2 size={11} />Человек: {Math.round(call.human_score)}</IosBadge>
+                            )}
+                        </div>
                     </div>
                     <div className="mt-3 flex items-center gap-2 text-[11.5px] text-slate-400">
                         <Languages size={13} />

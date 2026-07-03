@@ -71,6 +71,24 @@ def _norm_verdict(v):
     return str(v)
 
 
+def _ai_score(direction: dict, result: dict):
+    """Балл ИИ по той же формуле, что и человеческий (main.jsx): критический Incorrect → 0;
+    иначе сумма весов НЕкритических критериев со статусом Correct/N/A. Критерии, которые ИИ
+    не может проверить (system_api/manual → Pending), считаем зачётом (benefit of the doubt)."""
+    verdict = {r["idx"]: r["verdict"] for r in result.get("per_criterion", [])}
+    crits = direction.get("criteria", [])
+    for c in crits:
+        if c.get("is_critical") and verdict.get(c["idx"]) == "Incorrect":
+            return 0
+    total = 0.0
+    for c in crits:
+        if c.get("is_critical"):
+            continue
+        if verdict.get(c["idx"]) in ("Correct", "N/A", "Pending"):
+            total += (c.get("weight") or 0)
+    return round(total)
+
+
 def _lines_from_tokens(toks: list[dict]) -> list[dict]:
     """Токены Soniox → диаризованные строки с сегментами (низкая уверенность помечена 'c')."""
     cnt = {}
@@ -176,6 +194,7 @@ def review_payload(call_id: int, refresh: bool = False) -> dict:
         "operator": row[3] or "—", "datetime": row[4],
         "human_score": row[5], "languages": asm["languages"], "asr_mean_conf": asm["mean_conf"] or 0,
         "transcript": _lines_from_tokens(toks), "criteria": criteria,
+        "ai_score": _ai_score(direction, result),
         "_audio_path": audio_path,
     }
     _cache_put(call_id, model, payload)
