@@ -15329,7 +15329,9 @@ def handle_monthly_report():
             report_format = 'standard'
         if report_format in {'date', 'dates', 'by_dates', 'date_matrix'}:
             report_format = 'dates'
-        if report_format not in {'standard', 'dates'}:
+        if report_format in {'group', 'by_group', 'groups', 'per_operator', 'operators'}:
+            report_format = 'group'
+        if report_format not in {'standard', 'dates', 'group'}:
             return jsonify({"error": "Invalid report format"}), 400
         
         # Validate month format
@@ -15422,6 +15424,249 @@ def handle_monthly_report():
 
         if not svs:
             return jsonify({"error": "No supervisors found"}), 404
+
+        # ── «По группе»: отдельный лист на каждого оператора выбранного СВ ──
+        # (та же информация, что и в Журнале оценок)
+        if report_format == 'group':
+            requested_supervisor_raw = request.args.get('supervisor_id')
+            if requested_supervisor_raw in (None, ''):
+                return jsonify({"error": "supervisor_id is required for group report"}), 400
+            try:
+                requested_supervisor_id = int(requested_supervisor_raw)
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid supervisor_id"}), 400
+
+            target_sv = next(
+                (sv for sv in svs if int(sv.get('id')) == requested_supervisor_id),
+                None
+            )
+            if not target_sv:
+                return jsonify({"error": "Supervisor is not available in your scope"}), 404
+
+            group_sv_id = target_sv.get('id')
+            group_sv_name = target_sv.get('name') or f"СВ {group_sv_id}"
+
+            group_operators = db.get_operators_by_supervisor(group_sv_id)
+            if effective_department_id is not None:
+                group_operators = [
+                    op for op in group_operators
+                    if op.get('department_id') is not None
+                    and int(op.get('department_id')) == int(effective_department_id)
+                ]
+
+            group_output = BytesIO()
+            group_workbook = xlsxwriter.Workbook(group_output, {'in_memory': True})
+
+            g_title_format = group_workbook.add_format({
+                'bold': True, 'font_size': 13, 'font_color': '#111827'
+            })
+            g_subtitle_format = group_workbook.add_format({
+                'font_size': 10, 'font_color': '#6B7280'
+            })
+            g_header_format = group_workbook.add_format({
+                'bold': True, 'bg_color': '#D3D3D3', 'border': 1,
+                'align': 'center', 'valign': 'vcenter', 'text_wrap': True
+            })
+            g_left_format = group_workbook.add_format({
+                'border': 1, 'align': 'left', 'valign': 'vcenter'
+            })
+            g_center_format = group_workbook.add_format({
+                'border': 1, 'align': 'center', 'valign': 'vcenter'
+            })
+            g_idx_format = group_workbook.add_format({
+                'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_color': '#6B7280'
+            })
+            g_muted_format = group_workbook.add_format({
+                'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_color': '#9CA3AF'
+            })
+            g_score_red = group_workbook.add_format({
+                'border': 1, 'num_format': '0', 'align': 'center', 'valign': 'vcenter', 'bg_color': '#FFCCCC'
+            })
+            g_score_yellow = group_workbook.add_format({
+                'border': 1, 'num_format': '0', 'align': 'center', 'valign': 'vcenter', 'bg_color': '#FFFACD'
+            })
+            g_score_green = group_workbook.add_format({
+                'border': 1, 'num_format': '0', 'align': 'center', 'valign': 'vcenter', 'bg_color': '#C6EFCE'
+            })
+            g_status_evaluated = group_workbook.add_format({
+                'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_color': '#166534'
+            })
+            g_status_draft = group_workbook.add_format({
+                'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_color': '#1D4ED8'
+            })
+            g_status_imported = group_workbook.add_format({
+                'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_color': '#B45309'
+            })
+
+            def _group_score_format(score_value):
+                try:
+                    numeric = float(score_value)
+                except (TypeError, ValueError):
+                    return None
+                if numeric >= 80:
+                    return g_score_green
+                if numeric >= 60:
+                    return g_score_yellow
+                return g_score_red
+
+            def _group_status(evaluation):
+                if evaluation.get('is_imported'):
+                    return 'Не оценён', g_status_imported
+                if evaluation.get('is_draft'):
+                    return 'Черновик', g_status_draft
+                return 'Оценён', g_status_evaluated
+
+            def _group_resolution(evaluation):
+                if evaluation.get('is_imported'):
+                    return '—'
+                resolved = bool(evaluation.get('question_resolved'))
+                resolution = 'Решен' if resolved else 'Не решен'
+                if not resolved:
+                    first_contact = 'N/A'
+                else:
+                    first_contact = '1 обращение' if evaluation.get('resolved_first_contact') else 'Повторно'
+                return f"{resolution} · {first_contact}"
+
+            def _group_datetime(value):
+                if value in (None, '', '-'):
+                    return '—'
+                text = str(value).strip().replace('T', ' ')
+                if not text or text == '-':
+                    return '—'
+                for fmt, length in (('%Y-%m-%d %H:%M:%S', 19), ('%Y-%m-%d %H:%M', 16), ('%Y-%m-%d', 10)):
+                    try:
+                        parsed = datetime.strptime(text[:length], fmt)
+                    except ValueError:
+                        continue
+                    if fmt == '%Y-%m-%d':
+                        return parsed.strftime('%d.%m.%Y')
+                    return parsed.strftime('%d.%m.%Y %H:%M')
+                return text
+
+            used_group_sheet_names = set()
+
+            def _unique_group_sheet_name(raw_name):
+                base = str(raw_name or 'Оператор').strip() or 'Оператор'
+                for ch in '[]:*?/\\':
+                    base = base.replace(ch, ' ')
+                base = base.strip() or 'Оператор'
+                candidate = base[:31]
+                if candidate.casefold() not in used_group_sheet_names:
+                    used_group_sheet_names.add(candidate.casefold())
+                    return candidate
+                suffix = 2
+                while True:
+                    tail = f" ({suffix})"
+                    candidate = base[:31 - len(tail)].rstrip() + tail
+                    if candidate.casefold() not in used_group_sheet_names:
+                        used_group_sheet_names.add(candidate.casefold())
+                        return candidate
+                    suffix += 1
+
+            group_headers = [
+                '#', 'Статус', 'Направление', 'Телефон', 'Балл',
+                'Решение', 'Дата обращения', 'Дата оценки'
+            ]
+            group_col_widths = [5, 12, 18, 16, 8, 22, 20, 20]
+
+            def _write_group_operator_sheet(sheet_title, evaluations, is_supervisor=False):
+                worksheet = group_workbook.add_worksheet(_unique_group_sheet_name(sheet_title))
+
+                evaluated = [
+                    ev for ev in evaluations
+                    if not ev.get('is_imported') and not ev.get('is_draft') and ev.get('score') is not None
+                ]
+                evaluated_count = len(evaluated)
+                avg_score = (sum(float(ev['score']) for ev in evaluated) / evaluated_count) if evaluated_count else None
+                avg_text = f"{avg_score:.1f}" if avg_score is not None else '—'
+
+                display_name = sheet_title
+                worksheet.merge_range(0, 0, 0, len(group_headers) - 1, display_name, g_title_format)
+                subtitle = (
+                    f"Супервайзер: {group_sv_name}  ·  Месяц: {month}  ·  "
+                    f"Оценок: {evaluated_count}  ·  Средний балл: {avg_text}"
+                )
+                worksheet.merge_range(1, 0, 1, len(group_headers) - 1, subtitle, g_subtitle_format)
+
+                header_row = 3
+                for col, header in enumerate(group_headers):
+                    worksheet.write(header_row, col, header, g_header_format)
+
+                first_data_row = header_row + 1
+                for offset, ev in enumerate(evaluations):
+                    row_idx = first_data_row + offset
+                    status_label, status_fmt = _group_status(ev)
+                    worksheet.write(row_idx, 0, offset + 1, g_idx_format)
+                    worksheet.write(row_idx, 1, status_label, status_fmt)
+                    direction = (ev.get('direction') or {}).get('name') if ev.get('direction') else None
+                    worksheet.write(row_idx, 2, direction or '—', g_left_format)
+                    worksheet.write(row_idx, 3, ev.get('phone_number') or '—', g_left_format)
+
+                    score_value = ev.get('score')
+                    if score_value is not None:
+                        worksheet.write_number(
+                            row_idx, 4, float(score_value),
+                            _group_score_format(score_value) or g_center_format
+                        )
+                    else:
+                        worksheet.write(row_idx, 4, '—', g_muted_format)
+
+                    worksheet.write(row_idx, 5, _group_resolution(ev), g_center_format)
+                    worksheet.write(row_idx, 6, _group_datetime(ev.get('appeal_date')), g_center_format)
+                    worksheet.write(
+                        row_idx, 7,
+                        _group_datetime(ev.get('evaluation_date') or ev.get('created_at')),
+                        g_center_format
+                    )
+
+                if not evaluations:
+                    worksheet.merge_range(
+                        first_data_row, 0, first_data_row, len(group_headers) - 1,
+                        'Нет данных за выбранный месяц', g_muted_format
+                    )
+
+                for col, width in enumerate(group_col_widths):
+                    worksheet.set_column(col, col, width)
+                worksheet.freeze_panes(first_data_row, 0)
+
+            group_operators_sorted = sorted(
+                group_operators,
+                key=lambda op: str(op.get('name') or '').strip().casefold()
+            )
+
+            sheets_written = 0
+            for op in group_operators_sorted:
+                op_id = op.get('id')
+                op_status = str(op.get('status') or '').strip().lower()
+                op_evaluations = db.get_call_evaluations(op_id, month=month)
+                # Уволенных оставляем в выгрузке только если за месяц есть данные журнала.
+                if op_status in ('fired', 'dismissal') and not op_evaluations:
+                    continue
+                _write_group_operator_sheet(op.get('name') or f"Оператор {op_id}", op_evaluations)
+                sheets_written += 1
+
+            # Сам супервайзер — отдельным листом, если за месяц у него есть оценки.
+            sv_evaluations = db.get_call_evaluations(group_sv_id, month=month)
+            if sv_evaluations:
+                _write_group_operator_sheet(f"{group_sv_name} (СВ)", sv_evaluations, is_supervisor=True)
+                sheets_written += 1
+
+            if sheets_written == 0:
+                placeholder = group_workbook.add_worksheet('Нет данных')
+                placeholder.set_column(0, 0, 60)
+                placeholder.write(0, 0, f"Нет операторов с данными у {group_sv_name} за {month}.", g_subtitle_format)
+
+            group_workbook.close()
+            group_output.seek(0)
+
+            safe_sv_name = re.sub(r'[\\/:*?"<>|]+', '_', str(group_sv_name)).strip('_ ') or 'group'
+            group_filename = f"journal_group_{safe_sv_name}_{month}.xlsx"
+            return send_file(
+                group_output,
+                as_attachment=True,
+                download_name=group_filename,
+                mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
 
         output = BytesIO()
         workbook = xlsxwriter.Workbook(output, {'in_memory': True})
