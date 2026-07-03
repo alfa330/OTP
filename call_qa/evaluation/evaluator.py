@@ -100,11 +100,13 @@ def _claude_eval(transcript, direction, criteria, *, asr_low_spans, use_rag, mod
 
 
 def _needs_escalation(v: dict, crit: dict) -> bool:
-    """Критерий уходит на HARD-модель: низкая уверенность ИЛИ критический с вердиктом Incorrect."""
+    """На HARD-модель уходит: ЛЮБОЙ вердикт Incorrect (высокая цена ошибки — не штрафуем
+    оператора без второго мнения сильной модели; там же применяются разборы), ИЛИ низкая
+    уверенность модели."""
+    if v.get("verdict") == "Incorrect":
+        return True
     conf = v.get("confidence")
     if conf is not None and conf < config.ESCALATE_CONF:
-        return True
-    if crit.get("is_critical") and v.get("verdict") == "Incorrect":
         return True
     return False
 
