@@ -58,10 +58,14 @@ def build_system(criteria: list[dict]) -> str:
 
 
 def _rag_block(direction_id: int, criteria: list[dict], transcript: str) -> str:
+    # Оптимизация: embedding текущего транскрипта считаем один раз на всю оценку,
+    # а не отдельно на каждый критерий. Retrieval остаётся семантическим: внутри
+    # каждого критерия pgvector выбирает самые похожие сохранённые разборы.
+    query_vector = store.embed_query(transcript) if transcript else None
     chunks = []
     for c in criteria:
         try:
-            hits = store.retrieve(direction_id=direction_id, criterion_idx=c["idx"], query_text=transcript)
+            hits = store.retrieve(direction_id=direction_id, criterion_idx=c["idx"], query_vector=query_vector)
         except Exception:
             hits = []
         for h in hits:
