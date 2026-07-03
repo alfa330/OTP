@@ -57,8 +57,12 @@ VERTEX_REGION = env("VERTEX_REGION", "asia-southeast1")
 VERTEX_EMBED_MODEL = env("VERTEX_EMBED_MODEL", "text-multilingual-embedding-002")
 EMBED_DIM = 768
 
-# --- LLM (Claude) ---
-CLAUDE_MODEL = env("CLAUDE_MODEL", "claude-opus-4-8")
+# --- LLM (Claude) — двухуровнево: массовая модель + эскалация на сложных ---
+CLAUDE_MODEL_BULK = env("CLAUDE_MODEL_BULK", "claude-sonnet-4-6")   # первый проход (дёшево, массово)
+CLAUDE_MODEL_HARD = env("CLAUDE_MODEL_HARD", "claude-opus-4-8")     # эскалация: спорное / критическое
+ESCALATE_CONF = float(env("CLAUDE_ESCALATE_CONF", "0.6"))          # ниже — критерий уходит на HARD-модель
+# Тег для кэша/меты (при смене моделей меняется → старые кэш-оценки не подмешиваются).
+CLAUDE_MODEL = env("CLAUDE_MODEL", f"{CLAUDE_MODEL_BULK}+{CLAUDE_MODEL_HARD}")
 CLAUDE_EFFORT = env("CLAUDE_EFFORT", "high")
 
 

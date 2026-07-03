@@ -168,7 +168,7 @@ def review_payload(call_id: int, refresh: bool = False) -> dict:
         criteria.append({
             "idx": v["idx"], "name": v["name"], "is_critical": bool(cm.get("is_critical")),
             "source": v["source"], "ai": v["verdict"], "conf": v["confidence"],
-            "evidence": v["evidence_quote"], "comment": v["comment"],
+            "evidence": v["evidence_quote"], "comment": v["comment"], "model": v.get("model"),
         })
 
     payload = {
