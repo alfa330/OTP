@@ -14810,16 +14810,19 @@ class Database:
             )
 
     def get_imported_call_audio(self, imported_id):
-        """Возвращает {operator_id, audio_path, status} импортированного звонка или None."""
+        """Возвращает {operator_id, audio_path, status, external_id, notes} импортированного
+        звонка или None. external_id/notes нужны для докачки записи Binotel по требованию
+        (external_id = generalCallID; notes оканчивается на ':binotel' для TEZ-звонков)."""
         with self._get_cursor() as cur:
             cur.execute(
-                "SELECT operator_id, audio_path, status FROM imported_calls WHERE id = %s",
+                "SELECT operator_id, audio_path, status, external_id, notes FROM imported_calls WHERE id = %s",
                 (int(imported_id),)
             )
             row = cur.fetchone()
         if not row:
             return None
-        return {"operator_id": row[0], "audio_path": row[1], "status": row[2]}
+        return {"operator_id": row[0], "audio_path": row[1], "status": row[2],
+                "external_id": row[3], "notes": row[4]}
 
     def get_call_distribution_settings(self) -> dict:
         with self._get_cursor() as cur:

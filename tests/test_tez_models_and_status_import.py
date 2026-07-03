@@ -342,6 +342,63 @@ class TezBinotelRandomCallTests(unittest.TestCase):
         self.assertIn("recording_status", func)
         self.assertIn("RECORDED_STATUSES", func)
 
+    def test_too_frequent_wait_seconds_parsing(self):
+        f = self.tb._too_frequent_wait_seconds
+        self.assertEqual(f({"message": "Requests are too frequent. You can do this request after 7 sec."}), 7)
+        self.assertEqual(f({"error": "too frequent"}), 10)  # без числа — дефолт
+        self.assertIsNone(f({"message": "some other error"}))
+
+    def test_post_retries_on_rate_limit(self):
+        import unittest.mock as mock
+        tb = self.tb
+        n = {"c": 0}
+
+        class FakeResp:
+            status_code = 200
+            def __init__(self, payload): self._p = payload
+            def json(self): return self._p
+
+        class FakeSession:
+            def post(self, url, json=None, timeout=None):
+                n["c"] += 1
+                if n["c"] == 1:
+                    return FakeResp({"status": "error",
+                                     "message": "Requests are too frequent. You can do this request after 2 sec."})
+                return FakeResp({"status": "success", "callDetails": {}})
+
+        client = tb.BinotelApiClient("k", "s")
+        client.session = FakeSession()
+        with mock.patch.object(tb.time, "sleep", lambda *a, **k: None):
+            payload = client._post("stats/x", {})
+        self.assertEqual(payload.get("status"), "success")
+        self.assertEqual(n["c"], 2)  # один повтор после «too frequent»
+
+    def test_client_has_rate_limit_config(self):
+        self.assertTrue(hasattr(self.tb, "MIN_REQUEST_INTERVAL"))
+        self.assertTrue(hasattr(self.tb, "RATE_LIMIT_MAX_RETRIES"))
+        self.assertIn("uploaded", self.tb.RECORDED_STATUSES)
+
+    def test_random_call_supports_count_and_7day_cap(self):
+        bot_src = _read(BOT_PATH)
+        func = bot_src[bot_src.index("def _binotel_random_call("):]
+        func = func[:func.index("\ndef fetch_random_evaluation_call(")]
+        self.assertIn("count=1", func)              # параметр количества в сигнатуре
+        self.assertIn("MAX_WINDOW_DAYS", func)       # лимит периода 7 дней
+        self.assertIn("created_list", func)          # создаём несколько звонков
+        self.assertIn('"calls"', func)               # ответ содержит список
+        # Диспетч ограничивает count и прокидывает его в обе ветки.
+        self.assertIn("RANDOM_CALL_MAX_COUNT", bot_src)
+        disp = bot_src[bot_src.index("def fetch_random_evaluation_call("):][:5000]
+        self.assertIn("count=count", disp)           # проброс в TEZ-ветку
+        self.assertIn("len(created_list) >= count", bot_src)  # Oktell-ветка тоже по count
+
+    def test_audio_endpoint_has_on_demand_fetch(self):
+        bot_src = _read(BOT_PATH)
+        self.assertIn("def _binotel_store_record(", bot_src)   # синхронное ядро докачки
+        ep = bot_src[bot_src.index("def get_imported_call_audio_file("):][:2500]
+        self.assertIn("_binotel_store_record(", ep)            # докачка по требованию
+        self.assertIn("AUDIO_NOT_READY", ep)
+
 
 if __name__ == "__main__":
     unittest.main()
