@@ -308,7 +308,10 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     const isExistingUserEdit = Boolean(userToEdit?.id);
     const isSupervisorRateEditDay = getAlmatyDayOfMonth() === 1;
     const isSupervisorRateLocked = isSupervisorRequester && isOperatorDraft(editedUser) && isExistingUserEdit && !isSupervisorRateEditDay;
-    const canShowOperatorRateControls = isOperatorDraft(editedUser) && (isAdminLikeRequester || isSupervisorRequester);
+    // Глава отдела (scoped head) — админ-подобная роль, но исключена из isAdminLikeRequester
+    // ради скоупа отдела. Ставку сотрудника ей менять можно (бэкенд разрешает как админу),
+    // поэтому явно включаем её в право показать контрол ставки в режиме редактирования.
+    const canShowOperatorRateControls = isOperatorDraft(editedUser) && (isAdminLikeRequester || isSupervisorRequester || isScopedDepartmentHeadRequester);
     const normalizeModalStatusValue = (value) => {
         const status = String(value ?? '').trim();
         if (status === 'unpaid_leave') return 'bs';
