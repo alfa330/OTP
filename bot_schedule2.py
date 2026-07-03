@@ -3957,13 +3957,17 @@ def _resource_fte_error_response(error):
 
 # ── ИИ-оценка звонков (раздел call_qa) — только super_admin ──────────────────
 def _ai_qa_guard():
-    """Возвращает (requester_id, error_response|None). Доступ только супер-админу."""
+    """Возвращает (requester_id, error_response|None). Доступ: супер-админ ИЛИ глава ОП (деп. 367)."""
     requester_id = getattr(g, 'user_id', None)
     user = db.get_user(id=requester_id) if requester_id else None
     role = _normalize_user_role(user[3]) if user else None
-    if not _is_super_admin_role(role):
-        return None, (jsonify({"error": "forbidden"}), 403)
-    return requester_id, None
+    if _is_super_admin_role(role):
+        return requester_id, None
+    if requester_id is not None:
+        headed = _headed_department_id(requester_id)
+        if headed is not None and int(headed) == 367:  # Отдел продаж (call_qa.config.OP_DEPARTMENT_ID)
+            return requester_id, None
+    return None, (jsonify({"error": "forbidden"}), 403)
 
 
 @app.route('/api/ai-qa/review-queue', methods=['GET', 'OPTIONS'])
