@@ -10,6 +10,19 @@ def _rw_conn():
     return config.connect_rw()
 
 
+def criteria_with_adjudications(direction_id) -> set:
+    """Индексы критериев направления, по которым уже есть разборы — их отдаём на HARD-модель,
+    чтобы стандарт из разбора применяла сильная модель (даже если BULK уверенно поставил Correct)."""
+    try:
+        ro = config.connect_ro(); cur = ro.cursor()
+        cur.execute("SELECT DISTINCT criterion_idx FROM qa_adjudications WHERE direction_id=%s", (direction_id,))
+        idx = {r[0] for r in cur.fetchall()}
+        cur.close(); ro.close()
+        return idx
+    except Exception:
+        return set()
+
+
 def _vec(v):
     """Список float → текстовый формат pgvector '[1,2,3]' (или None)."""
     return "[" + ",".join(str(float(x)) for x in v) + "]" if v else None
