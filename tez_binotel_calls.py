@@ -13,7 +13,9 @@
         stats/call-record   (параметр callID = generalCallID);
   - ответ: {status:'success', callDetails:{ "<generalCallID>": {...} }}.
 
-Сопоставление с нашими операторами — по users.sip_number == internalNumber.
+Сопоставление звонка с нашим оператором — ПО ИМЕНИ (employeeData.name из ответа),
+а не по internalNumber: один и тот же sip со временем закрепляют за разными
+операторами (см. ветку матчинга в bot_schedule2._binotel_random_call).
 
 ENV (.env.codex.local или окружение):
     TEZ_BINOTEL_API_KEY=<ключ>
@@ -52,6 +54,8 @@ CALL_TYPE_INCOMING = 0
 CALL_TYPE_OUTGOING = 1
 # disposition, у которых по документации существует запись разговора.
 RECORDED_DISPOSITIONS = {"ANSWER", "ANSWERED", "SUCCESS", "VM-SUCCESS"}
+# recordingStatus из ответа Binotel, при котором запись реально доступна.
+RECORDED_STATUSES = {"uploaded"}
 
 
 def _parse_env_file(path):
@@ -165,6 +169,15 @@ class BinotelApiClient:
         billsec = _to_int(raw.get("billsec"), default=0)
         waitsec = _to_int(raw.get("waitsec"), default=0)
         start_time = _to_int(raw.get("startTime") or raw.get("startTimeUTC") or raw.get("start_time"), default=0)
+        # employeeData несёт имя/почту сотрудника, обслужившего звонок. Один и тот же
+        # sip (internalNumber) со временем закрепляют за разными операторами, поэтому
+        # сопоставлять звонок с нашим оператором нужно ПО ИМЕНИ, а не по номеру.
+        emp = raw.get("employeeData")
+        emp_name = ""
+        emp_email = ""
+        if isinstance(emp, dict):
+            emp_name = str(emp.get("name") or emp.get("fullName") or "").strip()
+            emp_email = str(emp.get("email") or "").strip()
         return {
             "general_call_id": str(gid),
             "call_type": call_type,
@@ -174,6 +187,9 @@ class BinotelApiClient:
             "internal_number": str(raw.get("internalNumber") or raw.get("internalNumbers") or "").strip(),
             "external_number": str(raw.get("externalNumber") or raw.get("clientNumber") or "").strip(),
             "disposition": str(raw.get("disposition") or "").strip().upper(),
+            "employee_name": emp_name,
+            "employee_email": emp_email,
+            "recording_status": str(raw.get("recordingStatus") or "").strip().lower(),
         }
 
     @staticmethod

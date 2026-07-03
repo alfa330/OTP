@@ -16227,10 +16227,13 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
                          date_from, date_to, min_duration_sec=None, max_duration_sec=None):
     """«Случайный звонок» для TEZ через Binotel API 4.0. Возвращает Flask-ответ.
 
-    Сопоставление оператора с Binotel — по users.sip_number == internalNumber.
-    Кандидаты: отвеченные звонки с записью (billsec > 0) в диапазоне длительности,
-    нужного направления, ещё НЕ бывшие в оценках. Первый подходящий кладётся в
-    imported_calls, а запись разговора докачивается в GCS фоново."""
+    Список звонков берём по sip (internalNumber — это параметр API), но каждый
+    звонок сопоставляем с нашим оператором ПО ИМЕНИ (employeeData.name), как в
+    ветке Oktell: один sip со временем закрепляют за разными операторами, поэтому
+    номеру доверять нельзя. Кандидаты: отвеченные звонки с записью (billsec > 0,
+    recordingStatus=uploaded) в диапазоне длительности, нужного направления,
+    закреплённые за этим оператором и ещё НЕ бывшие в оценках. Первый подходящий
+    кладётся в imported_calls, а запись разговора докачивается в GCS фоново."""
     import tez_binotel_calls
     cfg = tez_binotel_calls.get_config()
     if not tez_binotel_calls.api_ready(cfg):
@@ -16272,14 +16275,34 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
         logging.exception("binotel random_call: list calls failed (sip=%s)", sip)
         return jsonify({"error": "Не удалось обратиться к Binotel, попробуйте ещё раз"}), 502
 
+    # Матчинг по имени (sip делят разные операторы) — тот же резолвер, что у Oktell.
+    operator_lookup = _status_import_build_operator_lookup(exclude_chat_managers=True)
+
+    def _call_belongs_to_operator(call):
+        name = str(call.get('employee_name') or '').strip()
+        if not name:
+            return False
+        matches = _status_import_resolve_operator_matches(name, operator_lookup)
+        return len(matches) == 1 and int(matches[0]['id']) == operator_id
+
     candidates = []
+    skipped_other_operator = 0
     for c in calls:
         if c['call_type'] not in allowed_types:
+            continue
+        if not _call_belongs_to_operator(c):
+            skipped_other_operator += 1
             continue
         billsec = c['billsec']
         if billsec <= 0:  # только отвеченные с разговором (у них есть запись)
             continue
-        if c['disposition'] and c['disposition'] not in tez_binotel_calls.RECORDED_DISPOSITIONS:
+        # Наличие записи: доверяем recordingStatus, если он есть; иначе — эвристике
+        # по disposition (в некоторых инсталляциях поле может отсутствовать).
+        rec_status = c.get('recording_status') or ''
+        if rec_status:
+            if rec_status not in tez_binotel_calls.RECORDED_STATUSES:
+                continue
+        elif c['disposition'] and c['disposition'] not in tez_binotel_calls.RECORDED_DISPOSITIONS:
             continue
         if min_d and billsec < min_d:
             continue
@@ -16290,6 +16313,12 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
         candidates.append(c)
 
     if not candidates:
+        if skipped_other_operator:
+            logging.info(
+                "binotel random_call: %d звонков по sip=%s отброшены (закреплены за другим/неизвестным "
+                "оператором по имени); оператор_id=%s '%s'",
+                skipped_other_operator, sip, operator_id, operator_name,
+            )
         return jsonify({"error": "За выбранный период у оператора нет подходящих звонков по этим критериям"}), 404
 
     existing = db.get_imported_call_external_ids_for_operator(operator_id)
