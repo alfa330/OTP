@@ -74,8 +74,8 @@ def _rag_block(direction_id: int, criteria: list[dict], transcript: str) -> str:
     return "\n".join(chunks) if chunks else "(прецедентов пока нет)"
 
 
-def _claude_eval(transcript, direction, criteria, *, asr_low_spans, use_rag) -> dict:
-    """Оценка подмножества (transcript) критериев. Сырой HTTP + output_config.format."""
+def _claude_eval(transcript, direction, criteria, *, asr_low_spans, use_rag, model) -> dict:
+    """Оценка подмножества (transcript) критериев моделью `model`. Сырой HTTP + output_config.format."""
     key = config.anthropic_key()
     if not key:
         raise RuntimeError("нет ключа Claude (CLAUDE_API_KEY / ANTHROPIC_API_KEY)")
@@ -85,7 +85,7 @@ def _claude_eval(transcript, direction, criteria, *, asr_low_spans, use_rag) -> 
     user = (f"РАЗБОРЫ (согласованные прецеденты):\n{rag}\n\n"
             f"ТРАНСКРИПТ ЗВОНКА:\n{transcript}{low}\n\nОцени по всем перечисленным критериям.")
     body = {
-        "model": config.CLAUDE_MODEL,
+        "model": model,
         "max_tokens": 8000,
         "system": [{"type": "text", "text": build_system(criteria), "cache_control": {"type": "ephemeral"}}],
         "messages": [{"role": "user", "content": user}],
@@ -99,16 +99,41 @@ def _claude_eval(transcript, direction, criteria, *, asr_low_spans, use_rag) -> 
     return json.loads(text)  # {"per_criterion": [...], "overall_comment": "..."}
 
 
+def _needs_escalation(v: dict, crit: dict) -> bool:
+    """Критерий уходит на HARD-модель: низкая уверенность ИЛИ критический с вердиктом Incorrect."""
+    conf = v.get("confidence")
+    if conf is not None and conf < config.ESCALATE_CONF:
+        return True
+    if crit.get("is_critical") and v.get("verdict") == "Incorrect":
+        return True
+    return False
+
+
 def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=True, call_context=None) -> dict:
-    """Полная оценка по всем критериям с маршрутизацией по источнику. Возвращает dict."""
+    """Полная оценка. Двухуровнево: массовая модель (BULK) первым проходом, затем спорные/
+    критические критерии переоцениваются HARD-моделью. Плюс маршрутизация по источнику."""
     cc.apply_to_direction(direction)
+    crit_by_idx = {c["idx"]: c for c in direction["criteria"]}
     t_crits = [c for c in direction["criteria"] if c["eval_source"] == cc.TRANSCRIPT]
 
-    ai = (_claude_eval(transcript, direction, t_crits, asr_low_spans=asr_low_spans, use_rag=use_rag)
+    # 1) первый проход — массовая (дешёвая) модель
+    ai = (_claude_eval(transcript, direction, t_crits, asr_low_spans=asr_low_spans,
+                       use_rag=use_rag, model=config.CLAUDE_MODEL_BULK)
           if t_crits else {"per_criterion": [], "overall_comment": ""})
     by_idx = {v["idx"]: v for v in ai.get("per_criterion", [])}
-    checker = get_data_checker()
+    model_by_idx = {idx: config.CLAUDE_MODEL_BULK for idx in by_idx}
 
+    # 2) эскалация: спорные/критические (+ не вернувшиеся вердикты) → HARD-модель
+    escalate = [c for c in t_crits
+                if c["idx"] not in by_idx or _needs_escalation(by_idx[c["idx"]], crit_by_idx[c["idx"]])]
+    if escalate and config.CLAUDE_MODEL_HARD and config.CLAUDE_MODEL_HARD != config.CLAUDE_MODEL_BULK:
+        ai2 = _claude_eval(transcript, direction, escalate, asr_low_spans=asr_low_spans,
+                           use_rag=use_rag, model=config.CLAUDE_MODEL_HARD)
+        for v in ai2.get("per_criterion", []):
+            by_idx[v["idx"]] = v
+            model_by_idx[v["idx"]] = config.CLAUDE_MODEL_HARD
+
+    checker = get_data_checker()
     results = []
     for c in direction["criteria"]:
         base = {"idx": c["idx"], "name": c["name"], "source": c["eval_source"]}
@@ -117,23 +142,24 @@ def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=Tr
             v = by_idx.get(c["idx"])
             if v:
                 results.append({**base, "verdict": v.get("verdict", "N/A"), "confidence": v.get("confidence"),
-                                "evidence_quote": v.get("evidence_quote", ""), "comment": v.get("comment", "")})
+                                "evidence_quote": v.get("evidence_quote", ""), "comment": v.get("comment", ""),
+                                "model": model_by_idx.get(c["idx"])})
             else:
                 results.append({**base, "verdict": "Pending", "confidence": None,
-                                "evidence_quote": "", "comment": "ИИ не вернул вердикт"})
+                                "evidence_quote": "", "comment": "ИИ не вернул вердикт", "model": None})
         elif src == cc.SYSTEM_API:
             if checker.supports(c) and call_context:
                 rr = checker.check(c, call_context)
                 results.append({**base, "verdict": rr.get("verdict", "Pending"), "confidence": rr.get("confidence"),
-                                "evidence_quote": rr.get("evidence", ""), "comment": rr.get("comment", "проверка данных в ПО")})
+                                "evidence_quote": rr.get("evidence", ""), "comment": rr.get("comment", "проверка данных в ПО"), "model": None})
             elif c.get("default_verdict"):
                 results.append({**base, "verdict": c["default_verdict"], "confidence": None,
-                                "evidence_quote": "", "comment": "по умолчанию (нет API проверки данных)"})
+                                "evidence_quote": "", "comment": "по умолчанию (нет API проверки данных)", "model": None})
             else:
                 results.append({**base, "verdict": "Pending", "confidence": None,
-                                "evidence_quote": "", "comment": "нужна проверка данных в ПО (API пока нет)"})
+                                "evidence_quote": "", "comment": "нужна проверка данных в ПО (API пока нет)", "model": None})
         else:
             results.append({**base, "verdict": "Pending", "confidence": None,
-                            "evidence_quote": "", "comment": "ручная проверка"})
+                            "evidence_quote": "", "comment": "ручная проверка", "model": None})
 
     return {"per_criterion": results, "overall_comment": ai.get("overall_comment", "")}
