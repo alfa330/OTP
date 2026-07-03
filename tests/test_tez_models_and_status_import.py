@@ -260,5 +260,88 @@ class TezBinotelSyncTests(unittest.TestCase):
         self.assertNotIn("sip_lookup", bot_src)
 
 
+def _build_binotel_operator_lookup(ns, operators):
+    """Мини-версия _status_import_build_operator_lookup для тестов: имя -> оператор(ы)."""
+    variants = ns["_status_import_operator_name_variants"]
+    lookup = {}
+    for op in operators:
+        for key in variants(op["name"]):
+            lookup.setdefault(key, [])
+            if not any(int(item["id"]) == op["id"] for item in lookup[key]):
+                lookup[key].append(op)
+    return lookup
+
+
+class TezBinotelRandomCallTests(unittest.TestCase):
+    """«Случайный звонок» TEZ через Binotel API 4.0: матчинг по имени + запись."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ns = _tez_status_import_namespace()
+        import sys
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))
+        import tez_binotel_calls as tb
+        cls.tb = tb
+
+    def test_normalize_call_exposes_employee_and_recording(self):
+        raw = {
+            "generalCallID": "6629469101", "callType": "1", "billsec": "197",
+            "waitsec": "15", "startTime": "1780580938",
+            "internalNumber": "907", "externalNumber": "77478586700",
+            "disposition": "answer", "recordingStatus": "uploaded",
+            "employeeData": {"name": "Ермахан Жасмин Бахтияркызы",
+                             "email": "ermahanjasmin94@gmail.com"},
+        }
+        c = self.tb.BinotelApiClient._normalize_call(raw)
+        self.assertEqual(c["general_call_id"], "6629469101")
+        self.assertEqual(c["call_type"], 1)
+        self.assertEqual(c["billsec"], 197)
+        self.assertEqual(c["disposition"], "ANSWER")  # нормализуется в верхний регистр
+        # employeeData раньше выбрасывался — теперь имя/почта доступны для матчинга.
+        self.assertEqual(c["employee_name"], "Ермахан Жасмин Бахтияркызы")
+        self.assertEqual(c["employee_email"], "ermahanjasmin94@gmail.com")
+        self.assertEqual(c["recording_status"], "uploaded")
+
+    def test_normalize_call_without_employee_data(self):
+        c = self.tb.BinotelApiClient._normalize_call({"callID": "42", "billsec": 10})
+        self.assertEqual(c["general_call_id"], "42")  # gid c fallback на callID
+        self.assertEqual(c["employee_name"], "")
+        self.assertEqual(c["employee_email"], "")
+        self.assertEqual(c["recording_status"], "")
+
+    def test_recorded_statuses_constant(self):
+        self.assertIn("uploaded", self.tb.RECORDED_STATUSES)
+
+    def test_shared_sip_is_disambiguated_by_name(self):
+        # Прод: внутренний номер 925 закреплён СРАЗУ за двумя операторами. Матчинг по
+        # имени должен развести их звонки, а не свалить всё на одного (это и была
+        # ошибка sip-матчинга, которую чиним).
+        ops = [
+            {"id": 365, "name": "Нурмухан Акерке Асылкызы"},   # sip 925
+            {"id": 367, "name": "Сагатова Аружан Алтайкызы"},  # sip 925 (тот же!)
+            {"id": 337, "name": "Ермахан Жасмин Бахтияркызы"},  # sip 907
+        ]
+        lookup = _build_binotel_operator_lookup(self.ns, ops)
+        resolve = self.ns["_status_import_resolve_operator_matches"]
+        self.assertEqual([o["id"] for o in resolve("Нурмухан Акерке Асылкызы", lookup)], [365])
+        self.assertEqual([o["id"] for o in resolve("Сагатова Аружан Алтайкызы", lookup)], [367])
+        self.assertEqual([o["id"] for o in resolve("Ермахан Жасмин Бахтияркызы", lookup)], [337])
+        # Чужое/неизвестное имя не привязываем ни к кому.
+        self.assertEqual(resolve("Кто То Неизвестный", lookup), [])
+
+    def test_random_call_matches_by_name_and_uses_recording_status(self):
+        bot_src = _read(BOT_PATH)
+        self.assertIn("def _binotel_random_call(", bot_src)
+        func = bot_src[bot_src.index("def _binotel_random_call("):][:4500]
+        # Матчинг звонка с оператором — по имени тем же резолвером, что и в ветке Oktell.
+        self.assertIn("_status_import_build_operator_lookup", func)
+        self.assertIn("_status_import_resolve_operator_matches", func)
+        self.assertIn("employee_name", func)
+        # Наличие записи берём из recordingStatus, а не только угадываем по disposition.
+        self.assertIn("recording_status", func)
+        self.assertIn("RECORDED_STATUSES", func)
+
+
 if __name__ == "__main__":
     unittest.main()
