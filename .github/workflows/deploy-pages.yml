@@ -14,7 +14,9 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  # Деплой Pages прерывать НЕЛЬЗЯ (иначе гонки и «Deployment failed, try again later»).
+  # Как в официальном шаблоне GitHub Pages: очередь без отмены выполняющегося.
+  cancel-in-progress: false
 
 jobs:
   build:
