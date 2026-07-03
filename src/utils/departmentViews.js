@@ -30,6 +30,7 @@ const SALES_SUPERVISOR_VIEWS = [
 const SALES_HEAD_VIEWS = [
     ...SALES_SUPERVISOR_VIEWS.slice(0, 4),
     'monitoring_scale',
+    'ai_qa',
     ...SALES_SUPERVISOR_VIEWS.slice(4),
 ];
 

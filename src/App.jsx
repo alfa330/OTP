@@ -41552,6 +41552,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </button>
                                             </li>
                                             )}
+                                            {isDepartmentHeadUser && Number(headedDepartmentId(user)) === 367 && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'ai_qa')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'ai_qa' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-robot"></FaIcon> <span className="sidebar-text">ИИ-оценка</span>
+                                                </button>
+                                            </li>
+                                            )}
                                             {!departmentRestrictsViews(user) && renderSidebarDividerInner()}
                                             {departmentAllowsView(user, 'work_schedules') && (
                                             <li>
@@ -43766,7 +43776,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         canEdit={isAdminLikeRole}
                                     />
                                 ))}
-                                {( view === "ai_qa" && user?.role === 'super_admin' && (
+                                {( view === "ai_qa" && (user?.role === 'super_admin' || (isDepartmentHead(user) && Number(headedDepartmentId(user)) === 367)) && (
                                     <CallQaView
                                         user={user}
                                         showToast={showToast}
