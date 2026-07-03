@@ -160,7 +160,7 @@ def review_payload(call_id: int, refresh: bool = False) -> dict:
     direction = criteria_mod.load_direction(direction_id)
     cc.apply_to_direction(direction)
     crit_meta = {c["idx"]: c for c in direction["criteria"]}
-    result = evaluator.evaluate(asm["text"], direction, asr_low_spans=asm["low_conf_spans"], use_rag=False)
+    result = evaluator.evaluate(asm["text"], direction, asr_low_spans=asm["low_conf_spans"], use_rag=True)
 
     criteria = []
     for v in result["per_criterion"]:

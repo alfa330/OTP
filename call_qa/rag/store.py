@@ -22,6 +22,11 @@ def _embed(text):
         return None  # разбор сохраняем и без вектора
 
 
+def embed_query(text):
+    """Embedding поискового запроса для RAG. None → fallback на последние разборы."""
+    return _embed(text)
+
+
 def save_adjudication(*, direction_id, criterion_idx, criterion_name, call_id,
                       excerpt, ai_verdict, correct_verdict, reason,
                       situation_tag=None, created_by=None) -> int:
@@ -39,13 +44,13 @@ def save_adjudication(*, direction_id, criterion_idx, criterion_name, call_id,
         return cur.fetchone()[0]
 
 
-def retrieve(*, direction_id, criterion_idx, query_text=None, k=None) -> list[dict]:
-    """Разборы по критерию. С query_text — ранжируем по косинусной близости (pgvector),
+def retrieve(*, direction_id, criterion_idx, query_text=None, query_vector=None, k=None) -> list[dict]:
+    """Разборы по критерию. С query_text/query_vector — ранжируем по косинусной близости (pgvector),
     иначе — последние. Ограниченный список → промпт не растёт с базой."""
     k = k or config.RETRIEVAL_TOP_K
     ro = config.connect_ro(); cur = ro.cursor()
     try:
-        qvec = _embed(query_text) if query_text else None
+        qvec = query_vector if query_vector is not None else (_embed(query_text) if query_text else None)
         if qvec:
             cur.execute(
                 """SELECT id, criterion_name, excerpt, ai_verdict, correct_verdict, reason,
