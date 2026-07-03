@@ -31,6 +31,9 @@ import argparse
 import json
 import logging
 import os
+import re
+import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -56,6 +59,23 @@ CALL_TYPE_OUTGOING = 1
 RECORDED_DISPOSITIONS = {"ANSWER", "ANSWERED", "SUCCESS", "VM-SUCCESS"}
 # recordingStatus из ответа Binotel, при котором запись реально доступна.
 RECORDED_STATUSES = {"uploaded"}
+# Binotel лимитирует частоту запросов (даёт ошибку status='error' «Requests are too
+# frequent. You can do this request after N sec.»). Клиент сериализует запросы,
+# разносит их во времени и повторяет при этой ошибке, учитывая подсказку сервера.
+MIN_REQUEST_INTERVAL = 1.0   # минимальный зазор между запросами к Binotel, сек
+RATE_LIMIT_MAX_RETRIES = 3   # сколько раз повторить при «too frequent»
+RATE_LIMIT_MAX_WAIT = 12     # потолок ожидания по подсказке сервера, сек
+_RATE_LOCK = threading.Lock()
+_LAST_REQUEST_AT = [0.0]     # monotonic-время последнего запроса (общий на процесс)
+
+
+def _too_frequent_wait_seconds(payload):
+    """Если Binotel ответил «слишком часто» — вернёт рекомендованную паузу (сек), иначе None."""
+    text = f"{payload.get('message') or ''} {payload.get('error') or ''}".lower()
+    if 'too frequent' not in text and 'frequent' not in text and 'часто' not in text:
+        return None
+    m = re.search(r'after\s+(\d+)\s*sec', text)
+    return int(m.group(1)) if m else 10
 
 
 def _parse_env_file(path):
@@ -133,25 +153,54 @@ class BinotelApiClient:
         return cls(cfg.get("api_key"), cfg.get("api_secret"), cfg.get("base_url"), cfg.get("tz"))
 
     def _post(self, endpoint, params):
-        """POST {base}/{endpoint}.json с key+secret. Возвращает распарсенный JSON."""
+        """POST {base}/{endpoint}.json с key+secret. Возвращает распарсенный JSON.
+
+        Запросы к Binotel сериализуются и разносятся во времени (общий на процесс
+        замок + зазор MIN_REQUEST_INTERVAL), а на ошибку «too frequent» делается
+        ретрай с паузой по подсказке сервера — иначе второй запрос подряд (второе
+        7-дневное окно, фоновая докачка записи или повторный клик) валится в 502."""
         url = f"{self.base_url}/{endpoint}.json"
         body = dict(params or {})
         body["key"] = self.api_key
         body["secret"] = self.api_secret
-        resp = self.session.post(url, json=body, timeout=self.timeout)
-        if resp.status_code != 200:
-            raise RuntimeError(f"Binotel HTTP {resp.status_code}: {resp.text[:300]}")
-        try:
-            payload = resp.json()
-        except ValueError:
-            raise RuntimeError(f"Binotel: не JSON в ответе {endpoint}: {resp.text[:300]}")
-        status = str(payload.get("status", "")).lower()
-        if status and status not in ("success", "ok", "1", "true"):
+
+        last_rate_err = None
+        for attempt in range(1, RATE_LIMIT_MAX_RETRIES + 1):
+            # Сериализуем запросы и выдерживаем минимальный зазор между ними.
+            with _RATE_LOCK:
+                gap = time.monotonic() - _LAST_REQUEST_AT[0]
+                if gap < MIN_REQUEST_INTERVAL:
+                    time.sleep(MIN_REQUEST_INTERVAL - gap)
+                try:
+                    resp = self.session.post(url, json=body, timeout=self.timeout)
+                finally:
+                    _LAST_REQUEST_AT[0] = time.monotonic()
+
+            if resp.status_code != 200:
+                raise RuntimeError(f"Binotel HTTP {resp.status_code}: {resp.text[:300]}")
+            try:
+                payload = resp.json()
+            except ValueError:
+                raise RuntimeError(f"Binotel: не JSON в ответе {endpoint}: {resp.text[:300]}")
+            status = str(payload.get("status", "")).lower()
+            if not status or status in ("success", "ok", "1", "true"):
+                return payload
+
+            wait = _too_frequent_wait_seconds(payload)
+            if wait is not None and attempt < RATE_LIMIT_MAX_RETRIES:
+                sleep_s = min(wait, RATE_LIMIT_MAX_WAIT) + 0.4  # пауза вне замка
+                last_rate_err = payload.get('message') or payload.get('error') or 'too frequent'
+                log.info("Binotel %s: слишком часто, пауза %.1fs и повтор (попытка %d/%d)",
+                         endpoint, sleep_s, attempt, RATE_LIMIT_MAX_RETRIES)
+                time.sleep(sleep_s)
+                continue
+
             raise RuntimeError(
                 f"Binotel {endpoint} status={payload.get('status')!r}: "
                 f"{payload.get('message') or payload.get('error') or ''}"[:300]
             )
-        return payload
+
+        raise RuntimeError(f"Binotel {endpoint}: превышен лимит частоты запросов ({last_rate_err})")
 
     @staticmethod
     def _normalize_call(raw):

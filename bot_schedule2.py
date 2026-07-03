@@ -305,6 +305,8 @@ TEZ_CALL_DISTRIBUTION_DEPARTMENT_CODE = (os.getenv('TEZ_CALL_DISTRIBUTION_DEPART
 TEZ_RANDOM_CALL_MODELS = {'operator', 'tez_line', 'tez_op'}
 # Верхняя граница выборки кандидатов Binotel за запрос (перед дедупом и рандомом).
 TEZ_BINOTEL_SAMPLE_CAP = _env_int('TEZ_BINOTEL_SAMPLE_CAP', 500, minimum=1, maximum=5000)
+# Сколько случайных звонков разрешаем взять за один запрос (СЗоВ и TEZ).
+RANDOM_CALL_MAX_COUNT = _env_int('RANDOM_CALL_MAX_COUNT', 20, minimum=1, maximum=100)
 
 if not API_TOKEN:
     raise Exception("Переменная окружения BOT_TOKEN обязательна.")
@@ -16443,33 +16445,41 @@ def _binotel_upload_record_to_gcs(audio_bytes, content_type='audio/mpeg'):
     return f"{bucket_name}/{blob_path}"
 
 
+def _binotel_store_record(imported_id, general_call_id):
+    """Тянет ссылку на запись Binotel (живёт ~15 мин), скачивает mp3, кладёт в GCS и
+    проставляет imported_calls.audio_path. Возвращает audio_path или None (записи нет /
+    не удалось скачать). Синхронное ядро — используется и фоном, и докачкой по требованию
+    из аудио-эндпоинта, чтобы запись появлялась даже если фоновый поток не отработал."""
+    import tez_binotel_calls
+    cfg = tez_binotel_calls.get_config()
+    if not tez_binotel_calls.api_ready(cfg):
+        return None
+    client = tez_binotel_calls.BinotelApiClient.from_config(cfg)
+    url = client.get_call_record_url(general_call_id)
+    if not url:
+        logging.info("binotel record: нет записи для call %s", general_call_id)
+        return None
+    resp = requests.get(url, timeout=120)
+    if resp.status_code != 200 or not resp.content:
+        logging.warning("binotel record download %s: HTTP %s", general_call_id, resp.status_code)
+        return None
+    audio_path = _binotel_upload_record_to_gcs(resp.content, resp.headers.get('Content-Type'))
+    db.set_imported_call_audio_path(imported_id, audio_path)
+    logging.info("binotel record stored: imported_call=%s -> %s", imported_id, audio_path)
+    return audio_path
+
+
 def _binotel_store_record_async(imported_id, general_call_id):
-    """Фон: тянет ссылку на запись Binotel (живёт ~15 мин), скачивает mp3, кладёт в
-    GCS и проставляет imported_calls.audio_path. Ошибки не критичны — тогда у звонка
-    просто нет записи в журнале (СВ может послушать в панели Binotel)."""
+    """Фон-обёртка над _binotel_store_record: ошибки не критичны (СВ дослушает через
+    докачку по требованию в аудио-эндпоинте или в панели Binotel)."""
     try:
-        import tez_binotel_calls
-        cfg = tez_binotel_calls.get_config()
-        if not tez_binotel_calls.api_ready(cfg):
-            return
-        client = tez_binotel_calls.BinotelApiClient.from_config(cfg)
-        url = client.get_call_record_url(general_call_id)
-        if not url:
-            logging.info("binotel record: нет записи для call %s", general_call_id)
-            return
-        resp = requests.get(url, timeout=120)
-        if resp.status_code != 200 or not resp.content:
-            logging.warning("binotel record download %s: HTTP %s", general_call_id, resp.status_code)
-            return
-        audio_path = _binotel_upload_record_to_gcs(resp.content, resp.headers.get('Content-Type'))
-        db.set_imported_call_audio_path(imported_id, audio_path)
-        logging.info("binotel record stored: imported_call=%s -> %s", imported_id, audio_path)
+        _binotel_store_record(imported_id, general_call_id)
     except Exception:
         logging.exception("binotel record store failed (imported_call=%s, call=%s)", imported_id, general_call_id)
 
 
 def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, outgoing,
-                         date_from, date_to, min_duration_sec=None, max_duration_sec=None):
+                         date_from, date_to, min_duration_sec=None, max_duration_sec=None, count=1):
     """«Случайный звонок» для TEZ через Binotel API 4.0. Возвращает Flask-ответ.
 
     Список звонков берём по sip (internalNumber — это параметр API), но каждый
@@ -16477,8 +16487,11 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
     ветке Oktell: один sip со временем закрепляют за разными операторами, поэтому
     номеру доверять нельзя. Кандидаты: отвеченные звонки с записью (billsec > 0,
     recordingStatus=uploaded) в диапазоне длительности, нужного направления,
-    закреплённые за этим оператором и ещё НЕ бывшие в оценках. Первый подходящий
-    кладётся в imported_calls, а запись разговора докачивается в GCS фоново."""
+    закреплённые за этим оператором и ещё НЕ бывшие в оценках. Берём до `count`
+    новых звонков, а записи разговоров докачиваются в GCS фоново.
+
+    Период ограничен 7 днями: тогда список тянется одним запросом к Binotel и не
+    упирается в его лимит частоты (см. также ретрай в tez_binotel_calls._post)."""
     import tez_binotel_calls
     cfg = tez_binotel_calls.get_config()
     if not tez_binotel_calls.api_ready(cfg):
@@ -16492,6 +16505,12 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
         start_ts, stop_ts = tez_binotel_calls._day_bounds_unix(date_from, date_to, cfg['tz'])
     except (TypeError, ValueError):
         return jsonify({"error": "Укажите период (date_from, date_to в формате YYYY-MM-DD)"}), 400
+
+    max_days = tez_binotel_calls.MAX_WINDOW_DAYS
+    if stop_ts - start_ts > max_days * 86400:
+        return jsonify({"error": f"Для TEZ период не больше {max_days} дней (ограничение Binotel)"}), 400
+
+    count = max(1, min(int(count or 1), RANDOM_CALL_MAX_COUNT))
 
     # Длительность разговора задаётся в модалке (сек). Пусто = без ограничения
     # (не наследуем глобальные настройки распределения СЗоВ).
@@ -16571,8 +16590,10 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
     if len(candidates) > TEZ_BINOTEL_SAMPLE_CAP:
         candidates = candidates[:TEZ_BINOTEL_SAMPLE_CAP]
 
-    created = None
+    created_list = []
     for c in candidates:
+        if len(created_list) >= count:
+            break
         gid = c['general_call_id']
         if gid in existing:
             continue
@@ -16592,9 +16613,10 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
             phone=c['external_number'], duration_sec=c['billsec'],
             notes=f"random:{requester_id}:binotel",
         )
+        existing.add(gid)  # чтобы не выбрать тот же дважды (и на гонке — пропустить)
         if new_id:
             threading.Thread(target=_binotel_store_record_async, args=(new_id, gid), daemon=True).start()
-            created = {
+            created_list.append({
                 "id": new_id,
                 "operator_id": operator_id,
                 "operator_name": operator_name,
@@ -16604,14 +16626,18 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
                 "duration_sec": c['billsec'],
                 "direction": "in" if c['call_type'] == tez_binotel_calls.CALL_TYPE_INCOMING else "out",
                 "audio_pending": True,
-            }
-            break
-        existing.add(gid)  # на гонке уже существует — пробуем следующего кандидата
+            })
 
-    if not created:
+    if not created_list:
         return jsonify({"error": "Новых звонков по этим критериям не осталось — все уже в оценках"}), 404
 
-    return jsonify({"status": "success", "call": created, "month": created["month"]}), 200
+    return jsonify({
+        "status": "success",
+        "calls": created_list,
+        "created": len(created_list),
+        "call": created_list[0],          # обратная совместимость со старым фронтом
+        "month": created_list[0]["month"],
+    }), 200
 
 
 @app.route('/api/call_evaluations/random_call', methods=['POST'])
@@ -16647,6 +16673,13 @@ def fetch_random_evaluation_call():
         if not incoming and not outgoing:
             return jsonify({"error": "Выберите хотя бы один тип звонка (исходящие или входящие)"}), 400
 
+        # Сколько случайных звонков взять за раз (СЗоВ и TEZ); пусто = 1.
+        try:
+            count = int(data.get('count', 1) or 1)
+        except (TypeError, ValueError):
+            count = 1
+        count = max(1, min(count, RANDOM_CALL_MAX_COUNT))
+
         operator = db.get_user(id=operator_id)
         if not operator:
             return jsonify({"error": "Оператор не найден"}), 404
@@ -16665,6 +16698,7 @@ def fetch_random_evaluation_call():
                 date_from=data.get('date_from'), date_to=data.get('date_to'),
                 min_duration_sec=data.get('min_duration_sec'),
                 max_duration_sec=data.get('max_duration_sec'),
+                count=count,
             )
 
         if dept_code != OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE:
@@ -16700,17 +16734,21 @@ def fetch_random_evaluation_call():
         if not auserids:
             return jsonify({"error": "За выбранный период у оператора нет записанных звонков по этим критериям"}), 404
 
-        # 2) случайная выборка кандидатов (порядок уже рандомный — ORDER BY NEWID())
+        # 2) случайная выборка кандидатов (порядок уже рандомный — ORDER BY NEWID());
+        #    берём с запасом под запрошенное количество.
+        sample_limit = max(60, count * 5)
         try:
-            sample = _oktell_query(_oktell_eval_sample_sql(mstart, mnext, auserids, 60, min_d, max_d, conn_types=conn_types))
+            sample = _oktell_query(_oktell_eval_sample_sql(mstart, mnext, auserids, sample_limit, min_d, max_d, conn_types=conn_types))
         except Exception:
             logging.exception("random_call: oktell sample query failed")
             return jsonify({"error": "Не удалось обратиться к Oktell, попробуйте ещё раз"}), 502
 
-        # 3) исключаем то, что уже в оценках/пуле, и кладём первый новый звонок
+        # 3) исключаем то, что уже в оценках/пуле, и кладём до `count` новых звонков
         existing = db.get_imported_call_external_ids_for_operator(operator_id)
-        created = None
+        created_list = []
         for c in sample:
+            if len(created_list) >= count:
+                break
             conn_id = str(c.get('conn_id') or '')
             if not conn_id or conn_id in existing:
                 continue
@@ -16730,8 +16768,9 @@ def fetch_random_evaluation_call():
                 phone=c.get('phone'), duration_sec=c.get('talk_sec'),
                 notes=f"random:{requester_id}",
             )
+            existing.add(conn_id)  # чтобы не выбрать тот же дважды (и на гонке — пропустить)
             if new_id:
-                created = {
+                created_list.append({
                     "id": new_id,
                     "operator_id": operator_id,
                     "operator_name": operator_name,
@@ -16740,14 +16779,18 @@ def fetch_random_evaluation_call():
                     "phone": c.get('phone'),
                     "duration_sec": c.get('talk_sec'),
                     "direction": "in" if int(c.get('ct') or 0) == 5 else "out",
-                }
-                break
-            existing.add(conn_id)  # на гонке уже существует — пробуем следующего кандидата
+                })
 
-        if not created:
+        if not created_list:
             return jsonify({"error": "Новых звонков по этим критериям не осталось — все уже в оценках"}), 404
 
-        return jsonify({"status": "success", "call": created, "month": created["month"]}), 200
+        return jsonify({
+            "status": "success",
+            "calls": created_list,
+            "created": len(created_list),
+            "call": created_list[0],          # обратная совместимость со старым фронтом
+            "month": created_list[0]["month"],
+        }), 200
     except Exception as e:
         logging.error(f"Error fetching random evaluation call: {e}", exc_info=True)
         return jsonify({"error": "Внутренняя ошибка сервера"}), 500
@@ -16834,13 +16877,28 @@ def get_imported_call_audio_file(imported_id):
                 }), 403
 
         rec = db.get_imported_call_audio(imported_id)
-        if not rec or not rec.get('audio_path'):
+        if not rec:
             return jsonify({"error": "Audio file not found"}), 404
 
         if not _ensure_call_access_for_requester(rec["operator_id"], requester, requester_id):
             return jsonify({"error": "Unauthorized to access this audio"}), 403
 
-        path_parts = str(rec['audio_path']).split('/', 1)
+        audio_path = rec.get('audio_path')
+        if not audio_path:
+            # Докачка по требованию для TEZ/Binotel: фон мог не отработать (рестарт
+            # воркера, рейт-лимит) или запись ещё готовилась в момент создания звонка.
+            ext_id = rec.get('external_id')
+            if ext_id and str(rec.get('notes') or '').endswith(':binotel'):
+                try:
+                    audio_path = _binotel_store_record(imported_id, str(ext_id))
+                except Exception:
+                    logging.exception("binotel on-demand record fetch failed (imported_call=%s)", imported_id)
+                    audio_path = None
+            if not audio_path:
+                return jsonify({"error": "Запись ещё готовится или недоступна",
+                                "code": "AUDIO_NOT_READY"}), 404
+
+        path_parts = str(audio_path).split('/', 1)
         if len(path_parts) != 2:
             return jsonify({"error": "Invalid GCS path format"}), 400
 

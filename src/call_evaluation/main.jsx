@@ -1576,7 +1576,7 @@ const rcSpanDays = (start, end) => { const s = rcParseKey(start); const e = rcPa
 const rcMonthStartKey = (mo) => `${mo}-01`;
 const rcMonthEndKey = (mo) => { const y = Number(mo.slice(0, 4)); const m = Number(mo.slice(5, 7)); return `${mo}-${rcPad(new Date(y, m, 0).getDate())}`; };
 
-const RcRangeCalendar = ({ value, onChange, maxKey }) => {
+const RcRangeCalendar = ({ value, onChange, maxKey, minKey }) => {
     const todayKey = rcToKey(new Date());
     const start = value?.start || todayKey;
     const end = value?.end || start;
@@ -1588,6 +1588,7 @@ const RcRangeCalendar = ({ value, onChange, maxKey }) => {
 
     const selectDay = (key) => {
         if (maxKey && key > maxKey) return;
+        if (minKey && key < minKey) return;
         if (activeEdge === 'start') {
             onChange?.({ start: key, end: key > end ? key : end });
             setActiveEdge('end');
@@ -1606,7 +1607,9 @@ const RcRangeCalendar = ({ value, onChange, maxKey }) => {
         else if (preset === 'last7') { s = rcAddDays(now, -6); e = now; }
         else { s = rcAddDays(now, -29); e = now; }
         if (e > now) e = now;
-        onChange?.({ start: rcToKey(s), end: rcToKey(e) });
+        let sKey = rcToKey(s);
+        if (minKey && sKey < minKey) sKey = minKey;  // не уводим начало раньше допустимого
+        onChange?.({ start: sKey, end: rcToKey(e) });
         setCalMonth(new Date(s.getFullYear(), s.getMonth(), 1));
         setActiveEdge('start');
     };
@@ -1623,7 +1626,7 @@ const RcRangeCalendar = ({ value, onChange, maxKey }) => {
                 isStart: key === start, isEnd: key === end,
                 inRange: key > start && key < end,
                 isToday: key === todayKey,
-                disabled: !!(maxKey && key > maxKey),
+                disabled: !!((maxKey && key > maxKey) || (minKey && key < minKey)),
             };
         });
     })();
@@ -1698,13 +1701,22 @@ const rcDefaultRange = (mo) => {
     return { start, end };
 };
 
+const RC_TEZ_MAX_DAYS = 7;       // TEZ: период Binotel ограничен 7 днями (лимит частоты API)
+const RC_MAX_COUNT = 20;         // максимум звонков за один запрос (совпадает с бэкендом)
+
 const RandomCallModal = ({ isOpen, onClose, operator, userId, selectedMonth, source, onImported }) => {
     const isBinotel = source === 'binotel'; // TEZ: min/max длительности задаются в модалке
-    const [range, setRange] = useState(() => rcDefaultRange(selectedMonth));
+    // Для TEZ разрешаем только последние 7 дней (иначе Binotel упирается в rate limit).
+    const binotelMinKey = isBinotel ? rcToKey(rcAddDays(new Date(), -(RC_TEZ_MAX_DAYS - 1))) : null;
+    const rcInitialRange = () => isBinotel
+        ? { start: rcToKey(rcAddDays(new Date(), -(RC_TEZ_MAX_DAYS - 1))), end: rcToKey(new Date()) }
+        : rcDefaultRange(selectedMonth);
+    const [range, setRange] = useState(rcInitialRange);
     const [incoming, setIncoming] = useState(true);
     const [outgoing, setOutgoing] = useState(true);
     const [minDur, setMinDur] = useState('');
     const [maxDur, setMaxDur] = useState('');
+    const [count, setCount] = useState(1);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
     const [results, setResults] = useState([]);
@@ -1713,8 +1725,8 @@ const RandomCallModal = ({ isOpen, onClose, operator, userId, selectedMonth, sou
 
     useEffect(() => {
         if (!isOpen) return;
-        setRange(rcDefaultRange(selectedMonth));
-        setIncoming(true); setOutgoing(true); setMinDur(''); setMaxDur('');
+        setRange(rcInitialRange());
+        setIncoming(true); setOutgoing(true); setMinDur(''); setMaxDur(''); setCount(1);
         setBusy(false); setError(''); setResults([]);
         importedMonthsRef.current = new Set();
     }, [isOpen, selectedMonth]);
@@ -1728,12 +1740,13 @@ const RandomCallModal = ({ isOpen, onClose, operator, userId, selectedMonth, sou
     const minDurNum = parseDur(minDur);
     const maxDurNum = parseDur(maxDur);
     const durRangeInvalid = isBinotel && minDurNum != null && maxDurNum != null && maxDurNum < minDurNum;
+    const countNum = Math.max(1, Math.min(parseInt(String(count), 10) || 1, RC_MAX_COUNT));
 
     const fetchOne = async () => {
         if (!operator || busy || durRangeInvalid) return;
         setBusy(true); setError('');
         try {
-            const body = { operator_id: operator.id, date_from: range.start, date_to: range.end, incoming, outgoing };
+            const body = { operator_id: operator.id, date_from: range.start, date_to: range.end, incoming, outgoing, count: countNum };
             if (isBinotel) {
                 if (minDurNum != null) body.min_duration_sec = minDurNum;
                 if (maxDurNum != null) body.max_duration_sec = maxDurNum;
@@ -1744,10 +1757,13 @@ const RandomCallModal = ({ isOpen, onClose, operator, userId, selectedMonth, sou
                 body: JSON.stringify(body),
             });
             const d = await r.json().catch(() => ({}));
-            if (r.ok && d.status === 'success' && d.call) {
-                setResults(prev => [d.call, ...prev]);
-                if (d.month) importedMonthsRef.current.add(d.month);
-                emitCallEvaluationToast('Случайный звонок добавлен в журнал', 'success');
+            const list = Array.isArray(d.calls) ? d.calls : (d.call ? [d.call] : []);
+            if (r.ok && d.status === 'success' && list.length > 0) {
+                setResults(prev => [...list, ...prev]);
+                list.forEach(c => { if (c.month) importedMonthsRef.current.add(c.month); });
+                const n = list.length;
+                const word = n === 1 ? 'звонок' : (n >= 2 && n <= 4 ? 'звонка' : 'звонков');
+                emitCallEvaluationToast(`Добавлено в журнал: ${n} ${word}`, 'success');
             } else {
                 setError(d.error || 'Не удалось получить звонок');
             }
@@ -1792,14 +1808,22 @@ const RandomCallModal = ({ isOpen, onClose, operator, userId, selectedMonth, sou
                     <button className="close-btn" onClick={handleClose}><FaIcon className="fas fa-times" /></button>
                 </div>
                 <div className="modal-body">
-                    <label className="label" style={{ marginBottom: 6, display: 'block' }}>Период · {span} дн.</label>
-                    <RcRangeCalendar value={range} onChange={setRange} maxKey={todayKey} />
+                    <label className="label" style={{ marginBottom: 6, display: 'block' }}>
+                        Период · {span} дн.{isBinotel ? ` (не более ${RC_TEZ_MAX_DAYS})` : ''}
+                    </label>
+                    <RcRangeCalendar value={range} onChange={setRange} maxKey={todayKey} minKey={binotelMinKey} />
 
                     <label className="label" style={{ margin: '16px 0 6px', display: 'block' }}>Тип звонка</label>
                     <div style={{ display: 'flex', gap: 8 }}>
                         <TypeCheck checked={outgoing} label="Исходящие" onToggle={() => { if (outgoing && !incoming) return; setOutgoing(v => !v); }} />
                         <TypeCheck checked={incoming} label="Входящие" onToggle={() => { if (incoming && !outgoing) return; setIncoming(v => !v); }} />
                     </div>
+
+                    <label className="label" style={{ margin: '16px 0 6px', display: 'block' }}>Сколько звонков (1–{RC_MAX_COUNT})</label>
+                    <input type="number" min="1" max={RC_MAX_COUNT} inputMode="numeric" value={count}
+                        onChange={e => setCount(e.target.value)}
+                        onBlur={() => setCount(countNum)}
+                        style={{ width: '100%', padding: '9px 12px', borderRadius: 'var(--radius)', border: '1px solid var(--border-strong)', background: 'var(--surface)', color: 'var(--text)', fontSize: 13 }} />
 
                     {isBinotel ? (
                         <>
@@ -1848,7 +1872,7 @@ const RandomCallModal = ({ isOpen, onClose, operator, userId, selectedMonth, sou
                 <div className="modal-footer">
                     <button className="btn btn-secondary" onClick={handleClose}>Закрыть</button>
                     <button className="btn btn-primary" onClick={fetchOne} disabled={busy || durRangeInvalid}>
-                        {busy ? <><span className="spinner" /> Поиск…</> : <><FaIcon className="fas fa-shuffle" /> {results.length > 0 ? 'Получить ещё один' : 'Получить случайный звонок'}</>}
+                        {busy ? <><span className="spinner" /> Поиск…</> : <><FaIcon className="fas fa-shuffle" /> {results.length > 0 ? 'Получить ещё' : (countNum > 1 ? `Получить звонки (${countNum})` : 'Получить случайный звонок')}</>}
                     </button>
                 </div>
             </div>
