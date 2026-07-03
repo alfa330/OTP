@@ -125,9 +125,14 @@ def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=Tr
     by_idx = {v["idx"]: v for v in ai.get("per_criterion", [])}
     model_by_idx = {idx: config.CLAUDE_MODEL_BULK for idx in by_idx}
 
-    # 2) эскалация: спорные/критические (+ не вернувшиеся вердикты) → HARD-модель
+    # 2) эскалация на HARD-модель: спорные / не вернувшиеся вердикты + КРИТЕРИИ С РАЗБОРОМ.
+    #    Последнее закрывает дыру: если по критерию есть разбор, решение принимает сильная
+    #    модель, даже если BULK уверенно поставил Correct (иначе такой случай был бы упущен).
+    adj_criteria = store.criteria_with_adjudications(direction["id"]) if use_rag else set()
     escalate = [c for c in t_crits
-                if c["idx"] not in by_idx or _needs_escalation(by_idx[c["idx"]], crit_by_idx[c["idx"]])]
+                if c["idx"] not in by_idx
+                or _needs_escalation(by_idx[c["idx"]], crit_by_idx[c["idx"]])
+                or c["idx"] in adj_criteria]
     if escalate and config.CLAUDE_MODEL_HARD and config.CLAUDE_MODEL_HARD != config.CLAUDE_MODEL_BULK:
         ai2 = _claude_eval(transcript, direction, escalate, asr_low_spans=asr_low_spans,
                            use_rag=use_rag, model=config.CLAUDE_MODEL_HARD)
