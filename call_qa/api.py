@@ -74,8 +74,13 @@ def _norm_verdict(v):
 def _ai_score(direction: dict, result: dict):
     """Балл ИИ по той же формуле, что и человеческий (main.jsx): критический Incorrect → 0;
     иначе сумма весов НЕкритических критериев со статусом Correct/N/A. Критерии, которые ИИ
-    не может проверить (system_api/manual → Pending), считаем зачётом (benefit of the doubt)."""
-    verdict = {r["idx"]: r["verdict"] for r in result.get("per_criterion", [])}
+    не может проверить (system_api/manual → Pending), считаем зачётом (benefit of the doubt).
+    Но Pending по TRANSCRIPT-критерию = модель не вернула вердикт даже после повтора —
+    оценка неполная, балла нет (None): сбой не должен превращаться в незаслуженный зачёт."""
+    rows = result.get("per_criterion", [])
+    if any(r.get("source") == "transcript" and r.get("verdict") == "Pending" for r in rows):
+        return None
+    verdict = {r["idx"]: r["verdict"] for r in rows}
     crits = direction.get("criteria", [])
     for c in crits:
         if c.get("is_critical") and verdict.get(c["idx"]) == "Incorrect":

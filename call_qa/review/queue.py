@@ -15,8 +15,8 @@ def needs_review(result, direction: dict, asr_mean_conf: float | None) -> bool:
     for v in result["per_criterion"]:
         if v["verdict"] == "Pending":
             return True   # системный (нет API) или ручной критерий
-        if v["source"] == "transcript" and v["confidence"] is not None and v["confidence"] < config.REVIEW_MODEL_CONF:
-            return True
+        if v["source"] == "transcript" and v["confidence"] is not None and v["confidence"] <= config.REVIEW_MODEL_CONF:
+            return True  # порог включительно: ровно 0.6 — тоже сомнение
         if v["idx"] in crit_idx and v["verdict"] == "Incorrect":
             return True   # критический «Incorrect» — всегда подтверждает человек
     return False
