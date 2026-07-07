@@ -4028,6 +4028,24 @@ def api_ai_qa_adjudicate():
         return jsonify({"error": str(error)}), 500
 
 
+@app.route('/api/ai-qa/adjudicate/refine', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_adjudicate_refine():
+    """ИИ-подсказка формулировки разбора: точное правило + границы. Решение остаётся за человеком."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        from call_qa.api import refine_adjudication
+        proposal = refine_adjudication(request.get_json(force=True) or {})
+        return jsonify({"status": "success", "proposal": proposal}), 200
+    except Exception as error:
+        logging.exception("ai-qa adjudicate refine failed")
+        return jsonify({"error": str(error)}), 500
+
+
 @app.route('/api/ai-qa/criteria-config', methods=['GET', 'POST', 'OPTIONS'])
 @require_api_key
 def api_ai_qa_criteria_config():
