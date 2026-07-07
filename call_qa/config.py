@@ -57,10 +57,13 @@ VERTEX_REGION = env("VERTEX_REGION", "asia-southeast1")
 VERTEX_EMBED_MODEL = env("VERTEX_EMBED_MODEL", "text-multilingual-embedding-002")
 EMBED_DIM = 768
 
-# --- LLM (Claude) — двухуровнево: массовая модель + эскалация на сложных ---
-CLAUDE_MODEL_BULK = env("CLAUDE_MODEL_BULK", "claude-sonnet-4-6")   # первый проход (дёшево, массово)
-CLAUDE_MODEL_HARD = env("CLAUDE_MODEL_HARD", "claude-opus-4-8")     # эскалация: спорное / критическое
-ESCALATE_CONF = float(env("CLAUDE_ESCALATE_CONF", "0.6"))          # ниже — критерий уходит на HARD-модель
+# --- LLM (Claude). По умолчанию одна модель (Opus) на всё: бенч 2026-07-07 показал,
+# что Opus точнее Sonnet в разы (MAE 5 vs 18-24), а двухуровневая схема с разборами
+# эскалирует ~все звонки и выходит ДОРОЖЕ чистого Opus. Механизм эскалации сохранён:
+# задайте CLAUDE_MODEL_BULK дешевле HARD — и двухуровневость включится сама. ---
+CLAUDE_MODEL_BULK = env("CLAUDE_MODEL_BULK", "claude-opus-4-8")     # первый проход
+CLAUDE_MODEL_HARD = env("CLAUDE_MODEL_HARD", "claude-opus-4-8")     # эскалация (если отличается от BULK)
+ESCALATE_CONF = float(env("CLAUDE_ESCALATE_CONF", "0.6"))          # не выше порога — критерий уходит на HARD-модель
 # Тег для кэша/меты (при смене моделей меняется → старые кэш-оценки не подмешиваются).
 CLAUDE_MODEL = env("CLAUDE_MODEL", f"{CLAUDE_MODEL_BULK}+{CLAUDE_MODEL_HARD}")
 CLAUDE_EFFORT = env("CLAUDE_EFFORT", "high")
