@@ -24,9 +24,10 @@ def needs_review(result, direction: dict, asr_mean_conf: float | None) -> bool:
 
 def on_adjudication(*, direction_id, criterion_idx, criterion_name, call_id,
                     excerpt, ai_verdict, correct_verdict, reason,
-                    situation_tag=None, reviewer_id=None) -> int:
+                    not_covered=None, situation=None, situation_tag=None, reviewer_id=None) -> int:
     """Человек разобрал спорный критерий → кладём в RAG (с embedding). Возвращает id записи."""
     return store.save_adjudication(
         direction_id=direction_id, criterion_idx=criterion_idx, criterion_name=criterion_name,
         call_id=call_id, excerpt=excerpt, ai_verdict=ai_verdict, correct_verdict=correct_verdict,
-        reason=reason, situation_tag=situation_tag, created_by=reviewer_id)
+        reason=reason, not_covered=not_covered, situation=situation, situation_tag=situation_tag,
+        created_by=reviewer_id)

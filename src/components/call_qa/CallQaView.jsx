@@ -132,12 +132,30 @@ export default function CallQaView(props) {
 
     const closeCall = () => { setSelected(null); setCallData(null); setCallErr(null); };
 
+    // ИИ-подсказка формулировки разбора (правило + границы) — человек редактирует и сохраняет сам.
+    const refineAdjud = async (c, d) => {
+        if (!apiBaseUrl || !callData) return null;
+        try {
+            const r = await axios.post(`${apiBaseUrl}/api/ai-qa/adjudicate/refine`, {
+                direction_id: callData.direction_id, criterion_idx: c.idx, criterion_name: c.name,
+                ai_verdict: c.ai, ai_comment: c.comment || '', correct_verdict: d.verdict,
+                reason: d.reason || '', excerpt: c.evidence || '',
+            }, { headers: headers() });
+            return r.data?.proposal || null;
+        } catch {
+            showToast?.('Не удалось получить подсказку ИИ', 'error');
+            return null;
+        }
+    };
+
     const saveAdjud = (decisions) => {
         const call = callData;
         const items = call ? (call.criteria || [])
             .filter((c) => c.source === 'transcript' && decisions[c.idx] && decisions[c.idx].verdict !== c.ai)
             .map((c) => ({ criterion_idx: c.idx, criterion_name: c.name, ai_verdict: c.ai,
                            correct_verdict: decisions[c.idx].verdict, reason: decisions[c.idx].reason || '',
+                           not_covered: decisions[c.idx].not_covered || null,
+                           situation: decisions[c.idx].situation || null,
                            excerpt: c.evidence || '' })) : [];
         if (apiBaseUrl && call && items.length) {
             axios.post(`${apiBaseUrl}/api/ai-qa/adjudicate`,
@@ -186,7 +204,7 @@ export default function CallQaView(props) {
                     ) : callErr ? (
                         <ErrorCard text={callErr} onRetry={() => openCall(selected)} />
                     ) : (
-                        <CallReviewCard call={callData || undefined} onSkip={closeCall} onSave={saveAdjud} />
+                        <CallReviewCard call={callData || undefined} onSkip={closeCall} onSave={saveAdjud} onRefine={refineAdjud} />
                     )}
                 </div>
             ) : tab === 'queue' ? (

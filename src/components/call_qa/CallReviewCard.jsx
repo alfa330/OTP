@@ -2,10 +2,10 @@ import React, { useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import {
     Check, X, Minus, Clock, Sparkles, Server, User2, Headphones,
-    Quote, ShieldAlert, ChevronDown, Languages, Save, RotateCcw,
+    Quote, ShieldAlert, ChevronDown, Languages, Save, RotateCcw, Wand2, Loader2,
 } from 'lucide-react';
 import {
-    APPLE_FONT, iosCard, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge,
+    APPLE_FONT, iosCard, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge,
 } from '../ui/ios';
 
 /* Карточка ревью одного звонка — центральный экран взаимодействия с ИИ.
@@ -72,12 +72,46 @@ function TranscriptLine({ line }) {
     );
 }
 
-function CriterionRow({ c, decision, onDecide }) {
+const fieldCls = `${iosInput} px-3 py-2 text-[12.5px]`;
+
+function CriterionRow({ c, decision, onEdit, onRefine }) {
     const [open, setOpen] = useState(false);
+    const [refining, setRefining] = useState(false);
+    const [aiNote, setAiNote] = useState(null);
     const src = SOURCE[c.source] || SOURCE.transcript;
     const editable = c.source === 'transcript';
     const chosen = decision?.verdict ?? c.ai;
     const corrected = editable && chosen !== c.ai;
+
+    const pick = (v) => {
+        if (v === chosen) return;
+        const patch = { verdict: v };
+        // Текст от ИИ формулировался под другой вердикт — сбрасываем, чтобы не сохранить противоречие.
+        if (decision?._refined_for && decision._refined_for !== v) {
+            patch.reason = ''; patch.situation = ''; patch.not_covered = ''; patch._refined_for = null;
+            setAiNote(null);
+        }
+        onEdit(c.idx, patch);
+    };
+
+    const refine = async () => {
+        if (!onRefine || refining) return;
+        setRefining(true);
+        try {
+            const p = await onRefine(c, { verdict: chosen, reason: decision?.reason || '' });
+            if (p) {
+                onEdit(c.idx, {
+                    reason: p.rule || decision?.reason || '',
+                    situation: p.situation || decision?.situation || '',
+                    not_covered: p.not_covered || decision?.not_covered || '',
+                    _refined_for: chosen,
+                });
+                setAiNote(p.note_to_reviewer || null);
+            }
+        } finally {
+            setRefining(false);
+        }
+    };
 
     return (
         <div className={`${iosCard} p-3 ${corrected ? 'ring-2 ring-blue-400/60' : ''}`}>
@@ -121,7 +155,7 @@ function CriterionRow({ c, decision, onDecide }) {
                             {HUMAN_OPTS.map((o) => {
                                 const active = chosen === o.v;
                                 return (
-                                    <button key={o.v} onClick={() => onDecide(c.idx, o.v)}
+                                    <button key={o.v} onClick={() => pick(o.v)}
                                             className={`flex items-center gap-1 rounded-lg px-2.5 py-1 text-[12px] font-semibold transition ${
                                                 active ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}>
                                         <o.Icon size={12} strokeWidth={2.5} />{o.label}
@@ -133,10 +167,35 @@ function CriterionRow({ c, decision, onDecide }) {
                     </div>
 
                     {corrected && (
-                        <motion.input initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }}
-                            value={decision?.reason || ''} onChange={(e) => onDecide(c.idx, chosen, e.target.value)}
-                            placeholder="Почему так правильно? (запомнится для похожих случаев)"
-                            className="mt-2 w-full rounded-xl bg-slate-100 px-3 py-2 text-[12.5px] text-slate-800 placeholder-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/60" />
+                        <motion.div initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} className="mt-2 space-y-1.5">
+                            <textarea rows={2} value={decision?.reason || ''}
+                                onChange={(e) => onEdit(c.idx, { reason: e.target.value })}
+                                placeholder="Почему так правильно? (запомнится для похожих случаев)"
+                                className={`${fieldCls} resize-y`} />
+                            <div>
+                                <div className="mb-0.5 text-[10.5px] font-semibold uppercase tracking-wide text-slate-400">Ситуация (когда применять правило)</div>
+                                <input value={decision?.situation || ''}
+                                    onChange={(e) => onEdit(c.idx, { situation: e.target.value })}
+                                    placeholder="Обобщённо: в какой ситуации действует правило" className={fieldCls} />
+                            </div>
+                            <div>
+                                <div className="mb-0.5 text-[10.5px] font-semibold uppercase tracking-wide text-slate-400">Чего правило НЕ оправдывает</div>
+                                <input value={decision?.not_covered || ''}
+                                    onChange={(e) => onEdit(c.idx, { not_covered: e.target.value })}
+                                    placeholder="Границы: какие нарушения этим правилом не прощаются" className={fieldCls} />
+                            </div>
+                            {aiNote && <p className="text-[11.5px] leading-snug text-amber-600">{aiNote}</p>}
+                            {onRefine && (
+                                <div className="flex items-center gap-2">
+                                    <button onClick={refine} disabled={refining}
+                                        className="flex items-center gap-1.5 rounded-lg bg-violet-50 px-2.5 py-1.5 text-[12px] font-semibold text-violet-600 ring-1 ring-violet-200/70 transition hover:bg-violet-100 disabled:opacity-60">
+                                        {refining ? <Loader2 size={13} className="animate-spin" /> : <Wand2 size={13} />}
+                                        {refining ? 'Формулирую…' : 'Сформулировать с ИИ'}
+                                    </button>
+                                    <span className="text-[11px] text-slate-400">подсказка — финальный текст за вами</span>
+                                </div>
+                            )}
+                        </motion.div>
                     )}
                 </>
             ) : (
@@ -148,12 +207,12 @@ function CriterionRow({ c, decision, onDecide }) {
     );
 }
 
-export default function CallReviewCard({ call, onSave, onSkip }) {
+export default function CallReviewCard({ call, onSave, onSkip, onRefine }) {
     const [decisions, setDecisions] = useState({});
     if (!call) return null;
 
-    const onDecide = (idx, verdict, reason) => {
-        setDecisions((d) => ({ ...d, [idx]: { verdict, reason: reason ?? d[idx]?.reason ?? '' } }));
+    const onEdit = (idx, patch) => {
+        setDecisions((d) => ({ ...d, [idx]: { ...(d[idx] || {}), ...patch } }));
     };
 
     const corrections = useMemo(
@@ -225,7 +284,8 @@ export default function CallReviewCard({ call, onSave, onSkip }) {
 
                 <div className="space-y-2.5">
                     {(call.criteria || []).map((c) => (
-                        <CriterionRow key={c.idx} c={c} decision={decisions[c.idx]} onDecide={onDecide} />
+                        <CriterionRow key={c.idx} c={c} decision={decisions[c.idx]}
+                                      onEdit={onEdit} onRefine={onRefine} />
                     ))}
                 </div>
 

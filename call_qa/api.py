@@ -228,7 +228,8 @@ def adjudications_list(direction=None, q=None, limit=200) -> list[dict]:
         conn = config.connect_ro()
         cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
         sql = ("""SELECT a.id, d.name, a.criterion_name, a.ai_verdict, a.correct_verdict,
-                         a.excerpt, a.reason, a.use_count, u.name, TO_CHAR(a.created_at,'DD.MM.YYYY')
+                         a.excerpt, a.reason, a.use_count, u.name, TO_CHAR(a.created_at,'DD.MM.YYYY'),
+                         a.not_covered, a.situation
                     FROM qa_adjudications a
                     LEFT JOIN directions d ON a.direction_id = d.id
                     LEFT JOIN users u ON a.created_by = u.id
@@ -242,7 +243,8 @@ def adjudications_list(direction=None, q=None, limit=200) -> list[dict]:
         sql += " ORDER BY a.created_at DESC LIMIT %s"; params.append(limit)
         cur.execute(sql, params); rows = cur.fetchall(); cur.close(); conn.close()
         return [{"id": r[0], "direction": r[1], "criterion": r[2], "ai": r[3], "correct": r[4],
-                 "excerpt": r[5], "reason": r[6], "use_count": r[7] or 0, "by": r[8] or "—", "date": r[9]}
+                 "excerpt": r[5], "reason": r[6], "use_count": r[7] or 0, "by": r[8] or "—", "date": r[9],
+                 "not_covered": r[10], "situation": r[11]}
                 for r in rows]
     except Exception:
         return []  # qa_adjudications ещё не создана
@@ -257,10 +259,22 @@ def save_adjudications(call_id, direction_id, items, reviewer_id=None) -> int:
             criterion_name=it.get("criterion_name"), call_id=call_id,
             excerpt=it.get("excerpt", ""), ai_verdict=it.get("ai_verdict"),
             correct_verdict=it["correct_verdict"], reason=it.get("reason", ""),
+            not_covered=it.get("not_covered"), situation=it.get("situation"),
             reviewer_id=reviewer_id,
         )
         saved += 1
     return saved
+
+
+def refine_adjudication(body: dict) -> dict:
+    """ИИ-подсказка формулировки разбора (человек редактирует и сохраняет сам)."""
+    from .rag import refine as rag_refine
+    return rag_refine.refine_adjudication(
+        direction_id=body["direction_id"], criterion_idx=body["criterion_idx"],
+        criterion_name=body.get("criterion_name"),
+        ai_verdict=body.get("ai_verdict"), ai_comment=body.get("ai_comment"),
+        correct_verdict=body["correct_verdict"], reason=body.get("reason", ""),
+        excerpt=body.get("excerpt"))
 
 
 def random_call() -> dict:

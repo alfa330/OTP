@@ -42,17 +42,20 @@ def embed_query(text):
 
 def save_adjudication(*, direction_id, criterion_idx, criterion_name, call_id,
                       excerpt, ai_verdict, correct_verdict, reason,
-                      situation_tag=None, created_by=None) -> int:
-    """Авто-сохранение разбора человека (+ embedding). Вызывается из экшена ревью."""
-    vec = _embed(f"{criterion_name or ''}. {excerpt}. {reason}")
+                      not_covered=None, situation=None, situation_tag=None, created_by=None) -> int:
+    """Авто-сохранение разбора человека (+ embedding). Вызывается из экшена ревью.
+    В embedding входят и границы (not_covered): прецедент должен находиться и по звонкам
+    с нарушением, которое правило НЕ оправдывает — чтобы модель увидела запрет."""
+    vec = _embed(". ".join(p for p in (criterion_name, situation, excerpt, reason, not_covered) if p))
     with _rw_conn() as c, c.cursor() as cur:
         cur.execute(
             """INSERT INTO qa_adjudications
                (direction_id, criterion_idx, criterion_name, call_id, excerpt,
-                ai_verdict, correct_verdict, reason, situation_tag, embedding, created_by)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector,%s) RETURNING id""",
+                ai_verdict, correct_verdict, reason, not_covered, situation, situation_tag, embedding, created_by)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector,%s) RETURNING id""",
             (direction_id, criterion_idx, criterion_name, call_id, excerpt,
-             ai_verdict, correct_verdict, reason, situation_tag, _vec(vec), created_by),
+             ai_verdict, correct_verdict, reason, not_covered or None, situation or None,
+             situation_tag, _vec(vec), created_by),
         )
         return cur.fetchone()[0]
 
@@ -66,7 +69,7 @@ def retrieve(*, direction_id, criterion_idx, query_text=None, query_vector=None,
         qvec = query_vector if query_vector is not None else (_embed(query_text) if query_text else None)
         if qvec:
             cur.execute(
-                """SELECT id, criterion_name, excerpt, ai_verdict, correct_verdict, reason,
+                """SELECT id, criterion_name, excerpt, ai_verdict, correct_verdict, reason, not_covered, situation,
                           1 - (embedding <=> %s::vector) AS sim
                      FROM qa_adjudications
                     WHERE direction_id=%s AND criterion_idx=%s AND embedding IS NOT NULL
@@ -74,12 +77,12 @@ def retrieve(*, direction_id, criterion_idx, query_text=None, query_vector=None,
                 (_vec(qvec), direction_id, criterion_idx, _vec(qvec), k))
         else:
             cur.execute(
-                """SELECT id, criterion_name, excerpt, ai_verdict, correct_verdict, reason, NULL
+                """SELECT id, criterion_name, excerpt, ai_verdict, correct_verdict, reason, not_covered, situation, NULL
                      FROM qa_adjudications
                     WHERE direction_id=%s AND criterion_idx=%s
                     ORDER BY created_at DESC LIMIT %s""",
                 (direction_id, criterion_idx, k))
-        cols = ["id", "criterion_name", "excerpt", "ai_verdict", "correct_verdict", "reason", "sim"]
+        cols = ["id", "criterion_name", "excerpt", "ai_verdict", "correct_verdict", "reason", "not_covered", "situation", "sim"]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
     finally:
         cur.close(); ro.close()

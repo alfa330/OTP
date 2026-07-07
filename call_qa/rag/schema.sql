@@ -54,6 +54,8 @@ CREATE TABLE IF NOT EXISTS qa_adjudications (
     ai_verdict       text,                      -- что поставил ИИ
     correct_verdict  text NOT NULL,             -- что правильно (человек)
     reason           text NOT NULL,             -- почему — это и есть «правило»
+    not_covered      text,                      -- границы: какие нарушения правило НЕ оправдывает
+    situation        text,                      -- обобщённое «когда применять» (excerpt остаётся дословной цитатой)
     situation_tag    text,                      -- короткий тег ситуации (для фильтра)
     embedding        vector(768),               -- эмбеддинг для семантического поиска (может быть NULL)
     use_count        integer NOT NULL DEFAULT 0,-- сколько раз подтянулась в оценки
@@ -61,3 +63,7 @@ CREATE TABLE IF NOT EXISTS qa_adjudications (
     created_at       timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_adj_dir_crit ON qa_adjudications (direction_id, criterion_idx);
+
+-- Для БД, где таблица создана до появления границ/ситуации правила.
+ALTER TABLE qa_adjudications ADD COLUMN IF NOT EXISTS not_covered text;
+ALTER TABLE qa_adjudications ADD COLUMN IF NOT EXISTS situation text;

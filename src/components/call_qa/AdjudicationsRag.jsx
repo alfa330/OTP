@@ -81,12 +81,18 @@ export default function AdjudicationsRag(props) {
                                     </div>
                                     <IosBadge tone="blue"><Repeat size={11} />{m.use_count}</IosBadge>
                                 </div>
+                                {m.situation && (
+                                    <p className="mt-2 text-[12.5px] text-slate-600"><b className="text-slate-500">Когда применять:</b> {m.situation}</p>
+                                )}
                                 {m.excerpt && (
                                     <p className="mt-2 flex gap-1.5 rounded-lg bg-slate-50 px-3 py-2 text-[12.5px] italic text-slate-600 ring-1 ring-slate-100">
                                         <Quote size={13} className="mt-0.5 shrink-0 text-slate-300" />{m.excerpt}
                                     </p>
                                 )}
                                 <p className="mt-2 text-[13px] text-slate-700"><b className="text-slate-500">Правило:</b> {m.reason}</p>
+                                {m.not_covered && (
+                                    <p className="mt-1 text-[12.5px] text-rose-600/80"><b className="text-rose-500/70">НЕ оправдывает:</b> {m.not_covered}</p>
+                                )}
                                 <p className="mt-1.5 text-[11px] text-slate-400">{m.by} · {m.date}</p>
                             </div>
                         ))}

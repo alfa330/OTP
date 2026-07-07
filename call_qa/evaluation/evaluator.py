@@ -9,15 +9,13 @@ from __future__ import annotations
 import os
 import json
 
-import httpx
-
 from .. import config
+from .. import llm
 from . import criterion_config as cc
 from .data_checks import get_data_checker
 from ..rag import store
 
 _PROMPT = os.path.join(os.path.dirname(__file__), os.pardir, "prompts", "evaluator_system.md")
-_API_URL = "https://api.anthropic.com/v1/messages"
 
 # JSON-схема ответа Claude (только transcript-критерии).
 _OUTPUT_SCHEMA = {
@@ -69,34 +67,26 @@ def _rag_block(direction_id: int, criteria: list[dict], transcript: str) -> str:
         except Exception:
             hits = []
         for h in hits:
-            chunks.append(f"[критерий {c['idx']}] ситуация: {h['excerpt']}\n"
-                          f"  правильно: {h['correct_verdict']} — потому что: {h['reason']}")
+            chunk = f"[критерий {c['idx']}] ситуация: {h.get('situation') or h['excerpt']}"
+            if h.get("situation") and h.get("excerpt"):
+                chunk += f"\n  цитата из звонка-источника: «{h['excerpt']}»"
+            chunk += f"\n  правильно: {h['correct_verdict']} — потому что: {h['reason']}"
+            if h.get("not_covered"):
+                chunk += f"\n  правило НЕ оправдывает: {h['not_covered']}"
+            chunks.append(chunk)
     return "\n".join(chunks) if chunks else "(прецедентов пока нет)"
 
 
 def _claude_eval(transcript, direction, criteria, *, asr_low_spans, use_rag, model) -> dict:
-    """Оценка подмножества (transcript) критериев моделью `model`. Сырой HTTP + output_config.format."""
-    key = config.anthropic_key()
-    if not key:
-        raise RuntimeError("нет ключа Claude (CLAUDE_API_KEY / ANTHROPIC_API_KEY)")
+    """Оценка подмножества (transcript) критериев моделью `model`."""
     rag = _rag_block(direction["id"], criteria, transcript) if use_rag else "(RAG отключён)"
     low = ("\nНЕУВЕРЕННЫЕ ФРАГМЕНТЫ РАСПОЗНАВАНИЯ (не штрафовать):\n"
            + json.dumps(asr_low_spans, ensure_ascii=False)) if asr_low_spans else ""
     user = (f"РАЗБОРЫ (согласованные прецеденты):\n{rag}\n\n"
             f"ТРАНСКРИПТ ЗВОНКА:\n{transcript}{low}\n\nОцени по всем перечисленным критериям.")
-    body = {
-        "model": model,
-        "max_tokens": 8000,
-        "system": [{"type": "text", "text": build_system(criteria), "cache_control": {"type": "ephemeral"}}],
-        "messages": [{"role": "user", "content": user}],
-        "output_config": {"format": {"type": "json_schema", "schema": _OUTPUT_SCHEMA}},
-    }
-    headers = {"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
-    r = httpx.post(_API_URL, json=body, headers=headers, timeout=120.0)
-    r.raise_for_status()
-    data = r.json()
-    text = next((b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"), "")
-    return json.loads(text)  # {"per_criterion": [...], "overall_comment": "..."}
+    return llm.claude_json(model=model, system=build_system(criteria), user=user,
+                           schema=_OUTPUT_SCHEMA, max_tokens=8000, timeout=120.0,
+                           cache_system=True)  # {"per_criterion": [...], "overall_comment": "..."}
 
 
 def _needs_escalation(v: dict, crit: dict) -> bool:
