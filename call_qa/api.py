@@ -134,7 +134,7 @@ def _cache_get(call_id, model):
         return None  # таблицы ещё нет
 
 
-def _cache_put(call_id, model, payload):
+def _cache_put(call_id, model, payload, strict=False):
     try:
         from psycopg2.extras import Json
         conn = config.connect_rw()
@@ -146,7 +146,9 @@ def _cache_put(call_id, model, payload):
                 (call_id, model, Json(payload)))
         conn.close()
     except Exception:
-        pass  # best-effort (нет RW/таблицы) — просто не кэшируем
+        if strict:
+            raise  # пакетная оценка: потеря результата недопустима — наверху ретрай
+        pass  # карточка ревью: best-effort (нет RW/таблицы) — просто не кэшируем
 
 
 def review_payload(call_id: int, refresh: bool = False) -> dict:

@@ -77,16 +77,22 @@ def _rag_block(direction_id: int, criteria: list[dict], transcript: str) -> str:
     return "\n".join(chunks) if chunks else "(прецедентов пока нет)"
 
 
-def _claude_eval(transcript, direction, criteria, *, asr_low_spans, use_rag, model) -> dict:
-    """Оценка подмножества (transcript) критериев моделью `model`."""
+def build_eval_body(transcript, direction, criteria, *, asr_low_spans=None, use_rag=True, model) -> dict:
+    """Тело запроса оценки (для синхронного вызова и для Batch API)."""
     rag = _rag_block(direction["id"], criteria, transcript) if use_rag else "(RAG отключён)"
     low = ("\nНЕУВЕРЕННЫЕ ФРАГМЕНТЫ РАСПОЗНАВАНИЯ (не штрафовать):\n"
            + json.dumps(asr_low_spans, ensure_ascii=False)) if asr_low_spans else ""
     user = (f"РАЗБОРЫ (согласованные прецеденты):\n{rag}\n\n"
             f"ТРАНСКРИПТ ЗВОНКА:\n{transcript}{low}\n\nОцени по всем перечисленным критериям.")
-    return llm.claude_json(model=model, system=build_system(criteria), user=user,
-                           schema=_OUTPUT_SCHEMA, max_tokens=8000, timeout=120.0,
-                           cache_system=True)  # {"per_criterion": [...], "overall_comment": "..."}
+    return llm.build_body(model=model, system=build_system(criteria), user=user,
+                          schema=_OUTPUT_SCHEMA, max_tokens=8000, cache_system=True)
+
+
+def _claude_eval(transcript, direction, criteria, *, asr_low_spans, use_rag, model) -> dict:
+    """Оценка подмножества (transcript) критериев моделью `model`."""
+    body = build_eval_body(transcript, direction, criteria, asr_low_spans=asr_low_spans,
+                           use_rag=use_rag, model=model)
+    return llm.post_body(body, timeout=120.0)  # {"per_criterion": [...], "overall_comment": "..."}
 
 
 def _needs_escalation(v: dict, crit: dict) -> bool:
@@ -164,6 +170,14 @@ def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=Tr
                 by_idx[idx] = v
                 model_by_idx[idx] = config.CLAUDE_MODEL_HARD
 
+    return assemble_results(direction, by_idx, model_by_idx,
+                            call_context=call_context, overall_comment=ai.get("overall_comment", ""))
+
+
+def assemble_results(direction: dict, by_idx: dict, model_by_idx: dict, *,
+                     call_context=None, overall_comment="") -> dict:
+    """Вердикты модели + маршрутизация по источнику критерия → итоговая структура оценки.
+    Используется и синхронным evaluate(), и пакетной оценкой (batch_eval)."""
     checker = get_data_checker()
     results = []
     for c in direction["criteria"]:
@@ -193,4 +207,4 @@ def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=Tr
             results.append({**base, "verdict": "Pending", "confidence": None,
                             "evidence_quote": "", "comment": "ручная проверка", "model": None})
 
-    return {"per_criterion": results, "overall_comment": ai.get("overall_comment", "")}
+    return {"per_criterion": results, "overall_comment": overall_comment}
