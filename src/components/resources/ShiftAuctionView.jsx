@@ -501,10 +501,27 @@ const isNightAuctionLot = (lot) => (
   && normalizeClockValue(lot?.end_time) === '08:00'
 );
 
+// The lot's rate is derived from the shift's clock duration, NOT from the
+// rate key stored on the lot — plans sometimes seed e.g. a 9h shift under a
+// 0.75-rate slot. Boundaries: <5.5h → 0.5, 5.5–7.5h → 0.75, ≥7.5h → 1.
+// Night 20*08 lots are exempt (they keep their dedicated grid group).
+const getAuctionLotDurationRate = (lot) => {
+  const range = lotMinuteRange(lot);
+  if (!range) {
+    const fallback = Number(lot?.rate_min);
+    if (!Number.isFinite(fallback) || fallback <= 0.5) return 0.5;
+    return fallback <= 0.75 ? 0.75 : 1;
+  }
+  const durationMinutes = Math.max(0, range[1] - range[0]);
+  if (durationMinutes < 5.5 * 60) return 0.5;
+  if (durationMinutes < 7.5 * 60) return 0.75;
+  return 1;
+};
+
 const getAuctionRateGroupId = (lot) => {
   if (isNightAuctionLot(lot)) return 'night-20-08';
-  const rate = Number(lot?.rate_min);
-  if (!Number.isFinite(rate) || rate <= 0.5) return 'rate-0.5';
+  const rate = getAuctionLotDurationRate(lot);
+  if (rate <= 0.5) return 'rate-0.5';
   if (rate <= 0.75) return 'rate-0.75';
   return 'rate-1';
 };
@@ -653,7 +670,8 @@ const AuctionLotCell = ({
   // out from auto-seeded lots, and the title shows who added it.
   const isAddedLot = Boolean(lot.added_by);
   const addedToneStyle = { backgroundColor: '#ede9fe', borderColor: '#c4b5fd', color: '#5b21b6' };
-  const minRate = Number(lot.rate_min || 0);
+  // Tooltip rate must match the grid row: duration-derived (night lots keep their key).
+  const minRate = isNightAuctionLot(lot) ? Number(lot.rate_min || 0) : getAuctionLotDurationRate(lot);
   const lotActionKey = getAuctionLotActionKey(lot);
   const isClaiming = claimingLotIds instanceof Set && claimingLotIds.has(lotActionKey);
   const isPostClaiming = postClaimingLotIds instanceof Set && postClaimingLotIds.has(lotActionKey);
