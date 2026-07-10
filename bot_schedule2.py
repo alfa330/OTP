@@ -2176,6 +2176,7 @@ AVATAR_SIGNED_URL_CACHE = {}
 AVATAR_SIGNED_URL_CACHE_LOCK = threading.Lock()
 FOUR_YOU_ADMIN_USER_ID = int(os.getenv('FOUR_YOU_ADMIN_USER_ID', '2'))
 FOUR_YOU_VIEWER_USER_ID = int(os.getenv('FOUR_YOU_VIEWER_USER_ID', '241') or 241)
+AI_QA_EXTRA_ACCESS_USER_IDS = {183}
 FOUR_YOU_MAX_FILES_PER_UPLOAD = int(os.getenv('FOUR_YOU_MAX_FILES_PER_UPLOAD', '20'))
 FOUR_YOU_MAX_FILE_SIZE_BYTES = int(os.getenv('FOUR_YOU_MAX_FILE_SIZE_BYTES', str(15 * 1024 * 1024)))
 FOUR_YOU_MAX_IMAGE_PIXELS = int(os.getenv('FOUR_YOU_MAX_IMAGE_PIXELS', str(40_000_000)))
@@ -3961,6 +3962,8 @@ def _resource_fte_error_response(error):
 def _ai_qa_guard():
     """Возвращает (requester_id, error_response|None). Доступ: супер-админ ИЛИ глава ОП (деп. 367)."""
     requester_id = getattr(g, 'user_id', None)
+    if requester_id is not None and int(requester_id) in AI_QA_EXTRA_ACCESS_USER_IDS:
+        return requester_id, None
     user = db.get_user(id=requester_id) if requester_id else None
     role = _normalize_user_role(user[3]) if user else None
     if _is_super_admin_role(role):
