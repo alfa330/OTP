@@ -208,7 +208,14 @@ def poll_batch(batch_id: str, interval: int = 30) -> dict:
         return r.json()
 
     while True:
-        st = _retry(_get, what="статус батча")
+        # Ожидание не должно умирать от сети: батч на стороне Anthropic живёт своей жизнью,
+        # мы можем ждать сколько угодно (длинные DNS-провалы на машине — реальность).
+        try:
+            st = _retry(_get, what="статус батча")
+        except Exception as e:
+            log(f"статус батча недоступен ({e}) — продолжаю ждать")
+            time.sleep(interval)
+            continue
         if st.get("processing_status") == "ended":
             log(f"батч завершён: {st.get('request_counts')}")
             return st
