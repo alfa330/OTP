@@ -7131,9 +7131,11 @@ def admin_update_user():
             supervisor_target_roles=scoped_target_roles
         ):
             return jsonify({"error": "Forbidden for this user"}), 403
-        if field == 'rate' and not _is_admin_role(requester_role) and requester_role != 'sv':
+        # Глава отдела меняет ставку как админ (в любой день, без sv-ограничений):
+        # скоуп «только свой отдел» уже обеспечен _requester_can_access_target_user выше.
+        if field == 'rate' and not _is_admin_role(requester_role) and requester_role != 'sv' and headed_dept_id is None:
             return jsonify({"error": "Only admins and supervisors can change rate"}), 403
-        if field == 'rate' and requester_role == 'sv':
+        if field == 'rate' and requester_role == 'sv' and headed_dept_id is None:
             if not _is_supervisor_rate_change_day():
                 return jsonify({"error": "Supervisor can change rate only on the first day of the month"}), 403
             if target_role != 'operator':

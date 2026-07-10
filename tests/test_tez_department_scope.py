@@ -258,6 +258,20 @@ class DepartmentHeadWriteScopeTests(unittest.TestCase):
             admin_update_user,
         )
 
+    def test_admin_update_user_rate_gate_allows_department_head(self):
+        admin_update_user = _function_source(BOT_PATH, "admin_update_user")
+        # Глава отдела меняет ставку как админ — в любой день, без sv-ограничений;
+        # «чистый» СВ по-прежнему ограничен 1-м числом месяца и своими операторами.
+        self.assertIn(
+            "if field == 'rate' and not _is_admin_role(requester_role) and requester_role != 'sv' and headed_dept_id is None:",
+            admin_update_user,
+        )
+        self.assertIn(
+            "if field == 'rate' and requester_role == 'sv' and headed_dept_id is None:",
+            admin_update_user,
+        )
+        self.assertIn("_is_supervisor_rate_change_day()", admin_update_user)
+
     def test_department_head_assignment_endpoints_require_global_admin(self):
         set_head = _function_source(BOT_PATH, "api_admin_set_department_head")
         head_history = _function_source(BOT_PATH, "api_admin_department_head_history")
