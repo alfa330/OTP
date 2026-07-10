@@ -139,6 +139,8 @@ const REFRESH_TOKEN_STORAGE_KEY = 'otp_refresh_token';
 const ADMIN_SESSIONS_PAGE_SIZE = 100;
 const FOUR_YOU_ADMIN_USER_ID = 2;
 const FOUR_YOU_VIEWER_USER_ID = 241;
+const AI_QA_OP_DEPARTMENT_ID = 367;
+const AI_QA_EXTRA_ACCESS_USER_IDS = new Set([183]);
 const DEFAULT_USERS_REPORT_OPTIONS = {
     sheetMode: 'summary_and_supervisors',
     includeFired: false,
@@ -1244,6 +1246,12 @@ const canManageFourYouForUser = (userLike) => (
 const canAccessFourYouForUser = (userLike) => (
     canManageFourYouForUser(userLike) ||
     (FOUR_YOU_VIEWER_USER_ID > 0 && Number(userLike?.id) === FOUR_YOU_VIEWER_USER_ID)
+);
+
+const canAccessAiQaForUser = (userLike) => (
+    normalizeRole(userLike?.role) === 'super_admin' ||
+    (isDepartmentHead(userLike) && Number(headedDepartmentId(userLike)) === AI_QA_OP_DEPARTMENT_ID) ||
+    AI_QA_EXTRA_ACCESS_USER_IDS.has(Number(userLike?.id))
 );
 
 const DEV_LETTER_ACCESS_OPERATOR_NAME = '\u041d\u0443\u0440\u0448\u043e\u0432\u0430 \u0410\u0439\u0448\u0430 \u041a\u0430\u043d\u0430\u0433\u0430\u0442\u043a\u044b\u0437\u044b';
@@ -32680,6 +32688,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canUsePinnedTasks = isAdminLikeRole || isDepartmentManager || currentUserRole === 'trainer';
             const canAccessLmsSection = canAccessLmsSectionForUser(user);
             const canAccessResourceFteSection = canAccessResourceFteSectionForUser(user);
+            const canAccessAiQaSection = canAccessAiQaForUser(user);
             const canAccessFourYouSection = canAccessFourYouForUser(user);
             const canManageFourYouSection = canManageFourYouForUser(user);
             const canAccessDevLetterSection = canAccessDevLetterForUser(user);
@@ -35971,6 +35980,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     requestedViewFromUrl &&
                     (requestedViewFromUrl !== 'lms' || canAccessLmsSection) &&
                     (requestedViewFromUrl !== 'resource_fte' || canAccessResourceFteSection) &&
+                    (requestedViewFromUrl !== 'ai_qa' || canAccessAiQaSection) &&
                     (requestedViewFromUrl !== 'four_you' || canAccessFourYouSection);
                 if (canOpenRequestedView) {
                     setView(requestedViewFromUrl);
@@ -35981,7 +35991,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                 else if (isSupervisorRole(user?.role)) setView('operators');
                 else setView('hours');
-            }, [user, user?.id, user?.role, isAdminLikeRole, canAccessLmsSection, canAccessResourceFteSection, canAccessFourYouSection, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, isAdminLikeRole, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessFourYouSection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks' || !requestedTaskIdFromLocation) return;
@@ -36016,6 +36026,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     else if (user?.role === 'trainer') setView('surveys');
                     else setView('hours');
                 }
+                if (view === 'ai_qa' && !canAccessAiQaSection) {
+                    if (isAdminLikeRole) setView('sv_list');
+                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
+                    else if (isSupervisorRole(user?.role)) setView('operators');
+                    else if (user?.role === 'trainer') setView('surveys');
+                    else setView('hours');
+                }
                 if (view === 'four_you' && !canAccessFourYouSection) {
                     if (isAdminLikeRole) setView('sv_list');
                     else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
@@ -36023,7 +36040,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     else if (user?.role === 'trainer') setView('surveys');
                     else setView('hours');
                 }
-            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, view, canAccessLmsSection, canAccessResourceFteSection, canAccessFourYouSection]);
+            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessFourYouSection]);
 
             useEffect(() => {
                 // Only mirror `view` into the URL after authentication has
@@ -40919,11 +40936,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setView('manage_users');
                     return;
                 }
+                if (view === 'ai_qa' && canAccessAiQaSection) return;
                 if (departmentAllowsView(user, view)) return;
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) setView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canAccessAiQaSection, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -41358,7 +41376,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <FaIcon className="fas fa-sliders-h"></FaIcon> <span className="sidebar-text">Мониторинговая шкала</span>
                                                 </button>
                                             </li>
-                                            {user?.role === 'super_admin' && (
+                                            {canAccessAiQaSection && (
                                                 <li>
                                                     <button
                                                         onClick={(e) => handleSidebarViewNavigation(e, 'ai_qa')}
@@ -41552,7 +41570,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </button>
                                             </li>
                                             )}
-                                            {isDepartmentHeadUser && Number(headedDepartmentId(user)) === 367 && (
+                                            {isDepartmentHeadUser && Number(headedDepartmentId(user)) === AI_QA_OP_DEPARTMENT_ID && (
                                             <li>
                                                 <button
                                                     onClick={(e) => handleSidebarViewNavigation(e, 'ai_qa')}
@@ -41767,6 +41785,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     {renderSidebarDividerInner()}
                                     {renderEventsSidebarItemInner()}
 
+                                    {canAccessAiQaSection && !isAdminLikeRole && !(isDepartmentHeadUser && Number(headedDepartmentId(user)) === AI_QA_OP_DEPARTMENT_ID) && (
+                                        <li>
+                                            <button
+                                                type="button"
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'ai_qa')}
+                                                className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'ai_qa' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <FaIcon className="fas fa-robot"></FaIcon> <span className="sidebar-text">ИИ-оценка</span>
+                                            </button>
+                                        </li>
+                                    )}
+
                                     {canAccessFourYouSection && !canManageFourYouSection && (
                                         <li>
                                             <button
@@ -41901,6 +41931,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 isSuperAdmin,
                 canAccessLmsSection,
                 canAccessResourceFteSection,
+                canAccessAiQaSection,
                 canAccessFourYouSection,
                 canManageFourYouSection,
                 canAccessDevLetterSection,
@@ -42226,6 +42257,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 style={{ height: 'calc(100vh - 24px)', border: 'none', backgroundColor: '#f7f7f5' }}
                             />
                         </div>
+                        )}
+                        {view === "ai_qa" && canAccessAiQaSection && (
+                            <CallQaView
+                                user={user}
+                                showToast={showToast}
+                                apiBaseUrl={API_BASE_URL}
+                                withAccessTokenHeader={withAccessTokenHeader}
+                                directions={directions}
+                            />
                         )}
                         {(view === "shift_auction" && (
                             <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
@@ -43774,15 +43814,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         departments={departments}
                                         showToast={showToast}
                                         canEdit={isAdminLikeRole}
-                                    />
-                                ))}
-                                {( view === "ai_qa" && (user?.role === 'super_admin' || (isDepartmentHead(user) && Number(headedDepartmentId(user)) === 367)) && (
-                                    <CallQaView
-                                        user={user}
-                                        showToast={showToast}
-                                        apiBaseUrl={API_BASE_URL}
-                                        withAccessTokenHeader={withAccessTokenHeader}
-                                        directions={directions}
                                     />
                                 ))}
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}
