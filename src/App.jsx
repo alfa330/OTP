@@ -21086,6 +21086,35 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [user?.role, breakReminderEnabled, breakReminderLeadMinutes, breakReminderCandidates]);
 
             if (isOperatorSelfSchedules) {
+                const nowStatusVisual = ({
+                    work: { icon: 'fa-headset', tile: 'bg-emerald-500' },
+                    break: { icon: 'fa-mug-hot', tile: 'bg-amber-500' },
+                    off: { icon: 'fa-umbrella-beach', tile: 'bg-sky-500' },
+                    free: { icon: 'fa-house', tile: 'bg-slate-400' },
+                    idle: { icon: 'fa-hourglass-half', tile: 'bg-slate-400' }
+                })[myNowStatus.key] || { icon: 'fa-circle-info', tile: 'bg-slate-400' };
+                const pluralRu = (n, one, few, many) => {
+                    const abs = Math.abs(Number(n) || 0);
+                    const d10 = abs % 10;
+                    const d100 = abs % 100;
+                    if (d10 === 1 && d100 !== 11) return one;
+                    if (d10 >= 2 && d10 <= 4 && (d100 < 12 || d100 > 14)) return few;
+                    return many;
+                };
+                const formatHoursRu = (minutes) => {
+                    const rounded = Math.round(((Number(minutes) || 0) / 60) * 10) / 10;
+                    return `${String(rounded).replace('.', ',')} ч`;
+                };
+                const formatEtaRu = (targetTs) => {
+                    const diffMin = Math.round((targetTs - Date.now()) / 60000);
+                    if (diffMin < 1) return 'начинается сейчас';
+                    const days = Math.floor(diffMin / 1440);
+                    const hours = Math.floor((diffMin % 1440) / 60);
+                    const mins = diffMin % 60;
+                    if (days > 0) return `через ${days} ${pluralRu(days, 'день', 'дня', 'дней')}${hours > 0 ? ` ${hours} ч` : ''}`;
+                    if (hours > 0) return `через ${hours} ч${mins > 0 ? ` ${mins} мин` : ''}`;
+                    return `через ${mins} мин`;
+                };
                 return (
                     <div className="px-0 sm:px-4 py-2 min-h-screen bg-slate-50">
                         <div className="flex flex-col lg:flex-row items-stretch lg:items-start gap-3 lg:gap-4 mb-0">
@@ -21207,148 +21236,157 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     )}
                                 </div>
 
-                                <div className="grid grid-cols-1 gap-3 mb-3">
-                                    <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-3 sm:p-4">
-                                        <div className="md:grid md:grid-cols-2 md:gap-4">
-                                            <div className="space-y-3">
-                                                <div className={`rounded-xl border-l-4 p-3.5 ${myNowStatus.panelClass}`}>
-                                                    <div className="flex items-center justify-between gap-2 mb-1.5">
-                                                        <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wide text-slate-600 font-medium">
-                                                            <FaIcon className="fas fa-circle-dot text-xs"></FaIcon>
-                                                            Статус сейчас
-                                                        </div>
-                                                        <div className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${myNowStatus.badgeClass}`}>
-                                                            {myNowStatus.label}
-                                                        </div>
+                                <div className="mb-3 px-3 sm:px-0" style={{ fontFamily: IOS_FONT }}>
+                                    <div className="grid grid-cols-1 items-start gap-3 md:grid-cols-2">
+                                        <section>
+                                            <div className={`${IOS_GROUP_LABEL} mb-1.5`}>Статус сейчас</div>
+                                            <div className={`${IOS_CARD} px-4 py-3.5`}>
+                                                <div className="flex items-center gap-3">
+                                                    <div className={`grid h-10 w-10 flex-shrink-0 place-items-center rounded-[12px] text-white shadow-sm ${nowStatusVisual.tile}`}>
+                                                        <FaIcon className={`fas ${nowStatusVisual.icon} text-[15px]`}></FaIcon>
                                                     </div>
-                                                    <div className="text-base font-semibold text-slate-900 leading-snug">
-                                                        {myNowStatus.hint}
-                                                    </div>
-                                                    {myNowStatus.subHint && (
-                                                        <div className="mt-1 text-xs text-slate-600">
-                                                            {myNowStatus.subHint}
+                                                    <div className="min-w-0 flex-1">
+                                                        <div className="flex items-center gap-2">
+                                                            <span className="text-[15px] font-semibold leading-tight text-slate-900">{myNowStatus.label}</span>
+                                                            {myNowStatus.key === 'work' && (
+                                                                <span className="relative flex h-2 w-2" aria-hidden="true">
+                                                                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75"></span>
+                                                                    <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500"></span>
+                                                                </span>
+                                                            )}
                                                         </div>
-                                                    )}
+                                                        <div className="mt-0.5 text-[13px] leading-snug text-slate-500">{myNowStatus.hint}</div>
+                                                    </div>
                                                 </div>
-
-                                                <div className="rounded-xl border border-slate-200 bg-white p-3.5">
-                                                    <div className="flex items-center justify-between gap-3">
-                                                        <div className="min-w-0 flex items-center gap-2.5">
-                                                            <div className="w-8 h-8 rounded-lg bg-amber-50 border border-amber-200 flex items-center justify-center flex-shrink-0">
-                                                                <FaIcon className="fas fa-bell text-amber-600 text-xs"></FaIcon>
-                                                            </div>
-                                                            <div>
-                                                                <div className="text-sm font-semibold text-slate-900">Напоминание о перерыве</div>
-                                                                <div className="text-xs text-slate-500">За {breakReminderLeadMinutes} мин до начала</div>
-                                                            </div>
-                                                        </div>
-                                                        <button
-                                                            type="button"
-                                                            onClick={handleToggleBreakReminder}
-                                                            className={`relative inline-flex h-7 w-12 items-center rounded-full border shadow-sm transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 ${
-                                                                breakReminderEnabled
-                                                                    ? 'bg-blue-600 border-blue-600 focus-visible:ring-blue-500'
-                                                                    : 'bg-slate-200 border-slate-300 focus-visible:ring-slate-500'
-                                                            }`}
-                                                            aria-pressed={breakReminderEnabled}
-                                                            aria-label={breakReminderEnabled ? 'Выключить напоминания о перерыве' : 'Включить напоминания о перерыве'}
-                                                        >
-                                                            <span className={`inline-block h-5 w-5 rounded-full border border-slate-300 bg-white shadow-md transition-transform ${breakReminderEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
-                                                        </button>
+                                                {myNowStatus.subHint && (
+                                                    <div className="mt-3 border-t border-slate-100 pt-2.5 text-[12px] leading-snug text-slate-400">
+                                                        {myNowStatus.subHint}
                                                     </div>
-                                                    <div className="mt-2.5 pl-[42px] flex items-center gap-2">
-                                                        <span className="text-xs text-slate-500 whitespace-nowrap">Предупреждать за</span>
-                                                        <div className="flex items-center gap-1">
+                                                )}
+                                            </div>
+                                        </section>
+
+                                        <section className="md:col-start-2 md:row-span-2 md:row-start-1">
+                                            <div className="mb-1.5 flex items-end justify-between gap-2">
+                                                <div className={IOS_GROUP_LABEL}>Ближайшие смены</div>
+                                                {myUpcomingShiftItems.length > 3 && (
+                                                    <div className="px-1 text-[11px] text-slate-400">3 из {myUpcomingShiftItems.length}</div>
+                                                )}
+                                            </div>
+                                            <div className={`${IOS_CARD} divide-y divide-slate-100 overflow-hidden`}>
+                                                {myUpcomingShiftItems.length === 0 ? (
+                                                    <div className="px-4 py-7 text-center">
+                                                        <div className="mx-auto mb-2 grid h-10 w-10 place-items-center rounded-full bg-slate-100 text-slate-400">
+                                                            <FaIcon className="fas fa-calendar-xmark"></FaIcon>
+                                                        </div>
+                                                        <div className="text-[13px] font-medium text-slate-600">Предстоящих смен нет</div>
+                                                        <div className="mt-0.5 text-[12px] text-slate-400">Когда график назначат, смены появятся здесь</div>
+                                                    </div>
+                                                ) : (
+                                                    myUpcomingShiftItems.slice(0, 3).map((item, idx) => {
+                                                        const nowTs = Date.now();
+                                                        const isOngoing = item.startTs <= nowTs && item.endTs > nowTs;
+                                                        const isToday = item.date === todayDateStr(new Date());
+                                                        const isTomorrow = item.date === todayDateStr(new Date(nowTs + 86400000));
+                                                        const dateLabel = isToday ? 'Сегодня' : isTomorrow ? 'Завтра' : formatDateRuDayMonth(item.date);
+                                                        const breakTimes = Array.isArray(item.breaks) && item.breaks.length > 0
+                                                            ? item.breaks.map(b => `${formatBreakMinuteWithDay(b.start)} — ${formatBreakMinuteWithDay(b.end)}`)
+                                                            : [];
+                                                        return (
+                                                            <div
+                                                                key={`my-upcoming-${item.key}`}
+                                                                className={`flex items-start gap-3 px-4 py-3 ${idx === 0 ? 'bg-blue-50/40' : ''}`}
+                                                            >
+                                                                <div className={`flex h-11 w-11 flex-shrink-0 flex-col items-center justify-center rounded-xl ${isToday ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-700'}`}>
+                                                                    <span className={`text-[9px] font-semibold uppercase leading-none tracking-wide ${isToday ? 'text-blue-200' : 'text-slate-400'}`}>{formatWeekdayRu(item.date, 'short')}</span>
+                                                                    <span className="mt-0.5 text-[16px] font-bold leading-none tabular-nums">{parseDateStr(item.date).getDate()}</span>
+                                                                </div>
+                                                                <div className="min-w-0 flex-1">
+                                                                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                                                                        <span className="text-[15px] font-semibold leading-tight text-slate-900 tabular-nums">
+                                                                            {item.start} — {item.end}{item.isCrossing ? ' (+1)' : ''}
+                                                                        </span>
+                                                                        {isOngoing ? (
+                                                                            <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10.5px] font-semibold text-emerald-700">Идёт сейчас</span>
+                                                                        ) : idx === 0 ? (
+                                                                            <span className="rounded-full bg-blue-600 px-2 py-0.5 text-[10.5px] font-semibold text-white">Следующая</span>
+                                                                        ) : null}
+                                                                    </div>
+                                                                    <div className="mt-0.5 text-[12px] text-slate-500">
+                                                                        {dateLabel} · {formatHoursRu(item.durationMin)} · {item.breakCount > 0
+                                                                            ? `${item.breakCount} ${pluralRu(item.breakCount, 'перерыв', 'перерыва', 'перерывов')} (${formatMinutesOnly(item.breakMinutes)})`
+                                                                            : 'без перерывов'}
+                                                                    </div>
+                                                                    {idx === 0 && !isOngoing && (
+                                                                        <div className="mt-0.5 text-[12px] font-medium text-blue-600">{formatEtaRu(item.startTs)}</div>
+                                                                    )}
+                                                                    {breakTimes.length > 0 && (
+                                                                        <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11.5px] text-amber-700 tabular-nums">
+                                                                            <FaIcon className="fas fa-mug-hot text-[10px] text-amber-500"></FaIcon>
+                                                                            {breakTimes.join(' · ')}
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    })
+                                                )}
+                                            </div>
+                                        </section>
+
+                                        <section className="md:col-start-1 md:row-start-2">
+                                            <div className={`${IOS_GROUP_LABEL} mb-1.5`}>Напоминания</div>
+                                            <div className={IOS_CARD}>
+                                                <div className="flex items-center gap-3 px-4 py-3">
+                                                    <div className="grid h-9 w-9 flex-shrink-0 place-items-center rounded-[10px] bg-amber-500 text-white shadow-sm">
+                                                        <FaIcon className="fas fa-bell text-[14px]"></FaIcon>
+                                                    </div>
+                                                    <div className="min-w-0 flex-1">
+                                                        <div className="text-[14px] font-semibold leading-tight text-slate-900">Напомнить о перерыве</div>
+                                                        <div className="mt-0.5 text-[12px] text-slate-500">Уведомление за {breakReminderLeadMinutes} мин до начала</div>
+                                                    </div>
+                                                    <button
+                                                        type="button"
+                                                        role="switch"
+                                                        aria-checked={breakReminderEnabled}
+                                                        onClick={handleToggleBreakReminder}
+                                                        aria-label={breakReminderEnabled ? 'Выключить напоминания о перерыве' : 'Включить напоминания о перерыве'}
+                                                        className={`relative inline-flex h-[26px] w-[44px] flex-shrink-0 items-center rounded-full transition-colors duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 ${breakReminderEnabled ? 'bg-emerald-500' : 'bg-slate-300'}`}
+                                                    >
+                                                        <span className={`inline-block h-[22px] w-[22px] transform rounded-full bg-white shadow-md transition-transform duration-200 ${breakReminderEnabled ? 'translate-x-[20px]' : 'translate-x-[2px]'}`} />
+                                                    </button>
+                                                </div>
+                                                {breakReminderEnabled && (
+                                                    <div className="border-t border-slate-100 px-4 py-3">
+                                                        <div className="mb-1.5 text-[12px] font-medium text-slate-500">За сколько минут предупреждать</div>
+                                                        <div className="flex rounded-lg bg-slate-100 p-0.5">
                                                             {[1, 2, 3, 5, 10, 15].map(m => (
                                                                 <button
                                                                     key={m}
                                                                     type="button"
                                                                     onClick={() => setBreakReminderLeadMinutes(m)}
-                                                                    className={`px-2 py-0.5 rounded-md text-xs font-medium border transition-colors ${
+                                                                    className={`flex-1 rounded-[7px] py-1.5 text-[12.5px] font-semibold tabular-nums transition-all ${
                                                                         breakReminderLeadMinutes === m
-                                                                            ? 'bg-amber-500 border-amber-500 text-white'
-                                                                            : 'bg-white border-slate-200 text-slate-600 hover:border-amber-300 hover:text-amber-700'
+                                                                            ? 'bg-white text-slate-900 shadow-sm'
+                                                                            : 'text-slate-500 hover:text-slate-700'
                                                                     }`}
                                                                 >
                                                                     {m}
                                                                 </button>
                                                             ))}
                                                         </div>
-                                                        <span className="text-xs text-slate-500">мин</span>
-                                                    </div>
-                                                    {breakReminderPermissionState && (
-                                                        <div className="mt-2 text-[11px] text-slate-500 pl-[42px]">
-                                                            {breakReminderPermissionState === 'granted' && <><FaIcon className="fas fa-check-circle text-emerald-500 mr-1"></FaIcon>Браузерные уведомления разрешены</>}
-                                                            {breakReminderPermissionState === 'denied' && <><FaIcon className="fas fa-times-circle text-red-400 mr-1"></FaIcon>Браузерные уведомления запрещены</>}
-                                                            {breakReminderPermissionState === 'default' && 'Разрешение будет запрошено при включении'}
-                                                            {breakReminderPermissionState === 'unsupported' && 'Уведомления не поддерживаются'}
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            </div>
-
-                                            <div className="pt-4 border-t border-slate-100 md:pt-1 md:border-0">
-                                                <div className="mb-2 text-xs font-semibold text-slate-900">Ближайшие смены</div>
-                                                {myUpcomingShiftItems.length === 0 ? (
-                                                    <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-2 text-xs text-slate-500">
-                                                        Нет предстоящих смен
-                                                    </div>
-                                                ) : (
-                                                    <div className="space-y-2.5">
-                                                        {myUpcomingShiftItems.slice(0, 3).map((item, idx) => {
-                                                            const isToday = item.date === todayDateStr(new Date());
-                                                            const isTomorrow = item.date === todayDateStr(new Date(Date.now() + 86400000));
-                                                            const dateLabel = isToday ? 'Сегодня' : isTomorrow ? 'Завтра' : formatDateRuShort(item.date);
-                                                            const breakTimes = Array.isArray(item.breaks) && item.breaks.length > 0
-                                                                ? item.breaks.map(b => `${formatBreakMinuteWithDay(b.start)} — ${formatBreakMinuteWithDay(b.end)}`)
-                                                                : [];
-                                                            return (
-                                                                <div
-                                                                    key={`my-upcoming-${item.key}`}
-                                                                    className={`rounded-xl border px-3 py-2.5 ${idx === 0 ? 'border-blue-300 bg-blue-50/40 shadow-sm' : 'border-slate-200 bg-white'}`}
-                                                                >
-                                                                    <div className="flex items-start justify-between gap-2">
-                                                                        <div className="min-w-0">
-                                                                            <div className="flex items-center gap-1.5">
-                                                                                <div className="text-xs font-semibold text-slate-900">{dateLabel}</div>
-                                                                                {idx === 0 && (
-                                                                                    <span className="rounded-full bg-blue-600 px-2 py-0.5 text-[10px] font-semibold text-white">
-                                                                                        Следующая
-                                                                                    </span>
-                                                                                )}
-                                                                            </div>
-                                                                            <div className="text-[11px] text-slate-500">{formatWeekdayRu(item.date, 'short')}</div>
-                                                                        </div>
-                                                                        <div className="whitespace-nowrap text-xs font-semibold text-slate-600 tabular-nums">
-                                                                            {(item.durationMin / 60).toFixed(2)} ч
-                                                                        </div>
-                                                                    </div>
-
-                                                                    <div className="mt-2 text-base font-semibold leading-tight text-slate-900 tabular-nums sm:text-lg">
-                                                                        {item.start} — {item.end}{item.isCrossing ? ' (+1)' : ''}
-                                                                    </div>
-
-                                                                    <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
-                                                                        <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-medium ${item.breakCount > 0 ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-slate-200 bg-slate-100 text-slate-500'}`}>
-                                                                            <FaIcon className="fas fa-mug-hot text-amber-500"></FaIcon>
-                                                                            {item.breakCount > 0 ? `${item.breakCount} пер. · ${formatMinutesOnly(item.breakMinutes)}` : 'Без перерывов'}
-                                                                        </span>
-                                                                    </div>
-
-                                                                    {breakTimes.length > 0 && (
-                                                                        <div className="mt-1.5 flex flex-wrap gap-1">
-                                                                            {breakTimes.map((t, i) => (
-                                                                                <span key={i} className="px-2 py-0.5 rounded-md bg-amber-50 border border-amber-200 text-[11px] text-amber-700 tabular-nums">{t}</span>
-                                                                            ))}
-                                                                        </div>
-                                                                    )}
-                                                                </div>
-                                                            );
-                                                        })}
                                                     </div>
                                                 )}
                                             </div>
-                                        </div>
+                                            {breakReminderPermissionState && (
+                                                <div className="mt-1.5 px-1 text-[11px] text-slate-400">
+                                                    {breakReminderPermissionState === 'granted' && <><FaIcon className="fas fa-check-circle mr-1 text-emerald-500"></FaIcon>Браузерные уведомления разрешены</>}
+                                                    {breakReminderPermissionState === 'denied' && <><FaIcon className="fas fa-times-circle mr-1 text-rose-400"></FaIcon>Уведомления запрещены в браузере — включите их в настройках сайта</>}
+                                                    {breakReminderPermissionState === 'default' && 'Разрешение на уведомления будет запрошено при включении'}
+                                                    {breakReminderPermissionState === 'unsupported' && 'Браузер не поддерживает уведомления'}
+                                                </div>
+                                            )}
+                                        </section>
                                     </div>
                                 </div>
 
