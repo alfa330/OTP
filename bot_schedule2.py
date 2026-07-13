@@ -4007,9 +4007,12 @@ def api_ai_qa_call(call_id):
             return jsonify({"status": "success", "call": binotel_review_payload(call_id, refresh=refresh)}), 200
         from call_qa.api import review_payload
         return jsonify({"status": "success", "call": review_payload(call_id, refresh=refresh)}), 200
-    except Exception as error:
+    except ValueError as error:
+        # Ожидаемое («звонок не найден» / «нет записи») — с текстом; это не сбой сервера.
+        return jsonify({"error": str(error)}), 404
+    except Exception:
         logging.exception("ai-qa call %s failed", call_id)
-        return jsonify({"error": str(error)}), 500
+        return jsonify({"error": "внутренняя ошибка ИИ-оценки (детали в логах сервера)"}), 500
 
 
 @app.route('/api/ai-qa/adjudicate', methods=['POST', 'OPTIONS'])
@@ -4026,9 +4029,9 @@ def api_ai_qa_adjudicate():
         saved = save_adjudications(body.get('call_id'), body.get('direction_id'),
                                    body.get('items', []), reviewer_id=requester_id)
         return jsonify({"status": "success", "saved": saved}), 200
-    except Exception as error:
+    except Exception:
         logging.exception("ai-qa adjudicate failed")
-        return jsonify({"error": str(error)}), 500
+        return jsonify({"error": "не удалось сохранить разбор (детали в логах сервера)"}), 500
 
 
 @app.route('/api/ai-qa/adjudicate/refine', methods=['POST', 'OPTIONS'])
@@ -4098,9 +4101,11 @@ def api_ai_qa_random_call():
     try:
         from call_qa.api import random_call
         return jsonify({"status": "success", "call": random_call()}), 200
-    except Exception as error:
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 404
+    except Exception:
         logging.exception("ai-qa random-call failed")
-        return jsonify({"error": str(error)}), 500
+        return jsonify({"error": "внутренняя ошибка ИИ-оценки (детали в логах сервера)"}), 500
 
 
 @app.route('/api/ai-qa/random-binotel-call', methods=['POST', 'OPTIONS'])

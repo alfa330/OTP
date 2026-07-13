@@ -2,8 +2,8 @@ import React, { useEffect, useState } from 'react';
 import axios from 'axios';
 import { motion } from 'framer-motion';
 import {
-    Sparkles, ListChecks, ClipboardList, SlidersHorizontal, Database,
-    ChevronLeft, ShieldAlert, Gauge, Server, Clock, Loader2, AlertCircle, RotateCcw,
+    Sparkles, ListChecks, ClipboardList, SlidersHorizontal, Database, ChevronLeft,
+    ShieldAlert, Gauge, Server, Clock, Loader2, AlertCircle, RotateCcw, Volume1, CheckCircle2,
 } from 'lucide-react';
 import { APPLE_FONT, iosCard, iosBtnGhost, iosBtnSecondary, IosBadge } from '../ui/ios';
 import CallReviewCard from './CallReviewCard';
@@ -28,6 +28,8 @@ const REASON = {
     critical: { tone: 'red',   label: 'Критический', Icon: ShieldAlert },
     lowconf:  { tone: 'amber', label: 'Низкая увер.', Icon: Clock },
     pending:  { tone: 'blue',  label: 'Ждёт API',    Icon: Server },
+    asr:      { tone: 'amber', label: 'Слабый звук', Icon: Volume1 },
+    ok:       { tone: 'green', label: 'Без флагов',  Icon: CheckCircle2 },
     new:      { tone: 'slate', label: 'Новый',       Icon: Sparkles },
 };
 
@@ -148,24 +150,28 @@ export default function CallQaView(props) {
         }
     };
 
+    // Отправляется ВСЕГДА (даже без исправлений): «Подтвердить» — тоже результат ревью,
+    // он убирает звонок из очереди и остаётся сигналом качества модели. Карточка
+    // закрывается только после успешного ответа — при сбое введённый разбор не теряется.
     const saveAdjud = (decisions) => {
         const call = callData;
-        const items = call ? (call.criteria || [])
+        if (!call) { closeCall(); return; }
+        const items = (call.criteria || [])
             .filter((c) => c.source === 'transcript' && decisions[c.idx] && decisions[c.idx].verdict !== c.ai)
             .map((c) => ({ criterion_idx: c.idx, criterion_name: c.name, ai_verdict: c.ai,
                            correct_verdict: decisions[c.idx].verdict, reason: decisions[c.idx].reason || '',
                            not_covered: decisions[c.idx].not_covered || null,
                            situation: decisions[c.idx].situation || null,
-                           excerpt: c.evidence || '' })) : [];
-        if (apiBaseUrl && call && items.length) {
-            axios.post(`${apiBaseUrl}/api/ai-qa/adjudicate`,
-                       { call_id: call.id, direction_id: call.direction_id, items }, { headers: headers() })
-                .then(() => showToast?.('Разбор сохранён', 'success'))
-                .catch(() => showToast?.('Не удалось сохранить разбор', 'error'));
-        } else {
-            showToast?.(items.length ? 'Разбор сохранён' : 'Подтверждено', 'success');
-        }
-        closeCall();
+                           excerpt: c.evidence || '' }));
+        if (!apiBaseUrl) { showToast?.('Бэкенд недоступен — разбор не сохранён', 'error'); return; }
+        axios.post(`${apiBaseUrl}/api/ai-qa/adjudicate`,
+                   { call_id: call.id, direction_id: call.direction_id, items }, { headers: headers() })
+            .then(() => {
+                showToast?.(items.length ? 'Разбор сохранён' : 'Подтверждено', 'success');
+                setQueue((q) => (Array.isArray(q) ? q.filter((x) => x.id !== call.id) : q));
+                closeCall();
+            })
+            .catch(() => showToast?.('Не удалось сохранить — карточка оставлена открытой', 'error'));
     };
 
     return (

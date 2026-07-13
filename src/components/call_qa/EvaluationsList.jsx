@@ -66,6 +66,12 @@ export default function EvaluationsList(props) {
                                 <p className="mt-0.5 text-[12px] text-slate-400">{m.operator} · {m.datetime}</p>
                             </div>
                             <div className="flex shrink-0 items-center gap-3">
+                                {m.ai != null && (
+                                    <div className="flex items-center gap-1 text-[12.5px]" title="Оценка ИИ">
+                                        <Bot size={13} className="text-blue-300" />
+                                        <span className="font-semibold tabular-nums text-slate-700">{m.ai}</span>
+                                    </div>
+                                )}
                                 {m.human != null && (
                                     <div className="flex items-center gap-1 text-[12.5px]" title="Оценка человека">
                                         <User2 size={13} className="text-slate-300" />

@@ -29,10 +29,13 @@ from .asr import soniox
 from .evaluation import criteria as criteria_mod
 from .evaluation import criterion_config as cc
 from .evaluation import evaluator
-from .api import _download, _lines_from_tokens, _ai_score, _cache_put
+from .api import _download, _lines_from_tokens, _ai_score, _cache_put, _meta_upsert
 
-# Цены Batch API для claude-opus-4-8, $/1M токенов (−50% от обычных 5/25).
-_PRICE = {"input": 2.5, "output": 12.5, "cache_write": 3.125, "cache_read": 0.25}
+# Цены Batch API, $/1M токенов (−50% от обычных): считаем стоимость только для известной
+# модели, чтобы смена CLAUDE_MODEL_BULK не давала молча неверную цифру.
+_PRICES = {
+    "claude-opus-4-8": {"input": 2.5, "output": 12.5, "cache_write": 3.125, "cache_read": 0.25},
+}
 
 
 # Windows-консоль может быть в cp1251 — не падаем на юникоде в логах.
@@ -174,7 +177,9 @@ def submit_batch(calls: list[dict], transcripts: dict, workdir: str, get_dir) ->
         return bid
 
     requests_ = []
-    for call in calls:
+    # Сортировка по направлению: у запросов одного направления одинаковый системный промпт,
+    # подряд идущие получают больше шансов на cache-hit внутри батча.
+    for call in sorted(calls, key=lambda c: c["direction_id"] or 0):
         rec = transcripts.get(call["id"])
         if not rec:
             continue  # ASR не удался — попадёт в следующий запуск
@@ -291,9 +296,11 @@ def process_results(batch: dict, calls: list[dict], transcripts: dict, workdir: 
             "asr_mean_conf": rec["asm"]["mean_conf"] or 0,
             "transcript": _lines_from_tokens(rec["toks"]), "criteria": criteria,
             "ai_score": score, "_audio_path": call["audio_path"],
+            "_asm": rec["asm"],  # переоценка карточки не будет платить за ASR повторно
         }
         _retry(lambda: _cache_put(cid, config.CLAUDE_MODEL, payload, strict=True),
                what=f"запись кэша call {cid}")
+        _meta_upsert(cid, config.CLAUDE_MODEL, payload)  # очередь ревью/журнал (best-effort)
         stats["ok"] += 1
         if score is None:
             stats["no_score"] += 1
@@ -339,15 +346,16 @@ def main():
     stats = process_results(batch, calls, transcripts, workdir, get_dir)
 
     u = stats["usage"]
-    cost = sum(u[k] * _PRICE[k] for k in _PRICE) / 1e6
     log(f"\nИТОГ: оценено {stats['ok']} (ошибок батча {stats['errored']}, без балла {stats['no_score']})")
     if stats["pairs"]:
         diffs = [abs(h - a) for h, a in stats["pairs"]]
         exact = sum(1 for d in diffs if d <= 5)
         log(f"согласие ИИ↔человек: средн. |Δ| = {sum(diffs)/len(diffs):.1f} баллов; "
             f"в пределах 5 баллов: {exact}/{len(diffs)} ({100*exact//len(diffs)}%)")
-    log(f"токены: in={u['input']} out={u['output']} cache_w={u['cache_write']} cache_r={u['cache_read']}"
-        f" | стоимость LLM (batch): ${cost:.2f}")
+    price = _PRICES.get(config.CLAUDE_MODEL_BULK)
+    cost = f" | стоимость LLM (batch): ${sum(u[k] * price[k] for k in price) / 1e6:.2f}" if price else \
+           f" | цены для {config.CLAUDE_MODEL_BULK} не заданы (_PRICES)"
+    log(f"токены: in={u['input']} out={u['output']} cache_w={u['cache_write']} cache_r={u['cache_read']}{cost}")
 
 
 if __name__ == "__main__":

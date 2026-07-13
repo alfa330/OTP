@@ -6,6 +6,30 @@ from .. import config
 from ..rag import store
 
 
+# Порядок = серьёзность (важнее — раньше): ключи совпадают с бейджами фронтенда (CallQaView.REASON).
+REASON_PRIORITY = ("critical", "lowconf", "pending", "asr")
+
+
+def review_reasons(criteria, asr_mean_conf=None) -> list[str]:
+    """Почему звонок требует человека — по критериям В ФОРМЕ КАРТОЧКИ (payload['criteria']:
+    {idx, is_critical, source, ai, conf}). Пустой список = флагов нет, ревью не обязательно.
+    Те же правила, что needs_review(), но на сохранённой карточке — для очереди ревью."""
+    reasons = set()
+    if asr_mean_conf is not None and asr_mean_conf < config.ASR_CONF_HARD:
+        reasons.add("asr")
+    for cr in criteria or []:
+        v = cr.get("ai")
+        if v == "Pending":
+            reasons.add("pending")
+        if cr.get("source") == "transcript":
+            conf = cr.get("conf")
+            if conf is not None and conf <= config.REVIEW_MODEL_CONF:
+                reasons.add("lowconf")
+            if cr.get("is_critical") and v == "Incorrect":
+                reasons.add("critical")
+    return [r for r in REASON_PRIORITY if r in reasons]
+
+
 def needs_review(result, direction: dict, asr_mean_conf: float | None) -> bool:
     """В ревью уходит звонок, если: плохое распознавание, есть Pending (нужна проверка
     данных/человек), низкая уверенность ИИ, или спорный критический критерий."""
