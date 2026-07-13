@@ -21115,6 +21115,161 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     if (hours > 0) return `через ${hours} ч${mins > 0 ? ` ${mins} мин` : ''}`;
                     return `через ${mins} мин`;
                 };
+                const nextFutureShiftItem = myUpcomingShiftItems.find(item => item.startTs > Date.now()) || null;
+                const statusSubHint = myNowStatus.key === 'free'
+                    ? (nextFutureShiftItem ? formatEtaRu(nextFutureShiftItem.startTs) : null)
+                    : (myNowStatus.subHint && myNowStatus.subHint !== 'Смена идет сейчас' ? myNowStatus.subHint : null);
+                const shiftTimeTextRu = (seg) => `${seg.start} — ${seg.end}${(timeToMinutes(seg.end) <= timeToMinutes(seg.start) && seg.end !== '00:00') ? ' (+1)' : ''}`;
+                const myScheduleWeekSections = (() => {
+                    if (viewMode === 'week') return myScheduleVisibleDays.length > 0 ? [{ key: 'week', days: myScheduleVisibleDays }] : [];
+                    if (viewMode !== 'month') return [];
+                    const sections = [];
+                    let current = null;
+                    myScheduleVisibleDays.forEach(dayCard => {
+                        const mondayIndex = (parseDateStr(dayCard.date).getDay() + 6) % 7;
+                        if (!current || mondayIndex === 0) {
+                            current = { key: dayCard.date, days: [] };
+                            sections.push(current);
+                        }
+                        current.days.push(dayCard);
+                    });
+                    return sections;
+                })();
+                const renderMyDayRow = (dayCard) => {
+                    const isToday = dayCard.date === todayDateStr(new Date());
+                    const scheduleStatus = dayCard.scheduleStatus || null;
+                    const statusTone = scheduleStatus ? getScheduleStatusTone(scheduleStatus.statusCode) : null;
+                    const shifts = dayCard.shifts || [];
+                    const hasShifts = shifts.length > 0;
+                    const dayWorkMin = shifts.reduce((acc, seg) => acc + (seg.durationMin || 0), 0);
+                    const dayBreakMin = shifts.reduce((acc, seg) => acc + (seg.breaks || []).reduce((s, b) => s + Math.max(0, (Number(b?.end) || 0) - (Number(b?.start) || 0)), 0), 0);
+                    const dayBreakCount = shifts.reduce((acc, seg) => acc + (Array.isArray(seg.breaks) ? seg.breaks.length : 0), 0);
+                    const dayNetMin = Math.max(0, dayWorkMin - dayBreakMin);
+                    const dayOfflineActivities = Array.isArray(dayCard.offlineActivities) ? dayCard.offlineActivities : [];
+                    const isExpanded = Boolean(expandedMyDayCards?.[dayCard.date]);
+                    const specialShift = shifts.find(seg => isPlannerOfficePracticeShift(seg) || isPlannerPhoneShift(seg)) || null;
+                    const secondaryParts = [];
+                    if (specialShift) secondaryParts.push(plannerShiftTypeLabel(specialShift.shift_type ?? specialShift.shiftType));
+                    if (hasShifts) secondaryParts.push(dayBreakCount > 0 ? `${dayBreakCount} ${pluralRu(dayBreakCount, 'перерыв', 'перерыва', 'перерывов')} · ${formatMinutesOnly(dayBreakMin)}` : 'без перерывов');
+                    return (
+                        <div key={`my-shifts-${dayCard.date}`}>
+                            <button
+                                type="button"
+                                onClick={() => setExpandedMyDayCards(prev => ({ ...prev, [dayCard.date]: !prev?.[dayCard.date] }))}
+                                className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-slate-50/70"
+                                aria-expanded={isExpanded}
+                            >
+                                <div className={`flex h-10 w-10 flex-shrink-0 flex-col items-center justify-center rounded-xl ${isToday ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-700'}`}>
+                                    <span className={`text-[9px] font-semibold uppercase leading-none tracking-wide ${isToday ? 'text-blue-200' : 'text-slate-400'}`}>{formatWeekdayRu(dayCard.date, 'short')}</span>
+                                    <span className="mt-0.5 text-[15px] font-bold leading-none tabular-nums">{parseDateStr(dayCard.date).getDate()}</span>
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                    {hasShifts ? (
+                                        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
+                                            {shifts.slice(0, 2).map((seg, i) => (
+                                                <span key={`${dayCard.date}-time-${i}`} className="inline-flex items-center gap-1.5 text-[15px] font-semibold leading-tight tabular-nums text-slate-900">
+                                                    <span className={`h-2 w-2 flex-shrink-0 rounded-full ${plannerShiftVisualMeta(seg).dotClass}`}></span>
+                                                    {shiftTimeTextRu(seg)}
+                                                </span>
+                                            ))}
+                                            {shifts.length > 2 && <span className="text-[12px] font-medium text-slate-400">+{shifts.length - 2}</span>}
+                                        </div>
+                                    ) : scheduleStatus ? (
+                                        <div className={`text-[15px] font-semibold leading-tight ${statusTone?.text || 'text-amber-800'}`}>{scheduleStatus.label || 'Статус'}</div>
+                                    ) : dayCard.isDayOff ? (
+                                        <div className="text-[15px] font-semibold leading-tight text-sky-600">Выходной</div>
+                                    ) : (
+                                        <div className="text-[15px] font-medium leading-tight text-slate-400">Смен нет</div>
+                                    )}
+                                    {secondaryParts.length > 0 && <div className="mt-0.5 truncate text-[12px] text-slate-500">{secondaryParts.join(' · ')}</div>}
+                                    {!hasShifts && scheduleStatus?.comment && <div className="mt-0.5 truncate text-[12px] text-slate-500">{scheduleStatus.comment}</div>}
+                                </div>
+                                <div className="flex flex-shrink-0 items-center gap-2">
+                                    {hasShifts && <span className="text-[13px] font-medium tabular-nums text-slate-400">{formatHoursRu(dayWorkMin)}</span>}
+                                    <FaIcon className={`fas ${isExpanded ? 'fa-chevron-up' : 'fa-chevron-down'} text-[11px] text-slate-300`}></FaIcon>
+                                </div>
+                            </button>
+                            {isExpanded && (
+                                <div className="space-y-2 border-t border-slate-100 bg-slate-50/70 px-4 py-3">
+                                    {scheduleStatus && (
+                                        <div className="text-[12px] leading-snug">
+                                            <span className={`text-[13px] font-semibold ${statusTone?.text || 'text-amber-800'}`}>{scheduleStatus.label || 'Статус'}</span>
+                                            {(scheduleStatus.startDate || scheduleStatus.endDate) && (
+                                                <span className="tabular-nums text-slate-500"> · {scheduleStatus.startDate || '—'}{scheduleStatus.endDate ? ` — ${scheduleStatus.endDate}` : ''}</span>
+                                            )}
+                                            {scheduleStatus.comment && <div className="mt-0.5 text-slate-500">{scheduleStatus.comment}</div>}
+                                        </div>
+                                    )}
+                                    {shifts.map((seg, idx) => {
+                                        const visual = plannerShiftVisualMeta(seg);
+                                        const segBreaks = Array.isArray(seg.breaks) ? seg.breaks : [];
+                                        return (
+                                            <div key={`${dayCard.date}-exp-${idx}`} className="rounded-xl bg-white px-3 py-2.5 ring-1 ring-slate-200/60">
+                                                <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                                                    <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
+                                                        <span className={`h-2 w-2 flex-shrink-0 rounded-full ${visual.dotClass}`}></span>
+                                                        <span className="text-[14px] font-semibold leading-tight tabular-nums text-slate-900">{shiftTimeTextRu(seg)}</span>
+                                                        <span className="text-[12px] text-slate-400">{plannerShiftTypeLabel(seg.shift_type ?? seg.shiftType)} · {formatHoursRu(seg.durationMin)}</span>
+                                                    </div>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handleOpenSwapModalForOwnShift(dayCard, seg)}
+                                                        className="inline-flex items-center gap-1 text-[12px] font-medium text-blue-600 transition-colors hover:text-blue-700"
+                                                    >
+                                                        <FaIcon className="fas fa-right-left text-[10px]"></FaIcon>
+                                                        Обменять
+                                                    </button>
+                                                </div>
+                                                {segBreaks.length === 0 ? (
+                                                    <div className="mt-1 text-[12px] text-slate-400">Без перерывов</div>
+                                                ) : (
+                                                    <div className="mt-1.5 space-y-1">
+                                                        {segBreaks.map((b, bi) => (
+                                                            <div key={`${dayCard.date}-exp-${idx}-break-${bi}`} className="flex items-center justify-between gap-2 text-[12px] tabular-nums">
+                                                                <span className="inline-flex items-center gap-1.5 text-slate-600">
+                                                                    <FaIcon className="fas fa-mug-hot text-[11px] text-amber-500"></FaIcon>
+                                                                    {formatBreakMinuteWithDay(b.start)} — {formatBreakMinuteWithDay(b.end)}
+                                                                </span>
+                                                                <span className="text-slate-400">{formatMinutesOnly(Math.max(0, (Number(b?.end) || 0) - (Number(b?.start) || 0)))}</span>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                    {dayOfflineActivities.length > 0 && (
+                                        <div className="rounded-xl bg-white px-3 py-2.5 ring-1 ring-slate-200/60">
+                                            <div className="text-[11px] font-semibold uppercase tracking-wider text-emerald-600">Офлайн-активность</div>
+                                            <div className="mt-1.5 space-y-1">
+                                                {dayOfflineActivities.map((seg, idx) => {
+                                                    const startRaw = Number(seg?.startMin ?? seg?.start_min ?? seg?.start ?? 0);
+                                                    const endRaw = Number(seg?.endMin ?? seg?.end_min ?? seg?.end ?? 0);
+                                                    if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw) || endRaw <= startRaw) return null;
+                                                    const commentText = String(seg?.comment || '').trim();
+                                                    return (
+                                                        <div key={`${dayCard.date}-offline-${seg?.id ?? idx}`} className="text-[12px] leading-snug">
+                                                            <span className="tabular-nums text-slate-600">{minutesToTime(startRaw)} — {minutesToTime(endRaw)}</span>
+                                                            <span className="text-slate-400"> · {formatMinutesOnly(endRaw - startRaw)}</span>
+                                                            {commentText && <span className="text-slate-500"> · {commentText}</span>}
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                    )}
+                                    {hasShifts && (
+                                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-0.5 text-[12px] text-slate-500">
+                                            <span>Работа <span className="font-semibold tabular-nums text-slate-700">{formatHoursRu(dayWorkMin)}</span></span>
+                                            <span>Чистое <span className="font-semibold tabular-nums text-slate-700">{formatHoursMinutes(dayNetMin)}</span></span>
+                                            <span>Перерывы <span className="font-semibold tabular-nums text-slate-700">{formatMinutesOnly(dayBreakMin)}</span></span>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    );
+                };
                 return (
                     <div className="px-0 sm:px-4 py-2 min-h-screen bg-slate-50">
                         <div className="flex flex-col lg:flex-row items-stretch lg:items-start gap-3 lg:gap-4 mb-0">
@@ -21239,9 +21394,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <div className="mb-3 px-3 sm:px-0" style={{ fontFamily: IOS_FONT }}>
                                     <div className="grid grid-cols-1 items-start gap-3 md:grid-cols-2">
                                         <section>
-                                            <div className={`${IOS_GROUP_LABEL} mb-1.5`}>Статус сейчас</div>
-                                            <div className={`${IOS_CARD} px-4 py-3.5`}>
-                                                <div className="flex items-center gap-3">
+                                            <div className={`${IOS_GROUP_LABEL} mb-1.5`}>Сейчас</div>
+                                            <div className={`${IOS_CARD} overflow-hidden`}>
+                                                <div className="flex items-center gap-3 px-4 py-3.5">
                                                     <div className={`grid h-10 w-10 flex-shrink-0 place-items-center rounded-[12px] text-white shadow-sm ${nowStatusVisual.tile}`}>
                                                         <FaIcon className={`fas ${nowStatusVisual.icon} text-[15px]`}></FaIcon>
                                                     </div>
@@ -21255,96 +21410,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 </span>
                                                             )}
                                                         </div>
-                                                        <div className="mt-0.5 text-[13px] leading-snug text-slate-500">{myNowStatus.hint}</div>
+                                                        <div className="mt-0.5 text-[13px] leading-snug text-slate-600">{myNowStatus.hint}</div>
+                                                        {statusSubHint && <div className="mt-0.5 text-[12px] leading-snug text-slate-400">{statusSubHint}</div>}
                                                     </div>
                                                 </div>
-                                                {myNowStatus.subHint && (
-                                                    <div className="mt-3 border-t border-slate-100 pt-2.5 text-[12px] leading-snug text-slate-400">
-                                                        {myNowStatus.subHint}
-                                                    </div>
-                                                )}
-                                            </div>
-                                        </section>
-
-                                        <section className="md:col-start-2 md:row-span-2 md:row-start-1">
-                                            <div className="mb-1.5 flex items-end justify-between gap-2">
-                                                <div className={IOS_GROUP_LABEL}>Ближайшие смены</div>
-                                                {myUpcomingShiftItems.length > 3 && (
-                                                    <div className="px-1 text-[11px] text-slate-400">3 из {myUpcomingShiftItems.length}</div>
-                                                )}
-                                            </div>
-                                            <div className={`${IOS_CARD} divide-y divide-slate-100 overflow-hidden`}>
-                                                {myUpcomingShiftItems.length === 0 ? (
-                                                    <div className="px-4 py-7 text-center">
-                                                        <div className="mx-auto mb-2 grid h-10 w-10 place-items-center rounded-full bg-slate-100 text-slate-400">
-                                                            <FaIcon className="fas fa-calendar-xmark"></FaIcon>
-                                                        </div>
-                                                        <div className="text-[13px] font-medium text-slate-600">Предстоящих смен нет</div>
-                                                        <div className="mt-0.5 text-[12px] text-slate-400">Когда график назначат, смены появятся здесь</div>
-                                                    </div>
-                                                ) : (
-                                                    myUpcomingShiftItems.slice(0, 3).map((item, idx) => {
-                                                        const nowTs = Date.now();
-                                                        const isOngoing = item.startTs <= nowTs && item.endTs > nowTs;
-                                                        const isToday = item.date === todayDateStr(new Date());
-                                                        const isTomorrow = item.date === todayDateStr(new Date(nowTs + 86400000));
-                                                        const dateLabel = isToday ? 'Сегодня' : isTomorrow ? 'Завтра' : formatDateRuDayMonth(item.date);
-                                                        const breakTimes = Array.isArray(item.breaks) && item.breaks.length > 0
-                                                            ? item.breaks.map(b => `${formatBreakMinuteWithDay(b.start)} — ${formatBreakMinuteWithDay(b.end)}`)
-                                                            : [];
-                                                        return (
-                                                            <div
-                                                                key={`my-upcoming-${item.key}`}
-                                                                className={`flex items-start gap-3 px-4 py-3 ${idx === 0 ? 'bg-blue-50/40' : ''}`}
-                                                            >
-                                                                <div className={`flex h-11 w-11 flex-shrink-0 flex-col items-center justify-center rounded-xl ${isToday ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-700'}`}>
-                                                                    <span className={`text-[9px] font-semibold uppercase leading-none tracking-wide ${isToday ? 'text-blue-200' : 'text-slate-400'}`}>{formatWeekdayRu(item.date, 'short')}</span>
-                                                                    <span className="mt-0.5 text-[16px] font-bold leading-none tabular-nums">{parseDateStr(item.date).getDate()}</span>
-                                                                </div>
-                                                                <div className="min-w-0 flex-1">
-                                                                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                                                                        <span className="text-[15px] font-semibold leading-tight text-slate-900 tabular-nums">
-                                                                            {item.start} — {item.end}{item.isCrossing ? ' (+1)' : ''}
-                                                                        </span>
-                                                                        {isOngoing ? (
-                                                                            <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10.5px] font-semibold text-emerald-700">Идёт сейчас</span>
-                                                                        ) : idx === 0 ? (
-                                                                            <span className="rounded-full bg-blue-600 px-2 py-0.5 text-[10.5px] font-semibold text-white">Следующая</span>
-                                                                        ) : null}
-                                                                    </div>
-                                                                    <div className="mt-0.5 text-[12px] text-slate-500">
-                                                                        {dateLabel} · {formatHoursRu(item.durationMin)} · {item.breakCount > 0
-                                                                            ? `${item.breakCount} ${pluralRu(item.breakCount, 'перерыв', 'перерыва', 'перерывов')} (${formatMinutesOnly(item.breakMinutes)})`
-                                                                            : 'без перерывов'}
-                                                                    </div>
-                                                                    {idx === 0 && !isOngoing && (
-                                                                        <div className="mt-0.5 text-[12px] font-medium text-blue-600">{formatEtaRu(item.startTs)}</div>
-                                                                    )}
-                                                                    {breakTimes.length > 0 && (
-                                                                        <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11.5px] text-amber-700 tabular-nums">
-                                                                            <FaIcon className="fas fa-mug-hot text-[10px] text-amber-500"></FaIcon>
-                                                                            {breakTimes.join(' · ')}
-                                                                        </div>
-                                                                    )}
-                                                                </div>
-                                                            </div>
-                                                        );
-                                                    })
-                                                )}
-                                            </div>
-                                        </section>
-
-                                        <section className="md:col-start-1 md:row-start-2">
-                                            <div className={`${IOS_GROUP_LABEL} mb-1.5`}>Напоминания</div>
-                                            <div className={IOS_CARD}>
-                                                <div className="flex items-center gap-3 px-4 py-3">
-                                                    <div className="grid h-9 w-9 flex-shrink-0 place-items-center rounded-[10px] bg-amber-500 text-white shadow-sm">
-                                                        <FaIcon className="fas fa-bell text-[14px]"></FaIcon>
-                                                    </div>
-                                                    <div className="min-w-0 flex-1">
-                                                        <div className="text-[14px] font-semibold leading-tight text-slate-900">Напомнить о перерыве</div>
-                                                        <div className="mt-0.5 text-[12px] text-slate-500">Уведомление за {breakReminderLeadMinutes} мин до начала</div>
-                                                    </div>
+                                                <div className="flex items-center gap-2.5 border-t border-slate-100 px-4 py-3">
+                                                    <FaIcon className="fas fa-bell text-[14px] text-amber-500"></FaIcon>
+                                                    <span className="flex-1 text-[13.5px] font-medium text-slate-700">Напомнить о перерыве</span>
                                                     <button
                                                         type="button"
                                                         role="switch"
@@ -21357,15 +21429,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </button>
                                                 </div>
                                                 {breakReminderEnabled && (
-                                                    <div className="border-t border-slate-100 px-4 py-3">
-                                                        <div className="mb-1.5 text-[12px] font-medium text-slate-500">За сколько минут предупреждать</div>
-                                                        <div className="flex rounded-lg bg-slate-100 p-0.5">
+                                                    <div className="flex items-center gap-2.5 px-4 pb-3">
+                                                        <span className="whitespace-nowrap text-[12px] text-slate-500">за</span>
+                                                        <div className="flex flex-1 rounded-lg bg-slate-100 p-0.5">
                                                             {[1, 2, 3, 5, 10, 15].map(m => (
                                                                 <button
                                                                     key={m}
                                                                     type="button"
                                                                     onClick={() => setBreakReminderLeadMinutes(m)}
-                                                                    className={`flex-1 rounded-[7px] py-1.5 text-[12.5px] font-semibold tabular-nums transition-all ${
+                                                                    className={`flex-1 rounded-[7px] py-1 text-[12.5px] font-semibold tabular-nums transition-all ${
                                                                         breakReminderLeadMinutes === m
                                                                             ? 'bg-white text-slate-900 shadow-sm'
                                                                             : 'text-slate-500 hover:text-slate-700'
@@ -21375,17 +21447,63 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 </button>
                                                             ))}
                                                         </div>
+                                                        <span className="text-[12px] text-slate-500">мин</span>
                                                     </div>
                                                 )}
                                             </div>
-                                            {breakReminderPermissionState && (
+                                            {breakReminderEnabled && breakReminderPermissionState && breakReminderPermissionState !== 'granted' && (
                                                 <div className="mt-1.5 px-1 text-[11px] text-slate-400">
-                                                    {breakReminderPermissionState === 'granted' && <><FaIcon className="fas fa-check-circle mr-1 text-emerald-500"></FaIcon>Браузерные уведомления разрешены</>}
-                                                    {breakReminderPermissionState === 'denied' && <><FaIcon className="fas fa-times-circle mr-1 text-rose-400"></FaIcon>Уведомления запрещены в браузере — включите их в настройках сайта</>}
+                                                    {breakReminderPermissionState === 'denied' && 'Уведомления запрещены в браузере — включите их в настройках сайта'}
                                                     {breakReminderPermissionState === 'default' && 'Разрешение на уведомления будет запрошено при включении'}
                                                     {breakReminderPermissionState === 'unsupported' && 'Браузер не поддерживает уведомления'}
                                                 </div>
                                             )}
+                                        </section>
+
+                                        <section>
+                                            <div className="mb-1.5 flex items-end justify-between gap-2">
+                                                <div className={IOS_GROUP_LABEL}>Ближайшие смены</div>
+                                                {myUpcomingShiftItems.length > 3 && (
+                                                    <div className="px-1 text-[11px] text-slate-400">3 из {myUpcomingShiftItems.length}</div>
+                                                )}
+                                            </div>
+                                            <div className={`${IOS_CARD} divide-y divide-slate-100 overflow-hidden`}>
+                                                {myUpcomingShiftItems.length === 0 ? (
+                                                    <div className="px-4 py-6 text-center">
+                                                        <div className="text-[13px] font-medium text-slate-600">Предстоящих смен нет</div>
+                                                        <div className="mt-0.5 text-[12px] text-slate-400">Когда график назначат, смены появятся здесь</div>
+                                                    </div>
+                                                ) : (
+                                                    myUpcomingShiftItems.slice(0, 3).map((item) => {
+                                                        const nowTs = Date.now();
+                                                        const isOngoing = item.startTs <= nowTs && item.endTs > nowTs;
+                                                        const isToday = item.date === todayDateStr(new Date());
+                                                        const isTomorrow = item.date === todayDateStr(new Date(nowTs + 86400000));
+                                                        const dateLabel = isToday ? 'Сегодня' : isTomorrow ? 'Завтра' : `${formatWeekdayRu(item.date, 'short')}, ${formatDateRuDayMonth(item.date)}`;
+                                                        const breakTimes = Array.isArray(item.breaks) && item.breaks.length > 0
+                                                            ? item.breaks.map(b => `${formatBreakMinuteWithDay(b.start)}–${formatBreakMinuteWithDay(b.end)}`)
+                                                            : [];
+                                                        return (
+                                                            <div key={`my-upcoming-${item.key}`} className="flex gap-3 px-4 py-2.5">
+                                                                <span className={`w-[84px] flex-shrink-0 pt-px text-[13px] leading-snug ${isToday ? 'font-semibold text-slate-900' : 'text-slate-500'}`}>{dateLabel}</span>
+                                                                <div className="min-w-0 flex-1">
+                                                                    <div className="flex items-baseline justify-between gap-2">
+                                                                        <span className="inline-flex items-center gap-1.5 text-[15px] font-semibold leading-tight tabular-nums text-slate-900">
+                                                                            {isOngoing && <span className="h-2 w-2 flex-shrink-0 rounded-full bg-emerald-500" title="Идёт сейчас"></span>}
+                                                                            {item.start} — {item.end}{item.isCrossing ? ' (+1)' : ''}
+                                                                        </span>
+                                                                        <span className="flex-shrink-0 text-[13px] tabular-nums text-slate-400">{formatHoursRu(item.durationMin)}</span>
+                                                                    </div>
+                                                                    {isOngoing && <div className="text-[11.5px] font-medium text-emerald-600">идёт сейчас</div>}
+                                                                    {breakTimes.length > 0 && (
+                                                                        <div className="mt-0.5 text-[11.5px] leading-snug tabular-nums text-slate-400">перерывы: {breakTimes.join(' · ')}</div>
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    })
+                                                )}
+                                            </div>
                                         </section>
                                     </div>
                                 </div>
@@ -21406,545 +21524,281 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     )}
 
                                     {!myScheduleLoading && !myScheduleError && (
-                                        <div className="space-y-3 pb-2">
-                                            {viewMode === 'day' && myCurrentDayCard && (
-                                                <div className="grid grid-cols-1 xl:grid-cols-3 gap-3">
-                                                    <div className="xl:col-span-2 bg-white rounded-xl border border-slate-200 overflow-hidden">
-                                                        <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-2">
-                                                            <div className="font-semibold text-slate-900 flex items-center gap-2">
-                                                                <FaIcon className="fas fa-chart-gantt text-blue-600"></FaIcon>
-                                                                Таймлайн дня
-                                                                <span className="text-sm font-normal text-slate-500">{formatDateRuDayMonth(myCurrentDayCard.date)}</span>
-                                                            </div>
-                                                            <div className="flex items-center gap-2 text-xs">
-                                                                {myCurrentDayCard.isDayOff && <span className="px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 font-semibold">Выходной</span>}
-                                                                <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700">{myTimelineParts.length} фрагм.</span>
-                                                                {myCurrentDayTechnicalIssues.length > 0 && (
-                                                                    <span className="px-2 py-0.5 rounded bg-violet-100 text-violet-800 font-semibold">{myCurrentDayTechnicalIssues.length} техсбой</span>
-                                                                )}
-                                                                {myCurrentDayOfflineActivities.length > 0 && (
-                                                                    <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 font-semibold">{myCurrentDayOfflineActivities.length} офлайн</span>
-                                                                )}
-                                                            </div>
-                                                        </div>
-                                                        <div className="p-4">
-                                                            <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px]">
-                                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-blue-200 bg-blue-50 text-blue-700">
-                                                                    <span className="w-2 h-2 rounded-full bg-blue-500"></span> Обычная смена
-                                                                </span>
-                                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-orange-200 bg-orange-50 text-orange-700">
-                                                                    <span className="w-2 h-2 rounded-full bg-orange-500"></span> Ночная смена
-                                                                </span>
-                                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-emerald-200 bg-emerald-50 text-emerald-700">
-                                                                    <span className="w-2 h-2 rounded-full bg-emerald-500"></span> {PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL}
-                                                                </span>
-                                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-cyan-200 bg-cyan-50 text-indigo-700">
-                                                                    <span className="w-2 h-2 rounded-full bg-indigo-500"></span> {PLANNER_SHIFT_TYPE_PHONE_SHIFT_LABEL}
-                                                                </span>
-                                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-amber-200 bg-amber-50 text-amber-700">
-                                                                    <span className="w-2 h-2 rounded-sm bg-amber-300 border border-amber-500/70"></span> Перерыв
-                                                                </span>
-                                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-violet-200 bg-violet-50 text-violet-700">
-                                                                    <span className="w-2 h-2 rounded-sm bg-violet-500 border border-violet-700/70"></span> Тех. сбой
-                                                                </span>
-                                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-emerald-200 bg-emerald-50 text-emerald-700">
-                                                                    <span className="w-2 h-2 rounded-sm bg-emerald-500 border border-emerald-700/70"></span> Офлайн
-                                                                </span>
-                                                            </div>
-                                                            <div className="overflow-x-auto">
-                                                                <div className="min-w-[720px]">
-                                                                    <div className="mb-2">
-                                                                        <div className="relative h-7 px-1 isolate bg-white rounded">
-                                                                            <div className="absolute inset-0 flex items-end z-20">
-                                                                                {Array.from({ length: 24 }).map((_, i) => (
-                                                                                    <div key={i} className="flex-1 text-center text-[11px] leading-[12px] text-slate-600">{pad(i)}</div>
-                                                                                ))}
-                                                                            </div>
-                                                                            <div className="absolute inset-0 flex z-10">
-                                                                                {Array.from({ length: 24 }).map((_, i) => (
-                                                                                    <div key={i} className="flex-1 border-r last:border-r-0 border-slate-200" />
-                                                                                ))}
-                                                                            </div>
-                                                                        </div>
-                                                                        <div className="relative h-6 mt-1 px-1 isolate bg-white rounded">
-                                                                            <div className="absolute inset-0 flex items-start z-20">
-                                                                                {myTotalsPerHourForDay.map((t, hour) => (
-                                                                                    <div key={hour} className={`flex-1 text-center text-[10px] tabular-nums ${t > 0 ? 'text-slate-700 font-medium' : 'text-slate-300'}`}>{t > 0 ? t.toFixed(1) : '0'}</div>
-                                                                                ))}
-                                                                            </div>
-                                                                            <div className="absolute inset-0 flex pointer-events-none z-10">
-                                                                                {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0 border-slate-200" />))}
-                                                                            </div>
-                                                                        </div>
-                                                                    </div>
-                                                                    <div className="relative h-20 rounded-lg border border-slate-200 bg-slate-50 overflow-hidden">
-                                                                        <div className="absolute inset-0 flex">
-                                                                            {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0 border-slate-200/80" />))}
-                                                                        </div>
-                                                                        {myCurrentDayTechnicalIssues.map((seg, idx) => (
-                                                                            <div
-                                                                                key={`my-tech-issue-${seg.id ?? idx}`}
-                                                                                className="absolute bottom-0 h-1.5 rounded-sm z-40 bg-violet-500/85 border border-violet-700/80"
-                                                                                style={{
-                                                                                    left: `${computeLeftPercent(seg.startMin)}%`,
-                                                                                    width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`
-                                                                                }}
-                                                                                title={seg.title}
-                                                                            />
-                                                                        ))}
-                                                                        {myCurrentDayOfflineActivities.map((seg, idx) => (
-                                                                            <div
-                                                                                key={`my-offline-activity-${seg.id ?? idx}`}
-                                                                                className="absolute bottom-2 h-1.5 rounded-sm z-40 bg-emerald-500/85 border border-emerald-700/80"
-                                                                                style={{
-                                                                                    left: `${computeLeftPercent(seg.startMin)}%`,
-                                                                                    width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`
-                                                                                }}
-                                                                                title={seg.title}
-                                                                            />
-                                                                        ))}
-                                                                        {myCurrentDayScheduleStatus && myTimelineParts.length === 0 && (
-                                                                            <div className={`absolute inset-0 flex items-center justify-center text-sm font-semibold ${myCurrentDayScheduleStatusTone?.text || 'text-slate-700'}`}>
-                                                                                {myCurrentDayScheduleStatus.label || 'Статус'}
-                                                                            </div>
-                                                                        )}
-                                                                        {!myCurrentDayScheduleStatus && myCurrentDayCard.isDayOff && myTimelineParts.length === 0 && (
-                                                                            <div className="absolute inset-0 flex items-center justify-center text-sm font-medium text-sky-600">Выходной</div>
-                                                                        )}
-                                                                        {!myCurrentDayScheduleStatus && !myCurrentDayCard.isDayOff && myTimelineParts.length === 0 && (
-                                                                            <div className="absolute inset-0 flex items-center justify-center text-sm text-slate-400">Нет смен</div>
-                                                                        )}
-                                                                        {myTimelineParts.map((p, idx) => {
-                                                                            const srcSeg = myTimelineOperator?.shifts?.[p.sourceDate]?.[p.sourceIndex];
-                                                                            const visual = plannerShiftVisualMeta(srcSeg);
-                                                                            const isNight = !!visual.isNight;
-                                                                            const label = srcSeg
-                                                                                ? `${srcSeg.start} — ${srcSeg.end}${(isNight && srcSeg.end !== '00:00') ? ' (+1)' : ''}`
-                                                                                : `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
-                                                                            return (
-                                                                                <div
-                                                                                    key={`my-timeline-${idx}`}
-                                                                                    className="absolute top-4 h-12 rounded text-xs overflow-hidden flex items-start"
-                                                                                    style={{
-                                                                                        left: `${computeLeftPercent(p.start)}%`,
-                                                                                        width: `${((p.end - p.start) / minutesInDay) * 100}%`,
-                                                                                        background: visual.barGradient,
-                                                                                        color: "white"
-                                                                                    }}
-                                                                                >
-                                                                                    <div className="px-2 py-1 truncate text-[11px] border border-white/25 bg-white/10 rounded-sm mt-1 ml-1">{label}</div>
-                                                                                    {(getBreakPartsForPart(myTimelineOperator, p, myCurrentDayCard.date) || []).map((b, bi) => (
-                                                                                        <div
-                                                                                            key={`my-timeline-break-${idx}-${bi}`}
-                                                                                            className="absolute top-0 h-full border border-amber-500/80 bg-amber-300/95"
-                                                                                            style={{
-                                                                                                left: `${((b.start - p.start) / Math.max(1, p.end - p.start)) * 100}%`,
-                                                                                                width: `${((b.end - b.start) / Math.max(1, p.end - p.start)) * 100}%`
-                                                                                            }}
-                                                                                            title={getBreakTimelineTitle(b)}
-                                                                                        />
-                                                                                    ))}
-                                                                                </div>
-                                                                            );
-                                                                        })}
-                                                                    </div>
-                                                                </div>
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                    <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-                                                        <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
-                                                            <div className="font-semibold text-slate-900 flex items-center gap-2"><FaIcon className="fas fa-mug-hot text-amber-600"></FaIcon>Перерывы дня</div>
-                                                            <div className="text-xs text-slate-500">{myCurrentDayBreaksList.length}</div>
-                                                        </div>
-                                                        <div className="p-4 max-h-[330px] overflow-auto">
-                                                            {myCurrentDayBreaksList.length === 0 ? (
-                                                                <div className="text-sm text-slate-400">Нет перерывов на выбранный день</div>
-                                                            ) : (
-                                                                <div className="space-y-2">
-                                                                    {myCurrentDayBreaksList.map(item => (
-                                                                        <div key={item.key} className="rounded-lg border border-amber-200 bg-amber-50/70 p-2">
-                                                                            <div className="flex items-start justify-between gap-2">
-                                                                                <div className="text-xs font-semibold text-amber-900 tabular-nums">
-                                                                                    {formatBreakMinuteWithDay(item.start)} — {formatBreakMinuteWithDay(item.end)}
-                                                                                </div>
-                                                                                <div className="text-[11px] text-amber-800 font-medium tabular-nums whitespace-nowrap">
-                                                                                    {formatMinutesOnly(item.durationMin)}
-                                                                                </div>
-                                                                            </div>
-                                                                            <div className="mt-1 text-[11px] text-slate-600">
-                                                                                Смена: <span className="text-slate-700 tabular-nums">{item.segText}</span>
-                                                                            </div>
-                                                                        </div>
-                                                                    ))}
-                                                                </div>
-                                                            )}
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            )}
-                                            {myScheduleVisibleDays.length === 0 && (
-                                                <div className="bg-white rounded-xl border border-dashed border-slate-300 p-6 text-center text-slate-500">
-                                                    Нет дней для отображения в выбранном периоде.
-                                                </div>
-                                            )}
-                                            {myScheduleVisibleDays.length > 0 && viewMode !== 'day' && (
-                                                <div className="flex items-center justify-between px-1">
-                                                    <div className="text-sm font-semibold text-slate-900">Дни периода</div>
-                                                    <div className="text-xs text-slate-500">
-                                                        {myScheduleVisibleDays.length} из {myScheduleDayCards.length}
-                                                    </div>
-                                                </div>
-                                            )}
-                                            <div className={viewMode === 'month'
-                                                ? 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3'
-                                                : viewMode === 'week'
-                                                    ? 'grid grid-cols-1 lg:grid-cols-2 gap-3'
-                                                    : 'space-y-3'
-                                            }>
-                                            {myScheduleVisibleDays.map(dayCard => {
-                                                const dateObj = parseDateStr(dayCard.date);
-                                                const isToday = dayCard.date === todayDateStr(new Date());
-                                                const scheduleStatus = dayCard.scheduleStatus || null;
-                                                const scheduleStatusTone = scheduleStatus ? getScheduleStatusTone(scheduleStatus.statusCode) : null;
-                                                const dayWorkMin = (dayCard.shifts || []).reduce((acc, seg) => acc + (seg.durationMin || 0), 0);
-                                                const dayBreakMin = (dayCard.shifts || []).reduce((acc, seg) => acc + (seg.breaks || []).reduce((s, b) => s + Math.max(0, (Number(b?.end) || 0) - (Number(b?.start) || 0)), 0), 0);
-                                                const dayBreakCount = (dayCard.shifts || []).reduce((acc, seg) => acc + (Array.isArray(seg.breaks) ? seg.breaks.length : 0), 0);
-                                                const dayOfflineActivities = Array.isArray(dayCard.offlineActivities) ? dayCard.offlineActivities : [];
-                                                const dayOfflineMin = dayOfflineActivities.reduce((acc, seg) => {
-                                                    const startRaw = Number(seg?.startMin ?? seg?.start_min ?? seg?.start ?? 0);
-                                                    const endRaw = Number(seg?.endMin ?? seg?.end_min ?? seg?.end ?? 0);
-                                                    if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw)) return acc;
-                                                    if (endRaw <= startRaw) return acc;
-                                                    return acc + (endRaw - startRaw);
-                                                }, 0);
+                                        <div className="space-y-4 px-3 pb-2 sm:px-0" style={{ fontFamily: IOS_FONT }}>
+                                            {viewMode === 'day' && myCurrentDayCard && (() => {
+                                                const dayCard = myCurrentDayCard;
+                                                const isTodaySelected = dayCard.date === todayDateStr(new Date());
+                                                const nowDate = new Date();
+                                                const nowMinuteOfDay = nowDate.getHours() * 60 + nowDate.getMinutes();
+                                                const shifts = dayCard.shifts || [];
+                                                const hasShifts = shifts.length > 0;
+                                                const dayWorkMin = shifts.reduce((acc, seg) => acc + (seg.durationMin || 0), 0);
+                                                const dayBreakMin = shifts.reduce((acc, seg) => acc + (seg.breaks || []).reduce((s, b) => s + Math.max(0, (Number(b?.end) || 0) - (Number(b?.start) || 0)), 0), 0);
                                                 const dayNetMin = Math.max(0, dayWorkMin - dayBreakMin);
-                                                const weekdayLabel = formatWeekdayRu(dateObj, 'long');
-                                                const isExpanded = Boolean(expandedMyDayCards?.[dayCard.date]);
-                                                const shiftPreviewItems = (dayCard.shifts || []).map(seg => ({
-                                                    label: plannerShiftDisplayLabel(seg),
-                                                    isPractice: isPlannerOfficePracticeShift(seg)
-                                                }));
-                                                const hasShifts = shiftPreviewItems.length > 0;
-                                                const hasPracticeShift = shiftPreviewItems.some(item => item.isPractice);
-                                                const primaryShiftLabel = hasShifts
-                                                    ? shiftPreviewItems[0].label
-                                                    : (scheduleStatus ? (scheduleStatus.label || 'Статус') : (dayCard.isDayOff ? 'Выходной' : 'Смен нет'));
-                                                const extraShiftCount = hasShifts ? Math.max(0, shiftPreviewItems.length - 1) : 0;
-                                                const tailShiftPreviewItems = hasShifts ? shiftPreviewItems.slice(1) : [];
                                                 return (
-                                                    <div key={`my-shifts-${dayCard.date}`} className={`bg-white rounded-xl border overflow-hidden shadow-sm flex ${isToday ? 'border-blue-300 ring-2 ring-blue-100' : 'border-slate-200'}`}>
-                                                        <div className={`w-1 flex-shrink-0 ${hasShifts ? (hasPracticeShift ? 'bg-emerald-500' : 'bg-blue-500') : dayCard.isDayOff ? 'bg-sky-400' : scheduleStatus ? 'bg-amber-400' : 'bg-slate-200'}`}></div>
-                                                        <div className="flex-1 min-w-0">
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => setExpandedMyDayCards(prev => ({ ...prev, [dayCard.date]: !prev?.[dayCard.date] }))}
-                                                            className="w-full text-left px-4 py-3 hover:bg-slate-50/70 transition-colors"
-                                                        >
-                                                            <div className="flex items-start justify-between gap-3">
-                                                                <div className="min-w-0">
-                                                                    <div className="flex items-baseline gap-1.5 mb-1">
-                                                                        <div className={`font-bold text-slate-900 ${viewMode === 'day' ? 'text-base' : 'text-sm'}`}>
-                                                                            {formatDateRuDayMonth(dayCard.date)}
-                                                                        </div>
-                                                                        <div className="text-xs text-slate-400 capitalize">{weekdayLabel}</div>
-                                                                    </div>
-                                                                    <div className="flex flex-wrap items-center gap-1.5">
-                                                                        <span className={`inline-flex items-center px-2.5 py-0.5 rounded-md border font-semibold tabular-nums ${
-                                                                            viewMode === 'day' ? 'text-base' : 'text-sm'
-                                                                        } ${
-                                                                            hasShifts
-                                                                                ? (hasPracticeShift ? 'bg-emerald-50 border-emerald-200 text-emerald-900' : 'bg-blue-50 border-blue-200 text-blue-900')
-                                                                                : scheduleStatus
-                                                                                    ? (scheduleStatusTone?.pill || 'bg-amber-100 border-amber-200 text-amber-800')
-                                                                                : dayCard.isDayOff
-                                                                                    ? 'bg-sky-50 border-sky-200 text-sky-700'
-                                                                                    : 'bg-slate-50 border-slate-200 text-slate-500'
-                                                                        }`}>
-                                                                            {primaryShiftLabel}
-                                                                        </span>
-                                                                        {extraShiftCount > 0 && (
-                                                                            <span className="px-2 py-0.5 rounded-md bg-slate-100 text-xs text-slate-600 font-medium">
-                                                                                +{extraShiftCount}
-                                                                            </span>
-                                                                        )}
-                                                                    </div>
-                                                                </div>
-                                                                <div className="flex items-center gap-2 flex-shrink-0">
-                                                                    <div className="flex flex-wrap items-center justify-end gap-1">
-                                                                        {isToday && <span className="px-2 py-0.5 rounded-full bg-blue-600 text-white text-[11px] font-semibold">Сегодня</span>}
-                                                                        {scheduleStatus && <span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${scheduleStatusTone?.pill || 'bg-amber-100 text-amber-800 border-amber-200'}`}>{scheduleStatus.label || 'Статус'}</span>}
-                                                                        {dayCard.isDayOff && !scheduleStatus && <span className="px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 text-[11px] font-semibold">Выходной</span>}
-                                                                        {!dayCard.isDayOff && hasShifts && dayWorkMin > 0 && (
-                                                                            <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 text-[11px] font-medium tabular-nums">
-                                                                                {(dayWorkMin / 60).toFixed(1)} ч
-                                                                            </span>
-                                                                        )}
-                                                                        {dayOfflineActivities.length > 0 && (
-                                                                            <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-[11px] font-medium tabular-nums">
-                                                                                Офлайн {(dayOfflineMin / 60).toFixed(1)} ч
-                                                                            </span>
-                                                                        )}
-                                                                    </div>
-                                                                    <div className="w-7 h-7 rounded-lg border border-slate-200 bg-white flex items-center justify-center text-slate-400">
-                                                                        <FaIcon className={`fas ${isExpanded ? 'fa-chevron-up' : 'fa-chevron-down'} text-xs`}></FaIcon>
-                                                                    </div>
-                                                                </div>
-                                                            </div>
-
-                                                            {tailShiftPreviewItems.length > 0 && viewMode !== 'day' && (
-                                                                <div className="mt-2 flex flex-wrap gap-1.5">
-                                                                    {tailShiftPreviewItems.slice(0, isExpanded ? tailShiftPreviewItems.length : 2).map((item, i) => (
+                                                    <section>
+                                                        <div className="mb-1.5 flex items-end justify-between gap-2">
+                                                            <div className={`${IOS_GROUP_LABEL} capitalize`}>{formatWeekdayRu(dayCard.date, 'long')}, {formatDateRuDayMonth(dayCard.date)}</div>
+                                                            {isTodaySelected && <div className="px-1 text-[11px] font-semibold text-blue-600">Сегодня</div>}
+                                                        </div>
+                                                        <div className={`${IOS_CARD} overflow-hidden`}>
+                                                            <div className="px-4 pb-4 pt-3.5">
+                                                                <div className="relative mb-1 h-4">
+                                                                    {[0, 3, 6, 9, 12, 15, 18, 21, 24].map(h => (
                                                                         <span
-                                                                            key={`${dayCard.date}-preview-${i}`}
-                                                                            className={`px-2 py-0.5 rounded-md border text-xs tabular-nums ${item.isPractice ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-white border-slate-200 text-slate-700'}`}
+                                                                            key={h}
+                                                                            className="absolute top-0 text-[10px] leading-none tabular-nums text-slate-400"
+                                                                            style={{ left: `${(h / 24) * 100}%`, transform: h === 0 ? 'none' : h === 24 ? 'translateX(-100%)' : 'translateX(-50%)' }}
                                                                         >
-                                                                            {item.label}
+                                                                            {h === 24 ? '24' : pad(h)}
                                                                         </span>
                                                                     ))}
-                                                                    {!isExpanded && tailShiftPreviewItems.length > 2 && (
-                                                                        <span className="px-2 py-0.5 rounded-md bg-slate-100 text-xs text-slate-600">
-                                                                            +{tailShiftPreviewItems.length - 2} еще
-                                                                        </span>
-                                                                    )}
                                                                 </div>
-                                                            )}
-                                                        </button>
-
-                                                        {isExpanded && (
-                                                            <div className="px-4 pb-4 border-t border-slate-100 bg-slate-50/40">
-                                                                <div className="pt-3 space-y-2">
-                                                                    {scheduleStatus && (
-                                                                        <div className={`rounded-xl border px-3 py-2 ${scheduleStatusTone?.pill || 'bg-amber-100 text-amber-800 border-amber-200'}`}>
-                                                                            <div className="text-sm font-semibold">{scheduleStatus.label || 'Статус'}</div>
-                                                                            {(scheduleStatus.startDate || scheduleStatus.endDate) && (
-                                                                                <div className="text-xs mt-1">
-                                                                                    Период: {scheduleStatus.startDate || '—'}{scheduleStatus.endDate ? ` — ${scheduleStatus.endDate}` : ''}
-                                                                                </div>
-                                                                            )}
-                                                                            {scheduleStatus.comment && (
-                                                                                <div className="text-xs mt-1">Комментарий: {scheduleStatus.comment}</div>
-                                                                            )}
-                                                                        </div>
-                                                                    )}
-                                                                    {dayCard.shifts.map((seg, idx) => {
-                                                                        const isPracticeShift = isPlannerOfficePracticeShift(seg);
-                                                                        const isPhoneShift = isPlannerPhoneShift(seg);
-                                                                        const shiftLabel = plannerShiftDisplayLabel(seg);
-                                                                        const visual = plannerShiftVisualMeta(seg);
-                                                                        const segBreakCount = Array.isArray(seg.breaks) ? seg.breaks.length : 0;
-                                                                        const segBreakMin = (seg.breaks || []).reduce((acc, b) => acc + Math.max(0, (Number(b?.end) || 0) - (Number(b?.start) || 0)), 0);
+                                                                <div className="relative h-11 overflow-hidden rounded-xl bg-slate-100">
+                                                                    {[3, 6, 9, 12, 15, 18, 21].map(h => (
+                                                                        <div key={h} className="absolute inset-y-0 w-px bg-slate-200" style={{ left: `${(h / 24) * 100}%` }} />
+                                                                    ))}
+                                                                    {myTimelineParts.map((p, idx) => {
+                                                                        const srcSeg = myTimelineOperator?.shifts?.[p.sourceDate]?.[p.sourceIndex];
+                                                                        const visual = plannerShiftVisualMeta(srcSeg);
                                                                         return (
-                                                                            <div key={`${dayCard.date}-${idx}-${seg.start}-${seg.end}`} className="rounded-xl border border-slate-200 bg-white overflow-hidden">
-                                                                                <div className="px-3 py-2 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2">
-                                                                                    <div className="flex items-center gap-2 min-w-0">
-                                                                                        <span className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${visual.dotClass}`}></span>
-                                                                                        <span className="font-semibold text-slate-900 tabular-nums truncate">
-                                                                                            {shiftLabel}
-                                                                                        </span>
-                                                                                    </div>
-                                                                                    <div className="flex flex-wrap items-center gap-1.5 text-xs">
-                                                                                        {isPracticeShift && (
-                                                                                            <span className="px-2 py-0.5 rounded-md bg-emerald-50 border border-emerald-200 text-emerald-700">
-                                                                                                {PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL}
-                                                                                            </span>
-                                                                                        )}
-                                                                                        {isPhoneShift && (
-                                                                                            <span className="px-2 py-0.5 rounded-md bg-cyan-50 border border-cyan-200 text-indigo-700">
-                                                                                                {PLANNER_SHIFT_TYPE_PHONE_SHIFT_LABEL}
-                                                                                            </span>
-                                                                                        )}
-                                                                                        <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 tabular-nums">
-                                                                                            {(seg.durationMin / 60).toFixed(2)} ч
-                                                                                        </span>
-                                                                                        <span className="px-2 py-0.5 rounded-md bg-amber-50 border border-amber-200 text-amber-800">
-                                                                                            {segBreakCount} пер.
-                                                                                        </span>
-                                                                                        <span className="text-[11px] text-amber-700 tabular-nums">
-                                                                                            {formatMinutesOnly(segBreakMin)}
-                                                                                        </span>
-                                                                                        <button
-                                                                                            type="button"
-                                                                                            onClick={() => handleOpenSwapModalForOwnShift(dayCard, seg)}
-                                                                                            className="px-2 py-0.5 rounded-md border border-emerald-200 bg-emerald-50 text-emerald-700 text-[11px] font-medium hover:bg-emerald-100 transition-colors"
-                                                                                            title="Обменять эту смену"
-                                                                                        >
-                                                                                            Обменять
-                                                                                        </button>
-                                                                                    </div>
-                                                                                </div>
-                                                                                {viewMode !== 'day' && (
-                                                                                    <div className="px-3 py-2">
-                                                                                        <div className="text-[11px] font-medium text-slate-600 mb-1.5 flex items-center gap-2 uppercase tracking-wide">
-                                                                                            <FaIcon className="fas fa-mug-hot text-amber-600"></FaIcon>
-                                                                                            Перерывы
-                                                                                        </div>
-                                                                                        {segBreakCount === 0 ? (
-                                                                                            <div className="text-xs text-slate-400">Перерывов нет</div>
-                                                                                        ) : (
-                                                                                            <div className="space-y-1.5">
-                                                                                                {(seg.breaks || []).map((b, bi) => {
-                                                                                                    const breakDuration = Math.max(0, (Number(b?.end) || 0) - (Number(b?.start) || 0));
-                                                                                                    return (
-                                                                                                        <div key={`${dayCard.date}-${idx}-break-${bi}`} className="flex items-center justify-between gap-2 rounded-md border border-amber-200 bg-amber-50/70 px-2 py-1">
-                                                                                                            <div className="text-xs text-amber-900 tabular-nums">
-                                                                                                                {formatBreakMinuteWithDay(b.start)} — {formatBreakMinuteWithDay(b.end)}
-                                                                                                            </div>
-                                                                                                            <div className="text-[11px] text-amber-800 font-medium tabular-nums whitespace-nowrap">
-                                                                                                                {formatMinutesOnly(breakDuration)}
-                                                                                                            </div>
-                                                                                                        </div>
-                                                                                                    );
-                                                                                                })}
-                                                                                            </div>
-                                                                                        )}
-                                                                                    </div>
-                                                                                )}
+                                                                            <div
+                                                                                key={`my-timeline-${idx}`}
+                                                                                className="absolute inset-y-1 overflow-hidden rounded-lg"
+                                                                                style={{
+                                                                                    left: `${computeLeftPercent(p.start)}%`,
+                                                                                    width: `${((p.end - p.start) / minutesInDay) * 100}%`,
+                                                                                    background: visual.barGradient
+                                                                                }}
+                                                                                title={srcSeg ? shiftTimeTextRu(srcSeg) : `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`}
+                                                                            >
+                                                                                {(getBreakPartsForPart(myTimelineOperator, p, dayCard.date) || []).map((b, bi) => (
+                                                                                    <div
+                                                                                        key={`my-timeline-break-${idx}-${bi}`}
+                                                                                        className="absolute inset-y-0 bg-amber-300/95"
+                                                                                        style={{
+                                                                                            left: `${((b.start - p.start) / Math.max(1, p.end - p.start)) * 100}%`,
+                                                                                            width: `${((b.end - b.start) / Math.max(1, p.end - p.start)) * 100}%`
+                                                                                        }}
+                                                                                        title={getBreakTimelineTitle(b)}
+                                                                                    />
+                                                                                ))}
                                                                             </div>
                                                                         );
                                                                     })}
-                                                                    {dayOfflineActivities.length > 0 && (
-                                                                        <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-3">
-                                                                            <div className="text-[11px] font-medium text-emerald-700 mb-1.5 uppercase tracking-wide flex items-center gap-2">
-                                                                                <FaIcon className="fas fa-user-clock text-emerald-500"></FaIcon>
-                                                                                Офлайн-активность
-                                                                            </div>
-                                                                            <div className="space-y-1.5">
-                                                                                {dayOfflineActivities.map((seg, idx) => {
-                                                                                    const startRaw = Number(seg?.startMin ?? seg?.start_min ?? seg?.start ?? 0);
-                                                                                    const endRaw = Number(seg?.endMin ?? seg?.end_min ?? seg?.end ?? 0);
-                                                                                    if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw) || endRaw <= startRaw) return null;
-                                                                                    const commentText = String(seg?.comment || '').trim();
-                                                                                    return (
-                                                                                        <div key={`${dayCard.date}-offline-${seg?.id ?? idx}`} className="rounded-md border border-emerald-200 bg-white px-2 py-1.5">
-                                                                                            <div className="text-xs font-semibold text-emerald-900 tabular-nums">
-                                                                                                {minutesToTime(startRaw)} — {minutesToTime(endRaw)}
-                                                                                            </div>
-                                                                                            <div className="text-[11px] text-emerald-700 tabular-nums">
-                                                                                                {formatMinutesOnly(endRaw - startRaw)}
-                                                                                            </div>
-                                                                                            {commentText && (
-                                                                                                <div className="mt-0.5 text-[11px] text-slate-600">
-                                                                                                    {commentText}
-                                                                                                </div>
-                                                                                            )}
-                                                                                        </div>
-                                                                                    );
-                                                                                })}
-                                                                            </div>
+                                                                    {myCurrentDayTechnicalIssues.map(seg => (
+                                                                        <div
+                                                                            key={`my-tech-issue-${seg.id}`}
+                                                                            className="absolute bottom-0.5 z-20 h-1 rounded-full bg-violet-500"
+                                                                            style={{ left: `${computeLeftPercent(seg.startMin)}%`, width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%` }}
+                                                                            title={seg.title}
+                                                                        />
+                                                                    ))}
+                                                                    {myCurrentDayOfflineActivities.map(seg => (
+                                                                        <div
+                                                                            key={`my-offline-activity-${seg.id}`}
+                                                                            className="absolute bottom-2 z-20 h-1 rounded-full bg-emerald-500"
+                                                                            style={{ left: `${computeLeftPercent(seg.startMin)}%`, width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%` }}
+                                                                            title={seg.title}
+                                                                        />
+                                                                    ))}
+                                                                    {myTimelineParts.length === 0 && (
+                                                                        <div className={`absolute inset-0 z-10 flex items-center justify-center text-[13px] font-medium ${myCurrentDayScheduleStatus ? (myCurrentDayScheduleStatusTone?.text || 'text-slate-600') : dayCard.isDayOff ? 'text-sky-600' : 'text-slate-400'}`}>
+                                                                            {myCurrentDayScheduleStatus ? (myCurrentDayScheduleStatus.label || 'Статус') : dayCard.isDayOff ? 'Выходной' : 'Смен нет'}
                                                                         </div>
                                                                     )}
-                                                                    {dayCard.shifts.length > 0 && (
-                                                                        <div className="pt-1">
-                                                                            <div className="grid grid-cols-3 gap-2">
-                                                                                <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
-                                                                                    <div className="flex items-center gap-1 text-[11px] text-slate-500 uppercase tracking-wide mb-0.5">
-                                                                                        <FaIcon className="fas fa-briefcase text-slate-400"></FaIcon>
-                                                                                        Работа
-                                                                                    </div>
-                                                                                    <div className="text-sm font-semibold text-slate-900 tabular-nums">{(dayWorkMin / 60).toFixed(2)} ч</div>
-                                                                                </div>
-                                                                                <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2">
-                                                                                    <div className="flex items-center gap-1 text-[11px] text-emerald-700 uppercase tracking-wide mb-0.5">
-                                                                                        <FaIcon className="fas fa-clock text-emerald-500"></FaIcon>
-                                                                                        Чистое
-                                                                                    </div>
-                                                                                    <div className="text-sm font-semibold text-emerald-900 tabular-nums">{formatHoursMinutes(dayNetMin)}</div>
-                                                                                </div>
-                                                                                <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
-                                                                                    <div className="flex items-center gap-1 text-[11px] text-amber-700 uppercase tracking-wide mb-0.5">
-                                                                                        <FaIcon className="fas fa-mug-hot text-amber-500"></FaIcon>
-                                                                                        Перерывы
-                                                                                    </div>
-                                                                                    <div className="text-sm font-semibold text-amber-900 tabular-nums">{formatMinutesOnly(dayBreakMin)}</div>
-                                                                                    <div className="text-[11px] text-amber-700/80 mt-0.5">{dayBreakCount} шт.</div>
-                                                                                </div>
-                                                                            </div>
+                                                                    {isTodaySelected && (
+                                                                        <div className="pointer-events-none absolute inset-y-0 z-30 w-[2px] -translate-x-1/2 bg-rose-500" style={{ left: `${(nowMinuteOfDay / minutesInDay) * 100}%` }}>
+                                                                            <div className="absolute -left-[3px] top-0 h-2 w-2 rounded-full bg-rose-500"></div>
                                                                         </div>
                                                                     )}
                                                                 </div>
                                                             </div>
-                                                        )}
+                                                            <div className="divide-y divide-slate-100 border-t border-slate-100">
+                                                                {myCurrentDayScheduleStatus && (
+                                                                    <div className="px-4 py-3">
+                                                                        <div className={`text-[13.5px] font-semibold leading-tight ${myCurrentDayScheduleStatusTone?.text || 'text-amber-800'}`}>
+                                                                            {myCurrentDayScheduleStatus.label || 'Статус'}
+                                                                        </div>
+                                                                        {(myCurrentDayScheduleStatus.startDate || myCurrentDayScheduleStatus.endDate) && (
+                                                                            <div className="mt-0.5 text-[12px] tabular-nums text-slate-500">
+                                                                                {myCurrentDayScheduleStatus.startDate || '—'}{myCurrentDayScheduleStatus.endDate ? ` — ${myCurrentDayScheduleStatus.endDate}` : ''}
+                                                                            </div>
+                                                                        )}
+                                                                        {myCurrentDayScheduleStatus.comment && (
+                                                                            <div className="mt-0.5 text-[12px] leading-snug text-slate-500">{myCurrentDayScheduleStatus.comment}</div>
+                                                                        )}
+                                                                    </div>
+                                                                )}
+                                                                {!hasShifts && !myCurrentDayScheduleStatus && (
+                                                                    <div className="flex items-center gap-3 px-4 py-4">
+                                                                        <div className={`grid h-9 w-9 flex-shrink-0 place-items-center rounded-[10px] text-white shadow-sm ${dayCard.isDayOff ? 'bg-sky-500' : 'bg-slate-300'}`}>
+                                                                            <FaIcon className={`fas ${dayCard.isDayOff ? 'fa-umbrella-beach' : 'fa-calendar-xmark'} text-[14px]`}></FaIcon>
+                                                                        </div>
+                                                                        <div>
+                                                                            <div className="text-[14px] font-semibold leading-tight text-slate-900">{dayCard.isDayOff ? 'Выходной' : 'Смен нет'}</div>
+                                                                            <div className="mt-0.5 text-[12px] text-slate-500">{dayCard.isDayOff ? 'Отдыхайте — на этот день смен не назначено' : 'На этот день ничего не запланировано'}</div>
+                                                                        </div>
+                                                                    </div>
+                                                                )}
+                                                                {shifts.map((seg, idx) => {
+                                                                    const visual = plannerShiftVisualMeta(seg);
+                                                                    const segBreaks = Array.isArray(seg.breaks) ? seg.breaks : [];
+                                                                    return (
+                                                                        <div key={`${dayCard.date}-shift-${idx}`} className="px-4 py-3">
+                                                                            <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                                                                                <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
+                                                                                    <span className={`h-2.5 w-2.5 flex-shrink-0 rounded-full ${visual.dotClass}`}></span>
+                                                                                    <span className="text-[15px] font-semibold leading-tight tabular-nums text-slate-900">{shiftTimeTextRu(seg)}</span>
+                                                                                    <span className="text-[12px] text-slate-400">{plannerShiftTypeLabel(seg.shift_type ?? seg.shiftType)} · {formatHoursRu(seg.durationMin)}</span>
+                                                                                </div>
+                                                                                <button
+                                                                                    type="button"
+                                                                                    onClick={() => handleOpenSwapModalForOwnShift(dayCard, seg)}
+                                                                                    className="inline-flex items-center gap-1 text-[12px] font-medium text-blue-600 transition-colors hover:text-blue-700"
+                                                                                >
+                                                                                    <FaIcon className="fas fa-right-left text-[10px]"></FaIcon>
+                                                                                    Обменять
+                                                                                </button>
+                                                                            </div>
+                                                                            {segBreaks.length === 0 ? (
+                                                                                <div className="mt-1 pl-[18px] text-[12px] text-slate-400">Без перерывов</div>
+                                                                            ) : (
+                                                                                <div className="mt-1.5 space-y-1 pl-[18px]">
+                                                                                    {segBreaks.map((b, bi) => (
+                                                                                        <div key={`${dayCard.date}-shift-${idx}-break-${bi}`} className="flex items-center justify-between gap-2 text-[12px] tabular-nums">
+                                                                                            <span className="inline-flex items-center gap-1.5 text-slate-600">
+                                                                                                <FaIcon className="fas fa-mug-hot text-[11px] text-amber-500"></FaIcon>
+                                                                                                {formatBreakMinuteWithDay(b.start)} — {formatBreakMinuteWithDay(b.end)}
+                                                                                            </span>
+                                                                                            <span className="text-slate-400">{formatMinutesOnly(Math.max(0, (Number(b?.end) || 0) - (Number(b?.start) || 0)))}</span>
+                                                                                        </div>
+                                                                                    ))}
+                                                                                </div>
+                                                                            )}
+                                                                        </div>
+                                                                    );
+                                                                })}
+                                                                {myCurrentDayTechnicalIssues.length > 0 && (
+                                                                    <div className="px-4 py-3">
+                                                                        <div className="text-[11px] font-semibold uppercase tracking-wider text-violet-600">Тех. сбои</div>
+                                                                        <div className="mt-1.5 space-y-1">
+                                                                            {myCurrentDayTechnicalIssues.map(seg => (
+                                                                                <div key={`tech-row-${seg.id}`} className="text-[12px] leading-snug">
+                                                                                    <span className="inline-flex items-center gap-1.5 tabular-nums text-slate-600">
+                                                                                        <span className="h-2 w-2 flex-shrink-0 rounded-full bg-violet-500"></span>
+                                                                                        {minutesToTime(seg.startMin)} — {minutesToTime(seg.endMin)}
+                                                                                    </span>
+                                                                                    <span className="text-slate-500"> · {seg.reason}</span>
+                                                                                    {seg.comment && <span className="text-slate-400"> · {seg.comment}</span>}
+                                                                                </div>
+                                                                            ))}
+                                                                        </div>
+                                                                    </div>
+                                                                )}
+                                                                {myCurrentDayOfflineActivities.length > 0 && (
+                                                                    <div className="px-4 py-3">
+                                                                        <div className="text-[11px] font-semibold uppercase tracking-wider text-emerald-600">Офлайн-активность</div>
+                                                                        <div className="mt-1.5 space-y-1">
+                                                                            {myCurrentDayOfflineActivities.map(seg => (
+                                                                                <div key={`offline-row-${seg.id}`} className="text-[12px] leading-snug">
+                                                                                    <span className="inline-flex items-center gap-1.5 tabular-nums text-slate-600">
+                                                                                        <span className="h-2 w-2 flex-shrink-0 rounded-full bg-emerald-500"></span>
+                                                                                        {minutesToTime(seg.startMin)} — {minutesToTime(seg.endMin)}
+                                                                                    </span>
+                                                                                    <span className="text-slate-400"> · {formatMinutesOnly(seg.endMin - seg.startMin)}</span>
+                                                                                    {seg.comment && <span className="text-slate-500"> · {seg.comment}</span>}
+                                                                                </div>
+                                                                            ))}
+                                                                        </div>
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                            {hasShifts && (
+                                                                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-slate-100 bg-slate-50/70 px-4 py-2.5 text-[12px] text-slate-500">
+                                                                    <span>Работа <span className="font-semibold tabular-nums text-slate-700">{formatHoursRu(dayWorkMin)}</span></span>
+                                                                    <span>Чистое <span className="font-semibold tabular-nums text-slate-700">{formatHoursMinutes(dayNetMin)}</span></span>
+                                                                    <span>Перерывы <span className="font-semibold tabular-nums text-slate-700">{formatMinutesOnly(dayBreakMin)}</span></span>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    </section>
+                                                );
+                                            })()}
+                                            {myScheduleVisibleDays.length === 0 && (
+                                                <div className={`${IOS_CARD} px-4 py-8 text-center`}>
+                                                    <div className="text-[13px] font-medium text-slate-600">Нет дней для отображения</div>
+                                                    <div className="mt-0.5 text-[12px] text-slate-400">Выберите другой период</div>
+                                                </div>
+                                            )}
+                                            {viewMode !== 'day' && myScheduleVisibleDays.length > 0 && (
+                                                <div className={viewMode === 'month' ? 'grid grid-cols-1 items-start gap-4 xl:grid-cols-2' : 'space-y-4'}>
+                                                    {myScheduleWeekSections.map(section => {
+                                                        const sectionDays = section.days;
+                                                        const sectionWorkMin = sectionDays.reduce((acc, d) => acc + (d.shifts || []).reduce((s, seg) => s + (seg.durationMin || 0), 0), 0);
+                                                        const firstDate = sectionDays[0]?.date;
+                                                        const lastDate = sectionDays[sectionDays.length - 1]?.date;
+                                                        return (
+                                                            <section key={`my-week-${section.key}`}>
+                                                                <div className="mb-1.5 flex items-end justify-between gap-2">
+                                                                    <div className={IOS_GROUP_LABEL}>
+                                                                        {firstDate === lastDate ? formatDateRuDayMonth(firstDate) : `${formatDateRuDayMonth(firstDate)} — ${formatDateRuDayMonth(lastDate)}`}
+                                                                    </div>
+                                                                    {sectionWorkMin > 0 && (
+                                                                        <div className="px-1 text-[11px] tabular-nums text-slate-400">{formatHoursRu(sectionWorkMin)}</div>
+                                                                    )}
+                                                                </div>
+                                                                <div className={`${IOS_CARD} divide-y divide-slate-100 overflow-hidden`}>
+                                                                    {sectionDays.map(dayCard => renderMyDayRow(dayCard))}
+                                                                </div>
+                                                            </section>
+                                                        );
+                                                    })}
+                                                </div>
+                                            )}
+                                            {viewMode !== 'day' && myScheduleVisibleDays.length > 0 && (
+                                                <section>
+                                                    <div className="mb-1.5 flex items-end justify-between gap-2">
+                                                        <div className={IOS_GROUP_LABEL}>Сводка за период</div>
+                                                        <div className="px-1 text-[11px] tabular-nums text-slate-400">
+                                                            {visibleRange[0] ? formatDateRuDayMonth(visibleRange[0]) : '—'}
+                                                            {visibleRange.length > 1 ? ` — ${formatDateRuDayMonth(visibleRange[visibleRange.length - 1])}` : ''}
                                                         </div>
                                                     </div>
-                                                );
-                                            })}
-                                            </div>
-                                            <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4">
-                                                <div className="flex flex-wrap items-start justify-between gap-2 mb-3">
-                                                    <div>
-                                                        <div className="flex items-center gap-1.5">
-                                                            <FaIcon className="fas fa-chart-gantt text-blue-500 text-sm"></FaIcon>
-                                                            <span className="text-sm font-semibold text-slate-900">Сводка за период</span>
-                                                            <span className="text-xs text-slate-400">
-                                                                {visibleRange[0] ? formatDateRuShort(visibleRange[0]) : '—'}
-                                                                {visibleRange.length > 1 ? ` — ${formatDateRuShort(visibleRange[visibleRange.length - 1])}` : ''}
-                                                            </span>
-                                                        </div>
-                                                        <div className="mt-1.5 flex flex-wrap gap-1 text-xs">
-                                                            <span className="px-2 py-0.5 rounded-md bg-slate-50 border border-slate-200 text-slate-600">
-                                                                {myScheduleData?.name || user?.name || 'Оператор'}
-                                                            </span>
+                                                    <div className={`${IOS_CARD} overflow-hidden`}>
+                                                        <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 border-b border-slate-100 px-4 py-2.5 text-[12px] text-slate-500">
+                                                            <span className="font-medium text-slate-700">{myScheduleData?.name || user?.name || 'Оператор'}</span>
                                                             {(myScheduleData?.direction || user?.direction) && (
-                                                                <span className="px-2 py-0.5 rounded-md bg-slate-50 border border-slate-200 text-slate-600">
-                                                                    {myScheduleData?.direction || user?.direction}
-                                                                </span>
+                                                                <>
+                                                                    <span className="text-slate-300">·</span>
+                                                                    <span>{myScheduleData?.direction || user?.direction}</span>
+                                                                </>
                                                             )}
                                                             {(myScheduleData?.rate ?? null) !== null && (
-                                                                <span className="px-2 py-0.5 rounded-md bg-blue-50 border border-blue-200 text-blue-700 font-medium">
-                                                                    Ставка: {myScheduleData?.rate}
-                                                                </span>
+                                                                <>
+                                                                    <span className="text-slate-300">·</span>
+                                                                    <span>ставка {myScheduleData?.rate}</span>
+                                                                </>
                                                             )}
                                                         </div>
-                                                    </div>
-                                                    <div className="flex flex-wrap gap-1 text-xs">
-                                                        <span className="px-2 py-1 rounded-md bg-slate-50 border border-slate-200 text-slate-600">
-                                                            Дней: <span className="font-bold tabular-nums text-slate-900">{myScheduleVisibleDays.length}</span>
-                                                        </span>
-                                                        <span className="px-2 py-1 rounded-md bg-sky-50 border border-sky-200 text-sky-700">
-                                                            Выходных: <span className="font-bold tabular-nums">{myScheduleSummary.daysOffCount}</span>
-                                                        </span>
-                                                    </div>
-                                                </div>
-                                                <div className="grid grid-cols-2 lg:grid-cols-5 gap-2">
-                                                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
-                                                        <div className="flex items-center gap-1 text-[11px] uppercase tracking-wide text-slate-500 mb-1">
-                                                            <FaIcon className="fas fa-calendar-check text-slate-400"></FaIcon>
-                                                            Смен
+                                                        <div className="grid grid-cols-3 gap-y-3 px-4 py-3.5 sm:grid-cols-6">
+                                                            {[
+                                                                { label: 'Смен', value: myScheduleSummary.shiftsCount },
+                                                                { label: 'Рабочих дней', value: myScheduleSummary.daysWithShifts },
+                                                                { label: 'Выходных', value: myScheduleSummary.daysOffCount },
+                                                                { label: 'Часов', value: formatHoursRu(myScheduleSummary.totalWorkMin) },
+                                                                { label: 'Чистое (план)', value: formatHoursMinutes(myScheduleSummary.totalNetWorkPlanMin) },
+                                                                { label: 'Перерывы', value: formatMinutesOnly(myScheduleSummary.totalBreakMin) }
+                                                            ].map(stat => (
+                                                                <div key={stat.label} className="min-w-0 pr-2">
+                                                                    <div className="truncate text-[16px] font-semibold leading-tight tabular-nums text-slate-900">{stat.value}</div>
+                                                                    <div className="mt-0.5 truncate text-[11px] text-slate-400">{stat.label}</div>
+                                                                </div>
+                                                            ))}
                                                         </div>
-                                                        <div className="text-xl font-bold text-slate-900 tabular-nums leading-none">{myScheduleSummary.shiftsCount}</div>
                                                     </div>
-                                                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
-                                                        <div className="flex items-center gap-1 text-[11px] uppercase tracking-wide text-slate-500 mb-1">
-                                                            <FaIcon className="fas fa-briefcase text-slate-400"></FaIcon>
-                                                            Рабочих дней
-                                                        </div>
-                                                        <div className="text-xl font-bold text-slate-900 tabular-nums leading-none">{myScheduleSummary.daysWithShifts}</div>
-                                                    </div>
-                                                    <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2.5">
-                                                        <div className="flex items-center gap-1 text-[11px] uppercase tracking-wide text-blue-600 mb-1">
-                                                            <FaIcon className="fas fa-clock text-blue-400"></FaIcon>
-                                                            Часов
-                                                        </div>
-                                                        <div className="text-xl font-bold text-blue-900 tabular-nums leading-none">{(myScheduleSummary.totalWorkMin / 60).toFixed(1)}</div>
-                                                    </div>
-                                                    <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2.5">
-                                                        <div className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-emerald-700 mb-1 leading-tight">
-                                                            <FaIcon className="fas fa-user-clock text-emerald-500"></FaIcon>
-                                                            Чистое время работы план
-                                                        </div>
-                                                        <div className="text-xl font-bold text-emerald-900 tabular-nums leading-none">{formatHoursMinutes(myScheduleSummary.totalNetWorkPlanMin)}</div>
-                                                        <div className="mt-1 text-[11px] text-emerald-700/80">без перерыва</div>
-                                                    </div>
-                                                    <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5">
-                                                        <div className="flex items-center gap-1 text-[11px] uppercase tracking-wide text-amber-700 mb-1">
-                                                            <FaIcon className="fas fa-mug-hot text-amber-500"></FaIcon>
-                                                            Перерывы
-                                                        </div>
-                                                        <div className="text-xl font-bold text-amber-900 tabular-nums leading-none">{formatMinutesOnly(myScheduleSummary.totalBreakMin)}</div>
-                                                    </div>
-                                                </div>
-                                            </div>
+                                                </section>
+                                            )}
                                         </div>
                                     )}
                                         </>
