@@ -17,6 +17,7 @@ import {
   History,
   Info,
   ListChecks,
+  Lock,
   Minus,
   MousePointerClick,
   PauseCircle,
@@ -38,7 +39,7 @@ import {
   X
 } from 'lucide-react';
 import { isAdminLikeRole, isSupervisorRole, normalizeRole } from '../../utils/roles';
-import { IosModal, IosBadge, iosCard } from '../ui/ios';
+import { IosModal, IosBadge, IosToggle, iosCard } from '../ui/ios';
 
 // Стабильный ключ недавнего добора: (lot_id | plan_id | source_schedule_shift_id).
 const getPostClaimKey = (claim) => {
@@ -3330,10 +3331,12 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     published_to_work_schedules_by_name: '',
     topup_started_at: null,
     topup_started_by_name: '',
+    rate_lock_enabled: false,
     post_auction_active: false,
     has_period_history_access: false
   });
   const [isTogglingTopup, setIsTogglingTopup] = useState(false);
+  const [isTogglingRateLock, setIsTogglingRateLock] = useState(false);
   const [lots, setLots] = useState([]);
   const [myDayOffs, setMyDayOffs] = useState([]);
   const [myBlockedDates, setMyBlockedDates] = useState([]);
@@ -3565,6 +3568,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       published_to_work_schedules_by_name: safe.published_to_work_schedules_by_name || '',
       topup_started_at: safe.topup_started_at || null,
       topup_started_by_name: safe.topup_started_by_name || '',
+      rate_lock_enabled: Boolean(safe.rate_lock_enabled),
       has_period_history_access: Boolean(safe.has_period_history_access),
       post_auction_active: Boolean(safe.post_auction_active)
     });
@@ -4546,6 +4550,14 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         }
         return;
       }
+      if (settings.rate_lock_enabled) {
+        const lotRate = getAuctionLotDurationRate(lot);
+        const myRateBucket = userRate <= 0.5 ? 0.5 : (userRate <= 0.75 ? 0.75 : 1);
+        if (Math.abs(lotRate - myRateBucket) > 0.001) {
+          reasons.set(lotId, `Смена ставки ${formatRate(lotRate)} — вам доступны только смены ставки ${formatRate(myRateBucket)}`);
+          return;
+        }
+      }
       if (isTopupActive) {
         // Top-up mode allows extra shifts on the same date as long as they don't
         // overlap with an already-claimed shift. Skip norm checks.
@@ -4583,7 +4595,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       }
     });
     return reasons;
-  }, [canMonitor, isTester, isTopupActive, isViewingActivePeriod, monitoredLots, myAuctionWorkload, myBlockedDateMap, myClaimedDateSet, myClaimedLotsByDate, postAuctionClaimOptionsByLotId, selectedViewPostAuctionActive, settings.has_period_history_access]);
+  }, [canMonitor, isTester, isTopupActive, isViewingActivePeriod, monitoredLots, myAuctionWorkload, myBlockedDateMap, myClaimedDateSet, myClaimedLotsByDate, postAuctionClaimOptionsByLotId, selectedViewPostAuctionActive, settings.has_period_history_access, settings.rate_lock_enabled, userRate]);
 
   useEffect(() => {
     if (!canUseAuction || !lotDates.length || typeof window === 'undefined') return undefined;
@@ -4861,6 +4873,27 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       setIsTogglingTopup(false);
     }
   }, [apiRoot, applySnapshot, buildHeaders, canManage, isTogglingTopup, notify, settings.topup_started_at]);
+
+  const handleToggleRateLock = useCallback(async () => {
+    if (!canManage || !apiRoot || isTogglingRateLock) return;
+    const enable = !settings.rate_lock_enabled;
+    setIsTogglingRateLock(true);
+    try {
+      const response = await axios({
+        method: enable ? 'POST' : 'DELETE',
+        url: `${apiRoot}/api/shift_auction/test_rate_lock`,
+        headers: buildHeaders({ 'Content-Type': 'application/json' })
+      });
+      applySnapshot(response?.data?.snapshot || {});
+      notify(enable
+        ? 'Теперь операторы могут брать только смены своей ставки'
+        : 'Ограничение по ставке снято — доступны смены любой ставки');
+    } catch (error) {
+      notify(error?.response?.data?.error || 'Не удалось изменить ограничение по ставке', 'error');
+    } finally {
+      setIsTogglingRateLock(false);
+    }
+  }, [apiRoot, applySnapshot, buildHeaders, canManage, isTogglingRateLock, notify, settings.rate_lock_enabled]);
 
   const handlePublishAuction = useCallback(async () => {
     if (!canManage || !apiRoot || isPublishingAuction) return;
@@ -5424,12 +5457,21 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                     Режим добора
                   </span>
                 ) : null}
+                {settings.rate_lock_enabled ? (
+                  <span className="ml-2 inline-flex items-center gap-1 rounded-full border border-sky-300 bg-sky-100 px-2 py-0.5 align-middle text-[11px] font-semibold text-sky-800 sm:text-xs">
+                    <Lock size={11} />
+                    Только своя ставка
+                  </span>
+                ) : null}
               </h1>
               <p className="mt-1 max-w-3xl text-xs leading-5 text-slate-600 sm:text-sm sm:leading-6">
                 {isTopupActive
                   ? <>Идёт <b className="text-violet-800">добор смен</b>{settings.topup_started_at ? <> с {formatDateTimeLabel(settings.topup_started_at)}</> : null}{settings.topup_started_by_name ? <> · включил {settings.topup_started_by_name}</> : null}. Можно брать дополнительные смены сверх нормы, если они не пересекаются по времени с уже выбранными.</>
                   : 'Тестовый realtime-раздел для проверки будущего выбора утвержденных смен по направлению.'
                 }
+                {settings.rate_lock_enabled && !canMonitor
+                  ? <> Сейчас можно брать <b className="text-sky-800">только смены своей ставки ({formatRate(userRate <= 0.5 ? 0.5 : (userRate <= 0.75 ? 0.75 : 1))})</b>.</>
+                  : null}
               </p>
             </div>
           </div>
@@ -6062,64 +6104,48 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                     Выберите неделю, задайте окно аукциона и управляйте составом участников.
                   </p>
                 </div>
-                <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
-                  {runtimeStatus === 'open' ? (
-                    <button
-                      type="button"
-                      onClick={() => handleAuctionControl('pause')}
-                      disabled={isControllingAuction}
-                      className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 text-xs font-semibold text-amber-800 transition hover:bg-amber-100 disabled:cursor-wait disabled:opacity-60 sm:h-10 sm:px-4 sm:text-sm"
-                    >
-                      <PauseCircle size={16} />
-                      Приостановить
-                    </button>
-                  ) : null}
-                  {runtimeStatus === 'paused' ? (
-                    <button
-                      type="button"
-                      onClick={() => handleAuctionControl('resume')}
-                      disabled={isControllingAuction}
-                      className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 text-xs font-semibold text-emerald-800 transition hover:bg-emerald-100 disabled:cursor-wait disabled:opacity-60 sm:h-10 sm:px-4 sm:text-sm"
-                    >
-                      <PlayCircle size={16} />
-                      Возобновить
-                    </button>
-                  ) : null}
-                  {runtimeStatus === 'open' ? (
-                    <button
-                      type="button"
-                      onClick={handleToggleTopup}
-                      disabled={isTogglingTopup}
-                      title={settings.topup_started_at
-                        ? `Режим добора включён ${formatDateTimeLabel(settings.topup_started_at)}${settings.topup_started_by_name ? ` (${settings.topup_started_by_name})` : ''}`
-                        : 'Перевести аукцион в режим добора смен — операторы смогут забирать смены сверх нормы, если они не пересекаются по времени с уже взятыми.'}
-                      className={`inline-flex h-9 items-center justify-center gap-2 rounded-lg border px-3 text-xs font-semibold transition disabled:cursor-wait disabled:opacity-60 sm:h-10 sm:px-4 sm:text-sm ${
-                        settings.topup_started_at
-                          ? 'border-violet-300 bg-violet-100 text-violet-900 hover:bg-violet-200'
-                          : 'border-violet-200 bg-violet-50 text-violet-800 hover:bg-violet-100'
-                      }`}
-                    >
-                      <Plus size={16} />
-                      {settings.topup_started_at ? 'Отключить добор' : 'Включить добор'}
-                    </button>
-                  ) : null}
+                <div className="flex flex-wrap items-center gap-2">
                   {['scheduled', 'open', 'paused'].includes(runtimeStatus) ? (
-                    <button
-                      type="button"
-                      onClick={() => handleAuctionControl('finish')}
-                      disabled={isControllingAuction}
-                      className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 text-xs font-semibold text-rose-800 transition hover:bg-rose-100 disabled:cursor-wait disabled:opacity-60 sm:h-10 sm:px-4 sm:text-sm"
-                    >
-                      <Square size={15} />
-                      Завершить
-                    </button>
+                    <div className="inline-flex items-center gap-1 rounded-2xl bg-slate-100 p-1">
+                      {runtimeStatus === 'open' ? (
+                        <button
+                          type="button"
+                          onClick={() => handleAuctionControl('pause')}
+                          disabled={isControllingAuction}
+                          className="inline-flex h-8 items-center justify-center gap-1.5 rounded-xl bg-white px-3 text-xs font-semibold text-amber-700 shadow-sm ring-1 ring-slate-200/70 transition-all hover:text-amber-800 active:scale-[0.97] disabled:cursor-wait disabled:opacity-50 sm:h-9 sm:px-3.5 sm:text-sm"
+                        >
+                          <PauseCircle size={16} />
+                          Пауза
+                        </button>
+                      ) : null}
+                      {runtimeStatus === 'paused' ? (
+                        <button
+                          type="button"
+                          onClick={() => handleAuctionControl('resume')}
+                          disabled={isControllingAuction}
+                          className="inline-flex h-8 items-center justify-center gap-1.5 rounded-xl bg-white px-3 text-xs font-semibold text-emerald-700 shadow-sm ring-1 ring-slate-200/70 transition-all hover:text-emerald-800 active:scale-[0.97] disabled:cursor-wait disabled:opacity-50 sm:h-9 sm:px-3.5 sm:text-sm"
+                        >
+                          <PlayCircle size={16} />
+                          Возобновить
+                        </button>
+                      ) : null}
+                      <button
+                        type="button"
+                        onClick={() => handleAuctionControl('finish')}
+                        disabled={isControllingAuction}
+                        className="inline-flex h-8 items-center justify-center gap-1.5 rounded-xl px-3 text-xs font-semibold text-rose-600 transition-all hover:bg-rose-50 active:scale-[0.97] disabled:cursor-wait disabled:opacity-50 sm:h-9 sm:px-3.5 sm:text-sm"
+                      >
+                        <Square size={14} />
+                        Завершить
+                      </button>
+                    </div>
                   ) : null}
                   <button
                     type="button"
                     onClick={handleExportAuctionReport}
                     disabled={isExportingAuctionReport || !isViewingActivePeriod || !lots.length}
                     title={!isViewingActivePeriod ? 'Отчет доступен только для активной недели аукциона' : lots.length ? 'Выгрузить Excel-отчет по выбранному периоду аукциона' : 'Нет смен для выгрузки'}
-                    className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 text-xs font-semibold text-blue-800 transition hover:bg-blue-100 disabled:cursor-wait disabled:opacity-60 sm:h-10 sm:px-4 sm:text-sm"
+                    className="inline-flex h-9 items-center justify-center gap-2 rounded-xl bg-slate-100 px-3.5 text-xs font-semibold text-slate-600 transition-all hover:bg-slate-200 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 sm:h-10 sm:px-4 sm:text-sm"
                   >
                     <Download size={16} />
                     {isExportingAuctionReport ? 'Выгрузка...' : 'Отчет Excel'}
@@ -6129,7 +6155,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                       type="button"
                       onClick={handlePublishAuction}
                       disabled={isPublishingAuction}
-                      className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 text-xs font-semibold text-emerald-800 transition hover:bg-emerald-100 disabled:cursor-wait disabled:opacity-60 sm:h-10 sm:px-4 sm:text-sm"
+                      className="inline-flex h-9 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-3.5 text-xs font-semibold text-white shadow-sm transition-all hover:bg-emerald-700 active:scale-[0.98] disabled:cursor-wait disabled:opacity-50 sm:h-10 sm:px-4 sm:text-sm"
                     >
                       <Save size={16} />
                       {isPublishingAuction ? 'Сохранение...' : 'Сохранить в графики'}
@@ -6139,7 +6165,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                     type="button"
                     onClick={handleRestartAuction}
                     disabled={isRestarting || !selectedDraftPeriod}
-                    className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60 sm:h-10 sm:px-4 sm:text-sm"
+                    className="inline-flex h-9 items-center justify-center gap-2 rounded-xl bg-slate-100 px-3.5 text-xs font-semibold text-slate-600 transition-all hover:bg-slate-200 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 sm:h-10 sm:px-4 sm:text-sm"
                   >
                     <RotateCcw size={16} />
                     {isRestarting ? 'Перезапуск...' : 'Начать заново'}
@@ -6148,7 +6174,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                     type="button"
                     onClick={handleSave}
                     disabled={isSaving}
-                    className="inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-blue-700 px-3 text-xs font-semibold text-white transition hover:bg-blue-800 disabled:cursor-wait disabled:bg-blue-400 sm:h-10 sm:px-4 sm:text-sm"
+                    className="inline-flex h-9 items-center justify-center gap-2 rounded-xl bg-blue-600 px-3.5 text-xs font-semibold text-white shadow-sm transition-all hover:bg-blue-700 active:scale-[0.98] disabled:cursor-wait disabled:opacity-50 sm:h-10 sm:px-4 sm:text-sm"
                   >
                     <Save size={16} />
                     {isSaving ? 'Сохранение...' : 'Сохранить'}
@@ -6165,18 +6191,62 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
             <div className="grid gap-4 p-3 sm:p-5 xl:grid-cols-[minmax(0,1fr)_360px]">
               <div className="space-y-4">
-                <label className="flex items-center justify-between gap-4 rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 sm:px-4">
-                  <span>
-                    <span className="block text-sm font-semibold text-slate-900">Включить тестовый режим</span>
-                    <span className="block text-xs text-slate-500 sm:text-sm">Выбранные операторы увидят realtime-полигон аукциона.</span>
-                  </span>
-                  <input
-                    type="checkbox"
-                    checked={draftEnabled}
-                    onChange={(event) => setDraftEnabled(event.target.checked)}
-                    className="h-5 w-5 rounded border-slate-300 text-blue-700 focus:ring-blue-600"
-                  />
-                </label>
+                <div className={`${iosCard} divide-y divide-slate-100`}>
+                  <div className="flex items-center justify-between gap-4 px-3 py-3 sm:px-4">
+                    <div className="flex min-w-0 items-center gap-3">
+                      <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-blue-50 text-blue-600">
+                        <Gavel size={17} />
+                      </span>
+                      <span className="min-w-0">
+                        <span className="block text-sm font-semibold text-slate-900">Аукцион включён</span>
+                        <span className="block text-xs text-slate-500">
+                          Выбранные операторы видят аукцион. Применяется после «Сохранить».
+                        </span>
+                      </span>
+                    </div>
+                    <IosToggle checked={draftEnabled} onChange={(next) => setDraftEnabled(next)} />
+                  </div>
+                  <div className="flex items-center justify-between gap-4 px-3 py-3 sm:px-4">
+                    <div className="flex min-w-0 items-center gap-3">
+                      <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-violet-50 text-violet-600">
+                        <Plus size={17} />
+                      </span>
+                      <span className="min-w-0">
+                        <span className="block text-sm font-semibold text-slate-900">Режим добора</span>
+                        <span className="block text-xs text-slate-500">
+                          {settings.topup_started_at
+                            ? <>Включён {formatDateTimeLabel(settings.topup_started_at)}{settings.topup_started_by_name ? ` · ${settings.topup_started_by_name}` : ''}. Смены сверх нормы без пересечений по времени.</>
+                            : runtimeStatus === 'open'
+                              ? 'Разрешить брать смены сверх нормы, если они не пересекаются по времени.'
+                              : 'Доступен только при открытом аукционе.'}
+                        </span>
+                      </span>
+                    </div>
+                    <IosToggle
+                      checked={Boolean(settings.topup_started_at)}
+                      onChange={handleToggleTopup}
+                      disabled={isTogglingTopup || (runtimeStatus !== 'open' && !settings.topup_started_at)}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between gap-4 px-3 py-3 sm:px-4">
+                    <div className="flex min-w-0 items-center gap-3">
+                      <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-sky-50 text-sky-600">
+                        <Lock size={16} />
+                      </span>
+                      <span className="min-w-0">
+                        <span className="block text-sm font-semibold text-slate-900">Только своя ставка</span>
+                        <span className="block text-xs text-slate-500">
+                          Оператор может брать смены только своей ставки (1 / 0.75 / 0.5). Применяется сразу.
+                        </span>
+                      </span>
+                    </div>
+                    <IosToggle
+                      checked={Boolean(settings.rate_lock_enabled)}
+                      onChange={handleToggleRateLock}
+                      disabled={isTogglingRateLock}
+                    />
+                  </div>
+                </div>
 
                 <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 sm:p-4">
                   <div className="flex items-start justify-between gap-3">

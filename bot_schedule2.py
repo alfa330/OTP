@@ -4484,6 +4484,7 @@ def _shift_auction_test_error_response(error):
         "LOT_NOT_CLAIMED": ("Эта смена сейчас не закреплена", 409),
         "LOT_NOT_OWNED": ("Эта смена закреплена за другим оператором", 409),
         "RATE_TOO_LOW": ("Смена недоступна по вашей ставке", 403),
+        "SHIFT_RATE_MISMATCH": ("Доступны только смены вашей ставки", 403),
         "SHIFT_NORM_EXCEEDED": ("Эта смена превысит вашу норму часов на период", 409),
         "SHIFT_AUCTION_STATUS_PERIOD_BLOCKED": ("Этот день закрыт статусным периодом оператора", 409),
         "DAY_OFF_SELECTED": ("На этот день выбран выходной", 409),
@@ -4856,6 +4857,31 @@ def api_shift_auction_test_topup():
         return _shift_auction_test_error_response(error)
     except Exception as error:
         logging.error(f"Shift auction top-up API error: {error}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/shift_auction/test_rate_lock', methods=['POST', 'DELETE', 'OPTIONS'])
+@require_api_key
+def api_shift_auction_test_rate_lock():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not _is_shift_auction_manager(requester_id, requester[3]):
+            return jsonify({"error": "Only admins and СЗоВ supervisors can toggle shift auction rate lock"}), 403
+        result = db.set_shift_auction_test_rate_lock(
+            enabled=(request.method == 'POST'),
+            updated_by=requester_id,
+        )
+        return jsonify({"status": "success", **result}), 200
+    except ValueError as error:
+        return _shift_auction_test_error_response(error)
+    except Exception as error:
+        logging.error(f"Shift auction rate lock API error: {error}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 
