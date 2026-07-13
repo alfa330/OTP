@@ -22738,55 +22738,46 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     <div className="space-y-2.5">
                                                                         {pageItems.map(req => {
                                                                             const statusMeta = getSwapStatusMeta(req?.status);
-                                                                            const periodLabel = formatSwapIntervalLabel(req);
                                                                             const isRespondingThis = Number(swapRespondingId) === Number(req?.id);
                                                                             const requestMode = String(req?.exchangeMode || '').toLowerCase();
                                                                             const isExchangeRequest = requestMode.includes('exchange') || (Array.isArray(req?.targetSegments) && req.targetSegments.length > 0);
                                                                             const counterpartName = isIncoming ? (req?.requester?.name || 'Оператор') : (req?.target?.name || 'Оператор');
-                                                                            const givenLabel = formatSwapSegmentsSummaryLabel(req?.swapDate || req?.startDate || '', req?.requestedSegments);
+                                                                            const swapDateStr = req?.swapDate || req?.startDate || '';
+                                                                            const periodLabel = (swapDateStr && req?.startTime && req?.endTime)
+                                                                                ? `${formatDateRuDayMonth(swapDateStr)} · ${req.startTime} — ${req.endTime}`
+                                                                                : formatSwapIntervalLabel(req);
                                                                             const givenHours = formatHoursRu(req?.summary?.totalMinutes ?? 0);
-                                                                            const counterLabel = formatSwapSegmentsSummaryLabel(req?.swapDate || req?.startDate || '', req?.targetSegments);
+                                                                            const counterLabel = formatSwapSegmentsSummaryLabel(swapDateStr, req?.targetSegments);
                                                                             const counterHours = formatHoursRu(req?.exchangeSummary?.totalMinutes ?? 0);
+                                                                            const directionText = isExchangeRequest
+                                                                                ? (isIncoming
+                                                                                    ? `Взамен вы отдаёте ${counterLabel} · ${counterHours}`
+                                                                                    : `Взамен получаете ${counterLabel} · ${counterHours}`)
+                                                                                : (isIncoming ? 'Вам передают эту смену' : 'Вы передаёте эту смену');
                                                                             return (
                                                                                 <div key={`swap-${panel.key}-${req?.id}`} className="overflow-hidden rounded-xl bg-white ring-1 ring-slate-200/70 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
-                                                                                    <div className="flex items-center gap-2.5 px-3.5 pt-3">
+                                                                                    <div className="flex items-start gap-2.5 px-3.5 py-3">
                                                                                         <div className={`grid h-8 w-8 flex-shrink-0 place-items-center rounded-[10px] text-white shadow-sm ${isExchangeRequest ? 'bg-emerald-500' : 'bg-blue-600'}`}>
                                                                                             <FaIcon className={`fas ${isExchangeRequest ? 'fa-right-left' : 'fa-user-clock'} text-[12px]`}></FaIcon>
                                                                                         </div>
                                                                                         <div className="min-w-0 flex-1">
-                                                                                            <div className="truncate text-[14px] font-semibold leading-tight text-slate-900">{counterpartName}</div>
-                                                                                            <div className="text-[11.5px] text-slate-400">{isExchangeRequest ? 'Обмен сменами' : 'Замена'}</div>
-                                                                                        </div>
-                                                                                        <span className={`flex-shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-semibold ${statusMeta.className}`}>
-                                                                                            {statusMeta.label}
-                                                                                        </span>
-                                                                                    </div>
-                                                                                    <div className="px-3.5 pt-2 text-[14px] font-semibold leading-snug tabular-nums text-slate-900">{periodLabel}</div>
-                                                                                    <div className="space-y-1 px-3.5 pb-3 pt-1.5 text-[12px]">
-                                                                                        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
-                                                                                            <span className="text-slate-500">{isIncoming ? 'Вам передают' : 'Вы отдаёте'}</span>
-                                                                                            <span className="text-right font-medium tabular-nums text-slate-800">{givenLabel} · {givenHours}</span>
-                                                                                        </div>
-                                                                                        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
-                                                                                            {isExchangeRequest ? (
-                                                                                                <>
-                                                                                                    <span className="text-slate-500">{isIncoming ? 'Вы отдаёте' : 'Получаете'}</span>
-                                                                                                    <span className="text-right font-medium tabular-nums text-slate-800">{counterLabel} · {counterHours}</span>
-                                                                                                </>
-                                                                                            ) : (
-                                                                                                <span className="text-slate-400">Встречная смена не требуется</span>
+                                                                                            <div className="flex items-center justify-between gap-2">
+                                                                                                <span className="truncate text-[13px] font-medium text-slate-500">{counterpartName}</span>
+                                                                                                <span className={`flex-shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-semibold ${statusMeta.className}`}>
+                                                                                                    {statusMeta.label}
+                                                                                                </span>
+                                                                                            </div>
+                                                                                            <div className="mt-1 text-[15px] font-semibold leading-snug tabular-nums text-slate-900">
+                                                                                                {periodLabel}
+                                                                                                <span className="ml-1.5 text-[12px] font-medium text-slate-400">{givenHours}</span>
+                                                                                            </div>
+                                                                                            <div className="mt-0.5 text-[12px] leading-snug text-slate-500 tabular-nums">{directionText}</div>
+                                                                                            {req?.requestComment && (
+                                                                                                <div className="mt-1 text-[12px] leading-snug text-slate-400">{req.requestComment}</div>
                                                                                             )}
-                                                                                        </div>
-                                                                                        {req?.requestComment && (
-                                                                                            <div className="pt-0.5 leading-snug text-slate-500">
-                                                                                                <span className="text-slate-400">Комментарий:</span> {req.requestComment}
-                                                                                            </div>
-                                                                                        )}
-                                                                                        {req?.responseComment && req?.status !== 'pending' && (
-                                                                                            <div className="pt-0.5 leading-snug text-slate-500">
-                                                                                                <span className="text-slate-400">Ответ:</span> {req.responseComment}
-                                                                                            </div>
-                                                                                        )}
+                                                                                            {req?.responseComment && req?.status !== 'pending' && (
+                                                                                                <div className="mt-1 text-[12px] leading-snug text-slate-400">Ответ: {req.responseComment}</div>
+                                                                                            )}
                                                                                         {req?.status === 'pending' && (
                                                                                             <div className="flex items-center gap-2 pt-2">
                                                                                                 {isIncoming ? (
@@ -22832,6 +22823,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                                 )}
                                                                                             </div>
                                                                                         )}
+                                                                                        </div>
                                                                                     </div>
                                                                                 </div>
                                                                             );
