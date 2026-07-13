@@ -21146,128 +21146,138 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const hasShifts = shifts.length > 0;
                     const dayWorkMin = shifts.reduce((acc, seg) => acc + (seg.durationMin || 0), 0);
                     const dayBreakMin = shifts.reduce((acc, seg) => acc + (seg.breaks || []).reduce((s, b) => s + Math.max(0, (Number(b?.end) || 0) - (Number(b?.start) || 0)), 0), 0);
-                    const dayBreakCount = shifts.reduce((acc, seg) => acc + (Array.isArray(seg.breaks) ? seg.breaks.length : 0), 0);
                     const dayNetMin = Math.max(0, dayWorkMin - dayBreakMin);
                     const dayOfflineActivities = Array.isArray(dayCard.offlineActivities) ? dayCard.offlineActivities : [];
-                    const isExpanded = Boolean(expandedMyDayCards?.[dayCard.date]);
                     const specialShift = shifts.find(seg => isPlannerOfficePracticeShift(seg) || isPlannerPhoneShift(seg)) || null;
-                    const secondaryParts = [];
-                    if (specialShift) secondaryParts.push(plannerShiftTypeLabel(specialShift.shift_type ?? specialShift.shiftType));
-                    if (hasShifts) secondaryParts.push(dayBreakCount > 0 ? `${dayBreakCount} ${pluralRu(dayBreakCount, 'перерыв', 'перерыва', 'перерывов')} · ${formatMinutesOnly(dayBreakMin)}` : 'без перерывов');
+                    const hasExpandableContent = hasShifts || Boolean(scheduleStatus) || dayOfflineActivities.length > 0;
+                    const isExpanded = hasExpandableContent && Boolean(expandedMyDayCards?.[dayCard.date]);
+                    const rowInner = (
+                        <>
+                            <div className={`flex h-10 w-10 flex-shrink-0 flex-col items-center justify-center rounded-xl ${isToday ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-700'}`}>
+                                <span className={`text-[9px] font-semibold uppercase leading-none tracking-wide ${isToday ? 'text-blue-200' : 'text-slate-400'}`}>{formatWeekdayRu(dayCard.date, 'short')}</span>
+                                <span className="mt-0.5 text-[15px] font-bold leading-none tabular-nums">{parseDateStr(dayCard.date).getDate()}</span>
+                            </div>
+                            <div className="min-w-0 flex-1">
+                                {hasShifts ? (
+                                    <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
+                                        {shifts.slice(0, 2).map((seg, i) => (
+                                            <span key={`${dayCard.date}-time-${i}`} className="inline-flex items-center gap-1.5 text-[15px] font-semibold leading-tight tabular-nums text-slate-900">
+                                                <span className={`h-2 w-2 flex-shrink-0 rounded-full ${plannerShiftVisualMeta(seg).dotClass}`}></span>
+                                                {shiftTimeTextRu(seg)}
+                                            </span>
+                                        ))}
+                                        {shifts.length > 2 && <span className="text-[12px] font-medium text-slate-400">+{shifts.length - 2}</span>}
+                                    </div>
+                                ) : scheduleStatus ? (
+                                    <div className={`text-[15px] font-semibold leading-tight ${statusTone?.text || 'text-amber-800'}`}>{scheduleStatus.label || 'Статус'}</div>
+                                ) : dayCard.isDayOff ? (
+                                    <div className="text-[15px] font-semibold leading-tight text-sky-600">Выходной</div>
+                                ) : (
+                                    <div className="text-[15px] font-medium leading-tight text-slate-400">Смен нет</div>
+                                )}
+                                {specialShift && <div className="mt-0.5 truncate text-[12px] text-slate-500">{plannerShiftTypeLabel(specialShift.shift_type ?? specialShift.shiftType)}</div>}
+                                {!hasShifts && scheduleStatus?.comment && <div className="mt-0.5 truncate text-[12px] text-slate-500">{scheduleStatus.comment}</div>}
+                            </div>
+                            <div className="flex flex-shrink-0 items-center gap-2">
+                                {hasShifts && <span className="text-[13px] font-medium tabular-nums text-slate-400">{formatHoursRu(dayWorkMin)}</span>}
+                                {hasExpandableContent && (
+                                    <FaIcon className={`fas fa-chevron-down text-[11px] text-slate-300 transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}></FaIcon>
+                                )}
+                            </div>
+                        </>
+                    );
                     return (
                         <div key={`my-shifts-${dayCard.date}`}>
-                            <button
-                                type="button"
-                                onClick={() => setExpandedMyDayCards(prev => ({ ...prev, [dayCard.date]: !prev?.[dayCard.date] }))}
-                                className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-slate-50/70"
-                                aria-expanded={isExpanded}
-                            >
-                                <div className={`flex h-10 w-10 flex-shrink-0 flex-col items-center justify-center rounded-xl ${isToday ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-700'}`}>
-                                    <span className={`text-[9px] font-semibold uppercase leading-none tracking-wide ${isToday ? 'text-blue-200' : 'text-slate-400'}`}>{formatWeekdayRu(dayCard.date, 'short')}</span>
-                                    <span className="mt-0.5 text-[15px] font-bold leading-none tabular-nums">{parseDateStr(dayCard.date).getDate()}</span>
+                            {hasExpandableContent ? (
+                                <button
+                                    type="button"
+                                    onClick={() => setExpandedMyDayCards(prev => ({ ...prev, [dayCard.date]: !prev?.[dayCard.date] }))}
+                                    className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-slate-50/70"
+                                    aria-expanded={isExpanded}
+                                >
+                                    {rowInner}
+                                </button>
+                            ) : (
+                                <div className="flex w-full items-center gap-3 px-4 py-2.5">
+                                    {rowInner}
                                 </div>
-                                <div className="min-w-0 flex-1">
-                                    {hasShifts ? (
-                                        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
-                                            {shifts.slice(0, 2).map((seg, i) => (
-                                                <span key={`${dayCard.date}-time-${i}`} className="inline-flex items-center gap-1.5 text-[15px] font-semibold leading-tight tabular-nums text-slate-900">
-                                                    <span className={`h-2 w-2 flex-shrink-0 rounded-full ${plannerShiftVisualMeta(seg).dotClass}`}></span>
-                                                    {shiftTimeTextRu(seg)}
-                                                </span>
-                                            ))}
-                                            {shifts.length > 2 && <span className="text-[12px] font-medium text-slate-400">+{shifts.length - 2}</span>}
-                                        </div>
-                                    ) : scheduleStatus ? (
-                                        <div className={`text-[15px] font-semibold leading-tight ${statusTone?.text || 'text-amber-800'}`}>{scheduleStatus.label || 'Статус'}</div>
-                                    ) : dayCard.isDayOff ? (
-                                        <div className="text-[15px] font-semibold leading-tight text-sky-600">Выходной</div>
-                                    ) : (
-                                        <div className="text-[15px] font-medium leading-tight text-slate-400">Смен нет</div>
-                                    )}
-                                    {secondaryParts.length > 0 && <div className="mt-0.5 truncate text-[12px] text-slate-500">{secondaryParts.join(' · ')}</div>}
-                                    {!hasShifts && scheduleStatus?.comment && <div className="mt-0.5 truncate text-[12px] text-slate-500">{scheduleStatus.comment}</div>}
-                                </div>
-                                <div className="flex flex-shrink-0 items-center gap-2">
-                                    {hasShifts && <span className="text-[13px] font-medium tabular-nums text-slate-400">{formatHoursRu(dayWorkMin)}</span>}
-                                    <FaIcon className={`fas ${isExpanded ? 'fa-chevron-up' : 'fa-chevron-down'} text-[11px] text-slate-300`}></FaIcon>
-                                </div>
-                            </button>
-                            {isExpanded && (
-                                <div className="space-y-2 border-t border-slate-100 bg-slate-50/70 px-4 py-3">
-                                    {scheduleStatus && (
-                                        <div className="text-[12px] leading-snug">
-                                            <span className={`text-[13px] font-semibold ${statusTone?.text || 'text-amber-800'}`}>{scheduleStatus.label || 'Статус'}</span>
-                                            {(scheduleStatus.startDate || scheduleStatus.endDate) && (
-                                                <span className="tabular-nums text-slate-500"> · {scheduleStatus.startDate || '—'}{scheduleStatus.endDate ? ` — ${scheduleStatus.endDate}` : ''}</span>
-                                            )}
-                                            {scheduleStatus.comment && <div className="mt-0.5 text-slate-500">{scheduleStatus.comment}</div>}
-                                        </div>
-                                    )}
-                                    {shifts.map((seg, idx) => {
-                                        const visual = plannerShiftVisualMeta(seg);
-                                        const segBreaks = Array.isArray(seg.breaks) ? seg.breaks : [];
-                                        return (
-                                            <div key={`${dayCard.date}-exp-${idx}`} className="rounded-xl bg-white px-3 py-2.5 ring-1 ring-slate-200/60">
-                                                <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
-                                                    <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
-                                                        <span className={`h-2 w-2 flex-shrink-0 rounded-full ${visual.dotClass}`}></span>
-                                                        <span className="text-[14px] font-semibold leading-tight tabular-nums text-slate-900">{shiftTimeTextRu(seg)}</span>
-                                                        <span className="text-[12px] text-slate-400">{plannerShiftTypeLabel(seg.shift_type ?? seg.shiftType)} · {formatHoursRu(seg.durationMin)}</span>
-                                                    </div>
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => handleOpenSwapModalForOwnShift(dayCard, seg)}
-                                                        className="inline-flex items-center gap-1 text-[12px] font-medium text-blue-600 transition-colors hover:text-blue-700"
-                                                    >
-                                                        <FaIcon className="fas fa-right-left text-[10px]"></FaIcon>
-                                                        Обменять
-                                                    </button>
+                            )}
+                            {hasExpandableContent && (
+                                <div className={`grid transition-[grid-template-rows] duration-300 ease-out ${isExpanded ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`} aria-hidden={!isExpanded}>
+                                    <div className="overflow-hidden">
+                                        <div className="space-y-2 px-4 pb-3 pl-[68px]">
+                                            {scheduleStatus && (
+                                                <div className="text-[12px] leading-snug">
+                                                    <span className={`font-semibold ${statusTone?.text || 'text-amber-800'}`}>{scheduleStatus.label || 'Статус'}</span>
+                                                    {(scheduleStatus.startDate || scheduleStatus.endDate) && (
+                                                        <span className="tabular-nums text-slate-500"> · {scheduleStatus.startDate || '—'}{scheduleStatus.endDate ? ` — ${scheduleStatus.endDate}` : ''}</span>
+                                                    )}
+                                                    {scheduleStatus.comment && <div className="mt-0.5 text-slate-500">{scheduleStatus.comment}</div>}
                                                 </div>
-                                                {segBreaks.length === 0 ? (
-                                                    <div className="mt-1 text-[12px] text-slate-400">Без перерывов</div>
-                                                ) : (
-                                                    <div className="mt-1.5 space-y-1">
-                                                        {segBreaks.map((b, bi) => (
-                                                            <div key={`${dayCard.date}-exp-${idx}-break-${bi}`} className="flex items-center justify-between gap-2 text-[12px] tabular-nums">
-                                                                <span className="inline-flex items-center gap-1.5 text-slate-600">
-                                                                    <FaIcon className="fas fa-mug-hot text-[11px] text-amber-500"></FaIcon>
-                                                                    {formatBreakMinutePlain(b.start)} — {formatBreakMinutePlain(b.end)}
-                                                                </span>
-                                                                <span className="text-slate-400">{formatMinutesOnly(Math.max(0, (Number(b?.end) || 0) - (Number(b?.start) || 0)))}</span>
+                                            )}
+                                            {shifts.map((seg, idx) => {
+                                                const visual = plannerShiftVisualMeta(seg);
+                                                const segBreaks = Array.isArray(seg.breaks) ? seg.breaks : [];
+                                                return (
+                                                    <div key={`${dayCard.date}-exp-${idx}`} className="space-y-1">
+                                                        {shifts.length > 1 && (
+                                                            <div className="flex items-center gap-1.5 pt-0.5 text-[12px] font-medium tabular-nums text-slate-500">
+                                                                <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${visual.dotClass}`}></span>
+                                                                {shiftTimeTextRu(seg)}
                                                             </div>
-                                                        ))}
+                                                        )}
+                                                        {segBreaks.length === 0 ? (
+                                                            <div className="text-[12px] text-slate-400">Без перерывов</div>
+                                                        ) : (
+                                                            segBreaks.map((b, bi) => (
+                                                                <div key={`${dayCard.date}-exp-${idx}-break-${bi}`} className="flex items-center justify-between gap-2 text-[12px] tabular-nums">
+                                                                    <span className="inline-flex items-center gap-1.5 text-slate-600">
+                                                                        <FaIcon className="fas fa-mug-hot text-[11px] text-amber-500"></FaIcon>
+                                                                        {formatBreakMinutePlain(b.start)} — {formatBreakMinutePlain(b.end)}
+                                                                    </span>
+                                                                    <span className="text-slate-400">{formatMinutesOnly(Math.max(0, (Number(b?.end) || 0) - (Number(b?.start) || 0)))}</span>
+                                                                </div>
+                                                            ))
+                                                        )}
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => handleOpenSwapModalForOwnShift(dayCard, seg)}
+                                                            tabIndex={isExpanded ? 0 : -1}
+                                                            className="inline-flex items-center gap-1 pt-0.5 text-[12px] font-medium text-blue-600 transition-colors hover:text-blue-700"
+                                                        >
+                                                            <FaIcon className="fas fa-right-left text-[10px]"></FaIcon>
+                                                            Обменять{shifts.length > 1 ? '' : ' смену'}
+                                                        </button>
                                                     </div>
-                                                )}
-                                            </div>
-                                        );
-                                    })}
-                                    {dayOfflineActivities.length > 0 && (
-                                        <div className="rounded-xl bg-white px-3 py-2.5 ring-1 ring-slate-200/60">
-                                            <div className="text-[11px] font-semibold uppercase tracking-wider text-emerald-600">Офлайн-активность</div>
-                                            <div className="mt-1.5 space-y-1">
-                                                {dayOfflineActivities.map((seg, idx) => {
-                                                    const startRaw = Number(seg?.startMin ?? seg?.start_min ?? seg?.start ?? 0);
-                                                    const endRaw = Number(seg?.endMin ?? seg?.end_min ?? seg?.end ?? 0);
-                                                    if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw) || endRaw <= startRaw) return null;
-                                                    const commentText = String(seg?.comment || '').trim();
-                                                    return (
-                                                        <div key={`${dayCard.date}-offline-${seg?.id ?? idx}`} className="text-[12px] leading-snug">
-                                                            <span className="tabular-nums text-slate-600">{minutesToTime(startRaw)} — {minutesToTime(endRaw)}</span>
-                                                            <span className="text-slate-400"> · {formatMinutesOnly(endRaw - startRaw)}</span>
-                                                            {commentText && <span className="text-slate-500"> · {commentText}</span>}
-                                                        </div>
-                                                    );
-                                                })}
-                                            </div>
+                                                );
+                                            })}
+                                            {dayOfflineActivities.length > 0 && (
+                                                <div className="space-y-1">
+                                                    <div className="text-[11px] font-semibold uppercase tracking-wider text-emerald-600">Офлайн-активность</div>
+                                                    {dayOfflineActivities.map((seg, idx) => {
+                                                        const startRaw = Number(seg?.startMin ?? seg?.start_min ?? seg?.start ?? 0);
+                                                        const endRaw = Number(seg?.endMin ?? seg?.end_min ?? seg?.end ?? 0);
+                                                        if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw) || endRaw <= startRaw) return null;
+                                                        const commentText = String(seg?.comment || '').trim();
+                                                        return (
+                                                            <div key={`${dayCard.date}-offline-${seg?.id ?? idx}`} className="text-[12px] leading-snug">
+                                                                <span className="tabular-nums text-slate-600">{minutesToTime(startRaw)} — {minutesToTime(endRaw)}</span>
+                                                                <span className="text-slate-400"> · {formatMinutesOnly(endRaw - startRaw)}</span>
+                                                                {commentText && <span className="text-slate-500"> · {commentText}</span>}
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            )}
+                                            {hasShifts && (
+                                                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-slate-100 pt-2 text-[12px] text-slate-500">
+                                                    <span>Работа <span className="font-semibold tabular-nums text-slate-700">{formatHoursRu(dayWorkMin)}</span></span>
+                                                    <span>Чистое <span className="font-semibold tabular-nums text-slate-700">{formatHoursMinutes(dayNetMin)}</span></span>
+                                                    <span>Перерывы <span className="font-semibold tabular-nums text-slate-700">{formatMinutesOnly(dayBreakMin)}</span></span>
+                                                </div>
+                                            )}
                                         </div>
-                                    )}
-                                    {hasShifts && (
-                                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-0.5 text-[12px] text-slate-500">
-                                            <span>Работа <span className="font-semibold tabular-nums text-slate-700">{formatHoursRu(dayWorkMin)}</span></span>
-                                            <span>Чистое <span className="font-semibold tabular-nums text-slate-700">{formatHoursMinutes(dayNetMin)}</span></span>
-                                            <span>Перерывы <span className="font-semibold tabular-nums text-slate-700">{formatMinutesOnly(dayBreakMin)}</span></span>
-                                        </div>
-                                    )}
+                                    </div>
                                 </div>
                             )}
                         </div>
@@ -21470,11 +21480,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <div className="px-1 text-[11px] text-slate-400">3 из {myUpcomingShiftItems.length}</div>
                                                 )}
                                             </div>
-                                            <div className="divide-y divide-white/10 overflow-hidden rounded-2xl bg-gradient-to-br from-blue-600 via-indigo-600 to-violet-600 shadow-[0_10px_28px_rgba(79,70,229,0.28)] ring-1 ring-black/5">
+                                            <div className="divide-y divide-white/10 overflow-hidden rounded-2xl bg-slate-800 shadow-[0_8px_20px_rgba(15,23,42,0.20)] ring-1 ring-black/5">
                                                 {myUpcomingShiftItems.length === 0 ? (
                                                     <div className="px-4 py-6 text-center">
                                                         <div className="text-[13px] font-medium text-white">Предстоящих смен нет</div>
-                                                        <div className="mt-0.5 text-[12px] text-blue-100/80">Когда график назначат, смены появятся здесь</div>
+                                                        <div className="mt-0.5 text-[12px] text-slate-400">Когда график назначат, смены появятся здесь</div>
                                                     </div>
                                                 ) : (
                                                     myUpcomingShiftItems.slice(0, 3).map((item) => {
@@ -21489,49 +21499,51 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 <button
                                                                     type="button"
                                                                     onClick={() => setExpandedMyUpcomingShifts(prev => ({ ...prev, [item.key]: !prev?.[item.key] }))}
-                                                                    className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-white/10"
+                                                                    className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-white/5"
                                                                     aria-expanded={isExpandedUpcoming}
                                                                 >
-                                                                    <span className={`w-[84px] flex-shrink-0 text-[13px] leading-snug ${isToday ? 'font-semibold text-white' : 'text-blue-100/90'}`}>{dateLabel}</span>
+                                                                    <span className={`w-[84px] flex-shrink-0 text-[13px] leading-snug ${isToday ? 'font-semibold text-white' : 'text-slate-400'}`}>{dateLabel}</span>
                                                                     <div className="min-w-0 flex-1">
                                                                         <div className="flex items-baseline justify-between gap-2">
                                                                             <span className="inline-flex items-center gap-1.5 text-[15px] font-semibold leading-tight tabular-nums text-white">
-                                                                                {isOngoing && <span className="h-2 w-2 flex-shrink-0 rounded-full bg-emerald-300 shadow-[0_0_6px_rgba(110,231,183,0.9)]"></span>}
+                                                                                {isOngoing && <span className="h-2 w-2 flex-shrink-0 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)]"></span>}
                                                                                 {item.start} — {item.end}
                                                                             </span>
-                                                                            <span className="flex-shrink-0 text-[13px] tabular-nums text-blue-100/80">{formatHoursRu(item.durationMin)}</span>
+                                                                            <span className="flex-shrink-0 text-[13px] tabular-nums text-slate-400">{formatHoursRu(item.durationMin)}</span>
                                                                         </div>
-                                                                        {isOngoing && <div className="text-[11.5px] font-medium text-emerald-200">идёт сейчас</div>}
+                                                                        {isOngoing && <div className="text-[11.5px] font-medium text-emerald-400">идёт сейчас</div>}
                                                                     </div>
-                                                                    <FaIcon className={`fas fa-chevron-down flex-shrink-0 text-[11px] text-white/50 transition-transform duration-200 ${isExpandedUpcoming ? 'rotate-180' : ''}`}></FaIcon>
+                                                                    <FaIcon className={`fas fa-chevron-down flex-shrink-0 text-[11px] text-slate-500 transition-transform duration-200 ${isExpandedUpcoming ? 'rotate-180' : ''}`}></FaIcon>
                                                                 </button>
-                                                                {isExpandedUpcoming && (
-                                                                    <div className="px-4 pb-3.5">
-                                                                        <div className="rounded-xl bg-white/10 px-3 py-2.5">
-                                                                            <div className="flex items-center justify-between gap-2">
-                                                                                <div className="text-[11px] font-semibold uppercase tracking-wider text-blue-100/80">Перерывы</div>
-                                                                                {item.breakCount > 0 && (
-                                                                                    <div className="text-[11px] tabular-nums text-blue-100/70">{item.breakCount} · {formatMinutesOnly(item.breakMinutes)}</div>
+                                                                <div className={`grid transition-[grid-template-rows] duration-300 ease-out ${isExpandedUpcoming ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`} aria-hidden={!isExpandedUpcoming}>
+                                                                    <div className="overflow-hidden">
+                                                                        <div className="px-4 pb-3.5">
+                                                                            <div className="rounded-xl bg-white/5 px-3 py-2.5 ring-1 ring-white/10">
+                                                                                <div className="flex items-center justify-between gap-2">
+                                                                                    <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Перерывы</div>
+                                                                                    {item.breakCount > 0 && (
+                                                                                        <div className="text-[11px] tabular-nums text-slate-400">{item.breakCount} · {formatMinutesOnly(item.breakMinutes)}</div>
+                                                                                    )}
+                                                                                </div>
+                                                                                {item.breakCount === 0 ? (
+                                                                                    <div className="mt-1 text-[12.5px] text-slate-300">Без перерывов</div>
+                                                                                ) : (
+                                                                                    <div className="mt-1.5 space-y-1.5">
+                                                                                        {item.breaks.map((b, bi) => (
+                                                                                            <div key={`my-upcoming-break-${item.key}-${bi}`} className="flex items-center justify-between gap-2 text-[12.5px] tabular-nums">
+                                                                                                <span className="inline-flex items-center gap-1.5 text-slate-100">
+                                                                                                    <FaIcon className="fas fa-mug-hot text-[11px] text-amber-400"></FaIcon>
+                                                                                                    {formatBreakMinutePlain(b.start)} — {formatBreakMinutePlain(b.end)}
+                                                                                                </span>
+                                                                                                <span className="text-slate-400">{formatMinutesOnly(b.durationMin)}</span>
+                                                                                            </div>
+                                                                                        ))}
+                                                                                    </div>
                                                                                 )}
                                                                             </div>
-                                                                            {item.breakCount === 0 ? (
-                                                                                <div className="mt-1 text-[12.5px] text-blue-50/90">Без перерывов</div>
-                                                                            ) : (
-                                                                                <div className="mt-1.5 space-y-1.5">
-                                                                                    {item.breaks.map((b, bi) => (
-                                                                                        <div key={`my-upcoming-break-${item.key}-${bi}`} className="flex items-center justify-between gap-2 text-[12.5px] tabular-nums">
-                                                                                            <span className="inline-flex items-center gap-1.5 text-white">
-                                                                                                <FaIcon className="fas fa-mug-hot text-[11px] text-amber-300"></FaIcon>
-                                                                                                {formatBreakMinutePlain(b.start)} — {formatBreakMinutePlain(b.end)}
-                                                                                            </span>
-                                                                                            <span className="text-blue-100/80">{formatMinutesOnly(b.durationMin)}</span>
-                                                                                        </div>
-                                                                                    ))}
-                                                                                </div>
-                                                                            )}
                                                                         </div>
                                                                     </div>
-                                                                )}
+                                                                </div>
                                                             </div>
                                                         );
                                                     })
@@ -22002,17 +22014,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             <span className="text-amber-700">{swapTimeValidation.message}</span>
                                                                         </>
                                                                     ) : (
-                                                                        <>
-                                                                            <FaIcon className="fas fa-circle-check mt-0.5 text-emerald-500"></FaIcon>
-                                                                            <span className="text-slate-600">
-                                                                                {formatSwapDateTimeRangeLabel(
-                                                                                    swapForm.swapDate,
-                                                                                    swapForm.startTime,
-                                                                                    swapForm.endTime,
-                                                                                    swapTimeValidation.effectiveEndDate || swapForm.endDate || swapForm.swapDate
-                                                                                )} · {formatMinutesOnly(swapTimeValidation.durationMin)}
-                                                                            </span>
-                                                                        </>
+                                                                        <FaIcon
+                                                                            className="fas fa-circle-check mt-0.5 text-emerald-500"
+                                                                            title={`${formatSwapDateTimeRangeLabel(
+                                                                                swapForm.swapDate,
+                                                                                swapForm.startTime,
+                                                                                swapForm.endTime,
+                                                                                swapTimeValidation.effectiveEndDate || swapForm.endDate || swapForm.swapDate
+                                                                            )} · ${formatHoursRu(swapTimeValidation.durationMin)}`}
+                                                                        ></FaIcon>
                                                                     )}
                                                                 </div>
                                                             </div>
@@ -22021,9 +22031,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <section className="space-y-1.5">
                                                     <div className="flex items-center justify-between gap-2">
                                                         <div className={IOS_GROUP_LABEL}>Ваша смена в этот день</div>
-                                                        <span className="text-[11px] text-slate-400">
+                                                        <span className="text-[11px] text-slate-400 tabular-nums">
                                                             {swapDayTimeline.date
-                                                                ? `${formatDateRuShort(swapDayTimeline.date)} · ${formatMinutesOnly(swapDayTimeline.totalMinutes)}`
+                                                                ? `${formatDateRuShort(swapDayTimeline.date)} · ${formatHoursRu(swapDayTimeline.totalMinutes)}`
                                                                 : 'Выберите дату'}
                                                         </span>
                                                     </div>
@@ -22039,15 +22049,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     ></div>
                                                                 ))}
                                                                 {swapDayTimeline.segments.map(seg => (
-                                                                    <div
+                                                                    <button
+                                                                        type="button"
                                                                         key={`swap-timeline-seg-${seg.id}`}
-                                                                        className="absolute top-1 bottom-1 rounded bg-blue-500/80 border border-blue-600/80"
+                                                                        onClick={() => handleSelectOwnSwapSegmentFromTimeline(seg)}
+                                                                        className="absolute top-1 bottom-1 flex items-center justify-center overflow-hidden rounded-lg bg-blue-500/90 px-1 transition-colors hover:bg-blue-600"
                                                                         style={{
                                                                             left: `${(seg.start / 1440) * 100}%`,
                                                                             width: `${((seg.end - seg.start) / 1440) * 100}%`
                                                                         }}
-                                                                        title={`${seg.label} (${formatMinutesOnly(seg.minutes)})`}
-                                                                    ></div>
+                                                                        title={`Выбрать целиком: ${seg.label} · ${formatHoursRu(seg.minutes)}`}
+                                                                    >
+                                                                        <span className="truncate text-[10.5px] font-semibold tabular-nums text-white">{seg.label} · {formatHoursRu(seg.minutes)}</span>
+                                                                    </button>
                                                                 ))}
                                                                 {(Array.isArray(swapDayTimeline.draftIntervals) ? swapDayTimeline.draftIntervals : []).map(item => (
                                                                     <div
@@ -22078,25 +22092,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 <span>18:00</span>
                                                                 <span>24:00</span>
                                                             </div>
-                                                            <div className="mt-2.5">
-                                                                <div className="mb-1.5 px-0.5 text-[11px] text-slate-400">Нажмите смену, чтобы выбрать её целиком</div>
-                                                                <div className="flex flex-wrap gap-1.5">
-                                                                    {swapDayTimeline.segments.map(seg => (
-                                                                        <button
-                                                                            type="button"
-                                                                            key={`swap-seg-chip-${seg.id}`}
-                                                                            onClick={() => handleSelectOwnSwapSegmentFromTimeline(seg)}
-                                                                            className="rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1 text-[12px] font-medium text-blue-700 transition-colors hover:bg-blue-100"
-                                                                            title="Выбрать весь этот интервал"
-                                                                        >
-                                                                            {seg.label} ({formatMinutesOnly(seg.minutes)})
-                                                                        </button>
-                                                                    ))}
-                                                                </div>
-                                                            </div>
-                                                            {((Array.isArray(swapDayTimeline.draftIntervals) && swapDayTimeline.draftIntervals.length > 0) || swapDayTimeline.selectedInterval) && (
+                                                            <div className="mt-2 px-0.5 text-[11px] text-slate-400">Нажмите смену на таймлайне, чтобы выбрать её целиком</div>
+                                                            {Array.isArray(swapDayTimeline.draftIntervals) && swapDayTimeline.draftIntervals.length > 0 && (
                                                                 <div className="mt-2 flex flex-wrap gap-1.5">
-                                                                    {(Array.isArray(swapDayTimeline.draftIntervals) ? swapDayTimeline.draftIntervals : []).map(item => (
+                                                                    {swapDayTimeline.draftIntervals.map(item => (
                                                                         <span
                                                                             key={`swap-day-draft-legend-${item.id}`}
                                                                             className={`px-2 py-0.5 rounded-md text-xs border ${item?.tone?.listClass || 'border-amber-200 bg-amber-50/60'}`}
@@ -22104,11 +22103,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             {item.label}
                                                                         </span>
                                                                     ))}
-                                                                    {swapDayTimeline.selectedInterval && (
-                                                                        <span className={`px-2 py-0.5 rounded-md text-xs border ${swapCurrentIntervalTone.legendClass}`}>
-                                                                            Текущий интервал: {swapForm.startTime} — {swapForm.endTime}
-                                                                        </span>
-                                                                    )}
                                                                 </div>
                                                             )}
                                                             {swapDayTimeline.hasNextDayShifts && (
@@ -22117,8 +22111,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         <div className={IOS_GROUP_LABEL}>
                                                                             Таймлайн следующего дня
                                                                         </div>
-                                                                        <div className="text-[11px] text-slate-400">
-                                                                            {formatDateRuShort(swapDayTimeline.nextDayDate)} · {formatMinutesOnly(swapDayTimeline.nextDayTotalMinutes)}
+                                                                        <div className="text-[11px] text-slate-400 tabular-nums">
+                                                                            {formatDateRuShort(swapDayTimeline.nextDayDate)} · {formatHoursRu(swapDayTimeline.nextDayTotalMinutes)}
                                                                         </div>
                                                                     </div>
                                                                     <div className="relative h-9 overflow-hidden rounded-xl bg-slate-100 ring-1 ring-slate-200">
@@ -22132,13 +22126,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         {swapDayTimeline.nextDaySegments.map(seg => (
                                                                             <div
                                                                                 key={`swap-next-timeline-seg-${seg.id}`}
-                                                                                className="absolute top-1 bottom-1 rounded bg-indigo-500/80 border border-indigo-600/80"
+                                                                                className="absolute top-1 bottom-1 flex items-center justify-center overflow-hidden rounded-lg bg-indigo-500/90 px-1"
                                                                                 style={{
                                                                                     left: `${(seg.start / 1440) * 100}%`,
                                                                                     width: `${((seg.end - seg.start) / 1440) * 100}%`
                                                                                 }}
-                                                                                title={`${seg.label} (${formatMinutesOnly(seg.minutes)})`}
-                                                                            ></div>
+                                                                                title={`${seg.label} · ${formatHoursRu(seg.minutes)}`}
+                                                                            >
+                                                                                <span className="truncate text-[10.5px] font-semibold tabular-nums text-white">{seg.label} · {formatHoursRu(seg.minutes)}</span>
+                                                                            </div>
                                                                         ))}
                                                                         {(Array.isArray(swapDayTimeline.draftIntervalsNextDay) ? swapDayTimeline.draftIntervalsNextDay : []).map(item => (
                                                                             <div
@@ -22162,29 +22158,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             ></div>
                                                                         )}
                                                                     </div>
-                                                                    <div className="mt-2 flex flex-wrap gap-1.5">
-                                                                        {swapDayTimeline.nextDaySegments.map(seg => (
-                                                                            <span
-                                                                                key={`swap-next-seg-chip-${seg.id}`}
-                                                                                className="px-2 py-0.5 rounded-md text-xs border border-indigo-200 bg-indigo-50 text-indigo-700"
-                                                                            >
-                                                                                {seg.label} ({formatMinutesOnly(seg.minutes)})
-                                                                            </span>
-                                                                        ))}
-                                                                        {(Array.isArray(swapDayTimeline.draftIntervalsNextDay) ? swapDayTimeline.draftIntervalsNextDay : []).map(item => (
-                                                                            <span
-                                                                                key={`swap-next-day-draft-legend-${item.id}`}
-                                                                                className={`px-2 py-0.5 rounded-md text-xs border ${item?.tone?.listClass || 'border-amber-200 bg-amber-50/60'}`}
-                                                                            >
-                                                                                {item.label}
-                                                                            </span>
-                                                                        ))}
-                                                                        {swapDayTimeline.selectedIntervalNextDay && (
-                                                                            <span className={`px-2 py-0.5 rounded-md text-xs border ${swapCurrentIntervalTone.legendClass}`}>
-                                                                                Текущий интервал: {swapForm.startTime} — {swapForm.endTime}
-                                                                            </span>
-                                                                        )}
-                                                                    </div>
+                                                                    {Array.isArray(swapDayTimeline.draftIntervalsNextDay) && swapDayTimeline.draftIntervalsNextDay.length > 0 && (
+                                                                        <div className="mt-2 flex flex-wrap gap-1.5">
+                                                                            {swapDayTimeline.draftIntervalsNextDay.map(item => (
+                                                                                <span
+                                                                                    key={`swap-next-day-draft-legend-${item.id}`}
+                                                                                    className={`px-2 py-0.5 rounded-md text-xs border ${item?.tone?.listClass || 'border-amber-200 bg-amber-50/60'}`}
+                                                                                >
+                                                                                    {item.label}
+                                                                                </span>
+                                                                            ))}
+                                                                        </div>
+                                                                    )}
                                                                 </div>
                                                             )}
                                                         </>
