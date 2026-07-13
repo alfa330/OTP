@@ -16291,27 +16291,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         : `Chat2Desk ${syncStart} - ${syncEnd}`
                     );
 
+                    // Не замораживаем планировщик снапшотом «анализа» (он отключает ленивую
+                    // подгрузку статусов до перезагрузки страницы): сбрасываем кэш окон и
+                    // перезагружаем видимый диапазон — остальные дни догрузятся как обычно.
                     plannerLoadedStatusRangeKeysRef.current = new Set();
                     plannerLoadingStatusRangeKeysRef.current = new Set();
                     plannerActiveStatusWindowKeyRef.current = '';
                     const currentRangeStart = String(plannerStatusFetchRange?.start || syncStart || '').trim();
                     const currentRangeEnd = String(plannerStatusFetchRange?.end || syncEnd || '').trim();
-                    const statusData = currentRangeStart && currentRangeEnd
-                        ? await fetchPlannerImportedStatusesForRange(currentRangeStart, currentRangeEnd, { force: true })
-                        : null;
-                    const serverOperators = Array.isArray(statusData?.operators) ? statusData.operators : [];
-                    const analysis = buildPlannerStatusAnalysisFromOperators(serverOperators.length ? serverOperators : operators);
-                    setPlannerStatusAnomalyAnalysis(analysis);
-                    setPlannerStatusModalFocus(null);
-                    setPlannerStatusHourlyExpandedKey('');
-                    setPlannerStatusGroupingDirectionKeys([]);
-                    setPlannerStatusSpecialViewEnabled(Boolean(analysis?.days?.length));
-                    const firstAnomalyDay = (analysis?.days || []).find(d => Number(d?.noPhoneAnomalyCount || 0) > 0)?.dateKey;
-                    const firstVisibleDay = (analysis?.days || []).find(d => String(d?.dateKey || '') >= visibleStart && String(d?.dateKey || '') <= visibleEnd)?.dateKey;
-                    const firstDay = firstAnomalyDay || firstVisibleDay || analysis?.days?.[0]?.dateKey || '';
-                    setPlannerStatusHourlyDayKey(String(firstDay || ''));
-                    setPlannerStatusAnomalyExpandedDays(firstDay ? { [firstDay]: true } : {});
-                    setShowPlannerStatusAnomalyModal(true);
+                    if (currentRangeStart && currentRangeEnd) {
+                        await fetchPlannerImportedStatusesForRange(currentRangeStart, currentRangeEnd, { force: true });
+                    }
                     emitAppToast(payload?.message || 'Статусы Chat2Desk синхронизированы', 'success');
                 } catch (error) {
                     console.error('Error syncing Chat2Desk operator statuses:', error);
@@ -16357,26 +16347,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         ? `Binotel ${normalized.start}`
                         : `Binotel ${normalized.start} - ${normalized.end}`);
 
+                    // Не замораживаем планировщик снапшотом «анализа» (он отключает ленивую
+                    // подгрузку статусов до перезагрузки страницы): сбрасываем кэш окон и
+                    // перезагружаем видимый диапазон — остальные дни догрузятся как обычно.
                     plannerLoadedStatusRangeKeysRef.current = new Set();
                     plannerLoadingStatusRangeKeysRef.current = new Set();
                     plannerActiveStatusWindowKeyRef.current = '';
                     const rangeStart = String(plannerStatusFetchRange?.start || normalized.start || '').trim();
                     const rangeEnd = String(plannerStatusFetchRange?.end || normalized.end || '').trim();
-                    const statusData = rangeStart && rangeEnd
-                        ? await fetchPlannerImportedStatusesForRange(rangeStart, rangeEnd, { force: true })
-                        : null;
-                    const serverOperators = Array.isArray(statusData?.operators) ? statusData.operators : [];
-                    const analysis = buildPlannerStatusAnalysisFromOperators(serverOperators.length ? serverOperators : operators);
-                    setPlannerStatusAnomalyAnalysis(analysis);
-                    setPlannerStatusModalFocus(null);
-                    setPlannerStatusHourlyExpandedKey('');
-                    setPlannerStatusGroupingDirectionKeys([]);
-                    setPlannerStatusSpecialViewEnabled(Boolean(analysis?.days?.length));
-                    const firstDay = analysis?.days?.[0]?.dateKey || '';
-                    setPlannerStatusHourlyDayKey(String(firstDay || ''));
-                    setPlannerStatusAnomalyExpandedDays(firstDay ? { [firstDay]: true } : {});
+                    if (rangeStart && rangeEnd) {
+                        await fetchPlannerImportedStatusesForRange(rangeStart, rangeEnd, { force: true });
+                    }
                     setShowPlannerOktellSyncModal(false);
-                    setShowPlannerStatusAnomalyModal(true);
                     emitAppToast(payload?.message || 'Статусы синхронизированы из Binotel', 'success');
                 } catch (error) {
                     console.error('Error syncing Binotel operator statuses:', error);
@@ -16519,24 +16501,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         : `Oktell ${normalized.start} - ${normalized.end}`
                     );
 
+                    // Не замораживаем планировщик снапшотом «анализа» (он отключает ленивую
+                    // подгрузку статусов до перезагрузки страницы): сбрасываем кэш окон и
+                    // перезагружаем видимый диапазон — остальные дни догрузятся как обычно.
                     plannerLoadedStatusRangeKeysRef.current = new Set();
                     plannerLoadingStatusRangeKeysRef.current = new Set();
                     plannerActiveStatusWindowKeyRef.current = '';
                     const currentRangeStart = String(plannerStatusFetchRange?.start || normalized.start || '').trim();
                     const currentRangeEnd = String(plannerStatusFetchRange?.end || normalized.end || '').trim();
-                    const statusData = currentRangeStart && currentRangeEnd
-                        ? await fetchPlannerImportedStatusesForRange(currentRangeStart, currentRangeEnd, { force: true })
-                        : null;
-                    const serverOperators = Array.isArray(statusData?.operators) ? statusData.operators : [];
-                    const analysis = buildPlannerStatusAnalysisFromOperators(serverOperators.length ? serverOperators : operators);
-                    setPlannerStatusAnomalyAnalysis(analysis);
-                    setPlannerStatusModalFocus(null);
-                    setPlannerStatusHourlyExpandedKey('');
-                    setPlannerStatusGroupingDirectionKeys([]);
-                    setPlannerStatusSpecialViewEnabled(Boolean(analysis?.days?.length));
-                    const firstDay = (analysis?.days || [])[0]?.dateKey || '';
-                    setPlannerStatusHourlyDayKey(String(firstDay || ''));
-                    setPlannerStatusAnomalyExpandedDays(firstDay ? { [firstDay]: true } : {});
+                    if (currentRangeStart && currentRangeEnd) {
+                        await fetchPlannerImportedStatusesForRange(currentRangeStart, currentRangeEnd, { force: true });
+                    }
                     setShowPlannerOktellSyncModal(false);
                     emitAppToast(payload?.message || 'Статусы из Oktell синхронизированы', 'success');
                 } catch (error) {
