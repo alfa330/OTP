@@ -19768,7 +19768,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         start,
                         end,
                         label: `${minutesToTime(start)} — ${minutesToTime(end % 1440)}`,
-                        minutes: Math.max(0, end - start)
+                        minutes: Math.max(0, end - start),
+                        // Полная смена (включая хвост после полуночи) — для подписи в баре и выбора целиком.
+                        sourceStart: String(seg?.start || ''),
+                        sourceEnd: String(seg?.end || ''),
+                        sourceEndsNextDay: endRaw > 1440,
+                        fullLabel: `${seg?.start || minutesToTime(start)} — ${seg?.end || minutesToTime(end % 1440)}`,
+                        fullMinutes: Math.max(0, endRaw - startRaw)
                     });
                     if (endRaw > 1440) {
                         hasCurrentDayCrossingShift = true;
@@ -19780,7 +19786,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 start: carryStart,
                                 end: carryEnd,
                                 label: `${minutesToTime(carryStart)} — ${minutesToTime(carryEnd)} (из смены прошлого дня)`,
-                                minutes: Math.max(0, carryEnd - carryStart)
+                                minutes: Math.max(0, carryEnd - carryStart),
+                                fullLabel: `${seg?.start || minutesToTime(carryStart)} — ${seg?.end || minutesToTime(carryEnd)}`,
+                                fullMinutes: Math.max(0, endRaw - startRaw)
                             });
                         }
                     }
@@ -19799,7 +19807,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         start,
                         end,
                         label: `${minutesToTime(start)} — ${minutesToTime(end % 1440)}`,
-                        minutes: Math.max(0, end - start)
+                        minutes: Math.max(0, end - start),
+                        fullLabel: `${seg?.start || minutesToTime(start)} — ${seg?.end || minutesToTime(end % 1440)}`,
+                        fullMinutes: Math.max(0, endRaw - startRaw)
                     });
                 });
                 nextDaySegments.sort((a, b) => (a.start - b.start) || (a.end - b.end));
@@ -20486,12 +20496,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
             const handleSelectOwnSwapSegmentFromTimeline = useCallback(async (segment) => {
                 const swapDate = String(swapForm.swapDate || '').trim();
-                const startMin = Number(segment?.start);
-                const endMin = Number(segment?.end);
-                if (!swapDate || !Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) return;
-                const startTime = minutesToTime(startMin);
-                const endTime = minutesToTime(endMin);
-                const endDate = swapDate;
+                if (!swapDate) return;
+                let startTime;
+                let endTime;
+                let endDate = swapDate;
+                if (segment?.sourceStart && segment?.sourceEnd) {
+                    // Выбираем смену целиком, включая хвост после полуночи.
+                    startTime = String(segment.sourceStart);
+                    endTime = String(segment.sourceEnd);
+                    if (segment.sourceEndsNextDay) {
+                        endDate = todayDateStr(addDays(parseDateStr(swapDate), 1));
+                    }
+                } else {
+                    const startMin = Number(segment?.start);
+                    const endMin = Number(segment?.end);
+                    if (!Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) return;
+                    startTime = minutesToTime(startMin);
+                    endTime = minutesToTime(endMin);
+                }
                 const promptKey = buildSwapPromptKey(swapDate, endDate, startTime, endTime);
                 const fullShiftMatch = findOwnFullShiftMatchForRange(swapDate, endDate, startTime, endTime);
                 let nextRequestType = normalizeSwapRequestType(swapForm.requestType);
@@ -22058,9 +22080,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             left: `${(seg.start / 1440) * 100}%`,
                                                                             width: `${((seg.end - seg.start) / 1440) * 100}%`
                                                                         }}
-                                                                        title={`Выбрать целиком: ${seg.label} · ${formatHoursRu(seg.minutes)}`}
+                                                                        title={`Выбрать целиком: ${seg.fullLabel || seg.label} · ${formatHoursRu(seg.fullMinutes ?? seg.minutes)}`}
                                                                     >
-                                                                        <span className="truncate text-[10.5px] font-semibold tabular-nums text-white">{seg.label} · {formatHoursRu(seg.minutes)}</span>
+                                                                        <span className="truncate text-[10.5px] font-semibold tabular-nums text-white">{seg.fullLabel || seg.label} · {formatHoursRu(seg.fullMinutes ?? seg.minutes)}</span>
                                                                     </button>
                                                                 ))}
                                                                 {(Array.isArray(swapDayTimeline.draftIntervals) ? swapDayTimeline.draftIntervals : []).map(item => (
@@ -22131,9 +22153,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                     left: `${(seg.start / 1440) * 100}%`,
                                                                                     width: `${((seg.end - seg.start) / 1440) * 100}%`
                                                                                 }}
-                                                                                title={`${seg.label} · ${formatHoursRu(seg.minutes)}`}
+                                                                                title={`${seg.label} · ${formatHoursRu(seg.fullMinutes ?? seg.minutes)}`}
                                                                             >
-                                                                                <span className="truncate text-[10.5px] font-semibold tabular-nums text-white">{seg.label} · {formatHoursRu(seg.minutes)}</span>
+                                                                                <span className="truncate text-[10.5px] font-semibold tabular-nums text-white">{seg.fullLabel || seg.label} · {formatHoursRu(seg.fullMinutes ?? seg.minutes)}</span>
                                                                             </div>
                                                                         ))}
                                                                         {(Array.isArray(swapDayTimeline.draftIntervalsNextDay) ? swapDayTimeline.draftIntervalsNextDay : []).map(item => (
