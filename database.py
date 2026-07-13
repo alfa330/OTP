@@ -2907,6 +2907,9 @@ class Database:
             # with early_access can claim/release from this time instead of the
             # main starts_at; ends_at stays shared. NULL => no early window.
             cursor.execute("ALTER TABLE shift_auction_test_access ADD COLUMN IF NOT EXISTS favored_starts_at TIMESTAMP NULL;")
+            # Rate lock: when enabled, operators may claim only lots whose rate
+            # group (derived from shift duration) matches their own users.rate.
+            cursor.execute("ALTER TABLE shift_auction_test_access ADD COLUMN IF NOT EXISTS rate_lock_enabled BOOLEAN NOT NULL DEFAULT FALSE;")
             cursor.execute("""
                 INSERT INTO shift_auction_test_access (id)
                 VALUES (1)
@@ -5745,6 +5748,7 @@ class Database:
                 "auction_restarted",
                 "auction_topup_started",
                 "auction_topup_stopped",
+                "auction_rate_lock_updated",
                 "resource_schedule_saved",
             }
             participant_invalidating_events = {"settings_updated"}
@@ -5799,6 +5803,32 @@ class Database:
         except Exception:
             total = 0
         return min(2, max(0, total))
+
+    @staticmethod
+    def _shift_auction_rate_bucket(rate_value):
+        # The same buckets the UI grid uses: anything up to 0.5 is a 0.5-rate
+        # shift/operator, up to 0.75 is 0.75, everything above is a full rate.
+        try:
+            rate = float(rate_value or 0)
+        except Exception:
+            rate = 0.0
+        if rate <= 0.5 + 0.001:
+            return 0.5
+        if rate <= 0.75 + 0.001:
+            return 0.75
+        return 1.0
+
+    def _shift_auction_lot_rate_bucket(self, start_time_value, end_time_value):
+        # A lot's rate group is derived from its clock duration, mirroring the
+        # frontend grid grouping: <5.5h -> 0.5, 5.5-7.5h -> 0.75, >=7.5h -> 1
+        # (the 20*08 night shift lands in 1.0 by duration as well).
+        start_minute, end_minute = self._schedule_interval_minutes(start_time_value, end_time_value)
+        duration_minutes = max(0, end_minute - start_minute)
+        if duration_minutes < int(5.5 * 60):
+            return 0.5
+        if duration_minutes < int(7.5 * 60):
+            return 0.75
+        return 1.0
 
     def _get_shift_auction_participant_workloads_tx(self, cursor, participant_rows, lots, lot_dates, day_offs_by_operator=None):
         # Per-operator workload (norm vs claimed) computed in one pass.
@@ -6235,9 +6265,10 @@ class Database:
                 ORDER BY u.name
             """)
             participant_rows = cursor.fetchall() or []
-            cursor.execute("SELECT favored_starts_at FROM shift_auction_test_access WHERE id = 1")
+            cursor.execute("SELECT favored_starts_at, COALESCE(rate_lock_enabled, FALSE) FROM shift_auction_test_access WHERE id = 1")
             favored_row = cursor.fetchone()
             favored_starts_at = favored_row[0] if favored_row else None
+            rate_lock_enabled = bool(favored_row[1]) if favored_row and len(favored_row) > 1 else False
             selected_period_row = self._get_shift_auction_period_row_tx(cursor, settings_row[6])
 
         selected_operator_ids = [int(row[0]) for row in participant_rows if row and row[0] is not None]
@@ -6258,6 +6289,7 @@ class Database:
             "ends_at": settings_row[3].isoformat() if settings_row and settings_row[3] else None,
             "favored_starts_at": favored_starts_at.isoformat() if favored_starts_at else None,
             "favored_operator_ids": favored_operator_ids,
+            "rate_lock_enabled": rate_lock_enabled,
             "paused_at": settings_row[4].isoformat() if settings_row and settings_row[4] else None,
             "finished_at": settings_row[5].isoformat() if settings_row and settings_row[5] else None,
             "selected_schedule_plan_id": settings_row[6] if settings_row else None,
@@ -6681,6 +6713,49 @@ class Database:
                     "plan_id": selected_schedule_plan_id,
                     "updated_by": updated_by,
                 })
+
+        return {
+            "event": event,
+            "snapshot": self.get_shift_auction_test_snapshot(
+                current_user_id=updated_by,
+                include_admin_fields=True
+            ),
+        }
+
+    def set_shift_auction_test_rate_lock(self, enabled, updated_by=None):
+        # Toggle the "own rate only" claim mode: when enabled, operators may
+        # claim only lots whose rate group matches their own rate. Unlike
+        # top-up this is a standing setting, so it can be flipped at any time.
+        enable = bool(enabled)
+        now = datetime.now()
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT COALESCE(rate_lock_enabled, FALSE), selected_schedule_plan_id
+                FROM shift_auction_test_access
+                WHERE id = 1
+                FOR UPDATE
+            """)
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("AUCTION_NOT_AVAILABLE")
+            current_enabled = bool(row[0])
+            selected_schedule_plan_id = row[1]
+            if current_enabled != enable:
+                cursor.execute("""
+                    UPDATE shift_auction_test_access
+                    SET rate_lock_enabled = %s,
+                        updated_by = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = 1
+                """, (enable, updated_by))
+                event = self._insert_shift_auction_test_event(cursor, "auction_rate_lock_updated", {
+                    "enabled": enable,
+                    "changed_at": now.isoformat(),
+                    "plan_id": selected_schedule_plan_id,
+                    "updated_by": updated_by,
+                })
+            else:
+                event = None
 
         return {
             "event": event,
@@ -7870,9 +7945,10 @@ class Database:
                 if current_id else []
             )
 
-            cursor.execute("SELECT favored_starts_at FROM shift_auction_test_access WHERE id = 1")
+            cursor.execute("SELECT favored_starts_at, COALESCE(rate_lock_enabled, FALSE) FROM shift_auction_test_access WHERE id = 1")
             favored_row = cursor.fetchone()
             favored_starts_at = favored_row[0] if favored_row else None
+            rate_lock_enabled = bool(favored_row[1]) if favored_row and len(favored_row) > 1 else False
             is_current_user_favored = False
             if current_id:
                 cursor.execute(
@@ -7932,6 +8008,7 @@ class Database:
             "topup_started_at": settings_row[13].isoformat() if settings_row and len(settings_row) > 13 and settings_row[13] else None,
             "topup_started_by": settings_row[14] if settings_row and len(settings_row) > 14 else None,
             "topup_started_by_name": (settings_row[15] or "") if settings_row and len(settings_row) > 15 else "",
+            "rate_lock_enabled": rate_lock_enabled,
             "selected_operator_ids": selected_operator_ids,
             "selected_operators": [
                 {
@@ -8881,7 +8958,8 @@ class Database:
                     ) AS operator_rate,
                     s.topup_started_at,
                     s.favored_starts_at,
-                    (SELECT COALESCE(early_access, FALSE) FROM shift_auction_test_participants WHERE operator_id = %s) AS early_access
+                    (SELECT COALESCE(early_access, FALSE) FROM shift_auction_test_participants WHERE operator_id = %s) AS early_access,
+                    COALESCE(s.rate_lock_enabled, FALSE) AS rate_lock_enabled
                 FROM shift_auction_test_access s
                 WHERE s.id = 1
             """, (operator_id, operator_id, operator_id))
@@ -8896,6 +8974,7 @@ class Database:
                 raise ValueError("OPERATOR_NOT_FOUND")
             operator_rate = float(header[6] or 1)
             is_topup_mode = bool(header[7]) and not header[4]  # topup_started_at set, auction not finished
+            rate_lock_enabled = bool(header[10]) if len(header) > 10 else False
 
             started_at = time.perf_counter()
             cursor.execute("""
@@ -8910,6 +8989,10 @@ class Database:
                 raise ValueError("LOT_NOT_FOUND")
             if lot[5] != 'available':
                 raise ValueError("LOT_ALREADY_CLAIMED")
+            if rate_lock_enabled:
+                lot_rate_bucket = self._shift_auction_lot_rate_bucket(lot[2], lot[3])
+                if abs(lot_rate_bucket - self._shift_auction_rate_bucket(operator_rate)) > 0.001:
+                    raise ValueError("SHIFT_RATE_MISMATCH")
 
             lot_date = lot[1]
             started_at = time.perf_counter()
