@@ -12330,6 +12330,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [operatorSelfTab, setOperatorSelfTab] = useState('schedule');
             const [expandedMyDayCards, setExpandedMyDayCards] = useState({});
             const [expandedMyUpcomingShifts, setExpandedMyUpcomingShifts] = useState({});
+            const [swapIncomingPage, setSwapIncomingPage] = useState(0);
+            const [swapOutgoingPage, setSwapOutgoingPage] = useState(0);
             const [showOperatorMobileCalendar, setShowOperatorMobileCalendar] = useState(false);
             const [breakReminderEnabled, setBreakReminderEnabled] = useState(false);
             const [breakReminderLeadMinutes, setBreakReminderLeadMinutes] = useState(5);
@@ -22693,172 +22695,176 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </div>
                                             )}
 
-                                            <div className="grid grid-cols-1 xl:grid-cols-2 gap-0 sm:gap-3">
-                                                <div className="bg-white rounded-none sm:rounded-xl border-y sm:border border-slate-200 p-4 mb-3 sm:mb-0">
-                                                    <div className="flex items-center justify-between gap-2 mb-3">
-                                                        <div className="text-sm font-semibold text-slate-900">Входящие</div>
-                                                        <div className="text-xs text-slate-500">
-                                                            Всего: <span className="font-semibold tabular-nums">{swapIncomingRequests.length}</span>
-                                                        </div>
-                                                    </div>
-                                                    {swapRequestsLoading ? (
-                                                        <div className="text-sm text-slate-500">
-                                                            <FaIcon className="fas fa-spinner fa-spin mr-2"></FaIcon>Загрузка...
-                                                        </div>
-                                                    ) : swapIncomingRequests.length === 0 ? (
-                                                        <div className="text-sm text-slate-400">Нет входящих запросов</div>
-                                                    ) : (
-                                                        <div className="space-y-2">
-                                                            {swapIncomingRequests.map(req => {
-                                                                const statusMeta = getSwapStatusMeta(req?.status);
-                                                                const periodLabel = formatSwapIntervalLabel(req);
-                                                                const isRespondingThis = Number(swapRespondingId) === Number(req?.id);
-                                                                const requestMode = String(req?.exchangeMode || '').toLowerCase();
-                                                                const isExchangeRequest = requestMode.includes('exchange') || (Array.isArray(req?.targetSegments) && req.targetSegments.length > 0);
-                                                                return (
-                                                                    <div key={`swap-in-${req?.id}`} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                                                                        <div className="flex flex-wrap items-start justify-between gap-2">
-                                                                            <div>
-                                                                                <div className="text-sm font-medium text-slate-900">{req?.requester?.name || 'Оператор'}</div>
-                                                                                <div className="text-xs text-slate-500">{periodLabel}</div>
-                                                                                <div className="text-xs text-slate-500 mt-0.5">
-                                                                                    Вам передают: <span className="font-semibold">{formatSwapSegmentsSummaryLabel(req?.swapDate || req?.startDate || '', req?.requestedSegments)}</span>
-                                                                                    {' '}(<span className="font-semibold tabular-nums">{formatMinutesOnly(req?.summary?.totalMinutes ?? 0)}</span>)
+                                            <div className="grid grid-cols-1 xl:grid-cols-2 gap-0 sm:gap-3" style={{ fontFamily: IOS_FONT }}>
+                                                {[
+                                                    {
+                                                        key: 'incoming',
+                                                        title: 'Входящие',
+                                                        items: swapIncomingRequests,
+                                                        page: swapIncomingPage,
+                                                        setPage: setSwapIncomingPage,
+                                                        emptyText: 'Нет входящих запросов',
+                                                        panelClass: 'mb-3 sm:mb-0'
+                                                    },
+                                                    {
+                                                        key: 'outgoing',
+                                                        title: 'Исходящие',
+                                                        items: swapOutgoingRequests,
+                                                        page: swapOutgoingPage,
+                                                        setPage: setSwapOutgoingPage,
+                                                        emptyText: 'Нет исходящих запросов',
+                                                        panelClass: ''
+                                                    }
+                                                ].map(panel => {
+                                                    const pageSize = 4;
+                                                    const pageCount = Math.max(1, Math.ceil(panel.items.length / pageSize));
+                                                    const page = Math.min(panel.page, pageCount - 1);
+                                                    const pageItems = panel.items.slice(page * pageSize, (page + 1) * pageSize);
+                                                    const isIncoming = panel.key === 'incoming';
+                                                    return (
+                                                        <div key={`swap-panel-${panel.key}`} className={`bg-white rounded-none sm:rounded-2xl border-y sm:border-0 border-slate-200 sm:ring-1 sm:ring-slate-200/70 sm:shadow-[0_1px_2px_rgba(15,23,42,0.04)] p-4 ${panel.panelClass}`}>
+                                                            <div className="mb-3 flex items-center justify-between gap-2">
+                                                                <div className="text-[13px] font-semibold text-slate-900">{panel.title}</div>
+                                                                <div className="text-[11.5px] tabular-nums text-slate-400">{panel.items.length}</div>
+                                                            </div>
+                                                            {swapRequestsLoading ? (
+                                                                <div className="text-sm text-slate-500">
+                                                                    <FaIcon className="fas fa-spinner fa-spin mr-2"></FaIcon>Загрузка...
+                                                                </div>
+                                                            ) : panel.items.length === 0 ? (
+                                                                <div className="rounded-xl bg-slate-50 px-3 py-4 text-center text-[12.5px] text-slate-400">{panel.emptyText}</div>
+                                                            ) : (
+                                                                <>
+                                                                    <div className="space-y-2.5">
+                                                                        {pageItems.map(req => {
+                                                                            const statusMeta = getSwapStatusMeta(req?.status);
+                                                                            const periodLabel = formatSwapIntervalLabel(req);
+                                                                            const isRespondingThis = Number(swapRespondingId) === Number(req?.id);
+                                                                            const requestMode = String(req?.exchangeMode || '').toLowerCase();
+                                                                            const isExchangeRequest = requestMode.includes('exchange') || (Array.isArray(req?.targetSegments) && req.targetSegments.length > 0);
+                                                                            const counterpartName = isIncoming ? (req?.requester?.name || 'Оператор') : (req?.target?.name || 'Оператор');
+                                                                            const givenLabel = formatSwapSegmentsSummaryLabel(req?.swapDate || req?.startDate || '', req?.requestedSegments);
+                                                                            const givenHours = formatHoursRu(req?.summary?.totalMinutes ?? 0);
+                                                                            const counterLabel = formatSwapSegmentsSummaryLabel(req?.swapDate || req?.startDate || '', req?.targetSegments);
+                                                                            const counterHours = formatHoursRu(req?.exchangeSummary?.totalMinutes ?? 0);
+                                                                            return (
+                                                                                <div key={`swap-${panel.key}-${req?.id}`} className="overflow-hidden rounded-xl bg-white ring-1 ring-slate-200/70 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+                                                                                    <div className="flex items-center gap-2.5 px-3.5 pt-3">
+                                                                                        <div className={`grid h-8 w-8 flex-shrink-0 place-items-center rounded-[10px] text-white shadow-sm ${isExchangeRequest ? 'bg-emerald-500' : 'bg-blue-600'}`}>
+                                                                                            <FaIcon className={`fas ${isExchangeRequest ? 'fa-right-left' : 'fa-user-clock'} text-[12px]`}></FaIcon>
+                                                                                        </div>
+                                                                                        <div className="min-w-0 flex-1">
+                                                                                            <div className="truncate text-[14px] font-semibold leading-tight text-slate-900">{counterpartName}</div>
+                                                                                            <div className="text-[11.5px] text-slate-400">{isExchangeRequest ? 'Обмен сменами' : 'Замена'}</div>
+                                                                                        </div>
+                                                                                        <span className={`flex-shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-semibold ${statusMeta.className}`}>
+                                                                                            {statusMeta.label}
+                                                                                        </span>
+                                                                                    </div>
+                                                                                    <div className="px-3.5 pt-2 text-[14px] font-semibold leading-snug tabular-nums text-slate-900">{periodLabel}</div>
+                                                                                    <div className="space-y-1 px-3.5 pb-3 pt-1.5 text-[12px]">
+                                                                                        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+                                                                                            <span className="text-slate-500">{isIncoming ? 'Вам передают' : 'Вы отдаёте'}</span>
+                                                                                            <span className="text-right font-medium tabular-nums text-slate-800">{givenLabel} · {givenHours}</span>
+                                                                                        </div>
+                                                                                        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+                                                                                            {isExchangeRequest ? (
+                                                                                                <>
+                                                                                                    <span className="text-slate-500">{isIncoming ? 'Вы отдаёте' : 'Получаете'}</span>
+                                                                                                    <span className="text-right font-medium tabular-nums text-slate-800">{counterLabel} · {counterHours}</span>
+                                                                                                </>
+                                                                                            ) : (
+                                                                                                <span className="text-slate-400">Встречная смена не требуется</span>
+                                                                                            )}
+                                                                                        </div>
+                                                                                        {req?.requestComment && (
+                                                                                            <div className="pt-0.5 leading-snug text-slate-500">
+                                                                                                <span className="text-slate-400">Комментарий:</span> {req.requestComment}
+                                                                                            </div>
+                                                                                        )}
+                                                                                        {req?.responseComment && req?.status !== 'pending' && (
+                                                                                            <div className="pt-0.5 leading-snug text-slate-500">
+                                                                                                <span className="text-slate-400">Ответ:</span> {req.responseComment}
+                                                                                            </div>
+                                                                                        )}
+                                                                                        {req?.status === 'pending' && (
+                                                                                            <div className="flex items-center gap-2 pt-2">
+                                                                                                {isIncoming ? (
+                                                                                                    <>
+                                                                                                        <button
+                                                                                                            type="button"
+                                                                                                            onClick={() => handleRespondSwapRequest(req, 'accept')}
+                                                                                                            disabled={!!swapRespondingId}
+                                                                                                            className={`flex-1 rounded-lg px-3 py-1.5 text-[12.5px] font-semibold transition-all active:scale-[0.98] ${
+                                                                                                                isRespondingThis
+                                                                                                                    ? 'bg-slate-200 text-slate-500'
+                                                                                                                    : 'bg-emerald-600 text-white hover:bg-emerald-700'
+                                                                                                            }`}
+                                                                                                        >
+                                                                                                            {isRespondingThis ? 'Обработка...' : 'Принять'}
+                                                                                                        </button>
+                                                                                                        <button
+                                                                                                            type="button"
+                                                                                                            onClick={() => handleRespondSwapRequest(req, 'reject')}
+                                                                                                            disabled={!!swapRespondingId}
+                                                                                                            className={`flex-1 rounded-lg px-3 py-1.5 text-[12.5px] font-semibold transition-all active:scale-[0.98] ${
+                                                                                                                isRespondingThis
+                                                                                                                    ? 'bg-slate-200 text-slate-500'
+                                                                                                                    : 'bg-rose-600 text-white hover:bg-rose-700'
+                                                                                                            }`}
+                                                                                                        >
+                                                                                                            Отказать
+                                                                                                        </button>
+                                                                                                    </>
+                                                                                                ) : (
+                                                                                                    <button
+                                                                                                        type="button"
+                                                                                                        onClick={() => handleRespondSwapRequest(req, 'cancel')}
+                                                                                                        disabled={!!swapRespondingId}
+                                                                                                        className={`rounded-lg px-3.5 py-1.5 text-[12.5px] font-semibold transition-all active:scale-[0.98] ${
+                                                                                                            isRespondingThis
+                                                                                                                ? 'bg-slate-200 text-slate-500'
+                                                                                                                : 'bg-amber-500 text-white hover:bg-amber-600'
+                                                                                                        }`}
+                                                                                                    >
+                                                                                                        {isRespondingThis ? 'Обработка...' : 'Отменить'}
+                                                                                                    </button>
+                                                                                                )}
+                                                                                            </div>
+                                                                                        )}
+                                                                                    </div>
                                                                                 </div>
-                                                                                <div className="text-xs text-slate-500 mt-0.5">
-                                                                                    {isExchangeRequest ? (
-                                                                                        <>
-                                                                                            Вы отдаете: <span className="font-semibold">{formatSwapSegmentsSummaryLabel(req?.swapDate || req?.startDate || '', req?.targetSegments)}</span>
-                                                                                            {' '}(<span className="font-semibold tabular-nums">{formatMinutesOnly(req?.exchangeSummary?.totalMinutes ?? 0)}</span>)
-                                                                                        </>
-                                                                                    ) : 'Встречная смена не требуется'}
-                                                                                </div>
-                                                                            </div>
-                                                                            <span className={`px-2 py-0.5 rounded-md border text-xs font-semibold ${statusMeta.className}`}>
-                                                                                {statusMeta.label}
-                                                                            </span>
-                                                                        </div>
-                                                                        {req?.requestComment && (
-                                                                            <div className="mt-2 text-xs text-slate-700">
-                                                                                Комментарий: {req.requestComment}
-                                                                            </div>
-                                                                        )}
-                                                                        {req?.responseComment && req?.status !== 'pending' && (
-                                                                            <div className="mt-2 text-xs text-slate-600">
-                                                                                Ответ: {req.responseComment}
-                                                                            </div>
-                                                                        )}
-                                                                        {req?.status === 'pending' && (
-                                                                            <div className="mt-3 flex items-center gap-2">
-                                                                                <button
-                                                                                    type="button"
-                                                                                    onClick={() => handleRespondSwapRequest(req, 'accept')}
-                                                                                    disabled={!!swapRespondingId}
-                                                                                    className={`px-3 py-1.5 rounded-md text-xs font-medium ${
-                                                                                        isRespondingThis
-                                                                                            ? 'bg-slate-200 text-slate-500'
-                                                                                            : 'bg-emerald-600 text-white hover:bg-emerald-700'
-                                                                                    }`}
-                                                                                >
-                                                                                    {isRespondingThis ? 'Обработка...' : 'Принять'}
-                                                                                </button>
-                                                                                <button
-                                                                                    type="button"
-                                                                                    onClick={() => handleRespondSwapRequest(req, 'reject')}
-                                                                                    disabled={!!swapRespondingId}
-                                                                                    className={`px-3 py-1.5 rounded-md text-xs font-medium ${
-                                                                                        isRespondingThis
-                                                                                            ? 'bg-slate-200 text-slate-500'
-                                                                                            : 'bg-rose-600 text-white hover:bg-rose-700'
-                                                                                    }`}
-                                                                                >
-                                                                                    Отказать
-                                                                                </button>
-                                                                            </div>
-                                                                        )}
+                                                                            );
+                                                                        })}
                                                                     </div>
-                                                                );
-                                                            })}
-                                                        </div>
-                                                    )}
-                                                </div>
-
-                                                <div className="bg-white rounded-none sm:rounded-xl border-y sm:border border-slate-200 p-4">
-                                                    <div className="flex items-center justify-between gap-2 mb-3">
-                                                        <div className="text-sm font-semibold text-slate-900">Исходящие</div>
-                                                        <div className="text-xs text-slate-500">
-                                                            Всего: <span className="font-semibold tabular-nums">{swapOutgoingRequests.length}</span>
-                                                        </div>
-                                                    </div>
-                                                    {swapRequestsLoading ? (
-                                                        <div className="text-sm text-slate-500">
-                                                            <FaIcon className="fas fa-spinner fa-spin mr-2"></FaIcon>Загрузка...
-                                                        </div>
-                                                    ) : swapOutgoingRequests.length === 0 ? (
-                                                        <div className="text-sm text-slate-400">Нет исходящих запросов</div>
-                                                    ) : (
-                                                        <div className="space-y-2">
-                                                            {swapOutgoingRequests.map(req => {
-                                                                const statusMeta = getSwapStatusMeta(req?.status);
-                                                                const periodLabel = formatSwapIntervalLabel(req);
-                                                                const requestMode = String(req?.exchangeMode || '').toLowerCase();
-                                                                const isExchangeRequest = requestMode.includes('exchange') || (Array.isArray(req?.targetSegments) && req.targetSegments.length > 0);
-                                                                const isRespondingThis = Number(swapRespondingId) === Number(req?.id);
-                                                                return (
-                                                                    <div key={`swap-out-${req?.id}`} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                                                                        <div className="flex flex-wrap items-start justify-between gap-2">
-                                                                            <div>
-                                                                                <div className="text-sm font-medium text-slate-900">{req?.target?.name || 'Оператор'}</div>
-                                                                                <div className="text-xs text-slate-500">{periodLabel}</div>
-                                                                                <div className="text-xs text-slate-500 mt-0.5">
-                                                                                    Вы отдаете: <span className="font-semibold">{formatSwapSegmentsSummaryLabel(req?.swapDate || req?.startDate || '', req?.requestedSegments)}</span>
-                                                                                    {' '}(<span className="font-semibold tabular-nums">{formatMinutesOnly(req?.summary?.totalMinutes ?? 0)}</span>)
-                                                                                </div>
-                                                                                <div className="text-xs text-slate-500 mt-0.5">
-                                                                                    {isExchangeRequest ? (
-                                                                                        <>
-                                                                                            Получаете: <span className="font-semibold">{formatSwapSegmentsSummaryLabel(req?.swapDate || req?.startDate || '', req?.targetSegments)}</span>
-                                                                                            {' '}(<span className="font-semibold tabular-nums">{formatMinutesOnly(req?.exchangeSummary?.totalMinutes ?? 0)}</span>)
-                                                                                        </>
-                                                                                    ) : 'Обычная замена: без встречной смены'}
-                                                                                </div>
-                                                                            </div>
-                                                                            <span className={`px-2 py-0.5 rounded-md border text-xs font-semibold ${statusMeta.className}`}>
-                                                                                {statusMeta.label}
-                                                                            </span>
+                                                                    {pageCount > 1 && (
+                                                                        <div className="mt-3 flex items-center justify-between border-t border-slate-100 pt-2.5">
+                                                                            <button
+                                                                                type="button"
+                                                                                onClick={() => panel.setPage(Math.max(0, page - 1))}
+                                                                                disabled={page === 0}
+                                                                                className="grid h-7 w-7 place-items-center rounded-lg bg-slate-100 text-slate-500 transition hover:bg-slate-200 active:scale-95 disabled:opacity-40 disabled:hover:bg-slate-100"
+                                                                                aria-label="Предыдущая страница"
+                                                                            >
+                                                                                <FaIcon className="fas fa-chevron-left text-[10px]"></FaIcon>
+                                                                            </button>
+                                                                            <span className="text-[11.5px] tabular-nums text-slate-400">{page + 1} из {pageCount}</span>
+                                                                            <button
+                                                                                type="button"
+                                                                                onClick={() => panel.setPage(Math.min(pageCount - 1, page + 1))}
+                                                                                disabled={page >= pageCount - 1}
+                                                                                className="grid h-7 w-7 place-items-center rounded-lg bg-slate-100 text-slate-500 transition hover:bg-slate-200 active:scale-95 disabled:opacity-40 disabled:hover:bg-slate-100"
+                                                                                aria-label="Следующая страница"
+                                                                            >
+                                                                                <FaIcon className="fas fa-chevron-right text-[10px]"></FaIcon>
+                                                                            </button>
                                                                         </div>
-                                                                        {req?.requestComment && (
-                                                                            <div className="mt-2 text-xs text-slate-700">
-                                                                                Комментарий: {req.requestComment}
-                                                                            </div>
-                                                                        )}
-                                                                        {req?.responseComment && req?.status !== 'pending' && (
-                                                                            <div className="mt-2 text-xs text-slate-600">
-                                                                                Ответ: {req.responseComment}
-                                                                            </div>
-                                                                        )}
-                                                                        {req?.status === 'pending' && (
-                                                                            <div className="mt-3 flex items-center gap-2">
-                                                                                <button
-                                                                                    type="button"
-                                                                                    onClick={() => handleRespondSwapRequest(req, 'cancel')}
-                                                                                    disabled={!!swapRespondingId}
-                                                                                    className={`px-3 py-1.5 rounded-md text-xs font-medium ${
-                                                                                        isRespondingThis
-                                                                                            ? 'bg-slate-200 text-slate-500'
-                                                                                            : 'bg-amber-500 text-white hover:bg-amber-600'
-                                                                                    }`}
-                                                                                >
-                                                                                    {isRespondingThis ? 'Обработка...' : 'Отменить'}
-                                                                                </button>
-                                                                            </div>
-                                                                        )}
-                                                                    </div>
-                                                                );
-                                                            })}
+                                                                    )}
+                                                                </>
+                                                            )}
                                                         </div>
-                                                    )}
-                                                </div>
+                                                    );
+                                                })}
                                             </div>
                                         </div>
                                     )}
