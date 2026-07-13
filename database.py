@@ -29024,7 +29024,7 @@ class Database:
         with self._get_cursor() as cursor:
             cursor.execute(
                 """
-                SELECT u.id, u.role, u.direction_id, COALESCE(d.name, '')
+                SELECT u.id, u.role, u.direction_id, COALESCE(d.name, ''), u.department_id
                 FROM users u
                 LEFT JOIN directions d ON d.id = u.direction_id
                 WHERE u.id = %s
@@ -29039,8 +29039,11 @@ class Database:
                 raise ValueError("Only operators can request swap candidates")
             requester_direction_id = requester_row[2]
             requester_direction_name = requester_row[3]
+            requester_department_id = requester_row[4]
             if requester_direction_id is None:
                 raise ValueError("У вашего профиля не задано направление")
+            if requester_department_id is None:
+                raise ValueError("У вашего профиля не задан отдел")
 
             cursor.execute(
                 """
@@ -29056,10 +29059,11 @@ class Database:
                 LEFT JOIN users s ON s.id = u.supervisor_id
                 WHERE u.role = 'operator'
                   AND u.id <> %s
+                  AND u.department_id = %s
                   AND COALESCE(u.status, 'working') <> 'fired'
                 ORDER BY LOWER(u.name), u.id
                 """,
-                (requester_operator_id,)
+                (requester_operator_id, int(requester_department_id))
             )
             candidate_rows = cursor.fetchall() or []
             candidate_rows = [
@@ -29261,10 +29265,12 @@ class Database:
                     u.direction_id,
                     u.name,
                     COALESCE(u.status, 'working'),
-                    COALESCE(d.name, '')
+                    COALESCE(d.name, ''),
+                    u.department_id
                 FROM users u
                 LEFT JOIN directions d ON d.id = u.direction_id
                 WHERE u.id = ANY(%s)
+                FOR SHARE OF u
                 """,
                 ([requester_operator_id, target_operator_id],)
             )
@@ -29280,6 +29286,13 @@ class Database:
                 raise ValueError("Swap is available only between operators")
             if str(target[4]) == 'fired':
                 raise ValueError("Выбранный оператор уволен")
+
+            requester_department_id = requester[6]
+            target_department_id = target[6]
+            if requester_department_id is None:
+                raise ValueError("У вашего профиля не задан отдел")
+            if target_department_id is None or int(target_department_id) != int(requester_department_id):
+                raise ValueError("Оператор для замены должен быть из вашего отдела")
 
             requester_direction_id = requester[2]
             target_direction_id = target[2]
@@ -29629,6 +29642,28 @@ class Database:
                 )
                 row = self._select_shift_swap_request_by_id_tx(cursor, request_id)
                 return self._serialize_shift_swap_request_row(row)
+
+            cursor.execute(
+                """
+                SELECT id, department_id
+                FROM users
+                WHERE id = ANY(%s)
+                FOR SHARE
+                """,
+                ([requester_operator_id, target_operator_id],)
+            )
+            participant_departments = {
+                int(user_id): department_id
+                for user_id, department_id in (cursor.fetchall() or [])
+            }
+            requester_department_id = participant_departments.get(requester_operator_id)
+            target_department_id = participant_departments.get(target_operator_id)
+            if (
+                requester_department_id is None
+                or target_department_id is None
+                or int(requester_department_id) != int(target_department_id)
+            ):
+                raise ValueError("Нельзя принять запрос: операторы находятся в разных отделах")
 
             fallback_date = start_date_obj.strftime('%Y-%m-%d') if isinstance(start_date_obj, date) else None
             payload = self._normalize_swap_request_payload(requested_shifts_raw, fallback_date=fallback_date)
