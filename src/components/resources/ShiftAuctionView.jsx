@@ -1279,7 +1279,7 @@ const explainSteps = [
   }
 ];
 
-const SHIFT_AUCTION_INSTRUCTIONS_VERSION = 'v3';
+const SHIFT_AUCTION_INSTRUCTIONS_VERSION = 'v4';
 
 const StatusPillPreview = ({ tone, icon: Icon, label, detail }) => (
   <span className={`inline-flex h-9 items-center gap-2 rounded-lg border px-3 text-xs font-semibold sm:text-sm ${tone}`}>
@@ -1362,6 +1362,50 @@ const ButtonPreview = ({ variant = 'primary', icon: Icon, children }) => {
   );
 };
 
+// Статичная копия IosToggle для иллюстраций в инструкции.
+const TogglePreview = ({ on = false }) => (
+  <span className={`relative inline-flex h-[26px] w-[44px] shrink-0 items-center rounded-full ${on ? 'bg-emerald-500' : 'bg-slate-300'}`}>
+    <span className={`inline-block h-[22px] w-[22px] rounded-full bg-white shadow-md ${on ? 'translate-x-[20px]' : 'translate-x-[2px]'}`} />
+  </span>
+);
+
+// Строка карточки «Режимы» (иконка + название + описание + переключатель).
+const ModeRowPreview = ({ icon: Icon, iconClass, title, hint, on }) => (
+  <div className="flex items-center justify-between gap-3 px-3 py-2.5">
+    <span className="flex min-w-0 items-center gap-2.5">
+      <span className={`grid h-8 w-8 shrink-0 place-items-center rounded-xl ${iconClass}`}>
+        <Icon size={15} />
+      </span>
+      <span className="min-w-0">
+        <span className="block truncate text-sm font-semibold text-slate-900">{title}</span>
+        {hint ? <span className="block truncate text-[11px] text-slate-500">{hint}</span> : null}
+      </span>
+    </span>
+    <TogglePreview on={on} />
+  </div>
+);
+
+// Сегмент управления запуском (Пауза / Возобновить / Завершить) для иллюстраций.
+const LifecycleSegmentPreview = ({ paused = false }) => (
+  <span className="inline-flex items-center gap-1 rounded-2xl bg-slate-100 p-1">
+    {paused ? (
+      <span className="inline-flex h-8 items-center gap-1.5 rounded-xl bg-white px-3 text-xs font-semibold text-emerald-700 shadow-sm ring-1 ring-slate-200/70">
+        <PlayCircle size={15} />
+        Возобновить
+      </span>
+    ) : (
+      <span className="inline-flex h-8 items-center gap-1.5 rounded-xl bg-white px-3 text-xs font-semibold text-amber-700 shadow-sm ring-1 ring-slate-200/70">
+        <PauseCircle size={15} />
+        Пауза
+      </span>
+    )}
+    <span className="inline-flex h-8 items-center gap-1.5 rounded-xl px-3 text-xs font-semibold text-rose-600">
+      <Square size={13} />
+      Завершить
+    </span>
+  </span>
+);
+
 const OPERATOR_INSTRUCTION_STEPS = [
   {
     icon: Info,
@@ -1383,7 +1427,10 @@ const OPERATOR_INSTRUCTION_STEPS = [
         <StatusPillPreview tone="border-blue-200 bg-blue-50 text-blue-800" icon={Clock3} label="Откроется" detail="00:14:32" />
         <span className="text-xs text-slate-500">Цифры обновляются каждую секунду. Когда отсчёт дойдёт до нуля — кнопки смен оживут.</span>
       </div>
-    )
+    ),
+    nuances: [
+      'Если администратор включил вам ранний доступ (значок ✨ в списке участников) — аукцион откроется для вас раньше остальных, таймер это учитывает автоматически.'
+    ]
   },
   {
     icon: ListChecks,
@@ -1421,7 +1468,7 @@ const OPERATOR_INSTRUCTION_STEPS = [
   {
     icon: Hand,
     title: 'Шаг 3 · Заберите смены',
-    body: 'В таблице кликните по нужному времени смены. Цвет смены показывает время старта (от голубого утром до тёмно-синего вечером). Ваша смена помечается зелёным, чужая — серым.',
+    body: 'Смены в таблице сгруппированы по строкам ставок: «Ставка 1» (9 ч), «Ставка 0.75» (6.5 ч), «Ставка 0.5» (4 ч) и «Ночные 20*08». Кликните по нужному времени. Цвет смены показывает время старта (от голубого утром до тёмно-синего вечером). Ваша смена помечается зелёным, чужая — серым.',
     visual: (
       <div className="space-y-2">
         <div className="flex flex-wrap items-end gap-3">
@@ -1458,7 +1505,56 @@ const OPERATOR_INSTRUCTION_STEPS = [
       'Сумма часов не должна превышать вашу норму на период (норма видна в правом верхнем углу).',
       'Если смена недоступна по правилам (превысит норму, на этот день уже есть смена и т. п.) — кнопка станет серой с подсказкой.'
     ],
-    example: 'Например, при ставке 1.0 и периоде в 7 дней с 1 выходным норма ≈ 48 часов. Если вы уже забрали 40, останется 8 часов, чтобы добрать.'
+    example: 'Например, при ставке 1.0 и неделе из 7 дней (квота 2 выходных) норма = 5 рабочих дней × 8 ч = 40 часов. При ставке 0.5 — 20 часов. Перерывы в норму не входят.'
+  },
+  {
+    icon: Lock,
+    title: 'Режим «Только своя ставка»',
+    body: 'Администратор может ограничить выбор: тогда вы сможете брать только смены своей ставки. В шапке раздела появится голубой бейдж, а под ним — подсказка с вашей ставкой. Строки чужих ставок останутся видимыми, но смены в них будут серыми с пояснением.',
+    visual: (
+      <div className="space-y-2.5">
+        <span className="inline-flex items-center gap-1 rounded-full border border-sky-300 bg-sky-100 px-2 py-0.5 text-[11px] font-semibold text-sky-800">
+          <Lock size={11} />
+          Только своя ставка
+        </span>
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-2">
+            <span className="w-24 shrink-0 text-[11px] font-semibold uppercase tracking-wider text-slate-500">Ставка 0.75</span>
+            <LotChipPreview tone="morning" label="09-15:30" />
+            <span className="text-[11px] font-semibold text-emerald-700">ваша ставка — можно брать</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="w-24 shrink-0 text-[11px] font-semibold uppercase tracking-wider text-slate-500">Ставка 1</span>
+            <LotChipPreview tone="blocked" label="08-17" />
+            <span className="text-[11px] text-slate-500">«Смена ставки 1 — вам доступны только смены ставки 0.75»</span>
+          </div>
+        </div>
+      </div>
+    ),
+    nuances: [
+      'Ставка смены определяется её длительностью: до 5.5 ч — 0.5, до 7.5 ч — 0.75, длиннее (включая ночные 20*08) — 1.',
+      'Если режим выключен — ограничения нет: можно брать смены любой ставки в пределах нормы.',
+      'Режим может включиться или выключиться прямо во время аукциона — таблица обновится сразу, без перезагрузки.'
+    ]
+  },
+  {
+    icon: Plus,
+    title: 'Режим добора',
+    body: 'Когда норма у большинства набрана, администратор может включить добор. В шапке появится фиолетовый бейдж «Режим добора» — с этого момента можно брать дополнительные смены сверх нормы, в том числе несколько на один день.',
+    visual: (
+      <div className="space-y-2">
+        <span className="inline-flex items-center gap-1 rounded-full border border-violet-300 bg-violet-100 px-2 py-0.5 text-[11px] font-semibold text-violet-800">
+          <Plus size={12} />
+          Режим добора
+        </span>
+        <span className="block text-xs text-slate-500">Единственное ограничение — новая смена не должна пересекаться по времени с уже взятыми в этот день.</span>
+      </div>
+    ),
+    nuances: [
+      'Проверка нормы в доборе не действует — часы могут превысить норму.',
+      'Пересекающаяся по времени смена всё равно недоступна — кнопка серая с подсказкой.',
+      'Если включён режим «Только своя ставка», в доборе тоже можно брать только смены своей ставки.'
+    ]
   },
   {
     icon: Undo2,
@@ -1555,7 +1651,7 @@ const OPERATOR_INSTRUCTION_STEPS = [
       'Если смена пересекается по времени с уже стоящей у вас в графиках — система не даст её взять.',
       'Если новая смена стыкуется встык (например 12:00-17:00 и уже есть 17:00-22:00) — они автоматически объединяются в одну, перерывы пересчитываются по правилам направления.',
       'Если стыка нет — для смены посчитаются собственные перерывы по тем же правилам.',
-      'Вернуть такую смену нельзя — она уже в реальном графике работы.'
+      'Передумали? Отменить взятую доп. смену можно в течение 10 минут через «Мои доп. смены» (кнопка в шапке). Позже смена закрепляется в графике — только через руководителя.'
     ]
   },
   {
@@ -1642,21 +1738,30 @@ const ADMIN_INSTRUCTION_STEPS = [
     ]
   },
   {
-    icon: Sparkles,
-    title: 'Шаг 2 · Создайте тестовые лоты',
-    body: 'Нажмите «Создать тестовые смены» в блоке «Тестовый запуск». Система сгенерирует набор смен на ближайшие 7 дней по шаблонам (1.0, 0.75, 0.5 ставки и ночные 20*08). При повторном клике существующие тестовые лоты пересоздаются.',
+    icon: CalendarDays,
+    title: 'Шаг 2 · Выберите неделю аукциона',
+    body: 'В блоке «Неделя аукциона» выберите сохранённый недельный план из «Расчёта ресурсов» — его смены станут лотами аукциона. Доступны только полные недели, которые ещё не закончились. Рядом видно, сколько смен в плане.',
     visual: (
       <div className="space-y-2">
-        <div className="flex flex-wrap items-center gap-2">
-          <ButtonPreview variant="outline" icon={Sparkles}>Создать тестовые смены</ButtonPreview>
-          <ButtonPreview variant="primary" icon={Save}>Сохранить</ButtonPreview>
+        <div className="grid max-w-sm gap-2">
+          <span className="rounded-lg border border-blue-500 bg-blue-50 px-3 py-2 text-left">
+            <span className="block text-sm font-semibold text-blue-900">14.07 – 20.07</span>
+            <span className="mt-0.5 block text-xs text-slate-500">166 смен · активная</span>
+          </span>
+          <span className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-left">
+            <span className="block text-sm font-semibold text-slate-700">21.07 – 27.07</span>
+            <span className="mt-0.5 block text-xs text-slate-500">181 смена</span>
+          </span>
         </div>
-        <span className="block text-xs text-slate-500">Кнопки в правом углу блока «Тестовый запуск».</span>
+        <div className="flex flex-wrap items-center gap-2">
+          <ButtonPreview variant="outline" icon={RotateCcw}>Начать заново</ButtonPreview>
+          <span className="text-xs text-slate-500">Перезапускает аукцион выбранной недели с чистого листа.</span>
+        </div>
       </div>
     ),
     nuances: [
-      'Создание лотов сбрасывает выбранные операторами выходные на тестовом полигоне.',
-      'На «боевые» графики это не влияет.'
+      'Смена недели или «Начать заново» очищает выбранные операторами смены и выходные этой недели. Прошлые опубликованные периоды не трогаются.',
+      'Если планов нет — сначала проведите генерацию в «Расчёте ресурсов» и сохраните недельный график.'
     ]
   },
   {
@@ -1681,7 +1786,10 @@ const ADMIN_INSTRUCTION_STEPS = [
         </div>
       </div>
     ),
-    example: 'Пример: старт 05.06 09:00, завершение 05.06 09:30. Это даст 30-минутное окно «гонки» за смены.'
+    example: 'Пример: старт 05.06 09:00, завершение 05.06 09:30. Это даст 30-минутное окно «гонки» за смены.',
+    nuances: [
+      'Быстрые пресеты «Завершить через 30 мин / 1 ч / 2 ч...» проставляют время завершения от выбранного старта одним кликом.'
+    ]
   },
   {
     icon: Users,
@@ -1720,26 +1828,111 @@ const ADMIN_INSTRUCTION_STEPS = [
     ]
   },
   {
+    icon: Sparkles,
+    title: 'Ранний доступ для избранной группы',
+    body: 'Отдельным участникам можно открыть аукцион раньше остальных: отметьте их значком ✨ в списке участников и задайте время раннего старта в янтарном блоке «Ранний доступ». Остальные зайдут в основное время.',
+    visual: (
+      <div className="max-w-sm rounded-lg border border-amber-200 bg-amber-50/60 p-3">
+        <div className="flex items-center gap-2 text-sm font-semibold text-amber-900">
+          <Sparkles size={15} className="text-amber-600" />
+          Ранний доступ для избранной группы
+        </div>
+        <div className="mt-2 flex items-center justify-between gap-2 rounded-md border border-amber-200 bg-white px-3 py-2">
+          <span className="text-sm font-semibold text-slate-900">Иванов Иван</span>
+          <Sparkles size={14} className="text-amber-500" />
+        </div>
+        <div className="mt-2 text-xs text-amber-800">Старт для избранных: 09:00 · основной старт: 10:00</div>
+      </div>
+    ),
+    nuances: [
+      'Ранний старт должен быть в день основного старта и раньше него.',
+      'Время завершения общее для всех.'
+    ]
+  },
+  {
     icon: PlayCircle,
-    title: 'Шаг 5 · Включите режим и сохраните',
-    body: 'Переключите «Включить тестовый режим» и нажмите «Сохранить». С этого момента выбранные операторы видят раздел и таймер до старта (либо сразу выбирают, если время старта уже прошло).',
+    title: 'Шаг 5 · Режимы аукциона и сохранение',
+    body: 'В карточке «Режимы» три переключателя. «Аукцион включён» — главный: применяется после кнопки «Сохранить» и открывает раздел выбранным операторам. «Режим добора» и «Только своя ставка» действуют мгновенно, без сохранения.',
     visual: (
       <div className="space-y-3">
-        <label className="flex items-center justify-between gap-4 rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
-          <span>
-            <span className="block text-sm font-semibold text-slate-900">Включить тестовый режим</span>
-            <span className="block text-xs text-slate-500">Выбранные операторы увидят realtime-полигон.</span>
-          </span>
-          <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded border border-blue-700 bg-blue-700">
-            <CheckCircle2 size={12} className="text-white" />
-          </span>
-        </label>
+        <div className="max-w-md divide-y divide-slate-100 rounded-2xl bg-white ring-1 ring-slate-200/70">
+          <ModeRowPreview icon={Gavel} iconClass="bg-blue-50 text-blue-600" title="Аукцион включён" hint="Применяется после «Сохранить»" on />
+          <ModeRowPreview icon={Plus} iconClass="bg-violet-50 text-violet-600" title="Режим добора" hint="Только при открытом аукционе" />
+          <ModeRowPreview icon={Lock} iconClass="bg-sky-50 text-sky-600" title="Только своя ставка" hint="Применяется сразу" />
+        </div>
         <ButtonPreview variant="primary" icon={Save}>Сохранить</ButtonPreview>
       </div>
     ),
     nuances: [
-      'Выключение режима — мгновенное: операторы потеряют доступ к разделу до нового включения.',
-      'Изменения в окнах старта/завершения подхватываются всеми клиентами без перезагрузки.'
+      'Выключение «Аукцион включён» (после «Сохранить») — мгновенное: операторы теряют доступ к разделу до нового включения.',
+      'Изменения окна старта/завершения и режимов подхватываются всеми клиентами без перезагрузки.'
+    ]
+  },
+  {
+    icon: Lock,
+    title: 'Режим «Только своя ставка»',
+    body: 'Ограничивает операторов сменами их собственной ставки: оператор 0.75 не сможет забрать 9-часовую смену, оператор 1.0 — короткую. Ставка смены определяется её длительностью: до 5.5 ч — 0.5, до 7.5 ч — 0.75, длиннее (включая ночные 20*08) — 1. Включается и выключается в любой момент, у операторов применяется сразу.',
+    visual: (
+      <div className="space-y-2.5">
+        <div className="flex max-w-md items-center justify-between gap-3 rounded-2xl bg-white px-3 py-2.5 ring-1 ring-slate-200/70">
+          <span className="flex items-center gap-2.5">
+            <span className="grid h-8 w-8 place-items-center rounded-xl bg-sky-50 text-sky-600"><Lock size={15} /></span>
+            <span className="text-sm font-semibold text-slate-900">Только своя ставка</span>
+          </span>
+          <TogglePreview on />
+        </div>
+        <div className="flex items-center gap-2">
+          <LotChipPreview tone="blocked" label="08-17" />
+          <span className="text-[11px] text-slate-500">— так оператор 0.75 видит смену ставки 1: серая, с подсказкой почему недоступна.</span>
+        </div>
+      </div>
+    ),
+    nuances: [
+      'У операторов появляется голубой бейдж «Только своя ставка» и подсказка с их ставкой.',
+      'Проверка двойная: и в интерфейсе, и на сервере при попытке взять смену.',
+      'Действует и в режиме добора.',
+      'На пост-аукционный добор оранжевых смен ограничение не распространяется.'
+    ]
+  },
+  {
+    icon: Plus,
+    title: 'Режим добора',
+    body: 'Когда основная «гонка» прошла и остались свободные смены — включите добор. Операторы смогут брать смены сверх нормы (в том числе несколько на день), лишь бы они не пересекались по времени с уже взятыми. Момент включения фиксируется в журнале.',
+    visual: (
+      <div className="space-y-2">
+        <div className="flex max-w-md items-center justify-between gap-3 rounded-2xl bg-white px-3 py-2.5 ring-1 ring-slate-200/70">
+          <span className="flex items-center gap-2.5">
+            <span className="grid h-8 w-8 place-items-center rounded-xl bg-violet-50 text-violet-600"><Plus size={15} /></span>
+            <span className="text-sm font-semibold text-slate-900">Режим добора</span>
+          </span>
+          <TogglePreview on />
+        </div>
+        <span className="inline-flex items-center gap-1 rounded-full border border-violet-300 bg-violet-100 px-2 py-0.5 text-[11px] font-semibold text-violet-800">
+          <Plus size={12} />
+          Режим добора
+        </span>
+        <span className="block text-xs text-slate-500">Такой бейдж видят все участники в шапке, пока добор активен.</span>
+      </div>
+    ),
+    nuances: [
+      'Включить добор можно только при открытом аукционе; выключить — в любой момент, даже на паузе.',
+      'При перезапуске аукциона или смене недели добор автоматически сбрасывается.'
+    ]
+  },
+  {
+    icon: PauseCircle,
+    title: 'Пауза, возобновление и досрочное завершение',
+    body: 'Открытый аукцион можно приостановить — операторы увидят статус «Пауза» и не смогут менять выбор. При возобновлении время завершения автоматически сдвигается на длительность паузы. «Завершить» закрывает аукцион досрочно.',
+    visual: (
+      <div className="flex flex-col items-start gap-2">
+        <LifecycleSegmentPreview />
+        <LifecycleSegmentPreview paused />
+        <span className="text-xs text-slate-500">Сегмент в шапке блока «Запуск аукциона»: набор кнопок зависит от статуса.</span>
+      </div>
+    ),
+    nuances: [
+      'Пауза доступна только для открытого аукциона (включая ранний доступ избранных).',
+      'После «Завершить» операторы больше не могут менять выбор — только просмотр итогов.'
     ]
   },
   {
@@ -1766,7 +1959,8 @@ const ADMIN_INSTRUCTION_STEPS = [
     ),
     nuances: [
       'Можно открыть раздел в режиме оператора через тестовый аккаунт, чтобы убедиться в корректности UX.',
-      'Индикатор «Realtime online» в шапке должен гореть зелёным.'
+      'Индикатор «Realtime online» в шапке должен гореть зелёным.',
+      'Кнопка «+» под каждой группой ставки добавляет недостающую смену в конкретный день — такие смены подсвечиваются фиолетовым с пометкой, кто их добавил.'
     ]
   },
   {
