@@ -12108,6 +12108,22 @@ def add_user():
         except ValueError:
             return jsonify({"error": "Invalid hire_date format. Use YYYY-MM-DD"}), 400
 
+        # Группа оператора: определяет и членство, и супервайзера (СВ группы).
+        # supervisor_id как прямой параметр — legacy-фолбэк для старых клиентов.
+        target_group = None
+        if role in ('operator', 'trainee'):
+            group_raw = data.get('group_id')
+            if group_raw not in [None, '']:
+                try:
+                    target_group_id = int(group_raw)
+                except (TypeError, ValueError):
+                    return jsonify({"error": "Invalid group_id"}), 400
+                target_group = db.get_group(target_group_id)
+                if not target_group:
+                    return jsonify({"error": "Группа не найдена"}), 400
+                if target_group.get('status') != 'active':
+                    return jsonify({"error": "Группа в архиве — выберите активную группу"}), 400
+
         if role in ('operator', 'trainee'):
             supervisor_raw = data.get('supervisor_id')
             if supervisor_raw not in [None, '']:
@@ -12361,6 +12377,17 @@ def add_user():
             # СВ / глава отдела — отдел создающего (выбор клиента игнорируем)
             department_id = requester_dept_id
 
+        # Группа: строго из отдела, в котором создаётся сотрудник. Если админ не
+        # выбрал отдел явно — сотрудник уходит в отдел группы. СВ берём из группы
+        # (переданный supervisor_id игнорируем — источник истины членство в группе).
+        if target_group is not None:
+            group_dept = target_group.get('department_id')
+            if department_id is not None and group_dept is not None and int(group_dept) != int(department_id):
+                return jsonify({"error": "Группа не принадлежит выбранному отделу"}), 400
+            if department_id is None and group_dept is not None:
+                department_id = int(group_dept)
+            supervisor_id = db.get_group_active_supervisor_id(target_group['id'])
+
         # Валидация принадлежности направления и супервайзера выбранному отделу
         # (когда отдел известен явно: для СВ/главы всегда, для админа — если выбрал отдел).
         if department_id is not None:
@@ -12427,6 +12454,14 @@ def add_user():
             taxipro_id=taxipro_id,
             department_id=department_id
         )
+
+        # Членство в группе с даты найма; СВ уже проставлен из группы выше,
+        # add_operator_to_group синхронизирует его же (идемпотентно).
+        if target_group is not None:
+            db.add_operator_to_group(
+                target_group['id'], user_id,
+                start_date=hire_date, assigned_by=requester_id
+            )
 
         changed_by = requester_id
         if role == 'trainer':

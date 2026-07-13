@@ -23329,6 +23329,16 @@ class Database:
                 """,
                 (int(group_id),),
             )
+            # Операторы, которых закрываем вместе с группой, — снять с них СВ
+            # (users.supervisor_id выводится из группы).
+            cursor.execute(
+                """
+                SELECT operator_id FROM group_operator_memberships
+                WHERE group_id = %s AND end_date IS NULL
+                """,
+                (int(group_id),),
+            )
+            orphaned = [r[0] for r in (cursor.fetchall() or [])]
             for table in ('group_operator_memberships', 'group_supervisor_memberships'):
                 cursor.execute(
                     "UPDATE " + table + """
@@ -23337,6 +23347,7 @@ class Database:
                     """,
                     (end_date, int(group_id)),
                 )
+            self._set_operators_supervisor_tx(cursor, orphaned, None)
         return self.get_group(group_id)
 
     def reuse_archived_group(self, group_id):
@@ -23458,9 +23469,62 @@ class Database:
             group_id, target_model_code, changed_by=changed_by, is_revert=True
         )
 
+    def _group_active_supervisor_id_tx(self, cursor, group_id):
+        """Текущий СВ группы: активное членство (end_date IS NULL); при нескольких —
+        назначенный последним. None, если у группы сейчас нет СВ."""
+        cursor.execute(
+            """
+            SELECT gsm.supervisor_id
+            FROM group_supervisor_memberships gsm
+            WHERE gsm.group_id = %s AND gsm.end_date IS NULL
+            ORDER BY gsm.start_date DESC, gsm.id DESC
+            LIMIT 1
+            """,
+            (int(group_id),),
+        )
+        row = cursor.fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+
+    def _set_operators_supervisor_tx(self, cursor, operator_ids, supervisor_id):
+        """users.supervisor_id (+ зеркало в operator_profiles) — legacy-указатель
+        «текущий СВ оператора»: выводится из группы, вручную не назначается."""
+        ids = [int(oid) for oid in (operator_ids or []) if oid is not None]
+        if not ids:
+            return
+        cursor.execute(
+            "UPDATE users SET supervisor_id = %s WHERE id = ANY(%s)",
+            (supervisor_id, ids),
+        )
+        cursor.execute(
+            "UPDATE operator_profiles SET supervisor_id = %s WHERE user_id = ANY(%s)",
+            (supervisor_id, ids),
+        )
+
+    def _sync_group_operators_supervisor_tx(self, cursor, group_id):
+        """Проставляет всем активным операторам группы её текущего СВ (сменился
+        СВ группы → операторы наследуют нового автоматически)."""
+        sv_id = self._group_active_supervisor_id_tx(cursor, group_id)
+        cursor.execute(
+            """
+            SELECT operator_id FROM group_operator_memberships
+            WHERE group_id = %s AND end_date IS NULL
+            """,
+            (int(group_id),),
+        )
+        self._set_operators_supervisor_tx(
+            cursor, [r[0] for r in (cursor.fetchall() or [])], sv_id
+        )
+        return sv_id
+
+    def get_group_active_supervisor_id(self, group_id):
+        """Публичный резолв текущего СВ группы (для создания оператора «в группу»)."""
+        with self._get_cursor() as cursor:
+            return self._group_active_supervisor_id_tx(cursor, group_id)
+
     def add_operator_to_group(self, group_id, operator_id, start_date=None, assigned_by=None):
         """Добавляет оператора в группу с effective date, закрывая прошлую основную
-        группу (один активный основной membership на оператора)."""
+        группу (один активный основной membership на оператора). users.supervisor_id
+        оператора становится текущим СВ новой группы."""
         with self._get_cursor() as cursor:
             cursor.execute(
                 """
@@ -23487,6 +23551,9 @@ class Database:
                     """,
                     (int(group_id), int(operator_id), start_date, assigned_by),
                 )
+            self._set_operators_supervisor_tx(
+                cursor, [operator_id], self._group_active_supervisor_id_tx(cursor, group_id)
+            )
 
     def remove_operator_from_group(self, group_id, operator_id, end_date=None):
         with self._get_cursor() as cursor:
@@ -23498,6 +23565,19 @@ class Database:
                 """,
                 (end_date, int(group_id), int(operator_id)),
             )
+            # Без группы нет и СВ (если вдруг осталось другое открытое членство —
+            # наследуем СВ оттуда).
+            cursor.execute(
+                """
+                SELECT group_id FROM group_operator_memberships
+                WHERE operator_id = %s AND end_date IS NULL
+                ORDER BY start_date DESC, id DESC LIMIT 1
+                """,
+                (int(operator_id),),
+            )
+            row = cursor.fetchone()
+            new_sv = self._group_active_supervisor_id_tx(cursor, row[0]) if row else None
+            self._set_operators_supervisor_tx(cursor, [operator_id], new_sv)
 
     def add_supervisor_to_group(self, group_id, supervisor_id, start_date=None, assigned_by=None):
         with self._get_cursor() as cursor:
@@ -23517,6 +23597,7 @@ class Database:
                     """,
                     (int(group_id), int(supervisor_id), start_date, assigned_by),
                 )
+            self._sync_group_operators_supervisor_tx(cursor, group_id)
 
     def remove_supervisor_from_group(self, group_id, supervisor_id, end_date=None):
         with self._get_cursor() as cursor:
@@ -23528,6 +23609,7 @@ class Database:
                 """,
                 (end_date, int(group_id), int(supervisor_id)),
             )
+            self._sync_group_operators_supervisor_tx(cursor, group_id)
 
     def reassign_operator_history(self, operator_id, before_group_id, from_date):
         """Историческая коррекция перевода: оператор был в before_group_id ДО from_date,
