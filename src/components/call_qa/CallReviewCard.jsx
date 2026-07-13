@@ -209,16 +209,19 @@ function CriterionRow({ c, decision, onEdit, onRefine }) {
 
 export default function CallReviewCard({ call, onSave, onSkip, onRefine }) {
     const [decisions, setDecisions] = useState({});
-    if (!call) return null;
 
     const onEdit = (idx, patch) => {
         setDecisions((d) => ({ ...d, [idx]: { ...(d[idx] || {}), ...patch } }));
     };
 
+    // Все хуки — до раннего return: иначе появление call между рендерами меняет
+    // количество хуков и React падает («Rendered more hooks…»).
     const corrections = useMemo(
-        () => (call.criteria || []).filter((c) => c.source === 'transcript' && decisions[c.idx] && decisions[c.idx].verdict !== c.ai),
-        [decisions, call.criteria],
+        () => (call?.criteria || []).filter((c) => c.source === 'transcript' && decisions[c.idx] && decisions[c.idx].verdict !== c.ai),
+        [decisions, call],
     );
+    if (!call) return null;
+
     const pendingCount = (call.criteria || []).filter((c) => c.source !== 'transcript').length;
 
     return (

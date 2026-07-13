@@ -56,17 +56,21 @@ def build_system(criteria: list[dict]) -> str:
 
 
 def _rag_block(direction_id: int, criteria: list[dict], transcript: str) -> str:
-    # Оптимизация: embedding текущего транскрипта считаем один раз на всю оценку,
-    # а не отдельно на каждый критерий. Retrieval остаётся семантическим: внутри
-    # каждого критерия pgvector выбирает самые похожие сохранённые разборы.
-    query_vector = store.embed_query(transcript) if transcript else None
-    chunks = []
+    # Оптимизация: эмбеддинги транскрипта считаем один раз на всю оценку (кусками, чтобы
+    # покрыть ВЕСЬ звонок — см. store._chunk_for_embedding), а не отдельно на каждый
+    # критерий. Retrieval семантический: pgvector выбирает разборы, похожие на любой
+    # кусок разговора.
+    query_vectors = store.embed_query_chunks(transcript) if transcript else []
+    try:
+        hits_by_idx = store.retrieve_for_criteria(
+            direction_id=direction_id, criterion_idxs=[c["idx"] for c in criteria],
+            query_vectors=query_vectors)
+    except Exception:
+        hits_by_idx = {}
+    chunks, used_ids = [], []
     for c in criteria:
-        try:
-            hits = store.retrieve(direction_id=direction_id, criterion_idx=c["idx"], query_vector=query_vector)
-        except Exception:
-            hits = []
-        for h in hits:
+        for h in hits_by_idx.get(c["idx"]) or []:
+            used_ids.append(h["id"])
             chunk = f"[критерий {c['idx']}] ситуация: {h.get('situation') or h['excerpt']}"
             if h.get("situation") and h.get("excerpt"):
                 chunk += f"\n  цитата из звонка-источника: «{h['excerpt']}»"
@@ -74,6 +78,7 @@ def _rag_block(direction_id: int, criteria: list[dict], transcript: str) -> str:
             if h.get("not_covered"):
                 chunk += f"\n  правило НЕ оправдывает: {h['not_covered']}"
             chunks.append(chunk)
+    store.bump_use_count(used_ids)
     return "\n".join(chunks) if chunks else "(прецедентов пока нет)"
 
 

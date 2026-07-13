@@ -67,3 +67,12 @@ CREATE INDEX IF NOT EXISTS idx_adj_dir_crit ON qa_adjudications (direction_id, c
 -- Для БД, где таблица создана до появления границ/ситуации правила.
 ALTER TABLE qa_adjudications ADD COLUMN IF NOT EXISTS not_covered text;
 ALTER TABLE qa_adjudications ADD COLUMN IF NOT EXISTS situation text;
+
+-- След ревью: ai_evaluation_meta становится и журналом оценок, и состоянием очереди ревью.
+-- review_outcome: NULL (не проверялся) | 'confirmed' (человек согласился) | 'adjudicated' (исправил).
+ALTER TABLE ai_evaluation_meta ADD COLUMN IF NOT EXISTS review_reasons jsonb;
+ALTER TABLE ai_evaluation_meta ADD COLUMN IF NOT EXISTS review_outcome text;
+ALTER TABLE ai_evaluation_meta ADD COLUMN IF NOT EXISTS reviewed_by integer;
+ALTER TABLE ai_evaluation_meta ADD COLUMN IF NOT EXISTS reviewed_at timestamptz;
+-- Для upsert по (call_id, model): одна актуальная мета на звонок и версию модели.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_eval_call_model ON ai_evaluation_meta (call_id, model);
