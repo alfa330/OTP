@@ -32819,6 +32819,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const adminSessionsRequestIdRef = useRef(0);
             const [showUserEditModal, setShowUserEditModal] = useState(false);
             const [userToEdit, setUserToEdit] = useState(null);
+            // Группы для модалки создания сотрудника: оператор зачисляется в группу,
+            // супервайзер наследуется от группы (бэкенд скоупит список по отделу).
+            const [userModalGroups, setUserModalGroups] = useState([]);
             const [showUsersReportModal, setShowUsersReportModal] = useState(false);
             const [usersReportOptions, setUsersReportOptions] = useState(DEFAULT_USERS_REPORT_OPTIONS);
             const [svOperators, setSvOperators] = useState([]);
@@ -37484,6 +37487,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     }
                 };
 
+                const fetchUserModalGroups = async () => {
+                    if (!user || !user.id) return;
+                    try {
+                        const response = await axios.get(`${API_BASE_URL}/api/groups`, {
+                            headers: withAccessTokenHeader({ 'X-User-Id': user.id })
+                        });
+                        const data = response.data;
+                        if (data?.status === 'success' && Array.isArray(data.groups) && isMounted.current) {
+                            setUserModalGroups(data.groups);
+                        }
+                    } catch (err) {
+                        // мягко игнорируем — селект группы просто будет пустым
+                        console.error('Fetch groups error:', err);
+                    }
+                };
+
             const saveDirections = async (newDirections, departmentId = null) => {
                 setIsLoading(true);
                 try {
@@ -37887,6 +37906,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const payload = {
                             name: editedUser.name || "",
                             role: editedUser.role || "operator",
+                            // Группа определяет и членство, и супервайзера (СВ группы);
+                            // supervisor_id остаётся как legacy-фолбэк без группы.
+                            group_id: isCreatedTrainer ? null : (editedUser.group_id ? Number(editedUser.group_id) : null),
                             supervisor_id: isCreatedTrainer ? null : (editedUser.supervisor_id || null),
                             direction_id: isCreatedTrainer ? null : (editedUser.direction_id || null),
                             department_id: editedUser.department_id ? Number(editedUser.department_id) : null,
@@ -40951,6 +40973,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const managementViews = ['manage_users', 'employees', 'sv_list', 'manage_trainers', 'manage_admins', 'manage_operators', 'departments', 'surveys'];
                 if (showUserEditModal || managementViews.includes(view)) {
                     fetchDepartments();
+                }
+                // Группы нужны только в открытой модалке (селект группы при создании оператора).
+                if (showUserEditModal) {
+                    fetchUserModalGroups();
                 }
             }, [showUserEditModal, view, user?.id, user?.role, isAdminLikeRole, isDepartmentManager]);
 
@@ -47442,6 +47468,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     svList={svList}
                                     directions={directions}
                                     departments={departments}
+                                    groups={userModalGroups}
                                     user={user}
                                     onSave={saveUserChanges}
                                 />

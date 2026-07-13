@@ -8,6 +8,7 @@ DB = (ROOT / "database.py").read_text(encoding="utf-8-sig")
 BOT = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
 APP = (ROOT / "src" / "App.jsx").read_text(encoding="utf-8-sig")
 GROUPS_VIEW = (ROOT / "src" / "components" / "groups" / "GroupsView.jsx").read_text(encoding="utf-8-sig")
+USER_MODAL = (ROOT / "src" / "components" / "modals" / "UserEditModal.jsx").read_text(encoding="utf-8-sig")
 
 
 class SchemaTests(unittest.TestCase):
@@ -189,6 +190,67 @@ class ReadPathTests(unittest.TestCase):
         self.assertIn("technicalParams.append('group_id', selectedGroupId)", APP)
         self.assertIn("offlineParams.append('group_id', selectedGroupId)", APP)
         self.assertIn("group_id: selectedGroupId || null", APP)
+
+
+class SupervisorSyncTests(unittest.TestCase):
+    """Оператор создаётся сразу в группу; users.supervisor_id — производное от
+    СВ группы и синхронизируется при любой смене членства (оператора или СВ)."""
+
+    def test_sync_helpers_exist(self):
+        for m in [
+            "def _group_active_supervisor_id_tx(self, cursor, group_id)",
+            "def _set_operators_supervisor_tx(self, cursor, operator_ids, supervisor_id)",
+            "def _sync_group_operators_supervisor_tx(self, cursor, group_id)",
+            "def get_group_active_supervisor_id(self, group_id)",
+        ]:
+            self.assertIn(m, DB, f"missing helper: {m}")
+
+    def test_sync_updates_both_users_and_profiles(self):
+        self.assertIn("UPDATE users SET supervisor_id = %s WHERE id = ANY(%s)", DB)
+        self.assertIn("UPDATE operator_profiles SET supervisor_id = %s WHERE user_id = ANY(%s)", DB)
+
+    def test_membership_mutations_resync_supervisor(self):
+        # add_operator_to_group: оператору проставляется СВ новой группы.
+        add_op = DB.split("def add_operator_to_group(", 1)[1].split("def remove_operator_from_group(", 1)[0]
+        self.assertIn("_set_operators_supervisor_tx", add_op)
+        self.assertIn("_group_active_supervisor_id_tx", add_op)
+        # remove_operator_from_group: без группы нет СВ (или наследуется от оставшейся).
+        remove_op = DB.split("def remove_operator_from_group(", 1)[1].split("def add_supervisor_to_group(", 1)[0]
+        self.assertIn("_set_operators_supervisor_tx", remove_op)
+        # смена СВ группы каскадится на её операторов.
+        add_sv = DB.split("def add_supervisor_to_group(", 1)[1].split("def remove_supervisor_from_group(", 1)[0]
+        self.assertIn("_sync_group_operators_supervisor_tx", add_sv)
+        remove_sv = DB.split("def remove_supervisor_from_group(", 1)[1].split("def reassign_operator_history(", 1)[0]
+        self.assertIn("_sync_group_operators_supervisor_tx", remove_sv)
+
+    def test_archive_group_clears_operator_supervisors(self):
+        archive = DB.split("def archive_group(", 1)[1].split("def reuse_archived_group(", 1)[0]
+        self.assertIn("_set_operators_supervisor_tx(cursor, orphaned, None)", archive)
+
+
+class AddUserGroupTests(unittest.TestCase):
+    """При создании оператора указывается группа (своего отдела), СВ — из группы."""
+
+    def test_add_user_accepts_group_and_derives_supervisor(self):
+        add_user = BOT.split("def add_user():", 1)[1].split("@app.route('/api/admin/directions'", 1)[0]
+        self.assertIn("data.get('group_id')", add_user)
+        self.assertIn("Группа не найдена", add_user)
+        self.assertIn("Группа в архиве", add_user)
+        self.assertIn("Группа не принадлежит выбранному отделу", add_user)
+        self.assertIn("db.get_group_active_supervisor_id(target_group['id'])", add_user)
+        self.assertIn("db.add_operator_to_group(", add_user)
+        self.assertIn("start_date=hire_date", add_user)
+
+    def test_create_payload_sends_group_id(self):
+        self.assertIn("group_id: isCreatedTrainer ? null : (editedUser.group_id ? Number(editedUser.group_id) : null)", APP)
+        self.assertIn("groups={userModalGroups}", APP)
+
+    def test_modal_uses_group_select_instead_of_supervisor(self):
+        self.assertIn("groupsForSelectedDept", USER_MODAL)
+        self.assertIn("Группа обязательна", USER_MODAL)
+        self.assertIn('group_id: ""', USER_MODAL)
+        # смена отдела сбрасывает группу чужого отдела
+        self.assertIn("next.group_id = ''", USER_MODAL)
 
 
 if __name__ == "__main__":

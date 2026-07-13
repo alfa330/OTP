@@ -217,7 +217,7 @@ const compressAvatarImageFile = async (sourceFile, cropState = null) => {
     });
 };
 
-const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = [], departments = [], onSave, user }) => {
+const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = [], departments = [], groups = [], onSave, user }) => {
     const [editedUser, setEditedUser] = useState(userToEdit || {});
     const [isLoading, setIsLoading] = useState(false);
     const [modalError, setModalError] = useState("");
@@ -291,7 +291,21 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         if (effectiveDeptId == null) return directions || [];
         return (directions || []).filter((dir) => Number(directionDeptOf(dir)) === Number(effectiveDeptId));
     };
-    // Сменить отдел: если текущее направление не принадлежит новому отделу — сбрасываем его.
+    // Активные группы отдела сотрудника: при создании оператор зачисляется в группу,
+    // а супервайзер наследуется от группы автоматически. Для не-админов /api/groups
+    // уже отдаёт только группы их отдела — клиентский фильтр нужен лишь админу,
+    // который выбирает отдел в модалке.
+    const groupsForSelectedDept = (effectiveDeptId) => {
+        const active = (groups || []).filter((g) => g?.status !== 'archived');
+        if (!isAdminLikeRequester || effectiveDeptId == null) return active;
+        return active.filter((g) => Number(g?.department_id ?? g?.departmentId) === Number(effectiveDeptId));
+    };
+    const selectedGroup = (groups || []).find((g) => String(g?.id) === String(editedUser?.group_id));
+    const selectedGroupSupervisorName = (selectedGroup?.supervisors || [])
+        .map((s) => s?.name)
+        .filter(Boolean)
+        .join(', ');
+    // Сменить отдел: если текущее направление/группа не принадлежат новому отделу — сбрасываем.
     const handleDepartmentChange = (deptValue) => {
         setEditedUser((prev) => {
             const next = { ...prev, department_id: deptValue };
@@ -300,6 +314,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                 const dir = (directions || []).find((d) => String(d.id) === String(prev.direction_id));
                 if (dir && effDept != null && Number(directionDeptOf(dir)) !== Number(effDept)) {
                     next.direction_id = '';
+                }
+            }
+            if (prev?.group_id) {
+                const grp = (groups || []).find((g) => String(g.id) === String(prev.group_id));
+                if (grp && effDept != null && Number(grp?.department_id ?? grp?.departmentId) !== Number(effDept)) {
+                    next.group_id = '';
                 }
             }
             return next;
@@ -624,6 +644,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         gender: "",
         direction_id: "",
         department_id: "",
+        group_id: "",
         supervisor_id: isTrainerCreateRole ? "" : ((isAdminLikeRequester || isScopedDepartmentHeadRequester) ? "" : (user?.id ?? "")),
         status: "working",
         role: createRole,
@@ -686,8 +707,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         return;
         }
 
-        if (isCreateMode && isOperatorUser && isAdminLikeRequester && !editedUser.supervisor_id) {
-        setModalError("Супервайзер обязателен.");
+        if (isCreateMode && isOperatorUser && !editedUser.group_id) {
+        setModalError("Группа обязательна: супервайзер назначается по группе.");
         return;
         }
 
@@ -1537,22 +1558,31 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </div>
                     )}
 
-                    {(isAdminLikeRequester || isDeptScoped) && isOperatorDraft(editedUser) && (
+                    {isOperatorDraft(editedUser) && (
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Супервайзер</label>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Группа</label>
                         <CustomSelect
-                        value={editedUser?.supervisor_id || ""}
-                        onChange={(v) => setEditedUser({ ...editedUser, supervisor_id: v })}
+                        value={editedUser?.group_id || ""}
+                        onChange={(v) => setEditedUser({ ...editedUser, group_id: v })}
                         disabled={isLoading || !!createdCredentials}
-                        placeholder="Выберите супервайзера"
+                        placeholder="Выберите группу"
                         options={[
-                            { value: "", label: "Выберите супервайзера" },
-                            ...(svList || [])
-                                .filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status)
-                                .filter(sv => effectiveDeptId == null || Number(sv.department_id ?? sv.departmentId) === Number(effectiveDeptId))
-                                .map((sv) => ({ value: sv.id, label: sv.name })),
+                            { value: "", label: "Выберите группу" },
+                            ...groupsForSelectedDept(effectiveDeptId).map((g) => ({
+                                value: g.id,
+                                label: (g.supervisors || []).length
+                                    ? `${g.name} — СВ: ${(g.supervisors || []).map(s => s?.name).filter(Boolean).join(', ')}`
+                                    : g.name,
+                            })),
                         ]}
                         />
+                        <p className="mt-1 text-xs text-slate-500">
+                            {editedUser?.group_id
+                                ? (selectedGroupSupervisorName
+                                    ? `Супервайзер назначится автоматически: ${selectedGroupSupervisorName}`
+                                    : 'У группы сейчас нет супервайзера — он проставится, когда его назначат группе.')
+                                : 'Оператор зачисляется в группу, супервайзер наследуется от группы.'}
+                        </p>
                     </div>
                     )}
 
