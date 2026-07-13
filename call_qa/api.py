@@ -483,47 +483,168 @@ def evaluations_list(limit=100) -> list[dict]:
         return []  # таблицы кэша ещё нет
 
 
+_VERDICTS = ("Correct", "Incorrect", "N/A")
+
+
+def _rate(hits, total):
+    """{pct, hits, total} или None, если событий не было (не рисуем выдуманный 0%)."""
+    return {"pct": round(100 * hits / total), "hits": hits, "total": total} if total else None
+
+
+def _verdict_metrics(rows) -> dict:
+    """Метрики доверия по «сырому» эталону — человеческим оценкам calls.scores.
+
+    rows: (criteria, scores, direction), criteria — в форме карточки ревью.
+    Считает матрицу «человек × ИИ» и три главных вопроса:
+      alarm_precision — когда ИИ ставит Incorrect, как часто человек согласен;
+      recall          — какую долю человеческих нарушений ИИ поймал;
+      correct_reliability — когда ИИ ставит Correct, как часто человек согласен.
+    «Deficiency» (частичный зачёт) НЕ считается расхождением — у ИИ такого
+    вердикта пока нет; учитывается отдельным счётчиком."""
+    matrix = {h: {a: 0 for a in _VERDICTS} for h in _VERDICTS}
+    per = {}
+    deficiency = 0
+    for criteria, scores, direction in rows:
+        for crit in criteria or []:
+            if crit.get("source") != "transcript":
+                continue
+            idx, ai = crit.get("idx"), crit.get("ai")
+            if ai not in _VERDICTS:
+                continue  # Pending/сбой — не вердикт
+            raw = scores[idx] if isinstance(scores, list) and idx is not None and idx < len(scores) else None
+            hv = _norm_verdict(raw)
+            if hv == "Deficiency":
+                deficiency += 1
+                continue
+            if hv not in _VERDICTS:
+                continue
+            matrix[hv][ai] += 1
+            d = per.setdefault((direction or "—", crit.get("name") or f"#{idx}"),
+                               {"n": 0, "match": 0, "alarms": 0, "alarm_hits": 0, "misses": 0})
+            d["n"] += 1
+            if hv == ai:
+                d["match"] += 1
+            if ai == "Incorrect":
+                d["alarms"] += 1
+                if hv == "Incorrect":
+                    d["alarm_hits"] += 1
+            elif hv == "Incorrect":
+                d["misses"] += 1  # человек видит нарушение, ИИ — нет
+
+    tot = sum(matrix[h][a] for h in _VERDICTS for a in _VERDICTS)
+    by_criterion = [
+        {"direction": dr, "name": nm, "n": d["n"], "v": round(100 * d["match"] / d["n"]),
+         "alarms": d["alarms"], "alarm_hits": d["alarm_hits"],
+         "false_alarms": d["alarms"] - d["alarm_hits"], "misses": d["misses"]}
+        for (dr, nm), d in per.items()]
+    return {
+        "total": tot,
+        "agreement": round(100 * sum(matrix[v][v] for v in _VERDICTS) / tot) if tot else None,
+        "alarm_precision": _rate(matrix["Incorrect"]["Incorrect"],
+                                 sum(matrix[h]["Incorrect"] for h in _VERDICTS)),
+        "recall": _rate(matrix["Incorrect"]["Incorrect"],
+                        sum(matrix["Incorrect"][a] for a in _VERDICTS)),
+        "correct_reliability": _rate(matrix["Correct"]["Correct"],
+                                     sum(matrix[h]["Correct"] for h in _VERDICTS)),
+        "matrix": matrix,
+        "deficiency": deficiency,
+        "by_criterion": by_criterion,
+    }
+
+
+def _reviewed_metrics(cur):
+    """«Чистый» эталон: только звонки, где человек нажал «Подтвердить»/«Сохранить разбор».
+    confirmed — все вердикты ИИ одобрены; adjudicated — исправленные критерии берём из
+    qa_adjudications, неисправленные считаются одобренными. None — миграции меты ещё нет."""
+    try:
+        cur.execute("""SELECT call_id, review_outcome, per_criterion
+                         FROM ai_evaluation_meta
+                        WHERE review_outcome IS NOT NULL AND model = %s""",
+                    (config.CLAUDE_MODEL,))
+        rows = cur.fetchall()
+    except Exception:
+        return None  # колонок ещё нет — появятся после деплоя (миграция на старте)
+    out = {"confirmed": 0, "adjudicated": 0, "endorsed": 0, "corrected": 0, "alarm_precision": None}
+    if not rows:
+        return out
+    corr = {}
+    try:
+        # Исправления могут быть и от ревью до появления следа — ключ call+criterion этого не различает,
+        # для точности тревог это безопасно (исправление = человек не согласен).
+        cur.execute("SELECT call_id, criterion_idx, correct_verdict FROM qa_adjudications WHERE call_id = ANY(%s)",
+                    ([r[0] for r in rows],))
+        corr = {(r[0], r[1]): r[2] for r in cur.fetchall()}
+    except Exception:
+        pass
+    alarms = alarm_hits = 0
+    for call_id, outcome, crits in rows:
+        out["confirmed" if outcome == "confirmed" else "adjudicated"] += 1
+        for c in crits or []:
+            if c.get("source") != "transcript" or c.get("ai") not in _VERDICTS:
+                continue
+            hv = corr.get((call_id, c.get("idx")), c.get("ai"))
+            out["endorsed" if hv == c.get("ai") else "corrected"] += 1
+            if c.get("ai") == "Incorrect":
+                alarms += 1
+                if hv == "Incorrect":
+                    alarm_hits += 1
+    out["alarm_precision"] = _rate(alarm_hits, alarms)
+    return out
+
+
 def stats() -> dict:
-    """Реальная статистика. Пустые места — честно null/[], без выдуманных цифр."""
-    out = {"queue": 0, "evaluated": 0, "agreement": None, "by_criterion": []}
+    """Метрики доверия для дашборда. Два эталона: «сырой» (человеческие оценки из
+    calls.scores — много данных, но Correct в форме — дефолт) и «чистый» (итоги ревью —
+    мало, но человек реально смотрел). Пустые места — честно null/[], без выдуманных цифр."""
+    out = {"queue": 0, "evaluated": 0, "agreement": None, "by_criterion": [], "focus": [],
+           "alarm_precision": None, "recall": None, "correct_reliability": None,
+           "matrix": None, "deficiency": 0, "reviewed": None}
     try:
         conn = config.connect_ro()
         cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
-        cur.execute(
-            """SELECT COUNT(*) FROM calls
-                WHERE direction_id = ANY(%s) AND audio_path IS NOT NULL AND audio_path <> ''
-                  AND COALESCE(is_draft, FALSE) = FALSE AND created_at > NOW() - INTERVAL '7 days'""",
-            (config.OP_DIRECTION_IDS,))
-        out["queue"] = cur.fetchone()[0]
         cur.execute("SELECT COUNT(*) FROM ai_review_cache")
         out["evaluated"] = cur.fetchone()[0]
-        # Только критерии (не весь payload: транскрипты — 90% веса) и свежие первыми,
-        # чтобы LIMIT был детерминированным.
+        try:  # реальный размер очереди ревью; до миграции — свежие звонки, как раньше
+            cur.execute("""SELECT COUNT(*) FROM ai_review_cache rc
+                             LEFT JOIN ai_evaluation_meta m ON m.call_id = rc.call_id AND m.model = rc.model
+                            WHERE rc.model = %s AND m.review_outcome IS NULL""", (config.CLAUDE_MODEL,))
+            out["queue"] = cur.fetchone()[0]
+        except Exception:
+            cur.execute(
+                """SELECT COUNT(*) FROM calls
+                    WHERE direction_id = ANY(%s) AND audio_path IS NOT NULL AND audio_path <> ''
+                      AND COALESCE(is_draft, FALSE) = FALSE AND created_at > NOW() - INTERVAL '7 days'""",
+                (config.OP_DIRECTION_IDS,))
+            out["queue"] = cur.fetchone()[0]
+
+        # Сырой эталон: последняя оценка каждого звонка (без дублей по тегам моделей).
         cur.execute(
-            """SELECT rc.payload->'criteria', c.scores
-                 FROM ai_review_cache rc JOIN calls c ON c.id = rc.call_id
-                WHERE c.scores IS NOT NULL
-                ORDER BY rc.created_at DESC LIMIT 500""")
-        match = tot = 0
-        per = {}
-        for criteria_rows, scores in cur.fetchall():
-            for crit in (criteria_rows or []):
-                if crit.get("source") != "transcript":
-                    continue
-                idx, ai = crit.get("idx"), crit.get("ai")
-                hv = _norm_verdict(scores[idx]) if isinstance(scores, list) and idx is not None and idx < len(scores) else None
-                if hv and ai in ("Correct", "Incorrect", "N/A"):
-                    tot += 1
-                    d = per.setdefault(crit.get("name", str(idx)), [0, 0])
-                    d[1] += 1
-                    if hv == ai:
-                        match += 1; d[0] += 1
+            """SELECT t.criteria, c.scores, t.direction
+                 FROM (SELECT DISTINCT ON (rc.call_id) rc.call_id,
+                              rc.payload->'criteria' AS criteria,
+                              rc.payload->>'direction' AS direction
+                         FROM ai_review_cache rc
+                        ORDER BY rc.call_id, rc.created_at DESC) t
+                 JOIN calls c ON c.id = t.call_id
+                WHERE c.scores IS NOT NULL""")
+        m = _verdict_metrics(cur.fetchall())
+        for k in ("agreement", "alarm_precision", "recall", "correct_reliability", "matrix", "deficiency"):
+            out[k] = m[k]
+        out["by_criterion"] = sorted([r for r in m["by_criterion"] if r["n"] >= 3], key=lambda x: x["v"])
+        # «Где отрабатывать»: критерии, генерирующие ложные тревоги и пропуски.
+        out["focus"] = sorted([r for r in m["by_criterion"] if r["false_alarms"] or r["misses"]],
+                              key=lambda x: -(x["false_alarms"] + x["misses"]))[:10]
+        try:  # сколько правил (разборов) уже накоплено по каждому проблемному критерию
+            cur.execute("""SELECT COALESCE(d.name, '—'), a.criterion_name, COUNT(*)
+                             FROM qa_adjudications a LEFT JOIN directions d ON d.id = a.direction_id
+                            GROUP BY 1, 2""")
+            rules = {(r[0], r[1]): r[2] for r in cur.fetchall()}
+            for r in out["focus"]:
+                r["rules"] = rules.get((r["direction"], r["name"]), 0)
+        except Exception:
+            pass
+        out["reviewed"] = _reviewed_metrics(cur)
         cur.close(); conn.close()
-        if tot:
-            out["agreement"] = round(100 * match / tot)
-            out["by_criterion"] = sorted(
-                [{"name": n, "v": round(100 * m / t)} for n, (m, t) in per.items() if t >= 3],
-                key=lambda x: x["v"])
     except Exception:
-        pass
+        logging.exception("ai-qa stats failed")
     return out
