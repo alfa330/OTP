@@ -12329,6 +12329,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [myScheduleReloadNonce, setMyScheduleReloadNonce] = useState(0);
             const [operatorSelfTab, setOperatorSelfTab] = useState('schedule');
             const [expandedMyDayCards, setExpandedMyDayCards] = useState({});
+            const [expandedMyUpcomingShifts, setExpandedMyUpcomingShifts] = useState({});
             const [showOperatorMobileCalendar, setShowOperatorMobileCalendar] = useState(false);
             const [breakReminderEnabled, setBreakReminderEnabled] = useState(false);
             const [breakReminderLeadMinutes, setBreakReminderLeadMinutes] = useState(5);
@@ -18942,7 +18943,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const day = myCurrentDayCard;
                 if (!day) return [];
                 return (day.shifts || []).flatMap((seg, segIndex) => {
-                    const segText = `${seg.start} — ${seg.end}${(timeToMinutes(seg.end) <= timeToMinutes(seg.start) && seg.end !== '00:00') ? ' (+1)' : ''}`;
+                    const segText = `${seg.start} — ${seg.end}`;
                     return (seg.breaks || []).map((b, bi) => {
                         const start = Number(b?.start);
                         const end = Number(b?.end);
@@ -20798,9 +20799,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const formatMinuteWithDayLocal = (minuteValue) => {
                     const val = Number(minuteValue);
                     if (!Number.isFinite(val)) return '—';
-                    const dayOffset = Math.floor(val / 1440);
-                    const base = minutesToTime(val % 1440);
-                    return dayOffset > 0 ? `${base} (+${dayOffset})` : base;
+                    return minutesToTime(((val % 1440) + 1440) % 1440);
                 };
                 const liveData = myLiveScheduleData || myScheduleData;
                 const todayIsDayOff = Array.isArray(liveData?.daysOff) && liveData.daysOff.includes(nowDateStr);
@@ -20832,8 +20831,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 const formatShiftLabel = (shift) => {
                     if (!shift) return 'Смена';
-                    const isNight = timeToMinutes(shift.end) <= timeToMinutes(shift.start) && shift.end !== '00:00';
-                    return `${shift.start} — ${shift.end}${isNight ? ' (+1)' : ''}`;
+                    return `${shift.start} — ${shift.end}`;
                 };
 
                 if (activePart && activeBreak) {
@@ -20881,7 +20879,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         badgeClass: 'bg-slate-100 text-slate-800',
                         panelClass: 'border-slate-200 bg-slate-50',
                         hint: `Следующая смена: ${dayLabel}, ${nextFutureShift.start}`,
-                        subHint: `${nextFutureShift.start} — ${nextFutureShift.end}${nextFutureShift.isCrossing ? ' (+1)' : ''}`
+                        subHint: `${nextFutureShift.start} — ${nextFutureShift.end}`
                     };
                 }
 
@@ -20902,6 +20900,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const base = minutesToTime(val % 1440);
                 return dayOffset > 0 ? `${base} (+${dayOffset})` : base;
             };
+            // Вкладка «Смены» оператора: время без маркеров перехода через полночь.
+            const formatBreakMinutePlain = (minuteValue) => {
+                const val = Number(minuteValue);
+                if (!Number.isFinite(val)) return '—';
+                return minutesToTime(((val % 1440) + 1440) % 1440);
+            };
             const formatHoursMinutes = (minutesValue) => {
                 const mins = Math.max(0, Math.round(Number(minutesValue) || 0));
                 const h = Math.floor(mins / 60);
@@ -20916,7 +20920,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const start = Number(breakPart?.start);
                 const end = Number(breakPart?.end);
                 if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return 'Перерыв';
-                return `Перерыв • ${formatBreakMinuteWithDay(start)} — ${formatBreakMinuteWithDay(end)} • ${formatMinutesOnly(end - start)}`;
+                return `Перерыв • ${formatBreakMinutePlain(start)} — ${formatBreakMinutePlain(end)} • ${formatMinutesOnly(end - start)}`;
             };
             const breakReminderCandidates = useMemo(() => {
                 const result = [];
@@ -20948,8 +20952,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 reminderDirection,
                                 getPlannerBreakRuleRangesForDirection(reminderDirection)
                             );
-                        const isCrossing = timeToMinutes(seg?.end) <= timeToMinutes(seg?.start) && seg?.end !== '00:00';
-                        const shiftLabel = `${seg?.start || '—'} — ${seg?.end || '—'}${isCrossing ? ' (+1)' : ''}`;
+                        const shiftLabel = `${seg?.start || '—'} — ${seg?.end || '—'}`;
 
                         (Array.isArray(breaks) ? breaks : []).forEach((b, breakIndex) => {
                             const bStart = Number(b?.start);
@@ -21035,8 +21038,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const title = minutesLeft <= 1
                         ? 'Скоро перерыв'
                         : `Скоро перерыв через ${minutesLeft} мин`;
-                    const body = `${formatBreakMinuteWithDay(candidate.breakStart)} — ${formatBreakMinuteWithDay(candidate.breakEnd)} • смена ${candidate.shiftLabel}`;
-                    const toastText = `Перерыв через ${minutesLeft} мин: ${formatBreakMinuteWithDay(candidate.breakStart)} — ${formatBreakMinuteWithDay(candidate.breakEnd)}`;
+                    const body = `${formatBreakMinutePlain(candidate.breakStart)} — ${formatBreakMinutePlain(candidate.breakEnd)} • смена ${candidate.shiftLabel}`;
+                    const toastText = `Перерыв через ${minutesLeft} мин: ${formatBreakMinutePlain(candidate.breakStart)} — ${formatBreakMinutePlain(candidate.breakEnd)}`;
 
                     try {
                         if (typeof window !== 'undefined' && 'Notification' in window && window.Notification.permission === 'granted') {
@@ -21119,7 +21122,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const statusSubHint = myNowStatus.key === 'free'
                     ? (nextFutureShiftItem ? formatEtaRu(nextFutureShiftItem.startTs) : null)
                     : (myNowStatus.subHint && myNowStatus.subHint !== 'Смена идет сейчас' ? myNowStatus.subHint : null);
-                const shiftTimeTextRu = (seg) => `${seg.start} — ${seg.end}${(timeToMinutes(seg.end) <= timeToMinutes(seg.start) && seg.end !== '00:00') ? ' (+1)' : ''}`;
+                const shiftTimeTextRu = (seg) => `${seg.start} — ${seg.end}`;
                 const myScheduleWeekSections = (() => {
                     if (viewMode === 'week') return myScheduleVisibleDays.length > 0 ? [{ key: 'week', days: myScheduleVisibleDays }] : [];
                     if (viewMode !== 'month') return [];
@@ -21228,7 +21231,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             <div key={`${dayCard.date}-exp-${idx}-break-${bi}`} className="flex items-center justify-between gap-2 text-[12px] tabular-nums">
                                                                 <span className="inline-flex items-center gap-1.5 text-slate-600">
                                                                     <FaIcon className="fas fa-mug-hot text-[11px] text-amber-500"></FaIcon>
-                                                                    {formatBreakMinuteWithDay(b.start)} — {formatBreakMinuteWithDay(b.end)}
+                                                                    {formatBreakMinutePlain(b.start)} — {formatBreakMinutePlain(b.end)}
                                                                 </span>
                                                                 <span className="text-slate-400">{formatMinutesOnly(Math.max(0, (Number(b?.end) || 0) - (Number(b?.start) || 0)))}</span>
                                                             </div>
@@ -21467,11 +21470,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <div className="px-1 text-[11px] text-slate-400">3 из {myUpcomingShiftItems.length}</div>
                                                 )}
                                             </div>
-                                            <div className={`${IOS_CARD} divide-y divide-slate-100 overflow-hidden`}>
+                                            <div className="divide-y divide-white/10 overflow-hidden rounded-2xl bg-gradient-to-br from-blue-600 via-indigo-600 to-violet-600 shadow-[0_10px_28px_rgba(79,70,229,0.28)] ring-1 ring-black/5">
                                                 {myUpcomingShiftItems.length === 0 ? (
                                                     <div className="px-4 py-6 text-center">
-                                                        <div className="text-[13px] font-medium text-slate-600">Предстоящих смен нет</div>
-                                                        <div className="mt-0.5 text-[12px] text-slate-400">Когда график назначат, смены появятся здесь</div>
+                                                        <div className="text-[13px] font-medium text-white">Предстоящих смен нет</div>
+                                                        <div className="mt-0.5 text-[12px] text-blue-100/80">Когда график назначат, смены появятся здесь</div>
                                                     </div>
                                                 ) : (
                                                     myUpcomingShiftItems.slice(0, 3).map((item) => {
@@ -21480,25 +21483,55 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         const isToday = item.date === todayDateStr(new Date());
                                                         const isTomorrow = item.date === todayDateStr(new Date(nowTs + 86400000));
                                                         const dateLabel = isToday ? 'Сегодня' : isTomorrow ? 'Завтра' : `${formatWeekdayRu(item.date, 'short')}, ${formatDateRuDayMonth(item.date)}`;
-                                                        const breakTimes = Array.isArray(item.breaks) && item.breaks.length > 0
-                                                            ? item.breaks.map(b => `${formatBreakMinuteWithDay(b.start)}–${formatBreakMinuteWithDay(b.end)}`)
-                                                            : [];
+                                                        const isExpandedUpcoming = Boolean(expandedMyUpcomingShifts?.[item.key]);
                                                         return (
-                                                            <div key={`my-upcoming-${item.key}`} className="flex gap-3 px-4 py-2.5">
-                                                                <span className={`w-[84px] flex-shrink-0 pt-px text-[13px] leading-snug ${isToday ? 'font-semibold text-slate-900' : 'text-slate-500'}`}>{dateLabel}</span>
-                                                                <div className="min-w-0 flex-1">
-                                                                    <div className="flex items-baseline justify-between gap-2">
-                                                                        <span className="inline-flex items-center gap-1.5 text-[15px] font-semibold leading-tight tabular-nums text-slate-900">
-                                                                            {isOngoing && <span className="h-2 w-2 flex-shrink-0 rounded-full bg-emerald-500" title="Идёт сейчас"></span>}
-                                                                            {item.start} — {item.end}{item.isCrossing ? ' (+1)' : ''}
-                                                                        </span>
-                                                                        <span className="flex-shrink-0 text-[13px] tabular-nums text-slate-400">{formatHoursRu(item.durationMin)}</span>
+                                                            <div key={`my-upcoming-${item.key}`}>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => setExpandedMyUpcomingShifts(prev => ({ ...prev, [item.key]: !prev?.[item.key] }))}
+                                                                    className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-white/10"
+                                                                    aria-expanded={isExpandedUpcoming}
+                                                                >
+                                                                    <span className={`w-[84px] flex-shrink-0 text-[13px] leading-snug ${isToday ? 'font-semibold text-white' : 'text-blue-100/90'}`}>{dateLabel}</span>
+                                                                    <div className="min-w-0 flex-1">
+                                                                        <div className="flex items-baseline justify-between gap-2">
+                                                                            <span className="inline-flex items-center gap-1.5 text-[15px] font-semibold leading-tight tabular-nums text-white">
+                                                                                {isOngoing && <span className="h-2 w-2 flex-shrink-0 rounded-full bg-emerald-300 shadow-[0_0_6px_rgba(110,231,183,0.9)]"></span>}
+                                                                                {item.start} — {item.end}
+                                                                            </span>
+                                                                            <span className="flex-shrink-0 text-[13px] tabular-nums text-blue-100/80">{formatHoursRu(item.durationMin)}</span>
+                                                                        </div>
+                                                                        {isOngoing && <div className="text-[11.5px] font-medium text-emerald-200">идёт сейчас</div>}
                                                                     </div>
-                                                                    {isOngoing && <div className="text-[11.5px] font-medium text-emerald-600">идёт сейчас</div>}
-                                                                    {breakTimes.length > 0 && (
-                                                                        <div className="mt-0.5 text-[11.5px] leading-snug tabular-nums text-slate-400">перерывы: {breakTimes.join(' · ')}</div>
-                                                                    )}
-                                                                </div>
+                                                                    <FaIcon className={`fas fa-chevron-down flex-shrink-0 text-[11px] text-white/50 transition-transform duration-200 ${isExpandedUpcoming ? 'rotate-180' : ''}`}></FaIcon>
+                                                                </button>
+                                                                {isExpandedUpcoming && (
+                                                                    <div className="px-4 pb-3.5">
+                                                                        <div className="rounded-xl bg-white/10 px-3 py-2.5">
+                                                                            <div className="flex items-center justify-between gap-2">
+                                                                                <div className="text-[11px] font-semibold uppercase tracking-wider text-blue-100/80">Перерывы</div>
+                                                                                {item.breakCount > 0 && (
+                                                                                    <div className="text-[11px] tabular-nums text-blue-100/70">{item.breakCount} · {formatMinutesOnly(item.breakMinutes)}</div>
+                                                                                )}
+                                                                            </div>
+                                                                            {item.breakCount === 0 ? (
+                                                                                <div className="mt-1 text-[12.5px] text-blue-50/90">Без перерывов</div>
+                                                                            ) : (
+                                                                                <div className="mt-1.5 space-y-1.5">
+                                                                                    {item.breaks.map((b, bi) => (
+                                                                                        <div key={`my-upcoming-break-${item.key}-${bi}`} className="flex items-center justify-between gap-2 text-[12.5px] tabular-nums">
+                                                                                            <span className="inline-flex items-center gap-1.5 text-white">
+                                                                                                <FaIcon className="fas fa-mug-hot text-[11px] text-amber-300"></FaIcon>
+                                                                                                {formatBreakMinutePlain(b.start)} — {formatBreakMinutePlain(b.end)}
+                                                                                            </span>
+                                                                                            <span className="text-blue-100/80">{formatMinutesOnly(b.durationMin)}</span>
+                                                                                        </div>
+                                                                                    ))}
+                                                                                </div>
+                                                                            )}
+                                                                        </div>
+                                                                    </div>
+                                                                )}
                                                             </div>
                                                         );
                                                     })
@@ -21669,7 +21702,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                         <div key={`${dayCard.date}-shift-${idx}-break-${bi}`} className="flex items-center justify-between gap-2 text-[12px] tabular-nums">
                                                                                             <span className="inline-flex items-center gap-1.5 text-slate-600">
                                                                                                 <FaIcon className="fas fa-mug-hot text-[11px] text-amber-500"></FaIcon>
-                                                                                                {formatBreakMinuteWithDay(b.start)} — {formatBreakMinuteWithDay(b.end)}
+                                                                                                {formatBreakMinutePlain(b.start)} — {formatBreakMinutePlain(b.end)}
                                                                                             </span>
                                                                                             <span className="text-slate-400">{formatMinutesOnly(Math.max(0, (Number(b?.end) || 0) - (Number(b?.start) || 0)))}</span>
                                                                                         </div>
