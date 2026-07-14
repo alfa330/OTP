@@ -32588,9 +32588,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const isScopedDepartmentHead = scopedDepartmentId != null;
             const isAdminLikeRole = isAdminLikeRoleFn(currentUserRole) && !isScopedDepartmentHead;
             const isDepartmentManager = isSupervisorRole(currentUserRole) || isScopedDepartmentHead;
-            const canUseAdminEmployeeAccounting = isAdminLikeRole || (isDepartmentHeadUser && departmentAllowsView(user, 'manage_operators'));
-            const canFilterByDepartment = isAdminLikeRole || currentUserRole === 'trainer';
-            const canUsePinnedTasks = isAdminLikeRole || isDepartmentManager || currentUserRole === 'trainer';
+            const isPlainTrainer = currentUserRole === 'trainer' && !isDepartmentHeadUser;
+            const canUseAdminEmployeeAccounting = isAdminLikeRole || isDepartmentHeadUser;
+            const canFilterByDepartment = isAdminLikeRole || isPlainTrainer;
+            const canUsePinnedTasks = isAdminLikeRole || isDepartmentManager || isPlainTrainer;
             const canAccessLmsSection = canAccessLmsSectionForUser(user);
             const canAccessResourceFteSection = canAccessResourceFteSectionForUser(user);
             const canAccessAiQaSection = canAccessAiQaForUser(user);
@@ -32618,7 +32619,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const initialViewFromUrl = readAppViewFromUrl();
                 return initialViewFromUrl || 'hours';
             });
-            const isDepartmentHeadAdminEmployeeView = canUseAdminEmployeeAccounting && isDepartmentHeadUser && ['sv_list', 'manage_users'].includes(view);
+            const isDepartmentHeadAdminEmployeeView = canUseAdminEmployeeAccounting && isDepartmentHeadUser && ['sv_list', 'manage_users', 'manage_trainers'].includes(view);
             const [pinnedTask, setPinnedTask] = useState(null);
             const [pinnedTaskPool, setPinnedTaskPool] = useState([]);
             const [isPinnedTaskPoolLoading, setIsPinnedTaskPoolLoading] = useState(false);
@@ -35874,7 +35875,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (!user) return;
 
                 const requestedViewFromUrl = requestedViewFromLocation;
-                if (user.role === 'trainer') {
+                if (isPlainTrainer) {
                     const trainerAllowedViews = new Set(['surveys', 'manage_operators', 'tasks', 'lms', 'shift_auction', 'work_schedules']);
                     if (requestedViewFromUrl && trainerAllowedViews.has(requestedViewFromUrl)) {
                         setView(requestedViewFromUrl);
@@ -35899,7 +35900,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                 else if (isSupervisorRole(user?.role)) setView('operators');
                 else setView('hours');
-            }, [user, user?.id, user?.role, isAdminLikeRole, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessFourYouSection, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessFourYouSection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks' || !requestedTaskIdFromLocation) return;
@@ -35917,38 +35918,38 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // null, and the subsequent URL sync effect rewrites the
                 // pathname, erasing the original LMS sub-path on reload.
                 if (isAuthInitializing || !user) return;
-                if (user?.role === 'trainer' && !['surveys', 'manage_operators', 'tasks', 'lms', 'shift_auction', 'work_schedules'].includes(view)) {
+                if (isPlainTrainer && !['surveys', 'manage_operators', 'tasks', 'lms', 'shift_auction', 'work_schedules'].includes(view)) {
                     setView('surveys');
                 }
                 if (view === 'lms' && !canAccessLmsSection) {
                     if (isAdminLikeRole) setView('sv_list');
                     else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                     else if (isSupervisorRole(user?.role)) setView('operators');
-                    else if (user?.role === 'trainer') setView('surveys');
+                    else if (isPlainTrainer) setView('surveys');
                     else setView('hours');
                 }
                 if (view === 'resource_fte' && !canAccessResourceFteSection) {
                     if (isAdminLikeRole) setView('sv_list');
                     else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                     else if (isSupervisorRole(user?.role)) setView('operators');
-                    else if (user?.role === 'trainer') setView('surveys');
+                    else if (isPlainTrainer) setView('surveys');
                     else setView('hours');
                 }
                 if (view === 'ai_qa' && !canAccessAiQaSection) {
                     if (isAdminLikeRole) setView('sv_list');
                     else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                     else if (isSupervisorRole(user?.role)) setView('operators');
-                    else if (user?.role === 'trainer') setView('surveys');
+                    else if (isPlainTrainer) setView('surveys');
                     else setView('hours');
                 }
                 if (view === 'four_you' && !canAccessFourYouSection) {
                     if (isAdminLikeRole) setView('sv_list');
                     else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                     else if (isSupervisorRole(user?.role)) setView('operators');
-                    else if (user?.role === 'trainer') setView('surveys');
+                    else if (isPlainTrainer) setView('surveys');
                     else setView('hours');
                 }
-            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessFourYouSection]);
+            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessFourYouSection]);
 
             useEffect(() => {
                 // Only mirror `view` into the URL after authentication has
@@ -38023,7 +38024,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const nextRate = Number(editedUser?.rate);
                     const prevRate = Number(userToEdit?.rate);
                     if (Number.isFinite(nextRate) && Number.isFinite(prevRate) && nextRate !== prevRate) {
-                        if (isSupervisorRole(user?.role) && !isSupervisorRateChangeDayInAlmaty()) {
+                        if (isSupervisorRole(user?.role) && !isDepartmentHeadUser && !isSupervisorRateChangeDayInAlmaty()) {
                             throw new Error('Супервайзер может менять ставку только 1-го числа каждого месяца');
                         }
                         await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
@@ -39266,7 +39267,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (!user?.id) {
                     throw new Error('Пользователь не найден');
                 }
-                if (!(isAdminLikeRoleFn(user?.role) || isSupervisorRole(user?.role))) {
+                if (!canChangeAccountAvatar) {
                     throw new Error('Недостаточно прав для смены аватара');
                 }
                 if (!avatar_file && !avatar_remove) {
@@ -40837,7 +40838,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     fetchUsers();
                     fetchDirections();
                     fetchDepartments();
-                } else if (user.role === 'trainer') {
+                } else if (isPlainTrainer) {
                     fetchUsers();
                     fetchDirections();
                     fetchDepartments();
@@ -40847,7 +40848,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     fetchSensitiveAccessStatus();
                     fetchSurveysPendingBadgeCount();
                 }
-            }, [user?.id, user?.role, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentManager]);
+            }, [user?.id, user?.role, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentManager, isPlainTrainer]);
 
             // Гард видимости разделов по отделу (Этап 10): если отдел ограничивает
             // набор разделов и текущий view недоступен — перенаправляем на разрешённый.
@@ -40859,8 +40860,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return;
                 }
                 if (!departmentRestrictsViews(user)) return;
-                if (isDepartmentHead(user) && view === 'manage_operators' && departmentAllowsView(user, 'manage_operators')) {
-                    setView('manage_users');
+                if (
+                    isDepartmentHeadUser &&
+                    canUseAdminEmployeeAccounting &&
+                    ['manage_operators', 'manage_users', 'sv_list', 'manage_trainers'].includes(view)
+                ) {
+                    if (view === 'manage_operators') setView('manage_users');
                     return;
                 }
                 if (view === 'ai_qa' && canAccessAiQaSection) return;
@@ -40868,7 +40873,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) setView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canAccessAiQaSection, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -41417,11 +41422,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     {isDepartmentManager && !isAdminLikeRole && (
                                         <>
                                             {canAccessLmsSection && !departmentRestrictsViews(user) && renderSidebarDividerInner()}
-                                            {departmentAllowsView(user, 'manage_operators') && isDepartmentHeadUser && (
+                                            {isDepartmentHeadUser && (
                                             <li className="relative" ref={sidebarEmployeesRef}>
                                                 <button
                                                     onClick={stableSidebarHandleToggleEmployeesDropdown}
-                                                    className={`group w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 relative ${['sv_list', 'manage_users'].includes(view) ? 'bg-blue-700' : ''}`}
+                                                    className={`group w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 relative ${['sv_list', 'manage_users', 'manage_trainers'].includes(view) ? 'bg-blue-700' : ''}`}
                                                     aria-expanded={showSidebarEmployeesDropdown}
                                                     aria-haspopup="menu"
                                                 >
@@ -41448,6 +41453,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'manage_users' ? 'bg-gray-100 font-medium' : ''}`}
                                                         >
                                                             <FaIcon className="fas fa-user-cog mr-2"></FaIcon> Операторы
+                                                        </button>
+
+                                                        <div className="border-t border-gray-200" />
+
+                                                        <button
+                                                            onClick={(e) => handleSidebarViewNavigation(e, 'manage_trainers', { onNavigate: () => stableSidebarHandleToggleEmployeesDropdown(true) })}
+                                                            className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'manage_trainers' ? 'bg-gray-100 font-medium' : ''}`}
+                                                        >
+                                                            <FaIcon className="fas fa-book mr-2"></FaIcon> Тренеры
                                                         </button>
                                                     </div>
                                                 )}
@@ -41597,7 +41611,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             )}
                                         </>
                                     )}
-                                    {currentUserRole === 'trainer' && (
+                                    {isPlainTrainer && (
                                         <>
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'manage_operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
@@ -42041,7 +42055,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const averageScore = operatorData?.evaluations?.length > 0
                     ? operatorData.evaluations.reduce((sum, eval1) => sum + (parseFloat(eval1.score) || 0), 0) / operatorData.evaluations.length
                     : 0;
-            const isManageOperatorsReadOnly = user?.role === 'trainer';
+            const isManageOperatorsReadOnly = isPlainTrainer;
             const callEvaluationIframeUrl = `${APP_BASE_URL}call_evaluation.html`;
             const isCallEvaluationView = view === 'call_evaluation' && (isAdminLikeRole || isDepartmentManager);
             const canSeeCallEvaluation = isAdminLikeRole || isDepartmentManager;
@@ -42594,7 +42608,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <div className="absolute right-0 mt-2 w-40 bg-white border rounded-lg shadow-lg z-50">
                                                     <button
                                                     onClick={() => {
-                                                        setUserToEdit({ ...sv });
+                                                        const fullSv = (Array.isArray(adminUsers) ? adminUsers : []).find(
+                                                            (candidate) => Number(candidate?.id) === Number(sv?.id)
+                                                        ) || sv;
+                                                        setUserToEdit({ ...fullSv });
                                                         setShowUserEditModal(true);
                                                         setOpenMenuId(null);
                                                     }}
@@ -43833,7 +43850,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 canEdit={isDepartmentHeadUser}
                             />
                         ))}
-                        {(isDepartmentManager || user.role === 'trainer') && (
+                        {(isDepartmentManager || isPlainTrainer) && (
                             <>
                                 {view === 'qr_access' && (
                                 <>

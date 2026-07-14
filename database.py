@@ -10799,7 +10799,14 @@ class Database:
         if not user_id:
             return None
         with self._get_cursor() as cursor:
-            cursor.execute("SELECT id FROM departments WHERE head_user_id = %s LIMIT 1", (user_id,))
+            cursor.execute("""
+                SELECT id
+                FROM departments
+                WHERE head_user_id = %s
+                  AND COALESCE(is_active, TRUE) = TRUE
+                ORDER BY name, id
+                LIMIT 1
+            """, (user_id,))
             r = cursor.fetchone()
             return r[0] if r else None
 

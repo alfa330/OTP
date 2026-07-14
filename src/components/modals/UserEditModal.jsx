@@ -270,6 +270,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     const isScopedDepartmentHeadRequester = requesterHeadedDeptId != null && requesterHeadedDeptId !== '' && requesterRole !== 'super_admin';
     const isAdminLikeRequester = isAdminLikeRoleFn(user?.role) && !isScopedDepartmentHeadRequester;
     const isSupervisorRequester = requesterRole === 'sv';
+    const isPureSupervisorRequester = isSupervisorRequester && !isScopedDepartmentHeadRequester;
     // Отдел по умолчанию (СЗоВ) — когда отдел у пользователя не выбран явно.
     const szovDeptId = (departments || []).find((d) => String(d.code || '').toLowerCase() === 'szov')?.id ?? null;
     // Скоуп отдела создающего: супервайзер/глава видят и могут назначать только свой отдел.
@@ -327,7 +328,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     };
     const isExistingUserEdit = Boolean(userToEdit?.id);
     const isSupervisorRateEditDay = getAlmatyDayOfMonth() === 1;
-    const isSupervisorRateLocked = isSupervisorRequester && isOperatorDraft(editedUser) && isExistingUserEdit && !isSupervisorRateEditDay;
+    const isSupervisorRateLocked = isPureSupervisorRequester && isOperatorDraft(editedUser) && isExistingUserEdit && !isSupervisorRateEditDay;
     // Глава отдела (scoped head) — админ-подобная роль, но исключена из isAdminLikeRequester
     // ради скоупа отдела. Ставку сотрудника ей менять можно (бэкенд разрешает как админу),
     // поэтому явно включаем её в право показать контрол ставки в режиме редактирования.
@@ -1545,7 +1546,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         disabled={isLoading || !!createdCredentials || isDeptScoped}
                         placeholder="По умолчанию (СЗоВ)"
                         options={isDeptScoped
-                            ? (departments || []).filter((dep) => Number(dep.id) === Number(requesterScopeDeptId)).map((dep) => ({ value: dep.id, label: dep.name }))
+                            ? (departments || []).filter((dep) => dep?.is_active !== false).map((dep) => ({ value: dep.id, label: dep.name }))
                             : [
                                 { value: "", label: "По умолчанию (СЗоВ)" },
                                 ...(departments || []).filter(d => d.is_active !== false).map((dep) => ({ value: dep.id, label: dep.name })),
@@ -1586,7 +1587,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </div>
                     )}
 
-                    {(!isSupervisorRequester || isOperatorDraft(editedUser)) && (
+                    {(!isPureSupervisorRequester || isOperatorDraft(editedUser)) && (
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Ставка</label>
                         <CustomSelect
@@ -2203,7 +2204,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 disabled={isLoading || isDeptScoped}
                                 placeholder="По умолчанию (СЗоВ)"
                                 options={isDeptScoped
-                                    ? (departments || []).filter((dep) => Number(dep.id) === Number(requesterScopeDeptId)).map((dep) => ({ value: dep.id, label: dep.name }))
+                                    ? (departments || []).filter((dep) => dep?.is_active !== false).map((dep) => ({ value: dep.id, label: dep.name }))
                                     : [
                                         { value: "", label: "По умолчанию (СЗоВ)" },
                                         ...(departments || []).filter(d => d.is_active !== false).map((dep) => ({ value: dep.id, label: dep.name })),
@@ -2218,7 +2219,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
                             {canShowOperatorRateControls && (
                                 <div className="grid grid-cols-1 gap-4">
-                                {isAdminLikeRequester && isOperatorDraft(editedUser) && (
+                                {(isAdminLikeRequester || isScopedDepartmentHeadRequester) && isOperatorDraft(editedUser) && (
                                 <div>
                                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Супервайзер</label>
                                     <select
