@@ -17139,13 +17139,13 @@ class Database:
 
     def get_operator_score_aggregates_for_month(self, month, operator_ids: Optional[List[int]] = None):
         """
-        Быстрые агрегаты по операторам за месяц:
+        Канонические агрегаты завершённых оценок за месяц:
         - call_count: количество оцененных звонков (score IS NOT NULL)
         - avg_score: средний балл
 
-        Логика "последней версии" соответствует get_call_evaluations:
-        берем MAX(created_at) для пары
-        (operator_id, phone_number, month, appeal_date).
+        Для каждого звонка берётся одна последняя завершённая версия по ключу
+        (operator_id, phone_number, month, appeal_date). id — детерминированный
+        tie-breaker, если две версии имеют одинаковый created_at.
         """
         if not month:
             return {}
@@ -17167,37 +17167,22 @@ class Database:
                 return {}
 
         params = [month]
-        filter_clause = "month = %s"
+        filter_clause = "month = %s AND is_draft = FALSE"
         if normalized_ids is not None:
             filter_clause += " AND operator_id = ANY(%s)"
             params.append(normalized_ids)
 
         query = f"""
-            WITH latest_versions AS (
-                SELECT
+            WITH latest_calls AS (
+                SELECT DISTINCT ON (operator_id, phone_number, month, appeal_date)
                     operator_id,
                     phone_number,
                     month,
                     appeal_date,
-                    MAX(created_at) AS latest_date
+                    score
                 FROM calls
                 WHERE {filter_clause}
-                GROUP BY operator_id, phone_number, month, appeal_date
-            ),
-            latest_calls AS (
-                SELECT
-                    c.operator_id,
-                    c.score
-                FROM calls c
-                JOIN latest_versions lv
-                  ON c.operator_id = lv.operator_id
-                 AND c.phone_number = lv.phone_number
-                 AND c.month = lv.month
-                 AND (
-                     (c.appeal_date IS NULL AND lv.appeal_date IS NULL)
-                     OR c.appeal_date = lv.appeal_date
-                 )
-                 AND c.created_at = lv.latest_date
+                ORDER BY operator_id, phone_number, month, appeal_date, created_at DESC, id DESC
             ),
             call_aggregates AS (
                 SELECT
@@ -17224,9 +17209,11 @@ class Database:
         for operator_id, call_count, avg_score, evaluation_row_count in rows:
             op_id = int(operator_id)
             evaluation_rows = int(evaluation_row_count or 0)
+            avg_score_raw = float(avg_score) if avg_score is not None else None
             result[op_id] = {
                 "call_count": int(call_count or 0),
-                "avg_score": round(float(avg_score), 2) if avg_score is not None else None,
+                "avg_score": round(avg_score_raw, 2) if avg_score_raw is not None else None,
+                "avg_score_raw": avg_score_raw,
                 "evaluation_row_count": evaluation_rows,
                 "has_evaluation_data": evaluation_rows > 0
             }

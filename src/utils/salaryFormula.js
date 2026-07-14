@@ -6,6 +6,36 @@
 
 export const SALARY_HOURLY_RATE = 700;
 
+// Качество для превью ЗП приходит из месячного контракта часов, а не из
+// лениво загружаемого журнала «Мои оценки». count отделяет «нет данных» от
+// реальной средней оценки 0; month не даёт подмешать качество другого месяца.
+export function resolveMonthlySalaryQuality(metrics, expectedMonth = '') {
+    const metricsMonth = String(metrics?.month || '').trim();
+    const normalizedExpectedMonth = String(expectedMonth || '').trim();
+    const monthMatches = !normalizedExpectedMonth || metricsMonth === normalizedExpectedMonth;
+    const rawCount = Number(metrics?.quality_evaluation_count);
+    const count = Number.isFinite(rawCount) ? Math.max(0, Math.trunc(rawCount)) : 0;
+    const hasAverageValue = (
+        metrics?.quality_average !== null &&
+        metrics?.quality_average !== undefined &&
+        String(metrics.quality_average).trim() !== ''
+    );
+    const average = Number(metrics?.quality_average);
+    const available = (
+        monthMatches &&
+        metrics?.quality_available === true &&
+        count > 0 &&
+        hasAverageValue &&
+        Number.isFinite(average)
+    );
+
+    return {
+        available,
+        count: monthMatches ? count : 0,
+        quality: available ? average : 0,
+    };
+}
+
 // --- Модель ОПЕРАТОР (звонки) — дословно из App.jsx:34530-34577 ---
 export function calculateOperatorSalary({
     hoursNorm = 0,

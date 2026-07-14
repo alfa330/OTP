@@ -21,7 +21,7 @@ import AuthEntranceSplash from './components/common/AuthEntranceSplash';
 import OrazAitSplash from './components/common/OrazAitSplash';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId } from './utils/roles';
 import { departmentAllowsView, departmentRestrictsViews, firstAllowedView } from './utils/departmentViews';
-import { calculateOperatorSalary, calculateChatSalary } from './utils/salaryFormula';
+import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality } from './utils/salaryFormula';
 
 const CHUNK_RELOAD_STORAGE_KEY = 'otp_chunk_reload_attempted';
 const PINNED_TASK_STORAGE_KEY_PREFIX = 'otp_pinned_task';
@@ -45330,12 +45330,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 operatorUserRowForSalary?.hire_date ||
                                                 operatorUserRowForSalary?.hireDate
                                             );
-                                            const salaryEvaluations = Array.isArray(operatorData?.evaluations)
-                                                ? operatorData.evaluations.filter((ev) => !(ev?.call?.is_imported === true || ev?.is_imported === true))
-                                                : [];
-                                            const salaryQuality = salaryEvaluations.length > 0
-                                                ? salaryEvaluations.reduce((sum, ev) => sum + safeNum(ev?.score), 0) / salaryEvaluations.length
-                                                : 0;
+                                            const {
+                                                quality: salaryQuality,
+                                                available: hasSalaryQuality,
+                                            } = resolveMonthlySalaryQuality(op.salary_metrics, selectedMonth);
                                             // Стаж и метрики для чат-модели (оценка/время ответа — из chat_metrics за месяц)
                                             const salaryChatExperience = resolveChatExperienceRange(
                                                 profileData?.hire_date ||
@@ -45375,7 +45373,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             };
                                             const missingSalaryInputs = [
                                                 !salaryExperience ? 'стаж' : null,
-                                                salaryEvaluations.length === 0 ? 'качество' : null,
+                                                !hasSalaryQuality ? 'качество' : null,
                                                 safeNum(norm) <= 0 ? 'норма' : null,
                                             ].filter(Boolean);
 
@@ -45481,7 +45479,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     // Предзаполняем чат-калькулятор метриками месяца (оценка/время ответа/чаты в час)
                                                     setSalaryChatPrefill({
                                                         experience: salaryChatExperience,
-                                                        quality: salaryEvaluations.length > 0 ? salaryQuality.toFixed(2) : '',
+                                                        quality: hasSalaryQuality ? salaryQuality.toFixed(2) : '',
                                                         avgScore: chatAvgScore > 0 ? chatAvgScore.toFixed(2) : '',
                                                         responseTime: chatRespMinutes > 0 ? chatRespMinutes.toFixed(2) : '',
                                                         chatsPerHour: safeNum(callsPerHour).toFixed(2),
@@ -45496,7 +45494,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 }
                                                 const nextSalaryData = {
                                                     experience: salaryExperience,
-                                                    quality: salaryEvaluations.length > 0 ? salaryQuality.toFixed(2) : '',
+                                                    quality: hasSalaryQuality ? salaryQuality.toFixed(2) : '',
                                                     callsPerHour: safeNum(callsPerHour).toFixed(2),
                                                     hoursNorm: safeNum(norm).toFixed(2),
                                                     totalHours: safeNum(regular).toFixed(2),
