@@ -379,6 +379,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         direction_id: isTrainerBase ? "" : (base.direction_id ?? ""),
         department_id: base.department_id ?? (isDeptScoped ? requesterScopeDeptId : ""),
         supervisor_id: isTrainerBase ? "" : (base.supervisor_id ?? ((isAdminLikeRequester || isScopedDepartmentHeadRequester) ? "" : (user?.id ?? ""))),
+        group_id: isTrainerBase ? "" : (base.group_id ?? ""),
         status: initialStatus,
         gender: base.gender ?? "",
         birth_date: base.birth_date ?? "",
@@ -2221,26 +2222,39 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 <div className="grid grid-cols-1 gap-4">
                                 {(isAdminLikeRequester || isScopedDepartmentHeadRequester) && isOperatorDraft(editedUser) && (
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Супервайзер</label>
+                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Группа</label>
                                     <select
-                                    value={editedUser?.supervisor_id || ""}
-                                    onChange={(e) => setEditedUser({ ...editedUser, supervisor_id: e.target.value })}
+                                    value={editedUser?.group_id || ""}
+                                    onChange={(e) => setEditedUser({ ...editedUser, group_id: e.target.value })}
                                     className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                                     disabled={isLoading}
                                     >
-                                    <option value="">Выберите супервайзера</option>
+                                    <option value="">Без группы</option>
                                     {(() => {
-                                        const all = svList || [];
-                                        const active = all.filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status);
+                                        const options = groupsForSelectedDept(effectiveDeptId);
+                                        const currentInOptions = !editedUser?.group_id
+                                            || options.some((g) => String(g.id) === String(editedUser.group_id));
                                         return (
                                             <>
-                                                {active.map(sv => (
-                                                <option key={sv.id} value={sv.id}>{sv.name}</option>
+                                                {!currentInOptions && (
+                                                <option value={editedUser.group_id}>
+                                                    {userToEdit?.group_name || `Группа #${editedUser.group_id}`}
+                                                </option>
+                                                )}
+                                                {options.map((g) => (
+                                                <option key={g.id} value={g.id}>
+                                                    {(g.supervisors || []).length
+                                                        ? `${g.name} — СВ: ${(g.supervisors || []).map(s => s?.name).filter(Boolean).join(', ')}`
+                                                        : g.name}
+                                                </option>
                                                 ))}
                                             </>
                                         );
                                     })()}
                                     </select>
+                                    <p className="mt-1 text-xs text-slate-500">
+                                        Супервайзер меняется автоматически вместе с группой. Убрать оператора из группы совсем — в разделе «Группы».
+                                    </p>
                                 </div>
                                 )}
 

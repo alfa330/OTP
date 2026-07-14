@@ -253,5 +253,50 @@ class AddUserGroupTests(unittest.TestCase):
         self.assertIn("next.group_id = ''", USER_MODAL)
 
 
+class ExistingUserGroupEditTests(unittest.TestCase):
+    """Редактирование существующих сотрудников тоже идёт через группу:
+    СВ напрямую не меняется ни в карточке, ни массово."""
+
+    def test_admin_users_projection_includes_current_group(self):
+        get_users = BOT.split("def get_admin_users():", 1)[1].split("def admin_update_user():", 1)[0]
+        self.assertIn("grp.group_id", get_users)
+        self.assertIn("grp.group_name", get_users)
+        self.assertIn("FROM group_operator_memberships gom", get_users)
+        self.assertIn("gom.end_date IS NULL", get_users)
+        self.assertIn('"group_id": row[49]', get_users)
+        self.assertIn('"group_name": row[50]', get_users)
+
+    def test_update_user_blocks_direct_supervisor_change(self):
+        upd = BOT.split("def admin_update_user():", 1)[1].split("def admin_bulk_update_users():", 1)[0]
+        self.assertIn("Супервайзер назначается группой оператора", upd)
+
+    def test_bulk_update_moves_group_instead_of_supervisor(self):
+        bulk = BOT.split("def admin_bulk_update_users():", 1)[1].split("def admin_promote_to_supervisor():", 1)[0]
+        self.assertIn("allowed_fields = {'direction_id', 'group_id', 'rate'}", bulk)
+        self.assertNotIn("updates['supervisor_id']", bulk)
+        self.assertIn("db.add_operator_to_group(target_group['id'], target_user_id, assigned_by=requester_id)", bulk)
+        # скоуп: не-глобальный админ переводит только в группы своего отдела
+        self.assertIn("Группа не из вашего отдела", bulk)
+        # группа применима только к операторам/стажёрам
+        self.assertIn("target_group is not None and target_role not in ('operator', 'trainee')", bulk)
+
+    def test_edit_flow_posts_group_membership_not_supervisor(self):
+        self.assertIn("`${API_BASE_URL}/api/admin/groups/${nextGroupId}/operators`", APP)
+        # в edit-флоу больше нет прямого update_user(supervisor_id) для операторов —
+        # осталось только легаси-обнуление для тренеров
+        self.assertEqual(APP.count("field: 'supervisor_id'"), 1)
+
+    def test_bulk_panel_uses_groups(self):
+        self.assertIn("Группа: не менять", APP)
+        self.assertIn("payloadChanges.group_id = Number(bulkManageUsersChanges.group_id)", APP)
+        self.assertNotIn("payloadChanges.supervisor_id", APP)
+
+    def test_edit_modal_prefills_and_changes_group(self):
+        self.assertIn('group_id: isTrainerBase ? "" : (base.group_id ?? "")', USER_MODAL)
+        self.assertIn("Супервайзер меняется автоматически вместе с группой", USER_MODAL)
+        # прямого селекта СВ в модалке больше нет
+        self.assertNotIn("Выберите супервайзера", USER_MODAL)
+
+
 if __name__ == "__main__":
     unittest.main()

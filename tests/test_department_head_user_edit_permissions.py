@@ -55,12 +55,14 @@ def _response_status(result):
 
 
 class _PermissionDB:
-    def __init__(self, users=None, departments=None, directions=None):
+    def __init__(self, users=None, departments=None, directions=None, groups=None):
         self.users = dict(users or {})
         self.departments = dict(departments or {})
         self.directions = list(directions or [])
+        self.groups = dict(groups or {})
         self.login_updates = []
         self.user_updates = []
+        self.group_moves = []
 
     def get_user(self, *, id):
         return self.users.get(int(id))
@@ -96,6 +98,12 @@ class _PermissionDB:
     def update_user(self, user_id, field, value, *, changed_by):
         self.user_updates.append((user_id, field, value, changed_by))
         return True
+
+    def get_group(self, group_id):
+        return self.groups.get(int(group_id))
+
+    def add_operator_to_group(self, group_id, operator_id, start_date=None, assigned_by=None):
+        self.group_moves.append((int(group_id), int(operator_id), assigned_by))
 
 
 class AuthenticatedLoginChangeTests(unittest.TestCase):
@@ -257,6 +265,11 @@ class ScopedRelationAssignmentTests(unittest.TestCase):
                 {"id": 41, "department_id": 7, "is_active": True},
                 {"id": 42, "department_id": 7, "is_active": False},
             ],
+            groups={
+                50: {"id": 50, "status": "active", "department_id": 7},
+                51: {"id": 51, "status": "active", "department_id": 8},
+                52: {"id": 52, "status": "archived", "department_id": 7},
+            },
         )
 
     def _load_namespace(self, request_payload=None, endpoint="admin_update_user"):
@@ -295,7 +308,7 @@ class ScopedRelationAssignmentTests(unittest.TestCase):
         self.assertIsNotNone(validate("trainer", 10, self.target, "direction_id", 42))
 
     def test_single_update_endpoint_rejects_foreign_relations_before_write(self):
-        for field, value in (("supervisor_id", 30), ("direction_id", 40)):
+        for field, value in (("direction_id", 40),):
             with self.subTest(field=field):
                 self.db.user_updates.clear()
                 namespace = self._load_namespace(
@@ -307,8 +320,23 @@ class ScopedRelationAssignmentTests(unittest.TestCase):
                 self.assertEqual(_response_status(result), 403)
                 self.assertEqual(self.db.user_updates, [])
 
+    def test_single_update_endpoint_blocks_direct_supervisor_change(self):
+        # СВ оператора — производное от его группы (каскад при смене группы/СВ
+        # группы). Прямая правка запрещена даже для СВ своего отдела.
+        for value in (30, 31):
+            with self.subTest(value=value):
+                self.db.user_updates.clear()
+                namespace = self._load_namespace(
+                    {"user_id": 20, "field": "supervisor_id", "value": value}
+                )
+
+                result = namespace["admin_update_user"]()
+
+                self.assertEqual(_response_status(result), 400)
+                self.assertEqual(self.db.user_updates, [])
+
     def test_single_update_endpoint_writes_same_department_relations(self):
-        for field, value in (("supervisor_id", 31), ("direction_id", 41)):
+        for field, value in (("direction_id", 41),):
             with self.subTest(field=field):
                 self.db.user_updates.clear()
                 namespace = self._load_namespace(
@@ -322,7 +350,6 @@ class ScopedRelationAssignmentTests(unittest.TestCase):
 
     def test_bulk_update_endpoint_keeps_relation_assignments_in_department(self):
         for field, foreign_value, own_value in (
-            ("supervisor_id", 30, 31),
             ("direction_id", 40, 41),
         ):
             with self.subTest(field=field, scope="foreign"):
@@ -354,6 +381,77 @@ class ScopedRelationAssignmentTests(unittest.TestCase):
                 self.assertEqual(payload["updated_count"], 1)
                 self.assertEqual(payload["failed_user_ids"], [])
                 self.assertEqual(self.db.user_updates, [(20, field, own_value, 10)])
+
+    def test_bulk_update_endpoint_rejects_supervisor_field(self):
+        # supervisor_id массово не меняется — перевод идёт через group_id.
+        namespace = self._load_namespace(
+            {"user_ids": [20], "changes": {"supervisor_id": 31}},
+            endpoint="admin_bulk_update_users",
+        )
+
+        result = namespace["admin_bulk_update_users"]()
+
+        self.assertEqual(_response_status(result), 400)
+        self.assertEqual(self.db.user_updates, [])
+        self.assertEqual(self.db.group_moves, [])
+
+    def test_bulk_update_endpoint_moves_operators_into_department_group(self):
+        with self.subTest(scope="own"):
+            self.db.group_moves.clear()
+            namespace = self._load_namespace(
+                {"user_ids": [20], "changes": {"group_id": 50}},
+                endpoint="admin_bulk_update_users",
+            )
+
+            result = namespace["admin_bulk_update_users"]()
+            payload = result[0]
+
+            self.assertEqual(_response_status(result), 200)
+            self.assertEqual(payload["updated_count"], 1)
+            self.assertEqual(payload["failed_user_ids"], [])
+            self.assertEqual(payload["applied_fields"], ["group_id"])
+            self.assertEqual(self.db.group_moves, [(50, 20, 10)])
+            # членство меняется через add_operator_to_group, не прямой записью в users
+            self.assertEqual(self.db.user_updates, [])
+
+        with self.subTest(scope="foreign"):
+            self.db.group_moves.clear()
+            namespace = self._load_namespace(
+                {"user_ids": [20], "changes": {"group_id": 51}},
+                endpoint="admin_bulk_update_users",
+            )
+
+            result = namespace["admin_bulk_update_users"]()
+
+            self.assertEqual(_response_status(result), 403)
+            self.assertEqual(self.db.group_moves, [])
+
+        with self.subTest(scope="archived"):
+            self.db.group_moves.clear()
+            namespace = self._load_namespace(
+                {"user_ids": [20], "changes": {"group_id": 52}},
+                endpoint="admin_bulk_update_users",
+            )
+
+            result = namespace["admin_bulk_update_users"]()
+
+            self.assertEqual(_response_status(result), 400)
+            self.assertEqual(self.db.group_moves, [])
+
+        with self.subTest(scope="non_operator_target"):
+            self.db.group_moves.clear()
+            namespace = self._load_namespace(
+                {"user_ids": [31], "changes": {"group_id": 50}},
+                endpoint="admin_bulk_update_users",
+            )
+
+            result = namespace["admin_bulk_update_users"]()
+            payload = result[0]
+
+            self.assertEqual(_response_status(result), 200)
+            self.assertEqual(payload["updated_count"], 0)
+            self.assertEqual(payload["failed_user_ids"], [31])
+            self.assertEqual(self.db.group_moves, [])
 
 
 class OperatorScopeHelpersTests(unittest.TestCase):
