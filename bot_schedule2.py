@@ -7951,12 +7951,48 @@ def save_department_plan():
         return jsonify({"error": "Internal server error"}), 500
 
 
+def _get_operator_month_salary_metrics(operator_id, month):
+    """Return non-sensitive, month-scoped inputs used by the salary preview."""
+    empty_payload = {
+        "month": str(month),
+        "quality_average": None,
+        "quality_evaluation_count": 0,
+        "quality_available": False,
+    }
+    try:
+        aggregates = db.get_operator_score_aggregates_for_month(
+            month=month,
+            operator_ids=[operator_id],
+        ) or {}
+        aggregate = aggregates.get(int(operator_id)) or {}
+        quality_count = int(aggregate.get("call_count") or 0)
+        quality_average = aggregate.get("avg_score_raw")
+        if quality_average is None:
+            quality_average = aggregate.get("avg_score")
+        quality_available = quality_count > 0 and quality_average is not None
+        return {
+            "month": str(month),
+            "quality_average": float(quality_average) if quality_available else None,
+            "quality_evaluation_count": quality_count,
+            "quality_available": quality_available,
+        }
+    except Exception:
+        # Сбой необязательного превью зарплаты не должен скрывать сами часы.
+        logging.exception(
+            "Failed to load salary quality metrics for operator %s, month %s",
+            operator_id,
+            month,
+        )
+        return empty_payload
+
+
 @app.route('/api/sv/daily_hours', methods=['GET'])
 @require_api_key
 def sv_daily_hours():
     """
     Возвращает daily_hours за месяц для всех операторов текущего супервайзера.
-    Если запрос делает обычный оператор — возвращаем только его daily_hours.
+    Если запрос делает обычный оператор — возвращаем только его daily_hours
+    и нечувствительный месячный salary_metrics для превью зарплаты.
     Параметры:
       - month (query param) — YYYY-MM (опционально, по умолчанию текущий месяц)
       - id (query param) — (только для admin) id нужного supervisor
@@ -8031,6 +8067,11 @@ def sv_daily_hours():
         if role == 'operator':
             result = db.get_daily_hours_for_operator_month(requester_id, month)
             operator_obj = result.get("operator") if isinstance(result, dict) else None
+            if operator_obj:
+                operator_obj["salary_metrics"] = _get_operator_month_salary_metrics(
+                    operator_id=requester_id,
+                    month=month,
+                )
             return jsonify({
                 "status": "success",
                 "month": result.get("month", month) if isinstance(result, dict) else month,
