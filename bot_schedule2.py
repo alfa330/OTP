@@ -919,6 +919,7 @@ def _get_user_payload(user):
     department_id = None
     department_code = None
     headed_department_id = None
+    headed_department_ids = []
     if user_id is not None:
         try:
             department_id, department_code = db.get_user_department(user_id)
@@ -927,6 +928,14 @@ def _get_user_payload(user):
             department_id = None
             department_code = None
             headed_department_id = None
+        try:
+            headed_department_ids = [
+                int(item.get('id'))
+                for item in (db.get_headed_departments_for_user(user_id) or [])
+                if isinstance(item, dict) and item.get('id') is not None
+            ]
+        except Exception:
+            headed_department_ids = []
     return {
         "role": role,
         "id": user_id,
@@ -936,6 +945,7 @@ def _get_user_payload(user):
         "department_id": department_id,
         "department_code": department_code,
         "headed_department_id": headed_department_id,
+        "headed_department_ids": headed_department_ids,
         "avatar_url": _build_avatar_signed_url(avatar_bucket, avatar_blob_path),
         "avatar_updated_at": avatar_updated_at.isoformat() if hasattr(avatar_updated_at, "isoformat") else avatar_updated_at
     }
@@ -1653,6 +1663,40 @@ def _department_scope_id_for_requester(requester_id):
     return db.get_user_department_id(requester_id)
 
 
+def _headed_department_ids(requester_id):
+    """All active departments formally headed by the requester (cached per request)."""
+    if not requester_id:
+        return frozenset()
+
+    cache = None
+    try:
+        cache = getattr(g, '_headed_dept_ids_cache', None)
+        if cache is None:
+            cache = {}
+            g._headed_dept_ids_cache = cache
+    except RuntimeError:
+        cache = None
+    except Exception:
+        cache = None
+
+    if cache is not None and requester_id in cache:
+        return cache[requester_id]
+
+    try:
+        departments = db.get_headed_departments_for_user(requester_id) or []
+        department_ids = frozenset(
+            int(item.get('id'))
+            for item in departments
+            if isinstance(item, dict) and item.get('id') is not None
+        )
+    except Exception:
+        department_ids = frozenset()
+
+    if cache is not None:
+        cache[requester_id] = department_ids
+    return department_ids
+
+
 def _is_department_manager_requester(requester_role, requester_id):
     role = _normalize_user_role(requester_role)
     return _is_supervisor_role(role) or _headed_department_id(requester_id) is not None
@@ -1684,9 +1728,13 @@ def _operator_item_id(item):
 def _authorize_operator_scope(requester, requester_id, operator_id):
     role = _normalize_user_role(requester[3])
     # Видят всех: супер-админ, админы, тренер
-    headed_dept = _headed_department_id(requester_id)
-    if headed_dept is not None and not _is_super_admin_role(role):
-        return db.get_user_department_id(operator_id) == headed_dept
+    headed_dept_ids = _headed_department_ids(requester_id)
+    if headed_dept_ids and not _is_super_admin_role(role):
+        operator_department_id = db.get_user_department_id(operator_id)
+        try:
+            return operator_department_id is not None and int(operator_department_id) in headed_dept_ids
+        except (TypeError, ValueError):
+            return False
     if _is_global_admin_requester(role, requester_id) or role == 'trainer':
         return True
     if role == 'operator':
@@ -1721,25 +1769,71 @@ def _requester_can_access_target_user(
     target_role = _normalize_user_role(target_user[3])
     target_user_id = int(target_user[0])
 
-    headed_dept = _headed_department_id(requester_id)
-    if headed_dept is not None and not _is_super_admin_role(requester_role):
-        if _is_admin_role(target_role):
-            return False
-        return db.get_user_department_id(target_user_id) == headed_dept
-    if _is_global_admin_requester(requester_role, requester_id):
-        return True
     if allow_self and requester_id == target_user_id:
         return True
-    # Глава отдела: управляет любым НЕ-админом своего отдела (замещает базовую роль)
+
+    headed_dept_ids = _headed_department_ids(requester_id)
+    if headed_dept_ids and not _is_super_admin_role(requester_role):
+        if _is_admin_role(target_role):
+            return False
+        target_department_id = db.get_user_department_id(target_user_id)
+        try:
+            return target_department_id is not None and int(target_department_id) in headed_dept_ids
+        except (TypeError, ValueError):
+            return False
+    if _is_global_admin_requester(requester_role, requester_id):
+        return True
     if _is_supervisor_role(requester_role):
         if target_role not in set(supervisor_target_roles or ()):
             return False
-        # Супервайзер управляет сотрудниками только СВОЕГО отдела
+        # A regular supervisor is scoped to their department. If legacy data
+        # has no department, keep access only to an explicit direct report.
         scope = _department_scope_id_for_requester(requester_id)
         if scope is None:
-            return True
+            return _target_user_supervisor_id(target_user) == requester_id
         return db.get_user_department_id(target_user_id) == scope
     return False
+
+
+def _validate_scoped_user_relation_update(requester_role, requester_id, target_user, field, value):
+    """Validate direction/supervisor assignments made by a scoped manager."""
+    if field not in ('direction_id', 'supervisor_id') or value is None:
+        return None
+    if _is_global_admin_requester(requester_role, requester_id):
+        return None
+
+    target_department_id = db.get_user_department_id(int(target_user[0]))
+    if target_department_id is None:
+        return ("Target user has no department", 403)
+
+    if field == 'direction_id':
+        try:
+            requested_direction_id = int(value)
+        except (TypeError, ValueError):
+            return ("Invalid direction_id", 400)
+        active_direction_ids = {
+            int(item.get('id'))
+            for item in (db.get_directions(department_id=target_department_id) or [])
+            if isinstance(item, dict) and item.get('id') is not None
+        }
+        if requested_direction_id not in active_direction_ids:
+            return ("Direction is outside the target user's department or inactive", 403)
+        relation_department_id = target_department_id
+    else:
+        supervisor = db.get_user(id=value)
+        if not supervisor or not _is_supervisor_role(supervisor[3]):
+            return ("Supervisor not found or has invalid role", 400)
+        relation_department_id = db.get_user_department_id(value)
+        if relation_department_id is None:
+            return ("Supervisor has no department", 400)
+
+    try:
+        same_department = int(relation_department_id) == int(target_department_id)
+    except (TypeError, ValueError):
+        same_department = False
+    if not same_department:
+        return (f"{field} does not belong to the target user's department", 403)
+    return None
 
 
 def _load_target_user_with_scope(
@@ -1795,12 +1889,20 @@ def _filter_operators_for_requester_scope(requester, requester_id, operators):
     # Видят всех: супер-админ, админы
     if _is_global_admin_requester(requester_role, requester_id):
         return items
+    # Глава отдела (любая базовая роль, включая тренера) — операторы своего
+    # отдела; для главы нескольких отделов — объединение всех возглавляемых.
+    headed_dept_ids = _headed_department_ids(requester_id)
+    if headed_dept_ids:
+        member_ids = set()
+        for department_id in headed_dept_ids:
+            member_ids.update(db.get_department_member_ids(department_id) or set())
+        return [it for it in items if _operator_item_id(it) in member_ids]
     # Тренер — только просмотр и только операторы отделов СЗоВ и ОП.
     if requester_role == 'trainer':
         member_ids = _trainer_work_schedule_member_ids()
         return [it for it in items if _operator_item_id(it) in member_ids]
-    # Супервайзер / глава отдела — только операторы своего отдела
-    if _is_supervisor_role(requester_role) or _headed_department_id(requester_id) is not None:
+    # Супервайзер — только операторы своего отдела.
+    if _is_supervisor_role(requester_role):
         scope = _department_scope_id_for_requester(requester_id)
         if scope is None:
             return items
@@ -1858,9 +1960,13 @@ def _resolve_scoped_operator_for_requester(requester, requester_id, operator_id)
 
 def _ensure_call_access_for_requester(call_operator_id, requester, requester_id):
     role = _normalize_user_role(requester[3])
-    headed_dept = _headed_department_id(requester_id)
-    if headed_dept is not None and not _is_super_admin_role(role):
-        return db.get_user_department_id(call_operator_id) == headed_dept
+    headed_dept_ids = _headed_department_ids(requester_id)
+    if headed_dept_ids and not _is_super_admin_role(role):
+        call_operator_department_id = db.get_user_department_id(call_operator_id)
+        try:
+            return call_operator_department_id is not None and int(call_operator_department_id) in headed_dept_ids
+        except (TypeError, ValueError):
+            return False
     if _is_global_admin_requester(role, requester_id):
         return True
     if role == 'operator':
@@ -3575,9 +3681,20 @@ def _resolve_avatar_target_user(requester, requester_id, target_user_id):
     if not target_user:
         return None, ("User not found", 404)
     requester_role = _normalize_user_role(requester[3])
-    if _is_admin_role(requester_role):
-        return target_user, None
     if requester_id == target_user[0]:
+        return target_user, None
+    headed_dept_id = _headed_department_id(requester_id)
+    if headed_dept_id is not None and not _is_super_admin_role(requester_role):
+        if _requester_can_access_target_user(
+            requester,
+            requester_id,
+            target_user,
+            allow_self=False,
+            supervisor_target_roles=('operator', 'trainee', 'trainer', 'sv')
+        ):
+            return target_user, None
+        return None, ("You do not have access to manage this avatar", 403)
+    if _is_admin_role(requester_role):
         return target_user, None
     if _is_supervisor_role(requester_role) and _normalize_user_role(target_user[3]) == 'operator' and target_user[6] == requester_id:
         return target_user, None
@@ -6790,9 +6907,9 @@ def get_admin_users():
             return jsonify({"error": message}), status_code
 
         requester_role = _normalize_user_role(requester[3])
-        headed_dept_id = _headed_department_id(requester_id)
+        headed_dept_ids = _headed_department_ids(requester_id)
 
-        if requester_role == 'operator' and headed_dept_id is None:
+        if requester_role == 'operator' and not headed_dept_ids:
             # Operator can only read a limited user projection.
             visible_roles = ['operator', 'trainee', 'trainer']
             with db._get_cursor() as cursor:
@@ -6831,11 +6948,11 @@ def get_admin_users():
 
             return jsonify({"status": "success", "users": users}), 200
 
-        if not (_is_admin_role(requester_role) or requester_role in ('sv', 'trainer') or headed_dept_id is not None):
+        if not (_is_admin_role(requester_role) or requester_role in ('sv', 'trainer') or headed_dept_ids):
             return jsonify({"error": "Forbidden"}), 403
 
         visible_roles = ['operator', 'trainee', 'trainer']
-        if headed_dept_id is not None:
+        if headed_dept_ids:
             visible_roles.extend(['sv', 'supervisor'])
         if requester_role == 'super_admin':
             visible_roles.append('admin')
@@ -6980,10 +7097,16 @@ def get_admin_users():
                     })
         # Изоляция отделов: супервайзер и глава отдела видят сотрудников только своего отдела.
         # Супер-админ, админы и тренер видят все отделы.
-        if requester_role == 'sv' or headed_dept_id is not None:
-            scope_dept = _department_scope_id_for_requester(requester_id)
-            if scope_dept is not None:
-                if requester_role == 'sv' and headed_dept_id is None:
+        if (requester_role == 'sv' or headed_dept_ids) and not _is_super_admin_role(requester_role):
+            if headed_dept_ids:
+                users = [
+                    item for item in users
+                    if item.get('department_id') is not None
+                    and int(item.get('department_id')) in headed_dept_ids
+                ]
+            else:
+                scope_dept = _department_scope_id_for_requester(requester_id)
+                if scope_dept is not None:
                     # СВ видит сотрудников своего отдела И всех, кого ведёт сам
                     # (supervisor_id == СВ), даже если у оператора другой/пустой отдел.
                     # Иначе такие операторы выпадают из полного списка, фронт берёт
@@ -6996,8 +7119,6 @@ def get_admin_users():
                         except (TypeError, ValueError):
                             return False
                     users = [u for u in users if u.get('department_id') == scope_dept or _supervised_by_requester(u)]
-                else:
-                    users = [u for u in users if u.get('department_id') == scope_dept]
         return jsonify({"status": "success", "users": users}), 200
     except Exception as e:
         logging.error(f"Error fetching users: {e}")
@@ -7162,6 +7283,16 @@ def admin_update_user():
             supervisor_target_roles=scoped_target_roles
         ):
             return jsonify({"error": "Forbidden for this user"}), 403
+        relation_error = _validate_scoped_user_relation_update(
+            requester_role,
+            requester_id,
+            target_user,
+            field,
+            value
+        )
+        if relation_error:
+            message, status_code = relation_error
+            return jsonify({"error": message}), status_code
         # Глава отдела меняет ставку как админ (в любой день, без sv-ограничений):
         # скоуп «только свой отдел» уже обеспечен _requester_can_access_target_user выше.
         if field == 'rate' and not _is_admin_role(requester_role) and requester_role != 'sv' and headed_dept_id is None:
@@ -7246,7 +7377,8 @@ def admin_bulk_update_users():
             return jsonify({"error": message}), status_code
 
         requester_role = _normalize_user_role(requester[3]) if requester else ''
-        if requester_role not in ('super_admin', 'admin', 'sv'):
+        headed_dept_id = _headed_department_id(requester_id)
+        if requester_role not in ('super_admin', 'admin', 'sv') and headed_dept_id is None:
             return jsonify({"error": "Only admins can update users"}), 403
 
         user_ids = []
@@ -7290,7 +7422,7 @@ def admin_bulk_update_users():
             if rate_value not in [1.0, 0.75, 0.5]:
                 return jsonify({"error": "Invalid rate value"}), 400
             updates['rate'] = rate_value
-            if requester_role == 'sv' and not _is_supervisor_rate_change_day():
+            if requester_role == 'sv' and headed_dept_id is None and not _is_supervisor_rate_change_day():
                 return jsonify({"error": "Supervisor can change rate only on the first day of the month"}), 403
 
         if not updates:
@@ -7298,14 +7430,44 @@ def admin_bulk_update_users():
 
         updated_count = 0
         failed_user_ids = []
+        scoped_target_roles = ('operator', 'trainee', 'trainer', 'sv') if headed_dept_id is not None else ('operator', 'trainee')
         for target_user_id in user_ids:
             try:
                 target_user = db.get_user(id=target_user_id)
                 if not target_user:
                     failed_user_ids.append(target_user_id)
                     continue
-                target_role = str(target_user[3] or '').strip().lower()
-                if requester_role == 'sv' and 'rate' in updates:
+                target_role = _normalize_user_role(target_user[3])
+                if target_role in ('admin', 'super_admin') and requester_role != 'super_admin':
+                    failed_user_ids.append(target_user_id)
+                    continue
+                if not _is_global_admin_requester(requester_role, requester_id) and not _requester_can_access_target_user(
+                    requester,
+                    requester_id,
+                    target_user,
+                    allow_self=False,
+                    supervisor_target_roles=scoped_target_roles
+                ):
+                    failed_user_ids.append(target_user_id)
+                    continue
+                relation_update_denied = False
+                if target_role != 'trainer':
+                    for relation_field in ('direction_id', 'supervisor_id'):
+                        if relation_field not in updates:
+                            continue
+                        if _validate_scoped_user_relation_update(
+                            requester_role,
+                            requester_id,
+                            target_user,
+                            relation_field,
+                            updates[relation_field]
+                        ):
+                            relation_update_denied = True
+                            break
+                if relation_update_denied:
+                    failed_user_ids.append(target_user_id)
+                    continue
+                if requester_role == 'sv' and headed_dept_id is None and 'rate' in updates:
                     try:
                         target_supervisor_id = int(target_user[6])
                     except (TypeError, ValueError):
@@ -7394,12 +7556,18 @@ def api_admin_departments():
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
         requester_role = _normalize_user_role(requester[3])
-        headed_dept_id = _headed_department_id(requester_id)
+        headed_dept_ids = _headed_department_ids(requester_id)
 
         if request.method == 'GET':
-            if headed_dept_id is not None and not _is_super_admin_role(requester_role):
-                department = db.get_department_by_id(headed_dept_id)
-                departments = [department] if department else []
+            if headed_dept_ids and not _is_super_admin_role(requester_role):
+                departments = [
+                    department
+                    for department in (
+                        db.get_department_by_id(department_id)
+                        for department_id in sorted(headed_dept_ids)
+                    )
+                    if department
+                ]
                 return jsonify({"status": "success", "departments": departments}), 200
             # Список отделов доступен админам (для назначения главы и т.п.)
             if not (_is_admin_role(requester_role) or requester_role == 'trainer'):
@@ -7528,18 +7696,30 @@ def get_user_history():
             return jsonify({"error": "Missing user_id parameter"}), 400
         user_id = int(user_id)
 
-        requester_id = int(request.headers.get('X-User-Id'))
-        requester = db.get_user(id=requester_id)
-        if not requester:
-            return jsonify({"error": "Requester not found"}), 404
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
 
         target_user = db.get_user(id=user_id)
         if not target_user:
             return jsonify({"error": "User not found"}), 404
 
-        # Permissions: Admin can view any, SV only their operators
+        # Permissions: global admin can view any user, a department head can
+        # view non-admin employees in the headed department, and a regular SV
+        # keeps the legacy direct-report access.
         requester_role = _normalize_user_role(requester[3])
-        if (not _is_admin_role(requester_role)) and (not _is_supervisor_role(requester_role) or target_user[6] != requester_id):
+        headed_dept_id = _headed_department_id(requester_id)
+        if headed_dept_id is not None and not _is_super_admin_role(requester_role):
+            if not _requester_can_access_target_user(
+                requester,
+                requester_id,
+                target_user,
+                allow_self=True,
+                supervisor_target_roles=('operator', 'trainee', 'trainer', 'sv')
+            ):
+                return jsonify({"error": "Unauthorized to view this user's history"}), 403
+        elif (not _is_admin_role(requester_role)) and (not _is_supervisor_role(requester_role) or target_user[6] != requester_id):
             return jsonify({"error": "Unauthorized to view this user's history"}), 403
 
         history = db.get_user_history(user_id)
@@ -7572,18 +7752,29 @@ def change_password():
         if not target_user:
             return jsonify({"error": "User not found"}), 404
 
-        # Authorization checks
+        # Authorization checks. A formally assigned department head may manage
+        # any non-admin employee in that department regardless of the head's
+        # base role; regular admins/SVs retain their previous permissions.
         requester_role = _normalize_user_role(requester[3])
         target_role = _normalize_user_role(target_user[3])
-        if requester_role == 'operator' and requester_id != user_id:
-            return jsonify({"error": "Operators can only change their own password"}), 403
-
-        if requester_role == 'sv' and (target_role != 'operator' or target_user[6] != requester_id) and requester_id != user_id:
-            return jsonify({"error": "Supervisors can only change passwords for their operators"}), 403
-
-        # Admins can change any password
-        if (not _is_admin_role(requester_role)) and requester_id != user_id and not (requester_role == 'sv' and target_user[6] == requester_id):
-            return jsonify({"error": "Unauthorized to change this user's password"}), 403
+        if requester_id != user_id:
+            headed_dept_id = _headed_department_id(requester_id)
+            if headed_dept_id is not None and not _is_super_admin_role(requester_role):
+                if not _requester_can_access_target_user(
+                    requester,
+                    requester_id,
+                    target_user,
+                    allow_self=False,
+                    supervisor_target_roles=('operator', 'trainee', 'trainer', 'sv')
+                ):
+                    return jsonify({"error": "Unauthorized to change this user's password"}), 403
+            elif requester_role == 'operator':
+                return jsonify({"error": "Operators can only change their own password"}), 403
+            elif requester_role == 'sv':
+                if target_role != 'operator' or target_user[6] != requester_id:
+                    return jsonify({"error": "Supervisors can only change passwords for their operators"}), 403
+            elif not _is_admin_role(requester_role):
+                return jsonify({"error": "Unauthorized to change this user's password"}), 403
 
         # Update password
         success = db.update_user_password(user_id, new_password)
@@ -8581,7 +8772,10 @@ def change_login():
 
         user_id = int(data['user_id'])
         new_login = data['new_login']
-        requester_id = int(request.headers.get('X-User-Id', user_id))
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
 
         if not new_login or len(new_login) < 4:
             return jsonify({"error": "New login must be at least 4 characters long"}), 400
@@ -8590,25 +8784,35 @@ def change_login():
         if db.get_user_by_login(new_login):
             return jsonify({"error": "Login is already in use"}), 400
 
-        # Fetch requester and target user
-        requester = db.get_user(id=requester_id)
+        # Fetch target user; requester comes only from the authenticated JWT context.
         target_user = db.get_user(id=user_id)
 
-        if not requester or not target_user:
+        if not target_user:
             return jsonify({"error": "User not found"}), 404
 
-        # Authorization checks
+        # Authorization checks. A formally assigned department head may manage
+        # any non-admin employee in that department regardless of the head's
+        # base role; regular admins/SVs retain their previous permissions.
         requester_role = _normalize_user_role(requester[3])
         target_role = _normalize_user_role(target_user[3])
-        if requester_role == 'operator' and requester_id != user_id:
-            return jsonify({"error": "Operators can only change their own login"}), 403
-
-        if requester_role == 'sv' and (target_role != 'operator' or target_user[6] != requester_id) and requester_id != user_id:
-            return jsonify({"error": "Supervisors can only change logins for their operators"}), 403
-
-        # Admins can change any login
-        if (not _is_admin_role(requester_role)) and requester_id != user_id and not (requester_role == 'sv' and target_user[6] == requester_id):
-            return jsonify({"error": "Unauthorized to change this user's login"}), 403
+        if requester_id != user_id:
+            headed_dept_id = _headed_department_id(requester_id)
+            if headed_dept_id is not None and not _is_super_admin_role(requester_role):
+                if not _requester_can_access_target_user(
+                    requester,
+                    requester_id,
+                    target_user,
+                    allow_self=False,
+                    supervisor_target_roles=('operator', 'trainee', 'trainer', 'sv')
+                ):
+                    return jsonify({"error": "Unauthorized to change this user's login"}), 403
+            elif requester_role == 'operator':
+                return jsonify({"error": "Operators can only change their own login"}), 403
+            elif requester_role == 'sv':
+                if target_role != 'operator' or target_user[6] != requester_id:
+                    return jsonify({"error": "Supervisors can only change logins for their operators"}), 403
+            elif not _is_admin_role(requester_role):
+                return jsonify({"error": "Unauthorized to change this user's login"}), 403
 
         # Update login
         success = db.update_operator_login(user_id, target_user[6] if requester_role in ('sv', 'admin', 'super_admin') else None, new_login)
@@ -8686,11 +8890,12 @@ def get_sv_list():
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
         requester_role = _normalize_user_role(requester[3])
-        headed_dept_id = _headed_department_id(requester_id)
-        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role) or headed_dept_id is not None):
+        headed_dept_ids = _headed_department_ids(requester_id)
+        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role) or headed_dept_ids):
             return jsonify({"error": "Only admins, supervisors or department heads can access supervisors list"}), 403
 
-        include_full_profile = _is_global_admin_requester(requester_role, requester_id)
+        is_global_admin = _is_global_admin_requester(requester_role, requester_id)
+        include_full_profile = is_global_admin or bool(headed_dept_ids)
         with db._get_cursor() as cursor:
             if include_full_profile:
                 cursor.execute("""
@@ -8740,6 +8945,11 @@ def get_sv_list():
                     ORDER BY name
                 """)
                 supervisors = cursor.fetchall()
+                if headed_dept_ids and not is_global_admin:
+                    supervisors = [
+                        supervisor for supervisor in supervisors
+                        if supervisor[39] is not None and int(supervisor[39]) in headed_dept_ids
+                    ]
                 sv_data = []
                 for sv in supervisors:
                     sv_data.append({
@@ -8786,6 +8996,8 @@ def get_sv_list():
                     })
             else:
                 # Супервайзер видит только супервайзеров СВОЕГО отдела
+                # (главы отделов сюда не попадают: им всегда отдаётся полный
+                # профиль с фильтром по возглавляемым отделам выше).
                 sv_scope_dept = _department_scope_id_for_requester(requester_id)
                 if sv_scope_dept is not None:
                     cursor.execute("""
@@ -12567,8 +12779,8 @@ def get_directions():
             logging.warning("Directions auth error: %s", message)
             return jsonify({"error": message}), status_code
         role = _normalize_user_role(requester[3])
-        headed_dept_id = _headed_department_id(requester_id)
-        if not (_is_admin_role(role) or _is_supervisor_role(role) or role == 'operator' or headed_dept_id is not None):
+        headed_dept_ids = _headed_department_ids(requester_id)
+        if not (_is_admin_role(role) or _is_supervisor_role(role) or role == 'operator' or headed_dept_ids):
             return jsonify({"error": "Only admins, supervisors, department heads and operators can access directions"}), 403
 
         # Скоуп по отделу: админ/супер-админ видят все направления (опц. фильтр
@@ -12582,10 +12794,20 @@ def get_directions():
                     scope_dept = int(dep_param)
                 except (TypeError, ValueError):
                     scope_dept = None
+            directions = db.get_directions(department_id=scope_dept)
+        elif headed_dept_ids:
+            # Глава отдела: объединение направлений всех возглавляемых отделов.
+            directions = []
+            seen_direction_ids = set()
+            for department_id in sorted(headed_dept_ids):
+                for direction in (db.get_directions(department_id=department_id) or []):
+                    direction_id = direction.get('id') if isinstance(direction, dict) else None
+                    if direction_id in seen_direction_ids:
+                        continue
+                    seen_direction_ids.add(direction_id)
+                    directions.append(direction)
         else:
-            scope_dept = headed_dept_id or db.get_user_department_id(requester_id)
-
-        directions = db.get_directions(department_id=scope_dept)
+            directions = db.get_directions(department_id=db.get_user_department_id(requester_id))
         # Признак для кнопки «Случайный звонок» в журнале:
         #  - СЗоВ (Oktell): операторская модель;
         #  - TEZ (Binotel): звонковые модели tez_line/tez_op (в модалке — свои min/max длительности).

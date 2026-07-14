@@ -9,6 +9,7 @@ BOT_PATH = ROOT / "bot_schedule2.py"
 DATABASE_PATH = ROOT / "database.py"
 DEPARTMENT_VIEWS_PATH = ROOT / "src" / "utils" / "departmentViews.js"
 APP_PATH = ROOT / "src" / "App.jsx"
+USER_EDIT_MODAL_PATH = ROOT / "src" / "components" / "modals" / "UserEditModal.jsx"
 CALL_EVALUATION_PATH = ROOT / "src" / "call_evaluation" / "main.jsx"
 
 
@@ -91,10 +92,11 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
         self.assertIn("const manageOperatorRoles = isDepartmentManager", source)
         self.assertIn("new Set(['operator', 'trainee', 'sv', 'supervisor'])", source)
         self.assertIn("manageOperatorRoles.has(normalizeRole(u?.role))", source)
-        self.assertIn("const canUseAdminEmployeeAccounting = isAdminLikeRole || (isDepartmentHeadUser && departmentAllowsView(user, 'manage_operators'));", source)
-        self.assertIn("const isDepartmentHeadAdminEmployeeView = canUseAdminEmployeeAccounting && isDepartmentHeadUser && ['sv_list', 'manage_users'].includes(view);", source)
+        self.assertIn("const canUseAdminEmployeeAccounting = isAdminLikeRole || isDepartmentHeadUser;", source)
+        self.assertIn("const isDepartmentHeadAdminEmployeeView = canUseAdminEmployeeAccounting && isDepartmentHeadUser && ['sv_list', 'manage_users', 'manage_trainers'].includes(view);", source)
         self.assertIn("handleSidebarViewNavigation(e, 'sv_list'", source)
         self.assertIn("handleSidebarViewNavigation(e, 'manage_users'", source)
+        self.assertIn("handleSidebarViewNavigation(e, 'manage_trainers'", source)
         self.assertIn("setView('manage_users')", source)
         self.assertNotIn("manageOperatorsRoleView", source)
         self.assertIn("const operatorUsers = useMemo(() => (", source)
@@ -103,6 +105,41 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
         self.assertIn("const filteredUsers = operatorUsers.filter", source)
         self.assertIn("const allUsers = (Array.isArray(operatorUsers) ? operatorUsers : [])", source)
         self.assertIn("const filteredByStatus = (operatorUsers || [])", source)
+
+    def test_trainer_department_head_is_not_treated_as_plain_trainer(self):
+        source = _read(APP_PATH)
+
+        self.assertIn(
+            "const isPlainTrainer = currentUserRole === 'trainer' && !isDepartmentHeadUser;",
+            source,
+        )
+        self.assertIn("const canFilterByDepartment = isAdminLikeRole || isPlainTrainer;", source)
+        self.assertIn(
+            "const canUsePinnedTasks = isAdminLikeRole || isDepartmentManager || isPlainTrainer;",
+            source,
+        )
+
+        restore_comment = source.index("// Persist and restore view")
+        restore_effect_start = source.index("useEffect(() => {", restore_comment)
+        restore_effect_end = source.index("useEffect(() => {", restore_effect_start + 1)
+        restore_effect = source[restore_effect_start:restore_effect_end]
+        self.assertIn("if (isPlainTrainer) {", restore_effect)
+        self.assertNotIn("user.role === 'trainer'", restore_effect)
+
+        redirect_start = source.index("// Do not touch view while authentication")
+        redirect_end = source.index("}, [isAuthInitializing", redirect_start)
+        redirect_guards = source[redirect_start:redirect_end]
+        self.assertIn("if (isPlainTrainer && ![", redirect_guards)
+        self.assertGreaterEqual(
+            redirect_guards.count("else if (isPlainTrainer) setView('surveys');"),
+            4,
+        )
+        self.assertNotIn("user?.role === 'trainer'", redirect_guards)
+
+        self.assertIn("} else if (isPlainTrainer) {\n                    fetchUsers();", source)
+        self.assertIn("{isPlainTrainer && (", source)
+        self.assertIn("const isManageOperatorsReadOnly = isPlainTrainer;", source)
+        self.assertIn("{(isDepartmentManager || isPlainTrainer) && (", source)
 
     def test_hours_accounting_groups_are_scoped_for_department_head(self):
         source = _read(APP_PATH)
@@ -202,11 +239,15 @@ class TezDepartmentBackendScopeTests(unittest.TestCase):
         sv_data = _function_source(BOT_PATH, "get_sv_data")
         groups = _function_source(BOT_PATH, "list_groups_endpoint")
 
-        self.assertIn("headed_dept_id = _headed_department_id(requester_id)", departments)
-        self.assertIn("db.get_department_by_id(headed_dept_id)", departments)
+        self.assertIn("headed_dept_ids = _headed_department_ids(requester_id)", departments)
+        self.assertIn("for department_id in sorted(headed_dept_ids)", departments)
+        self.assertIn("headed_dept_ids = _headed_department_ids(requester_id)", users)
         self.assertIn("visible_roles.extend(['sv', 'supervisor'])", users)
         self.assertIn("_is_global_admin_requester(requester_role, requester_id)", sv_list)
+        self.assertIn("include_full_profile = is_global_admin or bool(headed_dept_ids)", sv_list)
+        self.assertIn("int(supervisor[39]) in headed_dept_ids", sv_list)
         self.assertIn("_is_global_admin_requester(role, requester_id)", directions)
+        self.assertIn("for department_id in sorted(headed_dept_ids)", directions)
         self.assertIn("_is_global_admin_requester(requester_role, requester_id)", sv_data)
         self.assertIn("headed_dept_id = _headed_department_id(requester_id)", groups)
         self.assertIn("department_id=headed_dept_id", groups)
@@ -272,11 +313,129 @@ class DepartmentHeadWriteScopeTests(unittest.TestCase):
         )
         self.assertIn("_is_supervisor_rate_change_day()", admin_update_user)
 
+    def test_frontend_rate_lock_excludes_scoped_department_head(self):
+        modal = _read(USER_EDIT_MODAL_PATH)
+        app = _read(APP_PATH)
+
+        self.assertIn(
+            "const isPureSupervisorRequester = isSupervisorRequester && !isScopedDepartmentHeadRequester;",
+            modal,
+        )
+        modal_lock_start = modal.index("const isSupervisorRateLocked =")
+        modal_lock = modal[modal_lock_start:modal.index(";", modal_lock_start) + 1]
+        self.assertIn("isPureSupervisorRequester", modal_lock)
+        self.assertIn("!isSupervisorRateEditDay", modal_lock)
+
+        app_rate_start = app.index("const nextRate = Number(editedUser?.rate);")
+        app_rate_guard = app[app_rate_start:app.index("await axios.post", app_rate_start)]
+        self.assertIn("isSupervisorRole(user?.role)", app_rate_guard)
+        self.assertTrue(
+            any(
+                marker in app_rate_guard
+                for marker in (
+                    "!isScopedDepartmentHead",
+                    "!isDepartmentHeadUser",
+                    "!isDepartmentHead(user)",
+                )
+            ),
+            "The client-side SV rate guard must not apply to a department head",
+        )
+
+    def test_department_head_can_select_supervisor_when_editing_operator(self):
+        modal = _read(USER_EDIT_MODAL_PATH)
+        controls_start = modal.index("{canShowOperatorRateControls && (")
+        supervisor_label = modal.index(">Супервайзер</label>", controls_start)
+        supervisor_controls = modal[controls_start:supervisor_label]
+
+        self.assertIn("isOperatorDraft(editedUser)", supervisor_controls)
+        self.assertIn("isScopedDepartmentHeadRequester", supervisor_controls)
+
+    def test_related_user_write_endpoints_use_head_aware_scope(self):
+        scope_helper = _function_source(BOT_PATH, "_requester_can_access_target_user")
+        headed_branch = "if headed_dept_ids and not _is_super_admin_role(requester_role):"
+        self.assertIn(headed_branch, scope_helper)
+        self.assertIn("int(target_department_id) in headed_dept_ids", scope_helper)
+        self.assertLess(
+            scope_helper.index("if allow_self and requester_id == target_user_id:"),
+            scope_helper.index(headed_branch),
+        )
+        self.assertLess(
+            scope_helper.index(headed_branch),
+            scope_helper.index("if _is_global_admin_requester(requester_role, requester_id):"),
+        )
+
+        for function_name in (
+            "_resolve_avatar_target_user",
+            "get_user_history",
+            "change_login",
+            "change_password",
+        ):
+            with self.subTest(function=function_name):
+                source = _function_source(BOT_PATH, function_name)
+                self.assertIn("_requester_can_access_target_user(", source)
+
+    def test_scoped_relation_updates_cannot_escape_department(self):
+        relation_guard = _function_source(BOT_PATH, "_validate_scoped_user_relation_update")
+        single_update = _function_source(BOT_PATH, "admin_update_user")
+        bulk_update = _function_source(BOT_PATH, "admin_bulk_update_users")
+
+        self.assertIn("db.get_directions(department_id=target_department_id)", relation_guard)
+        self.assertIn("not _is_supervisor_role(supervisor[3])", relation_guard)
+        self.assertIn("same_department", relation_guard)
+        self.assertIn("_validate_scoped_user_relation_update(", single_update)
+        self.assertIn("_validate_scoped_user_relation_update(", bulk_update)
+
+    def test_change_login_uses_authenticated_requester_only(self):
+        change_login = _function_source(BOT_PATH, "change_login")
+        self.assertIn("requester_id, requester, auth_error = _get_authenticated_requester()", change_login)
+        self.assertNotIn("request.headers.get('X-User-Id', user_id)", change_login)
+
+    def test_all_formal_heads_receive_employee_accounting_ui(self):
+        app = _read(APP_PATH)
+        self.assertIn(
+            "const canUseAdminEmployeeAccounting = isAdminLikeRole || isDepartmentHeadUser;",
+            app,
+        )
+        self.assertIn("['sv_list', 'manage_users', 'manage_trainers'].includes(view)", app)
+        self.assertIn(
+            "['manage_operators', 'manage_users', 'sv_list', 'manage_trainers'].includes(view)",
+            app,
+        )
+        self.assertNotIn(
+            "{departmentAllowsView(user, 'manage_operators') && isDepartmentHeadUser && (",
+            app,
+        )
+
+    def test_bulk_update_allows_and_scopes_any_department_head(self):
+        bulk_update = _function_source(BOT_PATH, "admin_bulk_update_users")
+
+        self.assertIn("headed_dept_id = _headed_department_id(requester_id)", bulk_update)
+        self.assertIn(
+            "if requester_role not in ('super_admin', 'admin', 'sv') and headed_dept_id is None:",
+            bulk_update,
+        )
+        self.assertIn("_requester_can_access_target_user(", bulk_update)
+        self.assertIn("_is_global_admin_requester(requester_role, requester_id)", bulk_update)
+        self.assertGreaterEqual(
+            bulk_update.count("requester_role == 'sv' and headed_dept_id is None"),
+            2,
+            "Both the first-day gate and direct-report gate must exempt an sv who heads a department",
+        )
+
     def test_department_head_assignment_endpoints_require_global_admin(self):
         set_head = _function_source(BOT_PATH, "api_admin_set_department_head")
         head_history = _function_source(BOT_PATH, "api_admin_department_head_history")
         self.assertIn("if not _is_global_admin_requester(requester_role, requester_id):", set_head)
         self.assertIn("if not _is_global_admin_requester(requester_role, requester_id):", head_history)
+
+    def test_inactive_department_does_not_grant_head_permissions(self):
+        resolver = _function_source(
+            DATABASE_PATH,
+            "headed_department_id_for_user",
+            class_name="Database",
+        )
+        self.assertIn("COALESCE(is_active, TRUE) = TRUE", resolver)
+        self.assertIn("ORDER BY name, id", resolver)
 
     def test_group_write_endpoints_are_department_scoped(self):
         scope_helper = _function_source(BOT_PATH, "_ensure_group_in_requester_scope")
@@ -343,7 +502,12 @@ class SupervisorOperatorListCompletenessTests(unittest.TestCase):
 
     def test_get_admin_users_includes_supervised_operators_for_sv(self):
         users = _function_source(BOT_PATH, "get_admin_users")
-        self.assertIn("if requester_role == 'sv' and headed_dept_id is None:", users)
+        self.assertIn(
+            "if (requester_role == 'sv' or headed_dept_ids) and not _is_super_admin_role(requester_role):",
+            users,
+        )
+        self.assertIn("if headed_dept_ids:", users)
+        self.assertIn("else:\n                scope_dept = _department_scope_id_for_requester(requester_id)", users)
         self.assertIn("_supervised_by_requester", users)
         self.assertIn(
             "u.get('department_id') == scope_dept or _supervised_by_requester(u)",
@@ -360,6 +524,14 @@ class SupervisorOperatorListCompletenessTests(unittest.TestCase):
             "setUserToEdit({ ...fullOp, supervisor_id: fullOp?.supervisor_id ?? user?.id });",
             source,
         )
+
+    def test_supervisor_edit_seeds_modal_from_full_admin_users(self):
+        source = _read(APP_PATH)
+        self.assertIn(
+            "const fullSv = (Array.isArray(adminUsers) ? adminUsers : []).find(",
+            source,
+        )
+        self.assertIn("setUserToEdit({ ...fullSv });", source)
 
 
 if __name__ == "__main__":
