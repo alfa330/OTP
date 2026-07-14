@@ -4389,6 +4389,47 @@ def api_resource_fte_sync_oktell():
         return _resource_fte_error_response(error)
 
 
+def _oktell_billing_parse_request_args():
+    """Общий разбор параметров отчетов «Биллинг Oktell». Возвращает
+    (params_dict, error_response, status) — при ошибке params_dict is None."""
+    date_from = request.args.get('date_from') or request.args.get('date') or None
+    date_to = request.args.get('date_to') or date_from
+    start_day = _oktell_parse_date(date_from)
+    end_day = _oktell_parse_date(date_to)
+    if start_day is None or end_day is None:
+        return None, jsonify({"error": "date_from и date_to обязательны в формате YYYY-MM-DD"}), 400
+    if end_day < start_day:
+        return None, jsonify({"error": "date_to должен быть не раньше date_from"}), 400
+    if (end_day - start_day).days + 1 > OKTELL_RESOURCE_MAX_RANGE_DAYS:
+        return None, jsonify({"error": f"Период отчета не может быть больше {OKTELL_RESOURCE_MAX_RANGE_DAYS} дней"}), 400
+
+    minute_from = _oktell_billing_parse_time(request.args.get('time_from') or '00:00')
+    minute_to = _oktell_billing_parse_time(request.args.get('time_to') or '23:59')
+    if minute_from is None or minute_to is None:
+        return None, jsonify({"error": "time_from и time_to должны быть в формате HH:MM"}), 400
+    if minute_to < minute_from:
+        return None, jsonify({"error": "time_to должен быть не раньше time_from"}), 400
+
+    if not _oktell_api_ready():
+        return None, jsonify({"error": "Интеграция с Oktell недоступна: OKTELL_IP/OKTELL_API_TOKEN не задан"}), 503
+
+    return {
+        'start_day': start_day,
+        'end_day': end_day,
+        'minute_from': minute_from,
+        'minute_to': minute_to,
+    }, None, None
+
+
+def _oktell_billing_response_meta(params):
+    return {
+        "date_from": params['start_day'].strftime('%Y-%m-%d'),
+        "date_to": params['end_day'].strftime('%Y-%m-%d'),
+        "time_from": f"{params['minute_from'] // 60:02d}:{params['minute_from'] % 60:02d}",
+        "time_to": f"{params['minute_to'] // 60:02d}:{params['minute_to'] % 60:02d}",
+    }
+
+
 @app.route('/api/resource_fte/oktell_billing', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_resource_fte_oktell_billing():
@@ -4398,23 +4439,13 @@ def api_resource_fte_oktell_billing():
     if guard_response is not None:
         return guard_response, guard_status
 
-    date_from = request.args.get('date_from') or request.args.get('date') or None
-    date_to = request.args.get('date_to') or date_from
-    start_day = _oktell_parse_date(date_from)
-    end_day = _oktell_parse_date(date_to)
-    if start_day is None or end_day is None:
-        return jsonify({"error": "date_from и date_to обязательны в формате YYYY-MM-DD"}), 400
-    if end_day < start_day:
-        return jsonify({"error": "date_to должен быть не раньше date_from"}), 400
-    if (end_day - start_day).days + 1 > OKTELL_RESOURCE_MAX_RANGE_DAYS:
-        return jsonify({"error": f"Период отчета не может быть больше {OKTELL_RESOURCE_MAX_RANGE_DAYS} дней"}), 400
+    params, error_response, error_status = _oktell_billing_parse_request_args()
+    if params is None:
+        return error_response, error_status
 
-    minute_from = _oktell_billing_parse_time(request.args.get('time_from') or '00:00')
-    minute_to = _oktell_billing_parse_time(request.args.get('time_to') or '23:59')
-    if minute_from is None or minute_to is None:
-        return jsonify({"error": "time_from и time_to должны быть в формате HH:MM"}), 400
-    if minute_to < minute_from:
-        return jsonify({"error": "time_to должен быть не раньше time_from"}), 400
+    group_by = str(request.args.get('group_by') or 'park').strip().lower()
+    if group_by not in ('park', 'line'):
+        return jsonify({"error": "group_by должен быть park или line"}), 400
 
     try:
         sl_seconds = int(request.args.get('sl_seconds') or OKTELL_BILLING_SL_DEFAULT_SECONDS)
@@ -4422,23 +4453,49 @@ def api_resource_fte_oktell_billing():
         return jsonify({"error": "sl_seconds должен быть целым числом"}), 400
     sl_seconds = max(1, min(600, sl_seconds))
 
-    if not _oktell_api_ready():
-        return jsonify({"error": "Интеграция с Oktell недоступна: OKTELL_IP/OKTELL_API_TOKEN не задан"}), 503
-
     try:
-        raw_rows = _oktell_fetch_billing_rows(start_day, end_day, minute_from, minute_to, sl_seconds)
+        raw_rows = _oktell_fetch_billing_rows(
+            params['start_day'], params['end_day'],
+            params['minute_from'], params['minute_to'], sl_seconds, group_by)
     except Exception:
         logging.exception("Oktell billing report failed")
         return jsonify({"error": "Не удалось получить данные из Oktell, попробуйте ещё раз"}), 502
 
-    report = _oktell_billing_build_report(raw_rows)
+    report = _oktell_billing_build_report(raw_rows, include_line=(group_by == 'line'))
     return jsonify({
         "status": "success",
-        "date_from": start_day.strftime('%Y-%m-%d'),
-        "date_to": end_day.strftime('%Y-%m-%d'),
-        "time_from": f"{minute_from // 60:02d}:{minute_from % 60:02d}",
-        "time_to": f"{minute_to // 60:02d}:{minute_to % 60:02d}",
+        "group_by": group_by,
         "sl_threshold_seconds": sl_seconds,
+        **_oktell_billing_response_meta(params),
+        **report,
+    }), 200
+
+
+@app.route('/api/resource_fte/oktell_billing_operators', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_oktell_billing_operators():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+
+    params, error_response, error_status = _oktell_billing_parse_request_args()
+    if params is None:
+        return error_response, error_status
+
+    try:
+        calls_rows, states_rows = _oktell_fetch_billing_operator_rows(
+            params['start_day'], params['end_day'],
+            params['minute_from'], params['minute_to'])
+    except Exception:
+        logging.exception("Oktell billing operators report failed")
+        return jsonify({"error": "Не удалось получить данные из Oktell, попробуйте ещё раз"}), 502
+
+    report = _oktell_billing_build_operator_report(calls_rows, states_rows)
+    return jsonify({
+        "status": "success",
+        **_oktell_billing_response_meta(params),
         **report,
     }), 200
 
@@ -24183,18 +24240,40 @@ def _oktell_billing_parse_time(value):
     return int(match.group(1)) * 60 + int(match.group(2))
 
 
-def _oktell_billing_sql(date_from_compact, date_to_excl_compact, minute_from, minute_to, sl_seconds):
-    grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
-    fail = _OKTELL_FAILED_CALL.replace("'", "''")
-    minute_filter = ''
+def _oktell_billing_minute_filter(minute_from, minute_to, column='t.dt_insert'):
     if int(minute_from) > 0 or int(minute_to) < 1439:
-        minute_filter = (
-            "AND (DATEPART(HOUR, t.dt_insert) * 60 + DATEPART(MINUTE, t.dt_insert)) "
+        return (
+            f"AND (DATEPART(HOUR, {column}) * 60 + DATEPART(MINUTE, {column})) "
             f"BETWEEN {int(minute_from)} AND {int(minute_to)} "
         )
+    return ''
+
+
+def _oktell_billing_sql(date_from_compact, date_to_excl_compact, minute_from, minute_to, sl_seconds, group_by='park'):
+    grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
+    fail = _OKTELL_FAILED_CALL.replace("'", "''")
+    minute_filter = _oktell_billing_minute_filter(minute_from, minute_to)
+    line_select = ''
+    line_join = ''
+    line_group = ''
+    if group_by == 'line':
+        # Набранная SIP-линия: лег ConnectionType=4 (снаружи в IVR) той же цепочки.
+        # Цепочки бывают с несколькими легами ct=4 (повторные заходы в IVR) — дедуп через MIN;
+        # разные номера внутри одной цепочки — единичные случаи (2 за неделю), MIN детерминирован.
+        # Окно по TimeStart расширено на день назад: звонок может начаться до полуночи.
+        conn_from = (datetime.strptime(date_from_compact, '%Y%m%d') - timedelta(days=1)).strftime('%Y%m%d')
+        line_select = "COALESCE(c.line_number, N'') AS line_number, "
+        line_join = (
+            "LEFT JOIN (SELECT IdChain, MIN(ANumberDialed) AS line_number "
+            "FROM oktell.dbo.A_Stat_Connections_1x1 "
+            f"WHERE ConnectionType = 4 AND TimeStart >= '{conn_from}' AND TimeStart < '{date_to_excl_compact}' "
+            "GROUP BY IdChain) c ON c.IdChain = TRY_CAST(t.chainid AS uniqueidentifier) "
+        )
+        line_group = ", COALESCE(c.line_number, N'')"
     return (
         "SELECT CONVERT(varchar(10), t.dt_insert, 23) AS report_date, "
         "t.taxi_park AS taxi_park, "
+        f"{line_select}"
         f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (13,19,5) THEN 1 ELSE 0 END) AS arrived, "
         f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN 1 ELSE 0 END) AS served, "
         f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) AND t.LenQueue <= {int(sl_seconds)} THEN 1 ELSE 0 END) AS served_sl, "
@@ -24204,28 +24283,29 @@ def _oktell_billing_sql(date_from_compact, date_to_excl_compact, minute_from, mi
         f"SUM(CASE WHEN t.call_result IN (13,19) AND t.result_call NOT IN (N'{grt}', N'{fail}') THEN t.LenQueue ELSE 0 END) AS wait_lost_seconds, "
         f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (13,19,5) THEN t.total_length ELSE 0 END) AS total_seconds "
         "FROM oktell.dbo.Call_Systems_hst t "
+        f"{line_join}"
         f"WHERE t.dt_insert >= '{date_from_compact}' AND t.dt_insert < '{date_to_excl_compact}' "
         f"AND t.taxi_park <> '' AND t.route = 'incoming' AND t.result_call <> N'{fail}' "
         f"{minute_filter}"
-        "GROUP BY CONVERT(varchar(10), t.dt_insert, 23), t.taxi_park"
+        f"GROUP BY CONVERT(varchar(10), t.dt_insert, 23), t.taxi_park{line_group}"
     )
 
 
-def _oktell_fetch_billing_rows(range_from, range_to, minute_from, minute_to, sl_seconds):
-    """Строки (день x таксопарк) за период. Окна по OKTELL_RESOURCE_CHUNK_DAYS дней;
+def _oktell_fetch_billing_rows(range_from, range_to, minute_from, minute_to, sl_seconds, group_by='park'):
+    """Строки (день x таксопарк [x линия]) за период. Окна по OKTELL_RESOURCE_CHUNK_DAYS дней;
     при упоре в лимит прокси (1000 строк) — по одному дню. Запросы строго последовательные."""
     rows = []
 
     def _window(a, b):
         page = _oktell_query(_oktell_billing_sql(
             a.strftime('%Y%m%d'), (b + timedelta(days=1)).strftime('%Y%m%d'),
-            minute_from, minute_to, sl_seconds))
+            minute_from, minute_to, sl_seconds, group_by))
         if len(page) >= OKTELL_API_PAGE_SIZE and a < b:
             d = a
             while d <= b:
                 rows.extend(_oktell_query(_oktell_billing_sql(
                     d.strftime('%Y%m%d'), (d + timedelta(days=1)).strftime('%Y%m%d'),
-                    minute_from, minute_to, sl_seconds)))
+                    minute_from, minute_to, sl_seconds, group_by)))
                 d += timedelta(days=1)
         else:
             rows.extend(page)
@@ -24238,21 +24318,23 @@ def _oktell_fetch_billing_rows(range_from, range_to, minute_from, minute_to, sl_
     return rows
 
 
-def _oktell_billing_build_report(raw_rows):
-    """Сырые строки (день x таксопарк) -> {days, parks, totals}. Суммы в целых секундах;
-    проценты/средние считает фронтенд из сырых счётчиков."""
-    def _i(v):
-        try:
-            return int(v or 0)
-        except Exception:
-            return 0
+def _oktell_billing_int(value):
+    try:
+        return int(value or 0)
+    except Exception:
+        return 0
 
-    def _sec(v):
-        try:
-            return int(round(float(v or 0)))
-        except Exception:
-            return 0
 
+def _oktell_billing_sec(value):
+    try:
+        return int(round(float(value or 0)))
+    except Exception:
+        return 0
+
+
+def _oktell_billing_build_report(raw_rows, include_line=False):
+    """Сырые строки (день x таксопарк [x линия]) -> {days, parks, totals}. Суммы в целых
+    секундах; проценты/средние считает фронтенд из сырых счётчиков."""
     def _blank():
         return {key: 0 for key in _OKTELL_BILLING_METRICS}
 
@@ -24268,27 +24350,33 @@ def _oktell_billing_build_report(raw_rows):
         park = str(raw.get('taxi_park') or '').strip()
         if not report_date or not park:
             continue
-        arrived = max(0, _i(raw.get('arrived')))
-        served = max(0, _i(raw.get('served')))
+        key = (park, str(raw.get('line_number') or '').strip()) if include_line else (park, '')
+        arrived = max(0, _oktell_billing_int(raw.get('arrived')))
+        served = max(0, _oktell_billing_int(raw.get('served')))
         row = {
             'arrived': arrived,
             'served': served,
             'lost': max(0, arrived - served),
-            'served_sl': max(0, _i(raw.get('served_sl'))),
-            'greet_drop': max(0, _i(raw.get('greet_drop'))),
-            'talk_seconds': _sec(raw.get('talk_seconds')),
-            'wait_ok_seconds': _sec(raw.get('wait_ok_seconds')),
-            'wait_lost_seconds': _sec(raw.get('wait_lost_seconds')),
-            'total_seconds': _sec(raw.get('total_seconds')),
+            'served_sl': max(0, _oktell_billing_int(raw.get('served_sl'))),
+            'greet_drop': max(0, _oktell_billing_int(raw.get('greet_drop'))),
+            'talk_seconds': _oktell_billing_sec(raw.get('talk_seconds')),
+            'wait_ok_seconds': _oktell_billing_sec(raw.get('wait_ok_seconds')),
+            'wait_lost_seconds': _oktell_billing_sec(raw.get('wait_lost_seconds')),
+            'total_seconds': _oktell_billing_sec(raw.get('total_seconds')),
         }
         day_parks = days_map.setdefault(report_date, {})
-        _merge(day_parks.setdefault(park, _blank()), row)
-        _merge(parks_map.setdefault(park, _blank()), row)
+        _merge(day_parks.setdefault(key, _blank()), row)
+        _merge(parks_map.setdefault(key, _blank()), row)
         _merge(totals, row)
 
     def _sorted_parks(parks):
-        items = [{'park': park, **metrics} for park, metrics in parks.items()]
-        items.sort(key=lambda item: (-item['arrived'], item['park']))
+        items = []
+        for (park, line), metrics in parks.items():
+            item = {'park': park, **metrics}
+            if include_line:
+                item['line'] = line
+            items.append(item)
+        items.sort(key=lambda item: (-item['arrived'], item['park'], item.get('line') or ''))
         return items
 
     days = []
@@ -24301,6 +24389,147 @@ def _oktell_billing_build_report(raw_rows):
         days.append({'date': report_date, 'parks': park_rows, 'totals': day_totals})
 
     return {'days': days, 'parks': _sorted_parks(parks_map), 'totals': totals}
+
+
+# --- «Биллинг Oktell»: разрез по операторам ------------------------------------------------------
+# Обслужено/время разговора — из Call_Systems_hst (как в парковых таблицах, оператор = id_operator);
+# постобработка/удержание/ожидание/пауза — из oktell_cc_temp.dbo.A_Cube_CC_OperatorStates
+# (коды: 3 распределение, 6 разговор, 7 постобработка, 9 ожидание, 10 пауза, 12 резерв, 33 удержание).
+_OKTELL_BILLING_OPERATOR_METRICS = (
+    'served', 'talk_seconds', 'talk_in_seconds', 'talk_out_seconds', 'postproc_seconds',
+    'hold_seconds', 'wait_seconds', 'pause_seconds', 'dial_seconds',
+)
+
+
+def _oktell_billing_operator_calls_sql(date_from_compact, date_to_excl_compact, minute_from, minute_to):
+    grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
+    fail = _OKTELL_FAILED_CALL.replace("'", "''")
+    minute_filter = _oktell_billing_minute_filter(minute_from, minute_to)
+    return (
+        "SELECT CONVERT(varchar(10), t.dt_insert, 23) AS report_date, "
+        "oi.Name AS operator_name, "
+        "COUNT(*) AS served, "
+        "SUM(t.total_length) AS talk_seconds "
+        "FROM oktell.dbo.Call_Systems_hst t "
+        "JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo oi ON oi.Id = TRY_CAST(t.id_operator AS uniqueidentifier) "
+        f"WHERE t.dt_insert >= '{date_from_compact}' AND t.dt_insert < '{date_to_excl_compact}' "
+        "AND t.taxi_park <> '' AND t.route = 'incoming' "
+        f"AND t.result_call NOT IN (N'{grt}', N'{fail}') AND t.call_result IN (5) "
+        f"{minute_filter}"
+        "GROUP BY CONVERT(varchar(10), t.dt_insert, 23), oi.Name"
+    )
+
+
+def _oktell_billing_operator_states_sql(date_from_compact, date_to_excl_compact, minute_from, minute_to):
+    minute_filter = _oktell_billing_minute_filter(minute_from, minute_to, column='s.DateTimeStart')
+    return (
+        "SELECT CONVERT(varchar(10), s.DateStart, 23) AS report_date, "
+        "oi.Name AS operator_name, "
+        "SUM(CASE WHEN s.State = 6 AND s.IsOutput = 0 THEN s.LenTime ELSE 0 END) AS talk_in_seconds, "
+        "SUM(CASE WHEN s.State = 6 AND s.IsOutput = 1 THEN s.LenTime ELSE 0 END) AS talk_out_seconds, "
+        "SUM(CASE WHEN s.State = 7 THEN s.LenTime ELSE 0 END) AS postproc_seconds, "
+        "SUM(CASE WHEN s.State = 33 THEN s.LenTime ELSE 0 END) AS hold_seconds, "
+        "SUM(CASE WHEN s.State = 9 THEN s.LenTime ELSE 0 END) AS wait_seconds, "
+        "SUM(CASE WHEN s.State = 10 THEN s.LenTime ELSE 0 END) AS pause_seconds, "
+        "SUM(CASE WHEN s.State IN (3,12) THEN s.LenTime ELSE 0 END) AS dial_seconds "
+        "FROM oktell_cc_temp.dbo.A_Cube_CC_OperatorStates s "
+        "JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo oi ON oi.Id = s.IdOperator "
+        f"WHERE s.DateTimeStart >= '{date_from_compact}' AND s.DateTimeStart < '{date_to_excl_compact}' "
+        f"{minute_filter}"
+        "GROUP BY CONVERT(varchar(10), s.DateStart, 23), oi.Name"
+    )
+
+
+def _oktell_fetch_billing_operator_rows(range_from, range_to, minute_from, minute_to):
+    """Пары списков (calls_rows, states_rows) за период; чанки как у паркового отчёта,
+    два последовательных запроса на чанк."""
+    calls_rows = []
+    states_rows = []
+
+    def _window(target, sql_builder, a, b):
+        page = _oktell_query(sql_builder(
+            a.strftime('%Y%m%d'), (b + timedelta(days=1)).strftime('%Y%m%d'),
+            minute_from, minute_to))
+        if len(page) >= OKTELL_API_PAGE_SIZE and a < b:
+            d = a
+            while d <= b:
+                target.extend(_oktell_query(sql_builder(
+                    d.strftime('%Y%m%d'), (d + timedelta(days=1)).strftime('%Y%m%d'),
+                    minute_from, minute_to)))
+                d += timedelta(days=1)
+        else:
+            target.extend(page)
+
+    cur = range_from
+    while cur <= range_to:
+        chunk_end = min(range_to, cur + timedelta(days=OKTELL_RESOURCE_CHUNK_DAYS - 1))
+        _window(calls_rows, _oktell_billing_operator_calls_sql, cur, chunk_end)
+        _window(states_rows, _oktell_billing_operator_states_sql, cur, chunk_end)
+        cur = chunk_end + timedelta(days=1)
+    return calls_rows, states_rows
+
+
+def _oktell_billing_build_operator_report(calls_rows, states_rows):
+    """Слияние звонков и состояний по (день, оператор) -> {days, operators, totals}.
+    Технические учётки (supervisor/admin: нет ни звонков, ни разговоров) отбрасываются."""
+    def _blank():
+        return {key: 0 for key in _OKTELL_BILLING_OPERATOR_METRICS}
+
+    def _merge(target, row):
+        for key in _OKTELL_BILLING_OPERATOR_METRICS:
+            target[key] += row[key]
+
+    days_map = {}
+
+    def _entry(report_date, operator):
+        return days_map.setdefault(report_date, {}).setdefault(operator, _blank())
+
+    for raw in calls_rows:
+        report_date = str(raw.get('report_date') or '').strip()
+        operator = str(raw.get('operator_name') or '').strip()
+        if not report_date or not operator:
+            continue
+        entry = _entry(report_date, operator)
+        entry['served'] += max(0, _oktell_billing_int(raw.get('served')))
+        entry['talk_seconds'] += _oktell_billing_sec(raw.get('talk_seconds'))
+
+    state_keys = ('talk_in_seconds', 'talk_out_seconds', 'postproc_seconds', 'hold_seconds',
+                  'wait_seconds', 'pause_seconds', 'dial_seconds')
+    for raw in states_rows:
+        report_date = str(raw.get('report_date') or '').strip()
+        operator = str(raw.get('operator_name') or '').strip()
+        if not report_date or not operator:
+            continue
+        entry = _entry(report_date, operator)
+        for key in state_keys:
+            entry[key] += _oktell_billing_sec(raw.get(key))
+
+    def _is_real_operator(metrics):
+        return metrics['served'] > 0 or metrics['talk_in_seconds'] > 0 or metrics['talk_out_seconds'] > 0
+
+    operators_map = {}
+    totals = _blank()
+    days = []
+    for report_date in sorted(days_map):
+        rows = [
+            {'operator': operator, **metrics}
+            for operator, metrics in days_map[report_date].items()
+            if _is_real_operator(metrics)
+        ]
+        if not rows:
+            continue
+        rows.sort(key=lambda item: (-item['served'], -item['talk_in_seconds'], item['operator']))
+        day_totals = _blank()
+        for item in rows:
+            for key in _OKTELL_BILLING_OPERATOR_METRICS:
+                day_totals[key] += item[key]
+            _merge(operators_map.setdefault(item['operator'], _blank()), item)
+        _merge(totals, day_totals)
+        days.append({'date': report_date, 'operators': rows, 'totals': day_totals})
+
+    operators = [{'operator': operator, **metrics} for operator, metrics in operators_map.items()]
+    operators.sort(key=lambda item: (-item['served'], -item['talk_in_seconds'], item['operator']))
+    return {'days': days, 'operators': operators, 'totals': totals}
 
 
 # === Oktell: распределение звонков на оценку («Деление звонков») ================================
