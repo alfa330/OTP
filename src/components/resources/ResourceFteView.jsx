@@ -13,6 +13,7 @@ import {
   Clock3,
   Eye,
   EyeOff,
+  FileDown,
   FileUp,
   Gavel,
   LayoutDashboard,
@@ -1996,6 +1997,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
   }));
   const [billingReports, setBillingReports] = useState({ park: null, line: null, operator: null });
   const [isBillingLoading, setIsBillingLoading] = useState(false);
+  const [isBillingExporting, setIsBillingExporting] = useState(false);
   const [billingErrors, setBillingErrors] = useState({ park: '', line: '', operator: '' });
   const [billingExpandedDays, setBillingExpandedDays] = useState(() => new Set());
   const billingAttemptedRef = useRef({});
@@ -2124,6 +2126,43 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
     setBillingErrors({ park: '', line: '', operator: '' });
     setBillingApplied({ from: billingFrom, to: billingTo, timeFrom: billingTimeFrom, timeTo: billingTimeTo });
   }, [billingFrom, billingTimeFrom, billingTimeTo, billingTo]);
+
+  const exportBillingExcel = useCallback(async () => {
+    if (!apiRoot) return;
+    setIsBillingExporting(true);
+    try {
+      const response = await axios.get(`${apiRoot}/api/resource_fte/oktell_billing_export`, {
+        params: {
+          date_from: billingApplied.from,
+          date_to: billingApplied.to,
+          time_from: billingApplied.timeFrom,
+          time_to: billingApplied.timeTo,
+          mode: billingMode,
+        },
+        headers: buildHeaders(),
+        responseType: 'blob',
+      });
+      const url = window.URL.createObjectURL(response.data);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `oktell_billing_${billingMode}_${billingApplied.from}_${billingApplied.to}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      let message = 'Не удалось выгрузить Excel';
+      try {
+        const text = await error?.response?.data?.text?.();
+        if (text) message = JSON.parse(text)?.error || message;
+      } catch (parseError) {
+        // ответ не JSON — оставляем общее сообщение
+      }
+      notify(message, 'error');
+    } finally {
+      setIsBillingExporting(false);
+    }
+  }, [apiRoot, billingApplied, billingMode, buildHeaders, notify]);
 
   useEffect(() => {
     fetchOverview();
@@ -3673,6 +3712,16 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                   >
                     <RefreshCw size={16} className={isBillingLoading ? 'animate-spin' : ''} />
                     {isBillingLoading ? 'Загрузка...' : 'Сформировать'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={exportBillingExcel}
+                    disabled={isBillingExporting || isBillingLoading || !billingReport}
+                    title="Скачать текущий разрез в Excel (за применённый период)"
+                    className="inline-flex h-14 items-center gap-2 rounded-xl border-2 border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <FileDown size={16} className={isBillingExporting ? 'animate-pulse text-emerald-600' : 'text-emerald-600'} />
+                    {isBillingExporting ? 'Выгрузка...' : 'Excel'}
                   </button>
                 </div>
               </div>

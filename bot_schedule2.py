@@ -4500,6 +4500,57 @@ def api_resource_fte_oktell_billing_operators():
     }), 200
 
 
+@app.route('/api/resource_fte/oktell_billing_export', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_oktell_billing_export():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+
+    params, error_response, error_status = _oktell_billing_parse_request_args()
+    if params is None:
+        return error_response, error_status
+
+    mode = str(request.args.get('mode') or 'park').strip().lower()
+    if mode not in ('park', 'line', 'operator'):
+        return jsonify({"error": "mode должен быть park, line или operator"}), 400
+
+    try:
+        sl_seconds = int(request.args.get('sl_seconds') or OKTELL_BILLING_SL_DEFAULT_SECONDS)
+    except (TypeError, ValueError):
+        return jsonify({"error": "sl_seconds должен быть целым числом"}), 400
+    sl_seconds = max(1, min(600, sl_seconds))
+
+    try:
+        if mode == 'operator':
+            calls_rows, states_rows = _oktell_fetch_billing_operator_rows(
+                params['start_day'], params['end_day'],
+                params['minute_from'], params['minute_to'])
+            report = _oktell_billing_build_operator_report(calls_rows, states_rows)
+        else:
+            raw_rows = _oktell_fetch_billing_rows(
+                params['start_day'], params['end_day'],
+                params['minute_from'], params['minute_to'], sl_seconds, mode)
+            report = _oktell_billing_build_report(raw_rows, include_line=(mode == 'line'))
+    except Exception:
+        logging.exception("Oktell billing export failed")
+        return jsonify({"error": "Не удалось получить данные из Oktell, попробуйте ещё раз"}), 502
+
+    output = _oktell_billing_export_workbook(mode, params, report, sl_seconds)
+    filename = (
+        f"oktell_billing_{mode}_"
+        f"{params['start_day'].strftime('%Y-%m-%d')}_{params['end_day'].strftime('%Y-%m-%d')}.xlsx"
+    )
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=filename,
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+
+
 @app.route('/api/resource_fte/day/<string:report_date>', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_resource_fte_day(report_date):
@@ -24530,6 +24581,238 @@ def _oktell_billing_build_operator_report(calls_rows, states_rows):
     operators = [{'operator': operator, **metrics} for operator, metrics in operators_map.items()]
     operators.sort(key=lambda item: (-item['served'], -item['talk_in_seconds'], item['operator']))
     return {'days': days, 'operators': operators, 'totals': totals}
+
+
+# --- «Биллинг Oktell»: выгрузка в Excel ----------------------------------------------------------
+# Подписи парков/линий дублируют фронтовые BILLING_PARK_LABELS / BILLING_LINE_LABELS
+# (ResourceFteView.jsx) — при изменении списка номеров обновлять оба места.
+_OKTELL_BILLING_PARK_LABELS = {
+    'Dongelek': 'Eki Dongelek',
+    'Jana': 'Jana такси',
+    'Taxi24': 'Такси 24 (Нур)',
+    'Tenge_taxi': 'Тенге Такси',
+    'Halyk': 'Халык',
+    'Regions': 'Регионы',
+    'iTaxiVip': 'iTaxi VIP',
+    'Ноль Такси': 'Ноль такси',
+    'Бизнес партнер': 'Бизнес Партнер',
+}
+
+_OKTELL_BILLING_LINE_LABELS = {
+    '7470951111': 'Amanat',
+    '7470939729': 'Eki Dongelek',
+    '7005556100': 'Global',
+    '7470540094': 'iPartner',
+    '7075050880': 'iTaxi',
+    '7085872762': 'iTaxi 2',
+    '7001222322': 'Jana такси',
+    '7078544502': 'Jana такси 2',
+    '7470958988': 'Qazaq',
+    '7007442288': 'Бизнес Партнер',
+    '7470942010': 'Бизнес Партнер 2',
+    '7771442288': 'Бизнес Партнер Фин',
+    '7470947777': 'Департамент',
+    '7005554222': 'Стабильный',
+    '7074777639': 'Такси 24 (Нур)',
+    '7004568543': 'Тенге Такси',
+    '7001587070': 'Халык',
+    '7072147584': 'Регионы',
+    '7003330402': 'Честный',
+    '7001110702': 'Честный 1',
+    '7001110200': 'Честный 2',
+    '7009214222': 'Ноль такси',
+    '7082675487': 'Ноль такси2',
+    '7001551198': 'СТ 1',
+    '7078931501': 'СТ 2',
+    '7080881541': 'Wolt',
+    '7003838240': 'iTaxi VIP',
+}
+
+_OKTELL_BILLING_EXPORT_DUR_FMT = '[h]:mm:ss'
+_OKTELL_BILLING_EXPORT_PCT_FMT = '0.0%'
+
+
+def _oktell_billing_park_label(park):
+    return _OKTELL_BILLING_PARK_LABELS.get(park, park)
+
+
+def _oktell_billing_line_digits(line):
+    digits = re.sub(r'\D', '', str(line or ''))[-10:]
+    return digits
+
+
+def _oktell_billing_line_label(line):
+    return _OKTELL_BILLING_LINE_LABELS.get(_oktell_billing_line_digits(line), '')
+
+
+def _oktell_billing_ratio(numerator, denominator):
+    try:
+        denominator = float(denominator or 0)
+        if denominator <= 0:
+            return None
+        return float(numerator or 0) / denominator
+    except Exception:
+        return None
+
+
+def _oktell_billing_export_columns(mode):
+    """(заголовки, ширины, {индекс с 1: формат}) для листов экспорта; без колонки даты."""
+    dur = _OKTELL_BILLING_EXPORT_DUR_FMT
+    pct = _OKTELL_BILLING_EXPORT_PCT_FMT
+    if mode == 'operator':
+        headers = ['Оператор', 'Обслужено', 'АТТ', 'АНТ', 'Разговоры вх.', 'Разговоры исх.',
+                   'Постобработка', 'Удержание', 'Ожидание', 'Пауза', 'OCC', 'UTZ']
+        widths = [32, 11, 10, 10, 13, 13, 14, 11, 11, 10, 8, 8]
+        formats = {3: dur, 4: dur, 5: dur, 6: dur, 7: dur, 8: dur, 9: dur, 10: dur, 11: pct, 12: pct}
+    elif mode == 'line':
+        headers = ['Номер', 'Название', 'Таксопарк', 'Поступило', 'Обслужено', 'Потеряно', 'AR', 'SL',
+                   'Ср. разговор', 'Ср. ожидание', 'Время разговора', 'Общее время', 'Сброс на приветствии']
+        widths = [14, 18, 16, 11, 11, 10, 8, 8, 12, 12, 14, 13, 12]
+        formats = {7: pct, 8: pct, 9: dur, 10: dur, 11: dur, 12: dur}
+    else:
+        headers = ['Таксопарк', 'Поступило', 'Обслужено', 'Потеряно', 'AR', 'SL',
+                   'Ср. разговор', 'Ср. ожидание', 'Время разговора', 'Общее время', 'Сброс на приветствии']
+        widths = [20, 11, 11, 10, 8, 8, 12, 12, 14, 13, 12]
+        formats = {5: pct, 6: pct, 7: dur, 8: dur, 9: dur, 10: dur}
+    return headers, widths, formats
+
+
+def _oktell_billing_export_values(mode, item, label=None):
+    """Значения строки листа (та же математика, что в таблицах UI). Длительности — доля
+    суток (Excel-время, формат [h]:mm:ss), проценты — доля единицы (формат 0.0%)."""
+    def _dur(seconds):
+        return round(float(seconds or 0)) / 86400.0
+
+    def _opt(value):
+        return '—' if value is None else value
+
+    if mode == 'operator':
+        served = item.get('served') or 0
+        att = _oktell_billing_ratio(item.get('talk_seconds'), served)
+        aht = _oktell_billing_ratio(
+            float(item.get('talk_seconds') or 0) + float(item.get('hold_seconds') or 0) + float(item.get('postproc_seconds') or 0),
+            served,
+        )
+        # как billingOperatorActivity на фронте: актив = разговоры + обработка + удержание + распределение
+        active = sum(float(item.get(key) or 0) for key in (
+            'talk_in_seconds', 'talk_out_seconds', 'postproc_seconds', 'hold_seconds', 'dial_seconds'))
+        wait = float(item.get('wait_seconds') or 0)
+        pause = float(item.get('pause_seconds') or 0)
+        return [
+            label if label is not None else item.get('operator') or '',
+            served,
+            _opt(None if att is None else _dur(att)),
+            _opt(None if aht is None else _dur(aht)),
+            _dur(item.get('talk_in_seconds')),
+            _dur(item.get('talk_out_seconds')),
+            _dur(item.get('postproc_seconds')),
+            _dur(item.get('hold_seconds')),
+            _dur(item.get('wait_seconds')),
+            _dur(item.get('pause_seconds')),
+            _opt(_oktell_billing_ratio(active, active + wait + pause)),
+            _opt(_oktell_billing_ratio(active + wait, active + wait + pause)),
+        ]
+
+    arrived = item.get('arrived') or 0
+    served = item.get('served') or 0
+    metrics = [
+        arrived,
+        served,
+        item.get('lost') or 0,
+        _opt(_oktell_billing_ratio(item.get('lost'), arrived)),
+        _opt(_oktell_billing_ratio(item.get('served_sl'), served)),
+        _opt(None if served <= 0 else _dur(float(item.get('talk_seconds') or 0) / served)),
+        _opt(None if served <= 0 else _dur(float(item.get('wait_ok_seconds') or 0) / served)),
+        _dur(item.get('talk_seconds')),
+        _dur(item.get('total_seconds')),
+        item.get('greet_drop') or 0,
+    ]
+    if mode == 'line':
+        if label is not None:
+            return [label, '', ''] + metrics
+        digits = _oktell_billing_line_digits(item.get('line'))
+        number = f'8{digits}' if digits else '—'
+        return [number, _oktell_billing_line_label(item.get('line')) or '—',
+                _oktell_billing_park_label(item.get('park') or ''), *metrics]
+    return [label if label is not None else _oktell_billing_park_label(item.get('park') or ''), *metrics]
+
+
+def _oktell_billing_export_workbook(mode, params, report, sl_seconds):
+    headers, widths, formats = _oktell_billing_export_columns(mode)
+    mode_titles = {'park': 'Таксопарки', 'line': 'Номера', 'operator': 'Операторы'}
+    period_text = (
+        f"{params['start_day'].strftime('%d.%m.%Y')} — {params['end_day'].strftime('%d.%m.%Y')}, "
+        f"время {params['minute_from'] // 60:02d}:{params['minute_from'] % 60:02d}–"
+        f"{params['minute_to'] // 60:02d}:{params['minute_to'] % 60:02d}"
+    )
+    note = (
+        'OCC = разговоры и обработка ко всему времени в системе; UTZ = время без пауз'
+        if mode == 'operator' else f'SL — обслужено за ≤ {sl_seconds} сек ожидания'
+    )
+    header_fill = PatternFill(start_color='1F4E78', end_color='1F4E78', fill_type='solid')
+    header_font = Font(color='FFFFFF', bold=True)
+    bold_font = Font(bold=True)
+    rows_key = 'operators' if mode == 'operator' else 'parks'
+    total_label = 'Итого за период'
+
+    def _write_row(ws, values, bold=False, date_offset=0):
+        ws.append(values)
+        row_idx = ws.max_row
+        for col_offset, fmt in formats.items():
+            cell = ws.cell(row=row_idx, column=col_offset + date_offset)
+            if isinstance(cell.value, (int, float)):
+                cell.number_format = fmt
+        if bold:
+            for col in range(1, len(values) + 1):
+                ws.cell(row=row_idx, column=col).font = bold_font
+
+    def _write_header(ws, header_values):
+        ws.append(header_values)
+        for col in range(1, len(header_values) + 1):
+            cell = ws.cell(row=ws.max_row, column=col)
+            cell.fill = header_fill
+            cell.font = header_font
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Итого за период'
+    ws.append([f'Биллинг Oktell — {mode_titles.get(mode, mode)}'])
+    ws.cell(row=1, column=1).font = bold_font
+    ws.append([f'Период: {period_text}'])
+    ws.append([note])
+    ws.append(['Источник: Oktell (входящие звонки), сформировано '
+               + datetime.now().strftime('%d.%m.%Y %H:%M')])
+    ws.append([])
+    _write_header(ws, headers)
+    table_start = ws.max_row
+    for item in report.get(rows_key) or []:
+        _write_row(ws, _oktell_billing_export_values(mode, item))
+    if report.get('totals') and (report.get(rows_key) or []):
+        _write_row(ws, _oktell_billing_export_values(mode, report['totals'], label=total_label), bold=True)
+    for i, width in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = width
+    ws.freeze_panes = f'A{table_start + 1}'
+
+    ws_days = wb.create_sheet('По дням')
+    _write_header(ws_days, ['Дата'] + headers)
+    for day in report.get('days') or []:
+        try:
+            day_label = datetime.strptime(day.get('date') or '', '%Y-%m-%d').strftime('%d.%m.%Y')
+        except ValueError:
+            day_label = day.get('date') or ''
+        for item in day.get(rows_key) or []:
+            _write_row(ws_days, [day_label] + _oktell_billing_export_values(mode, item), date_offset=1)
+        if day.get('totals'):
+            _write_row(ws_days, [day_label] + _oktell_billing_export_values(mode, day['totals'], label='Итого за день'),
+                       bold=True, date_offset=1)
+    for i, width in enumerate([12] + widths, start=1):
+        ws_days.column_dimensions[get_column_letter(i)].width = width
+    ws_days.freeze_panes = 'A2'
+
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output
 
 
 # === Oktell: распределение звонков на оценку («Деление звонков») ================================
