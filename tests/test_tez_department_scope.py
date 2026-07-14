@@ -341,14 +341,16 @@ class DepartmentHeadWriteScopeTests(unittest.TestCase):
             "The client-side SV rate guard must not apply to a department head",
         )
 
-    def test_department_head_can_select_supervisor_when_editing_operator(self):
+    def test_department_head_can_select_group_when_editing_operator(self):
+        # СВ напрямую не выбирается: глава отдела меняет ГРУППУ оператора,
+        # а супервайзер наследуется от группы каскадом.
         modal = _read(USER_EDIT_MODAL_PATH)
         controls_start = modal.index("{canShowOperatorRateControls && (")
-        supervisor_label = modal.index(">Супервайзер</label>", controls_start)
-        supervisor_controls = modal[controls_start:supervisor_label]
+        group_label = modal.index(">Группа</label>", controls_start)
+        group_controls = modal[controls_start:group_label]
 
-        self.assertIn("isOperatorDraft(editedUser)", supervisor_controls)
-        self.assertIn("isScopedDepartmentHeadRequester", supervisor_controls)
+        self.assertIn("isOperatorDraft(editedUser)", group_controls)
+        self.assertIn("isScopedDepartmentHeadRequester", group_controls)
 
     def test_related_user_write_endpoints_use_head_aware_scope(self):
         scope_helper = _function_source(BOT_PATH, "_requester_can_access_target_user")

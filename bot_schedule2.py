@@ -7007,10 +7007,20 @@ def get_admin_users():
                         u.taxipro_id,
                         COALESCE(u.study_completed, FALSE) as study_completed,
                         u.study_completion_year,
-                        u.department_id
+                        u.department_id,
+                        grp.group_id,
+                        grp.group_name
                     FROM users u
                     LEFT JOIN directions d ON u.direction_id = d.id
                     LEFT JOIN users s ON u.supervisor_id = s.id
+                    LEFT JOIN LATERAL (
+                        SELECT gom.group_id, g.name AS group_name
+                        FROM group_operator_memberships gom
+                        JOIN groups g ON g.id = gom.group_id
+                        WHERE gom.operator_id = u.id AND gom.end_date IS NULL
+                        ORDER BY gom.start_date DESC, gom.id DESC
+                        LIMIT 1
+                    ) grp ON TRUE
                     LEFT JOIN LATERAL (
                         SELECT
                             p.status_code,
@@ -7093,7 +7103,9 @@ def get_admin_users():
                         "taxipro_id": row[45] or "",
                         "study_completed": bool(row[46]) if row[46] is not None else False,
                         "study_completion_year": int(row[47]) if row[47] is not None else None,
-                        "department_id": row[48]
+                        "department_id": row[48],
+                        "group_id": row[49],
+                        "group_name": row[50] or ""
                     })
         # Изоляция отделов: супервайзер и глава отдела видят сотрудников только своего отдела.
         # Супер-админ, админы и тренер видят все отделы.
@@ -7144,6 +7156,10 @@ def admin_update_user():
         if field in ['direction_id', 'supervisor_id']:
             if target_role == 'trainer':
                 value = None
+            elif field == 'supervisor_id':
+                # СВ оператора — производное от его группы (каскад при смене группы
+                # или СВ группы). Прямая правка ломала бы эту связь.
+                return jsonify({"error": "Супервайзер назначается группой оператора — измените группу в карточке сотрудника или разделе «Группы»"}), 400
             else:
                 try:
                     value = int(value) if value else None
@@ -7390,7 +7406,9 @@ def admin_bulk_update_users():
             if user_id not in user_ids:
                 user_ids.append(user_id)
 
-        allowed_fields = {'direction_id', 'supervisor_id', 'rate'}
+        # supervisor_id массово не меняется: СВ — производное от группы оператора,
+        # массовый перевод делается через group_id (членство + СВ каскадом).
+        allowed_fields = {'direction_id', 'group_id', 'rate'}
         unknown_fields = [field for field in changes_raw.keys() if field not in allowed_fields]
         if unknown_fields:
             return jsonify({"error": f"Unsupported fields: {', '.join(unknown_fields)}"}), 400
@@ -7405,14 +7423,27 @@ def admin_bulk_update_users():
             except (TypeError, ValueError):
                 return jsonify({"error": "Invalid direction_id"}), 400
 
-        if 'supervisor_id' in changes_raw:
-            supervisor_value = changes_raw.get('supervisor_id')
-            if supervisor_value in [None, '']:
-                return jsonify({"error": "supervisor_id cannot be empty"}), 400
+        target_group = None
+        if 'group_id' in changes_raw:
+            # Членством в группах управляют админы и главы отделов (как в /api/admin/groups/*).
+            if not (_is_admin_role(requester_role) or headed_dept_id is not None):
+                return jsonify({"error": "Only admins or department heads can change groups"}), 403
+            group_value = changes_raw.get('group_id')
+            if group_value in [None, '']:
+                return jsonify({"error": "group_id cannot be empty"}), 400
             try:
-                updates['supervisor_id'] = int(supervisor_value)
+                group_id_int = int(group_value)
             except (TypeError, ValueError):
-                return jsonify({"error": "Invalid supervisor_id"}), 400
+                return jsonify({"error": "Invalid group_id"}), 400
+            target_group = db.get_group(group_id_int)
+            if not target_group:
+                return jsonify({"error": "Группа не найдена"}), 400
+            if target_group.get('status') != 'active':
+                return jsonify({"error": "Группа в архиве — выберите активную группу"}), 400
+            if not _is_global_admin_requester(requester_role, requester_id):
+                scope_dept = headed_dept_id if headed_dept_id is not None else db.get_user_department_id(requester_id)
+                if scope_dept is None or target_group.get('department_id') != scope_dept:
+                    return jsonify({"error": "Группа не из вашего отдела"}), 403
 
         if 'rate' in changes_raw:
             try:
@@ -7425,7 +7456,7 @@ def admin_bulk_update_users():
             if requester_role == 'sv' and headed_dept_id is None and not _is_supervisor_rate_change_day():
                 return jsonify({"error": "Supervisor can change rate only on the first day of the month"}), 403
 
-        if not updates:
+        if not updates and target_group is None:
             return jsonify({"error": "No valid changes provided"}), 400
 
         updated_count = 0
@@ -7452,7 +7483,7 @@ def admin_bulk_update_users():
                     continue
                 relation_update_denied = False
                 if target_role != 'trainer':
-                    for relation_field in ('direction_id', 'supervisor_id'):
+                    for relation_field in ('direction_id',):
                         if relation_field not in updates:
                             continue
                         if _validate_scoped_user_relation_update(
@@ -7465,6 +7496,10 @@ def admin_bulk_update_users():
                             relation_update_denied = True
                             break
                 if relation_update_denied:
+                    failed_user_ids.append(target_user_id)
+                    continue
+                # Группа применима только к операторам/стажёрам.
+                if target_group is not None and target_role not in ('operator', 'trainee'):
                     failed_user_ids.append(target_user_id)
                     continue
                 if requester_role == 'sv' and headed_dept_id is None and 'rate' in updates:
@@ -7481,6 +7516,10 @@ def admin_bulk_update_users():
                     if not db.update_user(target_user_id, field, value_to_apply, changed_by=requester_id):
                         update_ok = False
                         break
+                if update_ok and target_group is not None:
+                    # Перевод в группу: закрывает прошлое членство и каскадом
+                    # проставляет оператору СВ новой группы.
+                    db.add_operator_to_group(target_group['id'], target_user_id, assigned_by=requester_id)
                 if update_ok:
                     updated_count += 1
                 else:
@@ -7493,7 +7532,7 @@ def admin_bulk_update_users():
             "status": "success",
             "updated_count": updated_count,
             "failed_user_ids": failed_user_ids,
-            "applied_fields": list(updates.keys())
+            "applied_fields": list(updates.keys()) + (['group_id'] if target_group is not None else [])
         }), 200
     except Exception as e:
         logging.error(f"Error bulk updating users: {e}")

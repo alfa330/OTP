@@ -32889,7 +32889,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [rowActionMenuPos, setRowActionMenuPos] = useState({ top: 0, left: 0, width: 208 });
             const [selectedManageUsersIds, setSelectedManageUsersIds] = useState(new Set());
             const [bulkManageUsersChanges, setBulkManageUsersChanges] = useState({
-                supervisor_id: '',
+                group_id: '',
                 direction_id: '',
                 rate: ''
             });
@@ -37965,11 +37965,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 headers: { 'X-User-Id': user.id }
                             });
                         }
-                        if (editedUser.supervisor_id && editedUser.supervisor_id !== userToEdit.supervisor_id) {
-                            await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
-                                user_id: editedUser.id,
-                                field: 'supervisor_id',
-                                value: editedUser.supervisor_id
+                        // Супервайзер напрямую не меняется: перевод в другую группу
+                        // закрывает старое членство и каскадом проставляет СВ новой группы.
+                        const nextGroupId = editedUser.group_id ? Number(editedUser.group_id) : null;
+                        const prevGroupId = userToEdit?.group_id ? Number(userToEdit.group_id) : null;
+                        if (nextGroupId && nextGroupId !== prevGroupId) {
+                            await axios.post(`${API_BASE_URL}/api/admin/groups/${nextGroupId}/operators`, {
+                                operator_id: editedUser.id
                             }, {
                                 headers: { 'X-User-Id': user.id }
                             });
@@ -39742,8 +39744,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
 
                 const payloadChanges = {};
-                if (bulkManageUsersChanges.supervisor_id !== '') {
-                    payloadChanges.supervisor_id = Number(bulkManageUsersChanges.supervisor_id);
+                if (bulkManageUsersChanges.group_id !== '') {
+                    payloadChanges.group_id = Number(bulkManageUsersChanges.group_id);
                 }
                 if (bulkManageUsersChanges.direction_id !== '') {
                     payloadChanges.direction_id = Number(bulkManageUsersChanges.direction_id);
@@ -39758,7 +39760,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
 
                 if (!Object.keys(payloadChanges).length) {
-                    showToast('Выберите, что менять: супервайзера, направление или ставку', 'error');
+                    showToast('Выберите, что менять: группу, направление или ставку', 'error');
                     return;
                 }
 
@@ -39797,7 +39799,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     await fetchUsers();
                     clearManageUsersSelection();
                     setBulkManageUsersChanges({
-                        supervisor_id: '',
+                        group_id: '',
                         direction_id: '',
                         rate: ''
                     });
@@ -40884,8 +40886,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (showUserEditModal || managementViews.includes(view)) {
                     fetchDepartments();
                 }
-                // Группы нужны только в открытой модалке (селект группы при создании оператора).
-                if (showUserEditModal) {
+                // Группы нужны в модалке (селект группы оператора) и в списках
+                // сотрудников (массовый перевод в группу).
+                if (showUserEditModal || view === 'manage_users' || view === 'employees') {
                     fetchUserModalGroups();
                 }
             }, [showUserEditModal, view, user?.id, user?.role, isAdminLikeRole, isDepartmentManager]);
@@ -43049,13 +43052,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         const sortedSvNames = ['__all__'];
                                         const selectedManageUsersCount = selectedManageUsersIds.size;
                                         const hasBulkManageUsersChanges =
-                                            bulkManageUsersChanges.supervisor_id !== '' ||
+                                            bulkManageUsersChanges.group_id !== '' ||
                                             bulkManageUsersChanges.direction_id !== '' ||
                                             bulkManageUsersChanges.rate !== '';
                                         const canApplyBulkManageUsersChanges =
                                             selectedManageUsersCount > 0 && hasBulkManageUsersChanges && !isBulkManageUsersSaving;
-                                        const availableSupervisors = (svList || [])
-                                            .filter((sv) => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status);
+                                        // Массовый перевод — в группу (СВ проставится каскадом от группы).
+                                        const availableBulkGroups = (userModalGroups || []).filter((g) => g?.status !== 'archived');
 
                                         return (
                                         <div className="overflow-x-auto rounded-lg border border-gray-200">
@@ -43087,14 +43090,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                                         <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                                                             <select
-                                                                value={bulkManageUsersChanges.supervisor_id}
-                                                                onChange={(e) => setBulkManageUsersChanges((prev) => ({ ...prev, supervisor_id: e.target.value }))}
+                                                                value={bulkManageUsersChanges.group_id}
+                                                                onChange={(e) => setBulkManageUsersChanges((prev) => ({ ...prev, group_id: e.target.value }))}
                                                                 className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-white text-gray-900"
                                                             >
-                                                                <option value="">Супервайзер: не менять</option>
-                                                                {availableSupervisors.map((sv) => (
-                                                                    <option key={sv.id} value={sv.id}>
-                                                                        {sv.name}
+                                                                <option value="">Группа: не менять</option>
+                                                                {availableBulkGroups.map((g) => (
+                                                                    <option key={g.id} value={g.id}>
+                                                                        {(g.supervisors || []).length
+                                                                            ? `${g.name} — СВ: ${(g.supervisors || []).map((s) => s?.name).filter(Boolean).join(', ')}`
+                                                                            : g.name}
                                                                     </option>
                                                                 ))}
                                                             </select>
