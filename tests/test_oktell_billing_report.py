@@ -12,7 +12,12 @@ import ast
 import re
 import unittest
 from datetime import date, datetime, timedelta
+from io import BytesIO
 from pathlib import Path
+
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font, PatternFill
+from openpyxl.utils import get_column_letter
 
 
 BOT_PATH = Path(__file__).resolve().parents[1] / "bot_schedule2.py"
@@ -29,7 +34,21 @@ FUNCTION_NAMES = [
     "_oktell_billing_operator_states_sql",
     "_oktell_fetch_billing_operator_rows",
     "_oktell_billing_build_operator_report",
+    "_oktell_billing_park_label",
+    "_oktell_billing_line_digits",
+    "_oktell_billing_line_label",
+    "_oktell_billing_ratio",
+    "_oktell_billing_export_columns",
+    "_oktell_billing_export_values",
+    "_oktell_billing_export_workbook",
 ]
+
+CONST_NAMES = (
+    "_OKTELL_BILLING_PARK_LABELS",
+    "_OKTELL_BILLING_LINE_LABELS",
+    "_OKTELL_BILLING_EXPORT_DUR_FMT",
+    "_OKTELL_BILLING_EXPORT_PCT_FMT",
+)
 
 
 def _extract_namespace(oktell_query=None, page_size=1000, chunk_days=7):
@@ -43,10 +62,19 @@ def _extract_namespace(oktell_query=None, page_size=1000, chunk_days=7):
     missing = wanted - found
     if missing:
         raise AssertionError("Не найдены функции в bot_schedule2.py: %s" % sorted(missing))
+    consts = [
+        node for node in module.body
+        if isinstance(node, ast.Assign) and any(getattr(t, "id", "") in CONST_NAMES for t in node.targets)
+    ]
     ns = {
         "re": re,
         "datetime": datetime,
         "timedelta": timedelta,
+        "BytesIO": BytesIO,
+        "Workbook": Workbook,
+        "Font": Font,
+        "PatternFill": PatternFill,
+        "get_column_letter": get_column_letter,
         "_OKTELL_GREETING_ABANDON": "Бросили трубку на приветствии",
         "_OKTELL_FAILED_CALL": "Неудачный звонок",
         "_OKTELL_BILLING_METRICS": (
@@ -61,7 +89,7 @@ def _extract_namespace(oktell_query=None, page_size=1000, chunk_days=7):
         "OKTELL_RESOURCE_CHUNK_DAYS": chunk_days,
         "_oktell_query": oktell_query or (lambda sql: []),
     }
-    exec(compile(ast.Module(body=selected, type_ignores=[]), str(BOT_PATH), "exec"), ns)
+    exec(compile(ast.Module(body=consts + selected, type_ignores=[]), str(BOT_PATH), "exec"), ns)
     return ns
 
 
@@ -274,6 +302,63 @@ class BuildOperatorReportTests(unittest.TestCase):
         report = build([], states)
         self.assertEqual(report["days"], [])
         self.assertEqual(report["operators"], [])
+
+    def test_export_values_park_row(self):
+        ns = _extract_namespace()
+        values = ns["_oktell_billing_export_values"]("park", {
+            "park": "Tenge_taxi", "arrived": 100, "served": 80, "lost": 20, "served_sl": 60,
+            "greet_drop": 2, "talk_seconds": 8000, "wait_ok_seconds": 400,
+            "wait_lost_seconds": 100, "total_seconds": 8500,
+        })
+        self.assertEqual(values[0], "Тенге Такси")
+        self.assertEqual(values[1:4], [100, 80, 20])
+        self.assertAlmostEqual(values[4], 0.2)   # AR
+        self.assertAlmostEqual(values[5], 0.75)  # SL
+        self.assertAlmostEqual(values[6], (8000 / 80) / 86400.0)  # АТТ как доля суток
+        self.assertAlmostEqual(values[8], 8000 / 86400.0)
+        self.assertEqual(values[10], 2)
+
+    def test_export_values_line_and_zero_served(self):
+        ns = _extract_namespace()
+        values = ns["_oktell_billing_export_values"]("line", {
+            "park": "Салам Такси", "line": "+77001551198", "arrived": 0, "served": 0, "lost": 0,
+            "served_sl": 0, "greet_drop": 1, "talk_seconds": 0, "wait_ok_seconds": 0,
+            "wait_lost_seconds": 0, "total_seconds": 0,
+        })
+        self.assertEqual(values[0], "87001551198")
+        self.assertEqual(values[1], "СТ 1")
+        self.assertEqual(values[2], "Салам Такси")
+        # нет обслуженных -> проценты и средние '—'
+        self.assertEqual(values[6], "—")
+        self.assertEqual(values[7], "—")
+        self.assertEqual(values[8], "—")
+
+    def test_export_workbook_structure(self):
+        ns = _extract_namespace()
+        report = ns["_oktell_billing_build_report"]([
+            {"report_date": "2026-07-13", "taxi_park": "iTaxi", "arrived": 10, "served": 9,
+             "served_sl": 8, "greet_drop": 0, "talk_seconds": 900, "wait_ok_seconds": 30,
+             "wait_lost_seconds": 5, "total_seconds": 940},
+        ])
+        params = {"start_day": date(2026, 7, 13), "end_day": date(2026, 7, 13),
+                  "minute_from": 0, "minute_to": 1439}
+        output = ns["_oktell_billing_export_workbook"]("park", params, report, 20)
+        wb = load_workbook(output)
+        self.assertEqual(wb.sheetnames, ["Итого за период", "По дням"])
+        ws = wb["Итого за период"]
+        header_row = next(
+            idx for idx in range(1, ws.max_row + 1)
+            if ws.cell(row=idx, column=1).value == "Таксопарк"
+        )
+        self.assertEqual(ws.cell(row=header_row + 1, column=1).value, "iTaxi")
+        self.assertEqual(ws.cell(row=header_row + 2, column=1).value, "Итого за период")
+        self.assertEqual(ws.cell(row=header_row + 1, column=5).number_format, "0.0%")
+        ws_days = wb["По дням"]
+        self.assertEqual(ws_days.cell(row=1, column=1).value, "Дата")
+        self.assertEqual(ws_days.cell(row=2, column=1).value, "13.07.2026")
+        self.assertEqual(ws_days.cell(row=3, column=2).value, "Итого за день")
+        # формат длительности в дневном листе со сдвигом на колонку даты
+        self.assertEqual(ws_days.cell(row=2, column=8).number_format, "[h]:mm:ss")
 
     def test_operator_fetch_runs_two_queries_per_chunk(self):
         calls = []
