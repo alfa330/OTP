@@ -11086,6 +11086,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         isBreakStatus: typeof seg?.isBreak === 'boolean'
                             ? seg.isBreak
                             : PLANNER_IMPORTED_BREAK_STATUS_KEYS.has(statusKeyNorm),
+                        isMatchExcusedStatus: typeof seg?.isMatchExcused === 'boolean'
+                            ? seg.isMatchExcused
+                            : plannerStatusIsTrainingKey(statusKeyNorm),
                         isLateStartStatus: typeof seg?.isLateStart === 'boolean'
                             ? seg.isLateStart
                             : PLANNER_IMPORTED_LATE_START_STATUS_KEYS.has(statusKeyNorm),
@@ -11104,6 +11107,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     .filter(seg => seg.isBreakStatus)
                     .map(seg => ({ start: seg.startMin, end: seg.endMin }))
             );
+            // Обоснованные служебные интервалы нейтральны для соответствия:
+            // они засчитывают ту часть графика, на которую попали (работу или перерыв),
+            // но сами по себе не превращаются в переработку за пределами смены.
+            const matchExcusedStatusIntervals = mergeIntervals(
+                bars
+                    .filter(seg => seg.isMatchExcusedStatus)
+                    .map(seg => ({ start: seg.startMin, end: seg.endMin }))
+            );
             const lateStartStatusIntervals = mergeIntervals(
                 bars
                     .filter(seg => seg.isLateStartStatus)
@@ -11118,8 +11129,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const totalScheduledMin = plannerIntervalsTotalMinutes(shiftIntervals);
             const scheduledBreakMin = plannerIntervalsTotalMinutes(breakIntervals);
             const scheduledWorkMin = plannerIntervalsTotalMinutes(workScheduleIntervals);
-            const matchedWorkMin = plannerOverlapMinutesBetweenIntervalSets(workScheduleIntervals, workStatusIntervals);
-            const matchedBreakMin = plannerOverlapMinutesBetweenIntervalSets(breakIntervals, breakStatusIntervals);
+            const matchedWorkMin = plannerOverlapMinutesBetweenIntervalSets(
+                workScheduleIntervals,
+                mergeIntervals([...workStatusIntervals, ...matchExcusedStatusIntervals])
+            );
+            const matchedBreakMin = plannerOverlapMinutesBetweenIntervalSets(
+                breakIntervals,
+                mergeIntervals([...breakStatusIntervals, ...matchExcusedStatusIntervals])
+            );
             const workStatusTotalMin = plannerIntervalsTotalMinutes(workStatusIntervals);
             const workInsideShiftMin = plannerOverlapMinutesBetweenIntervalSets(workStatusIntervals, shiftIntervals);
             const workOutsideShiftMin = Math.max(0, workStatusTotalMin - workInsideShiftMin);
@@ -11134,9 +11151,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const shiftWorkScheduleIntervals = plannerSubtractIntervals([shiftInterval], shiftBreakIntervals);
                 const shiftWorkStatusIntervals = plannerIntersectIntervalWithList(shiftInterval, workStatusIntervals);
                 const shiftBreakStatusIntervals = plannerIntersectIntervalWithList(shiftInterval, breakStatusIntervals);
+                const shiftMatchExcusedStatusIntervals = plannerIntersectIntervalWithList(shiftInterval, matchExcusedStatusIntervals);
                 const shiftLateStartStatusIntervals = plannerIntersectIntervalWithList(shiftInterval, lateStartStatusIntervals);
-                const shiftMatchedWorkMin = plannerOverlapMinutesBetweenIntervalSets(shiftWorkScheduleIntervals, shiftWorkStatusIntervals);
-                const shiftMatchedBreakMin = plannerOverlapMinutesBetweenIntervalSets(shiftBreakIntervals, shiftBreakStatusIntervals);
+                const shiftMatchedWorkMin = plannerOverlapMinutesBetweenIntervalSets(
+                    shiftWorkScheduleIntervals,
+                    mergeIntervals([...shiftWorkStatusIntervals, ...shiftMatchExcusedStatusIntervals])
+                );
+                const shiftMatchedBreakMin = plannerOverlapMinutesBetweenIntervalSets(
+                    shiftBreakIntervals,
+                    mergeIntervals([...shiftBreakStatusIntervals, ...shiftMatchExcusedStatusIntervals])
+                );
                 const shiftMatchedTotalMin = shiftMatchedWorkMin + shiftMatchedBreakMin;
                 const shiftCompliancePct = shiftDurMin > 0 ? (shiftMatchedTotalMin / shiftDurMin) * 100 : null;
                 let lateMin = 0;
@@ -12891,6 +12915,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const rows = Array.isArray(payload?.trainings) ? payload.trainings : (Array.isArray(payload) ? payload : []);
                 mergePlannerTrainingRows(rows);
                 plannerLoadedTrainingMonthKeysRef.current.add(normalizedMonth);
+                return rows;
             }, [API_BASE_URL, user?.id, withAccessTokenHeader, mergePlannerTrainingRows]);
             const mergePlannerTrainingRejectionRows = useCallback((rows = []) => {
                 setPlannerTrainingRejectionsByOperator(prev => {
@@ -15470,6 +15495,93 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return merged;
             };
 
+            const plannerStatusMatchActivityInterval = (seg) => {
+                const startValue = seg?.startMin ?? seg?.start_min;
+                const endValue = seg?.endMin ?? seg?.end_min;
+                let start = Number(startValue);
+                let end = Number(endValue);
+                if (!Number.isFinite(start)) {
+                    start = timeToMinutes(seg?.start_time ?? seg?.start);
+                }
+                if (!Number.isFinite(end)) {
+                    end = timeToMinutes(seg?.end_time ?? seg?.end);
+                }
+                if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+                if (end <= start) end += 1440;
+                if (end <= start) return null;
+                return { start, end };
+            };
+
+            const getPlannerStatusMatchCreditedActivityBarsForDate = (op, dateKeyRaw, trainingRowsByOperator = {}) => {
+                const dateKey = String(dateKeyRaw || '').trim();
+                if (!op || !dateKey) return [];
+                const bars = [];
+                const append = (seg, kind, idx) => {
+                    const interval = plannerStatusMatchActivityInterval(seg);
+                    if (!interval) return;
+                    const startMin = Math.max(0, Math.min(1440, Number(interval.start || 0)));
+                    const endMin = Math.max(0, Math.min(1440, Number(interval.end || 0)));
+                    if (endMin <= startMin) return;
+                    const isOfflineWork = kind === 'offline';
+                    const isTraining = kind === 'training';
+                    const isTechnicalReason = kind === 'technical_reason';
+                    bars.push({
+                        ...seg,
+                        id: `${kind}:${String(seg?.id ?? idx)}`,
+                        startMin,
+                        endMin,
+                        stateKey: `__credited_${kind}__`,
+                        stateName: isOfflineWork ? 'Оффлайн работа' : (isTraining ? 'Тренинг' : 'Тех причина (обоснованная)'),
+                        isWork: isOfflineWork,
+                        isBreak: false,
+                        isTraining,
+                        isTechnicalReason,
+                        isLateStart: isOfflineWork,
+                        isLateExcused: isTraining || isTechnicalReason,
+                        isMatchExcused: true
+                    });
+                };
+
+                const offlineRows = Array.isArray(op?.offlineActivityTimelineDays?.[dateKey])
+                    ? op.offlineActivityTimelineDays[dateKey]
+                    : [];
+                offlineRows.forEach((seg, idx) => {
+                    append(seg, seg?.isPhoneShiftTraining ? 'training' : 'offline', idx);
+                });
+
+                const technicalIssueRows = Array.isArray(op?.technicalIssueTimelineDays?.[dateKey])
+                    ? op.technicalIssueTimelineDays[dateKey]
+                    : [];
+                technicalIssueRows.forEach((seg, idx) => append(seg, 'technical_reason', idx));
+
+                const operatorTrainingRows = Array.isArray(trainingRowsByOperator?.[String(op?.id)])
+                    ? trainingRowsByOperator[String(op.id)]
+                    : [];
+                operatorTrainingRows
+                    .filter(row => String(row?.date || row?.training_date || '').trim() === dateKey)
+                    .forEach((seg, idx) => append(seg, 'training', idx));
+
+                return bars;
+            };
+
+            const getPlannerStatusMatchCreditedActivityContextBars = (op, dateKeyRaw, trainingRowsByOperator = {}) => {
+                const dateKey = String(dateKeyRaw || '').trim();
+                const dateObj = parseDateStr(dateKey);
+                if (!op || !dateKey || !dateObj || Number.isNaN(dateObj.getTime())) return [];
+                return [
+                    { dayKey: todayDateStr(addDays(dateObj, -1)), offset: -1440 },
+                    { dayKey: dateKey, offset: 0 },
+                    { dayKey: todayDateStr(addDays(dateObj, 1)), offset: 1440 }
+                ].flatMap(({ dayKey, offset }) => (
+                    getPlannerStatusMatchCreditedActivityBarsForDate(op, dayKey, trainingRowsByOperator)
+                        .map(seg => ({
+                            ...seg,
+                            startMin: Number(seg.startMin || 0) + offset,
+                            endMin: Number(seg.endMin || 0) + offset
+                        }))
+                ));
+            };
+
             const createPlannerStatusMatchAccumulator = () => ({
                 totalScheduledMin: 0,
                 scheduledWorkMin: 0,
@@ -15536,7 +15648,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return ['overall', 'supervisor', 'direction'].includes(mode) ? mode : 'supervisor';
             };
 
-            const buildPlannerStatusMatchReport = (sourceOperators = [], range = {}, groupModeRaw = 'supervisor') => {
+            const buildPlannerStatusMatchReport = (sourceOperators = [], range = {}, groupModeRaw = 'supervisor', trainingRowsByOperator = {}) => {
                 const normalizedRange = normalizePlannerStatusMatchExportRange(range);
                 if (!normalizedRange) return null;
                 const groupMode = normalizePlannerStatusMatchGroupMode(groupModeRaw);
@@ -15565,10 +15677,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             }))
                             .filter(part => part.end > part.start);
                         const dayStatusBars = timelineMap.get(`${operatorNameKey}|${dateKey}`) || [];
+                        const dayCreditedActivityBars = getPlannerStatusMatchCreditedActivityBarsForDate(
+                            op,
+                            dateKey,
+                            trainingRowsByOperator
+                        );
+                        const dayMatchBars = [...dayStatusBars, ...dayCreditedActivityBars];
                         const dayMetrics = plannerComputeShiftStatusMatchMetrics({
                             shiftParts: dayShiftParts,
                             breakParts: dayBreakParts,
-                            statusBars: dayStatusBars
+                            statusBars: dayMatchBars
                         });
 
                         const shiftStartParts = getShiftStartPartsForDate(op, dateKey);
@@ -15577,14 +15695,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             .map(part => ({ start: Number(part?.start || 0), end: Number(part?.end || 0) }))
                             .filter(part => part.end > part.start);
                         const shiftContextBars = getPlannerStatusMatchShiftContextBars(timelineMap, operatorName, dateKey);
+                        const shiftCreditedActivityContextBars = getPlannerStatusMatchCreditedActivityContextBars(
+                            op,
+                            dateKey,
+                            trainingRowsByOperator
+                        );
                         const boundaryMetrics = plannerComputeShiftStatusMatchMetrics({
                             shiftParts: shiftStartParts,
                             breakParts: shiftStartBreakParts,
-                            statusBars: shiftContextBars
+                            statusBars: [...shiftContextBars, ...shiftCreditedActivityContextBars]
                         });
                         const dayHasSchedule = Number(dayMetrics?.totalScheduledMin || 0) > 0;
-                        const dayHasStatuses = dayStatusBars.length > 0;
-                        const dayHasWorkLikeStatus = dayStatusBars.some(seg => {
+                        const dayHasStatuses = dayMatchBars.length > 0;
+                        const dayHasWorkLikeStatus = dayMatchBars.some(seg => {
                             const statusKey = plannerStatusNormalizeKey(seg?.stateKey || seg?.statusKey || seg?.stateName || seg?.statusName || '');
                             return typeof seg?.isWork === 'boolean'
                                 ? seg.isWork
@@ -15794,7 +15917,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const summaryRows = [];
                 summaryRows.push(rowXml([cell(`Отчет соответствия статусов графику: ${groupModeLabel}`, 'String', 'Title', 'ss:MergeAcross="14"')], '', 'ss:Height="28"'));
                 summaryRows.push(rowXml([textCell('Период', 'MetaLabel'), cell(periodLabel, 'String', 'MetaValue', 'ss:MergeAcross="3"'), textCell('Группировка', 'MetaLabel'), cell(groupModeLabel, 'String', 'MetaValue'), textCell('Операторов', 'MetaLabel'), numberCell(report.totalOperatorRows, 'MetaValueNumber')]));
-                summaryRows.push(rowXml([cell('Проценты считаются по минутам: совпавшие плановые минуты / плановые минуты.', 'String', 'Muted', 'ss:MergeAcross="14"')]));
+                summaryRows.push(rowXml([cell('Проценты считаются по минутам: совпавшие плановые минуты / плановые минуты. Оффлайн-работа, тренинг и обоснованная техпричина засчитываются как совпадение.', 'String', 'Muted', 'ss:MergeAcross="14"')]));
                 summaryRows.push(rowXml([cell('', 'String', 'Blank')]));
                 summaryRows.push(rowXml(summaryHeaders.map(headerCell), 'HeaderRow'));
                 report.groupRows.forEach(group => {
@@ -15992,19 +16115,42 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         start_date: requestStart,
                         end_date: requestEnd,
                         include_imported_statuses: '1',
-                        include_technical_issues: '0',
-                        include_offline_activities: '0'
+                        include_technical_issues: '1',
+                        include_offline_activities: '1'
                     });
-                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/operators?${queryParams.toString()}`, {
-                        credentials: 'include',
-                        headers: withAccessTokenHeader()
-                    });
+                    const trainingMonthKeys = Array.from(new Set(
+                        [requestStart, ...dateKeys, requestEnd]
+                            .map(dayKey => String(dayKey || '').slice(0, 7))
+                            .filter(monthKey => /^\d{4}-\d{2}$/.test(monthKey))
+                    ));
+                    const [response, trainingRowsByMonth] = await Promise.all([
+                        fetch(`${API_BASE_URL}/api/work_schedules/operators?${queryParams.toString()}`, {
+                            credentials: 'include',
+                            headers: withAccessTokenHeader()
+                        }),
+                        Promise.all(trainingMonthKeys.map(monthKey => (
+                            fetchPlannerTrainingsForMonth(monthKey, { force: true })
+                        )))
+                    ]);
                     const payload = await response.json().catch(() => ({}));
                     if (!response.ok) {
                         throw new Error(payload?.error || `HTTP ${response.status}`);
                     }
                     const sourceOperators = Array.isArray(payload?.operators) ? payload.operators : [];
-                    const report = buildPlannerStatusMatchReport(sourceOperators, normalizedRange, plannerStatusMatchExportGroupMode);
+                    const reportTrainingRowsByOperator = {};
+                    trainingRowsByMonth.flatMap(rows => Array.isArray(rows) ? rows : []).forEach(row => {
+                        const operatorId = Number(row?.operator_id);
+                        if (!Number.isFinite(operatorId) || operatorId <= 0) return;
+                        const key = String(operatorId);
+                        if (!Array.isArray(reportTrainingRowsByOperator[key])) reportTrainingRowsByOperator[key] = [];
+                        reportTrainingRowsByOperator[key].push(row);
+                    });
+                    const report = buildPlannerStatusMatchReport(
+                        sourceOperators,
+                        normalizedRange,
+                        plannerStatusMatchExportGroupMode,
+                        reportTrainingRowsByOperator
+                    );
                     if (!report || report.totalOperatorRows <= 0 || report.groupRows.length === 0) {
                         setPlannerStatusMatchExportError('Нет данных по графику или статусам за выбранный период с текущими фильтрами');
                         return;
@@ -18700,13 +18846,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     }))
                     .filter((b) => b.end > b.start);
                 const statusBars = Array.isArray(modalImportedStatusTimelineForShiftContext) ? modalImportedStatusTimelineForShiftContext : [];
-                if (statusBars.length === 0) return null;
+                const creditedActivityBars = getPlannerStatusMatchCreditedActivityContextBars(
+                    op,
+                    modalState.date,
+                    plannerTrainingsByOperator
+                );
+                const matchBars = [...statusBars, ...creditedActivityBars];
+                if (matchBars.length === 0) return null;
                 return plannerComputeShiftStatusMatchMetrics({
                     shiftParts,
                     breakParts,
-                    statusBars
+                    statusBars: matchBars
                 });
-            }, [isBulkSelectionModal, modalState?.opId, modalState?.date, operators, modalImportedStatusTimelineForShiftContext]);
+            }, [isBulkSelectionModal, modalState?.opId, modalState?.date, operators, modalImportedStatusTimelineForShiftContext, plannerTrainingsByOperator]);
             const modalLateStatusSegments = useMemo(() => {
                 const ranges = (Array.isArray(modalStatusMatchMetrics?.perShift) ? modalStatusMatchMetrics.perShift : [])
                     .map((sh) => {
@@ -23905,6 +24057,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const aggregatedFlagsForCell = getPlannerAggregatedFlagsForDate(op, d);
                                             const importedStatusBarsForCell = importedStatusTimelineByOperatorDateKey.get(`${plannerStatusNormalizeOperatorName(op?.name)}|${d}`) || [];
                                             const importedStatusBarsForShiftContextCell = getImportedStatusBarsForShiftContext(op?.name, d);
+                                            const creditedActivityBarsForCell = getPlannerStatusMatchCreditedActivityBarsForDate(
+                                                op,
+                                                d,
+                                                plannerTrainingsByOperator
+                                            );
+                                            const creditedActivityBarsForShiftContextCell = getPlannerStatusMatchCreditedActivityContextBars(
+                                                op,
+                                                d,
+                                                plannerTrainingsByOperator
+                                            );
+                                            const statusMatchBarsForCell = [...importedStatusBarsForCell, ...creditedActivityBarsForCell];
+                                            const statusMatchBarsForShiftContextCell = [
+                                                ...importedStatusBarsForShiftContextCell,
+                                                ...creditedActivityBarsForShiftContextCell
+                                            ];
                                             const technicalIssueBarsForCell = (Array.isArray(op?.technicalIssueTimelineDays?.[d]) ? op.technicalIssueTimelineDays[d] : [])
                                                 .map((seg, idx) => {
                                                     const startRaw = Number(seg?.startMin ?? seg?.start_min ?? seg?.start ?? 0);
@@ -23970,20 +24137,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 .flatMap(p => getBreakPartsForPart(op, p, d))
                                                 .map(b => ({ start: Number(b?.start || 0), end: Number(b?.end || 0) }))
                                                 .filter(b => b.end > b.start);
-                                            const shouldComputeDefectMetrics = (viewMode === 'day' || viewMode === 'week' || viewMode === 'month') && parts.length > 0 && importedStatusBarsForCell.length > 0;
-                                            const shouldComputeBoundaryDefectMetrics = (viewMode === 'day' || viewMode === 'week' || viewMode === 'month') && shiftStartPartsForCell.length > 0 && importedStatusBarsForShiftContextCell.length > 0;
+                                            const shouldComputeDefectMetrics = (viewMode === 'day' || viewMode === 'week' || viewMode === 'month') && parts.length > 0 && statusMatchBarsForCell.length > 0;
+                                            const shouldComputeBoundaryDefectMetrics = (viewMode === 'day' || viewMode === 'week' || viewMode === 'month') && shiftStartPartsForCell.length > 0 && statusMatchBarsForShiftContextCell.length > 0;
                                             const statusMatchMetricsForCell = shouldComputeDefectMetrics
                                                 ? plannerComputeShiftStatusMatchMetrics({
                                                     shiftParts: parts,
                                                     breakParts: breakPartsForCell,
-                                                    statusBars: importedStatusBarsForCell
+                                                    statusBars: statusMatchBarsForCell
                                                 })
                                                 : null;
                                             const shiftBoundaryMetricsForCell = shouldComputeBoundaryDefectMetrics
                                                 ? plannerComputeShiftStatusMatchMetrics({
                                                     shiftParts: shiftStartPartsForCell,
                                                     breakParts: shiftStartBreakPartsForCell,
-                                                    statusBars: importedStatusBarsForShiftContextCell
+                                                    statusBars: statusMatchBarsForShiftContextCell
                                                 })
                                                 : null;
                                             const noPhoneShiftMetricsForCell = shouldComputeDefectMetrics
@@ -27168,6 +27335,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         .filter(b => b.end > b.start);
                     const previewStatusBars = importedStatusTimelineByOperatorDateKey.get(`${plannerStatusNormalizeOperatorName(modalPreviewOp?.name)}|${modalPreviewDate}`) || [];
                     const previewStatusBarsForShiftContext = getImportedStatusBarsForShiftContext(modalPreviewOp?.name, modalPreviewDate);
+                    const previewCreditedActivityBarsForShiftContext = getPlannerStatusMatchCreditedActivityContextBars(
+                        modalPreviewOp,
+                        modalPreviewDate,
+                        plannerTrainingsByOperator
+                    );
+                    const previewMatchBarsForShiftContext = [
+                        ...previewStatusBarsForShiftContext,
+                        ...previewCreditedActivityBarsForShiftContext
+                    ];
                     const previewOfflineBars = (Array.isArray(modalPreviewOp?.offlineActivityTimelineDays?.[modalPreviewDate]) ? modalPreviewOp.offlineActivityTimelineDays[modalPreviewDate] : [])
                         .map((seg, idx) => {
                             const startRaw = Number(seg?.startMin ?? seg?.start_min ?? seg?.start ?? 0);
@@ -27185,11 +27361,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             };
                         })
                         .filter(Boolean);
-                    const previewMetrics = (previewShiftStartParts.length > 0 && previewStatusBarsForShiftContext.length > 0)
+                    const previewMetrics = (previewShiftStartParts.length > 0 && previewMatchBarsForShiftContext.length > 0)
                         ? plannerComputeShiftStatusMatchMetrics({
                             shiftParts: previewShiftStartParts,
                             breakParts: previewShiftStartBreakParts,
-                            statusBars: previewStatusBarsForShiftContext
+                            statusBars: previewMatchBarsForShiftContext
                         })
                         : null;
                     const previewShiftIntervals = mergeIntervals(
@@ -29223,10 +29399,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         const statusTimelineBarsForShiftContext = matchedPlannerOperator
                                                                             ? getImportedStatusBarsForShiftContext(matchedPlannerOperator?.name, day.dateKey)
                                                                             : [];
+                                                                        const creditedActivityBarsForShiftContext = matchedPlannerOperator
+                                                                            ? getPlannerStatusMatchCreditedActivityContextBars(
+                                                                                matchedPlannerOperator,
+                                                                                day.dateKey,
+                                                                                plannerTrainingsByOperator
+                                                                            )
+                                                                            : [];
                                                                         const shiftStatusMatchMetrics = plannerComputeShiftStatusMatchMetrics({
                                                                             shiftParts: plannedShiftStartParts,
                                                                             breakParts: plannedShiftStartBreakParts,
-                                                                            statusBars: statusTimelineBarsForShiftContext
+                                                                            statusBars: [...statusTimelineBarsForShiftContext, ...creditedActivityBarsForShiftContext]
                                                                         });
                                                                         const shiftLateBars = (shiftStatusMatchMetrics?.perShift || [])
                                                                             .map(sh => {
