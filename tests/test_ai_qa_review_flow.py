@@ -58,6 +58,8 @@ class ReviewFlowContractTests(unittest.TestCase):
         cls.api_src = (ROOT / "call_qa" / "api.py").read_text(encoding="utf-8-sig")
         cls.store_src = (ROOT / "call_qa" / "rag" / "store.py").read_text(encoding="utf-8-sig")
         cls.eval_src = (ROOT / "call_qa" / "evaluation" / "evaluator.py").read_text(encoding="utf-8-sig")
+        cls.batch_src = (ROOT / "call_qa" / "batch_eval.py").read_text(encoding="utf-8-sig")
+        cls.runtime_src = (ROOT / "call_qa" / "evaluation" / "runtime_store.py").read_text(encoding="utf-8-sig")
         cls.view_src = (ROOT / "src" / "components" / "call_qa" / "CallQaView.jsx").read_text(encoding="utf-8-sig")
         cls.schema_src = (ROOT / "call_qa" / "rag" / "schema.sql").read_text(encoding="utf-8-sig")
 
@@ -70,6 +72,19 @@ class ReviewFlowContractTests(unittest.TestCase):
         self.assertNotIn("items.length &&", self.view_src.replace("call && items.length", ""))
         self.assertIn("'Подтверждено'", self.view_src)
         self.assertIn("карточка оставлена открытой", self.view_src)
+
+    def test_frontend_binds_review_to_exact_run_scale_and_criterion(self):
+        for field in ("evaluation_run_id: call._evaluation_run_id",
+                      "scale_revision_id: call._scale_revision_id",
+                      "evaluation_fingerprint: call._evaluation_fingerprint",
+                      "criterion_id: c.criterion_id"):
+            self.assertIn(field, self.view_src)
+
+    def test_all_run_publishers_fail_closed_without_primary_lock(self):
+        self.assertIn("conn = config.connect_rw()", self.runtime_src)
+        self.assertIn("as lock_acquired", self.batch_src)
+        self.assertIn("advisory lock unavailable while publishing batch run", self.batch_src)
+        self.assertGreaterEqual(self.api_src.count("as lock_acquired"), 3)
 
     def test_use_count_incremented_on_retrieval(self):
         self.assertIn("def bump_use_count", self.store_src)

@@ -18,7 +18,7 @@ export const iosCard =
     'rounded-2xl bg-white ring-1 ring-slate-200/70 shadow-[0_1px_2px_rgba(15,23,42,0.04)]';
 
 export const iosGroupLabel =
-    'px-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400';
+    'px-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500';
 
 export const iosBtnPrimary =
     'inline-flex items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-[13.5px] font-semibold text-white shadow-sm transition-all hover:bg-blue-700 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed';
@@ -59,7 +59,7 @@ export const IosSection = ({ title, hint, children, right = null }) => (
         <div className={`${iosCard} p-4 space-y-3`}>
             {children}
         </div>
-        {hint && <div className="px-1 text-[11px] text-slate-400">{hint}</div>}
+        {hint && <div className="px-1 text-[11px] text-slate-500">{hint}</div>}
     </section>
 );
 
@@ -71,8 +71,8 @@ const BADGE_TONES = {
     amber: 'bg-amber-50 text-amber-700 ring-1 ring-amber-100',
 };
 
-export const IosBadge = ({ tone = 'slate', children, className = '' }) => (
-    <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11.5px] font-medium ${BADGE_TONES[tone] || BADGE_TONES.slate} ${className}`}>
+export const IosBadge = ({ tone = 'slate', children, className = '', ...props }) => (
+    <span {...props} className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11.5px] font-medium ${BADGE_TONES[tone] || BADGE_TONES.slate} ${className}`}>
         {children}
     </span>
 );
@@ -93,7 +93,7 @@ export const IosModal = ({ open, onClose, title, subtitle, children, footer = nu
                 <div className="relative flex items-center justify-between gap-3 border-b border-slate-200/70 bg-white/80 px-5 py-3.5 backdrop-blur-xl">
                     <div className="min-w-0">
                         <h3 className="truncate text-[15px] font-semibold text-slate-900">{title}</h3>
-                        {subtitle && <p className="truncate text-[12px] text-slate-400">{subtitle}</p>}
+                        {subtitle && <p className="truncate text-[12px] text-slate-500">{subtitle}</p>}
                     </div>
                     <button
                         type="button"

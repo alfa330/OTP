@@ -35443,10 +35443,14 @@ class Database:
 # Initialize database
 db = Database()
 
-# call_qa: применение схемы ИИ-оценки звонков при старте (идемпотентно, защищено —
-# никогда не валит запуск; при отсутствии read-write подключения просто пропускается).
+# call_qa: применение схемы ИИ-оценки звонков при старте. Без read-write
+# подключения миграция пропускается; в обязательном trace-режиме частичная схема
+# останавливает запуск, чтобы приложение не работало с ложной наблюдаемостью.
 try:
     from call_qa.rag.migrate import apply_on_startup as _apply_call_qa_schema
     _apply_call_qa_schema()
 except Exception:
     logging.exception("call_qa schema init skipped")
+    from call_qa import config as _call_qa_config
+    if _call_qa_config.RAG_TRACE_REQUIRED:
+        raise

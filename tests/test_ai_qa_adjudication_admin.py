@@ -7,7 +7,9 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
+from call_qa import api as call_qa_api
 from call_qa.api import _clean_adjudication_patch
+from call_qa.rag import knowledge
 from call_qa.rag import store
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +45,23 @@ class CleanPatchTests(unittest.TestCase):
         for body in (None, [], "reason", 1):
             with self.subTest(body=body), self.assertRaises(ValueError):
                 _clean_adjudication_patch(body)
+
+    def test_stale_canonical_edit_is_rejected_before_embedding(self):
+        source = {
+            "direction_id": 73, "rule_status": "active", "rule_version_id": 12,
+            "content_hash": "new-hash",
+        }
+        with mock.patch.object(call_qa_api, "_canonical_rule_source", return_value=source), \
+             mock.patch("call_qa.rag.store.embed_document_text") as embed, \
+             mock.patch.object(call_qa_api.config, "connect_rw") as connect, \
+             self.assertRaisesRegex(knowledge.KnowledgeConflict, "изменено другим пользователем"):
+            call_qa_api.update_adjudication("00000000-0000-0000-0000-000000000001", {
+                "reason": "новое правило",
+                "expected_rule_version_id": 11,
+                "expected_content_hash": "old-hash",
+            }, actor_id=7)
+        embed.assert_not_called()
+        connect.assert_not_called()
         for body in ({"reason": 123}, {"situation": ["x"]}, {"correct_verdict": True}):
             with self.subTest(body=body), self.assertRaises(ValueError):
                 _clean_adjudication_patch(body)
@@ -185,6 +204,8 @@ class AdminAccessContractTests(unittest.TestCase):
         self.assertIn("canManage={canManageRag}", self.view_src)
         self.assertIn("canManage && (", self.rag_src)
         self.assertIn("window.confirm", self.rag_src)
+        self.assertIn("expected_rule_version_id", self.rag_src)
+        self.assertIn("expected_content_hash", self.rag_src)
 
     def test_soft_delete_is_filtered_from_rag_but_kept_for_review_history(self):
         self.assertIn("is_active        boolean NOT NULL DEFAULT true", self.schema_src)
