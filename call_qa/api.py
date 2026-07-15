@@ -365,7 +365,7 @@ def adjudications_list(direction=None, q=None, limit=200) -> list[dict]:
                     FROM qa_adjudications a
                     LEFT JOIN directions d ON a.direction_id = d.id
                     LEFT JOIN users u ON a.created_by = u.id
-                   WHERE TRUE""")
+                   WHERE a.is_active""")
         params = []
         if direction and direction != "all":
             sql += " AND d.name = %s"; params.append(direction)
@@ -390,6 +390,7 @@ def _adjudication_exists(call_id, direction_id, criterion_idx, correct_verdict) 
         cur.execute(
             """SELECT 1 FROM qa_adjudications
                 WHERE call_id=%s AND direction_id=%s AND criterion_idx=%s AND correct_verdict=%s
+                  AND is_active
                 LIMIT 1""",
             (call_id, direction_id, criterion_idx, correct_verdict))
         row = cur.fetchone(); cur.close(); conn.close()
@@ -418,6 +419,48 @@ def save_adjudications(call_id, direction_id, items, reviewer_id=None) -> int:
     if call_id is not None:
         _record_review_outcome(call_id, "adjudicated" if (items or []) else "confirmed", reviewer_id)
     return saved
+
+
+def _clean_adjudication_patch(body: dict) -> dict:
+    """Патч правки разбора: только разрешённые поля, с валидацией.
+    correct_verdict — из фиксированного словаря; reason (правило) не может стать пустым;
+    необязательные текстовые поля пустая строка очищает в NULL."""
+    from .rag.store import EDITABLE_ADJ_FIELDS
+    if not isinstance(body, dict):
+        raise ValueError("тело запроса должно быть JSON-объектом")
+    patch = {}
+    for key in EDITABLE_ADJ_FIELDS:
+        if key not in body:
+            continue
+        val = body[key]
+        if val is not None and not isinstance(val, str):
+            raise ValueError(f"поле {key} должно быть строкой")
+        val = val.strip() if isinstance(val, str) else val
+        if key == "correct_verdict":
+            if val not in ("Correct", "Incorrect", "N/A"):
+                raise ValueError("недопустимый вердикт")
+            patch[key] = val
+        elif key == "reason":
+            if not val:
+                raise ValueError("правило (reason) не может быть пустым")
+            patch[key] = val
+        else:
+            patch[key] = val or None
+    if not patch:
+        raise ValueError("нет полей для изменения")
+    return patch
+
+
+def update_adjudication(adj_id: int, body: dict) -> bool:
+    """Правка разбора супер-админом (embedding пересчитывается). False — разбора нет."""
+    from .rag import store
+    return store.update_adjudication(int(adj_id), _clean_adjudication_patch(body))
+
+
+def delete_adjudication(adj_id: int) -> bool:
+    """Удаление разбора супер-админом. False — разбора нет."""
+    from .rag import store
+    return store.delete_adjudication(int(adj_id))
 
 
 def refine_adjudication(body: dict) -> dict:
@@ -571,7 +614,13 @@ def _reviewed_metrics(cur):
     try:
         # Исправления могут быть и от ревью до появления следа — ключ call+criterion этого не различает,
         # для точности тревог это безопасно (исправление = человек не согласен).
-        cur.execute("SELECT call_id, criterion_idx, correct_verdict FROM qa_adjudications WHERE call_id = ANY(%s)",
+        # Деактивированные RAG-правила остаются следом ревью. Если по тому же критерию
+        # разбор создавали повторно, человеческим эталоном считаем самый свежий.
+        cur.execute("""SELECT DISTINCT ON (call_id, criterion_idx)
+                              call_id, criterion_idx, correct_verdict
+                         FROM qa_adjudications
+                        WHERE call_id = ANY(%s)
+                        ORDER BY call_id, criterion_idx, created_at DESC, id DESC""",
                     ([r[0] for r in rows],))
         corr = {(r[0], r[1]): r[2] for r in cur.fetchall()}
     except Exception:
@@ -582,7 +631,10 @@ def _reviewed_metrics(cur):
         for c in crits or []:
             if c.get("source") != "transcript" or c.get("ai") not in _VERDICTS:
                 continue
-            hv = corr.get((call_id, c.get("idx")), c.get("ai"))
+            # confirmed означает, что в ТЕКУЩЕМ ревью человек одобрил все verdict'ы ИИ;
+            # старые разборы того же звонка не должны превращать это ревью в исправленное.
+            hv = (c.get("ai") if outcome == "confirmed"
+                  else corr.get((call_id, c.get("idx")), c.get("ai")))
             out["endorsed" if hv == c.get("ai") else "corrected"] += 1
             if c.get("ai") == "Incorrect":
                 alarms += 1
@@ -637,6 +689,7 @@ def stats() -> dict:
         try:  # сколько правил (разборов) уже накоплено по каждому проблемному критерию
             cur.execute("""SELECT COALESCE(d.name, '—'), a.criterion_name, COUNT(*)
                              FROM qa_adjudications a LEFT JOIN directions d ON d.id = a.direction_id
+                            WHERE a.is_active
                             GROUP BY 1, 2""")
             rules = {(r[0], r[1]): r[2] for r in cur.fetchall()}
             for r in out["focus"]:

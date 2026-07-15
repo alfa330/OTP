@@ -6,6 +6,7 @@ import {
     ShieldAlert, Gauge, Server, Clock, Loader2, AlertCircle, RotateCcw, Volume1, CheckCircle2,
 } from 'lucide-react';
 import { APPLE_FONT, iosCard, iosBtnGhost, iosBtnSecondary, IosBadge } from '../ui/ios';
+import { normalizeRole } from '../../utils/roles';
 import CallReviewCard from './CallReviewCard';
 import QaDashboard from './QaDashboard';
 import EvaluationsList from './EvaluationsList';
@@ -39,7 +40,7 @@ function Segmented({ tab, setTab }) {
             {TABS.map((t) => {
                 const active = tab === t.key;
                 return (
-                    <button key={t.key} onClick={() => setTab(t.key)}
+                    <button key={t.key} type="button" onClick={() => setTab(t.key)}
                         className={`relative flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-[13px] font-semibold transition ${
                             active ? 'text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}>
                         {active && (
@@ -97,10 +98,13 @@ const ErrorCard = ({ text, onRetry }) => (
 );
 
 export default function CallQaView(props) {
-    const { apiBaseUrl, withAccessTokenHeader, showToast } = props;
+    const { apiBaseUrl, withAccessTokenHeader, showToast, user } = props;
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
+    // Правка/удаление разборов — только супер-админ (бэкенд проверяет то же в _ai_qa_admin_guard).
+    const canManageRag = normalizeRole(user?.role) === 'super_admin';
 
     const [tab, setTab] = useState('queue');
+    const [ragInteraction, setRagInteraction] = useState({ editing: false, busy: false });
     const [queue, setQueue] = useState(null);      // null = загрузка
     const [queueErr, setQueueErr] = useState(false);
 
@@ -108,6 +112,17 @@ export default function CallQaView(props) {
     const [callData, setCallData] = useState(null);
     const [callLoading, setCallLoading] = useState(false);
     const [callErr, setCallErr] = useState(null);
+
+    const changeTab = (nextTab) => {
+        if (nextTab === tab) return;
+        if (tab === 'rag' && ragInteraction.busy) {
+            showToast?.('Дождитесь завершения сохранения разбора', 'error');
+            return;
+        }
+        if (tab === 'rag' && ragInteraction.editing &&
+            !window.confirm('Закрыть редактор? Несохранённые изменения будут потеряны.')) return;
+        setTab(nextTab);
+    };
 
     const loadQueue = () => {
         setQueue(null); setQueueErr(false);
@@ -186,7 +201,7 @@ export default function CallQaView(props) {
                 </div>
             </div>
 
-            {!selected && <Segmented tab={tab} setTab={setTab} />}
+            {!selected && <Segmented tab={tab} setTab={changeTab} />}
 
             {selected ? (
                 <div className="space-y-3">
@@ -227,7 +242,9 @@ export default function CallQaView(props) {
             ) : tab === 'criteria' ? (
                 <CriteriaClassification showToast={showToast} apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader} />
             ) : (
-                <AdjudicationsRag apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader} />
+                <AdjudicationsRag apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
+                                  showToast={showToast} canManage={canManageRag}
+                                  onInteractionChange={setRagInteraction} />
             )}
         </div>
     );
