@@ -346,7 +346,10 @@ const BILLING_MODES = [
   { key: 'park', label: 'Таксопарки' },
   { key: 'line', label: 'Номера' },
   { key: 'operator', label: 'Операторы' },
+  { key: 'detail', label: 'Детализация' },
 ];
+
+const BILLING_DETAIL_PAGE_SIZE = 25;
 
 // Подписи SIP-линий из договоров, ключ = последние 10 цифр набранного номера
 const BILLING_LINE_LABELS = {
@@ -388,6 +391,32 @@ const billingLineDisplayNumber = (line) => {
   const digits = String(line || '').replace(/\D/g, '').slice(-10);
   return digits ? `8${digits}` : '';
 };
+
+const billingDetailPhoneDisplayNumber = (value) => {
+  const raw = String(value ?? '').trim();
+  if (!raw) return '—';
+  const digits = raw.replace(/\D/g, '');
+  return digits.length >= 10 ? `8${digits.slice(-10)}` : raw;
+};
+
+const billingOccurredAtLabel = (value) => {
+  const raw = String(value ?? '').trim();
+  if (!raw) return '—';
+  const parsed = new Date(raw.includes('T') ? raw : raw.replace(' ', 'T'));
+  if (Number.isNaN(parsed.getTime())) return raw;
+  return new Intl.DateTimeFormat('ru-RU', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).format(parsed);
+};
+
+const billingCallFlagLabel = (value) => (value === true || Number(value) > 0 ? '1' : '—');
+
+const billingTalkDurationLabel = (value) => (Number(value) > 0 ? formatDurationHms(value) : '—');
 
 const DEFAULT_DISPLAY_OPTIONS = {
   metricOperators: true,
@@ -1687,6 +1716,39 @@ const BillingTable = ({ rows, totals, totalsLabel = 'Итого', mode = 'park' 
   );
 };
 
+const BillingDetailTable = ({ rows }) => (
+  <div className="overflow-x-auto">
+    <table className="w-full min-w-[1180px] divide-y divide-slate-200 text-sm tabular-nums">
+      <thead className="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500">
+        <tr>
+          <th className="px-3 py-2.5 text-left font-semibold">Дата</th>
+          <th className="px-3 py-2.5 text-left font-semibold">Парк на который звонят</th>
+          <th className="px-3 py-2.5 text-left font-semibold">Номер на который звонят</th>
+          <th className="px-3 py-2.5 text-left font-semibold">Номер водителя</th>
+          <th className="px-3 py-2.5 text-right font-semibold" title="Звонки, которые не дошли до очереди после IVR">Сброс на IVR</th>
+          <th className="px-3 py-2.5 text-right font-semibold" title="Оператор не принял звонок, водитель сбросил">Сброс в очереди/пропущенные</th>
+          <th className="px-3 py-2.5 text-right font-semibold" title="Время разговора, если звонок дошёл до оператора">Время разговора</th>
+        </tr>
+      </thead>
+      <tbody className="divide-y divide-slate-100">
+        {rows.map((item) => (
+          <tr key={item.id} className="transition hover:bg-slate-50/70">
+            <td className="whitespace-nowrap px-3 py-2.5 text-slate-700">{billingOccurredAtLabel(item.occurred_at)}</td>
+            <td className="px-3 py-2.5 font-medium text-slate-900">{billingParkLabel(item.park)}</td>
+            <td className="whitespace-nowrap px-3 py-2.5 text-slate-700">
+              {billingDetailPhoneDisplayNumber(item.line)}
+            </td>
+            <td className="whitespace-nowrap px-3 py-2.5 text-slate-700">{billingDetailPhoneDisplayNumber(item.driver_number)}</td>
+            <td className="px-3 py-2.5 text-right text-amber-700">{billingCallFlagLabel(item.ivr_drop)}</td>
+            <td className="px-3 py-2.5 text-right text-rose-600">{billingCallFlagLabel(item.queue_drop)}</td>
+            <td className="px-3 py-2.5 text-right font-medium text-slate-900">{billingTalkDurationLabel(item.talk_seconds)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </div>
+);
+
 // Занятость оператора: активное = разговоры (вх+исх) + постобработка + удержание + распределение
 const billingOperatorActivity = (item) => {
   const active = Number(item.talk_in_seconds || 0) + Number(item.talk_out_seconds || 0)
@@ -1995,11 +2057,12 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
     timeFrom: '00:00',
     timeTo: '23:59',
   }));
-  const [billingReports, setBillingReports] = useState({ park: null, line: null, operator: null });
+  const [billingReports, setBillingReports] = useState({ park: null, line: null, operator: null, detail: null });
   const [isBillingLoading, setIsBillingLoading] = useState(false);
   const [isBillingExporting, setIsBillingExporting] = useState(false);
-  const [billingErrors, setBillingErrors] = useState({ park: '', line: '', operator: '' });
+  const [billingErrors, setBillingErrors] = useState({ park: '', line: '', operator: '', detail: '' });
   const [billingExpandedDays, setBillingExpandedDays] = useState(() => new Set());
+  const [billingDetailPage, setBillingDetailPage] = useState(1);
   const billingAttemptedRef = useRef({});
   const [isOperatorDetailsOpen, setIsOperatorDetailsOpen] = useState(false);
   const [operatorAvailabilityDetailsByKey, setOperatorAvailabilityDetailsByKey] = useState({});
@@ -2089,28 +2152,40 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
 
   const billingAppliedKey = `${billingApplied.from}|${billingApplied.to}|${billingApplied.timeFrom}|${billingApplied.timeTo}`;
 
-  const fetchBillingReport = useCallback(async (mode) => {
+  const fetchBillingReport = useCallback(async (mode, { page = 1, snapshotId = '' } = {}) => {
     if (!apiRoot) return;
     const targetMode = mode || 'park';
     billingAttemptedRef.current[targetMode] = billingAppliedKey;
     setIsBillingLoading(true);
     setBillingErrors((current) => ({ ...current, [targetMode]: '' }));
     try {
-      const endpoint = targetMode === 'operator'
-        ? `${apiRoot}/api/resource_fte/oktell_billing_operators`
-        : `${apiRoot}/api/resource_fte/oktell_billing`;
+      const endpoint = targetMode === 'detail'
+        ? `${apiRoot}/api/resource_fte/oktell_billing_details`
+        : targetMode === 'operator'
+          ? `${apiRoot}/api/resource_fte/oktell_billing_operators`
+          : `${apiRoot}/api/resource_fte/oktell_billing`;
       const params = {
         date_from: billingApplied.from,
         date_to: billingApplied.to,
         time_from: billingApplied.timeFrom,
         time_to: billingApplied.timeTo,
       };
-      if (targetMode !== 'operator') params.group_by = targetMode;
+      if (targetMode === 'detail') {
+        params.page = page;
+        params.per_page = BILLING_DETAIL_PAGE_SIZE;
+        if (snapshotId) params.snapshot_id = snapshotId;
+      } else if (targetMode !== 'operator') {
+        params.group_by = targetMode;
+      }
       const response = await axios.get(endpoint, { params, headers: buildHeaders() });
       const payload = response.data || {};
       setBillingReports((current) => ({ ...current, [targetMode]: payload }));
-      const dayKeys = (payload.days || []).map((day) => day.date);
-      setBillingExpandedDays(new Set(dayKeys.length <= 3 ? dayKeys : []));
+      if (targetMode === 'detail') {
+        setBillingDetailPage(Math.max(1, Number(payload.pagination?.page || page)));
+      } else {
+        const dayKeys = (payload.days || []).map((day) => day.date);
+        setBillingExpandedDays(new Set(dayKeys.length <= 3 ? dayKeys : []));
+      }
     } catch (error) {
       setBillingReports((current) => ({ ...current, [targetMode]: null }));
       const message = error?.response?.data?.error || 'Не удалось получить данные из Oktell';
@@ -2122,8 +2197,9 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
 
   const buildBillingReport = useCallback(() => {
     billingAttemptedRef.current = {};
-    setBillingReports({ park: null, line: null, operator: null });
-    setBillingErrors({ park: '', line: '', operator: '' });
+    setBillingReports({ park: null, line: null, operator: null, detail: null });
+    setBillingErrors({ park: '', line: '', operator: '', detail: '' });
+    setBillingDetailPage(1);
     setBillingApplied({ from: billingFrom, to: billingTo, timeFrom: billingTimeFrom, timeTo: billingTimeTo });
   }, [billingFrom, billingTimeFrom, billingTimeTo, billingTo]);
 
@@ -2189,6 +2265,20 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
   const billingError = billingErrors[billingMode] || '';
   const billingDays = billingReport?.days || [];
   const billingTotals = billingReport?.totals || null;
+  const billingDetailRows = billingMode === 'detail' && Array.isArray(billingReport?.rows) ? billingReport.rows : [];
+  const billingDetailPagination = billingMode === 'detail' ? billingReport?.pagination || {} : {};
+  const billingDetailTotal = Math.max(0, Number(billingDetailPagination.total || 0));
+  const billingDetailTotalPages = Math.max(1, Number(billingDetailPagination.total_pages || 1));
+  const billingDetailCurrentPage = Math.min(
+    Math.max(1, Number(billingDetailPagination.page || billingDetailPage)),
+    billingDetailTotalPages,
+  );
+  const billingDetailPageStart = billingDetailTotal > 0
+    ? (billingDetailCurrentPage - 1) * BILLING_DETAIL_PAGE_SIZE + 1
+    : 0;
+  const billingDetailPageEnd = billingDetailTotal > 0
+    ? Math.min(billingDetailTotal, billingDetailPageStart + billingDetailRows.length - 1)
+    : 0;
   const billingArRatio = billingTotals ? safeRatio(billingTotals.lost, billingTotals.arrived) : null;
   const billingSlRatio = billingTotals ? safeRatio(billingTotals.served_sl, billingTotals.served) : null;
   const billingOperatorTotals = billingMode === 'operator' && billingTotals ? billingOperatorActivity(billingTotals) : null;
@@ -3726,7 +3816,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                 </div>
               </div>
               <div className="mt-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                <div className="inline-flex w-fit rounded-xl bg-slate-100 p-1">
+                <div className="inline-flex max-w-full w-fit overflow-x-auto rounded-xl bg-slate-100 p-1">
                   {BILLING_MODES.map((item) => (
                     <button
                       key={item.key}
@@ -3747,6 +3837,8 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                   <span className="tabular-nums">время {billingTimeFrom}–{billingTimeTo} включительно</span>
                   {billingMode === 'operator' ? (
                     <span>OCC — разговоры и обработка ко всему времени в системе; UTZ — время без пауз</span>
+                  ) : billingMode === 'detail' ? (
+                    <span>Одна строка — один звонок; на странице 25 звонков</span>
                   ) : (
                     <span>SL — обслужено за ≤ {billingReport?.sl_threshold_seconds ?? 20} сек ожидания</span>
                   )}
@@ -3769,9 +3861,12 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
               </div>
             )}
 
-            {!isBillingLoading && billingReport && billingTotals && billingDays.length > 0 && (
+            {!isBillingLoading && billingReport && (
+              (billingMode === 'detail' && billingDetailRows.length > 0)
+              || (billingMode !== 'detail' && billingTotals && billingDays.length > 0)
+            ) && (
               <>
-                {billingMode === 'operator' ? (
+                {billingMode !== 'detail' && (billingMode === 'operator' ? (
                   <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
                     <StatCard icon={CheckCircle2} label="Обслужено" value={formatInt(billingTotals.served)} hint="Входящие, отвеченные оператором" tone="emerald" />
                     <StatCard icon={Clock3} label="Время разговора" value={formatDurationHms(billingTotals.talk_in_seconds)} hint={`Исходящие ${formatDurationHms(billingTotals.talk_out_seconds)}`} tone="blue" />
@@ -3813,94 +3908,147 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                     />
                     <StatCard icon={Clock3} label="Время разговора" value={formatDurationHms(billingTotals.talk_seconds)} hint={`Общее время ${formatDurationHms(billingTotals.total_seconds)}`} tone="slate" />
                   </div>
-                )}
+                ))}
 
-                <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
-                  <div className="border-b border-slate-100 px-4 py-3">
-                    <h3 className="text-base font-semibold text-slate-950">
-                      {billingMode === 'operator' ? 'Итоги за период по операторам' : billingMode === 'line' ? 'Итоги за период по номерам' : 'Итоги за период по таксопаркам'}
-                    </h3>
-                    <p className="text-xs tabular-nums text-slate-500">{formatDate(billingReport.date_from)} — {formatDate(billingReport.date_to)} · {billingReport.time_from}–{billingReport.time_to}</p>
-                  </div>
-                  {billingMode === 'operator' ? (
-                    <BillingOperatorTable rows={billingReport.operators || []} totals={billingTotals} totalsLabel="Итого за период" />
-                  ) : (
-                    <BillingTable rows={billingReport.parks || []} totals={billingTotals} totalsLabel="Итого за период" mode={billingMode} />
-                  )}
-                </section>
-
-                <div className="flex items-center justify-between">
-                  <h3 className="text-base font-semibold text-slate-950">По дням</h3>
-                  <button
-                    type="button"
-                    onClick={() => setAllBillingDays(!billingAllExpanded)}
-                    className="text-sm font-semibold text-blue-700 transition hover:text-blue-800"
-                  >
-                    {billingAllExpanded ? 'Свернуть все' : 'Развернуть все'}
-                  </button>
-                </div>
-
-                <div className="space-y-3">
-                  {billingDays.map((day) => {
-                    const expanded = billingExpandedDays.has(day.date);
-                    const dayAr = billingMode === 'operator' ? null : safeRatio(day.totals?.lost, day.totals?.arrived);
-                    const daySl = billingMode === 'operator' ? null : safeRatio(day.totals?.served_sl, day.totals?.served);
-                    const dayOcc = billingMode === 'operator' ? billingOperatorActivity(day.totals || {}).occ : null;
-                    return (
-                      <section key={day.date} className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+                {billingMode === 'detail' ? (
+                  <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+                    <div className="border-b border-slate-100 px-4 py-3">
+                      <h3 className="text-base font-semibold text-slate-950">Детализация звонков</h3>
+                      <p className="text-xs tabular-nums text-slate-500">
+                        {formatDate(billingReport.date_from)} — {formatDate(billingReport.date_to)} · {billingReport.time_from}–{billingReport.time_to}
+                      </p>
+                      <p className="mt-1 text-xs text-slate-500">
+                        IVR — не дошли до очереди; очередь — не дождались оператора; время разговора — только отвеченные звонки.
+                      </p>
+                    </div>
+                    <BillingDetailTable rows={billingDetailRows} />
+                    <div className="flex flex-col gap-3 border-t border-slate-200 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="text-xs tabular-nums text-slate-500">
+                        Строки {formatInt(billingDetailPageStart)}–{formatInt(billingDetailPageEnd)} из {formatInt(billingDetailTotal)}
+                      </div>
+                      <div className="flex items-center justify-between gap-3 sm:justify-end">
                         <button
                           type="button"
-                          onClick={() => toggleBillingDay(day.date)}
-                          className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition hover:bg-slate-50"
+                          onClick={() => fetchBillingReport('detail', {
+                            page: billingDetailCurrentPage - 1,
+                            snapshotId: billingReport.snapshot_id,
+                          })}
+                          disabled={billingDetailCurrentPage <= 1}
+                          className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
                         >
-                          <div className="flex min-w-0 items-center gap-3">
-                            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-sky-50 text-sky-700">
-                              <CalendarDays size={17} />
-                            </span>
-                            <div className="min-w-0">
-                              <div className="truncate text-sm font-semibold capitalize text-slate-950">{billingDayLabel(day.date)}</div>
-                              <div className="truncate text-xs tabular-nums text-slate-500">
-                                {billingMode === 'operator'
-                                  ? `Операторов ${formatInt((day.operators || []).length)} · Обслужено ${formatInt(day.totals?.served)} · Разговоры ${formatDurationHms(day.totals?.talk_in_seconds)}`
-                                  : `Поступило ${formatInt(day.totals?.arrived)} · Обслужено ${formatInt(day.totals?.served)} · Потеряно ${formatInt(day.totals?.lost)}`}
-                              </div>
-                            </div>
-                          </div>
-                          <div className="flex shrink-0 items-center gap-2">
-                            {billingMode === 'operator' ? (
-                              <span className="hidden rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold tabular-nums text-slate-700 sm:inline">
-                                OCC {dayOcc === null ? '—' : formatPercent(dayOcc, 1)}
-                              </span>
-                            ) : (
-                              <>
-                                <span className={`hidden rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold tabular-nums sm:inline ${billingArClass(dayAr)}`}>
-                                  AR {dayAr === null ? '—' : formatPercent(dayAr, 1)}
-                                </span>
-                                <span className={`hidden rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold tabular-nums sm:inline ${billingSlClass(daySl)}`}>
-                                  SL {daySl === null ? '—' : formatPercent(daySl, 1)}
-                                </span>
-                              </>
-                            )}
-                            {expanded ? <ChevronUp size={17} className="text-slate-400" /> : <ChevronDown size={17} className="text-slate-400" />}
-                          </div>
+                          <ChevronLeft size={15} />
+                          Назад
                         </button>
-                        {expanded ? (
-                          <div className="border-t border-slate-100">
-                            {billingMode === 'operator' ? (
-                              <BillingOperatorTable rows={day.operators || []} totals={day.totals} totalsLabel="Итого за день" />
-                            ) : (
-                              <BillingTable rows={day.parks || []} totals={day.totals} totalsLabel="Итого за день" mode={billingMode} />
-                            )}
-                          </div>
-                        ) : null}
-                      </section>
-                    );
-                  })}
-                </div>
+                        <span className="min-w-16 text-center text-sm font-semibold tabular-nums text-slate-700">
+                          {formatInt(billingDetailCurrentPage)} / {formatInt(billingDetailTotalPages)}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => fetchBillingReport('detail', {
+                            page: billingDetailCurrentPage + 1,
+                            snapshotId: billingReport.snapshot_id,
+                          })}
+                          disabled={billingDetailCurrentPage >= billingDetailTotalPages}
+                          className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          Вперед
+                          <ChevronRight size={15} />
+                        </button>
+                      </div>
+                    </div>
+                  </section>
+                ) : (
+                  <>
+                    <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+                      <div className="border-b border-slate-100 px-4 py-3">
+                        <h3 className="text-base font-semibold text-slate-950">
+                          {billingMode === 'operator' ? 'Итоги за период по операторам' : billingMode === 'line' ? 'Итоги за период по номерам' : 'Итоги за период по таксопаркам'}
+                        </h3>
+                        <p className="text-xs tabular-nums text-slate-500">{formatDate(billingReport.date_from)} — {formatDate(billingReport.date_to)} · {billingReport.time_from}–{billingReport.time_to}</p>
+                      </div>
+                      {billingMode === 'operator' ? (
+                        <BillingOperatorTable rows={billingReport.operators || []} totals={billingTotals} totalsLabel="Итого за период" />
+                      ) : (
+                        <BillingTable rows={billingReport.parks || []} totals={billingTotals} totalsLabel="Итого за период" mode={billingMode} />
+                      )}
+                    </section>
+
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-base font-semibold text-slate-950">По дням</h3>
+                      <button
+                        type="button"
+                        onClick={() => setAllBillingDays(!billingAllExpanded)}
+                        className="text-sm font-semibold text-blue-700 transition hover:text-blue-800"
+                      >
+                        {billingAllExpanded ? 'Свернуть все' : 'Развернуть все'}
+                      </button>
+                    </div>
+
+                    <div className="space-y-3">
+                      {billingDays.map((day) => {
+                        const expanded = billingExpandedDays.has(day.date);
+                        const dayAr = billingMode === 'operator' ? null : safeRatio(day.totals?.lost, day.totals?.arrived);
+                        const daySl = billingMode === 'operator' ? null : safeRatio(day.totals?.served_sl, day.totals?.served);
+                        const dayOcc = billingMode === 'operator' ? billingOperatorActivity(day.totals || {}).occ : null;
+                        return (
+                          <section key={day.date} className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+                            <button
+                              type="button"
+                              onClick={() => toggleBillingDay(day.date)}
+                              className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition hover:bg-slate-50"
+                            >
+                              <div className="flex min-w-0 items-center gap-3">
+                                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-sky-50 text-sky-700">
+                                  <CalendarDays size={17} />
+                                </span>
+                                <div className="min-w-0">
+                                  <div className="truncate text-sm font-semibold capitalize text-slate-950">{billingDayLabel(day.date)}</div>
+                                  <div className="truncate text-xs tabular-nums text-slate-500">
+                                    {billingMode === 'operator'
+                                      ? `Операторов ${formatInt((day.operators || []).length)} · Обслужено ${formatInt(day.totals?.served)} · Разговоры ${formatDurationHms(day.totals?.talk_in_seconds)}`
+                                      : `Поступило ${formatInt(day.totals?.arrived)} · Обслужено ${formatInt(day.totals?.served)} · Потеряно ${formatInt(day.totals?.lost)}`}
+                                  </div>
+                                </div>
+                              </div>
+                              <div className="flex shrink-0 items-center gap-2">
+                                {billingMode === 'operator' ? (
+                                  <span className="hidden rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold tabular-nums text-slate-700 sm:inline">
+                                    OCC {dayOcc === null ? '—' : formatPercent(dayOcc, 1)}
+                                  </span>
+                                ) : (
+                                  <>
+                                    <span className={`hidden rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold tabular-nums sm:inline ${billingArClass(dayAr)}`}>
+                                      AR {dayAr === null ? '—' : formatPercent(dayAr, 1)}
+                                    </span>
+                                    <span className={`hidden rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold tabular-nums sm:inline ${billingSlClass(daySl)}`}>
+                                      SL {daySl === null ? '—' : formatPercent(daySl, 1)}
+                                    </span>
+                                  </>
+                                )}
+                                {expanded ? <ChevronUp size={17} className="text-slate-400" /> : <ChevronDown size={17} className="text-slate-400" />}
+                              </div>
+                            </button>
+                            {expanded ? (
+                              <div className="border-t border-slate-100">
+                                {billingMode === 'operator' ? (
+                                  <BillingOperatorTable rows={day.operators || []} totals={day.totals} totalsLabel="Итого за день" />
+                                ) : (
+                                  <BillingTable rows={day.parks || []} totals={day.totals} totalsLabel="Итого за день" mode={billingMode} />
+                                )}
+                              </div>
+                            ) : null}
+                          </section>
+                        );
+                      })}
+                    </div>
+                  </>
+                )}
               </>
             )}
 
-            {!isBillingLoading && billingReport && billingDays.length === 0 && (
+            {!isBillingLoading && billingReport && (
+              billingMode === 'detail' ? billingDetailRows.length === 0 : billingDays.length === 0
+            ) && (
               <EmptyState
                 title="Нет данных за выбранный период"
                 text="Oktell не вернул входящих звонков за указанный период и окно времени."

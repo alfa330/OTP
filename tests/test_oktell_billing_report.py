@@ -23,6 +23,7 @@ from openpyxl.utils import get_column_letter
 BOT_PATH = Path(__file__).resolve().parents[1] / "bot_schedule2.py"
 
 FUNCTION_NAMES = [
+    "_oktell_billing_range_exceeds_limit",
     "_oktell_billing_parse_time",
     "_oktell_billing_minute_filter",
     "_oktell_billing_sql",
@@ -30,12 +31,22 @@ FUNCTION_NAMES = [
     "_oktell_billing_int",
     "_oktell_billing_sec",
     "_oktell_billing_build_report",
+    "_oktell_billing_detail_source_sql",
+    "_oktell_billing_detail_select_sql",
+    "_oktell_billing_detail_line_apply_sql",
+    "_oktell_billing_detail_page_sql",
+    "_oktell_billing_detail_export_page_sql",
+    "_oktell_billing_detail_row",
+    "_oktell_billing_build_detail_page",
+    "_oktell_fetch_billing_detail_page",
+    "_oktell_fetch_billing_detail_export_rows",
     "_oktell_billing_operator_calls_sql",
     "_oktell_billing_operator_states_sql",
     "_oktell_fetch_billing_operator_rows",
     "_oktell_billing_build_operator_report",
     "_oktell_billing_park_label",
     "_oktell_billing_line_digits",
+    "_oktell_billing_phone_display",
     "_oktell_billing_line_label",
     "_oktell_billing_ratio",
     "_oktell_billing_export_columns",
@@ -44,6 +55,7 @@ FUNCTION_NAMES = [
 ]
 
 CONST_NAMES = (
+    "OKTELL_BILLING_MAX_RANGE_DAYS",
     "_OKTELL_BILLING_PARK_LABELS",
     "_OKTELL_BILLING_LINE_LABELS",
     "_OKTELL_BILLING_EXPORT_DUR_FMT",
@@ -111,6 +123,20 @@ class ParseTimeTests(unittest.TestCase):
             self.assertIsNone(parse(bad), bad)
 
 
+class BillingRangeLimitTests(unittest.TestCase):
+    def setUp(self):
+        self.ns = _extract_namespace()
+
+    def test_exactly_31_days_are_allowed(self):
+        exceeds = self.ns["_oktell_billing_range_exceeds_limit"]
+        self.assertEqual(self.ns["OKTELL_BILLING_MAX_RANGE_DAYS"], 31)
+        self.assertFalse(exceeds(date(2026, 7, 1), date(2026, 7, 31)))
+
+    def test_32_days_are_rejected(self):
+        exceeds = self.ns["_oktell_billing_range_exceeds_limit"]
+        self.assertTrue(exceeds(date(2026, 7, 1), date(2026, 8, 1)))
+
+
 class SqlBuilderTests(unittest.TestCase):
     def setUp(self):
         self.ns = _extract_namespace()
@@ -166,6 +192,97 @@ class SqlBuilderTests(unittest.TestCase):
             self.assertIn(state_alias, states_sql)
         self.assertIn("DATEPART(HOUR, s.DateTimeStart)", states_sql)
         self.assertNotIn(";", states_sql)
+
+
+class BillingDetailTests(unittest.TestCase):
+    def test_page_sql_contains_driver_outcomes_snapshot_and_stable_order(self):
+        ns = _extract_namespace()
+        sql = ns["_oktell_billing_detail_page_sql"](
+            "20260701", "20260703", 480, 1200, page=2, per_page=25, snapshot_id=500)
+        self.assertIn("COALESCE(t.[number], N'') AS driver_number", sql)
+        self.assertIn("s.ANumberDialed AS line_number", sql)
+        self.assertIn("s.AOutNumber AS caller_number", sql)
+        self.assertIn("s.ConnectionType = 4", sql)
+        self.assertIn("OUTER APPLY", sql)
+        self.assertIn("t.call_result IN (5,13,19)", sql)
+        self.assertIn("AS ivr_drop", sql)
+        self.assertIn("AS queue_drop", sql)
+        self.assertIn("AS talk_seconds", sql)
+        self.assertIn("COUNT(*) OVER() AS total_count", sql)
+        self.assertIn("MAX(t.Id) OVER() AS snapshot_id", sql)
+        self.assertIn("ORDER BY t.dt_insert DESC, t.Id DESC", sql)
+        self.assertIn("t.Id <= 500", sql)
+        self.assertIn("ranked.row_num BETWEEN 26 AND 50", sql)
+        self.assertIn("BETWEEN 480 AND 1200", sql)
+        self.assertNotIn(";", sql)
+
+    def test_export_sql_uses_keyset_cursor_and_proxy_page_size(self):
+        sql = _extract_namespace(page_size=1000)["_oktell_billing_detail_export_page_sql"](
+            "20260701", "20260702", 0, 1439, max_call_id=777, page_size=5000)
+        self.assertIn("SELECT TOP 1000", sql)
+        self.assertIn("t.Id <= 777", sql)
+        self.assertIn("ORDER BY t.Id DESC", sql)
+        self.assertIn("ORDER BY p.call_id DESC", sql)
+        self.assertNotIn("ROW_NUMBER()", sql)
+        self.assertNotIn(";", sql)
+
+    def test_build_page_normalizes_rows_and_preserves_snapshot(self):
+        ns = _extract_namespace()
+        page = ns["_oktell_billing_build_detail_page"]([{
+            "call_id": "42",
+            "occurred_at": "2026-07-15 10:20:30",
+            "taxi_park": " iTaxi ",
+            "line_number": "+77075050880",
+            "driver_number": "+77071234567",
+            "ivr_drop": 0,
+            "queue_drop": 1,
+            "talk_seconds": "0",
+            "total_count": 76,
+            "snapshot_id": 99,
+        }], page=2, per_page=25, snapshot_id=100)
+        self.assertEqual(page["snapshot_id"], 100)
+        self.assertEqual(page["pagination"], {
+            "page": 2, "per_page": 25, "total": 76, "total_pages": 4,
+        })
+        self.assertEqual(page["rows"], [{
+            "id": 42,
+            "occurred_at": "2026-07-15 10:20:30",
+            "park": "iTaxi",
+            "line": "+77075050880",
+            "driver_number": "+77071234567",
+            "ivr_drop": 0,
+            "queue_drop": 1,
+            "talk_seconds": 0,
+        }])
+
+    def test_full_export_fetches_every_keyset_page(self):
+        calls = []
+        pages = [
+            [
+                {"call_id": 5, "occurred_at": "2026-07-15 10:05:00", "taxi_park": "iTaxi"},
+                {"call_id": 4, "occurred_at": "2026-07-15 10:04:00", "taxi_park": "iTaxi"},
+            ],
+            [
+                {"call_id": 3, "occurred_at": "2026-07-15 10:03:00", "taxi_park": "iTaxi"},
+                {"call_id": 2, "occurred_at": "2026-07-15 10:02:00", "taxi_park": "iTaxi"},
+            ],
+            [
+                {"call_id": 1, "occurred_at": "2026-07-15 10:01:00", "taxi_park": "iTaxi"},
+            ],
+        ]
+
+        def fake_query(sql):
+            calls.append(sql)
+            return pages[len(calls) - 1]
+
+        ns = _extract_namespace(oktell_query=fake_query, page_size=2)
+        rows = ns["_oktell_fetch_billing_detail_export_rows"](
+            date(2026, 7, 15), date(2026, 7, 15), 0, 1439)
+        self.assertEqual([row["id"] for row in rows], [5, 4, 3, 2, 1])
+        self.assertEqual(len(calls), 3)
+        self.assertNotIn("t.Id <=", calls[0])
+        self.assertIn("t.Id <= 3", calls[1])
+        self.assertIn("t.Id <= 1", calls[2])
 
 
 class BuildReportTests(unittest.TestCase):
@@ -333,6 +450,45 @@ class BuildOperatorReportTests(unittest.TestCase):
         self.assertEqual(values[7], "—")
         self.assertEqual(values[8], "—")
 
+    def test_detail_export_columns_and_values(self):
+        ns = _extract_namespace()
+        headers, widths, formats = ns["_oktell_billing_export_columns"]("detail")
+        self.assertEqual(headers, [
+            "Дата",
+            "Парк на который звонят",
+            "Номер на который звонят",
+            "Номер водителя",
+            "Сброс на IVR",
+            "Сброс в очереди/пропущенные",
+            "Время разговора",
+        ])
+        self.assertEqual(len(widths), 7)
+        self.assertEqual(formats, {1: "dd.mm.yyyy hh:mm:ss", 7: "[h]:mm:ss"})
+
+        values = ns["_oktell_billing_export_values"]("detail", {
+            "occurred_at": "2026-07-15 11:22:33",
+            "park": "Tenge_taxi",
+            "line": "+7 (700) 155-1198",
+            "driver_number": "+7 707 123 45 67",
+            "ivr_drop": 0,
+            "queue_drop": 0,
+            "talk_seconds": 901,
+        })
+        self.assertEqual(values[:6], [
+            datetime(2026, 7, 15, 11, 22, 33), "Тенге Такси", "87001551198",
+            "87071234567", 0, 0,
+        ])
+        self.assertAlmostEqual(values[6], 901 / 86400.0)
+
+    def test_detail_export_uses_dash_for_missing_numbers(self):
+        values = _extract_namespace()["_oktell_billing_export_values"]("detail", {
+            "occurred_at": "2026-07-15 10:00:00", "park": "iTaxi", "line": "",
+            "driver_number": "", "ivr_drop": 1, "queue_drop": 0, "talk_seconds": 0,
+        })
+        self.assertEqual(values[2], "—")
+        self.assertEqual(values[3], "—")
+        self.assertEqual(values[4:6], [1, 0])
+
     def test_export_workbook_structure(self):
         ns = _extract_namespace()
         report = ns["_oktell_billing_build_report"]([
@@ -359,6 +515,46 @@ class BuildOperatorReportTests(unittest.TestCase):
         self.assertEqual(ws_days.cell(row=3, column=2).value, "Итого за день")
         # формат длительности в дневном листе со сдвигом на колонку даты
         self.assertEqual(ws_days.cell(row=2, column=8).number_format, "[h]:mm:ss")
+
+    def test_detail_workbook_is_one_flat_filtered_sheet(self):
+        ns = _extract_namespace()
+        report = {"rows": [
+            {"id": 103, "occurred_at": "2026-07-14 12:15:00", "park": "iTaxi",
+             "line": "+77075050880", "driver_number": "+77071234567",
+             "ivr_drop": 0, "queue_drop": 0, "talk_seconds": 960},
+            {"id": 102, "occurred_at": "2026-07-14 12:10:00", "park": "iTaxi",
+             "line": "+77075050880", "driver_number": "87079876543",
+             "ivr_drop": 0, "queue_drop": 1, "talk_seconds": 0},
+            {"id": 101, "occurred_at": "2026-07-13 09:00:00", "park": "Tenge_taxi",
+             "line": "", "driver_number": "", "ivr_drop": 1, "queue_drop": 0,
+             "talk_seconds": 0},
+        ]}
+        params = {"start_day": date(2026, 7, 13), "end_day": date(2026, 7, 14),
+                  "minute_from": 0, "minute_to": 1439}
+
+        output = ns["_oktell_billing_export_workbook"]("detail", params, report, 20)
+        wb = load_workbook(output)
+        self.assertEqual(wb.sheetnames, ["Детализация"])
+        ws = wb.active
+        self.assertEqual([cell.value for cell in ws[1]], [
+            "Дата", "Парк на который звонят", "Номер на который звонят", "Номер водителя",
+            "Сброс на IVR", "Сброс в очереди/пропущенные", "Время разговора",
+        ])
+        self.assertEqual(ws.max_row, 4)
+        self.assertEqual(ws.freeze_panes, "A2")
+        self.assertEqual(ws.auto_filter.ref, "A1:G4")
+        self.assertTrue(ws["A1"].font.bold)
+        self.assertEqual(ws["A1"].font.color.rgb, "00FFFFFF")
+
+        rows = [list(row) for row in ws.iter_rows(min_row=2, values_only=True)]
+        self.assertEqual(rows[0][:6], [
+            datetime(2026, 7, 14, 12, 15), "iTaxi", "87075050880", "87071234567", 0, 0,
+        ])
+        self.assertEqual(rows[0][6], timedelta(seconds=960))
+        self.assertEqual(ws["A2"].number_format, "dd.mm.yyyy hh:mm:ss")
+        self.assertEqual(ws["G2"].number_format, "[h]:mm:ss")
+        self.assertEqual(rows[1][3:6], ["87079876543", 0, 1])
+        self.assertEqual(rows[2][1:4], ["Тенге Такси", "—", "—"])
 
     def test_operator_fetch_runs_two_queries_per_chunk(self):
         calls = []

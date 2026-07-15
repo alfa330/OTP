@@ -273,6 +273,9 @@ OKTELL_CALLS_INTRADAY_MINUTE = _env_int('OKTELL_CALLS_INTRADAY_MINUTE', 20, mini
 OKTELL_RESOURCE_SYNC_ENABLED = _env_bool('OKTELL_RESOURCE_SYNC_ENABLED', True)
 OKTELL_RESOURCE_MAX_RANGE_DAYS = _env_int('OKTELL_RESOURCE_MAX_RANGE_DAYS', 31, minimum=1, maximum=92)
 OKTELL_RESOURCE_CHUNK_DAYS = _env_int('OKTELL_RESOURCE_CHUNK_DAYS', 7, minimum=1, maximum=31)
+# Пользовательские отчёты «Биллинг Oktell» всегда ограничены одним периодом до 31 дня.
+# Это отдельный лимит: OKTELL_RESOURCE_MAX_RANGE_DAYS относится только к синхронизации.
+OKTELL_BILLING_MAX_RANGE_DAYS = 31
 # Только ночной прогон: импорт пересчитывает все исторические прогнозы (тяжело для внутридневного).
 OKTELL_RESOURCE_NIGHTLY_HOUR = _env_int('OKTELL_RESOURCE_NIGHTLY_HOUR', 5, minimum=0, maximum=23)
 OKTELL_RESOURCE_NIGHTLY_MINUTE = _env_int('OKTELL_RESOURCE_NIGHTLY_MINUTE', 40, minimum=0, maximum=59)
@@ -4146,6 +4149,8 @@ def api_ai_qa_adjudicate():
         saved = save_adjudications(body.get('call_id'), body.get('direction_id'),
                                    body.get('items', []), reviewer_id=requester_id)
         return jsonify({"status": "success", "saved": saved}), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
     except Exception:
         logging.exception("ai-qa adjudicate failed")
         return jsonify({"error": "не удалось сохранить разбор (детали в логах сервера)"}), 500
@@ -4433,6 +4438,10 @@ def api_resource_fte_sync_oktell():
         return _resource_fte_error_response(error)
 
 
+def _oktell_billing_range_exceeds_limit(start_day, end_day):
+    return (end_day - start_day).days + 1 > OKTELL_BILLING_MAX_RANGE_DAYS
+
+
 def _oktell_billing_parse_request_args():
     """Общий разбор параметров отчетов «Биллинг Oktell». Возвращает
     (params_dict, error_response, status) — при ошибке params_dict is None."""
@@ -4444,8 +4453,8 @@ def _oktell_billing_parse_request_args():
         return None, jsonify({"error": "date_from и date_to обязательны в формате YYYY-MM-DD"}), 400
     if end_day < start_day:
         return None, jsonify({"error": "date_to должен быть не раньше date_from"}), 400
-    if (end_day - start_day).days + 1 > OKTELL_RESOURCE_MAX_RANGE_DAYS:
-        return None, jsonify({"error": f"Период отчета не может быть больше {OKTELL_RESOURCE_MAX_RANGE_DAYS} дней"}), 400
+    if _oktell_billing_range_exceeds_limit(start_day, end_day):
+        return None, jsonify({"error": f"Период отчета не может быть больше {OKTELL_BILLING_MAX_RANGE_DAYS} дней"}), 400
 
     minute_from = _oktell_billing_parse_time(request.args.get('time_from') or '00:00')
     minute_to = _oktell_billing_parse_time(request.args.get('time_to') or '23:59')
@@ -4544,6 +4553,57 @@ def api_resource_fte_oktell_billing_operators():
     }), 200
 
 
+@app.route('/api/resource_fte/oktell_billing_details', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_oktell_billing_details():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+
+    params, error_response, error_status = _oktell_billing_parse_request_args()
+    if params is None:
+        return error_response, error_status
+
+    try:
+        page = int(request.args.get('page') or 1)
+        per_page = int(request.args.get('per_page') or 25)
+    except (TypeError, ValueError):
+        return jsonify({"error": "page и per_page должны быть целыми числами"}), 400
+    if page < 1:
+        return jsonify({"error": "page должен быть не меньше 1"}), 400
+    if per_page < 1 or per_page > 100:
+        return jsonify({"error": "per_page должен быть от 1 до 100"}), 400
+
+    snapshot_raw = request.args.get('snapshot_id')
+    snapshot_id = None
+    if snapshot_raw not in (None, ''):
+        try:
+            snapshot_id = int(snapshot_raw)
+        except (TypeError, ValueError):
+            return jsonify({"error": "snapshot_id должен быть целым числом"}), 400
+        if snapshot_id < 1:
+            return jsonify({"error": "snapshot_id должен быть больше 0"}), 400
+
+    try:
+        raw_rows = _oktell_fetch_billing_detail_page(
+            params['start_day'], params['end_day'],
+            params['minute_from'], params['minute_to'],
+            page, per_page, snapshot_id,
+        )
+    except Exception:
+        logging.exception("Oktell billing details report failed")
+        return jsonify({"error": "Не удалось получить данные из Oktell, попробуйте ещё раз"}), 502
+
+    detail_page = _oktell_billing_build_detail_page(raw_rows, page, per_page, snapshot_id)
+    return jsonify({
+        "status": "success",
+        **_oktell_billing_response_meta(params),
+        **detail_page,
+    }), 200
+
+
 @app.route('/api/resource_fte/oktell_billing_export', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_resource_fte_oktell_billing_export():
@@ -4558,8 +4618,8 @@ def api_resource_fte_oktell_billing_export():
         return error_response, error_status
 
     mode = str(request.args.get('mode') or 'park').strip().lower()
-    if mode not in ('park', 'line', 'operator'):
-        return jsonify({"error": "mode должен быть park, line или operator"}), 400
+    if mode not in ('park', 'line', 'operator', 'detail'):
+        return jsonify({"error": "mode должен быть park, line, operator или detail"}), 400
 
     try:
         sl_seconds = int(request.args.get('sl_seconds') or OKTELL_BILLING_SL_DEFAULT_SECONDS)
@@ -4573,6 +4633,11 @@ def api_resource_fte_oktell_billing_export():
                 params['start_day'], params['end_day'],
                 params['minute_from'], params['minute_to'])
             report = _oktell_billing_build_operator_report(calls_rows, states_rows)
+        elif mode == 'detail':
+            detail_rows = _oktell_fetch_billing_detail_export_rows(
+                params['start_day'], params['end_day'],
+                params['minute_from'], params['minute_to'])
+            report = {'rows': detail_rows}
         else:
             raw_rows = _oktell_fetch_billing_rows(
                 params['start_day'], params['end_day'],
@@ -24486,6 +24551,172 @@ def _oktell_billing_build_report(raw_rows, include_line=False):
     return {'days': days, 'parks': _sorted_parks(parks_map), 'totals': totals}
 
 
+# --- «Биллинг Oktell»: построчная детализация звонков -------------------------------------------
+# Одна строка = один входящий звонок. Снимок по максимальному Id фиксирует выборку при переходе
+# между страницами, чтобы новые звонки текущего дня не сдвигали уже просмотренные строки.
+def _oktell_billing_detail_source_sql(date_from_compact, date_to_excl_compact,
+                                      minute_from, minute_to, max_call_id=None):
+    grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
+    fail = _OKTELL_FAILED_CALL.replace("'", "''")
+    minute_filter = _oktell_billing_minute_filter(minute_from, minute_to)
+    id_filter = f"AND t.Id <= {int(max_call_id)} " if max_call_id is not None else ''
+    return (
+        "FROM oktell.dbo.Call_Systems_hst t "
+        f"WHERE t.dt_insert >= '{date_from_compact}' AND t.dt_insert < '{date_to_excl_compact}' "
+        f"AND t.taxi_park <> '' AND t.route = 'incoming' AND t.result_call <> N'{fail}' "
+        f"AND (t.result_call = N'{grt}' OR (t.result_call <> N'{grt}' AND t.call_result IN (5,13,19))) "
+        f"{id_filter}{minute_filter}"
+    )
+
+
+def _oktell_billing_detail_select_sql():
+    return (
+        "t.Id AS call_id, "
+        "t.dt_insert AS occurred_at, "
+        "t.taxi_park AS taxi_park, "
+        "COALESCE(t.[number], N'') AS driver_number, "
+        "t.chainid AS chain_id, t.result_call AS result_call, "
+        "t.call_result AS call_result, t.total_length AS total_length"
+    )
+
+
+def _oktell_billing_detail_line_apply_sql(call_alias, date_from_compact, date_to_excl_compact):
+    conn_from = (datetime.strptime(date_from_compact, '%Y%m%d') - timedelta(days=1)).strftime('%Y%m%d')
+    return (
+        "OUTER APPLY (SELECT TOP 1 s.ANumberDialed AS line_number, s.AOutNumber AS caller_number "
+        "FROM oktell.dbo.A_Stat_Connections_1x1 s "
+        f"WHERE s.IdChain = TRY_CAST({call_alias}.chain_id AS uniqueidentifier) "
+        "AND s.ConnectionType = 4 "
+        f"AND s.TimeStart >= '{conn_from}' AND s.TimeStart < '{date_to_excl_compact}' "
+        "ORDER BY s.TimeStart ASC, s.Id ASC) c "
+    )
+
+
+def _oktell_billing_detail_page_sql(date_from_compact, date_to_excl_compact,
+                                    minute_from, minute_to, page, per_page, snapshot_id=None):
+    grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
+    page = max(1, int(page))
+    per_page = max(1, min(100, int(per_page)))
+    row_from = (page - 1) * per_page + 1
+    row_to = row_from + per_page - 1
+    source_sql = _oktell_billing_detail_source_sql(
+        date_from_compact, date_to_excl_compact, minute_from, minute_to, snapshot_id)
+    select_sql = _oktell_billing_detail_select_sql()
+    return (
+        "SELECT q.call_id, CONVERT(varchar(19), q.occurred_at, 120) AS occurred_at, "
+        "q.taxi_park, COALESCE(c.line_number, N'') AS line_number, "
+        "COALESCE(NULLIF(q.driver_number, N''), NULLIF(c.caller_number, N''), N'') AS driver_number, "
+        f"CASE WHEN q.result_call = N'{grt}' THEN 1 ELSE 0 END AS ivr_drop, "
+        f"CASE WHEN q.result_call <> N'{grt}' AND q.call_result IN (13,19) THEN 1 ELSE 0 END AS queue_drop, "
+        f"CASE WHEN q.result_call <> N'{grt}' AND q.call_result = 5 THEN q.total_length ELSE 0 END AS talk_seconds, "
+        "q.total_count, q.snapshot_id "
+        "FROM (SELECT ranked.* FROM (SELECT "
+        f"{select_sql}, "
+        "COUNT(*) OVER() AS total_count, MAX(t.Id) OVER() AS snapshot_id, "
+        "ROW_NUMBER() OVER (ORDER BY t.dt_insert DESC, t.Id DESC) AS row_num "
+        f"{source_sql}"
+        ") ranked "
+        f"WHERE ranked.row_num BETWEEN {row_from} AND {row_to}) q "
+        f"{_oktell_billing_detail_line_apply_sql('q', date_from_compact, date_to_excl_compact)}"
+        "ORDER BY q.row_num"
+    )
+
+
+def _oktell_billing_detail_export_page_sql(date_from_compact, date_to_excl_compact,
+                                           minute_from, minute_to, max_call_id=None,
+                                           page_size=None):
+    grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
+    size = max(1, min(int(page_size or OKTELL_API_PAGE_SIZE), int(OKTELL_API_PAGE_SIZE)))
+    source_sql = _oktell_billing_detail_source_sql(
+        date_from_compact, date_to_excl_compact, minute_from, minute_to, max_call_id)
+    return (
+        "SELECT p.call_id, CONVERT(varchar(19), p.occurred_at, 120) AS occurred_at, "
+        "p.taxi_park, COALESCE(c.line_number, N'') AS line_number, "
+        "COALESCE(NULLIF(p.driver_number, N''), NULLIF(c.caller_number, N''), N'') AS driver_number, "
+        f"CASE WHEN p.result_call = N'{grt}' THEN 1 ELSE 0 END AS ivr_drop, "
+        f"CASE WHEN p.result_call <> N'{grt}' AND p.call_result IN (13,19) THEN 1 ELSE 0 END AS queue_drop, "
+        f"CASE WHEN p.result_call <> N'{grt}' AND p.call_result = 5 THEN p.total_length ELSE 0 END AS talk_seconds "
+        f"FROM (SELECT TOP {size} {_oktell_billing_detail_select_sql()} "
+        f"{source_sql}"
+        "ORDER BY t.Id DESC) p "
+        f"{_oktell_billing_detail_line_apply_sql('p', date_from_compact, date_to_excl_compact)}"
+        "ORDER BY p.call_id DESC"
+    )
+
+
+def _oktell_billing_detail_row(raw):
+    return {
+        'id': max(0, _oktell_billing_int(raw.get('call_id'))),
+        'occurred_at': str(raw.get('occurred_at') or '').strip(),
+        'park': str(raw.get('taxi_park') or '').strip(),
+        'line': str(raw.get('line_number') or '').strip(),
+        'driver_number': str(raw.get('driver_number') or '').strip(),
+        'ivr_drop': 1 if _oktell_billing_int(raw.get('ivr_drop')) else 0,
+        'queue_drop': 1 if _oktell_billing_int(raw.get('queue_drop')) else 0,
+        'talk_seconds': max(0, _oktell_billing_sec(raw.get('talk_seconds'))),
+    }
+
+
+def _oktell_billing_build_detail_page(raw_rows, page, per_page, snapshot_id=None):
+    rows = [_oktell_billing_detail_row(raw) for raw in (raw_rows or [])]
+    first_raw = (raw_rows or [None])[0]
+    total = max(0, _oktell_billing_int(first_raw.get('total_count'))) if first_raw else 0
+    resolved_snapshot = snapshot_id
+    if resolved_snapshot is None and first_raw:
+        candidate = _oktell_billing_int(first_raw.get('snapshot_id'))
+        resolved_snapshot = candidate if candidate > 0 else None
+    page = max(1, int(page))
+    per_page = max(1, int(per_page))
+    total_pages = (total + per_page - 1) // per_page if total else 0
+    return {
+        'rows': rows,
+        'snapshot_id': resolved_snapshot,
+        'pagination': {
+            'page': page,
+            'per_page': per_page,
+            'total': total,
+            'total_pages': total_pages,
+        },
+    }
+
+
+def _oktell_fetch_billing_detail_page(range_from, range_to, minute_from, minute_to,
+                                      page, per_page, snapshot_id=None):
+    return _oktell_query(_oktell_billing_detail_page_sql(
+        range_from.strftime('%Y%m%d'), (range_to + timedelta(days=1)).strftime('%Y%m%d'),
+        minute_from, minute_to, page, per_page, snapshot_id))
+
+
+def _oktell_fetch_billing_detail_export_rows(range_from, range_to, minute_from, minute_to):
+    """Полная построчная выборка для Excel. Листаем по уникальному Id, поэтому лимит
+    прокси в 1000 строк не обрезает день или месячный период."""
+    date_from = range_from.strftime('%Y%m%d')
+    date_to_excl = (range_to + timedelta(days=1)).strftime('%Y%m%d')
+    page_size = int(OKTELL_API_PAGE_SIZE)
+    max_call_id = None
+    rows = []
+    while True:
+        raw_page = _oktell_query(_oktell_billing_detail_export_page_sql(
+            date_from, date_to_excl, minute_from, minute_to, max_call_id, page_size))
+        if not raw_page:
+            break
+        page_ids = [
+            _oktell_billing_int(item.get('call_id'))
+            for item in raw_page
+            if _oktell_billing_int(item.get('call_id')) > 0
+        ]
+        if not page_ids:
+            raise RuntimeError('Oktell billing detail page has no call_id cursor')
+        rows.extend(_oktell_billing_detail_row(item) for item in raw_page)
+        next_max_call_id = min(page_ids) - 1
+        if max_call_id is not None and next_max_call_id >= max_call_id:
+            raise RuntimeError('Oktell billing detail cursor did not advance')
+        max_call_id = next_max_call_id
+        if len(raw_page) < page_size:
+            break
+    return rows
+
+
 # --- «Биллинг Oktell»: разрез по операторам ------------------------------------------------------
 # Обслужено/время разговора — из Call_Systems_hst (как в парковых таблицах, оператор = id_operator);
 # постобработка/удержание/ожидание/пауза — из oktell_cc_temp.dbo.A_Cube_CC_OperatorStates
@@ -24685,6 +24916,14 @@ def _oktell_billing_line_digits(line):
     return digits
 
 
+def _oktell_billing_phone_display(value):
+    text = str(value or '').strip()
+    digits = re.sub(r'\D', '', text)
+    if len(digits) >= 10:
+        return f"8{digits[-10:]}"
+    return text or '—'
+
+
 def _oktell_billing_line_label(line):
     return _OKTELL_BILLING_LINE_LABELS.get(_oktell_billing_line_digits(line), '')
 
@@ -24703,7 +24942,19 @@ def _oktell_billing_export_columns(mode):
     """(заголовки, ширины, {индекс с 1: формат}) для листов экспорта; без колонки даты."""
     dur = _OKTELL_BILLING_EXPORT_DUR_FMT
     pct = _OKTELL_BILLING_EXPORT_PCT_FMT
-    if mode == 'operator':
+    if mode == 'detail':
+        headers = [
+            'Дата',
+            'Парк на который звонят',
+            'Номер на который звонят',
+            'Номер водителя',
+            'Сброс на IVR',
+            'Сброс в очереди/пропущенные',
+            'Время разговора',
+        ]
+        widths = [20, 28, 24, 20, 15, 34, 19]
+        formats = {1: 'dd.mm.yyyy hh:mm:ss', 7: dur}
+    elif mode == 'operator':
         headers = ['Оператор', 'Обслужено', 'АТТ', 'АНТ', 'Разговоры вх.', 'Разговоры исх.',
                    'Постобработка', 'Удержание', 'Ожидание', 'Пауза', 'OCC', 'UTZ']
         widths = [32, 11, 10, 10, 13, 13, 14, 11, 11, 10, 8, 8]
@@ -24729,6 +24980,23 @@ def _oktell_billing_export_values(mode, item, label=None):
 
     def _opt(value):
         return '—' if value is None else value
+
+    if mode == 'detail':
+        occurred_at = item.get('occurred_at') or ''
+        if isinstance(occurred_at, str):
+            try:
+                occurred_at = datetime.strptime(occurred_at, '%Y-%m-%d %H:%M:%S')
+            except ValueError:
+                pass
+        return [
+            occurred_at,
+            _oktell_billing_park_label(item.get('park') or ''),
+            _oktell_billing_phone_display(item.get('line')),
+            _oktell_billing_phone_display(item.get('driver_number')),
+            1 if item.get('ivr_drop') else 0,
+            1 if item.get('queue_drop') else 0,
+            _dur(item.get('talk_seconds')),
+        ]
 
     if mode == 'operator':
         served = item.get('served') or 0
@@ -24818,6 +25086,24 @@ def _oktell_billing_export_workbook(mode, params, report, sl_seconds):
             cell.font = header_font
 
     wb = Workbook()
+    if mode == 'detail':
+        ws = wb.active
+        ws.title = 'Детализация'
+        _write_header(ws, headers)
+        for item in report.get('rows') or []:
+            _write_row(ws, _oktell_billing_export_values(mode, item))
+            ws.cell(row=ws.max_row, column=1).number_format = 'dd.mm.yyyy hh:mm:ss'
+            ws.cell(row=ws.max_row, column=7).number_format = _OKTELL_BILLING_EXPORT_DUR_FMT
+        for i, width in enumerate(widths, start=1):
+            ws.column_dimensions[get_column_letter(i)].width = width
+        ws.freeze_panes = 'A2'
+        ws.auto_filter.ref = f'A1:{get_column_letter(len(headers))}{max(1, ws.max_row)}'
+
+        output = BytesIO()
+        wb.save(output)
+        output.seek(0)
+        return output
+
     ws = wb.active
     ws.title = 'Итого за период'
     ws.append([f'Биллинг Oktell — {mode_titles.get(mode, mode)}'])
