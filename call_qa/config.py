@@ -51,11 +51,21 @@ SONIOX_LANGS = ["kk", "ru"]
 ASR_CONF_SOFT = 0.70   # подсветка неуверенного токена
 ASR_CONF_HARD = 0.50   # «реальный» неуверенный спан
 
-# --- Эмбеддинги (Vertex) ---
-EMBEDDINGS_PROVIDER = env("EMBEDDINGS_PROVIDER", "vertex")  # vertex | selfhost
+# --- Эмбеддинги / retrieval ---
+EMBEDDINGS_PROVIDER = str(env("EMBEDDINGS_PROVIDER", "vertex")).strip().lower()  # vertex | selfhost
 VERTEX_REGION = env("VERTEX_REGION", "asia-southeast1")
 VERTEX_EMBED_MODEL = env("VERTEX_EMBED_MODEL", "text-multilingual-embedding-002")
-EMBED_DIM = 768
+SELFHOST_EMBED_MODEL = env("SELFHOST_EMBED_MODEL", "intfloat/multilingual-e5-small")
+# Размерность является частью контракта индекса. Провайдер с другой размерностью
+# отклоняется до обращения к pgvector, а не даёт позднюю/непонятную ошибку БД.
+EMBED_DIM = int(env("EMBED_DIM", "768"))
+
+# Транскрипт режется перекрывающимися окнами. При очень длинном звонке окна
+# выбираются равномерно по всей временной оси (начало/середина/конец), а не только
+# из головы и хвоста.
+EMBED_CHUNK_CHARS = int(env("EMBED_CHUNK_CHARS", "3200"))
+EMBED_CHUNK_OVERLAP = int(env("EMBED_CHUNK_OVERLAP", "480"))
+EMBED_MAX_CHUNKS = int(env("EMBED_MAX_CHUNKS", "16"))
 
 # --- LLM (Claude). По умолчанию одна модель (Opus) на всё: бенч 2026-07-07 показал,
 # что Opus точнее Sonnet в разы (MAE 5 vs 18-24), а двухуровневая схема с разборами
@@ -111,4 +121,24 @@ def connect_rw():
 
 # --- Ревью ---
 REVIEW_MODEL_CONF = 0.60   # ниже — на ревью
-RETRIEVAL_TOP_K = 3        # сколько разборов подтягивать на критерий
+RETRIEVAL_TOP_K = int(env("RETRIEVAL_TOP_K", "3"))
+# Ноль подходящих правил — штатный результат. Ближайший вектор ниже порога в
+# промпт не попадает.
+RETRIEVAL_MIN_SIMILARITY = float(env("RETRIEVAL_MIN_SIMILARITY", "0.68"))
+# Для наблюдаемости сохраняем несколько кандидатов за пределами итогового top-k.
+RETRIEVAL_CANDIDATE_MULTIPLIER = int(env("RETRIEVAL_CANDIDATE_MULTIPLIER", "4"))
+RETRIEVAL_LEXICAL_MIN_SCORE = float(env("RETRIEVAL_LEXICAL_MIN_SCORE", "0.05"))
+# Lexical match only rescues a dense candidate close to the semantic gate; it
+# cannot inject an unrelated rule solely because a common word matched.
+RETRIEVAL_LEXICAL_DENSE_MARGIN = float(env("RETRIEVAL_LEXICAL_DENSE_MARGIN", "0.08"))
+
+# Controlled production rollout.  ``shadow`` keeps the user-facing verdict on
+# the no-RAG path while collecting a paired RAG run; canary selection is stable
+# by call ID.  Set ``active`` only after the benchmark gates are met.
+RAG_MODE = str(env("RAG_MODE", "shadow")).strip().lower()
+RAG_CANARY_PERCENT = max(0, min(100, int(env("RAG_CANARY_PERCENT", "10"))))
+RAG_TRACE_REQUIRED = str(env("RAG_TRACE_REQUIRED", "true")).strip().lower() in {
+    "1", "true", "yes", "on",
+}
+RAG_REINDEX_MAX_ATTEMPTS = max(1, int(env("RAG_REINDEX_MAX_ATTEMPTS", "5")))
+EVALUATOR_CODE_VERSION = str(env("AI_QA_CODE_VERSION", "ai-qa-2026-07-v2"))

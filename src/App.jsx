@@ -15,7 +15,6 @@ import TechnicalIssuesView from './components/technical/TechnicalIssuesView';
 import RecruitingView from './components/recruiting/RecruitingView';
 import LmsView from './components/lms/LmsView';
 import MonitoringScaleView from './components/monitoring/MonitoringScaleView';
-import CallQaView from './components/call_qa/CallQaView';
 import FaIcon from './components/common/FaIcon';
 import AuthEntranceSplash from './components/common/AuthEntranceSplash';
 import OrazAitSplash from './components/common/OrazAitSplash';
@@ -118,6 +117,7 @@ const DepartmentsView = lazyWithRetry(() => import('./components/departments/Dep
 const GroupsView = lazyWithRetry(() => import('./components/groups/GroupsView'));
 const FourYouView = lazyWithRetry(() => import('./components/four_you/lenta'));
 const EventsView = lazyWithRetry(() => import('./components/events/EventsView'));
+const CallQaView = lazyWithRetry(() => import('./components/call_qa/CallQaView'));
 
 
 if (typeof window !== 'undefined') {
@@ -42323,7 +42323,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
                                     : (view === 'four_you' || view === 'tasks' || view === 'work_schedules' || view === 'shift_auction' || (view === 'resource_fte' && canAccessResourceFteSection))
                                         ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
-                                    : 'p-8 bg-gray-50 min-h-screen overflow-y-auto'
+                                    : view === 'ai_qa'
+                                        ? 'px-3 pb-6 pt-20 md:p-8 bg-gray-50 min-h-screen overflow-y-auto'
+                                        : 'p-8 bg-gray-50 min-h-screen overflow-y-auto'
                         } ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}
                         style={isCallEvaluationView ? { backgroundColor: '#f7f7f5' } : undefined}
                     >
@@ -42390,13 +42392,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </div>
                         )}
                         {view === "ai_qa" && canAccessAiQaSection && (
-                            <CallQaView
-                                user={user}
-                                showToast={showToast}
-                                apiBaseUrl={API_BASE_URL}
-                                withAccessTokenHeader={withAccessTokenHeader}
-                                directions={directions}
-                            />
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка ИИ-оценки…</div>}>
+                                <CallQaView
+                                    user={user}
+                                    showToast={showToast}
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    directions={directions}
+                                />
+                            </Suspense>
                         )}
                         {(view === "shift_auction" && (
                             <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>

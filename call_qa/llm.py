@@ -3,6 +3,7 @@
 формулировкой разборов и пакетной оценкой — правки протокола API делаются здесь один раз."""
 from __future__ import annotations
 import json
+import time
 
 import httpx
 
@@ -30,7 +31,10 @@ def build_body(*, model, system, user, schema, max_tokens=8000, cache_system=Fal
         "max_tokens": max_tokens,
         "system": [sys_block],
         "messages": [{"role": "user", "content": user}],
-        "output_config": {"format": {"type": "json_schema", "schema": schema}},
+        "output_config": {
+            "effort": config.CLAUDE_EFFORT,
+            "format": {"type": "json_schema", "schema": schema},
+        },
     }
 
 
@@ -40,10 +44,21 @@ def parse_message(message: dict) -> dict:
     return json.loads(text)
 
 
-def post_body(body: dict, *, timeout=120.0) -> dict:
+def post_body(body: dict, *, timeout=120.0, include_meta=False) -> dict:
+    started = time.perf_counter()
     r = httpx.post(_API_URL, json=body, headers=_headers(), timeout=timeout)
     r.raise_for_status()
-    return parse_message(r.json())
+    message = r.json()
+    parsed = parse_message(message)
+    if include_meta:
+        parsed["_llm_meta"] = {
+            "request_id": message.get("id"),
+            "model": message.get("model") or body.get("model"),
+            "stop_reason": message.get("stop_reason"),
+            "usage": message.get("usage") or {},
+            "latency_ms": round((time.perf_counter() - started) * 1000),
+        }
+    return parsed
 
 
 def claude_json(*, model, system, user, schema, max_tokens=8000, timeout=120.0, cache_system=False) -> dict:

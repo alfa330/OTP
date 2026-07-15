@@ -4146,8 +4146,14 @@ def api_ai_qa_adjudicate():
     try:
         from call_qa.api import save_adjudications
         body = request.get_json(force=True) or {}
-        saved = save_adjudications(body.get('call_id'), body.get('direction_id'),
-                                   body.get('items', []), reviewer_id=requester_id)
+        if not isinstance(body, dict):
+            raise ValueError("тело запроса должно быть JSON-объектом")
+        saved = save_adjudications(
+            body.get('call_id'), body.get('direction_id'), body.get('items', []),
+            reviewer_id=requester_id,
+            evaluation_run_id=body.get('evaluation_run_id'),
+            scale_revision_id=body.get('scale_revision_id'),
+            evaluation_fingerprint=body.get('evaluation_fingerprint'))
         return jsonify({"status": "success", "saved": saved}), 200
     except ValueError as error:
         return jsonify({"error": str(error)}), 400
@@ -4205,8 +4211,13 @@ def api_ai_qa_adjudications():
         return err
     try:
         from call_qa.api import adjudications_list
-        items = adjudications_list(direction=request.args.get('direction'), q=request.args.get('q'))
-        return jsonify({"status": "success", "items": items}), 200
+        result = adjudications_list(
+            direction=request.args.get('direction'), q=request.args.get('q'),
+            status=request.args.get('status'), index_status=request.args.get('index_status'),
+            page=request.args.get('page', 1), page_size=request.args.get('page_size', 20))
+        return jsonify({"status": "success", **result}), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
     except Exception as error:
         logging.exception("ai-qa adjudications failed")
         return jsonify({"error": str(error)}), 500
@@ -4225,6 +4236,7 @@ def _ai_qa_admin_guard():
 
 
 @app.route('/api/ai-qa/adjudications/<int:adj_id>', methods=['PUT', 'DELETE', 'OPTIONS'])
+@app.route('/api/ai-qa/adjudications/<adj_id>', methods=['PUT', 'DELETE', 'OPTIONS'])
 @require_api_key
 def api_ai_qa_adjudication_manage(adj_id):
     if request.method == 'OPTIONS':
@@ -4233,27 +4245,92 @@ def api_ai_qa_adjudication_manage(adj_id):
     if err:
         return err
     from call_qa.rag.store import AdjudicationConflict, AdjudicationEmbeddingUnavailable
+    from call_qa.rag.knowledge import KnowledgeConflict
     try:
         if request.method == 'DELETE':
             from call_qa.api import delete_adjudication
-            if not delete_adjudication(adj_id):
+            if not delete_adjudication(adj_id, actor_id=requester_id):
                 return jsonify({"error": "разбор не найден"}), 404
             logging.info("ai-qa: разбор %s удалён супер-админом %s", adj_id, requester_id)
             return jsonify({"status": "success"}), 200
         from call_qa.api import update_adjudication
-        if not update_adjudication(adj_id, request.get_json(silent=True)):
+        if not update_adjudication(adj_id, request.get_json(silent=True), actor_id=requester_id):
             return jsonify({"error": "разбор не найден"}), 404
         logging.info("ai-qa: разбор %s изменён супер-админом %s", adj_id, requester_id)
         return jsonify({"status": "success"}), 200
     except ValueError as error:
         return jsonify({"error": str(error)}), 400
-    except AdjudicationConflict as error:
+    except (AdjudicationConflict, KnowledgeConflict) as error:
         return jsonify({"error": str(error)}), 409
     except AdjudicationEmbeddingUnavailable as error:
         return jsonify({"error": str(error)}), 503
     except Exception:
         logging.exception("ai-qa adjudication manage %s failed", adj_id)
         return jsonify({"error": "внутренняя ошибка (детали в логах сервера)"}), 500
+
+
+@app.route('/api/ai-qa/adjudications/<adj_id>/reindex', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_adjudication_reindex(adj_id):
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_admin_guard()
+    if err:
+        return err
+    from call_qa.rag.knowledge import KnowledgeConflict
+    try:
+        from call_qa.api import queue_reindex_adjudication
+        item = queue_reindex_adjudication(adj_id, actor_id=requester_id)
+        logging.info("ai-qa: reindex правила %s поставлен супер-админом %s", adj_id, requester_id)
+        return jsonify({"status": "success", "item": item}), 202
+    except KeyError:
+        return jsonify({"error": "правило не найдено"}), 404
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except KnowledgeConflict as error:
+        return jsonify({"error": str(error)}), 409
+    except Exception as error:
+        from call_qa.rag.store import AdjudicationEmbeddingUnavailable
+        if isinstance(error, AdjudicationEmbeddingUnavailable):
+            return jsonify({"error": str(error)}), 503
+        logging.exception("ai-qa reindex %s failed", adj_id)
+        return jsonify({"error": "не удалось переиндексировать правило"}), 500
+
+
+@app.route('/api/ai-qa/rag-rollout', methods=['GET', 'PUT', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_rag_rollout():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    if request.method == 'GET':
+        requester_id, err = _ai_qa_guard()
+        if err:
+            return err
+        try:
+            from call_qa.api import rag_rollout_get
+            return jsonify({"status": "success", **rag_rollout_get()}), 200
+        except Exception:
+            logging.exception("ai-qa rollout read failed")
+            return jsonify({"error": "не удалось загрузить RAG rollout"}), 500
+    requester_id, err = _ai_qa_admin_guard()
+    if err:
+        return err
+    try:
+        from call_qa.api import rag_rollout_set
+        body = request.get_json(force=True) or {}
+        item = rag_rollout_set(
+            direction_id=body.get('direction_id'), mode=body.get('mode'),
+            canary_percent=body.get('canary_percent', 0),
+            approved_experiment_id=body.get('approved_experiment_id'),
+            manual_override=bool(body.get('manual_override')),
+            override_reason=body.get('override_reason'),
+            actor_id=requester_id)
+        return jsonify({"status": "success", "item": item}), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception:
+        logging.exception("ai-qa rollout update failed")
+        return jsonify({"error": "не удалось обновить RAG rollout"}), 500
 
 
 @app.route('/api/ai-qa/random-call', methods=['GET', 'OPTIONS'])
