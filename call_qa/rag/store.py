@@ -6,6 +6,14 @@ from .. import config
 from ..embeddings.provider import get_provider
 
 
+class AdjudicationEmbeddingUnavailable(RuntimeError):
+    """Семантическую правку нельзя безопасно сохранить без нового embedding."""
+
+
+class AdjudicationConflict(RuntimeError):
+    """Разбор несколько раз изменился между чтением и атомарной записью."""
+
+
 def _rw_conn():
     return config.connect_rw()
 
@@ -15,7 +23,8 @@ def criteria_with_adjudications(direction_id) -> set:
     чтобы стандарт из разбора применяла сильная модель (даже если BULK уверенно поставил Correct)."""
     try:
         ro = config.connect_ro(); cur = ro.cursor()
-        cur.execute("SELECT DISTINCT criterion_idx FROM qa_adjudications WHERE direction_id=%s", (direction_id,))
+        cur.execute("SELECT DISTINCT criterion_idx FROM qa_adjudications WHERE direction_id=%s AND is_active",
+                    (direction_id,))
         idx = {r[0] for r in cur.fetchall()}
         cur.close(); ro.close()
         return idx
@@ -84,13 +93,17 @@ def bump_use_count(ids):
         pass
 
 
+def _adjudication_embed_text(criterion_name, situation, excerpt, reason, not_covered) -> str:
+    """Текст, по которому разбор ищется семантически. В него входят и границы (not_covered):
+    прецедент должен находиться и по звонкам с нарушением, которое правило НЕ оправдывает."""
+    return ". ".join(p for p in (criterion_name, situation, excerpt, reason, not_covered) if p)
+
+
 def save_adjudication(*, direction_id, criterion_idx, criterion_name, call_id,
                       excerpt, ai_verdict, correct_verdict, reason,
                       not_covered=None, situation=None, situation_tag=None, created_by=None) -> int:
-    """Авто-сохранение разбора человека (+ embedding). Вызывается из экшена ревью.
-    В embedding входят и границы (not_covered): прецедент должен находиться и по звонкам
-    с нарушением, которое правило НЕ оправдывает — чтобы модель увидела запрет."""
-    vec = _embed(". ".join(p for p in (criterion_name, situation, excerpt, reason, not_covered) if p))
+    """Авто-сохранение разбора человека (+ embedding). Вызывается из экшена ревью."""
+    vec = _embed(_adjudication_embed_text(criterion_name, situation, excerpt, reason, not_covered))
     with _rw_conn() as c, c.cursor() as cur:
         cur.execute(
             """INSERT INTO qa_adjudications
@@ -114,17 +127,106 @@ def _retrieve_one(cur, direction_id, criterion_idx, qvec, k) -> list[dict]:
             """SELECT id, criterion_name, excerpt, ai_verdict, correct_verdict, reason, not_covered, situation,
                       1 - (embedding <=> %s::vector) AS sim
                  FROM qa_adjudications
-                WHERE direction_id=%s AND criterion_idx=%s AND embedding IS NOT NULL
+                 WHERE direction_id=%s AND criterion_idx=%s AND embedding IS NOT NULL AND is_active
                 ORDER BY embedding <=> %s::vector LIMIT %s""",
             (_vec(qvec), direction_id, criterion_idx, _vec(qvec), k))
     else:
         cur.execute(
             """SELECT id, criterion_name, excerpt, ai_verdict, correct_verdict, reason, not_covered, situation, NULL
                  FROM qa_adjudications
-                WHERE direction_id=%s AND criterion_idx=%s
+                 WHERE direction_id=%s AND criterion_idx=%s AND is_active
                 ORDER BY created_at DESC LIMIT %s""",
             (direction_id, criterion_idx, k))
     return [dict(zip(_RETRIEVE_COLS, r)) for r in cur.fetchall()]
+
+
+# Поля разбора, которые можно править из админки. Ключи попадают в SET напрямую,
+# поэтому список закрыт и проверяется и здесь, и в api (защита в глубину).
+EDITABLE_ADJ_FIELDS = ("correct_verdict", "reason", "situation", "not_covered", "situation_tag")
+_ADJ_EMBED_SOURCE_FIELDS = ("criterion_name", "situation", "excerpt", "reason", "not_covered")
+_ADJ_SNAPSHOT_FIELDS = _ADJ_EMBED_SOURCE_FIELDS + ("correct_verdict", "situation_tag")
+
+
+def _adjudication_source(adj_id: int) -> dict | None:
+    """Короткий снимок текста без блокировки: внешний embedding считаем уже после закрытия БД."""
+    conn = config.connect_rw()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET client_encoding TO 'UTF8'")
+            cur.execute(f"""SELECT {', '.join(_ADJ_SNAPSHOT_FIELDS)}
+                              FROM qa_adjudications
+                             WHERE id=%s AND is_active""", (adj_id,))
+            row = cur.fetchone()
+            return dict(zip(_ADJ_SNAPSHOT_FIELDS, row)) if row else None
+    finally:
+        conn.close()
+
+
+def _write_adjudication(adj_id: int, fields: dict, *, vec=None, source: dict | None = None) -> bool:
+    """Атомарная короткая запись. source включает optimistic check от параллельной правки."""
+    sets = ", ".join(f"{key}=%s" for key in fields)
+    params = list(fields.values())
+    if vec is not None:
+        sets += ", embedding=%s::vector"
+        params.append(_vec(vec))
+    where = "id=%s AND is_active"
+    params.append(adj_id)
+    if source is not None:
+        where += " AND " + " AND ".join(
+            f"{key} IS NOT DISTINCT FROM %s" for key in _ADJ_SNAPSHOT_FIELDS)
+        params.extend(source[key] for key in _ADJ_SNAPSHOT_FIELDS)
+
+    conn = config.connect_rw()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute("SET client_encoding TO 'UTF8'")
+            cur.execute(f"UPDATE qa_adjudications SET {sets} WHERE {where} RETURNING id", params)
+            return cur.fetchone() is not None
+    finally:
+        conn.close()
+
+
+def update_adjudication(adj_id: int, fields: dict) -> bool:
+    """Правка разбора (супер-админ). fields — уже провалидированный патч
+    (см. api._clean_adjudication_patch). Текст правила меняется → embedding
+    пересчитывается, иначе поиск продолжал бы находить разбор по старому смыслу.
+    False — разбора нет."""
+    fields = {k: v for k, v in fields.items() if k in EDITABLE_ADJ_FIELDS}
+    if not fields:
+        raise ValueError("нет полей для изменения")
+    # Optimistic snapshot сохраняет соответствие embedding и всех редактируемых полей,
+    # но не держит row lock во время внешнего Vertex-запроса (до 60 секунд).
+    source = _adjudication_source(adj_id)
+    if source is None:
+        return False
+    merged = {**source, **{key: value for key, value in fields.items() if key in source}}
+    semantic_changed = any(
+        merged[key] != source[key] for key in _ADJ_EMBED_SOURCE_FIELDS)
+    vec = None
+    if semantic_changed:
+        vec = _embed(_adjudication_embed_text(
+            merged["criterion_name"], merged["situation"], merged["excerpt"],
+            merged["reason"], merged["not_covered"],
+        ))
+        if vec is None:
+            raise AdjudicationEmbeddingUnavailable(
+                "не удалось пересчитать embedding; изменения не сохранены, повторите позже")
+    if _write_adjudication(adj_id, fields, vec=vec, source=source):
+        return True
+    raise AdjudicationConflict("разбор был изменён параллельно; повторите запрос")
+
+
+def delete_adjudication(adj_id: int) -> bool:
+    """Отключение разбора (супер-админ): из RAG он исчезает сразу, но остаётся
+    историческим следом человеческой корректировки для trust-метрик. False — разбора нет."""
+    conn = config.connect_rw()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute("""UPDATE qa_adjudications SET is_active=FALSE
+                            WHERE id=%s AND is_active RETURNING id""", (adj_id,))
+            return cur.fetchone() is not None
+    finally:
+        conn.close()
 
 
 def retrieve(*, direction_id, criterion_idx, query_text=None, query_vector=None, k=None) -> list[dict]:

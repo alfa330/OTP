@@ -4207,6 +4207,50 @@ def api_ai_qa_adjudications():
         return jsonify({"error": str(error)}), 500
 
 
+def _ai_qa_admin_guard():
+    """Управление базой разборов (правка/удаление) — ТОЛЬКО супер-админ.
+    Разбор влияет на все будущие оценки, поэтому доступ уже, чем _ai_qa_guard:
+    глава ОП и пользователи с доп-доступом остаются на просмотр/создание."""
+    requester_id = getattr(g, 'user_id', None)
+    user = db.get_user(id=requester_id) if requester_id else None
+    role = _normalize_user_role(user[3]) if user else None
+    if _is_super_admin_role(role):
+        return requester_id, None
+    return None, (jsonify({"error": "forbidden"}), 403)
+
+
+@app.route('/api/ai-qa/adjudications/<int:adj_id>', methods=['PUT', 'DELETE', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_adjudication_manage(adj_id):
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_admin_guard()
+    if err:
+        return err
+    from call_qa.rag.store import AdjudicationConflict, AdjudicationEmbeddingUnavailable
+    try:
+        if request.method == 'DELETE':
+            from call_qa.api import delete_adjudication
+            if not delete_adjudication(adj_id):
+                return jsonify({"error": "разбор не найден"}), 404
+            logging.info("ai-qa: разбор %s удалён супер-админом %s", adj_id, requester_id)
+            return jsonify({"status": "success"}), 200
+        from call_qa.api import update_adjudication
+        if not update_adjudication(adj_id, request.get_json(silent=True)):
+            return jsonify({"error": "разбор не найден"}), 404
+        logging.info("ai-qa: разбор %s изменён супер-админом %s", adj_id, requester_id)
+        return jsonify({"status": "success"}), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except AdjudicationConflict as error:
+        return jsonify({"error": str(error)}), 409
+    except AdjudicationEmbeddingUnavailable as error:
+        return jsonify({"error": str(error)}), 503
+    except Exception:
+        logging.exception("ai-qa adjudication manage %s failed", adj_id)
+        return jsonify({"error": "внутренняя ошибка (детали в логах сервера)"}), 500
+
+
 @app.route('/api/ai-qa/random-call', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_ai_qa_random_call():

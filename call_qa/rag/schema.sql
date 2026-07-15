@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS qa_adjudications (
     not_covered      text,                      -- границы: какие нарушения правило НЕ оправдывает
     situation        text,                      -- обобщённое «когда применять» (excerpt остаётся дословной цитатой)
     situation_tag    text,                      -- короткий тег ситуации (для фильтра)
+    is_active        boolean NOT NULL DEFAULT true, -- false = удалён из RAG, но сохранён как след ревью
     embedding        vector(768),               -- эмбеддинг для семантического поиска (может быть NULL)
     use_count        integer NOT NULL DEFAULT 0,-- сколько раз подтянулась в оценки
     created_by       integer,                   -- users.id ревьюера
@@ -67,6 +68,7 @@ CREATE INDEX IF NOT EXISTS idx_adj_dir_crit ON qa_adjudications (direction_id, c
 -- Для БД, где таблица создана до появления границ/ситуации правила.
 ALTER TABLE qa_adjudications ADD COLUMN IF NOT EXISTS not_covered text;
 ALTER TABLE qa_adjudications ADD COLUMN IF NOT EXISTS situation text;
+ALTER TABLE qa_adjudications ADD COLUMN IF NOT EXISTS is_active boolean NOT NULL DEFAULT true;
 
 -- След ревью: ai_evaluation_meta становится и журналом оценок, и состоянием очереди ревью.
 -- review_outcome: NULL (не проверялся) | 'confirmed' (человек согласился) | 'adjudicated' (исправил).

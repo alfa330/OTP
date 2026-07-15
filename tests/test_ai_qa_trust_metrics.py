@@ -3,7 +3,7 @@
 надёжность зачёта. Считаются в call_qa.api._verdict_metrics — чистая функция."""
 import unittest
 
-from call_qa.api import _verdict_metrics
+from call_qa.api import _reviewed_metrics, _verdict_metrics
 
 
 def _crit(idx, ai, source="transcript", name=None):
@@ -68,6 +68,42 @@ class VerdictMetricsTests(unittest.TestCase):
         m = _verdict_metrics([(crits, ["Correct"] * 10, "Поток")])
         self.assertEqual(m["agreement"], 90)
         self.assertEqual(m["alarm_precision"]["pct"], 0)
+
+
+class _ReviewedCursor:
+    def __init__(self, meta_rows, correction_rows):
+        self.meta_rows = meta_rows
+        self.correction_rows = correction_rows
+        self.current = []
+        self.queries = []
+
+    def execute(self, sql, _params=None):
+        normalized = " ".join(sql.split())
+        self.queries.append(normalized)
+        self.current = self.meta_rows if "FROM ai_evaluation_meta" in normalized else self.correction_rows
+
+    def fetchall(self):
+        return list(self.current)
+
+
+class ReviewedMetricsTests(unittest.TestCase):
+    def test_confirmed_review_ignores_old_correction(self):
+        crit = [_crit(0, "Incorrect")]
+        cur = _ReviewedCursor([(10, "confirmed", crit)], [(10, 0, "Correct")])
+        reviewed = _reviewed_metrics(cur)
+        self.assertEqual(reviewed["endorsed"], 1)
+        self.assertEqual(reviewed["corrected"], 0)
+        self.assertEqual(reviewed["alarm_precision"], {"pct": 100, "hits": 1, "total": 1})
+
+    def test_adjudicated_review_keeps_soft_deleted_correction_in_history(self):
+        crit = [_crit(0, "Incorrect")]
+        cur = _ReviewedCursor([(10, "adjudicated", crit)], [(10, 0, "Correct")])
+        reviewed = _reviewed_metrics(cur)
+        self.assertEqual(reviewed["endorsed"], 0)
+        self.assertEqual(reviewed["corrected"], 1)
+        self.assertEqual(reviewed["alarm_precision"], {"pct": 0, "hits": 0, "total": 1})
+        correction_query = next(q for q in cur.queries if "FROM qa_adjudications" in q)
+        self.assertNotIn("is_active", correction_query)
 
 
 if __name__ == "__main__":
