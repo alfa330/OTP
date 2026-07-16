@@ -145,7 +145,8 @@ const DEFAULT_USERS_REPORT_OPTIONS = {
     sheetMode: 'summary_and_supervisors',
     includeFired: false,
     includeDismissalDetails: true,
-    periodMonth: ''
+    periodMonth: '',
+    departmentId: ''
 };
 const SALARY_CALCULATOR_TYPES = new Set(['call', 'chat', 'converter', 'tez_line', 'tez_op']);
 const SALARY_CALCULATOR_READY_DEPARTMENT_CODES = new Set(['szov', 'tez']);
@@ -37808,6 +37809,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             };
 
+            const openUsersReportModal = () => {
+                    if (isLoading) return;
+                    setUsersReportOptions((prev) => ({
+                        ...prev,
+                        departmentId: isAdminLikeRole ? (manageUsersDeptFilter || '') : ''
+                    }));
+                    if (isAdminLikeRole && departments.length === 0) {
+                        fetchDepartments();
+                    }
+                    setShowUsersReportModal(true);
+                };
+
             const handleGenerateReport = async (options = usersReportOptions) => {
                     try {
                         setIsLoading(true);
@@ -37822,6 +37835,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         });
                         if (exportOptions.periodMonth) {
                             params.set('period_month', exportOptions.periodMonth);
+                        }
+                        if (isAdminLikeRole && exportOptions.departmentId) {
+                            params.set('department_id', exportOptions.departmentId);
                         }
                         const response = await axios.get(`${API_BASE_URL}/api/admin/users_report?${params.toString()}`, {
                             headers:  {'X-User-Id': user.id},
@@ -43178,7 +43194,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                         {/* Generate Report Button */}
                                         <button
-                                        onClick={() => setShowUsersReportModal(true)}
+                                        onClick={openUsersReportModal}
                                         className={`bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 transition-all duration-200 ${
                                             isLoading ? "opacity-50 cursor-not-allowed" : ""
                                         }`}
@@ -47399,6 +47415,36 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </div>
 
                                     <div className="space-y-6 px-6 py-6">
+                                        {isAdminLikeRole ? (
+                                            <label className="block rounded-xl border border-slate-200 bg-white p-4">
+                                                <span className="mb-1.5 block text-sm font-semibold text-slate-900">Отдел</span>
+                                                <span className="mb-3 block text-xs text-slate-500">
+                                                    Выберите отдел для выгрузки или оставьте общую выгрузку по всем отделам.
+                                                </span>
+                                                <select
+                                                    value={usersReportOptions.departmentId || ''}
+                                                    onChange={(event) => setUsersReportOptions((prev) => ({
+                                                        ...prev,
+                                                        departmentId: event.target.value
+                                                    }))}
+                                                    disabled={isLoading}
+                                                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-800 outline-none transition focus:border-green-500 focus:ring-2 focus:ring-green-100 disabled:bg-slate-50 disabled:text-slate-400"
+                                                >
+                                                    <option value="">Все отделы</option>
+                                                    {departments
+                                                        .filter((dept) => dept && dept.isActive !== false && dept.is_active !== false)
+                                                        .map((dept) => (
+                                                            <option key={dept.id} value={dept.id}>{dept.name}</option>
+                                                        ))}
+                                                </select>
+                                            </label>
+                                        ) : (
+                                            <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+                                                <FaIcon className="fas fa-building text-slate-400" />
+                                                <span>Будут выгружены только операторы вашего отдела.</span>
+                                            </div>
+                                        )}
+
                                         <div>
                                             <div className="mb-3 flex items-center justify-between gap-3">
                                                 <div>
