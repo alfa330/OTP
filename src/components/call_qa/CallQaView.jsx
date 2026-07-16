@@ -90,6 +90,11 @@ function QueueList({ items, onOpen }) {
                             const m = REASON[r] || REASON.new;
                             return <IosBadge key={r} tone={m.tone}><m.Icon size={11} />{m.label}</IosBadge>;
                         })}
+                        {c.stale && (
+                            <IosBadge tone="amber" title="Конфигурация ИИ (промпт, критерии или база знаний) изменилась после этой оценки — при открытии звонок будет переоценён автоматически.">
+                                <RotateCcw size={11} />Оценка устарела
+                            </IosBadge>
+                        )}
                     </div>
                 </button>
             ))}
@@ -297,7 +302,12 @@ export default function CallQaView(props) {
                             <ChevronLeft size={16} />Назад
                         </button>
                         {callData && apiBaseUrl && (
-                            <div className="flex items-center gap-2">
+                            <div className="flex flex-wrap items-center justify-end gap-2">
+                                {!callData._cached && callData._previous_evaluation_stale && (
+                                    <IosBadge tone="amber" title="Прежняя оценка сделана в устаревшей конфигурации ИИ (промпт, критерии или база знаний изменились), поэтому звонок переоценён заново.">
+                                        прежняя оценка устарела — переоценено
+                                    </IosBadge>
+                                )}
                                 <IosBadge tone={callData._cached ? 'slate' : 'green'}>
                                     {callData._cached ? 'из кэша' : 'оценено сейчас'}
                                 </IosBadge>
@@ -336,6 +346,12 @@ export default function CallQaView(props) {
                     ) : (
                         <div className="space-y-2.5">
                             <QueueList items={queue} onOpen={openCall} />
+                            {queue.some((c) => c.stale) && (
+                                <p className="px-1 text-[11.5px] text-slate-500">
+                                    «Оценка устарела» — после оценки изменилась конфигурация ИИ (промпт, критерии или база знаний);
+                                    при открытии такой звонок будет переоценён автоматически.
+                                </p>
+                            )}
                             {queue.length >= 30 && (
                                 <p className="px-1 text-[11.5px] text-slate-500">Показаны первые 30 звонков по приоритету ревью.</p>
                             )}

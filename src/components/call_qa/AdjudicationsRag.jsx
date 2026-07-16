@@ -18,9 +18,16 @@ const VERDICTS = {
 const RULE_STATUS = {
     draft: { tone: 'amber', label: 'Черновик' },
     active: { tone: 'green', label: 'Активно' },
-    deprecated: { tone: 'slate', label: 'Устарело' },
+    deprecated: { tone: 'slate', label: 'Удалено' },
     quarantined: { tone: 'red', label: 'Карантин' },
 };
+
+// Удаление разбора — мягкое: запись деактивируется (deprecated) и уходит из каталога
+// во вкладку «Удалённые», где остаётся историческим следом для trust-метрик.
+const VIEWS = [
+    { key: 'catalog', label: 'Каталог', Icon: Database },
+    { key: 'deleted', label: 'Удалённые', Icon: Trash2 },
+];
 
 const INDEX_STATUS = {
     indexed: { tone: 'green', label: 'Индекс готов', participates: true },
@@ -465,6 +472,7 @@ export default function AdjudicationsRag(props) {
     const { apiBaseUrl, withAccessTokenHeader, showToast, canManage, onInteractionChange } = props;
     const [queryInput, setQueryInput] = useState('');
     const [query, setQuery] = useState('');
+    const [view, setView] = useState('catalog');
     const [direction, setDirection] = useState('all');
     const [status, setStatus] = useState('all');
     const [indexStatus, setIndexStatus] = useState('all');
@@ -510,13 +518,16 @@ export default function AdjudicationsRag(props) {
         }
         setLoading(true);
         setError(null);
-        const requestState = { q: query, direction, status, indexStatus, page, pageSize };
+        // Вкладка «Удалённые» — это явный запрос deprecated-строк; каталог бэкенд
+        // по умолчанию отдаёт без них.
+        const effectiveStatus = view === 'deleted' ? 'deprecated' : status;
+        const requestState = { q: query, direction, status: effectiveStatus, indexStatus, page, pageSize };
         axios.get(`${apiBaseUrl}/api/ai-qa/adjudications`, {
             params: {
                 page, page_size: pageSize,
                 ...(query ? { q: query } : {}),
                 ...(direction !== 'all' ? { direction } : {}),
-                ...(status !== 'all' ? { status } : {}),
+                ...(effectiveStatus !== 'all' ? { status: effectiveStatus } : {}),
                 ...(indexStatus !== 'all' ? { index_status: indexStatus } : {}),
             },
             headers: headers(),
@@ -535,7 +546,7 @@ export default function AdjudicationsRag(props) {
         return () => controller.abort();
         // Access-token headers are intentionally read at request time.
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [apiBaseUrl, query, direction, status, indexStatus, page, pageSize, reloadKey]);
+    }, [apiBaseUrl, query, view, direction, status, indexStatus, page, pageSize, reloadKey]);
 
     const refresh = () => setReloadKey((value) => value + 1);
     const items = result?.items || [];
@@ -548,6 +559,9 @@ export default function AdjudicationsRag(props) {
         facets.statuses || facets.status || facets.rule_status,
         [...Object.keys(RULE_STATUS), ...items.map(ruleStatusOf)],
     ), [facets, items]);
+    // Deprecated живут во вкладке «Удалённые», из фильтра каталога они исключены.
+    const statusOptions = useMemo(() => statuses.filter((option) => option.value !== 'deprecated'), [statuses]);
+    const deletedCount = statuses.find((option) => option.value === 'deprecated')?.count;
     const indexStatuses = useMemo(() => toFacetOptions(
         facets.index_statuses || facets.index_status,
         [...Object.keys(INDEX_STATUS), ...items.map(indexStatusOf)],
@@ -579,11 +593,11 @@ export default function AdjudicationsRag(props) {
     const remove = async (item) => {
         if (locked) return;
         const title = item.criterion || item.criterion_name || `#${item.id}`;
-        if (!window.confirm(`Удалить правило «${title}»? Оно перестанет участвовать в будущих оценках.`)) return;
+        if (!window.confirm(`Удалить правило «${title}»? Оно перестанет участвовать в оценках и переместится во вкладку «Удалённые».`)) return;
         setBusy({ id: item.id, action: 'delete' });
         try {
             await axios.delete(`${apiBaseUrl}/api/ai-qa/adjudications/${item.id}`, { headers: headers() });
-            showToast?.('Правило удалено', 'success');
+            showToast?.('Разбор перемещён во вкладку «Удалённые»', 'success');
             if (items.length === 1 && page > 1) setPage((value) => value - 1);
             else refresh();
         } catch (requestError) {
@@ -591,6 +605,13 @@ export default function AdjudicationsRag(props) {
         } finally {
             setBusy(null);
         }
+    };
+
+    const switchView = (nextView) => {
+        if (nextView === view || locked) return;
+        setView(nextView);
+        setEditId(null);
+        setPage(1);
     };
 
     const reindex = async (item) => {
@@ -649,6 +670,29 @@ export default function AdjudicationsRag(props) {
                 </div>
             ) : null}
 
+            <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex w-fit max-w-full overflow-x-auto rounded-2xl bg-slate-100 p-1" role="tablist" aria-label="Каталог и удалённые разборы">
+                    {VIEWS.map((tab) => {
+                        const active = view === tab.key;
+                        const count = tab.key === 'deleted' ? deletedCount : undefined;
+                        return (
+                            <button key={tab.key} type="button" role="tab" aria-selected={active}
+                                onClick={() => switchView(tab.key)} disabled={locked}
+                                className={`flex shrink-0 items-center gap-1.5 rounded-xl px-3.5 py-2 text-[13px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 disabled:opacity-50 ${
+                                    active ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
+                                <tab.Icon size={14} />
+                                {tab.label}{count != null ? ` · ${count}` : ''}
+                            </button>
+                        );
+                    })}
+                </div>
+                {view === 'deleted' && (
+                    <p className="text-[11.5px] text-slate-500">
+                        Удалённые разборы не участвуют в оценках; они сохранены как история. Вернуть — через «Редактировать» → Жизненный цикл.
+                    </p>
+                )}
+            </div>
+
             <section className={`${iosCard} space-y-3 p-3.5`} aria-label="Фильтры базы знаний">
                 <div className="flex flex-col gap-2.5 lg:flex-row lg:items-center">
                     <label className="relative min-w-[240px] flex-1">
@@ -671,13 +715,15 @@ export default function AdjudicationsRag(props) {
                                 {directions.map((option) => <option key={option.value} value={option.value}>{option.label}{option.count != null ? ` · ${option.count}` : ''}</option>)}
                             </select>
                         </label>
-                        <label>
-                            <span className="sr-only">Статус правила</span>
-                            <select value={status} disabled={locked} onChange={(event) => { setStatus(event.target.value); setPage(1); }} className={`${controlCls} w-full xl:min-w-[150px] xl:w-auto`}>
-                                <option value="all">Любой статус</option>
-                                {statuses.map((option) => <option key={option.value} value={option.value}>{RULE_STATUS[option.value]?.label || option.label}{option.count != null ? ` · ${option.count}` : ''}</option>)}
-                            </select>
-                        </label>
+                        {view === 'catalog' && (
+                            <label>
+                                <span className="sr-only">Статус правила</span>
+                                <select value={status} disabled={locked} onChange={(event) => { setStatus(event.target.value); setPage(1); }} className={`${controlCls} w-full xl:min-w-[150px] xl:w-auto`}>
+                                    <option value="all">Любой статус</option>
+                                    {statusOptions.map((option) => <option key={option.value} value={option.value}>{RULE_STATUS[option.value]?.label || option.label}{option.count != null ? ` · ${option.count}` : ''}</option>)}
+                                </select>
+                            </label>
+                        )}
                         <label>
                             <span className="sr-only">Статус индекса</span>
                             <select value={indexStatus} disabled={locked} onChange={(event) => { setIndexStatus(event.target.value); setPage(1); }} className={`${controlCls} w-full xl:min-w-[150px] xl:w-auto`}>
@@ -735,11 +781,15 @@ export default function AdjudicationsRag(props) {
             ) : result && items.length === 0 ? (
                 <div className={`${iosCard} flex flex-col items-center gap-2 px-6 py-14 text-center`}>
                     <Database size={28} className="text-slate-300" />
-                    <p className="text-[14px] font-semibold text-slate-700">{hasFilters ? 'Ничего не найдено' : 'Правил пока нет'}</p>
-                    <p className="max-w-lg text-[12.5px] text-slate-400">
-                        {hasFilters ? 'Измените запрос или сбросьте фильтры.' : 'После проверки исправление станет черновиком и появится здесь для дальнейшей модерации.'}
+                    <p className="text-[14px] font-semibold text-slate-700">
+                        {view === 'deleted' ? 'Удалённых разборов нет' : hasFilters ? 'Ничего не найдено' : 'Правил пока нет'}
                     </p>
-                    {hasFilters && <button type="button" onClick={resetFilters} className={iosBtnSecondary}>Сбросить фильтры</button>}
+                    <p className="max-w-lg text-[12.5px] text-slate-400">
+                        {view === 'deleted'
+                            ? 'Удалённые из каталога разборы будут храниться здесь и не будут участвовать в оценках.'
+                            : hasFilters ? 'Измените запрос или сбросьте фильтры.' : 'После проверки исправление станет черновиком и появится здесь для дальнейшей модерации.'}
+                    </p>
+                    {view !== 'deleted' && hasFilters && <button type="button" onClick={resetFilters} className={iosBtnSecondary}>Сбросить фильтры</button>}
                 </div>
             ) : result ? (
                 <>
@@ -792,11 +842,13 @@ export default function AdjudicationsRag(props) {
                                                         className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 disabled:opacity-50">
                                                         <Pencil size={14} />
                                                     </button>
-                                                    <button type="button" title="Удалить правило" aria-label={`Удалить правило ${criterion}`}
-                                                        onClick={() => remove(item)} disabled={locked}
-                                                        className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/60 disabled:opacity-50">
-                                                        {busy?.action === 'delete' && busy.id === item.id ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
-                                                    </button>
+                                                    {itemRuleStatus !== 'deprecated' && (
+                                                        <button type="button" title="Удалить правило" aria-label={`Удалить правило ${criterion}`}
+                                                            onClick={() => remove(item)} disabled={locked}
+                                                            className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/60 disabled:opacity-50">
+                                                            {busy?.action === 'delete' && busy.id === item.id ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                                                        </button>
+                                                    )}
                                                 </>
                                             )}
                                         </div>

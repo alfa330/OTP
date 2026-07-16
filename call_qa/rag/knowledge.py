@@ -306,6 +306,27 @@ def ensure_knowledge_context(conn, *, direction: dict, created_by=None) -> dict:
     return {"scale_revision_id": scale_revision_id, "snapshot": snapshot}
 
 
+def peek_knowledge_snapshot_hash(conn, *, direction: dict) -> str | None:
+    """Read-only-двойник ensure_knowledge_context: content_hash текущего снапшота
+    для актуальной шкалы направления. None — снапшот ещё не создан (его создало бы
+    первое открытие/оценка). Ничего не пишет — безопасно для GET-эндпоинтов."""
+    manifest = _criterion_manifest(direction["criteria"])
+    revision_hash = scale_revision_fingerprint(
+        direction_id=int(direction["id"]), scale_hash=direction.get("scale_hash") or "",
+        criteria_manifest=manifest)
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT k.content_hash::text
+                 FROM qa_scale_revisions r
+                 JOIN qa_knowledge_state s
+                   ON s.direction_id = r.direction_id AND s.scale_revision_id = r.id
+                 JOIN qa_knowledge_snapshots k ON k.id = s.current_snapshot_id
+                WHERE r.direction_id = %s AND r.content_hash = %s""",
+            (int(direction["id"]), revision_hash))
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
 def create_adjudication_case(conn, *, direction_id: int, criterion_id: str,
                              correct_verdict: str, evidence_excerpt: str, reason: str,
                              criterion_idx=None, criterion_name=None, scale_revision_id=None,

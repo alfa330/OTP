@@ -306,12 +306,14 @@ def update_adjudication(adj_id: int, fields: dict) -> bool:
 
 def delete_adjudication(adj_id: int) -> bool:
     """Отключение разбора (супер-админ): из RAG он исчезает сразу, но остаётся
-    историческим следом человеческой корректировки для trust-метрик. False — разбора нет."""
+    историческим следом человеческой корректировки для trust-метрик (вкладка
+    «Удалённые»). Идемпотентно: повтор по уже отключённому — тоже успех, как у
+    canonical-правил. False — разбора не существует."""
     conn = config.connect_rw()
     try:
         with conn, conn.cursor() as cur:
             cur.execute("""UPDATE qa_adjudications SET is_active=FALSE
-                            WHERE id=%s AND is_active RETURNING id""", (adj_id,))
+                            WHERE id=%s RETURNING id""", (adj_id,))
             return cur.fetchone() is not None
     finally:
         conn.close()

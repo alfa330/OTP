@@ -306,6 +306,28 @@ def get_cached_evaluation(*, call_id: int, evaluation_fingerprint: str,
         conn.close()
 
 
+def latest_evaluation_fingerprint(call_id: int) -> str | None:
+    """Fingerprint последнего успешного прогона звонка (без учёта конфигурации) —
+    чтобы отличить переоценку устаревшей оценки от первой оценки звонка."""
+    conn = config.connect_ro()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT evaluation_fingerprint::text FROM ai_evaluation_runs
+                    WHERE call_id=%s AND status='succeeded'
+                      AND run_kind IN ('standard','force','batch')
+                    ORDER BY created_at DESC, id::text DESC LIMIT 1""",
+                (int(call_id),))
+            row = cur.fetchone()
+            return row[0] if row else None
+    except Exception as exc:
+        if is_schema_compat_error(exc):
+            raise RuntimeSchemaUnavailable("ai_evaluation_runs schema is unavailable") from exc
+        raise
+    finally:
+        conn.close()
+
+
 def _usage_totals(llm_meta: dict | None) -> dict:
     totals = {"input_tokens": 0, "output_tokens": 0,
               "cache_read_tokens": 0, "cache_write_tokens": 0}

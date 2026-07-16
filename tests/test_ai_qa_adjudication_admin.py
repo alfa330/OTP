@@ -168,6 +168,16 @@ class StoreMutationTests(unittest.TestCase):
         self.assertIn("SET is_active=FALSE", sql)
         self.assertNotIn("DELETE FROM qa_adjudications", sql)
 
+    def test_delete_is_idempotent_for_already_deleted_row(self):
+        # Повторный DELETE уже отключённого разбора — успех, а не 404 «разбор не найден»:
+        # UPDATE не фильтрует по is_active, строка находится и повторно деактивируется.
+        conn = _FakeConnection([(7,)])
+        with mock.patch.object(store.config, "connect_rw", return_value=conn):
+            self.assertTrue(store.delete_adjudication(7))
+        sql = " ".join(statement for statement, _ in conn.cur.executed)
+        self.assertIn("WHERE id=%s RETURNING id", sql)
+        self.assertNotIn("AND is_active RETURNING", sql)
+
 
 class AdminAccessContractTests(unittest.TestCase):
     """Контракт исходников: управление разборами — только супер-админ."""
@@ -211,6 +221,16 @@ class AdminAccessContractTests(unittest.TestCase):
         self.assertIn("is_active        boolean NOT NULL DEFAULT true", self.schema_src)
         self.assertIn("WHERE a.is_active", (ROOT / "call_qa" / "api.py").read_text(encoding="utf-8-sig"))
         self.assertIn("AND is_active", self.store_src)
+
+    def test_catalog_hides_deleted_by_default_with_dedicated_tab(self):
+        # Каталог по умолчанию без deprecated: у удалённых — своя вкладка с явным
+        # status='deprecated', там же скрыта кнопка повторного удаления.
+        call_qa_src = (ROOT / "call_qa" / "api.py").read_text(encoding="utf-8-sig")
+        self.assertIn("c.rule_status IS DISTINCT FROM 'deprecated'", call_qa_src)
+        self.assertIn("{ key: 'deleted', label: 'Удалённые', Icon: Trash2 }", self.rag_src)
+        self.assertIn("view === 'deleted' ? 'deprecated' : status", self.rag_src)
+        self.assertIn("itemRuleStatus !== 'deprecated' && (", self.rag_src)
+        self.assertIn("option.value !== 'deprecated'", self.rag_src)
 
 
 class AdminGuardBehaviorTests(unittest.TestCase):
