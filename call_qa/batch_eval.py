@@ -130,7 +130,7 @@ def select_calls(month: str, fallback_month: str | None, min_calls: int, limit: 
                   AND COALESCE(c.is_draft, FALSE) = FALSE
                   AND c.created_at >= %s AND c.created_at < %s
                 ORDER BY c.created_at""",
-            (config.OP_DIRECTION_IDS, lo, hi))
+            (config.op_direction_id_family(cur), lo, hi))
         rows = cur.fetchall(); cur.close(); conn.close()
         return [{"id": r[0], "direction_id": r[1], "direction": r[2], "operator": r[3] or "—",
                  "datetime": r[4], "human_score": r[5], "audio_path": r[6]} for r in rows]
@@ -495,10 +495,12 @@ def process_results(batch: dict, calls: list[dict], transcripts: dict, workdir: 
                 completed_at = datetime.now(timezone.utc)
             except Exception as exc:
                 completed_at = datetime.now(timezone.utc)
-                failure_payload = {"id": cid, "direction_id": call["direction_id"],
+                # прогоны ключуются каноническим id направления (call["direction_id"]
+                # может указывать на архивную версию шкалы — по ней грузятся критерии)
+                failure_payload = {"id": cid, "direction_id": int(direction["id"]),
                                    "_retrieval_trace": entry["prepared_rag"]["retrieval_trace"]}
                 runtime_store.save_evaluation_run(
-                    run_id=run_id, call_id=cid, direction_id=call["direction_id"],
+                    run_id=run_id, call_id=cid, direction_id=int(direction["id"]),
                     transcript_cache_id=entry["transcript_cache_id"],
                     transcript_hash=entry["transcript_hash"],
                     evaluation_fingerprint=entry["evaluation_fingerprint"],
@@ -529,7 +531,7 @@ def process_results(batch: dict, calls: list[dict], transcripts: dict, workdir: 
             } for v in result["per_criterion"]]
             score = _ai_score(direction, result)
             payload = {
-                "id": cid, "direction_id": call["direction_id"], "direction": call["direction"],
+                "id": cid, "direction_id": int(direction["id"]), "direction": call["direction"],
                 "operator": call["operator"], "datetime": call["datetime"],
                 "human_score": call["human_score"], "languages": rec["asm"]["languages"],
                 "asr_mean_conf": rec["asm"]["mean_conf"] or 0,
@@ -556,7 +558,7 @@ def process_results(batch: dict, calls: list[dict], transcripts: dict, workdir: 
             persisted_payload.pop("transcript", None)
             persisted_payload.pop("_audio_path", None)
             runtime_store.save_evaluation_run(
-                run_id=run_id, call_id=cid, direction_id=call["direction_id"],
+                run_id=run_id, call_id=cid, direction_id=int(direction["id"]),
                 transcript_cache_id=entry["transcript_cache_id"],
                 transcript_hash=entry["transcript_hash"],
                 evaluation_fingerprint=entry["evaluation_fingerprint"],

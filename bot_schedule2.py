@@ -13707,6 +13707,9 @@ def save_directions():
             "calculation_models": get_calculation_model_catalog()
         }), 200
 
+    except ValueError as e:
+        # Ошибки сопоставления направлений (чужой/битый id, дубли имён) — вина запроса
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error saving directions: {e}")
         return jsonify({"error": f"Internal server error"}), 500
