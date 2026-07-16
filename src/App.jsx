@@ -19,7 +19,7 @@ import MonitoringScaleView from './components/monitoring/MonitoringScaleView';
 import FaIcon from './components/common/FaIcon';
 import AuthEntranceSplash from './components/common/AuthEntranceSplash';
 import OrazAitSplash from './components/common/OrazAitSplash';
-import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
+import sidebarLogo from './components/common/sidebar-logo.svg';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId } from './utils/roles';
 import { departmentAllowsView, departmentRestrictsViews, firstAllowedView } from './utils/departmentViews';
 import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan } from './utils/salaryFormula';
@@ -41458,18 +41458,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                 <h1 className="text-5xl font-extrabold mb-6 flex items-center justify-center">
                                   {/* Полный логотип */}
-                                  <span className="sidebar-logo-full flex">
-                                    <span className="bg-white text-blue-800 px-3 py-1.5 rounded-l-2xl shadow-md text-3xl border border-white">
-                                      iCORE
-                                    </span>
+                                  <span className="sidebar-logo-full relative h-[54px] w-[169px] shrink-0 drop-shadow-md">
+                                    <img src={sidebarLogo} alt="iCORE" className="block h-full w-full"/>
                                     <button
                                       type="button"
                                       onClick={canManageFourYouSection ? (e) => handleSidebarViewNavigation(e, 'four_you') : undefined}
                                       aria-label={canManageFourYouSection ? 'Открыть 4 You' : undefined}
-                                      className={`bg-blue-800 text-indigo-700 px-2 py-1.5 rounded-r-2xl border-t border-b border-r border-white text-3xl -ml-px flex items-center ${canManageFourYouSection ? 'cursor-pointer hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-white/80' : 'cursor-default'}`}
-                                    >
-                                      <img src={sidebarLogoMark} alt="4 You" className="w-10 h-10 object-contain"/>
-                                    </button>
+                                      className={`absolute inset-y-0 right-0 w-[57px] rounded-r-2xl transition-colors ${canManageFourYouSection ? 'cursor-pointer hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-white/80' : 'cursor-default'}`}
+                                    />
                                   </span>
                                   {/* Мини логотип для свёрнутого состояния */}
                                   <span className="sidebar-logo-mini">
@@ -41479,7 +41475,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                       aria-label={canManageFourYouSection ? 'Открыть 4 You' : undefined}
                                       className={canManageFourYouSection ? 'cursor-pointer rounded-xl focus:outline-none focus:ring-2 focus:ring-white/80' : 'cursor-default'}
                                     >
-                                      <img src={sidebarLogoMark} alt="4 You" className="w-10 h-10 object-contain"/>
+                                      <img src={`${sidebarLogo}#mark`} alt="4 You" className="w-10 h-10 object-contain"/>
                                     </button>
                                   </span>
                                 </h1>
