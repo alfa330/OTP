@@ -42,7 +42,22 @@ def google_sa_info() -> dict | None:
 
 # --- ОП (отдел продаж) ---
 OP_DEPARTMENT_ID = 367
+# Канонические (стабильные) id направлений: живая строка направления держит id
+# навсегда (переименования и правки критериев его не меняют — см. save_directions).
 OP_DIRECTION_IDS = [72, 73, 74]  # Яндекс Регистрация / Основа / Поток
+
+
+def op_direction_id_family(cur) -> list[int]:
+    """Канонические id направлений ОП + id их архивных версий шкалы.
+
+    Исторические оценки (calls) при смене критериев перевешиваются на архивные
+    строки directions (canonical_id -> живая строка), поэтому выборки звонков
+    должны фильтровать по всей семье id, а не только по каноническим."""
+    cur.execute(
+        "SELECT id FROM directions WHERE id = ANY(%s) OR canonical_id = ANY(%s)",
+        (OP_DIRECTION_IDS, OP_DIRECTION_IDS))
+    ids = [r[0] for r in cur.fetchall()]
+    return ids or list(OP_DIRECTION_IDS)
 
 # --- ASR (Soniox) ---
 SONIOX_BASE = "https://api.soniox.com"

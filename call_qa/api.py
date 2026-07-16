@@ -97,7 +97,7 @@ def _recent_calls_fallback(limit: int) -> list[dict]:
             WHERE c.direction_id = ANY(%s) AND c.audio_path IS NOT NULL AND c.audio_path <> ''
               AND COALESCE(c.is_draft, FALSE) = FALSE
             ORDER BY c.created_at DESC LIMIT %s""",
-        (config.OP_DIRECTION_IDS, limit),
+        (config.op_direction_id_family(cur), limit),
     )
     rows = cur.fetchall(); cur.close(); conn.close()
     return [{"id": r[0], "direction": r[1], "operator": r[2] or "—",
@@ -110,7 +110,8 @@ def _direction_identity_context(direction_id: int) -> dict | None:
     from .rag import knowledge
     direction = criteria_mod.load_direction(int(direction_id))
     cc.apply_to_direction(direction)
-    rollout = _rag_rollout(int(direction_id), 0)  # bucket пер-звонковый, здесь не используется
+    # rollout ключуется каноническим id (для архивной версии шкалы — id живой строки)
+    rollout = _rag_rollout(int(direction["id"]), 0)  # bucket пер-звонковый, здесь не используется
     snapshot_hash = None
     conn = config.connect_ro()
     try:
@@ -152,7 +153,8 @@ def _flag_stale_evaluations(items: list[dict]) -> None:
             if ctx is None:
                 item["stale"] = None
                 continue
-            bucket = _canary_bucket(direction_id, item["id"])
+            # тот же канонический id, что использует _evaluate_and_cache при открытии
+            bucket = _canary_bucket(int(ctx["direction"]["id"]), item["id"])
             use_rag = ctx["mode"] == "active" or (
                 ctx["mode"] == "canary"
                 and bucket < max(0, min(100, ctx["canary_percent"])))
@@ -775,6 +777,10 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool) -> dict:
 
     direction = criteria_mod.load_direction(direction_id)
     cc.apply_to_direction(direction)
+    # Дальше работаем с каноническим id направления: у старого звонка direction_id
+    # может указывать на архивную версию шкалы — критерии берутся из неё (баллы
+    # позиционные), а rollout/знания/прогоны ключуются живой строкой направления.
+    direction_id = int(direction["id"])
     from .rag import knowledge
     knowledge_conn = config.connect_rw()
     try:
@@ -2407,13 +2413,14 @@ def random_call() -> dict:
                 LEFT JOIN users u ON c.operator_id = u.id
                WHERE c.direction_id = ANY(%s) AND c.audio_path IS NOT NULL AND c.audio_path <> ''
                  AND COALESCE(c.is_draft, FALSE) = FALSE AND c.score IS NOT NULL"""
+    id_family = config.op_direction_id_family(cur)
     cur.execute(base + """ AND NOT EXISTS (SELECT 1 FROM ai_review_cache rc
                                             WHERE rc.call_id = c.id AND rc.model = %s)
                            ORDER BY random() LIMIT 1""",
-                (config.OP_DIRECTION_IDS, config.CLAUDE_MODEL))
+                (id_family, config.CLAUDE_MODEL))
     row = cur.fetchone()
     if not row:
-        cur.execute(base + " ORDER BY random() LIMIT 1", (config.OP_DIRECTION_IDS,))
+        cur.execute(base + " ORDER BY random() LIMIT 1", (id_family,))
         row = cur.fetchone()
     cur.close(); conn.close()
     if not row:
@@ -2667,7 +2674,7 @@ def stats() -> dict:
                 """SELECT COUNT(*) FROM calls
                     WHERE direction_id = ANY(%s) AND audio_path IS NOT NULL AND audio_path <> ''
                       AND COALESCE(is_draft, FALSE) = FALSE AND created_at > NOW() - INTERVAL '7 days'""",
-                (config.OP_DIRECTION_IDS,))
+                (config.op_direction_id_family(cur),))
             out["queue"] = cur.fetchone()[0]
 
         # Сырой эталон: последняя оценка каждого звонка (без дублей по тегам моделей).

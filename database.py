@@ -1009,6 +1009,32 @@ class Database:
                     previous_version_id INTEGER REFERENCES directions(id)
                 );
             """)
+            # canonical_id: у архивной версии направления — id его «живой» строки.
+            # Живая строка направления держит свой id навсегда (операторы, группы и
+            # внешние связки, включая ИИ-оценку, не отвязываются при правках);
+            # архивные строки хранят шкалу критериев «как была» для старых оценок.
+            cursor.execute("""
+                ALTER TABLE directions
+                ADD COLUMN IF NOT EXISTS canonical_id INTEGER REFERENCES directions(id) ON DELETE SET NULL;
+            """)
+            # Бекфилл для исторических цепочек версий (старый механизм создавал новую
+            # строку на каждую правку): каждой неактивной версии проставляется ссылка
+            # на активное продолжение её цепочки, если оно существует.
+            cursor.execute("""
+                WITH RECURSIVE chain AS (
+                    SELECT id, previous_version_id, id AS head
+                    FROM directions WHERE is_active = TRUE
+                    UNION ALL
+                    SELECT d.id, d.previous_version_id, chain.head
+                    FROM directions d
+                    JOIN chain ON chain.previous_version_id = d.id
+                )
+                UPDATE directions SET canonical_id = chain.head
+                FROM chain
+                WHERE directions.id = chain.id
+                  AND chain.head <> chain.id
+                  AND directions.canonical_id IS DISTINCT FROM chain.head;
+            """)
             # Users table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS users (
@@ -14274,17 +14300,28 @@ class Database:
         return {"month": month, "work_days": work_days, "processed": int(processed)}
 
     def save_directions(self, directions, scope_department_id=None):
-        """Сохранить направления в таблицу directions, создавая новые версии при изменениях.
+        """Сохранить направления, сопоставляя записи по id (стабильная идентичность).
+
+        Живая строка направления держит свой id навсегда, поэтому правки не
+        отвязывают операторов/группы и внешние связки по direction_id (ИИ-оценка,
+        rollout-конфиги, база знаний):
+        - имя / файл / модель расчёта меняются НА МЕСТЕ;
+        - изменение критериев уводит старую шкалу в архивную строку
+          (is_active=FALSE, canonical_id -> живая строка) и перевешивает на неё
+          исторические оценки (calls, калибровки) — старые оценки продолжают
+          отображаться по той шкале, по которой ставились (баллы позиционные);
+        - запись без id (legacy-клиент) матчится по имени среди активных
+          направлений скоупа, иначе создаётся новое направление (version=1);
+        - активные направления скоупа, отсутствующие в списке, деактивируются,
+          их операторы отвязываются (direction_id = NULL) — это удаление.
 
         Если задан scope_department_id — операция ограничена этим отделом:
-        сравнение/деактивация берут только направления этого отдела, новые версии и
-        новые направления получают этот department_id, направления других отделов
-        не затрагиваются. Это нужно, чтобы глава отдела (или админ, редактирующий
-        конкретный отдел) не «обнулял» направления других отделов.
+        глава отдела (или админ, редактирующий конкретный отдел) не может
+        затронуть направления других отделов; чужой id в списке — ошибка.
         """
         scoped = scope_department_id is not None
         with self._get_cursor() as cursor:
-            # 1. Получаем текущие активные направления (в рамках отдела, если задан scope)
+            # 1. Текущие активные направления (в рамках отдела, если задан scope)
             if scoped:
                 cursor.execute("""
                     SELECT id, name, has_file_upload, criteria, version, calculation_model_code, department_id
@@ -14297,9 +14334,10 @@ class Database:
                     FROM directions
                     WHERE is_active = TRUE
                 """)
-            existing_directions = {
-                row[1]: {
+            existing_by_id = {
+                row[0]: {
                     "id": row[0],
+                    "name": row[1],
                     "has_file_upload": row[2],
                     "criteria": json.dumps(row[3] or [], ensure_ascii=False, sort_keys=True),
                     "version": row[4],
@@ -14307,115 +14345,113 @@ class Database:
                     "department_id": row[6]
                 } for row in cursor.fetchall()
             }
-            
-            new_direction_names = {str(d.get('name') or '').strip() for d in directions if str(d.get('name') or '').strip()}
-            directions_to_deactivate = []
-            insert_values = []
-            
-            # 2. Подготовка данных для пакетной обработки
+            existing_by_name = {row["name"]: row for row in existing_by_id.values()}
+
+            # 2. Классификация входящих записей
+            seen_ids = set()
+            names_in_payload = set()
+            in_place_updates = []   # (name, has_file_upload, model_code, id)
+            criteria_changes = []   # (existing, name, has_file_upload, criteria_json, model_code)
+            inserts = []            # (name, has_file_upload, criteria_json, model_code)
+
             for direction in directions:
                 name = str(direction.get('name') or '').strip()
                 if not name:
                     continue
+                if name in names_in_payload:
+                    raise ValueError(f"направление «{name}» указано в списке дважды")
+                names_in_payload.add(name)
                 has_file_upload = bool(direction.get('hasFileUpload', True))
                 criteria = json.dumps(direction.get('criteria') or [], ensure_ascii=False, sort_keys=True)
                 calculation_model_code = normalize_calculation_model_code(
                     direction.get('calculationModelCode') or direction.get('calculation_model_code'),
                     name
                 )
-                
-                if name in existing_directions:
-                    existing = existing_directions[name]
-                    if (existing['has_file_upload'] == has_file_upload and
-                        existing['criteria'] == criteria and
-                        existing['calculation_model_code'] == calculation_model_code):
-                        continue  # Ничего не изменилось, пропускаем
-                    
-                    directions_to_deactivate.append(existing['id'])
-                    insert_values.append((
-                        name, has_file_upload, criteria, calculation_model_code,
-                        existing['version'] + 1, existing['id'],
-                        scope_department_id if scoped else existing.get('department_id')
-                    ))
+
+                raw_id = direction.get('id')
+                if raw_id in (None, ''):
+                    existing = existing_by_name.get(name)
                 else:
-                    insert_values.append((
-                        name, has_file_upload, criteria, calculation_model_code,
-                        1, None,  # version=1, no previous version
-                        scope_department_id  # NULL для глобального режима (без scope)
-                    ))
-            
-            # 3. Пакетное деактивирование старых версий
-            if directions_to_deactivate:
+                    try:
+                        raw_id = int(raw_id)
+                    except (TypeError, ValueError):
+                        raise ValueError(f"некорректный id направления: {raw_id!r}")
+                    existing = existing_by_id.get(raw_id)
+                    if existing is None:
+                        raise ValueError(
+                            f"направление id={raw_id} не найдено среди активных направлений отдела")
+
+                if existing is None:
+                    inserts.append((name, has_file_upload, criteria, calculation_model_code))
+                    continue
+
+                if existing["id"] in seen_ids:
+                    raise ValueError(f"направление id={existing['id']} указано в списке дважды")
+                seen_ids.add(existing["id"])
+
+                criteria_changed = existing["criteria"] != criteria
+                settings_changed = (existing["name"] != name or
+                                    existing["has_file_upload"] != has_file_upload or
+                                    existing["calculation_model_code"] != calculation_model_code)
+                if criteria_changed:
+                    criteria_changes.append((existing, name, has_file_upload, criteria, calculation_model_code))
+                elif settings_changed:
+                    in_place_updates.append((name, has_file_upload, calculation_model_code, existing["id"]))
+
+            # 3. Правки на месте (переименование/файл/модель): id стабилен, привязки целы
+            for name, has_file_upload, model_code, direction_id in in_place_updates:
                 cursor.execute("""
                     UPDATE directions
-                    SET is_active = FALSE
-                    WHERE id = ANY(%s)
-                """, (directions_to_deactivate,))
-            
-            # 4. Пакетное добавление новых версий
-            if insert_values:
+                    SET name = %s, has_file_upload = %s, calculation_model_code = %s
+                    WHERE id = %s
+                """, (name, has_file_upload, model_code, direction_id))
+
+            # 4. Смена критериев: старая шкала — в архивную строку, живая строка
+            #    сохраняет id; исторические оценки перевешиваются на архив, потому
+            #    что их баллы позиционно привязаны к старому списку критериев.
+            for existing, name, has_file_upload, criteria, model_code in criteria_changes:
+                cursor.execute("""
+                    INSERT INTO directions (
+                        name, has_file_upload, criteria, calculation_model_code,
+                        version, previous_version_id, department_id, is_active, canonical_id
+                    )
+                    SELECT name, has_file_upload, criteria, calculation_model_code,
+                           version, previous_version_id, department_id, FALSE, id
+                    FROM directions WHERE id = %s
+                    RETURNING id
+                """, (existing["id"],))
+                archive_id = cursor.fetchone()[0]
+                for frozen_table in ("calls", "calibration_rooms", "calibration_room_calls"):
+                    cursor.execute(
+                        f"UPDATE {frozen_table} SET direction_id = %s WHERE direction_id = %s",
+                        (archive_id, existing["id"]))
+                cursor.execute("""
+                    UPDATE directions
+                    SET name = %s, has_file_upload = %s, criteria = %s,
+                        calculation_model_code = %s, version = version + 1,
+                        previous_version_id = %s
+                    WHERE id = %s
+                """, (name, has_file_upload, criteria, model_code, archive_id, existing["id"]))
+
+            # 5. Новые направления
+            if inserts:
                 cursor.executemany("""
                     INSERT INTO directions (
                         name, has_file_upload, criteria, calculation_model_code,
                         version, previous_version_id, department_id
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """, insert_values)
+                    VALUES (%s, %s, %s, %s, 1, NULL, %s)
+                """, [(n, h, c, m, scope_department_id) for n, h, c, m in inserts])
 
-            # 5. Деактивируем направления, которых нет в новом списке (в рамках scope-отдела, если задан)
-            if scoped:
-                if new_direction_names:
-                    cursor.execute("""
-                        UPDATE directions
-                        SET is_active = FALSE
-                        WHERE is_active = TRUE AND department_id = %s AND name NOT IN %s
-                    """, (scope_department_id, tuple(new_direction_names)))
-                else:
-                    cursor.execute("""
-                        UPDATE directions
-                        SET is_active = FALSE
-                        WHERE is_active = TRUE AND department_id = %s
-                    """, (scope_department_id,))
-            elif new_direction_names:
+            # 6. Удаление: активные направления скоупа, которых нет в новом списке
+            removed_ids = [direction_id for direction_id in existing_by_id if direction_id not in seen_ids]
+            if removed_ids:
                 cursor.execute("""
-                    UPDATE directions
-                    SET is_active = FALSE
-                    WHERE is_active = TRUE AND name NOT IN %s
-                """, (tuple(new_direction_names),))
-            else:
+                    UPDATE directions SET is_active = FALSE WHERE id = ANY(%s)
+                """, (removed_ids,))
                 cursor.execute("""
-                    UPDATE directions
-                    SET is_active = FALSE
-                    WHERE is_active = TRUE
-                """)
-            
-            # 6. Оптимизированное обновление direction_id в users
-            cursor.execute("""
-                -- Обновляем direction_id на последнюю активную версию в том же отделе
-                UPDATE users u
-                SET direction_id = latest.id
-                FROM directions current
-                JOIN (
-                    SELECT name, department_id, id,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY name, department_id
-                            ORDER BY version DESC
-                        ) as rn
-                    FROM directions
-                    WHERE is_active = TRUE
-                ) latest ON current.name = latest.name
-                    AND current.department_id IS NOT DISTINCT FROM latest.department_id
-                    AND latest.rn = 1
-                WHERE u.direction_id = current.id AND current.is_active = FALSE;
-                
-                -- Обнуляем direction_id где нет активных направлений
-                UPDATE users
-                SET direction_id = NULL
-                WHERE direction_id IS NOT NULL
-                AND direction_id NOT IN (
-                    SELECT id FROM directions WHERE is_active = TRUE
-                );
-            """)
+                    UPDATE users SET direction_id = NULL WHERE direction_id = ANY(%s)
+                """, (removed_ids,))
 
     def get_operator_credentials(self, operator_id, supervisor_id):
         """Получить логин и хеш пароля оператора с проверкой принадлежности супервайзеру"""

@@ -54,13 +54,21 @@ def scale_fingerprint(direction_id: int, name: str, criteria: list[dict]) -> str
 
 
 def load_direction(direction_id: int) -> dict:
-    """Возвращает {id, name, criteria: [{idx, name, value/description, weight, is_critical, deficiency}]}."""
+    """Возвращает {id, name, criteria: [{idx, name, value/description, weight, is_critical, deficiency}]}.
+
+    ``id`` — канонический (стабильный) id направления: для архивной версии шкалы
+    это id живой строки (directions.canonical_id). Все производные идентичности
+    (criterion_id, scale_hash) и связки (rollout, база знаний, scale revisions)
+    считаются от канонического id, поэтому оценка старого звонка по архивной
+    шкале остаётся в том же направлении, что и текущие звонки. ``row_id`` —
+    фактическая строка, из которой загружены критерии."""
     conn = config.connect_ro()
     cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
-    cur.execute("SELECT id, name, criteria FROM directions WHERE id=%s", (direction_id,))
+    cur.execute("SELECT id, name, criteria, canonical_id FROM directions WHERE id=%s", (direction_id,))
     row = cur.fetchone(); cur.close(); conn.close()
     if not row:
         raise ValueError(f"направление {direction_id} не найдено")
+    canonical_id = int(row[3] or row[0])
     raw = row[2] or []
     crits = []
     name_counts = {}
@@ -71,12 +79,12 @@ def load_direction(direction_id: int) -> dict:
         name_counts[norm_name] = duplicate + 1
         crits.append({
             "idx": i,
-            "criterion_id": criterion_identity(row[0], c, duplicate=duplicate),
+            "criterion_id": criterion_identity(canonical_id, c, duplicate=duplicate),
             "name": c.get("name") or f"Критерий {i + 1}",
             "description": c.get("value") or "",
             "weight": c.get("weight"),
             "is_critical": bool(c.get("isCritical")),
             "deficiency": c.get("deficiency"),
         })
-    return {"id": row[0], "name": row[1], "criteria": crits,
-            "scale_hash": scale_fingerprint(row[0], row[1], crits)}
+    return {"id": canonical_id, "row_id": row[0], "name": row[1], "criteria": crits,
+            "scale_hash": scale_fingerprint(canonical_id, row[1], crits)}
