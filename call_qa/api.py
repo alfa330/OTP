@@ -25,19 +25,31 @@ from .review.evidence import (EvidenceValidationError, VALID_VERDICTS,
 def review_queue_list(limit: int = 30) -> list[dict]:
     """Очередь ревью: ИИ-оценённые звонки (текущий тег модели), которые человек ещё не
     проверял. Причины считаются из сохранённой карточки; сортировка — сначала критичное,
-    внутри — свежее. Если миграция меты ещё не прошла — fallback на «последние звонки»."""
+    внутри — свежее. stale=True — сохранённая оценка не совпадает с актуальной
+    конфигурацией (промпт/шкала/база знаний/RAG-режим изменились или immutable-прогона
+    нет), поэтому открытие карточки автоматически переоценит звонок. Если миграция меты
+    ещё не прошла — fallback на «последние звонки»."""
     conn = None
     try:
         conn = config.connect_ro()
         cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
         cur.execute(
             """SELECT rc.call_id, d.name, u.name, TO_CHAR(c.created_at,'DD.MM HH24:MI'), c.score,
-                      rc.payload->'criteria', rc.payload->'asr_mean_conf', rc.created_at
+                      rc.payload->'criteria', rc.payload->'asr_mean_conf', rc.created_at,
+                      c.direction_id, run.evaluation_fingerprint::text, run.fingerprint_components
                  FROM ai_review_cache rc
                  JOIN calls c ON c.id = rc.call_id
                  LEFT JOIN directions d ON c.direction_id = d.id
                  LEFT JOIN users u ON c.operator_id = u.id
                  LEFT JOIN ai_evaluation_meta m ON m.call_id = rc.call_id AND m.model = rc.model
+                 LEFT JOIN LATERAL (
+                     SELECT r.evaluation_fingerprint, r.fingerprint_components
+                       FROM ai_evaluation_runs r
+                      WHERE r.call_id = rc.call_id AND r.status = 'succeeded'
+                        AND r.run_kind IN ('standard','force','batch')
+                      ORDER BY r.created_at DESC, r.id::text DESC
+                      LIMIT 1
+                 ) run ON true
                 WHERE rc.model = %s AND m.review_outcome IS NULL
                 ORDER BY rc.created_at DESC LIMIT %s""",
             (config.CLAUDE_MODEL, max(limit * 3, limit)),  # запас: часть окажется «чистой»
@@ -50,11 +62,15 @@ def review_queue_list(limit: int = 30) -> list[dict]:
             items.append({"id": r[0], "direction": r[1], "operator": r[2] or "—",
                           "datetime": r[3], "human_score": r[4], "reasons": reasons or ["ok"],
                           "_sev": min((prio.index(x) for x in reasons), default=len(prio)),
-                          "_ts": r[7]})
+                          "_ts": r[7], "_direction_id": r[8],
+                          "_run_fp": r[9], "_run_components": r[10]})
         items.sort(key=lambda i: (i["_sev"], -(i["_ts"].timestamp() if i["_ts"] else 0)))
+        items = items[:limit]
+        _flag_stale_evaluations(items)
         for i in items:
-            i.pop("_sev", None); i.pop("_ts", None)
-        return items[:limit]
+            for key in ("_sev", "_ts", "_direction_id", "_run_fp", "_run_components"):
+                i.pop(key, None)
+        return items
     except Exception as exc:
         if runtime_store.is_schema_compat_error(exc):
             logging.warning("ai-qa: очередь работает в режиме совместимости без evaluation meta")
@@ -86,6 +102,70 @@ def _recent_calls_fallback(limit: int) -> list[dict]:
     rows = cur.fetchall(); cur.close(); conn.close()
     return [{"id": r[0], "direction": r[1], "operator": r[2] or "—",
              "datetime": r[3], "human_score": r[4], "reasons": ["new"]} for r in rows]
+
+
+def _direction_identity_context(direction_id: int) -> dict | None:
+    """Направленческая часть evaluation identity, строго read-only (для очереди ревью).
+    None — не удалось вычислить; очередь при этом не падает (stale останется None)."""
+    from .rag import knowledge
+    direction = criteria_mod.load_direction(int(direction_id))
+    cc.apply_to_direction(direction)
+    rollout = _rag_rollout(int(direction_id), 0)  # bucket пер-звонковый, здесь не используется
+    snapshot_hash = None
+    conn = config.connect_ro()
+    try:
+        snapshot_hash = knowledge.peek_knowledge_snapshot_hash(conn, direction=direction)
+    finally:
+        conn.close()
+    return {"direction": direction, "mode": rollout["mode"],
+            "canary_percent": rollout["canary_percent"], "snapshot_hash": snapshot_hash}
+
+
+def _flag_stale_evaluations(items: list[dict]) -> None:
+    """Помечает элементы очереди, чью сохранённую оценку открытие пересчитает заново.
+
+    Открытие карточки (review_payload) отдаёт кэш только при точном совпадении
+    evaluation_fingerprint с актуальной конфигурацией. Здесь ожидаемый fingerprint
+    восстанавливается без записи в БД: транскрипт-компонент берётся из последнего
+    прогона (аудио и ASR-конфиг звонка неизменны в норме), остальные — из текущего
+    состояния направления. stale: True — открытие переоценит; False — кэш совпадёт;
+    None — определить не удалось."""
+    contexts: dict[int, dict | None] = {}
+    for item in items:
+        # Нет успешного immutable-прогона (карточка из старого кэша) —
+        # открытие гарантированно запустит новую оценку.
+        item["stale"] = True
+        components = item.get("_run_components") or {}
+        transcript_identity = components.get("transcript_hash")
+        direction_id, run_fp = item.get("_direction_id"), item.get("_run_fp")
+        if not (run_fp and transcript_identity and direction_id):
+            continue
+        try:
+            if direction_id not in contexts:
+                try:
+                    contexts[direction_id] = _direction_identity_context(direction_id)
+                except Exception:
+                    logging.exception(
+                        "ai-qa: очередь — не удалось построить identity направления %s", direction_id)
+                    contexts[direction_id] = None
+            ctx = contexts[direction_id]
+            if ctx is None:
+                item["stale"] = None
+                continue
+            bucket = _canary_bucket(direction_id, item["id"])
+            use_rag = ctx["mode"] == "active" or (
+                ctx["mode"] == "canary"
+                and bucket < max(0, min(100, ctx["canary_percent"])))
+            if use_rag and not ctx["snapshot_hash"]:
+                continue  # снапшота под текущую шкалу ещё нет — открытие создаст новый
+            expected, _, _ = _evaluation_identity(
+                transcript_hash=transcript_identity, direction=ctx["direction"],
+                knowledge_snapshot={"content_hash": ctx["snapshot_hash"]}, use_rag=use_rag)
+            item["stale"] = expected != run_fp
+        except Exception:
+            logging.exception(
+                "ai-qa: не удалось определить актуальность оценки звонка %s", item.get("id"))
+            item["stale"] = None
 
 
 def _download(audio_path: str, dest: str):
@@ -210,6 +290,11 @@ def _bind_rollout_approval(gates: dict, approval: dict) -> dict:
     return approval
 
 
+def _canary_bucket(direction_id: int, call_id: int) -> int:
+    """Детерминированная канарейка звонка: одна формула для оценки и очереди ревью."""
+    return int(content_hash({"call_id": int(call_id), "direction_id": int(direction_id)})[:8], 16) % 100
+
+
 def _rag_rollout(direction_id: int, call_id: int) -> dict:
     """Resolve DB-controlled rollout with a deterministic canary assignment."""
     mode, percent, source = config.RAG_MODE, config.RAG_CANARY_PERCENT, "environment"
@@ -254,7 +339,7 @@ def _rag_rollout(direction_id: int, call_id: int) -> dict:
             logging.warning("ai-qa: rollout for direction %s forced to shadow: %s",
                             direction_id, approval["reason"])
             mode, percent, source = "shadow", 0, "database-safe-fallback"
-    bucket = int(content_hash({"call_id": int(call_id), "direction_id": int(direction_id)})[:8], 16) % 100
+    bucket = _canary_bucket(direction_id, call_id)
     selected = mode == "active" or (mode == "canary" and bucket < max(0, min(100, percent)))
     return {"mode": mode, "canary_percent": percent, "canary_bucket": bucket,
             "rag_enabled": selected, "shadow_enabled": mode == "shadow",
@@ -752,6 +837,17 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool) -> dict:
                 _cache_put(call_id, model, cached)
             return cached
 
+    # Пометка для ревьюера: звонок уже оценивался, но прежний результат не совпал
+    # с актуальной конфигурацией (или прогона нет в immutable-кэше) — это переоценка
+    # устаревшей оценки, а не первая оценка звонка.
+    previous_evaluation_stale = False
+    if not refresh:
+        try:
+            prior_fp = runtime_store.latest_evaluation_fingerprint(call_id)
+        except runtime_store.RuntimeSchemaUnavailable:
+            prior_fp = None
+        previous_evaluation_stale = bool(prior_fp) or bool(_cache_get(call_id, model))
+
     crit_meta = {c["idx"]: c for c in direction["criteria"]}
     run_id = runtime_store.new_run_id()
     pair_id = runtime_store.new_run_id() if rollout["shadow_enabled"] else None
@@ -815,6 +911,7 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool) -> dict:
         "_pair_id": pair_id,
         "_retrieval_trace": result.get("retrieval_trace") or {},
         "_llm_meta": result.get("_llm_meta") or {},
+        "_previous_evaluation_stale": previous_evaluation_stale,
     }
     payload["evaluation"] = _evaluation_summary(
         run_id=run_id, fingerprint=fingerprint, knowledge_snapshot=snapshot,
@@ -1038,6 +1135,10 @@ def adjudications_list(direction=None, q=None, *, status=None, index_status=None
                 where.append("c.direction_name=%s"); params.append(direction)
         if status and status != "all":
             where.append("c.rule_status=%s"); params.append(status)
+        else:
+            # Удалённые (deprecated) скрыты из каталога по умолчанию: у них отдельная
+            # вкладка «Удалённые», которая запрашивает их явным status='deprecated'.
+            where.append("c.rule_status IS DISTINCT FROM 'deprecated'")
         if index_status and index_status != "all":
             if index_status in ("indexed", "ready"):
                 where.append("(c.index_status='ready' AND c.embedding_provider=%s AND "

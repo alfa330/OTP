@@ -3,7 +3,9 @@
 подтверждение/разбор фиксируются в ai_evaluation_meta, use_count реально растёт."""
 from pathlib import Path
 import unittest
+from unittest import mock
 
+from call_qa import api as call_qa_api
 from call_qa.review import queue
 from call_qa.rag import store
 
@@ -35,6 +37,52 @@ class ReviewReasonsTests(unittest.TestCase):
 
     def test_pending_on_system_api_criteria(self):
         self.assertEqual(queue.review_reasons([_crit(source="system_api", ai="Pending", conf=None)]), ["pending"])
+
+
+class QueueStalenessTests(unittest.TestCase):
+    """Флаг stale: очередь честно предупреждает, что открытие переоценит звонок."""
+
+    def test_card_without_immutable_run_is_stale(self):
+        # Карточки, созданные до immutable-кэша, не имеют прогона —
+        # открытие гарантированно запустит новую оценку.
+        items = [{"id": 5, "_direction_id": 74, "_run_fp": None, "_run_components": None}]
+        call_qa_api._flag_stale_evaluations(items)
+        self.assertTrue(items[0]["stale"])
+
+    def test_fingerprint_match_is_fresh_and_mismatch_is_stale(self):
+        ctx = {"direction": {"id": 74}, "mode": "shadow", "canary_percent": 0,
+               "snapshot_hash": "snap"}
+        with mock.patch.object(call_qa_api, "_direction_identity_context", return_value=ctx), \
+             mock.patch.object(call_qa_api, "_evaluation_identity",
+                               return_value=("fp-current", {}, {})):
+            items = [
+                {"id": 1, "_direction_id": 74, "_run_fp": "fp-current",
+                 "_run_components": {"transcript_hash": "t"}},
+                {"id": 2, "_direction_id": 74, "_run_fp": "fp-old",
+                 "_run_components": {"transcript_hash": "t"}},
+            ]
+            call_qa_api._flag_stale_evaluations(items)
+        self.assertFalse(items[0]["stale"])
+        self.assertTrue(items[1]["stale"])
+
+    def test_context_failure_yields_unknown_without_breaking_queue(self):
+        with mock.patch.object(call_qa_api, "_direction_identity_context",
+                               side_effect=RuntimeError("нет БД")):
+            items = [{"id": 1, "_direction_id": 74, "_run_fp": "fp",
+                      "_run_components": {"transcript_hash": "t"}}]
+            call_qa_api._flag_stale_evaluations(items)
+        self.assertIsNone(items[0]["stale"])
+
+    def test_missing_snapshot_with_rag_active_is_stale(self):
+        # RAG включён, а снапшота под текущую шкалу нет: открытие создаст новый
+        # снапшот и новый fingerprint — оценка заведомо пересчитается.
+        ctx = {"direction": {"id": 74}, "mode": "active", "canary_percent": 0,
+               "snapshot_hash": None}
+        with mock.patch.object(call_qa_api, "_direction_identity_context", return_value=ctx):
+            items = [{"id": 1, "_direction_id": 74, "_run_fp": "fp",
+                      "_run_components": {"transcript_hash": "t"}}]
+            call_qa_api._flag_stale_evaluations(items)
+        self.assertTrue(items[0]["stale"])
 
 
 class EmbeddingChunkingTests(unittest.TestCase):
@@ -98,6 +146,21 @@ class ReviewFlowContractTests(unittest.TestCase):
 
     def test_refresh_reuses_transcript(self):
         self.assertIn('"_asm"', self.api_src)
+
+    def test_queue_labels_stale_evaluations(self):
+        # Очередь сверяет fingerprint последнего прогона с актуальной конфигурацией
+        # (read-only), а фронтенд показывает бейдж «Оценка устарела».
+        self.assertIn("def _flag_stale_evaluations", self.api_src)
+        self.assertIn("peek_knowledge_snapshot_hash", self.api_src)
+        self.assertIn("run.fingerprint_components", self.api_src)
+        self.assertIn("c.stale &&", self.view_src)
+        self.assertIn("Оценка устарела", self.view_src)
+
+    def test_reevaluation_of_stale_card_is_labeled_on_open(self):
+        # Открытие, повлёкшее переоценку ранее оценённого звонка, помечается явно.
+        self.assertIn("_previous_evaluation_stale", self.api_src)
+        self.assertIn("latest_evaluation_fingerprint", self.api_src)
+        self.assertIn("_previous_evaluation_stale", self.view_src)
 
 
 if __name__ == "__main__":
