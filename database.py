@@ -14238,7 +14238,8 @@ class Database:
     def auto_fill_norm_hours(self, month):
         """
         Авто-подсчет `norm_hours` для всех операторов за указанный месяц (формат 'YYYY-MM'),
-        где текущая `norm_hours` равна 0. Формула: рабочие дни * 8 * rate.
+        где текущая `norm_hours` равна 0. Формула: рабочие дни * 8 * rate,
+        где рабочие дни = округл(дни месяца / 7 * 5) — не календарные пн-пт.
 
         Возвращает словарь: {"month": month, "work_days": int, "processed": int}
         processed — число строк, на которые сработал INSERT/UPDATE (оценочно).
@@ -15225,14 +15226,13 @@ class Database:
         return month_start_date, next_month_start
 
     def _get_month_work_days(self, month: Optional[str]) -> int:
+        # Рабочие дни месяца по формуле владельца: округл(дни месяца / 7 * 5),
+        # НЕ календарные пн-пт (31 д -> 22, 30 д -> 21, 28 д -> 20; июль = 176 ч).
+        # Используется в авто-норме часов (auto_fill_norm_hours) и норме на полную
+        # ставку (_get_full_rate_norm_hours -> норматив звонков для оценки).
         month_start_date, next_month_start = self._get_month_date_range(month)
-        work_days = 0
-        current_date = month_start_date
-        while current_date < next_month_start:
-            if current_date.weekday() < 5:
-                work_days += 1
-            current_date += timedelta(days=1)
-        return int(work_days)
+        days_in_month = (next_month_start - month_start_date).days
+        return int(round(days_in_month / 7.0 * 5.0))
 
     def _get_full_rate_norm_hours(self, month: Optional[str]) -> float:
         return float(self._get_month_work_days(month) * 8.0)

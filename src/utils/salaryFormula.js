@@ -284,26 +284,23 @@ export function calculateTezOpSalary({
 
 // ──────────────────────────────────────────────────────────────────────────
 // Индивидуальный план успешных сделок на месяц, модель ОП TEZ.
-// Правила владельца (июль 2026):
+// Правила владельца (июль 2026). Норма_FTE месяца = раб.дни × 8 ч, где
+// раб.дни = округл(дни месяца ÷ 7 × 5) — НЕ календарные (июль: 22 р.д. → 176 ч).
 //  2) стандарт (полный месяц, ≤100% выработки): план_FTE × ставка;
-//  3) переработка (факт > нормы сотрудника):    план_FTE ÷ 176 × факт;
+//  3) переработка (факт > нормы сотрудника):    план_FTE ÷ норма_FTE × факт;
 //  4) новичок (принят в отчётном месяце): ×0,8; неполный месяц — пропорционально
 //     раб. дням: план_FTE ÷ раб.дни месяца × ((конец месяца − дата приёма) ÷ 7 × 5) × ставка × 0,8;
-//  5) новичок с переработкой:                   план_FTE ÷ 176 × факт × 0,8;
+//  5) новичок с переработкой:                   план_FTE ÷ норма_FTE × факт × 0,8;
 //  6) увольнение/выход на БС (норма сотрудника пересчитана за фактический
-//     период вручную):                          план_FTE ÷ 176 × пересчитанная норма.
+//     период вручную):                          план_FTE ÷ норма_FTE × пересчитанная норма.
 // ──────────────────────────────────────────────────────────────────────────
 export const TEZ_OP_NEWBIE_COEF = 0.8;
 
-// Рабочие дни месяца (пн–пт), без учёта праздников — как в таблицах владельца.
+// Рабочие дни месяца для плана ОП: округл(кол-во дней месяца ÷ 7 × 5),
+// не календарные пн–пт — так считает владелец (31 д → 22; 30 д → 21; 28 д → 20).
 export function tezWorkdaysInMonth(year, monthNum) {
     const days = new Date(year, monthNum, 0).getDate();
-    let count = 0;
-    for (let d = 1; d <= days; d++) {
-        const dow = new Date(year, monthNum - 1, d).getDay();
-        if (dow !== 0 && dow !== 6) count++;
-    }
-    return count;
+    return Math.round((days / 7) * 5);
 }
 
 function parsePlanDate(value) {
@@ -347,11 +344,24 @@ export function calculateTezOpMonthlyPlan({
     const planFte = parseFloat(planPerFte) || 0;
     const fact = Math.max(0, parseFloat(factHours) || 0);
     const normRaw = Math.max(0, parseFloat(normHours) || 0);
-    let rateV = parseFloat(rate) || 0;
-    if (rateV <= 0) rateV = normRaw > 0 ? normRaw / TEZ_NORM_HOURS : 1;
-    const opNorm = normRaw > 0 ? normRaw : TEZ_NORM_HOURS * rateV;
 
-    const base = { isNewbie: false, overtime: false, opNorm, rate: rateV };
+    const [yStr, mStr] = String(month || '').split('-');
+    const year = parseInt(yStr, 10);
+    const monthNum = parseInt(mStr, 10);
+    const hasPeriod = Number.isFinite(year) && monthNum >= 1 && monthNum <= 12;
+    const monthStart = hasPeriod ? new Date(year, monthNum - 1, 1) : null;
+    const monthEnd = hasPeriod ? new Date(year, monthNum, 0) : null;
+
+    // Норма на 1 FTE этого месяца: округл(дни ÷ 7 × 5) раб. дней по 8 ч.
+    // Без месяца (калькулятор) — 22 р.д. → 176 ч.
+    const fteWorkdays = hasPeriod ? tezWorkdaysInMonth(year, monthNum) : Math.round(TEZ_NORM_HOURS / 8);
+    const fteNorm = fteWorkdays * 8;
+
+    let rateV = parseFloat(rate) || 0;
+    if (rateV <= 0) rateV = normRaw > 0 ? normRaw / fteNorm : 1;
+    const opNorm = normRaw > 0 ? normRaw : fteNorm * rateV;
+
+    const base = { isNewbie: false, overtime: false, opNorm, rate: rateV, fteNorm, fteWorkdays };
     if (planFte <= 0) {
         return {
             ...base,
@@ -361,13 +371,6 @@ export function calculateTezOpMonthlyPlan({
             lines: ['Внесите план отдела в панели «План ОП TEZ».'],
         };
     }
-
-    const [yStr, mStr] = String(month || '').split('-');
-    const year = parseInt(yStr, 10);
-    const monthNum = parseInt(mStr, 10);
-    const hasPeriod = Number.isFinite(year) && monthNum >= 1 && monthNum <= 12;
-    const monthStart = hasPeriod ? new Date(year, monthNum - 1, 1) : null;
-    const monthEnd = hasPeriod ? new Date(year, monthNum, 0) : null;
 
     const hire = parsePlanDate(hireDate);
     if (hasPeriod && hire && hire > monthEnd) {
@@ -385,7 +388,7 @@ export function calculateTezOpMonthlyPlan({
     const round1 = (v) => Math.round(v * 10) / 10;
 
     if (isNewbie && overtime) {
-        const plan = round1((planFte / TEZ_NORM_HOURS) * fact * TEZ_OP_NEWBIE_COEF);
+        const plan = round1((planFte / fteNorm) * fact * TEZ_OP_NEWBIE_COEF);
         return {
             ...base, isNewbie, overtime, plan,
             caseCode: 'newbie_overtime',
@@ -393,7 +396,8 @@ export function calculateTezOpMonthlyPlan({
             lines: [
                 hire ? `Принят ${fmtPlanDate(hire)} — новичок, коэффициент 0,8.` : 'Новичок — коэффициент 0,8.',
                 `Факт ${fmtPlanNum(fact)} ч > нормы ${fmtPlanNum(opNorm)} ч — расчёт по факту.`,
-                `План = ${fmtPlanNum(planFte)} ÷ ${TEZ_NORM_HOURS} × ${fmtPlanNum(fact)} × 0,8 = ${fmtPlanNum(plan, 1)}`,
+                `Норма на 1 FTE: ${fteWorkdays} р.д. × 8 = ${fteNorm} ч.`,
+                `План = ${fmtPlanNum(planFte)} ÷ ${fteNorm} × ${fmtPlanNum(fact)} × 0,8 = ${fmtPlanNum(plan, 1)}`,
             ],
         };
     }
@@ -413,48 +417,48 @@ export function calculateTezOpMonthlyPlan({
                 ],
             };
         }
-        const workdays = tezWorkdaysInMonth(year, monthNum);
         const calendarDays = Math.max(0, Math.round((monthEnd.getTime() - hire.getTime()) / 86400000));
         const newbieDays = (calendarDays / 7) * 5;
-        const plan = round1((planFte / workdays) * newbieDays * rateV * TEZ_OP_NEWBIE_COEF);
+        const plan = round1((planFte / fteWorkdays) * newbieDays * rateV * TEZ_OP_NEWBIE_COEF);
         return {
             ...base, isNewbie, plan,
             caseCode: 'newbie_partial',
             caseLabel: 'Новичок, неполный месяц (×0,8)',
             lines: [
                 `Принят ${fmtPlanDate(hire)} — новичок, коэффициент 0,8.`,
-                `Раб. дней в месяце: ${workdays}.`,
+                `Раб. дней в месяце: округл(${monthEnd.getDate()} ÷ 7 × 5) = ${fteWorkdays}.`,
                 `Раб. дни новичка: (${fmtPlanDate(monthEnd)} − ${fmtPlanDate(hire)}) ÷ 7 × 5 = ${fmtPlanNum(newbieDays)}.`,
-                `План = ${fmtPlanNum(planFte)} ÷ ${workdays} × ${fmtPlanNum(newbieDays)} × ${fmtPlanNum(rateV)} × 0,8 = ${fmtPlanNum(plan, 1)}`,
+                `План = ${fmtPlanNum(planFte)} ÷ ${fteWorkdays} × ${fmtPlanNum(newbieDays)} × ${fmtPlanNum(rateV)} × 0,8 = ${fmtPlanNum(plan, 1)}`,
             ],
         };
     }
 
     if (overtime) {
-        const plan = round1((planFte / TEZ_NORM_HOURS) * fact);
+        const plan = round1((planFte / fteNorm) * fact);
         return {
             ...base, overtime, plan,
             caseCode: 'overtime',
             caseLabel: 'Переработка — расчёт по факт-часам',
             lines: [
                 `Факт ${fmtPlanNum(fact)} ч > нормы ${fmtPlanNum(opNorm)} ч.`,
-                `План = ${fmtPlanNum(planFte)} ÷ ${TEZ_NORM_HOURS} × ${fmtPlanNum(fact)} = ${fmtPlanNum(plan, 1)}`,
+                `Норма на 1 FTE: ${fteWorkdays} р.д. × 8 = ${fteNorm} ч.`,
+                `План = ${fmtPlanNum(planFte)} ÷ ${fteNorm} × ${fmtPlanNum(fact)} = ${fmtPlanNum(plan, 1)}`,
             ],
         };
     }
 
-    // Норма заметно отличается от «176 × ставка» → пересчитана вручную
+    // Норма заметно отличается от «норма_FTE × ставка» → пересчитана вручную
     // (увольнение/БС/неполный период) — план пропорционально норме (правило 6).
-    const fullNormForRate = TEZ_NORM_HOURS * rateV;
+    const fullNormForRate = fteNorm * rateV;
     if (Math.abs(opNorm - fullNormForRate) > 0.5) {
-        const plan = round1((planFte / TEZ_NORM_HOURS) * opNorm);
+        const plan = round1((planFte / fteNorm) * opNorm);
         return {
             ...base, plan,
             caseCode: 'partial_norm',
             caseLabel: 'Пропорционально пересчитанной норме',
             lines: [
-                `Норма сотрудника ${fmtPlanNum(opNorm)} ч отличается от ${TEZ_NORM_HOURS} × ${fmtPlanNum(rateV)} = ${fmtPlanNum(fullNormForRate)} ч (пересчитана за фактический период — увольнение/БС/неполный месяц).`,
-                `План = ${fmtPlanNum(planFte)} ÷ ${TEZ_NORM_HOURS} × ${fmtPlanNum(opNorm)} = ${fmtPlanNum(plan, 1)}`,
+                `Норма сотрудника ${fmtPlanNum(opNorm)} ч отличается от ${fteNorm} × ${fmtPlanNum(rateV)} = ${fmtPlanNum(fullNormForRate)} ч (пересчитана за фактический период — увольнение/БС/неполный месяц).`,
+                `План = ${fmtPlanNum(planFte)} ÷ ${fteNorm} × ${fmtPlanNum(opNorm)} = ${fmtPlanNum(plan, 1)}`,
             ],
         };
     }
