@@ -20,6 +20,7 @@ import FaIcon from './components/common/FaIcon';
 import AuthEntranceSplash from './components/common/AuthEntranceSplash';
 import OrazAitSplash from './components/common/OrazAitSplash';
 import sidebarLogo from './components/common/sidebar-logo.svg';
+import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId } from './utils/roles';
 import { departmentAllowsView, departmentRestrictsViews, firstAllowedView } from './utils/departmentViews';
 import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan } from './utils/salaryFormula';
@@ -41475,7 +41476,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                       aria-label={canManageFourYouSection ? 'Открыть 4 You' : undefined}
                                       className={canManageFourYouSection ? 'cursor-pointer rounded-xl focus:outline-none focus:ring-2 focus:ring-white/80' : 'cursor-default'}
                                     >
-                                      <img src={`${sidebarLogo}#mark`} alt="4 You" className="w-10 h-10 object-contain"/>
+                                      <img src={sidebarLogoMark} alt="4 You" className="w-10 h-10 object-contain"/>
                                     </button>
                                   </span>
                                 </h1>
