@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import FaIcon from '../common/FaIcon';
-import { calculateTezLineSalary, calculateTezOpSalary, TEZ_NORM_HOURS } from '../../utils/salaryFormula';
+import { calculateTezLineSalary, calculateTezOpSalary, calculateTezOpMonthlyPlan, TEZ_NORM_HOURS } from '../../utils/salaryFormula';
 
 const money = (v) =>
   new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(
@@ -50,6 +50,7 @@ const SalaryCalculatorTez = ({ model = 'tez_line', planPrefill = null }) => {
   const [experienceMonths, setExperienceMonths] = useState('');
   const [planPerFte, setPlanPerFte] = useState('');
   const [planFact, setPlanFact] = useState('');
+  const [isNewbie, setIsNewbie] = useState(false);
   const [fines, setFines] = useState('');
   const [withholding, setWithholding] = useState('');
   const [bonuses, setBonuses] = useState('');
@@ -62,12 +63,19 @@ const SalaryCalculatorTez = ({ model = 'tez_line', planPrefill = null }) => {
     }
   }, [isOp, planPrefill]);
 
-  // Индивидуальный план = план на 1 FTE × (норма часов / 176).
-  const individualPlan = useMemo(() => {
-    const perFte = parseFloat(planPerFte) || 0;
+  // Индивидуальный план по правилам владельца: ставка / переработка / новичок ×0,8
+  // (см. calculateTezOpMonthlyPlan). Ставка выводится из нормы (норма / 176).
+  const planResult = useMemo(() => {
     const norm = parseFloat(hoursNorm) || TEZ_NORM_HOURS;
-    return perFte * (norm / TEZ_NORM_HOURS);
-  }, [planPerFte, hoursNorm]);
+    return calculateTezOpMonthlyPlan({
+      planPerFte,
+      rate: norm / TEZ_NORM_HOURS,
+      normHours: norm,
+      factHours: hoursWorked,
+      newbie: isNewbie,
+    });
+  }, [planPerFte, hoursNorm, hoursWorked, isNewbie]);
+  const individualPlan = planResult.plan || 0;
 
   const result = useMemo(() => {
     const common = {
@@ -89,6 +97,7 @@ const SalaryCalculatorTez = ({ model = 'tez_line', planPrefill = null }) => {
     setExperienceMonths('');
     setPlanPerFte('');
     setPlanFact('');
+    setIsNewbie(false);
     setFines('');
     setWithholding('');
     setBonuses('');
@@ -124,8 +133,20 @@ const SalaryCalculatorTez = ({ model = 'tez_line', planPrefill = null }) => {
           <>
             <Field label="План успешек (на 1 FTE):" icon="fa-bullseye" iconColor="text-rose-500">
               {numberInput(planPerFte, setPlanPerFte, { min: 0, step: '0.01' })}
+              <label className="mt-2 flex items-center gap-2 text-xs text-gray-600">
+                <input
+                  type="checkbox"
+                  checked={isNewbie}
+                  onChange={(e) => setIsNewbie(e.target.checked)}
+                  className="h-4 w-4 rounded border-gray-300 text-teal-600 focus:ring-teal-500"
+                />
+                Новичок (план ×0,8)
+              </label>
               <div className="mt-2 text-xs text-gray-500">
-                Индивидуальный план (× норма/176): <span className="font-medium text-gray-700">{individualPlan.toFixed(1)}</span>
+                Индивидуальный план: <span className="font-medium text-gray-700">{individualPlan.toFixed(1)}</span>
+                {planResult.caseCode !== 'no_plan' && (
+                  <span className="ml-1 text-gray-400">— {planResult.caseLabel.toLowerCase()}</span>
+                )}
               </div>
             </Field>
             <Field label="Факт успешек:" icon="fa-check-circle" iconColor="text-green-500">

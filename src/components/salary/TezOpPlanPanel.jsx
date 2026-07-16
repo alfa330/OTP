@@ -13,8 +13,9 @@ import FaIcon from '../common/FaIcon';
  *  - departmentId: id отдела
  *  - month: 'YYYY-MM'
  *  - canEdit: можно ли редактировать (управленец своего отдела)
+ *  - onSaved: колбэк после успешного сохранения (обновление колонки «План успешек»)
  */
-const TezOpPlanPanel = ({ apiBaseUrl = '', userId, departmentId, month, canEdit = false }) => {
+const TezOpPlanPanel = ({ apiBaseUrl = '', userId, departmentId, month, canEdit = false, onSaved = null }) => {
   const [planPerFte, setPlanPerFte] = useState('');
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -59,13 +60,14 @@ const TezOpPlanPanel = ({ apiBaseUrl = '', userId, departmentId, month, canEdit 
       .then(() => {
         setMsg('Сохранено');
         setTimeout(() => setMsg(''), 2000);
+        if (typeof onSaved === 'function') onSaved();
       })
       .catch(() => {
         setMsg('Ошибка сохранения');
         setTimeout(() => setMsg(''), 3000);
       })
       .finally(() => setSaving(false));
-  }, [apiBaseUrl, userId, departmentId, year, monthNum, validPeriod, planPerFte, canEdit]);
+  }, [apiBaseUrl, userId, departmentId, year, monthNum, validPeriod, planPerFte, canEdit, onSaved]);
 
   return (
     <div className="mb-6 rounded-xl border border-teal-200 bg-teal-50/60 px-4 py-4">
@@ -99,7 +101,10 @@ const TezOpPlanPanel = ({ apiBaseUrl = '', userId, departmentId, month, canEdit 
         {msg && <span className="text-sm font-medium text-teal-700">{msg}</span>}
       </div>
       <p className="mt-2 text-xs text-teal-700">
-        Индивидуальный план оператора = план на 1 FTE × (норма часов / 176). % выполнения = факт / индивидуальный план.
+        Индивидуальный план: по ставке (план × ставка); при переработке — пропорционально факт-часам (план ÷ 176 × факт);
+        новичок в месяце приёма — ×0,8, при неполном месяце — пропорционально рабочим дням с даты приёма;
+        при увольнении/выходе на БС — пропорционально пересчитанной норме. Подробный расчёт каждого оператора —
+        в колонке «План успешек» (наведите на значение).
       </p>
     </div>
   );

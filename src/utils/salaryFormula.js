@@ -281,3 +281,192 @@ export function calculateTezOpSalary({
         finalSalary,
     };
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// Индивидуальный план успешных сделок на месяц, модель ОП TEZ.
+// Правила владельца (июль 2026):
+//  2) стандарт (полный месяц, ≤100% выработки): план_FTE × ставка;
+//  3) переработка (факт > нормы сотрудника):    план_FTE ÷ 176 × факт;
+//  4) новичок (принят в отчётном месяце): ×0,8; неполный месяц — пропорционально
+//     раб. дням: план_FTE ÷ раб.дни месяца × ((конец месяца − дата приёма) ÷ 7 × 5) × ставка × 0,8;
+//  5) новичок с переработкой:                   план_FTE ÷ 176 × факт × 0,8;
+//  6) увольнение/выход на БС (норма сотрудника пересчитана за фактический
+//     период вручную):                          план_FTE ÷ 176 × пересчитанная норма.
+// ──────────────────────────────────────────────────────────────────────────
+export const TEZ_OP_NEWBIE_COEF = 0.8;
+
+// Рабочие дни месяца (пн–пт), без учёта праздников — как в таблицах владельца.
+export function tezWorkdaysInMonth(year, monthNum) {
+    const days = new Date(year, monthNum, 0).getDate();
+    let count = 0;
+    for (let d = 1; d <= days; d++) {
+        const dow = new Date(year, monthNum - 1, d).getDay();
+        if (dow !== 0 && dow !== 6) count++;
+    }
+    return count;
+}
+
+function parsePlanDate(value) {
+    if (!value) return null;
+    if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
+    const m = String(value).match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (!m) return null;
+    return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+}
+
+const fmtPlanNum = (v, digits = 2) => {
+    const n = Number(v) || 0;
+    const rounded = Math.round(n * 10 ** digits) / 10 ** digits;
+    return String(rounded).replace('.', ',');
+};
+
+const fmtPlanDate = (d) =>
+    `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}.${d.getFullYear()}`;
+
+/**
+ * Расчёт индивидуального плана ОП TEZ.
+ * @param planPerFte план успешек на 1 FTE (общий по отделу)
+ * @param rate       ставка сотрудника (0..1+); если не задана — выводится из нормы
+ * @param normHours  норма часов сотрудника (уже с учётом ставки и ручного
+ *                   пересчёта при увольнении/БС/неполном периоде)
+ * @param factHours  фактически отработанные часы за месяц
+ * @param hireDate   дата приёма ('YYYY-MM-DD' | Date | null)
+ * @param month      отчётный месяц 'YYYY-MM'
+ * @param newbie     принудительный признак новичка (true/false); null — по дате приёма
+ * @returns { plan, caseCode, caseLabel, lines[], isNewbie, overtime, opNorm, rate }
+ */
+export function calculateTezOpMonthlyPlan({
+    planPerFte = 0,
+    rate = 0,
+    normHours = 0,
+    factHours = 0,
+    hireDate = null,
+    month = '',
+    newbie = null,
+} = {}) {
+    const planFte = parseFloat(planPerFte) || 0;
+    const fact = Math.max(0, parseFloat(factHours) || 0);
+    const normRaw = Math.max(0, parseFloat(normHours) || 0);
+    let rateV = parseFloat(rate) || 0;
+    if (rateV <= 0) rateV = normRaw > 0 ? normRaw / TEZ_NORM_HOURS : 1;
+    const opNorm = normRaw > 0 ? normRaw : TEZ_NORM_HOURS * rateV;
+
+    const base = { isNewbie: false, overtime: false, opNorm, rate: rateV };
+    if (planFte <= 0) {
+        return {
+            ...base,
+            plan: null,
+            caseCode: 'no_plan',
+            caseLabel: 'План на 1 FTE не задан',
+            lines: ['Внесите план отдела в панели «План ОП TEZ».'],
+        };
+    }
+
+    const [yStr, mStr] = String(month || '').split('-');
+    const year = parseInt(yStr, 10);
+    const monthNum = parseInt(mStr, 10);
+    const hasPeriod = Number.isFinite(year) && monthNum >= 1 && monthNum <= 12;
+    const monthStart = hasPeriod ? new Date(year, monthNum - 1, 1) : null;
+    const monthEnd = hasPeriod ? new Date(year, monthNum, 0) : null;
+
+    const hire = parsePlanDate(hireDate);
+    if (hasPeriod && hire && hire > monthEnd) {
+        return {
+            ...base,
+            plan: null,
+            caseCode: 'not_hired',
+            caseLabel: 'Принят после отчётного месяца',
+            lines: [`Дата приёма: ${fmtPlanDate(hire)}.`],
+        };
+    }
+    const isNewbie = newbie === true
+        || (newbie !== false && !!(hasPeriod && hire && hire >= monthStart && hire <= monthEnd));
+    const overtime = opNorm > 0 && fact > opNorm;
+    const round1 = (v) => Math.round(v * 10) / 10;
+
+    if (isNewbie && overtime) {
+        const plan = round1((planFte / TEZ_NORM_HOURS) * fact * TEZ_OP_NEWBIE_COEF);
+        return {
+            ...base, isNewbie, overtime, plan,
+            caseCode: 'newbie_overtime',
+            caseLabel: 'Новичок с переработкой (×0,8)',
+            lines: [
+                hire ? `Принят ${fmtPlanDate(hire)} — новичок, коэффициент 0,8.` : 'Новичок — коэффициент 0,8.',
+                `Факт ${fmtPlanNum(fact)} ч > нормы ${fmtPlanNum(opNorm)} ч — расчёт по факту.`,
+                `План = ${fmtPlanNum(planFte)} ÷ ${TEZ_NORM_HOURS} × ${fmtPlanNum(fact)} × 0,8 = ${fmtPlanNum(plan, 1)}`,
+            ],
+        };
+    }
+
+    if (isNewbie) {
+        // Полный месяц (приём 1-го числа или ручной признак без даты) — по ставке ×0,8.
+        const hiredFirstDay = !hire || !hasPeriod || hire.getTime() <= monthStart.getTime();
+        if (hiredFirstDay) {
+            const plan = round1(planFte * rateV * TEZ_OP_NEWBIE_COEF);
+            return {
+                ...base, isNewbie, plan,
+                caseCode: 'newbie_full',
+                caseLabel: 'Новичок, полный месяц (×0,8)',
+                lines: [
+                    hire ? `Принят ${fmtPlanDate(hire)} — новичок, коэффициент 0,8.` : 'Новичок — коэффициент 0,8.',
+                    `План = ${fmtPlanNum(planFte)} × ${fmtPlanNum(rateV)} × 0,8 = ${fmtPlanNum(plan, 1)}`,
+                ],
+            };
+        }
+        const workdays = tezWorkdaysInMonth(year, monthNum);
+        const calendarDays = Math.max(0, Math.round((monthEnd.getTime() - hire.getTime()) / 86400000));
+        const newbieDays = (calendarDays / 7) * 5;
+        const plan = round1((planFte / workdays) * newbieDays * rateV * TEZ_OP_NEWBIE_COEF);
+        return {
+            ...base, isNewbie, plan,
+            caseCode: 'newbie_partial',
+            caseLabel: 'Новичок, неполный месяц (×0,8)',
+            lines: [
+                `Принят ${fmtPlanDate(hire)} — новичок, коэффициент 0,8.`,
+                `Раб. дней в месяце: ${workdays}.`,
+                `Раб. дни новичка: (${fmtPlanDate(monthEnd)} − ${fmtPlanDate(hire)}) ÷ 7 × 5 = ${fmtPlanNum(newbieDays)}.`,
+                `План = ${fmtPlanNum(planFte)} ÷ ${workdays} × ${fmtPlanNum(newbieDays)} × ${fmtPlanNum(rateV)} × 0,8 = ${fmtPlanNum(plan, 1)}`,
+            ],
+        };
+    }
+
+    if (overtime) {
+        const plan = round1((planFte / TEZ_NORM_HOURS) * fact);
+        return {
+            ...base, overtime, plan,
+            caseCode: 'overtime',
+            caseLabel: 'Переработка — расчёт по факт-часам',
+            lines: [
+                `Факт ${fmtPlanNum(fact)} ч > нормы ${fmtPlanNum(opNorm)} ч.`,
+                `План = ${fmtPlanNum(planFte)} ÷ ${TEZ_NORM_HOURS} × ${fmtPlanNum(fact)} = ${fmtPlanNum(plan, 1)}`,
+            ],
+        };
+    }
+
+    // Норма заметно отличается от «176 × ставка» → пересчитана вручную
+    // (увольнение/БС/неполный период) — план пропорционально норме (правило 6).
+    const fullNormForRate = TEZ_NORM_HOURS * rateV;
+    if (Math.abs(opNorm - fullNormForRate) > 0.5) {
+        const plan = round1((planFte / TEZ_NORM_HOURS) * opNorm);
+        return {
+            ...base, plan,
+            caseCode: 'partial_norm',
+            caseLabel: 'Пропорционально пересчитанной норме',
+            lines: [
+                `Норма сотрудника ${fmtPlanNum(opNorm)} ч отличается от ${TEZ_NORM_HOURS} × ${fmtPlanNum(rateV)} = ${fmtPlanNum(fullNormForRate)} ч (пересчитана за фактический период — увольнение/БС/неполный месяц).`,
+                `План = ${fmtPlanNum(planFte)} ÷ ${TEZ_NORM_HOURS} × ${fmtPlanNum(opNorm)} = ${fmtPlanNum(plan, 1)}`,
+            ],
+        };
+    }
+
+    const plan = round1(planFte * rateV);
+    return {
+        ...base, plan,
+        caseCode: 'standard',
+        caseLabel: 'Стандартный расчёт по ставке',
+        lines: [
+            `Полный месяц, выработка в пределах нормы (${fmtPlanNum(fact)} ч ≤ ${fmtPlanNum(opNorm)} ч).`,
+            `План = ${fmtPlanNum(planFte)} × ${fmtPlanNum(rateV)} = ${fmtPlanNum(plan, 1)}`,
+        ],
+    };
+}
