@@ -21161,7 +21161,8 @@ class Database:
         include_fired: bool = False,
         include_dismissal_details: bool = True,
         sheet_mode: str = 'summary_and_supervisors',
-        period_month: str = None
+        period_month: str = None,
+        department_ids=None
     ):
         """
         Generates an Excel report of operators with extended profile fields:
@@ -21174,6 +21175,8 @@ class Database:
         :param period_month: Optional 'YYYY-MM'. When set, exports operators who worked during that
             calendar month (employed from hire date up to dismissal date overlapping the month),
             regardless of their current status. Overrides include_fired.
+        :param department_ids: Optional iterable of department IDs. None exports all departments;
+            an iterable restricts every report sheet to operators from those departments.
         :return: (filename, content) or (None, None) on error.
         """
         try:
@@ -21206,6 +21209,19 @@ class Database:
             if sheet_mode not in ('summary', 'supervisors', 'summary_and_supervisors'):
                 sheet_mode = 'summary_and_supervisors'
 
+            normalized_department_ids = None
+            if department_ids is not None:
+                raw_department_ids = (
+                    department_ids
+                    if isinstance(department_ids, (list, tuple, set, frozenset))
+                    else [department_ids]
+                )
+                normalized_department_ids = sorted({
+                    int(department_id)
+                    for department_id in raw_department_ids
+                    if department_id not in (None, '')
+                })
+
             if period_start and period_end:
                 filename = f"users_report_{period_start.strftime('%Y-%m')}.xlsx"
             else:
@@ -21229,7 +21245,13 @@ class Database:
                     status_filter_sql = "" if include_fired else """
                         AND COALESCE(NULLIF(LOWER(TRIM(u.status)), ''), 'working') NOT IN ('fired', 'dismissal')
                     """
-                cursor.execute(f"""
+                department_filter_sql = ""
+                query_params = []
+                if normalized_department_ids is not None:
+                    department_filter_sql = "AND u.department_id = ANY(%s)"
+                    query_params.append(normalized_department_ids)
+
+                users_report_query = f"""
                     SELECT
                         u.name,
                         u.login,
@@ -21303,9 +21325,14 @@ class Database:
                         LIMIT 1
                     ) status_history ON TRUE
                     WHERE u.role = 'operator'
+                    {department_filter_sql}
                     {status_filter_sql}
                     ORDER BY s.name, u.name
-                """)
+                """
+                if query_params:
+                    cursor.execute(users_report_query, query_params)
+                else:
+                    cursor.execute(users_report_query)
                 all_operators = cursor.fetchall()
             
             if not all_operators:

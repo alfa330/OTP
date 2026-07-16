@@ -16791,8 +16791,34 @@ def get_users_report():
     try:
         requester_id = int(request.headers.get('X-User-Id'))
         requester = db.get_user(id=requester_id)
-        if not requester or not _is_admin_role(requester[3]):
-            return jsonify({"error": "Only admins can generate users report"}), 403
+        if not requester:
+            return jsonify({"error": "Requester not found"}), 403
+
+        requester_role = _normalize_user_role(requester[3])
+        is_global_admin = _is_global_admin_requester(requester_role, requester_id)
+        headed_department_ids = set(_headed_department_ids(requester_id))
+        headed_department_id = _headed_department_id(requester_id)
+        if headed_department_id is not None:
+            headed_department_ids.add(int(headed_department_id))
+
+        if not is_global_admin and not headed_department_ids:
+            return jsonify({"error": "Only admins and department heads can generate users report"}), 403
+
+        report_department_ids = None
+        requested_department_id = request.args.get('department_id')
+        if is_global_admin:
+            if requested_department_id not in (None, ''):
+                try:
+                    requested_department_id = int(requested_department_id)
+                except (TypeError, ValueError):
+                    return jsonify({"error": "Invalid department_id"}), 400
+                department = db.get_department_by_id(requested_department_id)
+                if not department or department.get('is_active') is False:
+                    return jsonify({"error": "Department not found"}), 404
+                report_department_ids = [requested_department_id]
+        else:
+            # A department head can never expand the export scope with a query parameter.
+            report_department_ids = sorted(headed_department_ids)
 
         def _bool_query_arg(name, default=False):
             raw = request.args.get(name)
@@ -16817,7 +16843,8 @@ def get_users_report():
             include_fired=include_fired,
             include_dismissal_details=include_dismissal_details,
             sheet_mode=sheet_mode,
-            period_month=period_month
+            period_month=period_month,
+            department_ids=report_department_ids
         )
         if not filename or not content:
             return jsonify({"error": "Failed to generate report"}), 500
