@@ -13415,6 +13415,7 @@ class Database:
                          ORDER BY wr.month DESC LIMIT 1),
                         u.rate
                     ) AS rate,
+                    u.hire_date,
                     d.name as direction_name,
                     d.calculation_model_code,
                     COALESCE(w.norm_hours, 0) AS norm_hours,
@@ -13446,12 +13447,13 @@ class Database:
 
         # default values if user / work_hours not found
         if row:
-            name, rate, direction_name, calculation_model_raw, norm_hours, regular_hours, total_break_time, total_talk_time, \
+            name, rate, hire_date, direction_name, calculation_model_raw, norm_hours, regular_hours, total_break_time, total_talk_time, \
                 total_calls, total_efficiency_hours, calls_per_hour, fines = row
             rate = float(rate) if rate is not None else 0.0
         else:
             name = None
             rate = 0.0
+            hire_date = None
             direction_name = None
             calculation_model_raw = None
             norm_hours = regular_hours = total_break_time = total_talk_time = 0.0
@@ -13537,6 +13539,7 @@ class Database:
             "calculation_model_code": effective_calculation_model_code,
             "calculationModelCode": effective_calculation_model_code,
             "rate": rate,
+            "hire_date": hire_date.isoformat() if hasattr(hire_date, "isoformat") else hire_date,
             "norm_hours": float(norm_hours),
             "fines": float(fines),
             "training_hours": round(float(training_hours), 2),
@@ -13613,7 +13616,7 @@ class Database:
                          ORDER BY wr.month DESC LIMIT 1),
                         u.rate
                     ) AS rate,
-                    u.status, u.supervisor_id,
+                    u.status, u.supervisor_id, u.hire_date,
                     d.name as direction_name,
             """
             _sel_suffix = """
@@ -13838,7 +13841,7 @@ class Database:
             # Сбор финального списка операторов
             operators = []
             for row in operator_rows:
-                (op_id, op_name, rate, status, sup_id, direction_name, calculation_model_raw, norm_hours,
+                (op_id, op_name, rate, status, sup_id, hire_date, direction_name, calculation_model_raw, norm_hours,
                 regular_hours, total_break_time, total_talk_time,
                 total_calls, total_efficiency_hours, calls_per_hour, fines) = row
                 calculation_model_code = self._normalize_calculation_model_code(calculation_model_raw, direction_name)
@@ -13896,6 +13899,7 @@ class Database:
                     "supervisor_id": sup_id,
                     "rate": float(rate) if rate is not None else 0.0,
                     "status": status_as_of.get(op_id, status),
+                    "hire_date": hire_date.isoformat() if hasattr(hire_date, "isoformat") else hire_date,
                     "norm_hours": float(norm_hours) if norm_hours is not None else 0.0,
                     "training_hours": round(float(training_hours), 2),
                     "no_phone_hours": round(float(no_phone_hours), 2),
@@ -14006,7 +14010,7 @@ class Database:
                          ORDER BY wr.month DESC LIMIT 1),
                         u.rate
                     ) AS rate,
-                    u.status, u.supervisor_id,
+                    u.status, u.supervisor_id, u.hire_date,
                     d.name as direction_name,
                     d.calculation_model_code,
                     COALESCE(w.norm_hours, 0) as norm_hours,
@@ -14148,7 +14152,7 @@ class Database:
 
             operators = []
             for row in operator_rows:
-                (op_id, op_name, rate, status, sup_id, direction_name, calculation_model_raw, norm_hours,
+                (op_id, op_name, rate, status, sup_id, hire_date, direction_name, calculation_model_raw, norm_hours,
                 regular_hours, total_break_time, total_talk_time,
                 total_calls, total_efficiency_hours, calls_per_hour, fines, operator_department_id) = row
                 calculation_model_code = self._normalize_calculation_model_code(calculation_model_raw, direction_name)
@@ -14191,6 +14195,7 @@ class Database:
                     "supervisor_id": sup_id,
                     "rate": float(rate) if rate is not None else 0.0,
                     "status": status,
+                    "hire_date": hire_date.isoformat() if hasattr(hire_date, "isoformat") else hire_date,
                     "norm_hours": float(norm_hours) if norm_hours is not None else 0.0,
                     "training_hours": round(float(training_hours), 2),
                     "no_phone_hours": round(float(no_phone_hours), 2),

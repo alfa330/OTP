@@ -9,6 +9,7 @@ import SalaryCalculationResult from './components/salary/SalaryCalculationResult
 import DualPeriodBreakdown from './components/salary/DualPeriodBreakdown';
 import SalaryComingSoon from './components/salary/SalaryComingSoon';
 import TezOpPlanPanel from './components/salary/TezOpPlanPanel';
+import TezOpPlanCell from './components/salary/TezOpPlanCell';
 import TasksView, { PinnedTaskWidget } from './components/tasks/TasksView';
 import SurveysView from './components/surveys/SurveysView';
 import TechnicalIssuesView from './components/technical/TechnicalIssuesView';
@@ -18,9 +19,10 @@ import MonitoringScaleView from './components/monitoring/MonitoringScaleView';
 import FaIcon from './components/common/FaIcon';
 import AuthEntranceSplash from './components/common/AuthEntranceSplash';
 import OrazAitSplash from './components/common/OrazAitSplash';
+import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId } from './utils/roles';
 import { departmentAllowsView, departmentRestrictsViews, firstAllowedView } from './utils/departmentViews';
-import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality } from './utils/salaryFormula';
+import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan } from './utils/salaryFormula';
 
 const CHUNK_RELOAD_STORAGE_KEY = 'otp_chunk_reload_attempted';
 const PINNED_TASK_STORAGE_KEY_PREFIX = 'otp_pinned_task';
@@ -2378,6 +2380,38 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         // Общий план ОП TEZ: панель показываем управленцам отдела TEZ в учёте часов.
         const isTezHoursDept = String(user?.department_code ?? user?.departmentCode ?? '').toLowerCase() === 'tez';
         const tezPlanDeptId = hoursDepartmentScopeId ?? (user?.department_id ?? user?.departmentId ?? null);
+        // План на 1 FTE отдела за месяц — для колонки «План успешек» (модель ОП TEZ).
+        const [tezPlanPerFte, setTezPlanPerFte] = useState(null);
+        const [tezPlanReloadKey, setTezPlanReloadKey] = useState(0);
+        useEffect(() => {
+            if (!isTezHoursDept || tezPlanDeptId == null || !user?.id) {
+                setTezPlanPerFte(null);
+                return;
+            }
+            const [py, pm] = String(month || '').split('-').map((v) => parseInt(v, 10));
+            if (!Number.isFinite(py) || !Number.isFinite(pm)) {
+                setTezPlanPerFte(null);
+                return;
+            }
+            let cancelled = false;
+            axios
+                .get(`${API_BASE_URL}/api/department_plan`, {
+                    params: { department_id: tezPlanDeptId, year: py, month: pm },
+                    headers: { 'X-User-Id': user.id },
+                })
+                .then((resp) => {
+                    if (cancelled) return;
+                    const v = resp?.data?.plan?.plan_per_fte;
+                    setTezPlanPerFte(v === undefined || v === null ? null : Number(v));
+                })
+                .catch(() => {
+                    if (!cancelled) setTezPlanPerFte(null);
+                });
+            return () => {
+                cancelled = true;
+            };
+            // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, [isTezHoursDept, tezPlanDeptId, month, user?.id, tezPlanReloadKey]);
         const [selectedSvId, setSelectedSvId] = useState(user?.role === 'sv' ? user.id : '');
         const [reportScope, setReportScope] = useState('by_sv'); // 'by_sv' or 'all' (admin only)
         const [isLoading, setIsLoading] = useState(false);
@@ -4431,6 +4465,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return String(op0?.calculation_model_code || op0?.calculationModelCode || '').trim();
         }, [selectedGroupId, groupsList, operators]);
         const isChatModel = activeCalcModelCode === 'chat_manager';
+        // Колонка «План успешек» (модель ОП TEZ): показываем, когда в выборке есть операторы tez_op.
+        const hasTezOpRows = useMemo(
+            () => (Array.isArray(operators) ? operators : []).some(
+                (o) => String(o?.calculation_model_code || o?.calculationModelCode || '').trim() === 'tez_op'
+            ),
+            [operators]
+        );
+        const showTezPlanColumn = isTezHoursDept && (hasTezOpRows || activeCalcModelCode === 'tez_op');
 
         useEffect(() => {
             setChatMetricsSurgeMonth(normalizeMonthKey(month));
@@ -4685,6 +4727,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             let noPhoneTotal = 0;
             let sumFines = 0;
             let sumBonuses = 0;
+            let sumTezPlan = 0; // сумма индивидуальных планов успешек (только tez_op)
+            let hasTezPlanRows = false;
 
             for (const op of filteredOperators) {
             const aggr = op.aggregates || {};
@@ -4722,6 +4766,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             const displayedTotal = regular + totalHoursCounted + technicalHoursTotal + offlineHoursTotal;
             const prodDiff = displayedTotal - norm;
+
+            if (String(op.calculation_model_code || op.calculationModelCode || '').trim() === 'tez_op') {
+                const planRes = calculateTezOpMonthlyPlan({
+                planPerFte: tezPlanPerFte,
+                rate: op.rate,
+                normHours: norm,
+                factHours: displayedTotal,
+                hireDate: op.hire_date,
+                month,
+                });
+                if (planRes.plan != null) {
+                sumTezPlan += planRes.plan;
+                hasTezPlanRows = true;
+                }
+            }
 
             sumDisplayedTotal += displayedTotal;
             sumRegular += regular;
@@ -4771,9 +4830,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             trainingsCounted,
             technicalIssuesTotal,
             offlineActivitiesTotal,
-            noPhoneTotal
+            noPhoneTotal,
+            sumTezPlan,
+            hasTezPlanRows
             };
-        }, [filteredOperators, trainingsMap, technicalIssuesMap, offlineActivitiesMap]);
+        }, [filteredOperators, trainingsMap, technicalIssuesMap, offlineActivitiesMap, tezPlanPerFte, month]);
 
         // Red → amber → green gradient by percentage (0..100)
         function efficiencyGradient(pct) {
@@ -5740,6 +5801,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     departmentId={tezPlanDeptId}
                     month={month}
                     canEdit={true}
+                    onSaved={() => setTezPlanReloadKey((k) => k + 1)}
                 />
             )}
             <div className="mb-4 flex flex-wrap items-stretch justify-between gap-3">
@@ -6791,6 +6853,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                     <div className={`${hoursRateColClass} bg-gray-50 text-sm`}>Ставка</div>
                     <div className={`${hoursNormColClass} bg-gray-50 text-sm`}>Норма часов</div>
+                    {showTezPlanColumn && (
+                    <div className={`${hoursNormColClass} bg-gray-50 text-sm`} title="Индивидуальный план успешных сделок (модель ОП TEZ). Наведите на значение — покажем расчёт.">
+                        План успешек
+                    </div>
+                    )}
 
                     {daysArray.map(day => (
                     <div key={day} className={hoursDayColClass}>
@@ -7002,6 +7069,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 />
                                 </div>
 
+                                {/* План успешек (модель ОП TEZ) */}
+                                {showTezPlanColumn && (
+                                <div className={`${hoursNormColClass} text-sm`}>
+                                    {String(op.calculation_model_code || op.calculationModelCode || '').trim() === 'tez_op' ? (
+                                    <TezOpPlanCell
+                                        planPerFte={tezPlanPerFte}
+                                        rate={op.rate}
+                                        normHours={norm}
+                                        factHours={displayedTotal}
+                                        hireDate={op.hire_date}
+                                        month={month}
+                                    />
+                                    ) : (
+                                    <span className="text-gray-400">—</span>
+                                    )}
+                                </div>
+                                )}
+
                                 {/* Days */}
                                 {daysArray.map(day => (
                                 <div key={day} className={hoursDayColClass}>
@@ -7140,6 +7225,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         <div className={`${hoursOperatorColClass} sticky left-0 z-20 bg-gray-50`}>Итого</div>
                         <div className={hoursRateColClass}>—</div>
                         <div className={hoursNormColClass}>{footerTotals.sumNorm}</div>
+                        {showTezPlanColumn && (
+                        <div className={hoursNormColClass}>
+                            {footerTotals.hasTezPlanRows ? footerTotals.sumTezPlan.toLocaleString('ru-RU', { maximumFractionDigits: 1 }) : '—'}
+                        </div>
+                        )}
 
                         {daysArray.map(day => (
                         <div key={`f-${day}`} className={hoursDayColClass}>&nbsp;</div>
@@ -41378,7 +41468,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                       aria-label={canManageFourYouSection ? 'Открыть 4 You' : undefined}
                                       className={`bg-blue-800 text-indigo-700 px-2 py-1.5 rounded-r-2xl border-t border-b border-r border-white text-3xl -ml-px flex items-center ${canManageFourYouSection ? 'cursor-pointer hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-white/80' : 'cursor-default'}`}
                                     >
-                                      <img src="https://iili.io/Kfw7PQp.png" alt="Site Icon" className="w-10 h-10 object-contain"/>
+                                      <img src={sidebarLogoMark} alt="4 You" className="w-10 h-10 object-contain"/>
                                     </button>
                                   </span>
                                   {/* Мини логотип для свёрнутого состояния */}
@@ -41389,7 +41479,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                       aria-label={canManageFourYouSection ? 'Открыть 4 You' : undefined}
                                       className={canManageFourYouSection ? 'cursor-pointer rounded-xl focus:outline-none focus:ring-2 focus:ring-white/80' : 'cursor-default'}
                                     >
-                                      <img src="https://iili.io/Kfw7PQp.png" alt="Site Icon" className="w-10 h-10 object-contain"/>
+                                      <img src={sidebarLogoMark} alt="4 You" className="w-10 h-10 object-contain"/>
                                     </button>
                                   </span>
                                 </h1>
