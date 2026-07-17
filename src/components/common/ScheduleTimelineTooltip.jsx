@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from
 import { createPortal } from 'react-dom';
 
 const TOOLTIP_SELECTOR = '[data-schedule-tooltip]';
+const SHOW_DELAY_MS = 250;
 const VIEWPORT_GAP = 12;
 const ANCHOR_GAP = 9;
 const ARROW_EDGE_GAP = 12;
@@ -24,6 +25,8 @@ function ScheduleTimelineTooltip() {
     const activeAnchorRef = useRef(null);
     const hoveredAnchorRef = useRef(null);
     const focusedAnchorRef = useRef(null);
+    const pendingAnchorRef = useRef(null);
+    const showTimerRef = useRef(null);
     const positionFrameRef = useRef(null);
     const [activeTooltip, setActiveTooltip] = useState(null);
     const [position, setPosition] = useState(null);
@@ -34,7 +37,16 @@ function ScheduleTimelineTooltip() {
         setPosition(null);
     }, []);
 
+    const cancelPendingShow = useCallback(() => {
+        if (showTimerRef.current != null) {
+            clearTimeout(showTimerRef.current);
+            showTimerRef.current = null;
+        }
+        pendingAnchorRef.current = null;
+    }, []);
+
     const showTooltip = useCallback((anchor) => {
+        cancelPendingShow();
         const text = getTooltipText(anchor);
         if (!anchor?.isConnected || !text) {
             hideTooltip();
@@ -47,7 +59,31 @@ function ScheduleTimelineTooltip() {
                 ? current
                 : { anchor, text }
         ));
-    }, [hideTooltip]);
+    }, [cancelPendingShow, hideTooltip]);
+
+    const scheduleTooltip = useCallback((anchor) => {
+        const text = getTooltipText(anchor);
+        if (!anchor?.isConnected || !text) {
+            cancelPendingShow();
+            hideTooltip();
+            return;
+        }
+        if (activeAnchorRef.current === anchor || pendingAnchorRef.current === anchor) return;
+
+        cancelPendingShow();
+        if (activeAnchorRef.current && activeAnchorRef.current !== anchor) {
+            hideTooltip();
+        }
+
+        pendingAnchorRef.current = anchor;
+        showTimerRef.current = setTimeout(() => {
+            showTimerRef.current = null;
+            pendingAnchorRef.current = null;
+            if (hoveredAnchorRef.current === anchor && anchor.isConnected) {
+                showTooltip(anchor);
+            }
+        }, SHOW_DELAY_MS);
+    }, [cancelPendingShow, hideTooltip, showTooltip]);
 
     const fallBackFrom = useCallback((anchor) => {
         if (activeAnchorRef.current !== anchor) return;
@@ -131,7 +167,7 @@ function ScheduleTimelineTooltip() {
             const previousAnchor = getTooltipAnchor(event.relatedTarget);
             if (!anchor || anchor === previousAnchor) return;
             hoveredAnchorRef.current = anchor;
-            showTooltip(anchor);
+            scheduleTooltip(anchor);
         };
 
         const handlePointerOut = (event) => {
@@ -143,8 +179,11 @@ function ScheduleTimelineTooltip() {
             if (hoveredAnchorRef.current === anchor) {
                 hoveredAnchorRef.current = nextAnchor;
             }
+            if (pendingAnchorRef.current === anchor) {
+                cancelPendingShow();
+            }
             if (nextAnchor) {
-                showTooltip(nextAnchor);
+                scheduleTooltip(nextAnchor);
             } else {
                 fallBackFrom(anchor);
             }
@@ -184,7 +223,7 @@ function ScheduleTimelineTooltip() {
             document.removeEventListener('focusin', handleFocusIn);
             document.removeEventListener('focusout', handleFocusOut);
         };
-    }, [fallBackFrom, showTooltip]);
+    }, [cancelPendingShow, fallBackFrom, scheduleTooltip, showTooltip]);
 
     useSafeLayoutEffect(() => {
         if (!activeTooltip) return;
@@ -203,10 +242,11 @@ function ScheduleTimelineTooltip() {
     }, [activeTooltip, schedulePositionUpdate]);
 
     useEffect(() => () => {
+        cancelPendingShow();
         if (positionFrameRef.current != null && typeof window !== 'undefined') {
             window.cancelAnimationFrame(positionFrameRef.current);
         }
-    }, []);
+    }, [cancelPendingShow]);
 
     if (!activeTooltip || typeof document === 'undefined' || !document.body) return null;
 
