@@ -6,7 +6,7 @@ import {
     ShieldAlert, Gauge, Server, Clock, Loader2, AlertCircle, RotateCcw, Volume1, CheckCircle2,
 } from 'lucide-react';
 import { APPLE_FONT, iosCard, iosBtnGhost, iosBtnSecondary, IosBadge } from '../ui/ios';
-import { normalizeRole } from '../../utils/roles';
+import { isDepartmentHead, normalizeRole } from '../../utils/roles';
 import CallReviewCard from './CallReviewCard';
 import QaDashboard from './QaDashboard';
 import EvaluationsList from './EvaluationsList';
@@ -14,7 +14,7 @@ import CriteriaClassification from './CriteriaClassification';
 import AdjudicationsRag from './AdjudicationsRag';
 
 /* Контейнер раздела «ИИ-оценка» (App.jsx: view === "ai_qa"; доступ: super_admin,
- * глава ОП, СВ ОП — последним бэкенд отдаёт только их направления, а вкладки
+ * главы ОП/СЗоВ, СВ ОП — последним бэкенд отдаёт только их направления, а вкладки
  * «Критерии»/«База разборов» скрыты). Все данные — реальные с /api/ai-qa/*.
  * Мок-данных нет; при недоступности бэкенда — состояния загрузки / ошибки / пусто. */
 
@@ -125,7 +125,7 @@ export default function CallQaView(props) {
     const canManageRag = normalizeRole(user?.role) === 'super_admin';
     // СВ ОП оценивает только свои направления: конфигурация критериев и база разборов
     // ему не показываются (бэкенд их тоже ограничивает/запрещает).
-    const isScopedSupervisor = normalizeRole(user?.role) === 'sv';
+    const isScopedSupervisor = normalizeRole(user?.role) === 'sv' && !isDepartmentHead(user);
     const visibleTabs = isScopedSupervisor
         ? TABS.filter((t) => t.key !== 'criteria' && t.key !== 'rag')
         : TABS;

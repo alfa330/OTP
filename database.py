@@ -10994,19 +10994,19 @@ class Database:
             return r[0] if r else None
 
     def get_headed_departments_for_user(self, user_id):
-        """Вернуть все активные отделы, которые возглавляет пользователь."""
+        """Вернуть id, название и код всех активных возглавляемых отделов."""
         if not user_id:
             return []
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT id, name
+                SELECT id, name, code
                 FROM departments
                 WHERE head_user_id = %s
                   AND COALESCE(is_active, TRUE) = TRUE
                 ORDER BY name, id
             """, (user_id,))
             return [
-                {"id": int(row[0]), "name": row[1] or ""}
+                {"id": int(row[0]), "name": row[1] or "", "code": row[2] or ""}
                 for row in (cursor.fetchall() or [])
                 if row and row[0] is not None
             ]

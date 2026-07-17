@@ -923,6 +923,8 @@ def _get_user_payload(user):
     department_code = None
     headed_department_id = None
     headed_department_ids = []
+    headed_department_code = None
+    headed_department_codes = []
     if user_id is not None:
         try:
             department_id, department_code = db.get_user_department(user_id)
@@ -932,13 +934,32 @@ def _get_user_payload(user):
             department_code = None
             headed_department_id = None
         try:
+            headed_departments = db.get_headed_departments_for_user(user_id) or []
             headed_department_ids = [
                 int(item.get('id'))
-                for item in (db.get_headed_departments_for_user(user_id) or [])
+                for item in headed_departments
                 if isinstance(item, dict) and item.get('id') is not None
             ]
+            headed_department_codes = [
+                str(item.get('code')).strip().lower()
+                for item in headed_departments
+                if isinstance(item, dict) and str(item.get('code') or '').strip()
+            ]
+            headed_department = next(
+                (
+                    item for item in headed_departments
+                    if isinstance(item, dict)
+                    and item.get('id') is not None
+                    and int(item.get('id')) == int(headed_department_id)
+                ),
+                None,
+            ) if headed_department_id is not None else None
+            if headed_department:
+                headed_department_code = str(headed_department.get('code') or '').strip().lower() or None
         except Exception:
             headed_department_ids = []
+            headed_department_codes = []
+            headed_department_code = None
     return {
         "role": role,
         "id": user_id,
@@ -949,6 +970,8 @@ def _get_user_payload(user):
         "department_code": department_code,
         "headed_department_id": headed_department_id,
         "headed_department_ids": headed_department_ids,
+        "headed_department_code": headed_department_code,
+        "headed_department_codes": headed_department_codes,
         "avatar_url": _build_avatar_signed_url(avatar_bucket, avatar_blob_path),
         "avatar_updated_at": avatar_updated_at.isoformat() if hasattr(avatar_updated_at, "isoformat") else avatar_updated_at
     }
@@ -4080,11 +4103,37 @@ def _resource_fte_error_response(error):
 
 # ── ИИ-оценка звонков (раздел call_qa) ────────────────────────────────────────
 AI_QA_OP_DEPARTMENT_ID = 367  # Отдел продаж (call_qa.config.OP_DEPARTMENT_ID)
+AI_QA_HEAD_DEPARTMENT_CODES = frozenset({'op', 'szov'})
+
+
+def _is_ai_qa_department_head(requester_id):
+    """Глава отдела, которому открыт полный доступ к ИИ-оценке и Wazzup-чатам."""
+    if requester_id is None:
+        return False
+    headed_ids = set(_headed_department_ids(requester_id))
+    headed = _headed_department_id(requester_id)
+    if headed is not None:
+        try:
+            headed_ids.add(int(headed))
+        except (TypeError, ValueError):
+            pass
+    if not headed_ids:
+        return False
+    if AI_QA_OP_DEPARTMENT_ID in headed_ids:
+        return True
+    for department_id in headed_ids:
+        try:
+            department = db.get_department_by_id(department_id) or {}
+        except Exception:
+            continue
+        if str(department.get('code') or '').strip().lower() in AI_QA_HEAD_DEPARTMENT_CODES:
+            return True
+    return False
 
 
 def _ai_qa_guard():
-    """Возвращает (requester_id, error_response|None). Доступ: супер-админ, глава ОП
-    (деп. 367), whitelist, а также СВ отдела продаж (данные ему режет
+    """Возвращает (requester_id, error_response|None). Доступ: супер-админ, главы ОП
+    и СЗоВ, whitelist, а также СВ отдела продаж (данные ему режет
     _ai_qa_direction_scope — только собственные направления)."""
     requester_id = getattr(g, 'user_id', None)
     if requester_id is not None and int(requester_id) in AI_QA_EXTRA_ACCESS_USER_IDS:
@@ -4094,8 +4143,7 @@ def _ai_qa_guard():
     if _is_super_admin_role(role):
         return requester_id, None
     if requester_id is not None:
-        headed = _headed_department_id(requester_id)
-        if headed is not None and int(headed) == AI_QA_OP_DEPARTMENT_ID:
+        if _is_ai_qa_department_head(requester_id):
             return requester_id, None
         if role == 'sv':
             dept_id = db.get_user_department_id(requester_id)
@@ -4105,8 +4153,8 @@ def _ai_qa_guard():
 
 
 def _ai_qa_direction_scope(requester_id):
-    """Скоуп данных раздела ИИ-оценки. None — без ограничений (супер-админ / глава ОП /
-    whitelist); список канонических id направлений — СВ ОП видит и оценивает только их
+    """Скоуп данных раздела ИИ-оценки. None — без ограничений (супер-админ / главы
+    ОП и СЗоВ / whitelist); список канонических id направлений — СВ ОП видит только их
     (направления его активных групп + операторов). Пустой список — направлений нет."""
     if requester_id is None:
         return None
@@ -4116,8 +4164,7 @@ def _ai_qa_direction_scope(requester_id):
     role = _normalize_user_role(user[3]) if user else None
     if _is_super_admin_role(role):
         return None
-    headed = _headed_department_id(requester_id)
-    if headed is not None and int(headed) == AI_QA_OP_DEPARTMENT_ID:
+    if _is_ai_qa_department_head(requester_id):
         return None
     try:
         return db.get_supervisor_direction_ids(requester_id, department_id=AI_QA_OP_DEPARTMENT_ID)
