@@ -146,6 +146,7 @@ const ADMIN_SESSIONS_PAGE_SIZE = 100;
 const FOUR_YOU_ADMIN_USER_ID = 2;
 const FOUR_YOU_VIEWER_USER_ID = 241;
 const AI_QA_OP_DEPARTMENT_ID = 367;
+const AI_QA_HEAD_DEPARTMENT_CODES = new Set(['op', 'szov']);
 const AI_QA_EXTRA_ACCESS_USER_IDS = new Set([183]);
 const DEFAULT_USERS_REPORT_OPTIONS = {
     sheetMode: 'summary_and_supervisors',
@@ -1261,9 +1262,23 @@ const isOpSalesSupervisorForAiQa = (userLike) => (
     Number(userLike?.department_id ?? userLike?.departmentId) === AI_QA_OP_DEPARTMENT_ID
 );
 
+const aiQaHeadDepartmentCodesOf = (userLike) => {
+    const codes = userLike?.headed_department_codes ?? userLike?.headedDepartmentCodes;
+    const values = Array.isArray(codes) ? codes : [];
+    const singular = userLike?.headed_department_code ?? userLike?.headedDepartmentCode;
+    return [...values, singular].map(normalizeDepartmentCode).filter(Boolean);
+};
+
+const isAiQaDepartmentHead = (userLike) => (
+    isDepartmentHead(userLike) && (
+        Number(headedDepartmentId(userLike)) === AI_QA_OP_DEPARTMENT_ID ||
+        aiQaHeadDepartmentCodesOf(userLike).some((code) => AI_QA_HEAD_DEPARTMENT_CODES.has(code))
+    )
+);
+
 const canAccessAiQaForUser = (userLike) => (
     normalizeRole(userLike?.role) === 'super_admin' ||
-    (isDepartmentHead(userLike) && Number(headedDepartmentId(userLike)) === AI_QA_OP_DEPARTMENT_ID) ||
+    isAiQaDepartmentHead(userLike) ||
     isOpSalesSupervisorForAiQa(userLike) ||
     AI_QA_EXTRA_ACCESS_USER_IDS.has(Number(userLike?.id))
 );
@@ -41875,7 +41890,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </button>
                                             </li>
                                             )}
-                                            {((isDepartmentHeadUser && Number(headedDepartmentId(user)) === AI_QA_OP_DEPARTMENT_ID) || isOpSalesSupervisorForAiQa(user)) && (
+                                            {(isAiQaDepartmentHead(user) || isOpSalesSupervisorForAiQa(user)) && (
                                             <li>
                                                 <button
                                                     onClick={(e) => handleSidebarViewNavigation(e, 'ai_qa')}
@@ -41885,7 +41900,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </button>
                                             </li>
                                             )}
-                                            {((isDepartmentHeadUser && Number(headedDepartmentId(user)) === AI_QA_OP_DEPARTMENT_ID) || isOpSalesSupervisorForAiQa(user)) && (
+                                            {(isAiQaDepartmentHead(user) || isOpSalesSupervisorForAiQa(user)) && (
                                             <li>
                                                 <button
                                                     onClick={(e) => handleSidebarViewNavigation(e, 'wazzup_chats')}
@@ -42117,7 +42132,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     {renderSidebarDividerInner()}
                                     {renderEventsSidebarItemInner()}
 
-                                    {canAccessAiQaSection && !isAdminLikeRole && !(isDepartmentHeadUser && Number(headedDepartmentId(user)) === AI_QA_OP_DEPARTMENT_ID) && !isOpSalesSupervisorForAiQa(user) && (
+                                    {canAccessAiQaSection && !isAdminLikeRole && !isAiQaDepartmentHead(user) && !isOpSalesSupervisorForAiQa(user) && (
                                         <li>
                                             <button
                                                 type="button"
@@ -42128,7 +42143,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </button>
                                         </li>
                                     )}
-                                    {canAccessAiQaSection && !isAdminLikeRole && !(isDepartmentHeadUser && Number(headedDepartmentId(user)) === AI_QA_OP_DEPARTMENT_ID) && !isOpSalesSupervisorForAiQa(user) && (
+                                    {canAccessAiQaSection && !isAdminLikeRole && !isAiQaDepartmentHead(user) && !isOpSalesSupervisorForAiQa(user) && (
                                         <li>
                                             <button
                                                 type="button"
