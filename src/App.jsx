@@ -122,6 +122,7 @@ const GroupsView = lazyWithRetry(() => import('./components/groups/GroupsView'))
 const FourYouView = lazyWithRetry(() => import('./components/four_you/lenta'));
 const EventsView = lazyWithRetry(() => import('./components/events/EventsView'));
 const CallQaView = lazyWithRetry(() => import('./components/call_qa/CallQaView'));
+const WazzupChatsView = lazyWithRetry(() => import('./components/wazzup/WazzupChatsView'));
 
 
 if (typeof window !== 'undefined') {
@@ -36185,6 +36186,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     (requestedViewFromUrl !== 'lms' || canAccessLmsSection) &&
                     (requestedViewFromUrl !== 'resource_fte' || canAccessResourceFteSection) &&
                     (requestedViewFromUrl !== 'ai_qa' || canAccessAiQaSection) &&
+                    (requestedViewFromUrl !== 'wazzup_chats' || canAccessAiQaSection) &&
                     (requestedViewFromUrl !== 'four_you' || canAccessFourYouSection);
                 if (canOpenRequestedView) {
                     setView(requestedViewFromUrl);
@@ -36230,7 +36232,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     else if (isPlainTrainer) setView('surveys');
                     else setView('hours');
                 }
-                if (view === 'ai_qa' && !canAccessAiQaSection) {
+                if ((view === 'ai_qa' || view === 'wazzup_chats') && !canAccessAiQaSection) {
                     if (isAdminLikeRole) setView('sv_list');
                     else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                     else if (isSupervisorRole(user?.role)) setView('operators');
@@ -41180,7 +41182,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     if (view === 'manage_operators') setView('manage_users');
                     return;
                 }
-                if (view === 'ai_qa' && canAccessAiQaSection) return;
+                if ((view === 'ai_qa' || view === 'wazzup_chats') && canAccessAiQaSection) return;
                 if (departmentAllowsView(user, view)) return;
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
@@ -41631,6 +41633,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </button>
                                                 </li>
                                             )}
+                                            {canAccessAiQaSection && (
+                                                <li>
+                                                    <button
+                                                        onClick={(e) => handleSidebarViewNavigation(e, 'wazzup_chats')}
+                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'wazzup_chats' ? 'bg-blue-700' : ''}`}
+                                                    >
+                                                        <FaIcon className="fas fa-comments"></FaIcon> <span className="sidebar-text">Чаты Верификаторов</span>
+                                                    </button>
+                                                </li>
+                                            )}
 
                                             {renderSidebarDividerInner()}
 
@@ -41831,6 +41843,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'ai_qa' ? 'bg-blue-700' : ''}`}
                                                 >
                                                     <FaIcon className="fas fa-robot"></FaIcon> <span className="sidebar-text">ИИ-оценка</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {((isDepartmentHeadUser && Number(headedDepartmentId(user)) === AI_QA_OP_DEPARTMENT_ID) || isOpSalesSupervisorForAiQa(user)) && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'wazzup_chats')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'wazzup_chats' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-comments"></FaIcon> <span className="sidebar-text">Чаты Верификаторов</span>
                                                 </button>
                                             </li>
                                             )}
@@ -42047,6 +42069,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'ai_qa' ? 'bg-blue-700' : ''}`}
                                             >
                                                 <FaIcon className="fas fa-robot"></FaIcon> <span className="sidebar-text">ИИ-оценка</span>
+                                            </button>
+                                        </li>
+                                    )}
+                                    {canAccessAiQaSection && !isAdminLikeRole && !(isDepartmentHeadUser && Number(headedDepartmentId(user)) === AI_QA_OP_DEPARTMENT_ID) && !isOpSalesSupervisorForAiQa(user) && (
+                                        <li>
+                                            <button
+                                                type="button"
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'wazzup_chats')}
+                                                className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'wazzup_chats' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <FaIcon className="fas fa-comments"></FaIcon> <span className="sidebar-text">Чаты Верификаторов</span>
                                             </button>
                                         </li>
                                     )}
@@ -42522,6 +42555,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     directions={directions}
+                                />
+                            </Suspense>
+                        )}
+                        {view === "wazzup_chats" && canAccessAiQaSection && (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка чатов…</div>}>
+                                <WazzupChatsView
+                                    user={user}
+                                    showToast={showToast}
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
                                 />
                             </Suspense>
                         )}
