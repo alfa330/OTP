@@ -18,6 +18,12 @@ import {
 const PAGE_SIZE = 30;
 const THREAD_PAGE = 50;
 
+// Воркспейс аккаунта в веб-приложении Wazzup; конкретный чат открывается по
+// /chat/<chatType>/<chatId>/<channelId> внутри него.
+const WAZZUP_APP_BASE = 'https://app.wazzup24.com/6757-7677';
+const wazzupChatUrl = (chat) =>
+    `${WAZZUP_APP_BASE}/chat/${chat.chatType || 'whatsapp'}/${encodeURIComponent(chat.chatId)}/${chat.channelId}`;
+
 const MEDIA_LABELS = {
     image: 'Фото', video: 'Видео', audio: 'Голосовое', document: 'Документ',
     geo: 'Геолокация', vcard: 'Контакт', missing_call: 'Пропущенный звонок',
@@ -493,7 +499,7 @@ export default function WazzupChatsView(props) {
                         {segBtn('chats', MessageSquare, 'Чаты')}
                         {segBtn('authors', Users, 'Операторы')}
                     </div>
-                    <a href="https://app.wazzup24.com/" target="_blank" rel="noopener noreferrer"
+                    <a href={WAZZUP_APP_BASE} target="_blank" rel="noopener noreferrer"
                        className={iosBtnGhost}>
                         <ExternalLink size={13} /> Открыть в Wazzup
                     </a>
@@ -632,9 +638,16 @@ export default function WazzupChatsView(props) {
                                         </div>
                                     </div>
                                 </div>
-                                <IosBadge tone="slate">
-                                    {selected.inboundCount ?? 0} вх. · {selected.outboundCount ?? 0} исх.
-                                </IosBadge>
+                                <div className="flex shrink-0 items-center gap-2">
+                                    <IosBadge tone="slate">
+                                        {selected.inboundCount ?? 0} вх. · {selected.outboundCount ?? 0} исх.
+                                    </IosBadge>
+                                    <a href={wazzupChatUrl(selected)} target="_blank" rel="noopener noreferrer"
+                                       title="Открыть этот чат в Wazzup (там доступна и история старше 45 дней)"
+                                       className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-[12px] font-semibold text-slate-600 transition hover:bg-slate-200 active:scale-[0.97]">
+                                        <ExternalLink size={12} /> В Wazzup
+                                    </a>
+                                </div>
                             </div>
                             <div ref={threadBox} className="flex-1 space-y-1.5 overflow-y-auto py-3">
                                 {thread === null && (
