@@ -645,10 +645,16 @@ CREATE TABLE IF NOT EXISTS qa_gold_labels (
     notes                text,
     metadata             jsonb NOT NULL DEFAULT '{}'::jsonb,
     UNIQUE (gold_set_id, call_id, criterion_id),
-    CHECK (gold_verdict IN ('Correct','Incorrect','N/A'))
+    CHECK (gold_verdict IN ('Correct','Incorrect','N/A','Deficiency'))
 );
 CREATE INDEX IF NOT EXISTS idx_gold_label_eval
     ON qa_gold_labels (gold_set_id,direction_id,criterion_id,call_id);
+
+-- Существующая прод-таблица создана со старым CHECK без 'Deficiency' (CREATE TABLE
+-- IF NOT EXISTS его не обновит) — пересоздаём ограничение идемпотентной парой.
+ALTER TABLE qa_gold_labels DROP CONSTRAINT IF EXISTS qa_gold_labels_gold_verdict_check;
+ALTER TABLE qa_gold_labels ADD CONSTRAINT qa_gold_labels_gold_verdict_check
+    CHECK (gold_verdict IN ('Correct','Incorrect','N/A','Deficiency'));
 
 CREATE TABLE IF NOT EXISTS qa_retrieval_relevance_labels (
     gold_label_id        bigint NOT NULL REFERENCES qa_gold_labels(id),

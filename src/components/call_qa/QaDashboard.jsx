@@ -53,8 +53,8 @@ function SmallStat({ label, value, Icon, tone = 'blue' }) {
     );
 }
 
-const V_LABEL = { Correct: 'Верно', Incorrect: 'Неверно', 'N/A': 'N/A' };
-const VERDICTS = ['Correct', 'Incorrect', 'N/A'];
+const V_LABEL = { Correct: 'Верно', Deficiency: 'Недочёт', Incorrect: 'Неверно', 'N/A': 'N/A' };
+const VERDICTS = ['Correct', 'Deficiency', 'Incorrect', 'N/A'];
 
 /* Матрица «человек × ИИ»: диагональ — согласие; колонка «Неверно» без согласия
  * человека — ложные тревоги; строка «Неверно» мимо ИИ — пропуски. */
@@ -102,7 +102,7 @@ function Matrix({ matrix, deficiency }) {
                 <span><span className="mr-1 inline-block h-2 w-2 rounded-sm bg-amber-300" />пропуск</span>
                 {deficiency > 0 && (
                     <span className="flex items-center gap-1"><Info size={12} />
-                        {deficiency} «недочёт(а)» человека не учтены — у ИИ нет вердикта Deficiency
+                        {deficiency} «недочёт(а)» человека из старых оценок не учтены в матрице
                     </span>
                 )}
             </div>

@@ -6,7 +6,7 @@ import re
 import unicodedata
 
 
-VALID_VERDICTS = frozenset({"Correct", "Incorrect", "N/A"})
+VALID_VERDICTS = frozenset({"Correct", "Incorrect", "N/A", "Deficiency"})
 VALID_EVIDENCE_STATUSES = frozenset({"verified", "no_evidence"})
 
 

@@ -10877,6 +10877,36 @@ class Database:
             r = cursor.fetchone()
             return (r[0], r[1]) if r else (None, None)
 
+    def get_supervisor_direction_ids(self, supervisor_id, department_id=None):
+        """Живые направления супервайзера: активные группы, где он текущий СВ,
+        плюс операторы с users.supervisor_id (legacy-кэш, синхронизируется с группами).
+        department_id сужает результат до направлений одного отдела."""
+        if not supervisor_id:
+            return []
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT DISTINCT d.id
+                  FROM directions d
+                 WHERE d.is_active = TRUE
+                   AND (%(dept)s::int IS NULL OR d.department_id = %(dept)s)
+                   AND d.id IN (
+                       SELECT g.direction_id
+                         FROM groups g
+                         JOIN group_supervisor_memberships m ON m.group_id = g.id
+                        WHERE m.supervisor_id = %(sv)s
+                          AND g.status = 'active'
+                          AND g.direction_id IS NOT NULL
+                          AND m.start_date <= CURRENT_DATE
+                          AND (m.end_date IS NULL OR m.end_date >= CURRENT_DATE)
+                       UNION
+                       SELECT u.direction_id
+                         FROM users u
+                        WHERE u.supervisor_id = %(sv)s AND u.direction_id IS NOT NULL
+                   )
+                 ORDER BY d.id
+            """, {"sv": supervisor_id, "dept": department_id})
+            return [int(row[0]) for row in (cursor.fetchall() or [])]
+
     def get_user_sip_number(self, user_id):
         """users.sip_number (внутренний номер = internalNumber в Binotel) или None."""
         if not user_id:

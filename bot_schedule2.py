@@ -4078,9 +4078,14 @@ def _resource_fte_error_response(error):
     return jsonify({"error": "Internal server error"}), 500
 
 
-# ── ИИ-оценка звонков (раздел call_qa) — только super_admin ──────────────────
+# ── ИИ-оценка звонков (раздел call_qa) ────────────────────────────────────────
+AI_QA_OP_DEPARTMENT_ID = 367  # Отдел продаж (call_qa.config.OP_DEPARTMENT_ID)
+
+
 def _ai_qa_guard():
-    """Возвращает (requester_id, error_response|None). Доступ: супер-админ ИЛИ глава ОП (деп. 367)."""
+    """Возвращает (requester_id, error_response|None). Доступ: супер-админ, глава ОП
+    (деп. 367), whitelist, а также СВ отдела продаж (данные ему режет
+    _ai_qa_direction_scope — только собственные направления)."""
     requester_id = getattr(g, 'user_id', None)
     if requester_id is not None and int(requester_id) in AI_QA_EXTRA_ACCESS_USER_IDS:
         return requester_id, None
@@ -4090,9 +4095,35 @@ def _ai_qa_guard():
         return requester_id, None
     if requester_id is not None:
         headed = _headed_department_id(requester_id)
-        if headed is not None and int(headed) == 367:  # Отдел продаж (call_qa.config.OP_DEPARTMENT_ID)
+        if headed is not None and int(headed) == AI_QA_OP_DEPARTMENT_ID:
             return requester_id, None
+        if role == 'sv':
+            dept_id = db.get_user_department_id(requester_id)
+            if dept_id is not None and int(dept_id) == AI_QA_OP_DEPARTMENT_ID:
+                return requester_id, None
     return None, (jsonify({"error": "forbidden"}), 403)
+
+
+def _ai_qa_direction_scope(requester_id):
+    """Скоуп данных раздела ИИ-оценки. None — без ограничений (супер-админ / глава ОП /
+    whitelist); список канонических id направлений — СВ ОП видит и оценивает только их
+    (направления его активных групп + операторов). Пустой список — направлений нет."""
+    if requester_id is None:
+        return None
+    if int(requester_id) in AI_QA_EXTRA_ACCESS_USER_IDS:
+        return None
+    user = db.get_user(id=requester_id)
+    role = _normalize_user_role(user[3]) if user else None
+    if _is_super_admin_role(role):
+        return None
+    headed = _headed_department_id(requester_id)
+    if headed is not None and int(headed) == AI_QA_OP_DEPARTMENT_ID:
+        return None
+    try:
+        return db.get_supervisor_direction_ids(requester_id, department_id=AI_QA_OP_DEPARTMENT_ID)
+    except Exception:
+        logging.exception("ai-qa: не удалось вычислить направления СВ %s", requester_id)
+        return []
 
 
 @app.route('/api/ai-qa/review-queue', methods=['GET', 'OPTIONS'])
@@ -4105,7 +4136,8 @@ def api_ai_qa_review_queue():
         return err
     try:
         from call_qa.api import review_queue_list
-        items = review_queue_list(limit=int(request.args.get('limit', 30)))
+        items = review_queue_list(limit=int(request.args.get('limit', 30)),
+                                  allowed_direction_ids=_ai_qa_direction_scope(requester_id))
         return jsonify({"status": "success", "items": items}), 200
     except Exception as error:
         logging.exception("ai-qa review-queue failed")
@@ -4121,11 +4153,17 @@ def api_ai_qa_call(call_id):
     if err:
         return err
     try:
+        scope = _ai_qa_direction_scope(requester_id)
         refresh = str(request.args.get('refresh', '')).lower() in ('1', 'true', 'yes')
         if str(request.args.get('source', '')).lower() == 'binotel':
+            if scope is not None:
+                # У Binotel-звонков нет направления — СВ работает только со своими направлениями.
+                return jsonify({"error": "forbidden"}), 403
             from call_qa.api import binotel_review_payload
             return jsonify({"status": "success", "call": binotel_review_payload(call_id, refresh=refresh)}), 200
-        from call_qa.api import review_payload
+        from call_qa.api import call_in_scope, review_payload
+        if not call_in_scope(call_id, scope):
+            return jsonify({"error": "звонок вне ваших направлений"}), 403
         return jsonify({"status": "success", "call": review_payload(call_id, refresh=refresh)}), 200
     except ValueError as error:
         # Ожидаемое («звонок не найден» / «нет записи») — с текстом; это не сбой сервера.
@@ -4144,10 +4182,13 @@ def api_ai_qa_adjudicate():
     if err:
         return err
     try:
-        from call_qa.api import save_adjudications
+        from call_qa.api import call_in_scope, save_adjudications
         body = request.get_json(force=True) or {}
         if not isinstance(body, dict):
             raise ValueError("тело запроса должно быть JSON-объектом")
+        scope = _ai_qa_direction_scope(requester_id)
+        if scope is not None and not call_in_scope(body.get('call_id'), scope):
+            return jsonify({"error": "звонок вне ваших направлений"}), 403
         saved = save_adjudications(
             body.get('call_id'), body.get('direction_id'), body.get('items', []),
             reviewer_id=requester_id,
@@ -4172,8 +4213,12 @@ def api_ai_qa_adjudicate_refine():
     if err:
         return err
     try:
-        from call_qa.api import refine_adjudication
-        proposal = refine_adjudication(request.get_json(force=True) or {})
+        from call_qa.api import direction_in_scope, refine_adjudication
+        body = request.get_json(force=True) or {}
+        scope = _ai_qa_direction_scope(requester_id)
+        if scope is not None and not direction_in_scope(body.get('direction_id'), scope):
+            return jsonify({"error": "направление вне вашего доступа"}), 403
+        proposal = refine_adjudication(body)
         return jsonify({"status": "success", "proposal": proposal}), 200
     except Exception as error:
         logging.exception("ai-qa adjudicate refine failed")
@@ -4189,9 +4234,18 @@ def api_ai_qa_criteria_config():
     if err:
         return err
     try:
+        from call_qa.api import direction_in_scope
+        scope = _ai_qa_direction_scope(requester_id)
         if request.method == 'GET':
             from call_qa.api import criteria_config_get
-            return jsonify({"status": "success", **criteria_config_get(int(request.args.get('direction_id')))}), 200
+            direction_id = int(request.args.get('direction_id'))
+            if not direction_in_scope(direction_id, scope):
+                return jsonify({"error": "направление вне вашего доступа"}), 403
+            return jsonify({"status": "success", **criteria_config_get(direction_id)}), 200
+        if scope is not None:
+            # Классификация критериев меняет поведение оценок всего направления —
+            # это остаётся за главой отдела и администраторами.
+            return jsonify({"error": "изменение классификации критериев недоступно супервайзеру"}), 403
         from call_qa.api import criteria_config_set
         body = request.get_json(force=True) or {}
         n = criteria_config_set(body.get('direction_id'), body.get('items', []))
@@ -4214,7 +4268,8 @@ def api_ai_qa_adjudications():
         result = adjudications_list(
             direction=request.args.get('direction'), q=request.args.get('q'),
             status=request.args.get('status'), index_status=request.args.get('index_status'),
-            page=request.args.get('page', 1), page_size=request.args.get('page_size', 20))
+            page=request.args.get('page', 1), page_size=request.args.get('page_size', 20),
+            allowed_direction_ids=_ai_qa_direction_scope(requester_id))
         return jsonify({"status": "success", **result}), 200
     except ValueError as error:
         return jsonify({"error": str(error)}), 400
@@ -4343,7 +4398,8 @@ def api_ai_qa_random_call():
         return err
     try:
         from call_qa.api import random_call
-        return jsonify({"status": "success", "call": random_call()}), 200
+        return jsonify({"status": "success",
+                        "call": random_call(allowed_direction_ids=_ai_qa_direction_scope(requester_id))}), 200
     except ValueError as error:
         return jsonify({"error": str(error)}), 404
     except Exception:
@@ -4359,6 +4415,9 @@ def api_ai_qa_random_binotel_call():
     requester_id, err = _ai_qa_guard()
     if err:
         return err
+    if _ai_qa_direction_scope(requester_id) is not None:
+        # У Binotel-звонков нет направления — СВ работает только со своими направлениями.
+        return jsonify({"error": "forbidden"}), 403
     try:
         from call_qa.api import random_binotel_call
         body = request.get_json(silent=True) or {}
@@ -4384,7 +4443,9 @@ def api_ai_qa_evaluations():
         return err
     try:
         from call_qa.api import evaluations_list
-        return jsonify({"status": "success", "items": evaluations_list(limit=int(request.args.get('limit', 100)))}), 200
+        return jsonify({"status": "success",
+                        "items": evaluations_list(limit=int(request.args.get('limit', 100)),
+                                                  allowed_direction_ids=_ai_qa_direction_scope(requester_id))}), 200
     except Exception as error:
         logging.exception("ai-qa evaluations failed")
         return jsonify({"error": str(error)}), 500
@@ -4400,7 +4461,8 @@ def api_ai_qa_stats():
         return err
     try:
         from call_qa.api import stats
-        return jsonify({"status": "success", **stats()}), 200
+        return jsonify({"status": "success",
+                        **stats(allowed_direction_ids=_ai_qa_direction_scope(requester_id))}), 200
     except Exception as error:
         logging.exception("ai-qa stats failed")
         return jsonify({"error": str(error)}), 500

@@ -25,7 +25,11 @@ class CleanPatchTests(unittest.TestCase):
 
     def test_invalid_verdict_rejected(self):
         with self.assertRaises(ValueError):
-            _clean_adjudication_patch({"correct_verdict": "Deficiency"})
+            _clean_adjudication_patch({"correct_verdict": "Maybe"})
+
+    def test_deficiency_verdict_accepted(self):
+        patch = _clean_adjudication_patch({"correct_verdict": "Deficiency"})
+        self.assertEqual(patch, {"correct_verdict": "Deficiency"})
 
     def test_empty_reason_rejected(self):
         with self.assertRaises(ValueError):

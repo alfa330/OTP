@@ -22,7 +22,80 @@ from .review.evidence import (EvidenceValidationError, VALID_VERDICTS,
                               locate_excerpt, validate_evidence)
 
 
-def review_queue_list(limit: int = 30) -> list[dict]:
+# ── Скоуп направлений (СВ ОП видит только свои направления) ──────────────────
+# allowed_direction_ids=None — без ограничений (супер-админ / глава ОП / whitelist);
+# список канонических id — только эти направления; пустой список — ничего.
+
+def _scope_family(cur, allowed_direction_ids) -> list[int]:
+    """Разворачивает канонические id направлений в семью: сами id + архивные версии
+    шкалы (canonical_id -> живая строка), как config.op_direction_id_family."""
+    ids = [int(x) for x in (allowed_direction_ids or [])]
+    if not ids:
+        return []
+    cur.execute("SELECT id FROM directions WHERE id = ANY(%s) OR canonical_id = ANY(%s)",
+                (ids, ids))
+    family = [r[0] for r in cur.fetchall()]
+    return family or ids
+
+
+def _scoped_op_family(cur, allowed_direction_ids) -> list[int]:
+    """Семья направлений ОП, суженная до скоупа (для выборок из calls)."""
+    family = config.op_direction_id_family(cur)
+    if allowed_direction_ids is None:
+        return family
+    allowed = set(_scope_family(cur, allowed_direction_ids))
+    return [i for i in family if i in allowed]
+
+
+def call_in_scope(call_id, allowed_direction_ids) -> bool:
+    """Принадлежит ли звонок направлениям скоупа (по каноническому id направления)."""
+    if allowed_direction_ids is None:
+        return True
+    try:
+        call_id = int(call_id)
+    except (TypeError, ValueError):
+        return False
+    allowed = {int(x) for x in allowed_direction_ids}
+    if not allowed:
+        return False
+    conn = config.connect_ro()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT COALESCE(d.canonical_id, d.id)
+                 FROM calls c
+                 LEFT JOIN directions d ON d.id = c.direction_id
+                WHERE c.id = %s""", (int(call_id),))
+        row = cur.fetchone(); cur.close()
+    finally:
+        conn.close()
+    return bool(row and row[0] is not None and int(row[0]) in allowed)
+
+
+def direction_in_scope(direction_id, allowed_direction_ids) -> bool:
+    """Принадлежит ли направление скоупу (архивная версия шкалы сводится к канонической)."""
+    if allowed_direction_ids is None:
+        return True
+    try:
+        did = int(direction_id)
+    except (TypeError, ValueError):
+        return False
+    allowed = {int(x) for x in allowed_direction_ids}
+    if not allowed:
+        return False
+    if did in allowed:
+        return True
+    conn = config.connect_ro()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COALESCE(canonical_id, id) FROM directions WHERE id = %s", (did,))
+        row = cur.fetchone(); cur.close()
+    finally:
+        conn.close()
+    return bool(row and row[0] is not None and int(row[0]) in allowed)
+
+
+def review_queue_list(limit: int = 30, allowed_direction_ids=None) -> list[dict]:
     """Очередь ревью: ИИ-оценённые звонки (текущий тег модели), которые человек ещё не
     проверял. Причины считаются из сохранённой карточки; сортировка — сначала критичное,
     внутри — свежее. stale=True — сохранённая оценка не совпадает с актуальной
@@ -33,6 +106,13 @@ def review_queue_list(limit: int = 30) -> list[dict]:
     try:
         conn = config.connect_ro()
         cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+        scope_sql, scope_params = "", ()
+        if allowed_direction_ids is not None:
+            family = _scope_family(cur, allowed_direction_ids)
+            if not family:
+                cur.close(); conn.close()
+                return []
+            scope_sql, scope_params = " AND c.direction_id = ANY(%s)", (family,)
         cur.execute(
             """SELECT rc.call_id, d.name, u.name, TO_CHAR(c.created_at,'DD.MM HH24:MI'), c.score,
                       rc.payload->'criteria', rc.payload->'asr_mean_conf', rc.created_at,
@@ -50,9 +130,9 @@ def review_queue_list(limit: int = 30) -> list[dict]:
                       ORDER BY r.created_at DESC, r.id::text DESC
                       LIMIT 1
                  ) run ON true
-                WHERE rc.model = %s AND m.review_outcome IS NULL
+                WHERE rc.model = %s AND m.review_outcome IS NULL""" + scope_sql + """
                 ORDER BY rc.created_at DESC LIMIT %s""",
-            (config.CLAUDE_MODEL, max(limit * 3, limit)),  # запас: часть окажется «чистой»
+            (config.CLAUDE_MODEL, *scope_params, max(limit * 3, limit)),  # запас: часть окажется «чистой»
         )
         rows = cur.fetchall(); cur.close(); conn.close()
         prio = review_queue.REASON_PRIORITY
@@ -74,7 +154,7 @@ def review_queue_list(limit: int = 30) -> list[dict]:
     except Exception as exc:
         if runtime_store.is_schema_compat_error(exc):
             logging.warning("ai-qa: очередь работает в режиме совместимости без evaluation meta")
-            return _recent_calls_fallback(limit)
+            return _recent_calls_fallback(limit, allowed_direction_ids)
         logging.exception("ai-qa: очередь ревью недоступна")
         raise
     finally:
@@ -85,10 +165,14 @@ def review_queue_list(limit: int = 30) -> list[dict]:
                 pass
 
 
-def _recent_calls_fallback(limit: int) -> list[dict]:
+def _recent_calls_fallback(limit: int, allowed_direction_ids=None) -> list[dict]:
     """Старое поведение очереди (до появления следа ревью): последние звонки ОП с записью."""
     conn = config.connect_ro()
     cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+    family = _scoped_op_family(cur, allowed_direction_ids)
+    if not family:
+        cur.close(); conn.close()
+        return []
     cur.execute(
         """SELECT c.id, d.name, u.name, TO_CHAR(c.created_at,'DD.MM HH24:MI'), c.score
              FROM calls c
@@ -97,7 +181,7 @@ def _recent_calls_fallback(limit: int) -> list[dict]:
             WHERE c.direction_id = ANY(%s) AND c.audio_path IS NOT NULL AND c.audio_path <> ''
               AND COALESCE(c.is_draft, FALSE) = FALSE
             ORDER BY c.created_at DESC LIMIT %s""",
-        (config.op_direction_id_family(cur), limit),
+        (family, limit),
     )
     rows = cur.fetchall(); cur.close(); conn.close()
     return [{"id": r[0], "direction": r[1], "operator": r[2] or "—",
@@ -462,15 +546,68 @@ def _norm_verdict(v):
         return "Correct"
     if s in {"incorrect", "error", "нет", "неверно", "false", "0"}:
         return "Incorrect"
+    if s in {"deficiency", "недочет", "недочёт"}:
+        return "Deficiency"
     if s in {"n/a", "na", "неприменимо", "-", ""}:
         return "N/A"
     return str(v)
 
 
+def _human_display_verdict(v):
+    """Человеческий вердикт для отображения в карточке: в отличие от _norm_verdict
+    НЕ схлопывает «Критич. ошибку» (Error) в Incorrect — супервайзер видит её отдельно."""
+    if v is None:
+        return None
+    s = str(v).strip().lower()
+    if s == "error":
+        return "Error"
+    if s == "":
+        return None
+    return _norm_verdict(v)
+
+
+def _attach_human_review(payload: dict) -> dict:
+    """Дописывает в карточку пер-критерийную оценку супервайзера (calls.scores /
+    calls.criterion_comments) и свежий итоговый балл. Всегда читается из БД на момент
+    запроса и НЕ попадает в immutable-кэш: человеческая оценка живёт независимо от
+    прогонов ИИ (супервайзер мог оценить звонок позже). Ошибки не роняют карточку."""
+    criteria = payload.get("criteria") or []
+    call_id = payload.get("id")
+    if not call_id or not criteria:
+        return payload
+    scores, comments, human_score = None, None, payload.get("human_score")
+    try:
+        conn = config.connect_ro()
+        try:
+            cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+            cur.execute("SELECT scores, criterion_comments, score FROM calls WHERE id = %s",
+                        (int(call_id),))
+            row = cur.fetchone(); cur.close()
+        finally:
+            conn.close()
+        if row:
+            scores = row[0] if isinstance(row[0], list) else None
+            comments = row[1] if isinstance(row[1], list) else None
+            human_score = row[2]
+    except Exception:
+        logging.exception("ai-qa: не удалось загрузить оценку супервайзера для звонка %s", call_id)
+        return payload
+    for c in criteria:
+        idx = c.get("idx")
+        raw = scores[idx] if scores is not None and isinstance(idx, int) and 0 <= idx < len(scores) else None
+        comment = comments[idx] if comments is not None and isinstance(idx, int) and 0 <= idx < len(comments) else None
+        c["human"] = _human_display_verdict(raw)
+        c["human_comment"] = (str(comment).strip() or None) if comment is not None else None
+    payload["human_score"] = human_score
+    payload["has_human_review"] = scores is not None
+    return payload
+
+
 def _ai_score(direction: dict, result: dict):
     """Балл ИИ по той же формуле, что и человеческий (main.jsx): критический Incorrect → 0;
-    иначе сумма весов НЕкритических критериев со статусом Correct/N/A. Критерии, которые ИИ
-    не может проверить (system_api/manual → Pending), считаем зачётом (benefit of the doubt).
+    иначе сумма весов НЕкритических критериев со статусом Correct/N/A; Deficiency даёт
+    частичный зачёт — вес недочёта из шкалы (criterion.deficiency.weight). Критерии, которые
+    ИИ не может проверить (system_api/manual → Pending), считаем зачётом (benefit of the doubt).
     Но Pending по TRANSCRIPT-критерию = модель не вернула вердикт даже после повтора —
     оценка неполная, балла нет (None): сбой не должен превращаться в незаслуженный зачёт."""
     rows = result.get("per_criterion", [])
@@ -485,8 +622,12 @@ def _ai_score(direction: dict, result: dict):
     for c in crits:
         if c.get("is_critical"):
             continue
-        if verdict.get(c["idx"]) in ("Correct", "N/A", "Pending"):
+        v = verdict.get(c["idx"])
+        if v in ("Correct", "N/A", "Pending"):
             total += (c.get("weight") or 0)
+        elif v == "Deficiency":
+            deficiency = c.get("deficiency") if isinstance(c.get("deficiency"), dict) else {}
+            total += float(deficiency.get("weight") or 0)
     return round(total)
 
 
@@ -701,7 +842,9 @@ def review_payload(call_id: int, refresh: bool = False) -> dict:
         with runtime_store.distributed_call_lock(call_id) as lock_acquired:
             if not lock_acquired:
                 raise RuntimeError("не удалось заблокировать звонок для безопасной оценки")
-            return _evaluate_and_cache(call_id, config.CLAUDE_MODEL, refresh)
+            payload = _evaluate_and_cache(call_id, config.CLAUDE_MODEL, refresh)
+    # Пер-критерийная оценка супервайзера — поверх результата, вне immutable-кэша.
+    return _attach_human_review(payload)
 
 
 def _evaluate_and_cache(call_id: int, model: str, refresh: bool) -> dict:
@@ -897,6 +1040,7 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool) -> dict:
         criteria.append({
             "idx": v["idx"], "criterion_id": cm.get("criterion_id"),
             "name": v["name"], "is_critical": bool(cm.get("is_critical")),
+            "deficiency": cm.get("deficiency") if isinstance(cm.get("deficiency"), dict) else None,
             "source": v["source"], "ai": v["verdict"], "conf": v["confidence"],
             "evidence": v["evidence_quote"], "comment": v["comment"], "model": v.get("model"),
         })
@@ -1118,7 +1262,7 @@ def criteria_config_set(direction_id: int, items: list[dict]) -> int:
 
 
 def adjudications_list(direction=None, q=None, *, status=None, index_status=None,
-                       page=1, page_size=20) -> dict:
+                       page=1, page_size=20, allowed_direction_ids=None) -> dict:
     """Server-paginated policy catalog with explicit health/degraded states."""
     # Переиндексацию НЕ пинаем из GET-каталога: она дёргается при постановке задачи
     # (queue_reindex_adjudication) и сама себя перезапускает по Timer, пока очередь не
@@ -1134,6 +1278,10 @@ def adjudications_list(direction=None, q=None, *, status=None, index_status=None
         conn = config.connect_ro(); cur = conn.cursor()
         cur.execute("SET client_encoding TO 'UTF8'")
         where, params = ["1=1"], []
+        if allowed_direction_ids is not None:
+            # Правила каталога ключуются каноническим id направления.
+            where.append("c.direction_id = ANY(%s)")
+            params.append([int(x) for x in allowed_direction_ids] or [-1])
         if direction and direction != "all":
             if str(direction).isdigit():
                 where.append("c.direction_id=%s"); params.append(int(direction))
@@ -1608,6 +1756,10 @@ def _validated_adjudication_items(call_id, direction_id, items, *,
         verdict = str(raw.get("correct_verdict") or "").strip()
         if verdict not in VALID_VERDICTS:
             raise ValueError(f"недопустимый вердикт для критерия {criterion_id}")
+        if verdict == "Deficiency" and not scale.get("deficiency"):
+            raise ValueError(
+                f"для критерия {criterion_id} недочёт не предусмотрен шкалой — "
+                "вердикт «Недочёт» недоступен")
         if verdict == card.get("ai"):
             raise ValueError(f"критерий {criterion_id} не содержит исправления вердикта")
         reason = str(raw.get("reason") or "").strip()
@@ -1850,7 +2002,7 @@ def _clean_adjudication_patch(body: dict) -> dict:
                 raise ValueError("недопустимый статус правила")
             patch[key] = val
         elif key == "correct_verdict":
-            if val not in ("Correct", "Incorrect", "N/A"):
+            if val not in ("Correct", "Incorrect", "N/A", "Deficiency"):
                 raise ValueError("недопустимый вердикт")
             patch[key] = val
         elif key == "reason":
@@ -2401,7 +2553,7 @@ def refine_adjudication(body: dict) -> dict:
         excerpt=body.get("excerpt"))
 
 
-def random_call() -> dict:
+def random_call(allowed_direction_ids=None) -> dict:
     """Случайный оценённый человеком звонок ОП с записью — для теста ИИ-оценки.
     Сначала из ЕЩЁ НЕ оценённых ИИ (каждый вызов = новый сигнал за те же деньги);
     если все уже оценены — любой."""
@@ -2413,7 +2565,10 @@ def random_call() -> dict:
                 LEFT JOIN users u ON c.operator_id = u.id
                WHERE c.direction_id = ANY(%s) AND c.audio_path IS NOT NULL AND c.audio_path <> ''
                  AND COALESCE(c.is_draft, FALSE) = FALSE AND c.score IS NOT NULL"""
-    id_family = config.op_direction_id_family(cur)
+    id_family = _scoped_op_family(cur, allowed_direction_ids)
+    if not id_family:
+        cur.close(); conn.close()
+        raise ValueError("нет оценённых звонков ОП с записью по вашим направлениям")
     cur.execute(base + """ AND NOT EXISTS (SELECT 1 FROM ai_review_cache rc
                                             WHERE rc.call_id = c.id AND rc.model = %s)
                            ORDER BY random() LIMIT 1""",
@@ -2429,7 +2584,7 @@ def random_call() -> dict:
             "datetime": row[3], "human_score": row[4]}
 
 
-def evaluations_list(limit=100) -> list[dict]:
+def evaluations_list(limit=100, allowed_direction_ids=None) -> list[dict]:
     """Уже оценённые ИИ звонки (из кэша) — реальные данные, пусто пока ничего не оценено.
     Один звонок = одна строка (последняя оценка), иначе звонки, оценённые несколькими
     версиями модели, дублировались в списке."""
@@ -2437,6 +2592,13 @@ def evaluations_list(limit=100) -> list[dict]:
     try:
         conn = config.connect_ro()
         cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+        scope_sql, scope_params = "", ()
+        if allowed_direction_ids is not None:
+            family = _scope_family(cur, allowed_direction_ids)
+            if not family:
+                cur.close(); conn.close()
+                return []
+            scope_sql, scope_params = " WHERE c.direction_id = ANY(%s)", (family,)
         cur.execute(
             """SELECT t.call_id, d.name, u.name, TO_CHAR(t.created_at,'DD.MM HH24:MI'), c.score, t.ai
                  FROM (SELECT DISTINCT ON (rc.call_id) rc.call_id, rc.created_at,
@@ -2445,8 +2607,8 @@ def evaluations_list(limit=100) -> list[dict]:
                         ORDER BY rc.call_id, rc.created_at DESC) t
                  JOIN calls c ON c.id = t.call_id
                  LEFT JOIN directions d ON c.direction_id = d.id
-                 LEFT JOIN users u ON c.operator_id = u.id
-                ORDER BY t.created_at DESC LIMIT %s""", (limit,))
+                 LEFT JOIN users u ON c.operator_id = u.id""" + scope_sql + """
+                ORDER BY t.created_at DESC LIMIT %s""", (*scope_params, limit))
         rows = cur.fetchall(); cur.close(); conn.close()
         return [{"id": r[0], "direction": r[1], "operator": r[2] or "—",
                  "datetime": r[3], "human": r[4],
@@ -2462,7 +2624,7 @@ def evaluations_list(limit=100) -> list[dict]:
                 pass
 
 
-_VERDICTS = ("Correct", "Incorrect", "N/A")
+_VERDICTS = ("Correct", "Deficiency", "Incorrect", "N/A")
 
 
 def _rate(hits, total):
@@ -2478,8 +2640,8 @@ def _verdict_metrics(rows) -> dict:
       alarm_precision — когда ИИ ставит Incorrect, как часто человек согласен;
       recall          — какую долю человеческих нарушений ИИ поймал;
       correct_reliability — когда ИИ ставит Correct, как часто человек согласен.
-    «Deficiency» (частичный зачёт) НЕ считается расхождением — у ИИ такого
-    вердикта пока нет; учитывается отдельным счётчиком."""
+    «Deficiency» (частичный зачёт) — полноправный вердикт обеих сторон и входит
+    в матрицу; счётчик deficiency оставлен в ответе (=0) для совместимости."""
     matrix = {h: {a: 0 for a in _VERDICTS} for h in _VERDICTS}
     per = {}
     deficiency = 0
@@ -2492,9 +2654,6 @@ def _verdict_metrics(rows) -> dict:
                 continue  # Pending/сбой — не вердикт
             raw = scores[idx] if isinstance(scores, list) and idx is not None and idx < len(scores) else None
             hv = _norm_verdict(raw)
-            if hv == "Deficiency":
-                deficiency += 1
-                continue
             if hv not in _VERDICTS:
                 continue
             matrix[hv][ai] += 1
@@ -2651,10 +2810,12 @@ def _rag_observability(cur) -> dict:
     return out
 
 
-def stats() -> dict:
+def stats(allowed_direction_ids=None) -> dict:
     """Метрики доверия для дашборда. Два эталона: «сырой» (человеческие оценки из
     calls.scores — много данных, но Correct в форме — дефолт) и «чистый» (итоги ревью —
-    мало, но человек реально смотрел). Пустые места — честно null/[], без выдуманных цифр."""
+    мало, но человек реально смотрел). Пустые места — честно null/[], без выдуманных цифр.
+    При заданном скоупе (СВ ОП) очередь/оценённые/сырой эталон считаются только по его
+    направлениям; операционные метрики reviewed/rag остаются общесистемными."""
     out = {"queue": 0, "evaluated": 0, "agreement": None, "by_criterion": [], "focus": [],
            "alarm_precision": None, "recall": None, "correct_reliability": None,
            "matrix": None, "deficiency": 0, "reviewed": None, "rag": None}
@@ -2662,19 +2823,37 @@ def stats() -> dict:
     try:
         conn = config.connect_ro()
         cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
-        cur.execute("SELECT COUNT(*) FROM ai_review_cache")
+        scope_family = None
+        if allowed_direction_ids is not None:
+            scope_family = _scope_family(cur, allowed_direction_ids)
+        if scope_family is not None:
+            cur.execute("""SELECT COUNT(*) FROM ai_review_cache rc
+                             JOIN calls c ON c.id = rc.call_id
+                            WHERE c.direction_id = ANY(%s)""",
+                        (scope_family or [-1],))
+        else:
+            cur.execute("SELECT COUNT(*) FROM ai_review_cache")
         out["evaluated"] = cur.fetchone()[0]
         try:  # реальный размер очереди ревью; до миграции — свежие звонки, как раньше
-            cur.execute("""SELECT COUNT(*) FROM ai_review_cache rc
-                             LEFT JOIN ai_evaluation_meta m ON m.call_id = rc.call_id AND m.model = rc.model
-                            WHERE rc.model = %s AND m.review_outcome IS NULL""", (config.CLAUDE_MODEL,))
+            if scope_family is not None:
+                cur.execute("""SELECT COUNT(*) FROM ai_review_cache rc
+                                 JOIN calls c ON c.id = rc.call_id
+                                 LEFT JOIN ai_evaluation_meta m ON m.call_id = rc.call_id AND m.model = rc.model
+                                WHERE rc.model = %s AND m.review_outcome IS NULL
+                                  AND c.direction_id = ANY(%s)""",
+                            (config.CLAUDE_MODEL, scope_family or [-1]))
+            else:
+                cur.execute("""SELECT COUNT(*) FROM ai_review_cache rc
+                                 LEFT JOIN ai_evaluation_meta m ON m.call_id = rc.call_id AND m.model = rc.model
+                                WHERE rc.model = %s AND m.review_outcome IS NULL""", (config.CLAUDE_MODEL,))
             out["queue"] = cur.fetchone()[0]
         except Exception:
+            family = _scoped_op_family(cur, allowed_direction_ids)
             cur.execute(
                 """SELECT COUNT(*) FROM calls
                     WHERE direction_id = ANY(%s) AND audio_path IS NOT NULL AND audio_path <> ''
                       AND COALESCE(is_draft, FALSE) = FALSE AND created_at > NOW() - INTERVAL '7 days'""",
-                (config.op_direction_id_family(cur),))
+                (family or [-1],))
             out["queue"] = cur.fetchone()[0]
 
         # Сырой эталон: последняя оценка каждого звонка (без дублей по тегам моделей).
@@ -2686,7 +2865,9 @@ def stats() -> dict:
                          FROM ai_review_cache rc
                         ORDER BY rc.call_id, rc.created_at DESC) t
                  JOIN calls c ON c.id = t.call_id
-                WHERE c.scores IS NOT NULL""")
+                WHERE c.scores IS NOT NULL"""
+            + (" AND c.direction_id = ANY(%s)" if scope_family is not None else ""),
+            ((scope_family or [-1],) if scope_family is not None else ()))
         m = _verdict_metrics(cur.fetchall())
         for k in ("agreement", "alarm_precision", "recall", "correct_reliability", "matrix", "deficiency"):
             out[k] = m[k]
