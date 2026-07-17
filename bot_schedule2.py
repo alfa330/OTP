@@ -4886,10 +4886,21 @@ def _c2d_normalize_message(msg, target_tz):
     }
 
 
-def _c2d_fetch_request_messages(request_id):
+def _c2d_fetch_request_messages(request_id, request_start=None, request_end=None):
     """Переписка заявки: /v1/requests/{id} -> dialog_id -> /v1/messages?dialog_id.
-    Фильтр по request_id — на нашей стороне (параметр request_id API игнорирует),
-    так остаётся именно «оцениваемая часть» диалога."""
+
+    ВАЖНО (проверено живьём): у /v1/messages НЕ работают offset/page — каждая
+    «страница» возвращает одни и те же первые 200 сообщений (отсюда были дубли
+    ×2 и пустые чаты, когда заявка глубже первых 200 сообщений диалога).
+    Работают только order=desc и start_id (нижняя граница id). Поэтому:
+      1) хвост диалога (order=desc) — заявки последних 45 дней почти всегда там;
+      2) начало диалога (по умолчанию asc) — вместе с хвостом покрывает
+         диалоги до 400 сообщений целиком;
+      3) для более длинных — интерполяция id по времени между якорями
+         и восходящий обход через start_id до смыкания с хвостом.
+    Сообщения складываются в dict по id — дубли невозможны. Фильтр по
+    request_id наш; если он дал пусто (счётчики заявки живут отдельно от
+    привязки сообщений) — фолбэк по окну времени заявки."""
     request_id = int(request_id)
     payload = _c2d_api_get(f"/v1/requests/{request_id}")
     info = payload.get('data') if isinstance(payload.get('data'), dict) else payload
@@ -4897,25 +4908,111 @@ def _c2d_fetch_request_messages(request_id):
     if not dialog_id:
         raise RuntimeError("Chat2Desk не вернул dialog_id для заявки")
     target_tz = _chat2desk_sync_timezone()
-    raw_messages, offset = [], 0
-    for _page in range(C2D_EVAL_MAX_MESSAGE_PAGES):
-        page = _c2d_api_get('/v1/messages', params={
-            'dialog_id': int(dialog_id), 'limit': 200, 'offset': offset})
-        rows = page.get('data') or []
-        if not rows:
-            break
-        raw_messages.extend(rows)
-        offset += len(rows)
-        if len(rows) < 200:
-            break
-        total = (page.get('meta') or {}).get('total')
-        if total is not None and offset >= int(total):
-            break
-    picked = [
-        _c2d_normalize_message(m, target_tz)
-        for m in raw_messages
-        if isinstance(m, dict) and str(m.get('request_id') or '') == str(request_id)
-    ]
+
+    def parse_local(value):
+        if isinstance(value, datetime):
+            return value
+        text = str(value or '').strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text)
+        except ValueError:
+            return None
+
+    start_dt = parse_local(request_start)
+    end_dt = parse_local(request_end)
+    # До какого времени назад нужно дотянуться, чтобы точно накрыть заявку
+    reach_from = (start_dt - timedelta(hours=3)) if start_dt else None
+
+    by_id = {}
+    dialog_total = None
+
+    def created_local(m):
+        return _c2d_parse_api_datetime(m.get('created'), target_tz)
+
+    def fetch_page(**extra):
+        nonlocal dialog_total
+        page = _c2d_api_get('/v1/messages', params={'dialog_id': int(dialog_id), 'limit': 200, **extra})
+        rows = [m for m in (page.get('data') or []) if isinstance(m, dict) and m.get('id') is not None]
+        meta_total = (page.get('meta') or {}).get('total')
+        if meta_total is not None:
+            try:
+                dialog_total = int(float(meta_total))
+            except (TypeError, ValueError):
+                pass
+        added = 0
+        for m in rows:
+            if m['id'] not in by_id:
+                by_id[m['id']] = m
+                added += 1
+        return rows, added
+
+    # 1) Хвост диалога (новые сообщения)
+    desc_rows, _ = fetch_page(order='desc')
+    tail_min_id = min((m['id'] for m in desc_rows), default=None)
+    covered = bool(dialog_total is not None and dialog_total <= 200) or len(desc_rows) < 200
+    if not covered and desc_rows and reach_from is not None:
+        oldest_tail = created_local(desc_rows[-1])
+        if oldest_tail is not None and oldest_tail <= reach_from:
+            covered = True
+
+    lo_anchor = None
+    if not covered:
+        # 2) Начало диалога: вместе с хвостом закрывает диалоги до 400 сообщений
+        asc_rows, _ = fetch_page()
+        lo_anchor = next((m for m in asc_rows if created_local(m) is not None), None)
+        if (dialog_total is not None and dialog_total <= 400) or reach_from is None:
+            covered = True
+
+    if not covered:
+        # 3) Длинный диалог: угадываем id около reach_from интерполяцией по времени
+        # между якорями (начало диалога <-> низ хвоста) и идём вверх по start_id.
+        hi_anchor = next((m for m in sorted(desc_rows, key=lambda m: m['id']) if created_local(m) is not None), None)
+        cursor = None
+        if lo_anchor and hi_anchor and hi_anchor['id'] > lo_anchor['id']:
+            lo_t, hi_t = created_local(lo_anchor), created_local(hi_anchor)
+            span = (hi_t - lo_t).total_seconds()
+            if span > 0:
+                frac = (reach_from - lo_t).total_seconds() / span
+                frac = min(max(frac, 0.0), 1.0)
+                cursor = int(lo_anchor['id'] + (hi_anchor['id'] - lo_anchor['id']) * frac)
+        if cursor is None and lo_anchor:
+            cursor = lo_anchor['id'] + 1
+        rows = []
+        if cursor is not None:
+            # Коррекция промаха: первая страница от guess должна начинаться не позже reach_from
+            for _attempt in range(3):
+                rows, _ = fetch_page(start_id=int(cursor))
+                first_t = created_local(rows[0]) if rows else None
+                if rows and first_t is not None and first_t > reach_from \
+                        and lo_anchor and cursor > lo_anchor['id'] + 1:
+                    step = max(int((hi_anchor['id'] - lo_anchor['id']) * 0.25), 200) if hi_anchor else 10000
+                    cursor = max(lo_anchor['id'] + 1, int(cursor) - step)
+                    continue
+                break
+            # Восходящий обход до смыкания с хвостом
+            for _page in range(C2D_EVAL_MAX_MESSAGE_PAGES):
+                if not rows or len(rows) < 200:
+                    break
+                last_id = max(m['id'] for m in rows)
+                if tail_min_id is not None and last_id >= tail_min_id:
+                    break
+                rows, added = fetch_page(start_id=last_id + 1)
+                if added == 0:
+                    break
+
+    all_msgs = sorted(by_id.values(), key=lambda m: m['id'])
+    picked_raw = [m for m in all_msgs if str(m.get('request_id') or '') == str(request_id)]
+    if not picked_raw and start_dt is not None:
+        win_from = start_dt - timedelta(minutes=30)
+        win_to = (end_dt + timedelta(hours=2)) if end_dt else (start_dt + timedelta(hours=12))
+        picked_raw = []
+        for m in all_msgs:
+            t = created_local(m)
+            if t is not None and win_from <= t <= win_to:
+                picked_raw.append(m)
+    picked = [_c2d_normalize_message(m, target_tz) for m in picked_raw]
     picked.sort(key=lambda m: (m.get('created') or '', m.get('id') or 0))
     return int(dialog_id), picked
 
@@ -4989,37 +5086,62 @@ def api_c2d_eval_pick():
 
     try:
         scope_dept = _c2d_eval_scope_department(requester_id, _normalize_user_role(requester[3]))
-        row, candidates = db.pick_c2d_request(
-            date_from=(data.get('date_from') or '').strip() or None,
-            date_to=(data.get('date_to') or '').strip() or None,
-            operator_id=as_int('operator_id'),
-            channel_id=as_int('channel_id'),
-            transport=(data.get('transport') or '').strip() or None,
-            min_messages=as_int('min_messages'),
-            max_messages=as_int('max_messages'),
-            rating_filter=(data.get('rating_filter') or '').strip() or None,
-            department_id=scope_dept,
-            exclude=(data.get('exclude') or 'mine').strip(),
-            evaluator_id=requester_id)
-        if not row:
+        # Счётчики сообщений в request_stats и фактическая привязка сообщений к
+        # заявке в Chat2Desk иногда расходятся — заявка может оказаться без
+        # переписки. Такие кандидаты пропускаем и берём следующего случайного.
+        skipped_empty = []
+        candidates = 0
+        for _attempt in range(4):
+            row, candidates = db.pick_c2d_request(
+                date_from=(data.get('date_from') or '').strip() or None,
+                date_to=(data.get('date_to') or '').strip() or None,
+                operator_id=as_int('operator_id'),
+                channel_id=as_int('channel_id'),
+                transport=(data.get('transport') or '').strip() or None,
+                min_messages=as_int('min_messages'),
+                max_messages=as_int('max_messages'),
+                rating_filter=(data.get('rating_filter') or '').strip() or None,
+                department_id=scope_dept,
+                exclude=(data.get('exclude') or 'mine').strip(),
+                evaluator_id=requester_id,
+                exclude_request_ids=skipped_empty)
+            if not row:
+                return jsonify({
+                    "status": "empty",
+                    "message": ("По заданным фильтрам заявок не нашлось — ослабьте условия"
+                                if not skipped_empty else
+                                "Подходящие заявки нашлись, но у них нет переписки в Chat2Desk — попробуйте другие фильтры"),
+                    "candidates": 0
+                }), 200
+
+            snapshot = db.get_c2d_snapshot(request_id=row['request_id'])
+            if snapshot is not None and not snapshot.get('messages'):
+                snapshot = None  # пустой снапшот старой версии — перечитываем заново
+            if snapshot is None:
+                dialog_id, messages = _c2d_fetch_request_messages(
+                    row['request_id'],
+                    request_start=row.get('request_start'),
+                    request_end=row.get('request_end'))
+                if not messages:
+                    skipped_empty.append(int(row['request_id']))
+                    logging.info("c2d eval pick: заявка %s без переписки, пропускаем", row['request_id'])
+                    continue
+                snapshot_id = db.save_c2d_snapshot(
+                    row['request_id'], dialog_id, messages,
+                    request_row=row, created_by=requester_id)
+                snapshot = db.get_c2d_snapshot(snapshot_id=snapshot_id)
             return jsonify({
-                "status": "empty",
-                "message": "По заданным фильтрам заявок не нашлось — ослабьте условия",
-                "candidates": 0
+                "status": "success",
+                "request": row,
+                "snapshot": snapshot,
+                "candidates": candidates,
+                "skippedEmpty": len(skipped_empty),
             }), 200
 
-        snapshot = db.get_c2d_snapshot(request_id=row['request_id'])
-        if snapshot is None:
-            dialog_id, messages = _c2d_fetch_request_messages(row['request_id'])
-            snapshot_id = db.save_c2d_snapshot(
-                row['request_id'], dialog_id, messages,
-                request_row=row, created_by=requester_id)
-            snapshot = db.get_c2d_snapshot(snapshot_id=snapshot_id)
         return jsonify({
-            "status": "success",
-            "request": row,
-            "snapshot": snapshot,
-            "candidates": candidates,
+            "status": "empty",
+            "message": "Несколько заявок подряд оказались без переписки — попробуйте ещё раз или измените фильтры",
+            "candidates": candidates
         }), 200
     except RuntimeError as error:
         logging.warning("c2d eval pick: %s", error)

@@ -13811,16 +13811,20 @@ class Database:
     def pick_c2d_request(self, date_from=None, date_to=None, operator_id=None,
                          channel_id=None, transport=None, min_messages=None,
                          max_messages=None, rating_filter=None, department_id=None,
-                         exclude='any', evaluator_id=None):
+                         exclude='any', evaluator_id=None, exclude_request_ids=None):
         """Случайная заявка по фильтрам. Оценки чатов живут в журнале (calls с
         c2d_snapshot_id), поэтому исключения смотрят туда: 'any' — без чатов,
         уже оценённых кем-либо, 'mine' — оценённых этим СВ, 'none' — без
-        исключений. Возвращает (row|None, candidates_count)."""
+        исключений. exclude_request_ids — заявки, отсеянные в этом же запросе
+        (например, без переписки). Возвращает (row|None, candidates_count)."""
         where, params = self._c2d_requests_where(
             date_from=date_from, date_to=date_to, operator_id=operator_id,
             channel_id=channel_id, transport=transport, min_messages=min_messages,
             max_messages=max_messages, rating_filter=rating_filter,
             department_id=department_id)
+        if exclude_request_ids:
+            where.append("r.request_id != ALL(%s)")
+            params.append([int(v) for v in exclude_request_ids])
         exclude = str(exclude or 'none').strip().lower()
         evaluated_exists = """NOT EXISTS (
             SELECT 1 FROM calls c
