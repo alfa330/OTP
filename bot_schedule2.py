@@ -4495,6 +4495,163 @@ def wazzup_webhook(token):
     return jsonify({"ok": True, "messages": stored, "statuses": updated}), 200
 
 
+# Просмотр чатов Wazzup (Верификаторы = направление 71 отдела продаж 367) —
+# доступ тот же, что у раздела ИИ-оценки: _ai_qa_guard.
+WAZZUP_API_KEY = (os.getenv('WAZZUP_OP_API_KEY') or '').strip()
+_WAZZUP_CHANNELS_CACHE = {'ts': 0.0, 'items': None}
+_WAZZUP_CHANNELS_CACHE_TTL = 600  # имена каналов меняются редко
+
+
+def _wazzup_channels_from_api():
+    """Список каналов аккаунта из Wazzup API (имя, номер, состояние) с кэшем.
+    При ошибке отдаёт последний удачный ответ — список чатов живёт и без имён."""
+    now = time.time()
+    cached = _WAZZUP_CHANNELS_CACHE['items']
+    if cached is not None and now - _WAZZUP_CHANNELS_CACHE['ts'] < _WAZZUP_CHANNELS_CACHE_TTL:
+        return cached
+    items = cached or []
+    if WAZZUP_API_KEY:
+        try:
+            r = requests.get('https://api.wazzup24.com/v3/channels',
+                             headers={'Authorization': f'Bearer {WAZZUP_API_KEY}'},
+                             timeout=10)
+            r.raise_for_status()
+            items = r.json() or []
+        except Exception:
+            logging.warning("wazzup: не удалось обновить список каналов", exc_info=True)
+    _WAZZUP_CHANNELS_CACHE.update(ts=now, items=items)
+    return items
+
+
+@app.route('/api/wazzup/channels', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_wazzup_channels():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    _, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        with db._get_cursor() as cursor:
+            cursor.execute("""SELECT channel_id, COUNT(*), MAX(last_message_at)
+                              FROM wazzup_chats GROUP BY channel_id""")
+            counts = {r[0]: (r[1], r[2].isoformat() if r[2] else None)
+                      for r in cursor.fetchall()}
+        items, seen = [], set()
+        for ch in _wazzup_channels_from_api():
+            cid = ch.get('channelId')
+            seen.add(cid)
+            chats_count, last_at = counts.get(cid, (0, None))
+            items.append({'channelId': cid, 'name': ch.get('name'),
+                          'plainId': ch.get('plainId'), 'transport': ch.get('transport'),
+                          'state': ch.get('state'), 'chatsCount': chats_count,
+                          'lastMessageAt': last_at})
+        # Каналы с перепиской, которых нет в ответе API (удалённые из Wazzup)
+        for cid, (chats_count, last_at) in counts.items():
+            if cid not in seen:
+                items.append({'channelId': cid, 'name': cid, 'plainId': None,
+                              'transport': None, 'state': None,
+                              'chatsCount': chats_count, 'lastMessageAt': last_at})
+        items.sort(key=lambda x: (-(x['chatsCount'] or 0), str(x['name'] or '')))
+        return jsonify({"status": "success", "items": items}), 200
+    except Exception as error:
+        logging.exception("wazzup channels failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/wazzup/chats', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_wazzup_chats():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    _, err = _ai_qa_guard()
+    if err:
+        return err
+    channel_id = (request.args.get('channel_id') or '').strip() or None
+    q = (request.args.get('q') or '').strip()
+    try:
+        limit = min(max(int(request.args.get('limit', 30)), 1), 100)
+    except (TypeError, ValueError):
+        limit = 30
+    try:
+        offset = max(int(request.args.get('offset', 0)), 0)
+    except (TypeError, ValueError):
+        offset = 0
+    where, params = ["TRUE"], []
+    if channel_id:
+        where.append("channel_id = %s")
+        params.append(channel_id)
+    if q:
+        where.append("(contact_name ILIKE %s OR contact_phone ILIKE %s OR chat_id ILIKE %s)")
+        like = f"%{q}%"
+        params.extend([like, like, like])
+    try:
+        with db._get_cursor() as cursor:
+            cursor.execute(f"SELECT COUNT(*) FROM wazzup_chats WHERE {' AND '.join(where)}",
+                           params)
+            total = cursor.fetchone()[0]
+            cursor.execute(f"""
+                SELECT channel_id, chat_id, chat_type, contact_name, contact_phone,
+                       last_message_at, last_message_text, last_message_is_echo,
+                       messages_count, inbound_count, outbound_count
+                  FROM wazzup_chats WHERE {' AND '.join(where)}
+                 ORDER BY last_message_at DESC NULLS LAST
+                 LIMIT %s OFFSET %s""", params + [limit, offset])
+            items = [{'channelId': r[0], 'chatId': r[1], 'chatType': r[2],
+                      'contactName': r[3], 'contactPhone': r[4],
+                      'lastMessageAt': r[5].isoformat() if r[5] else None,
+                      'lastMessageText': r[6], 'lastMessageIsEcho': r[7],
+                      'messagesCount': r[8], 'inboundCount': r[9], 'outboundCount': r[10]}
+                     for r in cursor.fetchall()]
+        return jsonify({"status": "success", "items": items, "total": total}), 200
+    except Exception as error:
+        logging.exception("wazzup chats failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/wazzup/chat-messages', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_wazzup_chat_messages():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    _, err = _ai_qa_guard()
+    if err:
+        return err
+    channel_id = (request.args.get('channel_id') or '').strip()
+    chat_id = (request.args.get('chat_id') or '').strip()
+    if not channel_id or not chat_id:
+        return jsonify({"error": "channel_id and chat_id are required"}), 400
+    before = (request.args.get('before') or '').strip() or None  # ISO-курсор вверх
+    try:
+        limit = min(max(int(request.args.get('limit', 50)), 1), 200)
+    except (TypeError, ValueError):
+        limit = 50
+    where = ["channel_id = %s", "chat_id = %s"]
+    params = [channel_id, chat_id]
+    if before:
+        where.append("dt < %s")
+        params.append(before)
+    try:
+        with db._get_cursor() as cursor:
+            cursor.execute(f"""
+                SELECT message_id, dt, is_echo, type, text, content_uri,
+                       author_name, author_id, status, is_edited, is_deleted
+                  FROM wazzup_messages WHERE {' AND '.join(where)}
+                 ORDER BY dt DESC LIMIT %s""", params + [limit + 1])
+            rows = cursor.fetchall()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        items = [{'messageId': r[0], 'dt': r[1].isoformat() if r[1] else None,
+                  'isEcho': r[2], 'type': r[3], 'text': r[4], 'contentUri': r[5],
+                  'authorName': r[6], 'authorId': r[7], 'status': r[8],
+                  'isEdited': r[9], 'isDeleted': r[10]}
+                 for r in reversed(rows)]  # в ответе — по возрастанию времени
+        return jsonify({"status": "success", "items": items, "hasMore": has_more}), 200
+    except Exception as error:
+        logging.exception("wazzup chat messages failed")
+        return jsonify({"error": str(error)}), 500
+
+
 @app.route('/api/resource_fte/overview', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_resource_fte_overview():
