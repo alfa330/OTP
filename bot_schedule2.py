@@ -4468,6 +4468,33 @@ def api_ai_qa_stats():
         return jsonify({"error": str(error)}), 500
 
 
+# ── Wazzup (Верификаторы): приём вебхуков ─────────────────────────────────────
+# Wazzup не подписывает вебхуки, поэтому аутентификация — секретный сегмент пути.
+WAZZUP_WEBHOOK_TOKEN = (os.getenv('WAZZUP_WEBHOOK_TOKEN') or '').strip()
+
+
+@app.route('/api/wazzup/webhook/<token>', methods=['POST'])
+def wazzup_webhook(token):
+    """Приёмник вебхуков Wazzup (messagesAndStatuses). Обработчик намеренно
+    тонкий: принял → записал → 200 (Wazzup ждёт ответ не дольше 30 секунд;
+    на не-2xx повторяет доставку, upsert делает повтор безопасным)."""
+    if not WAZZUP_WEBHOOK_TOKEN or not hmac.compare_digest(token, WAZZUP_WEBHOOK_TOKEN):
+        return jsonify({"error": "not found"}), 404
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "bad request"}), 400
+    if payload.get('test'):
+        # Проверочный запрос при регистрации webhooksUri
+        return jsonify({"ok": True}), 200
+    try:
+        stored = db.store_wazzup_messages(payload.get('messages'))
+        updated = db.update_wazzup_statuses(payload.get('statuses'))
+    except Exception:
+        logging.exception("wazzup webhook: ошибка записи")
+        return jsonify({"error": "internal"}), 500
+    return jsonify({"ok": True, "messages": stored, "statuses": updated}), 200
+
+
 @app.route('/api/resource_fte/overview', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_resource_fte_overview():
@@ -39659,6 +39686,15 @@ async def run_oktell_resource_sync_async(triggered_by='scheduler'):
         lambda: sync_oktell_resource_hours(triggered_by=triggered_by)
     )
 
+
+async def run_wazzup_retention_async():
+    # Ежедневный ретеншн переписки Wazzup (см. db.cleanup_wazzup_messages).
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(executor_pool, db.cleanup_wazzup_messages)
+    except Exception:
+        logging.exception("wazzup retention failed")
+
 # === Главный запуск =============================================================================================
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('reject_reval:'))
 async def handle_reject_reval(callback_query: types.CallbackQuery, state: FSMContext):
@@ -39851,6 +39887,17 @@ if __name__ == '__main__':
         tez_status_sync_job,
         CronTrigger(hour=1, minute=0, timezone=ZoneInfo('Asia/Almaty')),
         id='tez_status_sync_daily',
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # Ретеншн переписки Wazzup (Верификаторы): сообщения старше 45 дней
+    # удаляются ежедневно в 03:30 (Asia/Almaty) — диск прода 1 ГБ.
+    scheduler.add_job(
+        run_wazzup_retention_async,
+        CronTrigger(hour=3, minute=30, timezone=ZoneInfo('Asia/Almaty')),
+        id='wazzup_retention_daily',
         misfire_grace_time=3600,
         max_instances=1,
         coalesce=True
