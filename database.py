@@ -2128,6 +2128,18 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_wazzup_chats_last_message
                 ON wazzup_chats(last_message_at DESC);
             """)
+            # Привязка авторов Wazzup к нашим операторам (для атрибуции ИИ-оценки).
+            # is_bot — авторассылки/интеграции (Autocontact и т.п.), исключаются из оценки.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS wazzup_operator_map (
+                    author_id TEXT PRIMARY KEY,
+                    author_name TEXT,
+                    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    is_bot BOOLEAN NOT NULL DEFAULT FALSE,
+                    updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+            """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operator_technical_issues (
                     id SERIAL PRIMARY KEY,
@@ -13512,6 +13524,74 @@ class Database:
             logging.info("wazzup retention: удалено %s сообщений, %s чатов",
                          deleted_messages, deleted_chats)
         return {'messages': deleted_messages, 'chats': deleted_chats}
+
+    def list_wazzup_authors(self):
+        """Авторы исходящих сообщений Wazzup (по author_id) со статистикой
+        и текущей привязкой из wazzup_operator_map. Привязки без сообщений
+        в окне ретеншна тоже возвращаются (FULL JOIN) — маппинг не «исчезает»."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT COALESCE(a.author_id, map.author_id) AS author_id,
+                       COALESCE(a.author_name, map.author_name) AS author_name,
+                       COALESCE(a.messages_count, 0),
+                       a.last_message_at,
+                       COALESCE(a.chats_count, 0),
+                       map.user_id, u.name, COALESCE(map.is_bot, FALSE)
+                  FROM (SELECT author_id,
+                               (array_agg(author_name ORDER BY dt DESC))[1] AS author_name,
+                               COUNT(*) AS messages_count,
+                               MAX(dt) AS last_message_at,
+                               COUNT(DISTINCT (channel_id, chat_id)) AS chats_count
+                          FROM wazzup_messages
+                         WHERE is_echo AND author_id IS NOT NULL
+                         GROUP BY author_id) a
+                  FULL JOIN wazzup_operator_map map ON map.author_id = a.author_id
+                  LEFT JOIN users u ON u.id = map.user_id
+                 ORDER BY COALESCE(a.messages_count, 0) DESC, author_name
+            """)
+            return [{'author_id': r[0], 'author_name': r[1], 'messages_count': r[2],
+                     'last_message_at': r[3], 'chats_count': r[4],
+                     'user_id': r[5], 'user_name': r[6], 'is_bot': r[7]}
+                    for r in cursor.fetchall()]
+
+    def upsert_wazzup_author_map(self, author_id, author_name=None, user_id=None,
+                                 is_bot=False, updated_by=None):
+        """Сохраняет привязку автора Wazzup: user_id (наш оператор) и/или is_bot.
+        user_id=None + is_bot=False — сброс привязки (строка остаётся как факт разбора)."""
+        author_id = str(author_id or '').strip()
+        if not author_id:
+            raise ValueError("author_id is required")
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO wazzup_operator_map
+                       (author_id, author_name, user_id, is_bot, updated_by, updated_at)
+                VALUES (%s, %s, %s, %s, %s, now())
+                ON CONFLICT (author_id) DO UPDATE SET
+                    author_name = COALESCE(EXCLUDED.author_name, wazzup_operator_map.author_name),
+                    user_id = EXCLUDED.user_id,
+                    is_bot = EXCLUDED.is_bot,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = now()
+            """, (author_id, author_name,
+                  int(user_id) if user_id is not None else None,
+                  bool(is_bot),
+                  int(updated_by) if updated_by is not None else None))
+        return True
+
+    def list_wazzup_operator_candidates(self, department_id=367, verifier_direction_id=71):
+        """Кандидаты для привязки: действующие операторы отдела (Верификаторы первыми)."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT u.id, u.name, u.direction_id, d.name
+                  FROM users u
+                  LEFT JOIN directions d ON d.id = u.direction_id
+                 WHERE u.role IN ('operator', 'trainee')
+                   AND u.status NOT IN ('fired', 'dismissal')
+                   AND d.department_id = %s
+                 ORDER BY (u.direction_id = %s) DESC, u.name
+            """, (int(department_id), int(verifier_direction_id)))
+            return [{'id': r[0], 'name': r[1], 'direction_id': r[2], 'direction_name': r[3]}
+                    for r in cursor.fetchall()]
 
     def get_daily_hours_for_operator_month(self, operator_id: int, month: str):
         """

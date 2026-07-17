@@ -3,6 +3,7 @@ import axios from 'axios';
 import {
     Search, RefreshCw, Loader2, AlertCircle, MessageSquare, ExternalLink,
     ChevronUp, User2, Headset, ImageIcon, FileText, Mic, Video, MapPin, Ban,
+    Users, Bot, Wand2, Link2,
 } from 'lucide-react';
 import { APPLE_FONT, iosCard, iosInput, IosBadge } from '../ui/ios';
 
@@ -76,9 +77,152 @@ function MessageBubble({ msg }) {
     );
 }
 
+/* Вкладка «Операторы»: привязка авторов Wazzup к нашим операторам.
+ * Привязка нужна атрибуции ИИ-оценки; is_bot исключает авторассылки. */
+function AuthorsTab({ apiBaseUrl, headers, showToast }) {
+    const [data, setData] = useState(null);       // {items, operators} | null = загрузка
+    const [error, setError] = useState(null);
+    const [savingId, setSavingId] = useState(null);
+
+    const load = () => {
+        setData(null); setError(null);
+        axios.get(`${apiBaseUrl}/api/wazzup/authors`, { headers: headers() })
+            .then((r) => setData({ items: r.data.items || [], operators: r.data.operators || [] }))
+            .catch(() => setError('Не удалось загрузить авторов'));
+    };
+    useEffect(() => { load(); /* eslint-disable-next-line */ }, [apiBaseUrl]);
+
+    const save = (author, patch) => {
+        const next = { userId: author.userId, isBot: author.isBot, ...patch };
+        setSavingId(author.authorId);
+        axios.post(`${apiBaseUrl}/api/wazzup/authors/map`, {
+            authorId: author.authorId, authorName: author.authorName,
+            userId: next.isBot ? null : next.userId, isBot: next.isBot,
+        }, { headers: headers() }).then(() => {
+            setSavingId(null);
+            const opName = (data.operators.find((o) => o.id === next.userId) || {}).name || null;
+            setData((prev) => ({
+                ...prev,
+                items: prev.items.map((it) => it.authorId === author.authorId
+                    ? { ...it, userId: next.isBot ? null : next.userId,
+                        userName: next.isBot ? null : opName, isBot: next.isBot,
+                        suggestedUserId: null, suggestedUserName: null }
+                    : it),
+            }));
+        }).catch(() => {
+            setSavingId(null);
+            showToast?.('Не удалось сохранить привязку', 'error');
+        });
+    };
+
+    const verifiers = (data?.operators || []).filter((o) => o.isVerifier);
+    const others = (data?.operators || []).filter((o) => !o.isVerifier);
+    const unmatched = (data?.items || []).filter((a) => !a.userId && !a.isBot).length;
+
+    return (
+        <div className={`${iosCard} overflow-hidden`}>
+            <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
+                <div className="text-sm text-slate-600">
+                    Авторы исходящих сообщений{data ? ` — ${data.items.length}` : ''}
+                    {data && unmatched > 0 && (
+                        <span className="ml-2 text-amber-600">без привязки: {unmatched}</span>
+                    )}
+                </div>
+                <button onClick={load}
+                        className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50">
+                    <RefreshCw size={13} /> Обновить
+                </button>
+            </div>
+            {data === null && !error && (
+                <div className="flex items-center justify-center gap-2 py-10 text-sm text-slate-400">
+                    <Loader2 size={15} className="animate-spin" /> Загрузка…
+                </div>
+            )}
+            {error && (
+                <div className="flex items-center justify-center gap-2 py-8 text-sm text-rose-500">
+                    <AlertCircle size={15} /> {error}
+                </div>
+            )}
+            {data && data.items.length === 0 && (
+                <div className="py-10 text-center text-sm text-slate-400">
+                    Исходящих сообщений пока нет — авторы появятся по мере переписки
+                </div>
+            )}
+            {data && data.items.length > 0 && (
+                <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                        <thead>
+                            <tr className="border-b border-slate-100 text-left text-[11px] uppercase tracking-wide text-slate-400">
+                                <th className="px-4 py-2 font-medium">Автор в Wazzup</th>
+                                <th className="px-2 py-2 font-medium">Сообщ.</th>
+                                <th className="px-2 py-2 font-medium">Чатов</th>
+                                <th className="px-2 py-2 font-medium">Активность</th>
+                                <th className="px-2 py-2 font-medium">Наш оператор</th>
+                                <th className="px-2 py-2 font-medium">Бот</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {data.items.map((a) => {
+                                const saving = savingId === a.authorId;
+                                return (
+                                    <tr key={a.authorId}
+                                        className={`border-b border-slate-50 ${a.isBot ? 'opacity-60' : ''}`}>
+                                        <td className="px-4 py-2">
+                                            <div className="flex items-center gap-1.5 font-medium text-slate-900">
+                                                {a.isBot ? <Bot size={14} className="text-slate-400" /> : <Headset size={14} className="text-emerald-500" />}
+                                                {a.authorName || '—'}
+                                            </div>
+                                            <div className="text-[10px] text-slate-400">id {a.authorId}</div>
+                                        </td>
+                                        <td className="px-2 py-2 text-slate-600">{a.messagesCount}</td>
+                                        <td className="px-2 py-2 text-slate-600">{a.chatsCount}</td>
+                                        <td className="px-2 py-2 text-xs text-slate-500">{fmtListDate(a.lastMessageAt)}</td>
+                                        <td className="px-2 py-2">
+                                            <div className="flex items-center gap-1.5">
+                                                <select value={a.userId ?? ''} disabled={a.isBot || saving}
+                                                        onChange={(e) => save(a, { userId: e.target.value ? Number(e.target.value) : null })}
+                                                        className="w-56 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-700 disabled:bg-slate-50">
+                                                    <option value="">— не привязан —</option>
+                                                    <optgroup label="Верификаторы">
+                                                        {verifiers.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+                                                    </optgroup>
+                                                    {others.length > 0 && (
+                                                        <optgroup label="Остальные (отдел продаж)">
+                                                            {others.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+                                                        </optgroup>
+                                                    )}
+                                                </select>
+                                                {saving && <Loader2 size={13} className="animate-spin text-slate-400" />}
+                                                {!saving && !a.isBot && !a.userId && a.suggestedUserId && (
+                                                    <button onClick={() => save(a, { userId: a.suggestedUserId })}
+                                                            title={`Похоже, это ${a.suggestedUserName}`}
+                                                            className="flex items-center gap-1 rounded-lg border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] font-medium text-amber-700 hover:bg-amber-100">
+                                                        <Wand2 size={12} /> {a.suggestedUserName}
+                                                    </button>
+                                                )}
+                                                {!saving && a.userId && <Link2 size={13} className="text-emerald-500" />}
+                                            </div>
+                                        </td>
+                                        <td className="px-2 py-2">
+                                            <input type="checkbox" checked={a.isBot} disabled={saving}
+                                                   onChange={(e) => save(a, { isBot: e.target.checked })}
+                                                   className="h-4 w-4 accent-slate-600" />
+                                        </td>
+                                    </tr>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                </div>
+            )}
+        </div>
+    );
+}
+
 export default function WazzupChatsView(props) {
     const { apiBaseUrl, withAccessTokenHeader, showToast } = props;
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
+    const [mainTab, setMainTab] = useState('chats');
 
     const [channels, setChannels] = useState(null);       // null = загрузка
     const [channelId, setChannelId] = useState('');       // '' = все каналы
@@ -221,18 +365,36 @@ export default function WazzupChatsView(props) {
                     </p>
                 </div>
                 <div className="flex items-center gap-2">
+                    <div className="flex rounded-lg border border-slate-200 bg-white p-0.5 text-xs font-medium">
+                        <button onClick={() => setMainTab('chats')}
+                                className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 ${mainTab === 'chats' ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>
+                            <MessageSquare size={13} /> Чаты
+                        </button>
+                        <button onClick={() => setMainTab('authors')}
+                                className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 ${mainTab === 'authors' ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>
+                            <Users size={13} /> Операторы
+                        </button>
+                    </div>
                     <a href="https://app.wazzup24.com/" target="_blank" rel="noopener noreferrer"
                        className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50">
                         <ExternalLink size={13} /> Открыть в Wazzup
                     </a>
-                    <button onClick={refreshAll}
-                            className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50">
-                        <RefreshCw size={13} /> Обновить
-                    </button>
+                    {mainTab === 'chats' && (
+                        <button onClick={refreshAll}
+                                className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50">
+                            <RefreshCw size={13} /> Обновить
+                        </button>
+                    )}
                 </div>
             </div>
 
-            <div className={`${iosCard} flex overflow-hidden`} style={{ height: 'calc(100vh - 170px)', minHeight: 420 }}>
+            {mainTab === 'authors' && (
+                <AuthorsTab apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast} />
+            )}
+
+            <div className={`${iosCard} flex overflow-hidden`}
+                 style={{ height: 'calc(100vh - 170px)', minHeight: 420,
+                          display: mainTab === 'chats' ? undefined : 'none' }}>
                 {/* Каналы */}
                 <div className="hidden w-56 shrink-0 flex-col overflow-y-auto border-r border-slate-100 bg-slate-50/60 md:flex">
                     <button onClick={() => pickChannel('')}

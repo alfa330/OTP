@@ -4652,6 +4652,91 @@ def api_wazzup_chat_messages():
         return jsonify({"error": str(error)}), 500
 
 
+def _wazzup_normalize_name(value):
+    """Нормализация имени для автоподсказки: регистр, ё, повторные пробелы."""
+    return ' '.join(str(value or '').lower().replace('ё', 'е').split())
+
+
+def _wazzup_suggest_user(author_name, operators):
+    """Кандидат по имени: точное совпадение нормализованных имён, либо все слова
+    автора входят в слова ФИО оператора (у нас ФИО полнее, чем ник в Wazzup).
+    Двусмысленность (>1 кандидата) — подсказки нет."""
+    norm = _wazzup_normalize_name(author_name)
+    if not norm:
+        return None
+    exact = [op for op in operators if _wazzup_normalize_name(op['name']) == norm]
+    if len(exact) == 1:
+        return exact[0]
+    tokens = set(norm.split())
+    if len(tokens) < 2:
+        return None
+    partial = [op for op in operators
+               if tokens <= set(_wazzup_normalize_name(op['name']).split())]
+    return partial[0] if len(partial) == 1 else None
+
+
+@app.route('/api/wazzup/authors', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_wazzup_authors():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    _, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        operators = db.list_wazzup_operator_candidates()
+        items = []
+        for a in db.list_wazzup_authors():
+            suggested = None
+            if a['user_id'] is None and not a['is_bot']:
+                suggested = _wazzup_suggest_user(a['author_name'], operators)
+            items.append({
+                'authorId': a['author_id'], 'authorName': a['author_name'],
+                'messagesCount': a['messages_count'], 'chatsCount': a['chats_count'],
+                'lastMessageAt': a['last_message_at'].isoformat() if a['last_message_at'] else None,
+                'userId': a['user_id'], 'userName': a['user_name'], 'isBot': a['is_bot'],
+                'suggestedUserId': suggested['id'] if suggested else None,
+                'suggestedUserName': suggested['name'] if suggested else None,
+            })
+        ops = [{'id': op['id'], 'name': op['name'], 'directionName': op['direction_name'],
+                'isVerifier': op['direction_id'] == 71} for op in operators]
+        return jsonify({"status": "success", "items": items, "operators": ops}), 200
+    except Exception as error:
+        logging.exception("wazzup authors failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/wazzup/authors/map', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_wazzup_authors_map():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    author_id = str(data.get('authorId') or '').strip()
+    if not author_id:
+        return jsonify({"error": "authorId is required"}), 400
+    user_id = data.get('userId')
+    if user_id is not None:
+        try:
+            user_id = int(user_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "userId must be an integer"}), 400
+    is_bot = bool(data.get('isBot'))
+    if is_bot:
+        user_id = None  # бот не может быть одновременно оператором
+    try:
+        db.upsert_wazzup_author_map(
+            author_id, author_name=data.get('authorName'),
+            user_id=user_id, is_bot=is_bot, updated_by=requester_id)
+        return jsonify({"status": "success"}), 200
+    except Exception as error:
+        logging.exception("wazzup author map failed")
+        return jsonify({"error": str(error)}), 500
+
+
 @app.route('/api/resource_fte/overview', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_resource_fte_overview():
