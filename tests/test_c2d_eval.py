@@ -1,5 +1,7 @@
-"""Тесты раздела «Оценка чатов ЧМ» (Chat2Desk): нормализация заявок request_stats,
-медиа-ссылки/время API, валидация цитат и критериев оценки."""
+"""Тесты оценки чатов Chat2Desk в журнале оценок: нормализация заявок
+request_stats, медиа-ссылки/время API, валидация цитат. Сама оценка — обычная
+запись журнала (calls) с критериями направления ЧМ, поэтому логика счёта
+не тестируется здесь (она живёт во фронте журнала, как у звонков)."""
 import ast
 import csv
 import json
@@ -43,7 +45,6 @@ def _c2d_namespace():
         "_c2d_media_url",
         "_c2d_normalize_message",
         "_c2d_eval_normalize_quotes",
-        "_c2d_eval_normalize_criteria",
     }
 
     module = ast.parse(BOT_PATH.read_text(encoding="utf-8"))
@@ -202,26 +203,6 @@ class C2dEvalHelpersTests(unittest.TestCase):
             [{"messageId": 1, "text": "  "}, "мусор"], [{"id": 1, "text": "х"}])
         self.assertIsNone(err)
         self.assertEqual(quotes, [])
-
-    # ── критерии ──
-
-    def test_criteria_average_and_partial(self):
-        criteria, score, err = self.ns["_c2d_eval_normalize_criteria"]([
-            {"key": "greeting", "label": "Приветствие", "score": 5},
-            {"key": "solution", "label": "Решение", "score": 4},
-            {"key": "literacy", "label": "Грамотность", "score": None},  # не заполнен
-        ])
-        self.assertIsNone(err)
-        self.assertEqual(len(criteria), 2)
-        self.assertEqual(score, 4.5)
-
-    def test_criteria_validation_errors(self):
-        _, _, err = self.ns["_c2d_eval_normalize_criteria"]([{"key": "a", "score": 6}])
-        self.assertIsNotNone(err)
-        _, _, err = self.ns["_c2d_eval_normalize_criteria"]([{"key": "a", "score": "abc"}])
-        self.assertIsNotNone(err)
-        _, _, err = self.ns["_c2d_eval_normalize_criteria"]([])
-        self.assertIsNotNone(err)
 
 
 if __name__ == "__main__":

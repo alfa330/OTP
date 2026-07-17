@@ -1899,6 +1899,565 @@ const RandomCallModal = ({ isOpen, onClose, operator, userId, selectedMonth, sou
     );
 };
 
+// ─── Чаты Chat2Desk (чат-менеджеры СЗоВ) ───────────────────────────────────
+// «Случайный чат» вместо «Случайного звонка»: заявка выбирается по фильтрам из
+// c2d_requests, переписка снапшотится, оценка идёт обычной записью журнала с
+// критериями направления ЧМ + цитаты, выделяемые прямо из текста переписки.
+
+const chatSquash = (text) => String(text || '').split(/\s+/).join(' ').trim().toLowerCase();
+
+const chatFmtTime = (iso) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+};
+const chatFmtDay = (iso) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' });
+};
+
+// Подсветка цитат: точное вхождение без учёта регистра.
+const chatHighlight = (text, quoteTexts) => {
+    if (!text || !quoteTexts?.length) return text;
+    let segments = [{ text, mark: false }];
+    quoteTexts.forEach((quote) => {
+        const q = String(quote || '');
+        if (!q) return;
+        const next = [];
+        segments.forEach((seg) => {
+            if (seg.mark) { next.push(seg); return; }
+            const idx = seg.text.toLowerCase().indexOf(q.toLowerCase());
+            if (idx === -1) { next.push(seg); return; }
+            if (idx > 0) next.push({ text: seg.text.slice(0, idx), mark: false });
+            next.push({ text: seg.text.slice(idx, idx + q.length), mark: true });
+            if (idx + q.length < seg.text.length) next.push({ text: seg.text.slice(idx + q.length), mark: false });
+        });
+        segments = next;
+    });
+    return segments.map((seg, i) => seg.mark
+        ? <mark key={i} style={{ background: '#fde68a', borderRadius: 3, padding: '0 1px' }}>{seg.text}</mark>
+        : <React.Fragment key={i}>{seg.text}</React.Fragment>);
+};
+
+const ChatMedia = ({ msg }) => {
+    const chip = {
+        display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 8px',
+        borderRadius: 8, background: 'var(--surface-2)', border: '1px solid var(--border)',
+        fontSize: 12, color: 'var(--text-2)', textDecoration: 'none',
+    };
+    const pieces = [];
+    if (msg.photo) {
+        pieces.push(
+            <img key="photo" src={msg.photo} alt="" loading="lazy"
+                 onClick={() => window.open(msg.photo, '_blank', 'noopener')}
+                 style={{ maxHeight: 220, maxWidth: '100%', borderRadius: 10, cursor: 'zoom-in', display: 'block' }} />
+        );
+    }
+    if (msg.video) pieces.push(<video key="video" controls preload="metadata" src={msg.video} style={{ maxHeight: 220, maxWidth: '100%', borderRadius: 10, display: 'block' }} />);
+    if (msg.audio) pieces.push(<audio key="audio" controls preload="none" src={msg.audio} style={{ width: 230, maxWidth: '100%', height: 36 }} />);
+    if (msg.pdf) pieces.push(<a key="pdf" href={msg.pdf} target="_blank" rel="noopener noreferrer" style={chip}><FaIcon className="fas fa-file-pdf" /> PDF</a>);
+    (msg.attachments || []).forEach((att, i) => {
+        if (msg.photo && att.link === msg.photo) return;
+        pieces.push(<a key={`att-${i}`} href={att.link} target="_blank" rel="noopener noreferrer" style={chip}><FaIcon className="fas fa-paperclip" /> {att.name || 'Файл'}</a>);
+    });
+    if (!pieces.length) return null;
+    return <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>{pieces}</div>;
+};
+
+/* Лента переписки заявки. selectable — включает «Цитировать» по выделению текста
+ * (data-mid на пузыре указывает сообщение). quotes подсвечиваются жёлтым. */
+const ChatThread = ({ snapshot, quotes = [], selectable = false, onAddQuote, height = 420 }) => {
+    const boxRef = useRef(null);
+    const [hideService, setHideService] = useState(false);
+    const [selection, setSelection] = useState(null);
+
+    const quotesByMessage = {};
+    (quotes || []).forEach((q) => {
+        const key = String(q.messageId);
+        (quotesByMessage[key] = quotesByMessage[key] || []).push(q.text);
+    });
+
+    const allMessages = snapshot?.messages || [];
+    const messages = hideService
+        ? allMessages.filter((m) => m.type !== 'system' && m.type !== 'autoreply')
+        : allMessages;
+
+    const handleMouseUp = () => {
+        if (!selectable) return;
+        const sel = window.getSelection();
+        if (!sel || sel.isCollapsed) { setSelection(null); return; }
+        const text = sel.toString().trim();
+        if (!text) { setSelection(null); return; }
+        const toEl = (node) => (node && node.nodeType === 3 ? node.parentElement : node);
+        const a = toEl(sel.anchorNode)?.closest?.('[data-mid]');
+        const b = toEl(sel.focusNode)?.closest?.('[data-mid]');
+        if (!a || a !== b) { setSelection(null); return; }
+        const rect = sel.getRangeAt(0).getBoundingClientRect();
+        const box = boxRef.current?.getBoundingClientRect();
+        if (!box) return;
+        setSelection({
+            messageId: a.dataset.mid, text,
+            x: Math.min(Math.max(rect.left + rect.width / 2 - box.left, 70), box.width - 70),
+            y: rect.top - box.top + (boxRef.current?.scrollTop || 0),
+        });
+    };
+
+    const addQuote = () => {
+        if (!selection) return;
+        onAddQuote?.(selection);
+        setSelection(null);
+        window.getSelection()?.removeAllRanges();
+    };
+
+    let lastDay = null;
+    return (
+        <div style={{ display: 'flex', flexDirection: 'column', height, minHeight: 260, border: '1px solid var(--border)', borderRadius: 'var(--radius)', overflow: 'hidden', background: 'var(--surface-2)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '8px 12px', background: 'var(--surface)', borderBottom: '1px solid var(--border)' }}>
+                <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {snapshot?.client_name || snapshot?.client_phone || 'Клиент'}
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {snapshot?.client_phone ? `${snapshot.client_phone} · ` : ''}{snapshot?.channel_name || ''}{snapshot?.transport ? ` · ${snapshot.transport}` : ''} · {snapshot?.messages_count ?? 0} сообщ.
+                    </div>
+                </div>
+                <button type="button" className="btn btn-secondary btn-sm" onClick={() => setHideService(v => !v)}>
+                    <FaIcon className={`fas fa-${hideService ? 'eye' : 'eye-slash'}`} /> {hideService ? 'Автоответы' : 'Без автоответов'}
+                </button>
+            </div>
+            <div ref={boxRef} onMouseUp={handleMouseUp} style={{ position: 'relative', flex: 1, overflowY: 'auto', padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {messages.length === 0 && (
+                    <div style={{ textAlign: 'center', color: 'var(--text-3)', fontSize: 13, padding: '30px 0' }}>Сообщений нет</div>
+                )}
+                {messages.map((m) => {
+                    const day = (m.created || '').slice(0, 10);
+                    const daySep = day && day !== lastDay
+                        ? <div key={`day-${day}`} style={{ textAlign: 'center', margin: '6px 0 2px' }}>
+                              <span style={{ fontSize: 11, color: 'var(--text-3)', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 999, padding: '2px 10px' }}>{chatFmtDay(m.created)}</span>
+                          </div>
+                        : null;
+                    lastDay = day || lastDay;
+                    if (m.type === 'system') {
+                        return (
+                            <React.Fragment key={m.id}>
+                                {daySep}
+                                <div style={{ textAlign: 'center' }}>
+                                    <span style={{ fontSize: 11, color: 'var(--text-3)' }}>{m.text || 'Системное сообщение'} · {chatFmtTime(m.created)}</span>
+                                </div>
+                            </React.Fragment>
+                        );
+                    }
+                    const out = m.type === 'to_client';
+                    const auto = m.type === 'autoreply';
+                    const bubbleStyle = {
+                        maxWidth: '78%', padding: '7px 10px', borderRadius: 12, fontSize: 13, lineHeight: 1.45,
+                        whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                        ...(out
+                            ? { background: 'var(--accent)', color: '#fff', borderBottomRightRadius: 4 }
+                            : auto
+                                ? { background: 'var(--surface)', color: 'var(--text-3)', border: '1px dashed var(--border-strong)', borderBottomRightRadius: 4 }
+                                : { background: 'var(--surface)', color: 'var(--text)', border: '1px solid var(--border)', borderBottomLeftRadius: 4 }),
+                    };
+                    const hasMedia = Boolean(m.photo || m.video || m.audio || m.pdf || (m.attachments || []).length);
+                    return (
+                        <React.Fragment key={m.id}>
+                            {daySep}
+                            <div style={{ display: 'flex', justifyContent: (out || auto) ? 'flex-end' : 'flex-start' }}>
+                                <div data-mid={m.id} style={bubbleStyle}>
+                                    {auto && <div style={{ fontSize: 10.5, fontWeight: 600, marginBottom: 2 }}><FaIcon className="fas fa-robot" /> Автоответ</div>}
+                                    {hasMedia && <div style={{ marginBottom: m.text ? 5 : 0 }}><ChatMedia msg={m} /></div>}
+                                    {m.text ? chatHighlight(m.text, quotesByMessage[String(m.id)]) : (!hasMedia && <em style={{ opacity: 0.7 }}>[сообщение]</em>)}
+                                    <div style={{ fontSize: 10, opacity: 0.65, textAlign: 'right', marginTop: 3 }}>{chatFmtTime(m.created)}</div>
+                                </div>
+                            </div>
+                        </React.Fragment>
+                    );
+                })}
+                {selectable && selection && (
+                    <button type="button" onClick={addQuote}
+                        style={{ position: 'absolute', left: selection.x, top: Math.max(selection.y - 36, 4), transform: 'translateX(-50%)',
+                                 zIndex: 5, background: 'var(--text)', color: 'var(--surface)', border: 'none', borderRadius: 999,
+                                 padding: '5px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer', boxShadow: '0 4px 12px rgba(0,0,0,0.25)' }}>
+                        <FaIcon className="fas fa-quote-left" /> Цитировать
+                    </button>
+                )}
+            </div>
+        </div>
+    );
+};
+
+/* Модалка «Случайный чат»: настройки выборки (период в пределах месяца, длина
+ * чата, оценка клиента, без уже оценённых) -> POST /api/c2d_eval/pick. */
+const RandomChatModal = ({ isOpen, onClose, operator, userId, selectedMonth, onPicked }) => {
+    const todayKey = rcToKey(new Date());
+    const monthStartKey = rcMonthStartKey(selectedMonth);
+    const monthEndKey = rcMonthEndKey(selectedMonth);
+    const maxKey = monthEndKey < todayKey ? monthEndKey : todayKey;
+    const initialRange = () => ({ start: monthStartKey, end: maxKey });
+    const [range, setRange] = useState(initialRange);
+    const [minMsgs, setMinMsgs] = useState(4);
+    const [maxMsgs, setMaxMsgs] = useState('');
+    const [ratingFilter, setRatingFilter] = useState('');
+    const [excludeEvaluated, setExcludeEvaluated] = useState(true);
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState('');
+
+    useEffect(() => {
+        if (!isOpen) return;
+        setRange(initialRange());
+        setMinMsgs(4); setMaxMsgs(''); setRatingFilter(''); setExcludeEvaluated(true);
+        setBusy(false); setError('');
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isOpen, selectedMonth]);
+
+    if (!isOpen) return null;
+
+    const fetchChat = async () => {
+        if (!operator || busy) return;
+        setBusy(true); setError('');
+        try {
+            const body = {
+                operator_id: operator.id,
+                date_from: range.start,
+                date_to: range.end,
+                min_messages: parseInt(minMsgs, 10) || 1,
+                exclude: excludeEvaluated ? 'any' : 'none',
+            };
+            const maxNum = parseInt(maxMsgs, 10);
+            if (Number.isFinite(maxNum) && maxNum > 0) body.max_messages = maxNum;
+            if (ratingFilter) body.rating_filter = ratingFilter;
+            const r = await authFetch(`${API_BASE_URL}/api/c2d_eval/pick`, {
+                method: 'POST',
+                headers: { 'X-User-Id': userId, 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const d = await r.json().catch(() => ({}));
+            if (r.ok && d.status === 'success' && d.snapshot) {
+                onPicked?.(d);
+                onClose?.();
+            } else if (d.status === 'empty') {
+                setError(d.message || 'По заданным фильтрам чатов не нашлось');
+            } else {
+                setError(d.error || 'Не удалось получить чат');
+            }
+        } catch (e) {
+            setError('Сетевая ошибка, попробуйте ещё раз');
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const inputStyle = { width: '100%', padding: '9px 12px', borderRadius: 'var(--radius)', border: '1px solid var(--border-strong)', background: 'var(--surface)', color: 'var(--text)', fontSize: 13 };
+
+    return (
+        <div className="modal-backdrop" onClick={onClose}>
+            <div className="modal" style={{ maxWidth: 460 }} onClick={e => e.stopPropagation()}>
+                <div className="modal-header">
+                    <div>
+                        <h2><FaIcon className="fas fa-shuffle" /> Случайный чат</h2>
+                        <div className="modal-header-sub">{operator?.name || '—'} · Chat2Desk</div>
+                    </div>
+                    <button className="close-btn" onClick={onClose}><FaIcon className="fas fa-times" /></button>
+                </div>
+                <div className="modal-body">
+                    <label className="label" style={{ marginBottom: 6, display: 'block' }}>
+                        Период (в пределах месяца; заявки хранятся 45 дней)
+                    </label>
+                    <RcRangeCalendar value={range} onChange={setRange} maxKey={maxKey} minKey={monthStartKey} />
+
+                    <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+                        <div style={{ flex: 1 }}>
+                            <label className="label" style={{ marginBottom: 6, display: 'block' }}>Мин. сообщений</label>
+                            <input type="number" min="1" inputMode="numeric" value={minMsgs} onChange={e => setMinMsgs(e.target.value)} style={inputStyle} />
+                        </div>
+                        <div style={{ flex: 1 }}>
+                            <label className="label" style={{ marginBottom: 6, display: 'block' }}>Макс. (необязательно)</label>
+                            <input type="number" min="1" inputMode="numeric" placeholder="Без лимита" value={maxMsgs} onChange={e => setMaxMsgs(e.target.value)} style={inputStyle} />
+                        </div>
+                    </div>
+
+                    <label className="label" style={{ margin: '16px 0 6px', display: 'block' }}>Оценка клиента</label>
+                    <select className="select" value={ratingFilter} onChange={e => setRatingFilter(e.target.value)} style={inputStyle}>
+                        <option value="">Не важно</option>
+                        <option value="rated">С оценкой клиента</option>
+                        <option value="unrated">Без оценки клиента</option>
+                        <option value="low">Низкая оценка (&lt; 4)</option>
+                    </select>
+
+                    <button type="button" onClick={() => setExcludeEvaluated(v => !v)}
+                        style={{ marginTop: 16, width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderRadius: 'var(--radius)', cursor: 'pointer',
+                                 border: `1px solid ${excludeEvaluated ? 'var(--accent)' : 'var(--border-strong)'}`,
+                                 background: excludeEvaluated ? 'var(--accent-light)' : 'var(--surface)' }}>
+                        <span style={{ width: 18, height: 18, flexShrink: 0, borderRadius: 5, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, color: '#fff',
+                                       background: excludeEvaluated ? 'var(--accent)' : 'transparent', border: `1px solid ${excludeEvaluated ? 'var(--accent)' : 'var(--border-strong)'}` }}>
+                            {excludeEvaluated ? <FaIcon className="fas fa-check" /> : null}
+                        </span>
+                        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>Не предлагать уже оценённые чаты</span>
+                    </button>
+
+                    {error ? (
+                        <div style={{ marginTop: 14, padding: '10px 12px', borderRadius: 'var(--radius)', background: 'var(--accent-light)', border: '1px solid var(--border)', fontSize: 13, color: 'var(--red)' }}>
+                            <FaIcon className="fas fa-circle-exclamation" /> {error}
+                        </div>
+                    ) : null}
+                </div>
+                <div className="modal-footer">
+                    <button className="btn btn-secondary" onClick={onClose}>Закрыть</button>
+                    <button className="btn btn-primary" onClick={fetchChat} disabled={busy}>
+                        {busy ? <><span className="spinner" /> Поиск…</> : <><FaIcon className="fas fa-shuffle" /> Получить случайный чат</>}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+/* Оценка чата: слева переписка (цитаты выделением), справа критерии направления
+ * ЧМ (та же механика и формула, что у звонков) + цитаты с комментариями.
+ * Сабмит — обычный POST /api/call_evaluation с c2d_snapshot_id/chat_quotes. */
+const ChatEvaluationModal = ({ isOpen, onClose, operator, chatData, directions, selectedMonth, userId, userName, onSubmitted }) => {
+    const snapshot = chatData?.snapshot || null;
+    const request = chatData?.request || null;
+    const direction = (directions || []).find(d => Number(d.id) === Number(operator?.direction_id)) || null;
+    const criteria = direction?.criteria || [];
+
+    const [scores, setScores] = useState([]);
+    const [comments, setComments] = useState([]);
+    const [commentVisible, setCommentVisible] = useState([]);
+    const [generalComment, setGeneralComment] = useState('');
+    const [commentVisibleToOperator, setCommentVisibleToOperator] = useState(true);
+    const [quotes, setQuotes] = useState([]);
+    const [infoIndex, setInfoIndex] = useState(null);
+    const [isSubmitting, setIsSubmitting] = useState(false);
+
+    useEffect(() => {
+        if (!isOpen) return;
+        setScores(criteria.map(() => 'Correct'));
+        setComments(criteria.map(() => ''));
+        setCommentVisible(criteria.map(() => false));
+        setGeneralComment('');
+        setCommentVisibleToOperator(true);
+        setQuotes([]);
+        setInfoIndex(null);
+        setIsSubmitting(false);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isOpen, snapshot?.id]);
+
+    if (!isOpen || !snapshot) return null;
+
+    const hasCriticalError = criteria.some((c, i) => c.isCritical && scores[i] === 'Error');
+    const totalScore = hasCriticalError ? 0 : criteria.reduce((sum, c, i) => {
+        if (c.isCritical) return sum;
+        if (scores[i] === 'Correct' || scores[i] === 'N/A') return sum + c.weight;
+        if (scores[i] === 'Deficiency' && c.deficiency) return sum + c.deficiency.weight;
+        return sum;
+    }, 0);
+
+    const addQuote = ({ messageId, text }) => {
+        const msg = (snapshot.messages || []).find((m) => String(m.id) === String(messageId));
+        if (!msg || !chatSquash(msg.text).includes(chatSquash(text))) {
+            emitCallEvaluationToast('Выделите фрагмент внутри одного сообщения', 'error');
+            return;
+        }
+        setQuotes(prev => [...prev, { messageId: msg.id, text, comment: '' }]);
+    };
+
+    const isSubmitDisabled = !criteria.length ||
+        scores.some((s, i) => (s === 'Error' || s === 'Incorrect') && !comments[i]?.trim());
+
+    const handleSubmit = async () => {
+        if (isSubmitDisabled || isSubmitting) return;
+        setIsSubmitting(true);
+        try {
+            const fd = new FormData();
+            fd.append('evaluator', userName);
+            fd.append('operator', operator?.name || '');
+            fd.append('phone_number', snapshot.client_phone || snapshot.client_name || `chat_${snapshot.request_id}`);
+            fd.append('appeal_date', request?.request_start || `${snapshot.day}T00:00:00`);
+            fd.append('score', totalScore);
+            fd.append('comment', String(generalComment || '').trim());
+            fd.append('comment_visible_to_operator', String(!!commentVisibleToOperator));
+            fd.append('month', selectedMonth);
+            fd.append('is_draft', 'false');
+            fd.append('scores', JSON.stringify(scores));
+            fd.append('criterion_comments', JSON.stringify(comments));
+            fd.append('direction', String(direction?.id ?? operator?.direction_id ?? ''));
+            fd.append('c2d_snapshot_id', String(snapshot.id));
+            fd.append('chat_quotes', JSON.stringify(quotes));
+            const r = await authFetch(`${API_BASE_URL}/api/call_evaluation`, { method: 'POST', headers: { 'X-User-Id': userId }, body: fd });
+            const res = await r.json().catch(() => ({}));
+            if (r.ok && res.status === 'success') {
+                emitCallEvaluationToast('Оценка чата сохранена в журнал', 'success');
+                onSubmitted?.();
+                onClose?.();
+            } else {
+                emitCallEvaluationToast('Ошибка: ' + (res.error || 'не удалось сохранить'), 'error');
+            }
+        } catch (e) {
+            emitCallEvaluationToast('Ошибка отправки: ' + e.message, 'error');
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+
+    return (
+        <div className="modal-backdrop">
+            <div className="modal modal-wide" style={{ maxWidth: 1100 }} onClick={e => e.stopPropagation()}>
+                <div className="modal-header">
+                    <div>
+                        <h2><FaIcon className="fas fa-comments" /> Оценка чата</h2>
+                        <div className="modal-header-sub">
+                            {operator?.name || '—'} · заявка #{snapshot.request_id} · {request?.day || snapshot.day || ''}
+                            {request?.rating_score != null ? ` · оценка клиента: ${request.rating_score}` : ''}
+                        </div>
+                    </div>
+                    <button className="close-btn" onClick={onClose}><FaIcon className="fas fa-times" /></button>
+                </div>
+                <div className="modal-body">
+                    <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                        <div style={{ flex: '1 1 420px', minWidth: 340 }}>
+                            <ChatThread snapshot={snapshot} quotes={quotes} selectable onAddQuote={addQuote} height="min(58vh, 560px)" />
+                            <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-3)' }}>
+                                <FaIcon className="fas fa-quote-left" /> Выделите текст сообщения — появится кнопка «Цитировать»; фрагмент попадёт в оценку и подсветится у чат-менеджера.
+                            </div>
+                            {quotes.length > 0 && (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 10 }}>
+                                    {quotes.map((q, i) => (
+                                        <div key={i} style={{ borderLeft: '3px solid #f59e0b', background: 'var(--surface-2)', borderRadius: 'var(--radius)', padding: '8px 10px' }}>
+                                            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+                                                <div style={{ flex: 1, fontSize: 12.5, fontStyle: 'italic', color: 'var(--text)' }}>«{q.text}»</div>
+                                                <button type="button" className="close-btn" style={{ width: 22, height: 22, fontSize: 11 }}
+                                                        onClick={() => setQuotes(prev => prev.filter((_, j) => j !== i))}>
+                                                    <FaIcon className="fas fa-times" />
+                                                </button>
+                                            </div>
+                                            <input value={q.comment || ''} placeholder="Комментарий к цитате…"
+                                                   onChange={e => setQuotes(prev => prev.map((item, j) => j === i ? { ...item, comment: e.target.value } : item))}
+                                                   style={{ marginTop: 6, width: '100%', padding: '6px 8px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text)', fontSize: 12 }} />
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                        <div style={{ flex: '1 1 380px', minWidth: 320 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                                <span className="label">Критерии · {direction?.name || 'направление не найдено'}</span>
+                                <span className={`badge ${hasCriticalError ? 'badge-red' : totalScore >= 80 ? 'badge-green' : 'badge-blue'}`}>
+                                    <span className="badge-dot" /> {totalScore} / 100
+                                </span>
+                            </div>
+                            {!criteria.length ? (
+                                <div style={{ padding: '14px 12px', border: '1px solid var(--border)', borderRadius: 'var(--radius)', fontSize: 13, color: 'var(--red)' }}>
+                                    У направления «{direction?.name || '—'}» нет критериев — настройте их в разделе направлений.
+                                </div>
+                            ) : (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 'min(48vh, 470px)', overflowY: 'auto', paddingRight: 4 }}>
+                                    {criteria.map((criterion, i) => (
+                                        <CriterionCard key={i} criterion={criterion} index={i}
+                                            score={scores[i]} comment={comments[i]} commentVisible={commentVisible[i]}
+                                            onScoreChange={(v) => setScores(prev => prev.map((s, j) => j === i ? v : s))}
+                                            onCommentChange={(v) => setComments(prev => prev.map((c, j) => j === i ? v : c))}
+                                            onToggleComment={() => setCommentVisible(prev => prev.map((c, j) => j === i ? !c : c))}
+                                            onShowInfo={() => setInfoIndex(i)} />
+                                    ))}
+                                </div>
+                            )}
+                            <label className="label" style={{ margin: '12px 0 6px', display: 'block' }}>Общий комментарий</label>
+                            <textarea className="textarea" style={{ marginTop: 0, minHeight: 70 }} rows={3}
+                                      value={generalComment} onChange={e => setGeneralComment(e.target.value)}
+                                      placeholder="Общий вывод по чату…" />
+                            <button type="button" onClick={() => setCommentVisibleToOperator(v => !v)}
+                                style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', borderRadius: 'var(--radius)', cursor: 'pointer', width: '100%',
+                                         border: `1px solid ${commentVisibleToOperator ? 'var(--accent)' : 'var(--border-strong)'}`,
+                                         background: commentVisibleToOperator ? 'var(--accent-light)' : 'var(--surface)' }}>
+                                <span style={{ width: 16, height: 16, flexShrink: 0, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 9, color: '#fff',
+                                               background: commentVisibleToOperator ? 'var(--accent)' : 'transparent', border: `1px solid ${commentVisibleToOperator ? 'var(--accent)' : 'var(--border-strong)'}` }}>
+                                    {commentVisibleToOperator ? <FaIcon className="fas fa-check" /> : null}
+                                </span>
+                                <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text)' }}>Показывать комментарий чат-менеджеру</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div className="modal-footer">
+                    <button className="btn btn-secondary" onClick={onClose} disabled={isSubmitting}>Отмена</button>
+                    <button className="btn btn-primary" onClick={handleSubmit} disabled={isSubmitDisabled || isSubmitting}>
+                        {isSubmitting ? <><span className="spinner" /> Сохранение…</> : <><FaIcon className="fas fa-check" /> Сохранить оценку ({totalScore})</>}
+                    </button>
+                </div>
+            </div>
+            {infoIndex !== null && criteria[infoIndex] && (
+                <div className="info-panel" onClick={e => e.stopPropagation()}>
+                    <div className="info-panel-header">
+                        <span className="info-panel-title">{criteria[infoIndex].name}</span>
+                        <button className="close-btn" onClick={() => setInfoIndex(null)}><FaIcon className="fas fa-times" /></button>
+                    </div>
+                    <div className="info-panel-body" dangerouslySetInnerHTML={{ __html: parseToHtml(String(criteria[infoIndex].value || 'Описание отсутствует')) }} />
+                </div>
+            )}
+        </div>
+    );
+};
+
+/* Просмотр переписки уже оценённого чата (из развёрнутой строки журнала). */
+const ChatViewModal = ({ isOpen, onClose, snapshotId, quotes, userId, title }) => {
+    const [snapshot, setSnapshot] = useState(null);
+    const [error, setError] = useState('');
+
+    useEffect(() => {
+        if (!isOpen || !snapshotId) return;
+        setSnapshot(null); setError('');
+        authFetch(`${API_BASE_URL}/api/c2d_eval/snapshots/${snapshotId}`, { headers: { 'X-User-Id': userId } })
+            .then(r => r.json().then(d => ({ ok: r.ok, d })))
+            .then(({ ok, d }) => {
+                if (ok && d.status === 'success') setSnapshot(d.snapshot);
+                else setError(d.error || 'Не удалось загрузить переписку');
+            })
+            .catch(() => setError('Сетевая ошибка'));
+    }, [isOpen, snapshotId, userId]);
+
+    if (!isOpen) return null;
+    return (
+        <div className="modal-backdrop" onClick={onClose}>
+            <div className="modal" style={{ maxWidth: 640 }} onClick={e => e.stopPropagation()}>
+                <div className="modal-header">
+                    <div>
+                        <h2><FaIcon className="fas fa-comments" /> Переписка чата</h2>
+                        <div className="modal-header-sub">{title || ''}</div>
+                    </div>
+                    <button className="close-btn" onClick={onClose}><FaIcon className="fas fa-times" /></button>
+                </div>
+                <div className="modal-body">
+                    {error ? (
+                        <div style={{ padding: '18px 12px', textAlign: 'center', fontSize: 13, color: 'var(--red)' }}>
+                            <FaIcon className="fas fa-circle-exclamation" /> {error}
+                        </div>
+                    ) : !snapshot ? (
+                        <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--text-3)', fontSize: 13 }}>
+                            <span className="spinner" /> Загрузка переписки…
+                        </div>
+                    ) : (
+                        <>
+                            <ChatThread snapshot={snapshot} quotes={quotes || []} height="min(60vh, 560px)" />
+                            {(quotes || []).length > 0 && (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 10 }}>
+                                    {(quotes || []).map((q, i) => (
+                                        <div key={i} style={{ borderLeft: '3px solid #f59e0b', background: 'var(--surface-2)', borderRadius: 'var(--radius)', padding: '8px 10px' }}>
+                                            <div style={{ fontSize: 12.5, fontStyle: 'italic', color: 'var(--text)' }}>«{q.text}»</div>
+                                            {q.comment && <div style={{ marginTop: 4, fontSize: 12, color: 'var(--text-2)' }}>{q.comment}</div>}
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </>
+                    )}
+                </div>
+            </div>
+        </div>
+    );
+};
+
 // ─── Evaluation Modal ──────────────────────────────────
 const EvaluationModal = ({
     isOpen,
@@ -2825,6 +3384,10 @@ const App = ({ user, initialSelection }) => {
     const [batchModalCalls, setBatchModalCalls] = useState([]);
     const [evalModalMode, setEvalModalMode] = useState('journal');
     const [showRandomModal, setShowRandomModal] = useState(false);
+    // Чаты Chat2Desk (ЧМ СЗоВ): модалка выборки, данные выбранного чата, просмотр переписки
+    const [showRandomChatModal, setShowRandomChatModal] = useState(false);
+    const [chatEvalData, setChatEvalData] = useState(null);      // {snapshot, request, candidates}
+    const [chatViewTarget, setChatViewTarget] = useState(null);  // {snapshotId, quotes, title}
     const [evaluationTarget, setEvaluationTarget] = useState(null);
     const [isLoading, setIsLoading] = useState(false);
     const [loadingCallId, setLoadingCallId] = useState(null);
@@ -4107,6 +4670,8 @@ const App = ({ user, initialSelection }) => {
     // отделы/направления кнопку не видят. source управляет модалкой (у TEZ — свои min/max).
     const selectedOperatorDirectionMeta = (directions || []).find(d => Number(d.id) === Number(selectedOperator?.direction_id)) || null;
     const isOperatorModelDirection = !!selectedOperatorDirectionMeta?.random_call_eligible;
+    // «Случайный чат» (Chat2Desk): только чат-менеджеры СЗоВ — признак считает бэкенд.
+    const isChatManagerDirection = !!selectedOperatorDirectionMeta?.random_chat_eligible;
     const sectionTitle = activeSection === 'requests'
         ? 'Журнал запросов'
         : activeSection === 'calibration'
@@ -5019,6 +5584,27 @@ const App = ({ user, initialSelection }) => {
                                                                 <audio controls style={{width:'100%'}}><source src={call.audioUrl} type="audio/mpeg" /></audio>
                                                             </div>
                                                         )}
+                                                        {call._rawEvaluation?.c2d_snapshot_id && (
+                                                            <div style={{marginBottom:14}}>
+                                                                <button className="btn btn-secondary btn-sm" onClick={() => setChatViewTarget({
+                                                                    snapshotId: call._rawEvaluation.c2d_snapshot_id,
+                                                                    quotes: call._rawEvaluation.chat_quotes || [],
+                                                                    title: `${selectedOperator?.name || ''} · ${call.phoneNumber || ''}`
+                                                                })}>
+                                                                    <FaIcon className="fas fa-comments" /> Открыть переписку чата
+                                                                </button>
+                                                                {(call._rawEvaluation.chat_quotes || []).length > 0 && (
+                                                                    <div style={{display:'flex',flexDirection:'column',gap:6,marginTop:10,maxWidth:640}}>
+                                                                        {(call._rawEvaluation.chat_quotes || []).map((q, qi) => (
+                                                                            <div key={qi} style={{borderLeft:'3px solid #f59e0b',background:'var(--surface-2)',borderRadius:'var(--radius)',padding:'8px 10px'}}>
+                                                                                <div style={{fontSize:12.5,fontStyle:'italic',color:'var(--text)'}}>«{q.text}»</div>
+                                                                                {q.comment && <div style={{marginTop:4,fontSize:12,color:'var(--text-2)'}}>{q.comment}</div>}
+                                                                            </div>
+                                                                        ))}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        )}
                                                         {call.directions?.[0]?.criteria?.length > 0 && (
                                                             <table className="crit-table">
                                                                 <thead><tr><th>Критерий</th><th>Вес</th><th>Оценка</th><th>Комментарий</th></tr></thead>
@@ -5069,6 +5655,17 @@ const App = ({ user, initialSelection }) => {
                                 title="Взять случайный звонок из Oktell за период (исход/вход), которого ещё не было в оценках"
                             >
                                 <FaIcon className="fas fa-shuffle" /> Случайный звонок
+                            </button>
+                        )}
+                        {viewMode === 'normal' && isChatManagerDirection && (
+                            <button
+                                className={`btn btn-secondary btn-sm ${!selectedOperator ? 'disabled' : ''}`}
+                                style={{opacity:!selectedOperator?0.4:1,cursor:!selectedOperator?'not-allowed':'pointer'}}
+                                onClick={() => { if (!selectedOperator) return; setShowRandomChatModal(true); }}
+                                disabled={!selectedOperator}
+                                title="Взять случайный чат из Chat2Desk по фильтрам (период, длина, оценка клиента) и оценить его по критериям направления"
+                            >
+                                <FaIcon className="fas fa-comments" /> Случайный чат
                             </button>
                         )}
                         {viewMode === 'normal' && (
@@ -6072,6 +6669,33 @@ const App = ({ user, initialSelection }) => {
                 selectedMonth={selectedMonth}
                 source={selectedOperatorDirectionMeta?.random_call_source || null}
                 onImported={handleRandomCallsImported}
+            />
+            <RandomChatModal
+                isOpen={showRandomChatModal}
+                onClose={() => setShowRandomChatModal(false)}
+                operator={selectedOperator}
+                userId={userId}
+                selectedMonth={selectedMonth}
+                onPicked={(data) => setChatEvalData(data)}
+            />
+            <ChatEvaluationModal
+                isOpen={!!chatEvalData}
+                onClose={() => setChatEvalData(null)}
+                operator={selectedOperator}
+                chatData={chatEvalData}
+                directions={directions}
+                selectedMonth={selectedMonth}
+                userId={userId}
+                userName={userName}
+                onSubmitted={() => fetchEvaluations({ force: true })}
+            />
+            <ChatViewModal
+                isOpen={!!chatViewTarget}
+                onClose={() => setChatViewTarget(null)}
+                snapshotId={chatViewTarget?.snapshotId}
+                quotes={chatViewTarget?.quotes}
+                title={chatViewTarget?.title}
+                userId={userId}
             />
             <FeedbackModal
                 isOpen={showFeedbackModal}

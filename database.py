@@ -2202,31 +2202,19 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_c2d_snapshots_operator
                 ON c2d_chat_snapshots(operator_id, day);
             """)
-            # Оценка чата супервайзером: критерии/итог/комментарий + цитаты из
-            # переписки ({messageId, text, comment}). Снапшот может удалиться по
-            # ретеншну — оценка остаётся (snapshot_id -> NULL).
+            # Оценка чата — обычная запись журнала (calls) с критериями направления
+            # ЧМ; чат-специфика — ссылка на снапшот переписки и цитаты
+            # ({messageId, text, comment}). Отдельная таблица оценок чатов была
+            # ошибкой первой итерации — удалена до появления данных.
+            cursor.execute("DROP TABLE IF EXISTS c2d_chat_evaluations;")
             cursor.execute("""
-                CREATE TABLE IF NOT EXISTS c2d_chat_evaluations (
-                    id SERIAL PRIMARY KEY,
-                    snapshot_id INTEGER REFERENCES c2d_chat_snapshots(id) ON DELETE SET NULL,
-                    request_id BIGINT NOT NULL,
-                    day DATE,
-                    operator_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-                    operator_name TEXT,
-                    evaluator_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-                    evaluator_name TEXT,
-                    score NUMERIC(4,2),
-                    criteria JSONB NOT NULL DEFAULT '[]'::jsonb,
-                    comment TEXT,
-                    quotes JSONB NOT NULL DEFAULT '[]'::jsonb,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                    UNIQUE (request_id, evaluator_id)
-                );
+                ALTER TABLE calls
+                ADD COLUMN IF NOT EXISTS c2d_snapshot_id INTEGER
+                    REFERENCES c2d_chat_snapshots(id) ON DELETE SET NULL;
             """)
             cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_c2d_evaluations_operator
-                ON c2d_chat_evaluations(operator_id, day);
+                ALTER TABLE calls
+                ADD COLUMN IF NOT EXISTS chat_quotes JSONB;
             """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operator_technical_issues (
@@ -13823,23 +13811,26 @@ class Database:
     def pick_c2d_request(self, date_from=None, date_to=None, operator_id=None,
                          channel_id=None, transport=None, min_messages=None,
                          max_messages=None, rating_filter=None, department_id=None,
-                         exclude='mine', evaluator_id=None):
-        """Случайная заявка по фильтрам. exclude: 'mine' — без уже оценённых этим
-        СВ, 'any' — без оценённых кем-либо, 'none' — без исключений.
-        Возвращает (row|None, candidates_count)."""
+                         exclude='any', evaluator_id=None):
+        """Случайная заявка по фильтрам. Оценки чатов живут в журнале (calls с
+        c2d_snapshot_id), поэтому исключения смотрят туда: 'any' — без чатов,
+        уже оценённых кем-либо, 'mine' — оценённых этим СВ, 'none' — без
+        исключений. Возвращает (row|None, candidates_count)."""
         where, params = self._c2d_requests_where(
             date_from=date_from, date_to=date_to, operator_id=operator_id,
             channel_id=channel_id, transport=transport, min_messages=min_messages,
             max_messages=max_messages, rating_filter=rating_filter,
             department_id=department_id)
         exclude = str(exclude or 'none').strip().lower()
+        evaluated_exists = """NOT EXISTS (
+            SELECT 1 FROM calls c
+            JOIN c2d_chat_snapshots s ON s.id = c.c2d_snapshot_id
+            WHERE s.request_id = r.request_id{extra})"""
         if exclude == 'mine' and evaluator_id is not None:
-            where.append("""NOT EXISTS (SELECT 1 FROM c2d_chat_evaluations e
-                            WHERE e.request_id = r.request_id AND e.evaluator_id = %s)""")
+            where.append(evaluated_exists.format(extra=" AND c.evaluator_id = %s"))
             params.append(int(evaluator_id))
-        elif exclude == 'any':
-            where.append("""NOT EXISTS (SELECT 1 FROM c2d_chat_evaluations e
-                            WHERE e.request_id = r.request_id)""")
+        elif exclude in ('any', 'mine'):
+            where.append(evaluated_exists.format(extra=""))
         with self._get_cursor() as cursor:
             cursor.execute(f"""
                 SELECT {self._C2D_REQUEST_COLUMNS}, COUNT(*) OVER ()
@@ -13955,129 +13946,6 @@ class Database:
             'created_at': row[14].isoformat() if row[14] else None,
             'operator_department_id': row[15],
         }
-
-    def upsert_c2d_evaluation(self, snapshot_id, request_id, day, operator_id,
-                              operator_name, evaluator_id, evaluator_name,
-                              score, criteria, comment, quotes):
-        """Создаёт/обновляет оценку чата (одна на пару заявка+СВ). Возвращает id."""
-        with self._get_cursor() as cursor:
-            cursor.execute("""
-                INSERT INTO c2d_chat_evaluations (
-                    snapshot_id, request_id, day, operator_id, operator_name,
-                    evaluator_id, evaluator_name, score, criteria, comment, quotes)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (request_id, evaluator_id) DO UPDATE SET
-                    snapshot_id = EXCLUDED.snapshot_id,
-                    score = EXCLUDED.score,
-                    criteria = EXCLUDED.criteria,
-                    comment = EXCLUDED.comment,
-                    quotes = EXCLUDED.quotes,
-                    updated_at = now()
-                RETURNING id
-            """, (
-                int(snapshot_id) if snapshot_id is not None else None,
-                int(request_id), day,
-                int(operator_id) if operator_id is not None else None,
-                operator_name,
-                int(evaluator_id) if evaluator_id is not None else None,
-                evaluator_name, score, Json(criteria or []),
-                comment, Json(quotes or []),
-            ))
-            return cursor.fetchone()[0]
-
-    _C2D_EVAL_SELECT = """
-        SELECT e.id, e.snapshot_id, e.request_id, e.day,
-               e.operator_id, COALESCE(u.name, e.operator_name),
-               e.evaluator_id, COALESCE(ev.name, e.evaluator_name),
-               e.score, e.criteria, e.comment, e.quotes,
-               e.created_at, e.updated_at,
-               s.channel_name, s.transport, s.client_name, s.client_phone,
-               s.messages_count, u.department_id
-          FROM c2d_chat_evaluations e
-          LEFT JOIN users u ON u.id = e.operator_id
-          LEFT JOIN users ev ON ev.id = e.evaluator_id
-          LEFT JOIN c2d_chat_snapshots s ON s.id = e.snapshot_id
-    """
-
-    @staticmethod
-    def _c2d_eval_row_dict(r):
-        return {
-            'id': r[0], 'snapshot_id': r[1], 'request_id': r[2],
-            'day': r[3].isoformat() if r[3] else None,
-            'operator_id': r[4], 'operator_name': r[5],
-            'evaluator_id': r[6], 'evaluator_name': r[7],
-            'score': float(r[8]) if r[8] is not None else None,
-            'criteria': r[9] or [], 'comment': r[10], 'quotes': r[11] or [],
-            'created_at': r[12].isoformat() if r[12] else None,
-            'updated_at': r[13].isoformat() if r[13] else None,
-            'channel_name': r[14], 'transport': r[15],
-            'client_name': r[16], 'client_phone': r[17],
-            'messages_count': r[18], 'operator_department_id': r[19],
-        }
-
-    def get_c2d_evaluation(self, eval_id):
-        with self._get_cursor() as cursor:
-            cursor.execute(f"{self._C2D_EVAL_SELECT} WHERE e.id = %s", (int(eval_id),))
-            row = cursor.fetchone()
-        return self._c2d_eval_row_dict(row) if row else None
-
-    def list_c2d_evaluations(self, date_from=None, date_to=None, operator_id=None,
-                             evaluator_id=None, department_id=None, request_id=None,
-                             page=1, per_page=20):
-        """Список оценок (для СВ — все в скоупе отдела, для ЧМ — свои)."""
-        where, params = ["TRUE"], []
-        if request_id is not None:
-            where.append("e.request_id = %s")
-            params.append(int(request_id))
-        if date_from:
-            where.append("e.day >= %s")
-            params.append(date_from)
-        if date_to:
-            where.append("e.day <= %s")
-            params.append(date_to)
-        if operator_id is not None:
-            where.append("e.operator_id = %s")
-            params.append(int(operator_id))
-        if evaluator_id is not None:
-            where.append("e.evaluator_id = %s")
-            params.append(int(evaluator_id))
-        if department_id is not None:
-            where.append("u.department_id = %s")
-            params.append(int(department_id))
-        page = max(1, int(page or 1))
-        per_page = min(max(1, int(per_page or 20)), 100)
-        cond = ' AND '.join(where)
-        with self._get_cursor() as cursor:
-            cursor.execute(f"""
-                SELECT COUNT(*), AVG(e.score)
-                  FROM c2d_chat_evaluations e
-                  LEFT JOIN users u ON u.id = e.operator_id
-                 WHERE {cond}
-            """, params)
-            total, avg_score = cursor.fetchone()
-            cursor.execute(
-                f"{self._C2D_EVAL_SELECT} WHERE {cond} "
-                "ORDER BY e.updated_at DESC LIMIT %s OFFSET %s",
-                params + [per_page, (page - 1) * per_page])
-            items = [self._c2d_eval_row_dict(r) for r in cursor.fetchall()]
-        return {
-            'items': items, 'total': int(total or 0),
-            'avg_score': round(float(avg_score), 2) if avg_score is not None else None,
-            'page': page, 'per_page': per_page,
-        }
-
-    def delete_c2d_evaluation(self, eval_id):
-        with self._get_cursor() as cursor:
-            cursor.execute("DELETE FROM c2d_chat_evaluations WHERE id = %s", (int(eval_id),))
-            return cursor.rowcount > 0
-
-    def count_c2d_evaluations_for_operator(self, operator_id):
-        """Число оценок ЧМ — гейт пункта меню «Оценки чатов» в кабинете оператора."""
-        with self._get_cursor() as cursor:
-            cursor.execute(
-                "SELECT COUNT(*) FROM c2d_chat_evaluations WHERE operator_id = %s",
-                (int(operator_id),))
-            return int(cursor.fetchone()[0] or 0)
 
     def get_daily_hours_for_operator_month(self, operator_id: int, month: str):
         """
@@ -15438,9 +15306,14 @@ class Database:
                             appeal_date=None,
                             question_resolved=False,
                             resolved_first_contact=None,
-                            external_id=None):   # <-- NEW optional param
+                            external_id=None,
+                            c2d_snapshot_id=None,
+                            chat_quotes=None):
         """
         Создаёт/обновляет запись в calls и, если возможно, помечает связанную запись в imported_calls как evaluated.
+
+        c2d_snapshot_id/chat_quotes — оценка чата Chat2Desk (чат-менеджеры):
+        ссылка на снапшот переписки и цитаты из неё.
         """
         month = month or datetime.now().strftime('%Y-%m')
         question_resolved = bool(question_resolved)
@@ -15451,6 +15324,7 @@ class Database:
         # Подготовка JSON данных один раз
         scores_json = json.dumps(scores) if scores else None
         criterion_comments_json = json.dumps(criterion_comments) if criterion_comments else None
+        chat_quotes_json = json.dumps(chat_quotes) if chat_quotes else None
 
         with self._get_cursor() as cursor:
             # Проверка существования direction_id одним запросом
@@ -15533,7 +15407,9 @@ class Database:
                             scores = %s,
                             criterion_comments = %s,
                             is_correction = %s,
-                            direction_id = %s
+                            direction_id = %s,
+                            c2d_snapshot_id = COALESCE(%s, c2d_snapshot_id),
+                            chat_quotes = COALESCE(%s::jsonb, chat_quotes)
                         WHERE id = %s
                         RETURNING id
                     """, (
@@ -15542,6 +15418,8 @@ class Database:
                         scores_json, criterion_comments_json,
                         False,
                         direction_id,
+                        int(c2d_snapshot_id) if c2d_snapshot_id is not None else None,
+                        chat_quotes_json,
                         call_id
                     ))
                     call_id = cursor.fetchone()[0]
@@ -15583,21 +15461,36 @@ class Database:
 
                     return call_id
 
+            # Переоценка чата без явно переданного снапшота — наследуем чат и
+            # цитаты из предыдущей версии (как audio_path у звонков).
+            if is_correction and previous_version_id and c2d_snapshot_id is None:
+                cursor.execute(
+                    "SELECT c2d_snapshot_id, chat_quotes FROM calls WHERE id = %s",
+                    (previous_version_id,))
+                prev_chat = cursor.fetchone()
+                if prev_chat and prev_chat[0]:
+                    c2d_snapshot_id = prev_chat[0]
+                    if chat_quotes_json is None and prev_chat[1]:
+                        chat_quotes_json = json.dumps(prev_chat[1])
+
             # Создаем новую запись (для новой оценки, переоценки или если нет черновика)
             cursor.execute("""
                 INSERT INTO calls (
                     evaluator_id, operator_id, month, phone_number, score, comment,
                     comment_visible_to_operator, question_resolved, resolved_first_contact,
                     audio_path, is_draft, is_correction, previous_version_id,
-                    scores, criterion_comments, direction_id, appeal_date
+                    scores, criterion_comments, direction_id, appeal_date,
+                    c2d_snapshot_id, chat_quotes
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (
                 evaluator_id, operator_id, month, phone_number, score, comment,
                 bool(comment_visible_to_operator), question_resolved, resolved_first_contact,
                 audio_path, is_draft, is_correction, previous_version_id,
-                scores_json, criterion_comments_json, direction_id, appeal_date
+                scores_json, criterion_comments_json, direction_id, appeal_date,
+                int(c2d_snapshot_id) if c2d_snapshot_id is not None else None,
+                chat_quotes_json
             ))
             call_id = cursor.fetchone()[0]
 
@@ -17640,7 +17533,9 @@ class Database:
                 cf_updater.name AS feedback_updated_by_name,
                 COALESCE(c.question_resolved, FALSE) AS question_resolved,
                 c.resolved_first_contact,
-                c.sv_request_approve_comment
+                c.sv_request_approve_comment,
+                c.c2d_snapshot_id,
+                c.chat_quotes
             FROM calls c
             JOIN latest_calls lc ON c.id::text = lc.id_text
             LEFT JOIN directions d ON c.direction_id = d.id  
@@ -17710,7 +17605,9 @@ class Database:
                 NULL::text AS feedback_updated_by_name,
                 FALSE::boolean AS question_resolved,
                 NULL::boolean AS resolved_first_contact,
-                NULL::text AS sv_request_approve_comment
+                NULL::text AS sv_request_approve_comment,
+                NULL::integer AS c2d_snapshot_id,
+                NULL::jsonb AS chat_quotes
             FROM imported_calls ic
             WHERE ic.operator_id = %s AND ic.status = 'not_evaluated'
         """
@@ -17835,6 +17732,8 @@ class Database:
                         "question_resolved": bool(row[46]) if row[46] is not None else False,
                         "resolved_first_contact": bool(row[47]) if row[47] is not None else None,
                         "sv_request_approve_comment": row[48],
+                        "c2d_snapshot_id": row[49],
+                        "chat_quotes": row[50] if row[50] else [],
                         "feedback": feedback_payload,
                         "feedback_sla": feedback_sla_payload
                     }
