@@ -629,6 +629,30 @@ const emitCallEvaluationToast = (message, type = 'info') => {
     else console.warn(text);
 };
 
+// Страница живёт в iframe, где window.showToast родителя недоступен — раньше
+// ВСЕ тосты журнала («Добавлено в журнал», ошибки сохранения…) молча уходили
+// в консоль. Собственный минимальный тост-слой (стили — .ce-toast в styles.css).
+if (typeof window !== 'undefined' && typeof document !== 'undefined'
+        && typeof window.showToast !== 'function') {
+    window.showToast = (message, type = 'info') => {
+        let host = document.getElementById('ce-toast-host');
+        if (!host) {
+            host = document.createElement('div');
+            host.id = 'ce-toast-host';
+            document.body.appendChild(host);
+        }
+        const el = document.createElement('div');
+        el.className = `ce-toast ce-toast-${type}`;
+        el.textContent = String(message ?? '');
+        host.appendChild(el);
+        requestAnimationFrame(() => el.classList.add('ce-toast-in'));
+        window.setTimeout(() => {
+            el.classList.remove('ce-toast-in');
+            window.setTimeout(() => el.remove(), 250);
+        }, type === 'error' ? 6000 : 3500);
+    };
+}
+
 const escapeHtml = (s) => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');
 
 const parseToHtml = (text) => {
@@ -2026,7 +2050,10 @@ const ChatThread = ({ snapshot, quotes = [], selectable = false, onAddQuote, hei
                     <FaIcon className={`fas fa-${hideService ? 'eye' : 'eye-slash'}`} /> {hideService ? 'Автоответы' : 'Без автоответов'}
                 </button>
             </div>
-            <div ref={boxRef} onMouseUp={handleMouseUp} style={{ position: 'relative', flex: 1, overflowY: 'auto', padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div ref={boxRef} onMouseUp={handleMouseUp} style={{ position: 'relative', flex: 1, overflowY: 'auto', overscrollBehavior: 'contain', padding: '10px 12px' }}>
+                {/* Колонка сообщений ограничена по ширине: на широком экране строки
+                    по 1200px нечитаемы и цитату неудобно выделять. */}
+                <div style={{ width: '100%', maxWidth: 960, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {messages.length === 0 && (
                     <div style={{ textAlign: 'center', color: 'var(--text-3)', fontSize: 13, padding: '30px 0' }}>Сообщений нет</div>
                 )}
@@ -2051,7 +2078,7 @@ const ChatThread = ({ snapshot, quotes = [], selectable = false, onAddQuote, hei
                     const out = m.type === 'to_client';
                     const auto = m.type === 'autoreply';
                     const bubbleStyle = {
-                        maxWidth: '78%', padding: '7px 10px', borderRadius: 12, fontSize: 13, lineHeight: 1.45,
+                        maxWidth: 'min(78%, 640px)', padding: '7px 10px', borderRadius: 12, fontSize: 13, lineHeight: 1.45,
                         whiteSpace: 'pre-wrap', wordBreak: 'break-word',
                         ...(out
                             ? { background: 'var(--accent)', color: '#fff', borderBottomRightRadius: 4 }
@@ -2065,7 +2092,7 @@ const ChatThread = ({ snapshot, quotes = [], selectable = false, onAddQuote, hei
                             {daySep}
                             <div style={{ display: 'flex', justifyContent: (out || auto) ? 'flex-end' : 'flex-start' }}>
                                 <div data-mid={m.id} style={bubbleStyle}>
-                                    {auto && <div style={{ fontSize: 10.5, fontWeight: 600, marginBottom: 2 }}><FaIcon className="fas fa-robot" /> Автоответ</div>}
+                                    {auto && <div style={{ fontSize: 10.5, fontWeight: 600, marginBottom: 2, display: 'flex', alignItems: 'center', gap: 4 }}><FaIcon className="fas fa-robot" /> Автоответ</div>}
                                     {hasMedia && <div style={{ marginBottom: m.text ? 5 : 0 }}><ChatMedia msg={m} /></div>}
                                     {m.text ? chatHighlight(m.text, quotesByMessage[String(m.id)]) : (!hasMedia && <em style={{ opacity: 0.7 }}>[сообщение]</em>)}
                                     <div style={{ fontSize: 10, opacity: 0.65, textAlign: 'right', marginTop: 3 }}>{chatFmtTime(m.created)}</div>
@@ -2074,10 +2101,12 @@ const ChatThread = ({ snapshot, quotes = [], selectable = false, onAddQuote, hei
                         </React.Fragment>
                     );
                 })}
+                </div>
                 {selectable && selection && (
                     <button type="button" onClick={addQuote}
                         style={{ position: 'absolute', left: selection.x, top: Math.max(selection.y - 36, 4), transform: 'translateX(-50%)',
-                                 zIndex: 5, background: 'var(--text)', color: 'var(--surface)', border: 'none', borderRadius: 999,
+                                 zIndex: 5, display: 'inline-flex', alignItems: 'center', gap: 6,
+                                 background: 'var(--text)', color: 'var(--surface)', border: 'none', borderRadius: 999,
                                  padding: '5px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer', boxShadow: '0 4px 12px rgba(0,0,0,0.25)' }}>
                         <FaIcon className="fas fa-quote-left" /> Цитировать
                     </button>
@@ -2178,7 +2207,7 @@ const RandomChatModal = ({ isOpen, onClose, operator, userId, selectedMonth, onP
                     </div>
 
                     <label className="label" style={{ margin: '16px 0 6px', display: 'block' }}>Оценка клиента</label>
-                    <select className="select" value={ratingFilter} onChange={e => setRatingFilter(e.target.value)} style={inputStyle}>
+                    <select className="select" value={ratingFilter} onChange={e => setRatingFilter(e.target.value)}>
                         <option value="">Не важно</option>
                         <option value="rated">С оценкой клиента</option>
                         <option value="unrated">Без оценки клиента</option>
@@ -2197,7 +2226,7 @@ const RandomChatModal = ({ isOpen, onClose, operator, userId, selectedMonth, onP
                     </button>
 
                     {error ? (
-                        <div style={{ marginTop: 14, padding: '10px 12px', borderRadius: 'var(--radius)', background: 'var(--accent-light)', border: '1px solid var(--border)', fontSize: 13, color: 'var(--red)' }}>
+                        <div style={{ marginTop: 14, padding: '10px 12px', borderRadius: 'var(--radius)', background: 'var(--red-light)', border: '1px solid #fca5a5', fontSize: 13, color: 'var(--red)' }}>
                             <FaIcon className="fas fa-circle-exclamation" /> {error}
                         </div>
                     ) : null}
@@ -2230,6 +2259,19 @@ const ChatEvaluationModal = ({ isOpen, onClose, operator, chatData, directions, 
     const [quotes, setQuotes] = useState([]);
     const [infoIndex, setInfoIndex] = useState(null);
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const [showPanel, setShowPanel] = useState(true); // панель оценки справа
+
+    // Несохранённые изменения: любые тронутые критерии, комментарии или цитаты.
+    const isDirty = quotes.length > 0
+        || String(generalComment || '').trim() !== ''
+        || scores.some((s) => s !== 'Correct')
+        || comments.some((c) => String(c || '').trim() !== '');
+
+    const closeGuarded = () => {
+        if (isSubmitting) return;
+        if (isDirty && !window.confirm('Закрыть окно без сохранения оценки? Выставленные критерии и цитаты будут потеряны.')) return;
+        onClose?.();
+    };
 
     useEffect(() => {
         if (!isOpen) return;
@@ -2241,8 +2283,28 @@ const ChatEvaluationModal = ({ isOpen, onClose, operator, chatData, directions, 
         setQuotes([]);
         setInfoIndex(null);
         setIsSubmitting(false);
+        setShowPanel(true);
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [isOpen, snapshot?.id]);
+
+    // Полноэкранное окно: блокируем прокрутку журнала под собой + Esc для закрытия.
+    useEffect(() => {
+        if (!isOpen) return;
+        const prevOverflow = document.body.style.overflow;
+        document.body.style.overflow = 'hidden';
+        const onKeyDown = (e) => {
+            if (e.key === 'Escape') {
+                e.stopPropagation();
+                closeGuarded();
+            }
+        };
+        window.addEventListener('keydown', onKeyDown);
+        return () => {
+            document.body.style.overflow = prevOverflow;
+            window.removeEventListener('keydown', onKeyDown);
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isOpen, isDirty, isSubmitting]);
 
     if (!isOpen || !snapshot) return null;
 
@@ -2263,11 +2325,28 @@ const ChatEvaluationModal = ({ isOpen, onClose, operator, chatData, directions, 
         setQuotes(prev => [...prev, { messageId: msg.id, text, comment: '' }]);
     };
 
+    // Клик по цитате — проскроллить чат к её сообщению и подсветить его.
+    const scrollToMessage = (messageId) => {
+        const el = document.querySelector(`[data-mid="${messageId}"]`);
+        if (!el) return;
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        el.classList.add('chat-msg-flash');
+        setTimeout(() => el.classList.remove('chat-msg-flash'), 1400);
+    };
+
     const isSubmitDisabled = !criteria.length ||
         scores.some((s, i) => (s === 'Error' || s === 'Incorrect') && !comments[i]?.trim());
+    const submitTitle = !criteria.length
+        ? 'У направления нет критериев'
+        : isSubmitDisabled
+            ? 'Заполните комментарии к критериям с ошибками'
+            : `Сохранить оценку ${totalScore}/100 в журнал`;
 
     const handleSubmit = async () => {
         if (isSubmitDisabled || isSubmitting) return;
+        // Защита от «сохранил не глядя»: все критерии в дефолтном «Корректно»
+        // и ничего не заполнено — просим явное подтверждение сотки.
+        if (!isDirty && !window.confirm('Все критерии остались «Корректно» — сохранить оценку 100/100?')) return;
         setIsSubmitting(true);
         try {
             const fd = new FormData();
@@ -2301,58 +2380,92 @@ const ChatEvaluationModal = ({ isOpen, onClose, operator, chatData, directions, 
         }
     };
 
+    // Полноэкранное окно (z-index 150: выше слоёв журнала и .modal-backdrop=100,
+    // ниже .info-panel=200 и тостов). Чат — на весь экран, цитаты — сразу под
+    // чатом (где их создают), критерии — панель справа, сворачивается кнопкой.
     return (
-        <div className="modal-backdrop">
-            <div className="modal modal-wide" style={{ maxWidth: 1100 }} onClick={e => e.stopPropagation()}>
-                <div className="modal-header">
-                    <div>
-                        <h2><FaIcon className="fas fa-comments" /> Оценка чата</h2>
-                        <div className="modal-header-sub">
-                            {operator?.name || '—'} · заявка #{snapshot.request_id} · {request?.day || snapshot.day || ''}
-                            {request?.rating_score != null ? ` · оценка клиента: ${request.rating_score}` : ''}
-                        </div>
+        <div style={{ position: 'fixed', inset: 0, zIndex: 150, display: 'flex', flexDirection: 'column', background: 'var(--surface-2)' }}>
+            {/* Шапка: одна строка, заголовок усечётся, контролы не переносятся */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', background: 'var(--surface)', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ fontSize: 14.5, fontWeight: 700, color: 'var(--text)', display: 'flex', alignItems: 'center', gap: 8, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        <FaIcon className="fas fa-comments" style={{ flexShrink: 0 }} /> Оценка чата · {operator?.name || '—'}
                     </div>
-                    <button className="close-btn" onClick={onClose}><FaIcon className="fas fa-times" /></button>
+                    <div style={{ fontSize: 11.5, color: 'var(--text-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        Заявка #{snapshot.request_id} · {request?.day || snapshot.day || ''}
+                        {request?.rating_score != null ? ` · оценка клиента: ${request.rating_score}` : ''}
+                        {' · '}{direction?.name || 'направление не найдено'}
+                    </div>
                 </div>
-                <div className="modal-body">
-                    <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start', flexWrap: 'wrap' }}>
-                        <div style={{ flex: '1 1 420px', minWidth: 340 }}>
-                            <ChatThread snapshot={snapshot} quotes={quotes} selectable onAddQuote={addQuote} height="min(58vh, 560px)" />
-                            <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-3)' }}>
-                                <FaIcon className="fas fa-quote-left" /> Выделите текст сообщения — появится кнопка «Цитировать»; фрагмент попадёт в оценку и подсветится у чат-менеджера.
+                <span className={`badge ${hasCriticalError ? 'badge-red' : totalScore >= 80 ? 'badge-green' : 'badge-blue'}`}
+                      style={{ fontSize: 13, flexShrink: 0 }}
+                      title={hasCriticalError ? 'Критическая ошибка обнуляет итог' : 'Текущий итог по критериям'}>
+                    <span className="badge-dot" /> {totalScore} / 100
+                </span>
+                <button className="btn btn-secondary btn-sm" style={{ flexShrink: 0 }} onClick={() => setShowPanel(v => !v)}>
+                    <FaIcon className={`fas fa-${showPanel ? 'chevron-right' : 'clipboard-check'}`} /> {showPanel ? 'Свернуть панель' : `Панель оценки (${criteria.length})`}
+                </button>
+                <button className="btn btn-secondary btn-sm" style={{ flexShrink: 0 }} onClick={closeGuarded} disabled={isSubmitting}>
+                    <FaIcon className="fas fa-times" /> Закрыть
+                </button>
+                <button className="btn btn-primary btn-sm" style={{ flexShrink: 0 }} onClick={handleSubmit}
+                        disabled={isSubmitDisabled || isSubmitting} title={submitTitle}>
+                    {isSubmitting ? <><span className="spinner" /> Сохранение…</> : <><FaIcon className="fas fa-check" /> Сохранить</>}
+                </button>
+            </div>
+
+            {/* Тело: слева чат + цитаты под ним, справа — панель критериев */}
+            <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
+                <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', padding: 10, gap: 8 }}>
+                    <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+                        <ChatThread snapshot={snapshot} quotes={quotes} selectable onAddQuote={addQuote} height="100%" />
+                    </div>
+                    {/* Цитаты живут под чатом — комментарий пишется не отходя от переписки */}
+                    <div style={{ flexShrink: 0, maxHeight: '30vh', overflowY: 'auto', overscrollBehavior: 'contain' }}>
+                        {!quotes.length ? (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-3)', padding: '7px 10px', border: '1px dashed var(--border-strong)', borderRadius: 'var(--radius)' }}>
+                                <FaIcon className="fas fa-quote-left" /> Выделите текст сообщения — появится кнопка «Цитировать»; фрагмент попадёт сюда и подсветится у чат-менеджера.
                             </div>
-                            {quotes.length > 0 && (
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 10 }}>
-                                    {quotes.map((q, i) => (
-                                        <div key={i} style={{ borderLeft: '3px solid #f59e0b', background: 'var(--surface-2)', borderRadius: 'var(--radius)', padding: '8px 10px' }}>
-                                            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
-                                                <div style={{ flex: 1, fontSize: 12.5, fontStyle: 'italic', color: 'var(--text)' }}>«{q.text}»</div>
-                                                <button type="button" className="close-btn" style={{ width: 22, height: 22, fontSize: 11 }}
-                                                        onClick={() => setQuotes(prev => prev.filter((_, j) => j !== i))}>
-                                                    <FaIcon className="fas fa-times" />
-                                                </button>
+                        ) : (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                <span className="label" style={{ marginBottom: 0 }}>Цитаты ({quotes.length}) — клик по тексту прокрутит чат к сообщению</span>
+                                {quotes.map((q, i) => (
+                                    <div key={i} style={{ borderLeft: '3px solid #f59e0b', background: 'var(--surface)', border: '1px solid var(--border)', borderLeftColor: '#f59e0b', borderLeftWidth: 3, borderRadius: 'var(--radius)', padding: '7px 10px' }}>
+                                        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+                                            <div style={{ flex: 1, fontSize: 12.5, fontStyle: 'italic', color: 'var(--text)', cursor: 'pointer' }}
+                                                 title="Показать сообщение в чате"
+                                                 onClick={() => scrollToMessage(q.messageId)}>
+                                                «{q.text}»
                                             </div>
                                             <input value={q.comment || ''} placeholder="Комментарий к цитате…"
                                                    onChange={e => setQuotes(prev => prev.map((item, j) => j === i ? { ...item, comment: e.target.value } : item))}
-                                                   style={{ marginTop: 6, width: '100%', padding: '6px 8px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text)', fontSize: 12 }} />
+                                                   style={{ flex: 1, minWidth: 160, padding: '5px 8px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--surface-2)', color: 'var(--text)', fontSize: 12 }} />
+                                            <button type="button" className="close-btn" style={{ width: 22, height: 22, fontSize: 11, flexShrink: 0 }}
+                                                    title="Убрать цитату"
+                                                    onClick={() => setQuotes(prev => prev.filter((_, j) => j !== i))}>
+                                                <FaIcon className="fas fa-times" />
+                                            </button>
                                         </div>
-                                    ))}
-                                </div>
-                            )}
-                        </div>
-                        <div style={{ flex: '1 1 380px', minWidth: 320 }}>
-                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-                                <span className="label">Критерии · {direction?.name || 'направление не найдено'}</span>
-                                <span className={`badge ${hasCriticalError ? 'badge-red' : totalScore >= 80 ? 'badge-green' : 'badge-blue'}`}>
-                                    <span className="badge-dot" /> {totalScore} / 100
-                                </span>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                </div>
+
+                {showPanel && (
+                    <div className="chat-eval-panel" style={{ width: 'clamp(430px, 36vw, 600px)', maxWidth: '92vw', flexShrink: 0, borderLeft: '1px solid var(--border)', background: 'var(--surface)', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+                        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain', padding: '10px 12px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                                <span className="label" style={{ marginBottom: 0 }}>Критерии · {direction?.name || '—'}</span>
+                                <span style={{ fontSize: 11, color: 'var(--text-3)', fontFamily: 'var(--font-mono)' }}>{criteria.length} шт.</span>
                             </div>
                             {!criteria.length ? (
-                                <div style={{ padding: '14px 12px', border: '1px solid var(--border)', borderRadius: 'var(--radius)', fontSize: 13, color: 'var(--red)' }}>
+                                <div style={{ padding: '14px 12px', border: '1px solid #fca5a5', background: 'var(--red-light)', borderRadius: 'var(--radius)', fontSize: 13, color: 'var(--red)' }}>
                                     У направления «{direction?.name || '—'}» нет критериев — настройте их в разделе направлений.
                                 </div>
                             ) : (
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 'min(48vh, 470px)', overflowY: 'auto', paddingRight: 4 }}>
+                                <div>
                                     {criteria.map((criterion, i) => (
                                         <CriterionCard key={i} criterion={criterion} index={i}
                                             score={scores[i]} comment={comments[i]} commentVisible={commentVisible[i]}
@@ -2363,12 +2476,13 @@ const ChatEvaluationModal = ({ isOpen, onClose, operator, chatData, directions, 
                                     ))}
                                 </div>
                             )}
-                            <label className="label" style={{ margin: '12px 0 6px', display: 'block' }}>Общий комментарий</label>
-                            <textarea className="textarea" style={{ marginTop: 0, minHeight: 70 }} rows={3}
+
+                            <label className="label" style={{ margin: '10px 0 6px', display: 'block' }}>Общий комментарий</label>
+                            <textarea className="textarea" style={{ marginTop: 0, minHeight: 56 }} rows={2}
                                       value={generalComment} onChange={e => setGeneralComment(e.target.value)}
                                       placeholder="Общий вывод по чату…" />
                             <button type="button" onClick={() => setCommentVisibleToOperator(v => !v)}
-                                style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', borderRadius: 'var(--radius)', cursor: 'pointer', width: '100%',
+                                style={{ margin: '8px 0 4px', display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', borderRadius: 'var(--radius)', cursor: 'pointer', width: '100%',
                                          border: `1px solid ${commentVisibleToOperator ? 'var(--accent)' : 'var(--border-strong)'}`,
                                          background: commentVisibleToOperator ? 'var(--accent-light)' : 'var(--surface)' }}>
                                 <span style={{ width: 16, height: 16, flexShrink: 0, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 9, color: '#fff',
@@ -2379,14 +2493,9 @@ const ChatEvaluationModal = ({ isOpen, onClose, operator, chatData, directions, 
                             </button>
                         </div>
                     </div>
-                </div>
-                <div className="modal-footer">
-                    <button className="btn btn-secondary" onClick={onClose} disabled={isSubmitting}>Отмена</button>
-                    <button className="btn btn-primary" onClick={handleSubmit} disabled={isSubmitDisabled || isSubmitting}>
-                        {isSubmitting ? <><span className="spinner" /> Сохранение…</> : <><FaIcon className="fas fa-check" /> Сохранить оценку ({totalScore})</>}
-                    </button>
-                </div>
+                )}
             </div>
+
             {infoIndex !== null && criteria[infoIndex] && (
                 <div className="info-panel" onClick={e => e.stopPropagation()}>
                     <div className="info-panel-header">
@@ -2420,7 +2529,7 @@ const ChatViewModal = ({ isOpen, onClose, snapshotId, quotes, userId, title }) =
     if (!isOpen) return null;
     return (
         <div className="modal-backdrop" onClick={onClose}>
-            <div className="modal" style={{ maxWidth: 640 }} onClick={e => e.stopPropagation()}>
+            <div className="modal" style={{ maxWidth: 880 }} onClick={e => e.stopPropagation()}>
                 <div className="modal-header">
                     <div>
                         <h2><FaIcon className="fas fa-comments" /> Переписка чата</h2>
@@ -2435,11 +2544,11 @@ const ChatViewModal = ({ isOpen, onClose, snapshotId, quotes, userId, title }) =
                         </div>
                     ) : !snapshot ? (
                         <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--text-3)', fontSize: 13 }}>
-                            <span className="spinner" /> Загрузка переписки…
+                            <span className="spinner spinner-dark" /> Загрузка переписки…
                         </div>
                     ) : (
                         <>
-                            <ChatThread snapshot={snapshot} quotes={quotes || []} height="min(60vh, 560px)" />
+                            <ChatThread snapshot={snapshot} quotes={quotes || []} height="min(68vh, 700px)" />
                             {(quotes || []).length > 0 && (
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 10 }}>
                                     {(quotes || []).map((q, i) => (
