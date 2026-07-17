@@ -525,6 +525,8 @@ def process_results(batch: dict, calls: list[dict], transcripts: dict, workdir: 
             criteria = [{
                 "idx": v["idx"], "criterion_id": crit_meta.get(v["idx"], {}).get("criterion_id"),
                 "name": v["name"], "is_critical": bool(crit_meta.get(v["idx"], {}).get("is_critical")),
+                "deficiency": (crit_meta.get(v["idx"], {}).get("deficiency")
+                               if isinstance(crit_meta.get(v["idx"], {}).get("deficiency"), dict) else None),
                 "source": v["source"], "ai": v["verdict"], "conf": v["confidence"],
                 "evidence": v["evidence_quote"], "comment": v["comment"],
                 "model": v.get("model"),

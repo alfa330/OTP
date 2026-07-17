@@ -1252,9 +1252,16 @@ const canAccessFourYouForUser = (userLike) => (
     (FOUR_YOU_VIEWER_USER_ID > 0 && Number(userLike?.id) === FOUR_YOU_VIEWER_USER_ID)
 );
 
+// СВ отдела продаж: раздел «ИИ-оценка» доступен, данные бэкенд режет до его направлений.
+const isOpSalesSupervisorForAiQa = (userLike) => (
+    isSupervisorRole(userLike?.role) &&
+    Number(userLike?.department_id ?? userLike?.departmentId) === AI_QA_OP_DEPARTMENT_ID
+);
+
 const canAccessAiQaForUser = (userLike) => (
     normalizeRole(userLike?.role) === 'super_admin' ||
     (isDepartmentHead(userLike) && Number(headedDepartmentId(userLike)) === AI_QA_OP_DEPARTMENT_ID) ||
+    isOpSalesSupervisorForAiQa(userLike) ||
     AI_QA_EXTRA_ACCESS_USER_IDS.has(Number(userLike?.id))
 );
 
@@ -41804,7 +41811,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </button>
                                             </li>
                                             )}
-                                            {isDepartmentHeadUser && Number(headedDepartmentId(user)) === AI_QA_OP_DEPARTMENT_ID && (
+                                            {((isDepartmentHeadUser && Number(headedDepartmentId(user)) === AI_QA_OP_DEPARTMENT_ID) || isOpSalesSupervisorForAiQa(user)) && (
                                             <li>
                                                 <button
                                                     onClick={(e) => handleSidebarViewNavigation(e, 'ai_qa')}
@@ -42019,7 +42026,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     {renderSidebarDividerInner()}
                                     {renderEventsSidebarItemInner()}
 
-                                    {canAccessAiQaSection && !isAdminLikeRole && !(isDepartmentHeadUser && Number(headedDepartmentId(user)) === AI_QA_OP_DEPARTMENT_ID) && (
+                                    {canAccessAiQaSection && !isAdminLikeRole && !(isDepartmentHeadUser && Number(headedDepartmentId(user)) === AI_QA_OP_DEPARTMENT_ID) && !isOpSalesSupervisorForAiQa(user) && (
                                         <li>
                                             <button
                                                 type="button"

@@ -156,4 +156,4 @@ RAG_TRACE_REQUIRED = str(env("RAG_TRACE_REQUIRED", "true")).strip().lower() in {
     "1", "true", "yes", "on",
 }
 RAG_REINDEX_MAX_ATTEMPTS = max(1, int(env("RAG_REINDEX_MAX_ATTEMPTS", "5")))
-EVALUATOR_CODE_VERSION = str(env("AI_QA_CODE_VERSION", "ai-qa-2026-07-v2"))
+EVALUATOR_CODE_VERSION = str(env("AI_QA_CODE_VERSION", "ai-qa-2026-07-v3"))  # v3: вердикт Deficiency («Недочёт»)

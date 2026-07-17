@@ -13,9 +13,10 @@ import EvaluationsList from './EvaluationsList';
 import CriteriaClassification from './CriteriaClassification';
 import AdjudicationsRag from './AdjudicationsRag';
 
-/* Контейнер раздела «ИИ-оценка» (App.jsx: view === "ai_qa", только super_admin).
- * Все данные — реальные с /api/ai-qa/*. Мок-данных нет; при недоступности бэкенда
- * показываются состояния загрузки / ошибки / пусто. */
+/* Контейнер раздела «ИИ-оценка» (App.jsx: view === "ai_qa"; доступ: super_admin,
+ * глава ОП, СВ ОП — последним бэкенд отдаёт только их направления, а вкладки
+ * «Критерии»/«База разборов» скрыты). Все данные — реальные с /api/ai-qa/*.
+ * Мок-данных нет; при недоступности бэкенда — состояния загрузки / ошибки / пусто. */
 
 const TABS = [
     { key: 'overview',  label: 'Обзор',          Icon: Gauge },
@@ -34,22 +35,22 @@ const REASON = {
     new:      { tone: 'slate', label: 'Новый',       Icon: Sparkles },
 };
 
-function Segmented({ tab, setTab }) {
+function Segmented({ tabs = TABS, tab, setTab }) {
     const refs = useRef([]);
     const move = (event, index) => {
         let next = null;
-        if (event.key === 'ArrowRight') next = (index + 1) % TABS.length;
-        if (event.key === 'ArrowLeft') next = (index - 1 + TABS.length) % TABS.length;
+        if (event.key === 'ArrowRight') next = (index + 1) % tabs.length;
+        if (event.key === 'ArrowLeft') next = (index - 1 + tabs.length) % tabs.length;
         if (event.key === 'Home') next = 0;
-        if (event.key === 'End') next = TABS.length - 1;
+        if (event.key === 'End') next = tabs.length - 1;
         if (next === null) return;
         event.preventDefault();
-        setTab(TABS[next].key);
+        setTab(tabs[next].key);
         refs.current[next]?.focus();
     };
     return (
         <div className="flex max-w-full overflow-x-auto rounded-2xl bg-slate-100 p-1" role="tablist" aria-label="Разделы ИИ-оценки">
-            {TABS.map((t, index) => {
+            {tabs.map((t, index) => {
                 const active = tab === t.key;
                 return (
                     <button key={t.key} ref={(node) => { refs.current[index] = node; }} type="button" role="tab"
@@ -122,6 +123,12 @@ export default function CallQaView(props) {
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
     // Правка/удаление разборов — только супер-админ (бэкенд проверяет то же в _ai_qa_admin_guard).
     const canManageRag = normalizeRole(user?.role) === 'super_admin';
+    // СВ ОП оценивает только свои направления: конфигурация критериев и база разборов
+    // ему не показываются (бэкенд их тоже ограничивает/запрещает).
+    const isScopedSupervisor = normalizeRole(user?.role) === 'sv';
+    const visibleTabs = isScopedSupervisor
+        ? TABS.filter((t) => t.key !== 'criteria' && t.key !== 'rag')
+        : TABS;
 
     const [tab, setTab] = useState('queue');
     const [sectionInteraction, setSectionInteraction] = useState({ editing: false, busy: false });
@@ -288,11 +295,15 @@ export default function CallQaView(props) {
                 </div>
                 <div>
                     <h1 className="text-[19px] font-semibold text-slate-900">ИИ-оценка звонков</h1>
-                    <p className="text-[12.5px] text-slate-400">Автоматическая проверка качества · отдел продаж</p>
+                    <p className="text-[12.5px] text-slate-400">
+                        {isScopedSupervisor
+                            ? 'Автоматическая проверка качества · ваши направления'
+                            : 'Автоматическая проверка качества · отдел продаж'}
+                    </p>
                 </div>
             </div>
 
-            {!selected && <Segmented tab={tab} setTab={changeTab} />}
+            {!selected && <Segmented tabs={visibleTabs} tab={tab} setTab={changeTab} />}
 
             {selected ? (
                 <div className="space-y-3">

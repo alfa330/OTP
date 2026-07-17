@@ -27,9 +27,13 @@ import CallQaView from './components/call_qa/CallQaView';
 ## API-контракт (для бэкенда)
 - `GET  /api/ai-qa/review-queue?direction=&limit=` → `[{ id, direction, operator, datetime, reasons:["critical"|"lowconf"|"pending"] }]`
 - `GET  /api/ai-qa/call/:id` → объект как `MOCK_CALL` в `CallReviewCard.jsx`:
-  `{ id, direction, operator, datetime, human_score, languages, asr_mean_conf,
+  `{ id, direction, operator, datetime, human_score, has_human_review, languages, asr_mean_conf,
      transcript:[{ speaker:"operator"|"client", seg:[{ t, c? }] }],
-     criteria:[{ idx, name, is_critical, source, ai, conf, evidence, comment }] }`
+     criteria:[{ idx, name, is_critical, deficiency?:{weight,description}, source,
+                 ai, conf, evidence, comment, human?, human_comment? }] }`
+  Вердикты ИИ: `Correct | Incorrect | N/A | Deficiency | Pending` («Недочёт» — только у критериев
+  с `deficiency`). `human`/`human_comment` — пер-критерийная оценка супервайзера из `calls.scores`
+  (`Correct | Incorrect | N/A | Deficiency | Error`), прикрепляется свежей при каждом открытии.
 - `POST /api/ai-qa/adjudicate` ← `{ call_id, decisions:{ [idx]:{ verdict, reason } } }`
   → создаёт записи в `qa_adjudications` (call_qa/review/queue.on_adjudication).
 - `GET/POST /api/ai-qa/criteria-config` ↔ таблица `criterion_config`.

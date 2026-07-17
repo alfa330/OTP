@@ -35,13 +35,19 @@ class VerdictMetricsTests(unittest.TestCase):
         self.assertEqual(sum(r["false_alarms"] for r in row), 1)
         self.assertEqual(sum(r["misses"] for r in row), 1)
 
-    def test_deficiency_is_not_a_mismatch(self):
-        # У человека частичный зачёт, у ИИ такого вердикта нет — не считаем расхождением.
-        rows = [([_crit(0, "Incorrect")], ["Deficiency"], "Поток")]
+    def test_deficiency_enters_matrix(self):
+        # «Недочёт» — полноправный вердикт обеих сторон: расхождение с ИИ попадает
+        # в матрицу, согласие по Deficiency — на диагональ. Старый счётчик = 0.
+        rows = [([_crit(0, "Incorrect"), _crit(1, "Deficiency")],
+                 ["Deficiency", "Deficiency"], "Поток")]
         m = _verdict_metrics(rows)
-        self.assertEqual(m["total"], 0)
-        self.assertEqual(m["deficiency"], 1)
-        self.assertIsNone(m["alarm_precision"])
+        self.assertEqual(m["total"], 2)
+        self.assertEqual(m["deficiency"], 0)
+        self.assertEqual(m["matrix"]["Deficiency"]["Incorrect"], 1)
+        self.assertEqual(m["matrix"]["Deficiency"]["Deficiency"], 1)
+        self.assertEqual(m["agreement"], 50)
+        # Тревога ИИ (Incorrect) при человеческом «Недочёте» — неподтверждённая тревога.
+        self.assertEqual(m["alarm_precision"], {"pct": 0, "hits": 0, "total": 1})
 
     def test_ignores_pending_and_non_transcript(self):
         rows = [([

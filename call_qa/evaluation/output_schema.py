@@ -10,7 +10,7 @@ from pydantic import BaseModel
 # --- Выход Claude (структурный) ---
 class CriterionVerdict(BaseModel):
     idx: int
-    verdict: Literal["Correct", "Incorrect", "N/A"]
+    verdict: Literal["Correct", "Incorrect", "N/A", "Deficiency"]
     confidence: float
     evidence_quote: str
     comment: str
@@ -26,7 +26,7 @@ class CriterionResult(BaseModel):
     idx: int
     name: str
     source: str                              # transcript | system_api | manual
-    verdict: str                             # Correct | Incorrect | N/A | Pending
+    verdict: str                             # Correct | Incorrect | N/A | Deficiency | Pending
     confidence: Optional[float] = None
     evidence_quote: str = ""
     comment: str = ""

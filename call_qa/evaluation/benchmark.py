@@ -34,9 +34,9 @@ def classification_metrics(gold: list[str], predicted: list[str]) -> dict:
     tp = fp = fn = tn = 0
     exact = 0
     for expected, actual in zip(gold, predicted):
-        if expected not in ("Correct", "Incorrect", "N/A"):
+        if expected not in ("Correct", "Incorrect", "N/A", "Deficiency"):
             continue
-        if actual not in ("Correct", "Incorrect", "N/A"):
+        if actual not in ("Correct", "Incorrect", "N/A", "Deficiency"):
             continue
         exact += expected == actual
         expected_alarm, actual_alarm = expected == "Incorrect", actual == "Incorrect"
@@ -101,9 +101,9 @@ def _mae(examples: list[dict], key: str) -> float | None:
 def paired_rag_report(examples: list[dict], *, retrieval_records=None, k: int = 3) -> dict:
     """Compare identical calls/configs where only RAG enabledness differs."""
     usable = [item for item in examples
-              if item.get("gold_verdict") in ("Correct", "Incorrect", "N/A")
-              and item.get("off_verdict") in ("Correct", "Incorrect", "N/A")
-              and item.get("on_verdict") in ("Correct", "Incorrect", "N/A")]
+              if item.get("gold_verdict") in ("Correct", "Incorrect", "N/A", "Deficiency")
+              and item.get("off_verdict") in ("Correct", "Incorrect", "N/A", "Deficiency")
+              and item.get("on_verdict") in ("Correct", "Incorrect", "N/A", "Deficiency")]
     gold = [item["gold_verdict"] for item in usable]
     off = [item["off_verdict"] for item in usable]
     on = [item["on_verdict"] for item in usable]

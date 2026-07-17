@@ -35,10 +35,13 @@ const excerptFoundInTranscript = (excerpt, transcriptText) => {
 };
 
 const VERDICT = {
-    Correct:   { tone: 'green', label: 'Верно',   Icon: Check },
-    Incorrect: { tone: 'red',   label: 'Неверно', Icon: X },
-    'N/A':     { tone: 'slate', label: 'N/A',     Icon: Minus },
-    Pending:   { tone: 'amber', label: 'Ожидает', Icon: Clock },
+    Correct:    { tone: 'green', label: 'Верно',   Icon: Check },
+    Deficiency: { tone: 'amber', label: 'Недочёт', Icon: AlertTriangle },
+    Incorrect:  { tone: 'red',   label: 'Неверно', Icon: X },
+    'N/A':      { tone: 'slate', label: 'N/A',     Icon: Minus },
+    Pending:    { tone: 'amber', label: 'Ожидает', Icon: Clock },
+    // «Критич. ошибка» ставит только супервайзер (панель «Супервайзер»).
+    Error:      { tone: 'red',   label: 'Критич. ошибка', Icon: ShieldAlert },
 };
 
 const SOURCE = {
@@ -51,6 +54,14 @@ const HUMAN_OPTS = [
     { v: 'Correct',   label: 'Верно',   Icon: Check },
     { v: 'Incorrect', label: 'Неверно', Icon: X },
     { v: 'N/A',       label: 'N/A',     Icon: Minus },
+];
+// «Недочёт» доступен только критериям, у которых он предусмотрен шкалой (c.deficiency).
+const DEFICIENCY_OPT = { v: 'Deficiency', label: 'Недочёт', Icon: AlertTriangle };
+
+// Закреплённые переключатели под «Оценка по критериям»: чью оценку показываем.
+const PANELS = [
+    { key: 'ai', label: 'ИИ',          Icon: Sparkles },
+    { key: 'sv', label: 'Супервайзер', Icon: User2 },
 ];
 
 function ConfidenceBar({ value }) {
@@ -68,6 +79,9 @@ function ConfidenceBar({ value }) {
 }
 
 function VerdictChip({ verdict }) {
+    if (verdict == null) {
+        return <IosBadge tone="slate"><Minus size={12} strokeWidth={2.5} />Нет оценки</IosBadge>;
+    }
     const v = VERDICT[verdict] || VERDICT['N/A'];
     return <IosBadge tone={v.tone}><v.Icon size={12} strokeWidth={2.5} />{v.label}</IosBadge>;
 }
@@ -229,18 +243,22 @@ function EvidenceReview({ c, decision, onEdit, disabled, transcriptText }) {
     );
 }
 
-const CriterionRow = memo(function CriterionRow({ c, decision, onEdit, onRefine, disabled = false, transcriptText }) {
+const CriterionRow = memo(function CriterionRow({ c, decision, onEdit, onRefine, disabled = false, transcriptText, panel = 'ai' }) {
     const [open, setOpen] = useState(false);
     const [refining, setRefining] = useState(false);
     const [aiNote, setAiNote] = useState(null);
     const refineRequest = useRef(0);
     const src = SOURCE[c.source] || SOURCE.transcript;
-    const editable = c.source === 'transcript';
+    const svPanel = panel === 'sv';
+    const editable = !svPanel && c.source === 'transcript';
     const chosen = decision?.verdict ?? c.ai;
     const chosenRef = useRef(chosen);
     chosenRef.current = chosen;
     const corrected = editable && chosen !== c.ai;
     const rowDisabled = disabled || refining;
+    const verdictOpts = c.deficiency
+        ? [HUMAN_OPTS[0], HUMAN_OPTS[1], DEFICIENCY_OPT, HUMAN_OPTS[2]]
+        : HUMAN_OPTS;
 
     useEffect(() => () => { refineRequest.current += 1; }, []);
 
@@ -288,6 +306,36 @@ const CriterionRow = memo(function CriterionRow({ c, decision, onEdit, onRefine,
         }
     };
 
+    if (svPanel) {
+        // Панель «Супервайзер»: что по этому критерию поставил и написал человек
+        // (calls.scores / criterion_comments) — только просмотр, без правок.
+        return (
+            <div className={`${iosCard} p-3`}>
+                <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                            {c.is_critical && <ShieldAlert size={13} className="shrink-0 text-rose-500" title="Критический критерий" />}
+                            <span className="text-[13.5px] font-medium leading-snug text-slate-800">{c.name}</span>
+                        </div>
+                        <div className="mt-1 flex items-center gap-1.5">
+                            <IosBadge tone="slate" className="!px-2 !py-0.5"><User2 size={11} />Супервайзер</IosBadge>
+                        </div>
+                    </div>
+                    <VerdictChip verdict={c.human ?? null} />
+                </div>
+                {c.human != null || c.human_comment ? (
+                    c.human_comment ? (
+                        <p className="mt-2 rounded-lg bg-slate-50 px-2.5 py-1.5 text-[12.5px] text-slate-600 ring-1 ring-slate-100">{c.human_comment}</p>
+                    ) : (
+                        <p className="mt-2 text-[12px] text-slate-400">Без комментария супервайзера.</p>
+                    )
+                ) : (
+                    <p className="mt-2 text-[12px] text-slate-400">Супервайзер не оценивал этот критерий.</p>
+                )}
+            </div>
+        );
+    }
+
     return (
         <div className={`${iosCard} p-3 ${corrected ? 'ring-2 ring-blue-400/60' : ''}`}>
             <div className="flex items-start justify-between gap-2">
@@ -327,7 +375,7 @@ const CriterionRow = memo(function CriterionRow({ c, decision, onEdit, onRefine,
 
                     <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
                         <div className="flex rounded-xl bg-slate-100 p-0.5" role="group" aria-label={`Решение по критерию «${c.name}»`}>
-                            {HUMAN_OPTS.map((o) => {
+                            {verdictOpts.map((o) => {
                                 const active = chosen === o.v;
                                 return (
                                     <button key={o.v} type="button" onClick={() => pick(o.v)} disabled={rowDisabled} aria-pressed={active}
@@ -389,6 +437,7 @@ const CriterionRow = memo(function CriterionRow({ c, decision, onEdit, onRefine,
 export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInteractionChange }) {
     const [decisions, setDecisions] = useState({});
     const [saving, setSaving] = useState(false);
+    const [panel, setPanel] = useState('ai');
     const audioRef = useRef(null);
 
     const seekAudio = useCallback((startMs) => {
@@ -424,6 +473,11 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
     const hasCriteria = Boolean(call?.criteria?.length);
     const hasTranscript = Boolean(call?.transcript?.length);
     const canSubmit = hasCriteria && hasTranscript;
+    // Есть ли у звонка оценка супервайзера (calls.scores) — иначе панель «Супервайзер» пуста.
+    const hasHumanReview = useMemo(
+        () => call?.has_human_review === true || (call?.criteria || []).some((c) => c.human != null),
+        [call],
+    );
 
     useEffect(() => {
         onInteractionChange?.({ dirty: corrections.length > 0, busy: saving });
@@ -504,18 +558,43 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
             </div>
 
             <div className="flex flex-col">
-                <div className="mb-2 flex items-center justify-between">
-                    <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-                        Оценка по критериям
+                <div className="sticky top-0 z-10 mb-2 rounded-2xl bg-white/95 px-2.5 py-2 ring-1 ring-slate-200/70 backdrop-blur-xl">
+                    <div className="flex items-center justify-between gap-2">
+                        <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                            Оценка по критериям
+                        </div>
+                        {pendingCount > 0 && <IosBadge tone="amber"><Server size={11} />{pendingCount} ждут API</IosBadge>}
                     </div>
-                    {pendingCount > 0 && <IosBadge tone="amber"><Server size={11} />{pendingCount} ждут API</IosBadge>}
+                    <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                        <div className="flex rounded-xl bg-slate-100 p-0.5" role="group" aria-label="Чья оценка показана по критериям">
+                            {PANELS.map((p) => {
+                                const active = panel === p.key;
+                                const svDisabled = p.key === 'sv' && !hasHumanReview;
+                                return (
+                                    <button key={p.key} type="button" onClick={() => setPanel(p.key)}
+                                            disabled={svDisabled} aria-pressed={active}
+                                            title={svDisabled ? 'Супервайзер ещё не оценил этот звонок' : undefined}
+                                            className={`flex min-h-8 items-center gap-1 rounded-lg px-2.5 py-1 text-[12px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 disabled:cursor-not-allowed disabled:opacity-50 ${
+                                                active ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
+                                        <p.Icon size={12} strokeWidth={2.5} />{p.label}
+                                    </button>
+                                );
+                            })}
+                        </div>
+                        {panel === 'sv' && call.human_score != null && (
+                            <IosBadge tone={scoreTone(call.human_score)}><User2 size={11} />Итог супервайзера: {Math.round(call.human_score)}</IosBadge>
+                        )}
+                        {!hasHumanReview && (
+                            <span className="text-[11px] text-slate-400">оценки супервайзера пока нет</span>
+                        )}
+                    </div>
                 </div>
 
                 <div className="space-y-2.5">
                     {hasCriteria ? call.criteria.map((c) => (
-                            <CriterionRow key={c.idx} c={c} decision={decisions[c.idx]}
+                            <CriterionRow key={`${panel}:${c.idx}`} c={c} decision={decisions[c.idx]}
                                           onEdit={onEdit} onRefine={onRefine} disabled={saving}
-                                          transcriptText={transcriptText} />
+                                          transcriptText={transcriptText} panel={panel} />
                         )) : (
                             <div className={`${iosCard} flex min-h-32 items-center justify-center px-5 text-center text-[13px] text-rose-600`} role="alert">
                                 Критерии оценки не загрузились. Подтверждение этой карточки недоступно.
@@ -523,6 +602,7 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
                         )}
                 </div>
 
+                {panel === 'ai' && (
                 <div className="sticky bottom-0 mt-3 flex flex-col gap-2 rounded-2xl bg-white/95 px-3 py-2.5 ring-1 ring-slate-200/70 backdrop-blur-xl sm:flex-row sm:items-center sm:justify-between" aria-live="polite">
                     <span className={`text-[12.5px] ${incompleteCorrections.length ? 'font-medium text-amber-700' : 'text-slate-500'}`}>
                         {!canSubmit
@@ -545,6 +625,7 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
                         </button>
                     </div>
                 </div>
+                )}
             </div>
         </div>
     );

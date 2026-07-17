@@ -27,7 +27,7 @@ _OUTPUT_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "idx": {"type": "integer"},
-                    "verdict": {"type": "string", "enum": ["Correct", "Incorrect", "N/A"]},
+                    "verdict": {"type": "string", "enum": ["Correct", "Incorrect", "N/A", "Deficiency"]},
                     "confidence": {"type": "number"},
                     "evidence_quote": {"type": "string"},
                     "comment": {"type": "string"},
@@ -47,7 +47,13 @@ def _criteria_block(criteria: list[dict]) -> str:
     out = []
     for c in criteria:
         crit = " (КРИТИЧЕСКИЙ)" if c.get("is_critical") else ""
-        out.append(f"{c['idx']}. {c['name']}{crit}\n   Требование: {c['description']}")
+        line = f"{c['idx']}. {c['name']}{crit}\n   Требование: {c['description']}"
+        deficiency = c.get("deficiency")
+        if isinstance(deficiency, dict):
+            desc = str(deficiency.get("description") or "").strip()
+            line += ("\n   НЕДОЧЁТ ДОПУСТИМ (вердикт Deficiency): "
+                     f"{desc or 'частичное выполнение требования'}")
+        out.append(line)
     return "\n".join(out)
 
 
@@ -180,10 +186,10 @@ def _claude_eval(transcript, direction, criteria, *, asr_low_spans, use_rag, mod
 
 
 def _needs_escalation(v: dict, crit: dict) -> bool:
-    """На HARD-модель уходит: ЛЮБОЙ вердикт Incorrect (высокая цена ошибки — не штрафуем
-    оператора без второго мнения сильной модели; там же применяются разборы), ИЛИ низкая
-    уверенность модели (порог включительно: ровно 0.6 — тоже сомнение)."""
-    if v.get("verdict") == "Incorrect":
+    """На HARD-модель уходит: ЛЮБОЙ штрафующий вердикт (Incorrect/Deficiency — высокая цена
+    ошибки: не штрафуем оператора без второго мнения сильной модели; там же применяются
+    разборы), ИЛИ низкая уверенность модели (порог включительно: ровно 0.6 — тоже сомнение)."""
+    if v.get("verdict") in ("Incorrect", "Deficiency"):
         return True
     conf = v.get("confidence")
     if conf is not None and conf <= config.ESCALATE_CONF:
@@ -319,8 +325,17 @@ def assemble_results(direction: dict, by_idx: dict, model_by_idx: dict, *,
         if src == cc.TRANSCRIPT:
             v = by_idx.get(c["idx"])
             if v:
-                results.append({**base, "verdict": v.get("verdict", "N/A"), "confidence": v.get("confidence"),
-                                "evidence_quote": v.get("evidence_quote", ""), "comment": v.get("comment", ""),
+                verdict = v.get("verdict", "N/A")
+                comment = v.get("comment", "")
+                # «Недочёт» существует только у критериев с настроенным deficiency в шкале.
+                # Если модель поставила его там, где недочёт не предусмотрен, — это штраф
+                # без частичного зачёта, т.е. Incorrect (иначе скоринг дал бы 0 молча).
+                if verdict == "Deficiency" and not c.get("deficiency"):
+                    verdict = "Incorrect"
+                    note = "(ИИ предложил «Недочёт», но для критерия недочёт не предусмотрен — учтено как ошибка)"
+                    comment = f"{comment} {note}".strip()
+                results.append({**base, "verdict": verdict, "confidence": v.get("confidence"),
+                                "evidence_quote": v.get("evidence_quote", ""), "comment": comment,
                                 "model": model_by_idx.get(c["idx"])})
             else:
                 results.append({**base, "verdict": "Pending", "confidence": None,
