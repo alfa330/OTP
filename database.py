@@ -2071,6 +2071,63 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_chat_metric_surge_windows_month
                 ON chat_metric_surge_windows(month, start_at);
             """)
+            # Wazzup (Верификаторы): сырые сообщения из вебхука messagesAndStatuses.
+            # Ретеншн 45 дней (см. cleanup_wazzup_messages) — таблица не растёт бесконечно.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS wazzup_messages (
+                    message_id TEXT PRIMARY KEY,
+                    channel_id TEXT NOT NULL,
+                    chat_type TEXT,
+                    chat_id TEXT NOT NULL,
+                    dt TIMESTAMPTZ NOT NULL,
+                    is_echo BOOLEAN NOT NULL DEFAULT FALSE,
+                    type TEXT,
+                    text TEXT,
+                    content_uri TEXT,
+                    author_name TEXT,
+                    author_id TEXT,
+                    contact_name TEXT,
+                    contact_phone TEXT,
+                    status TEXT,
+                    sent_from_app BOOLEAN,
+                    is_edited BOOLEAN NOT NULL DEFAULT FALSE,
+                    is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+                    raw JSONB,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_wazzup_messages_chat
+                ON wazzup_messages(channel_id, chat_id, dt);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_wazzup_messages_dt
+                ON wazzup_messages(dt);
+            """)
+            # Сводка по чату для списка «как в мессенджере»: одна строка на
+            # (канал, чат), обновляется при вставке сообщения — список чатов
+            # не сканирует wazzup_messages.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS wazzup_chats (
+                    channel_id TEXT NOT NULL,
+                    chat_id TEXT NOT NULL,
+                    chat_type TEXT,
+                    contact_name TEXT,
+                    contact_phone TEXT,
+                    last_message_at TIMESTAMPTZ,
+                    last_message_text TEXT,
+                    last_message_is_echo BOOLEAN,
+                    messages_count INTEGER NOT NULL DEFAULT 0,
+                    inbound_count INTEGER NOT NULL DEFAULT 0,
+                    outbound_count INTEGER NOT NULL DEFAULT 0,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    PRIMARY KEY (channel_id, chat_id)
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_wazzup_chats_last_message
+                ON wazzup_chats(last_message_at DESC);
+            """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operator_technical_issues (
                     id SERIAL PRIMARY KEY,
@@ -13311,6 +13368,150 @@ class Database:
             'aggregations': aggregations,
             'score_adjustment': score_adjustment,
         }
+
+    # ── Wazzup (Верификаторы): приём вебхуков ────────────────────────────────
+
+    def store_wazzup_messages(self, messages):
+        """Идемпотентный upsert сообщений из вебхука Wazzup (messagesAndStatuses).
+
+        Повторная доставка безопасна (PK message_id); правки/удаления
+        (isEdited/isDeleted) обновляют существующую строку. После вставки
+        обновляет сводки wazzup_chats затронутых чатов. Возвращает число
+        обработанных сообщений."""
+        if not isinstance(messages, list) or not messages:
+            return 0
+        processed = 0
+        affected = {}
+        with self._get_cursor() as cursor:
+            for m in messages:
+                if not isinstance(m, dict):
+                    continue
+                message_id = m.get('messageId')
+                channel_id = m.get('channelId')
+                chat_id = m.get('chatId')
+                dt = m.get('dateTime')
+                if not message_id or not channel_id or chat_id is None or not dt:
+                    continue
+                contact = m.get('contact') if isinstance(m.get('contact'), dict) else {}
+                cursor.execute("""
+                    INSERT INTO wazzup_messages (
+                        message_id, channel_id, chat_type, chat_id, dt, is_echo,
+                        type, text, content_uri, author_name, author_id,
+                        contact_name, contact_phone, status, sent_from_app,
+                        is_edited, is_deleted, raw)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (message_id) DO UPDATE SET
+                        -- событие удаления приходит без текста: сохраняем последний
+                        -- известный текст, факт удаления фиксирует is_deleted
+                        text = COALESCE(EXCLUDED.text, wazzup_messages.text),
+                        content_uri = COALESCE(EXCLUDED.content_uri, wazzup_messages.content_uri),
+                        status = COALESCE(EXCLUDED.status, wazzup_messages.status),
+                        author_name = COALESCE(EXCLUDED.author_name, wazzup_messages.author_name),
+                        author_id = COALESCE(EXCLUDED.author_id, wazzup_messages.author_id),
+                        is_edited = EXCLUDED.is_edited,
+                        is_deleted = EXCLUDED.is_deleted,
+                        raw = EXCLUDED.raw
+                """, (
+                    str(message_id), str(channel_id), m.get('chatType'), str(chat_id),
+                    dt, bool(m.get('isEcho')), m.get('type'), m.get('text'),
+                    m.get('contentUri'), m.get('authorName'),
+                    str(m['authorId']) if m.get('authorId') is not None else None,
+                    contact.get('name'), contact.get('phone'), m.get('status'),
+                    m.get('sentFromApp'), bool(m.get('isEdited')), bool(m.get('isDeleted')),
+                    Json(m),
+                ))
+                processed += 1
+                affected[(str(channel_id), str(chat_id))] = (m.get('chatType'), contact)
+            for (channel_id, chat_id), (chat_type, contact) in affected.items():
+                self._refresh_wazzup_chat_tx(cursor, channel_id, chat_id, chat_type, contact)
+        return processed
+
+    @staticmethod
+    def _refresh_wazzup_chat_tx(cursor, channel_id, chat_id, chat_type=None, contact=None):
+        """Пересчитывает сводку чата из wazzup_messages (в текущей транзакции).
+
+        Счётчики отражают окно ретеншна (старые сообщения удаляются), это
+        осознанно: сводка нужна списку чатов, не вечной статистике."""
+        contact = contact or {}
+        cursor.execute("""
+            INSERT INTO wazzup_chats (
+                channel_id, chat_id, chat_type, contact_name, contact_phone,
+                last_message_at, last_message_text, last_message_is_echo,
+                messages_count, inbound_count, outbound_count, updated_at)
+            SELECT %(channel_id)s, %(chat_id)s, %(chat_type)s,
+                   %(contact_name)s, %(contact_phone)s,
+                   a.last_at, lm.preview, lm.is_echo,
+                   a.total, a.inbound, a.outbound, now()
+            FROM (SELECT COUNT(*) AS total,
+                         COUNT(*) FILTER (WHERE NOT is_echo) AS inbound,
+                         COUNT(*) FILTER (WHERE is_echo) AS outbound,
+                         MAX(dt) AS last_at
+                    FROM wazzup_messages
+                   WHERE channel_id = %(channel_id)s AND chat_id = %(chat_id)s
+                     AND NOT is_deleted) a
+            LEFT JOIN LATERAL (
+                SELECT COALESCE(NULLIF(LEFT(text, 300), ''),
+                                '[' || COALESCE(type, 'message') || ']') AS preview,
+                       is_echo
+                  FROM wazzup_messages
+                 WHERE channel_id = %(channel_id)s AND chat_id = %(chat_id)s
+                   AND NOT is_deleted
+                 ORDER BY dt DESC LIMIT 1) lm ON TRUE
+            WHERE a.total > 0
+            ON CONFLICT (channel_id, chat_id) DO UPDATE SET
+                chat_type = COALESCE(EXCLUDED.chat_type, wazzup_chats.chat_type),
+                contact_name = COALESCE(EXCLUDED.contact_name, wazzup_chats.contact_name),
+                contact_phone = COALESCE(EXCLUDED.contact_phone, wazzup_chats.contact_phone),
+                last_message_at = EXCLUDED.last_message_at,
+                last_message_text = EXCLUDED.last_message_text,
+                last_message_is_echo = EXCLUDED.last_message_is_echo,
+                messages_count = EXCLUDED.messages_count,
+                inbound_count = EXCLUDED.inbound_count,
+                outbound_count = EXCLUDED.outbound_count,
+                updated_at = now()
+        """, {
+            'channel_id': channel_id, 'chat_id': chat_id, 'chat_type': chat_type,
+            'contact_name': contact.get('name'), 'contact_phone': contact.get('phone'),
+        })
+
+    def update_wazzup_statuses(self, statuses):
+        """Обновляет статусы доставки (sent/delivered/read/error) сообщений.
+        Статусы сообщений, которых у нас нет (например, отправленных до
+        включения сбора), молча пропускаются. Возвращает число обновлённых."""
+        if not isinstance(statuses, list) or not statuses:
+            return 0
+        updated = 0
+        with self._get_cursor() as cursor:
+            for s in statuses:
+                if not isinstance(s, dict):
+                    continue
+                message_id = s.get('messageId')
+                status = s.get('status')
+                if not message_id or not status:
+                    continue
+                cursor.execute(
+                    "UPDATE wazzup_messages SET status = %s WHERE message_id = %s",
+                    (str(status), str(message_id)))
+                updated += cursor.rowcount
+        return updated
+
+    def cleanup_wazzup_messages(self, retention_days=45):
+        """Ретеншн Wazzup: удаляет сообщения старше retention_days (~1,5 мес.)
+        и сводки чатов без активности за тот же срок. Диск прода 1 ГБ — история
+        намеренно не хранится дольше; ранние чаты смотрят в самом Wazzup."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM wazzup_messages WHERE dt < now() - make_interval(days => %s)",
+                (int(retention_days),))
+            deleted_messages = cursor.rowcount
+            cursor.execute(
+                "DELETE FROM wazzup_chats WHERE last_message_at < now() - make_interval(days => %s)",
+                (int(retention_days),))
+            deleted_chats = cursor.rowcount
+        if deleted_messages or deleted_chats:
+            logging.info("wazzup retention: удалено %s сообщений, %s чатов",
+                         deleted_messages, deleted_chats)
+        return {'messages': deleted_messages, 'chats': deleted_chats}
 
     def get_daily_hours_for_operator_month(self, operator_id: int, month: str):
         """
