@@ -1,10 +1,12 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { Loader2, AlertCircle, MessageSquare, X, Bot, FileText, Headset, Eye, EyeOff } from 'lucide-react';
+import { Loader2, AlertCircle, MessageSquare, X, Bot, FileText, Headset, Eye, EyeOff, Quote } from 'lucide-react';
 
 /* Просмотр переписки оценённого чата Chat2Desk (снапшот) с подсветкой цитат СВ.
  * Используется в «Мои оценки» чат-менеджера: оценка живёт в журнале (calls),
- * а этот модал показывает сам чат по calls.c2d_snapshot_id + chat_quotes. */
+ * а этот модал показывает сам чат по calls.c2d_snapshot_id + chat_quotes.
+ * При открытии автоматически прокручивается к первой цитате (или к
+ * focusMessageId); клик по цитате внизу ведёт к её сообщению. */
 
 const fmtTime = (iso) => (iso ? new Date(iso).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : '');
 const fmtDay = (iso) => (iso ? new Date(iso).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' }) : '');
@@ -63,10 +65,13 @@ function Media({ msg, light }) {
     return <div className="flex flex-wrap items-center gap-1.5">{pieces}</div>;
 }
 
-export default function ChatSnapshotModal({ open, onClose, apiBaseUrl, withAccessTokenHeader, snapshotId, quotes = [], title = '' }) {
+export default function ChatSnapshotModal({ open, onClose, apiBaseUrl, withAccessTokenHeader, snapshotId, quotes = [], title = '', focusMessageId = null }) {
     const [snapshot, setSnapshot] = useState(null);
     const [error, setError] = useState('');
     const [hideService, setHideService] = useState(false);
+    const [flashId, setFlashId] = useState(null);
+    const threadRef = useRef(null);
+    const flashTimer = useRef(null);
 
     useEffect(() => {
         if (!open || !snapshotId) return;
@@ -76,6 +81,41 @@ export default function ChatSnapshotModal({ open, onClose, apiBaseUrl, withAcces
             .then((r) => setSnapshot(r.data.snapshot))
             .catch((e) => setError(e.response?.data?.error || 'Не удалось загрузить переписку (возможно, удалена по ретеншну)'));
     }, [open, snapshotId, apiBaseUrl, withAccessTokenHeader]);
+
+    // Esc закрывает модал; прокрутка страницы под ним заблокирована.
+    useEffect(() => {
+        if (!open) return;
+        const prevOverflow = document.body.style.overflow;
+        document.body.style.overflow = 'hidden';
+        const onKeyDown = (e) => { if (e.key === 'Escape') onClose?.(); };
+        window.addEventListener('keydown', onKeyDown);
+        return () => {
+            document.body.style.overflow = prevOverflow;
+            window.removeEventListener('keydown', onKeyDown);
+        };
+    }, [open, onClose]);
+
+    const scrollToMessage = (messageId, behavior = 'smooth') => {
+        const host = threadRef.current;
+        if (!host || messageId == null) return;
+        const el = host.querySelector(`[data-mid="${messageId}"]`);
+        if (!el) return;
+        el.scrollIntoView({ behavior, block: 'center' });
+        setFlashId(String(messageId));
+        clearTimeout(flashTimer.current);
+        flashTimer.current = setTimeout(() => setFlashId(null), 1600);
+    };
+
+    // После загрузки переписки — сразу показать нужный фрагмент:
+    // явно запрошенное сообщение (клик по цитате в оценке) или первую цитату.
+    useEffect(() => {
+        if (!open || !snapshot) return;
+        const target = focusMessageId ?? (quotes?.[0]?.messageId ?? null);
+        if (target == null) return;
+        const timer = setTimeout(() => scrollToMessage(target, 'auto'), 120);
+        return () => clearTimeout(timer);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [open, snapshot, focusMessageId]);
 
     const quotesByMessage = useMemo(() => {
         const map = {};
@@ -106,7 +146,7 @@ export default function ChatSnapshotModal({ open, onClose, apiBaseUrl, withAcces
 
     return (
         <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-3" onClick={onClose}>
-            <div className="flex max-h-[88vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl"
+            <div className="flex max-h-[92vh] h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl"
                  onClick={(e) => e.stopPropagation()}>
                 <div className="flex items-center justify-between gap-2 border-b border-slate-100 px-4 py-3">
                     <div className="min-w-0">
@@ -129,7 +169,7 @@ export default function ChatSnapshotModal({ open, onClose, apiBaseUrl, withAcces
                     </div>
                 </div>
 
-                <div className="min-h-0 flex-1 overflow-y-auto bg-[#f2f2f7] py-3">
+                <div ref={threadRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-[#f2f2f7] py-3">
                     {error && (
                         <div className="flex items-center justify-center gap-2 px-6 py-10 text-center text-[13px] text-rose-500">
                             <AlertCircle size={15} className="shrink-0" /> {error}
@@ -160,6 +200,7 @@ export default function ChatSnapshotModal({ open, onClose, apiBaseUrl, withAcces
                         const out = m.type === 'to_client';
                         const auto = m.type === 'autoreply';
                         const hasMedia = Boolean(m.photo || m.video || m.audio || m.pdf || (m.attachments || []).length);
+                        const isFlashing = flashId != null && String(m.id) === flashId;
                         const bubbleClass = out
                             ? 'rounded-br-md bg-blue-500 text-white'
                             : auto
@@ -167,7 +208,9 @@ export default function ChatSnapshotModal({ open, onClose, apiBaseUrl, withAcces
                                 : 'rounded-bl-md bg-white text-slate-900 ring-1 ring-slate-200/60';
                         return (
                             <div key={m.id} className={`flex ${(out || auto) ? 'justify-end' : 'justify-start'} px-4 py-0.5`}>
-                                <div className={`max-w-[78%] rounded-2xl px-3 py-2 text-[13.5px] leading-snug shadow-[0_1px_1px_rgba(15,23,42,0.05)] ${bubbleClass}`}>
+                                <div data-mid={m.id}
+                                     className={`max-w-[78%] rounded-2xl px-3 py-2 text-[13.5px] leading-snug shadow-[0_1px_1px_rgba(15,23,42,0.05)] transition-shadow duration-300 ${bubbleClass} ${
+                                         isFlashing ? 'ring-4 ring-amber-400/80' : ''}`}>
                                     {out && snapshot.operator_name && (
                                         <div className="mb-0.5 flex items-center gap-1 text-[11px] font-semibold text-blue-100">
                                             <Headset size={11} /> {snapshot.operator_name}
@@ -193,13 +236,20 @@ export default function ChatSnapshotModal({ open, onClose, apiBaseUrl, withAcces
                 </div>
 
                 {(quotes || []).length > 0 && (
-                    <div className="max-h-44 space-y-2 overflow-y-auto border-t border-slate-100 bg-white px-4 py-3">
-                        <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Цитаты супервайзера</div>
+                    <div className="max-h-48 space-y-2 overflow-y-auto overscroll-contain border-t border-slate-100 bg-white px-4 py-3">
+                        <div className="flex items-center justify-between">
+                            <span className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                                <Quote size={11} /> Цитаты супервайзера ({quotes.length})
+                            </span>
+                            <span className="text-[11px] text-slate-400">нажмите — покажем в переписке</span>
+                        </div>
                         {quotes.map((q, i) => (
-                            <div key={i} className="rounded-xl border-l-[3px] border-amber-400 bg-amber-50/70 px-3 py-2">
+                            <button key={i} onClick={() => scrollToMessage(q.messageId)}
+                                    title="Показать это место в переписке"
+                                    className="block w-full rounded-xl border-l-[3px] border-amber-400 bg-amber-50/70 px-3 py-2 text-left transition hover:bg-amber-100 active:scale-[0.995]">
                                 <div className="text-[12.5px] italic text-slate-700">«{q.text}»</div>
                                 {q.comment && <div className="mt-1 text-[12px] text-slate-500">{q.comment}</div>}
-                            </div>
+                            </button>
                         ))}
                     </div>
                 )}

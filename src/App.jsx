@@ -46169,6 +46169,69 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             return !(ev?.call?.is_imported === true || ev?.is_imported === true);
                                         });
 
+                                        // Оценка чата Chat2Desk: открыть переписку (опционально сразу на цитате)
+                                        const openEvaluationChat = (ev, quote = null) => setMyEvalChatView({
+                                            snapshotId: ev.c2d_snapshot_id,
+                                            quotes: ev.chat_quotes || [],
+                                            title: `${ev.phone_number || ''} · ${formatDate(ev.appeal_date || ev.created_at)}`,
+                                            focusMessageId: quote?.messageId ?? null,
+                                        });
+
+                                        // Блок «Оценённый чат» в деталях оценки ЧМ: цитаты с комментариями СВ
+                                        // кликабельны (переписка откроется на этом месте). Как и аудио,
+                                        // содержимое чата закрыто до QR-подтверждения доступа.
+                                        const renderChatEvaluationBlock = (ev) => {
+                                            if (!ev.c2d_snapshot_id) return null;
+                                            if (!canAccessSensitiveCallData) {
+                                                return (
+                                                    <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-700 flex items-center gap-2">
+                                                        <FaIcon className="fas fa-shield-alt"></FaIcon>
+                                                        Переписка чата и цитаты откроются после QR-подтверждения доступа
+                                                    </div>
+                                                );
+                                            }
+                                            const quotes = ev.chat_quotes || [];
+                                            return (
+                                                <div className="rounded-lg border border-blue-200 bg-blue-50/60 p-3">
+                                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                                        <h4 className="font-semibold text-gray-900 text-sm flex items-center gap-2">
+                                                            <FaIcon className="fas fa-comments text-blue-600"></FaIcon>
+                                                            Оценённый чат
+                                                            {quotes.length > 0 && (
+                                                                <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-700">
+                                                                    <FaIcon className="fas fa-quote-left"></FaIcon> {quotes.length}
+                                                                </span>
+                                                            )}
+                                                        </h4>
+                                                        <button
+                                                            onClick={(e) => { e.stopPropagation(); openEvaluationChat(ev); }}
+                                                            className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700 transition"
+                                                        >
+                                                            <FaIcon className="fas fa-comments"></FaIcon> Открыть переписку
+                                                        </button>
+                                                    </div>
+                                                    {quotes.length > 0 && (
+                                                        <div className="mt-2 space-y-1.5">
+                                                            {quotes.map((q, qi) => (
+                                                                <button
+                                                                    key={qi}
+                                                                    onClick={(e) => { e.stopPropagation(); openEvaluationChat(ev, q); }}
+                                                                    title="Открыть переписку на этом сообщении"
+                                                                    className="block w-full rounded-lg border border-amber-200 border-l-4 border-l-amber-400 bg-white px-3 py-2 text-left transition hover:bg-amber-50"
+                                                                >
+                                                                    <div className="text-sm italic text-gray-800">«{q.text}»</div>
+                                                                    {q.comment && <div className="mt-1 text-xs text-gray-500">{q.comment}</div>}
+                                                                </button>
+                                                            ))}
+                                                            <div className="text-[11px] text-gray-400">
+                                                                Нажмите на цитату — переписка откроется на выделенном фрагменте
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        };
+
                                         const evaluationCount = evalsForCalc.length;
                                         const averageScore =
                                             evaluationCount > 0
@@ -46551,8 +46614,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 
                                                                 {/* Phone number */}
                                                                 <div className="flex items-center gap-2 mb-2">
-                                                                    <FaIcon className="fas fa-phone text-gray-400 text-xs"></FaIcon>
+                                                                    <FaIcon className={`fas ${ev.c2d_snapshot_id ? 'fa-comments text-blue-400' : 'fa-phone text-gray-400'} text-xs`}></FaIcon>
                                                                     <span className="text-sm font-medium text-gray-800">{ev.phone_number || '-'}</span>
+                                                                    {ev.c2d_snapshot_id && (
+                                                                        <span className="inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-[11px] font-semibold text-blue-700">Чат</span>
+                                                                    )}
                                                                 </div>
                                                                 
                                                                 {/* Dates row */}
@@ -46636,6 +46702,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         )}
                                                                     </div>
 
+                                                                    {renderChatEvaluationBlock(ev)}
+
                                                                     {requestMeta.status !== 'none' && (
                                                                         <div className="rounded-lg border border-slate-200 bg-white p-3">
                                                                             <div className="flex flex-wrap items-center gap-2 mb-2">
@@ -46716,23 +46784,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         </div>
                                                                     </div>
 
-                                                                    {ev.c2d_snapshot_id ? (
-                                                                        <div>
-                                                                            <h4 className="font-semibold text-gray-900 mb-2 text-sm">Переписка чата</h4>
-                                                                            {!canAccessSensitiveCallData ? (
-                                                                                <div className="text-sm text-amber-600 flex items-center gap-2">
-                                                                                    <FaIcon className="fas fa-shield-alt"></FaIcon> Чат скрыт до QR-подтверждения
-                                                                                </div>
-                                                                            ) : (
-                                                                                <button
-                                                                                    onClick={(e) => { e.stopPropagation(); setMyEvalChatView({ snapshotId: ev.c2d_snapshot_id, quotes: ev.chat_quotes || [], title: `${ev.phone_number || ''} · ${formatDate(ev.appeal_date || ev.created_at)}` }); }}
-                                                                                    className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100 transition"
-                                                                                >
-                                                                                    <FaIcon className="fas fa-comments"></FaIcon> Открыть чат с выделенными фрагментами
-                                                                                </button>
-                                                                            )}
-                                                                        </div>
-                                                                    ) : (
+                                                                    {!ev.c2d_snapshot_id && (
                                                                     <div>
                                                                         <h4 className="font-semibold text-gray-900 mb-2 text-sm">Аудио</h4>
                                                                         {!canAccessSensitiveCallData ? (
@@ -46800,7 +46852,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         >
                                                             <td className="px-6 py-4 whitespace-nowrap">{index + 1}</td>
                                                             <td className="px-6 py-4 whitespace-nowrap flex items-center gap-2">
+                                                            {ev.c2d_snapshot_id && <FaIcon className="fas fa-comments text-blue-400 text-xs"></FaIcon>}
                                                             <span>{ev.phone_number || '-'}</span>
+                                                            {ev.c2d_snapshot_id && (
+                                                                <span className="inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-[11px] font-semibold text-blue-700">Чат</span>
+                                                            )}
                                                             {isImported && (
                                                                 <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">Не оценено</span>
                                                             )}
@@ -46867,6 +46923,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     <div className="text-sm text-gray-500">Комментариев нет.</div>
                                                                     )}
                                                                 </div>
+
+                                                                {renderChatEvaluationBlock(ev)}
 
                                                                 {requestMeta.status !== 'none' && (
                                                                     <div className="rounded-lg border border-slate-200 bg-white p-3">
@@ -46970,23 +47028,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     </div>
                                                                 </div>
 
-                                                                {ev.c2d_snapshot_id ? (
-                                                                <div>
-                                                                    <h4 className="font-semibold text-gray-900 mb-2">Переписка чата</h4>
-                                                                    {!canAccessSensitiveCallData ? (
-                                                                    <div className="text-sm text-amber-600 flex items-center gap-2">
-                                                                        <FaIcon className="fas fa-shield-alt"></FaIcon> Чат скрыт до QR-подтверждения
-                                                                    </div>
-                                                                    ) : (
-                                                                    <button
-                                                                        onClick={(e) => { e.stopPropagation(); setMyEvalChatView({ snapshotId: ev.c2d_snapshot_id, quotes: ev.chat_quotes || [], title: `${ev.phone_number || ''} · ${formatDate(ev.appeal_date || ev.created_at)}` }); }}
-                                                                        className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100 transition"
-                                                                    >
-                                                                        <FaIcon className="fas fa-comments"></FaIcon> Открыть чат с выделенными фрагментами
-                                                                    </button>
-                                                                    )}
-                                                                </div>
-                                                                ) : (
+                                                                {!ev.c2d_snapshot_id && (
                                                                 <div>
                                                                     <h4 className="font-semibold text-gray-900 mb-2">Аудио</h4>
                                                                     {!canAccessSensitiveCallData ? (
@@ -47051,6 +47093,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     snapshotId={myEvalChatView.snapshotId}
                                                     quotes={myEvalChatView.quotes}
                                                     title={myEvalChatView.title}
+                                                    focusMessageId={myEvalChatView.focusMessageId ?? null}
                                                 />
                                             </Suspense>
                                         )}
