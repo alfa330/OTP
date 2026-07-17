@@ -797,7 +797,7 @@
         .calibration-general-comments { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; display: flex; flex-direction: column; gap: 6px; }
         .calibration-general-comments-title { font-size: 12px; font-weight: 600; color: var(--text-2); margin-bottom: 2px; }
         .calibration-general-comment-item { display: flex; gap: 6px; font-size: 13px; }
-        .calibration-general-comment-name { font-weight: 600; color: var(--text-1); white-space: nowrap; }
+        .calibration-general-comment-name { font-weight: 600; color: var(--text); white-space: nowrap; }
         .calibration-general-comment-text { color: var(--text-2); }
 
         /* ── Stats bar ── */
@@ -882,6 +882,7 @@
         .badge-green { background: var(--green-light); color: var(--green); }
         .badge-amber { background: var(--amber-light); color: var(--amber); }
         .badge-blue { background: var(--accent-light); color: var(--accent); }
+        .badge-red { background: var(--red-light); color: var(--red); }
         .badge-muted { background: var(--surface-2); color: var(--text-2); }
         .badge-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
         .resolution-badges {
@@ -1327,3 +1328,50 @@
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
         ::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
+
+        /* ── Оценка чатов Chat2Desk (полноэкранное окно) ── */
+        /* Компактные карточки критериев в правой панели: на 14 критериях
+           экономия ~30% высоты против звонковой модалки. */
+        .chat-eval-panel .crit-card { margin-bottom: 6px; }
+        .chat-eval-panel .crit-card-header { padding: 6px 10px; gap: 8px; }
+        .chat-eval-panel .crit-card-name { font-size: 12.5px; line-height: 1.3; }
+        .chat-eval-panel .crit-card-body { padding: 0 10px 7px; }
+        .chat-eval-panel .score-toggle { padding: 3px 9px; font-size: 11.5px; }
+        .chat-eval-panel .comment-area .textarea { min-height: 48px; }
+
+        /* Подсветка сообщения при клике по цитате */
+        .chat-msg-flash {
+            box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.55) !important;
+            transition: box-shadow 0.3s ease;
+        }
+
+        /* ── Тосты страницы (журнал живёт в iframe — showToast родителя недоступен) ── */
+        #ce-toast-host {
+            position: fixed;
+            bottom: 22px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 5000;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            align-items: center;
+            pointer-events: none;
+        }
+        .ce-toast {
+            padding: 10px 16px;
+            border-radius: 10px;
+            font-size: 13px;
+            font-weight: 500;
+            color: #fff;
+            background: var(--text);
+            box-shadow: var(--shadow-lg);
+            opacity: 0;
+            transform: translateY(8px);
+            transition: opacity 0.25s ease, transform 0.25s ease;
+            max-width: 520px;
+            text-align: center;
+        }
+        .ce-toast-in { opacity: 1; transform: translateY(0); }
+        .ce-toast-success { background: var(--green); }
+        .ce-toast-error { background: var(--red); }
