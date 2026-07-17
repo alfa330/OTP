@@ -19,6 +19,7 @@ import MonitoringScaleView from './components/monitoring/MonitoringScaleView';
 import FaIcon from './components/common/FaIcon';
 import AuthEntranceSplash from './components/common/AuthEntranceSplash';
 import OrazAitSplash from './components/common/OrazAitSplash';
+import ScheduleTimelineTooltip from './components/common/ScheduleTimelineTooltip';
 import sidebarLogo from './components/common/sidebar-logo.svg';
 import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId } from './utils/roles';
@@ -21560,6 +21561,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 };
                 return (
                     <div className="px-0 sm:px-4 py-2 min-h-screen bg-slate-50">
+                        <ScheduleTimelineTooltip />
                         <div className="flex flex-col lg:flex-row items-stretch lg:items-start gap-3 lg:gap-4 mb-0">
                             <div className="lg:hidden mx-3 sm:mx-0">
                                 <button
@@ -21890,7 +21892,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                     width: `${((p.end - p.start) / minutesInDay) * 100}%`,
                                                                                     background: visual.barGradient
                                                                                 }}
-                                                                                title={srcSeg ? shiftTimeTextRu(srcSeg) : `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`}
+                                                                                data-schedule-tooltip={srcSeg ? shiftTimeTextRu(srcSeg) : `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`}
                                                                             >
                                                                                 {(getBreakPartsForPart(myTimelineOperator, p, dayCard.date) || []).map((b, bi) => (
                                                                                     <div
@@ -21900,7 +21902,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                             left: `${((b.start - p.start) / Math.max(1, p.end - p.start)) * 100}%`,
                                                                                             width: `${((b.end - b.start) / Math.max(1, p.end - p.start)) * 100}%`
                                                                                         }}
-                                                                                        title={getBreakTimelineTitle(b)}
+                                                                                        data-schedule-tooltip={getBreakTimelineTitle(b)}
                                                                                     />
                                                                                 ))}
                                                                             </div>
@@ -21911,7 +21913,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             key={`my-tech-issue-${seg.id}`}
                                                                             className="absolute bottom-0.5 z-20 h-1 rounded-full bg-violet-500"
                                                                             style={{ left: `${computeLeftPercent(seg.startMin)}%`, width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%` }}
-                                                                            title={seg.title}
+                                                                            data-schedule-tooltip={seg.title}
                                                                         />
                                                                     ))}
                                                                     {myCurrentDayOfflineActivities.map(seg => (
@@ -21919,7 +21921,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             key={`my-offline-activity-${seg.id}`}
                                                                             className="absolute bottom-2 z-20 h-1 rounded-full bg-emerald-500"
                                                                             style={{ left: `${computeLeftPercent(seg.startMin)}%`, width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%` }}
-                                                                            title={seg.title}
+                                                                            data-schedule-tooltip={seg.title}
                                                                         />
                                                                     ))}
                                                                     {myTimelineParts.length === 0 && (
@@ -22333,7 +22335,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             left: `${(seg.start / 1440) * 100}%`,
                                                                             width: `${((seg.end - seg.start) / 1440) * 100}%`
                                                                         }}
-                                                                        title={`Выбрать целиком: ${seg.fullLabel || seg.label} · ${formatHoursRu(seg.fullMinutes ?? seg.minutes)}`}
+                                                                        data-schedule-tooltip={`Выбрать целиком: ${seg.fullLabel || seg.label} · ${formatHoursRu(seg.fullMinutes ?? seg.minutes)}`}
+                                                                        aria-label={`Выбрать целиком: ${seg.fullLabel || seg.label} · ${formatHoursRu(seg.fullMinutes ?? seg.minutes)}`}
                                                                     >
                                                                         <span className="truncate text-[10.5px] font-semibold tabular-nums text-white">{seg.fullLabel || seg.label} · {formatHoursRu(seg.fullMinutes ?? seg.minutes)}</span>
                                                                     </button>
@@ -22346,7 +22349,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             left: `${(item.start / 1440) * 100}%`,
                                                                             width: `${((item.end - item.start) / 1440) * 100}%`
                                                                         }}
-                                                                        title={`Добавлено в список: ${item.label}`}
+                                                                        data-schedule-tooltip={`Добавлено в список: ${item.label}`}
                                                                     ></div>
                                                                 ))}
                                                                 {swapDayTimeline.selectedInterval && (
@@ -22356,7 +22359,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             left: `${(swapDayTimeline.selectedInterval.start / 1440) * 100}%`,
                                                                             width: `${((swapDayTimeline.selectedInterval.end - swapDayTimeline.selectedInterval.start) / 1440) * 100}%`
                                                                         }}
-                                                                        title={`Выбранный интервал: ${swapForm.startTime} — ${swapForm.endTime}`}
+                                                                        data-schedule-tooltip={`Выбранный интервал: ${swapForm.startTime} — ${swapForm.endTime}`}
                                                                     ></div>
                                                                 )}
                                                             </div>
@@ -22406,7 +22409,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                     left: `${(seg.start / 1440) * 100}%`,
                                                                                     width: `${((seg.end - seg.start) / 1440) * 100}%`
                                                                                 }}
-                                                                                title={`${seg.label} · ${formatHoursRu(seg.fullMinutes ?? seg.minutes)}`}
+                                                                                data-schedule-tooltip={`${seg.label} · ${formatHoursRu(seg.fullMinutes ?? seg.minutes)}`}
                                                                             >
                                                                                 <span className="truncate text-[10.5px] font-semibold tabular-nums text-white">{seg.fullLabel || seg.label} · {formatHoursRu(seg.fullMinutes ?? seg.minutes)}</span>
                                                                             </div>
@@ -22419,7 +22422,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                     left: `${(item.start / 1440) * 100}%`,
                                                                                     width: `${((item.end - item.start) / 1440) * 100}%`
                                                                                 }}
-                                                                                title={`Добавлено в список: ${item.label}`}
+                                                                                data-schedule-tooltip={`Добавлено в список: ${item.label}`}
                                                                             ></div>
                                                                         ))}
                                                                         {swapDayTimeline.selectedIntervalNextDay && (
@@ -22429,7 +22432,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                     left: `${(swapDayTimeline.selectedIntervalNextDay.start / 1440) * 100}%`,
                                                                                     width: `${((swapDayTimeline.selectedIntervalNextDay.end - swapDayTimeline.selectedIntervalNextDay.start) / 1440) * 100}%`
                                                                                 }}
-                                                                                title={`Выбранный интервал: ${swapForm.startTime} — ${swapForm.endTime}`}
+                                                                                data-schedule-tooltip={`Выбранный интервал: ${swapForm.startTime} — ${swapForm.endTime}`}
                                                                             ></div>
                                                                         )}
                                                                     </div>
@@ -23243,6 +23246,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             return (
                 <div className="px-4 py-2 min-h-screen bg-slate-50">
+                <ScheduleTimelineTooltip />
                 <div className="flex items-start gap-4 mb-0 h-[calc(100vh-1rem)]">
                     <div className="flex flex-col gap-3">
                     <SmallCalendar currentDate={currentDate} onChange={(d) => setCurrentDate(d)} viewMode={viewMode} />
@@ -24504,7 +24508,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 {(viewMode === 'week' || viewMode === 'month') && pendingFlagLabels.length > 0 && (
                                                     <span
                                                         className="absolute top-0.5 left-0.5 z-50 flex items-center gap-0.5"
-                                                        title={`Ожидает подтверждения: ${pendingFlagLabels.join(', ')}`}
+                                                        data-schedule-tooltip={`Ожидает подтверждения: ${pendingFlagLabels.join(', ')}`}
                                                     >
                                                         <span className="px-1 py-[1px] rounded-md bg-amber-500 text-white text-[8px] font-bold uppercase tracking-wide shadow-sm shadow-amber-500/35 leading-none">
                                                             Ожидает
@@ -24515,7 +24519,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </span>
                                                 )}
                                                 {showTopRightIndicators && (
-                                                    <span className="absolute top-0.5 right-0.5 z-50 flex items-center gap-1" title={topRightIndicatorsTitle || 'Есть недочеты/переработка'}>
+                                                    <span className="absolute top-0.5 right-0.5 z-50 flex items-center gap-1" data-schedule-tooltip={topRightIndicatorsTitle || 'Есть недочеты/переработка'}>
                                                         {showCarryDayOffBadge && (
                                                             <span className="px-1 py-[1px] rounded bg-sky-100 text-sky-700 text-[8px] font-semibold border border-sky-300 leading-none">
                                                                 Вых
@@ -24524,7 +24528,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         {hasOfflineMarker && (
                                                             <span
                                                                 className="w-2.5 h-2.5 rounded-full bg-emerald-400 border border-white ring-1 ring-emerald-500/60 shadow-sm shadow-emerald-400/45"
-                                                                title={`Офлайн-активность: ${offlineActivityBarsForCell.length}`}
+                                                                data-schedule-tooltip={`Офлайн-активность: ${offlineActivityBarsForCell.length}`}
                                                             />
                                                         )}
                                                         {hasOvertimeMarker && (
@@ -24550,7 +24554,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     onMouseDown={plannerStatusSpecialDayViewEnabled ? undefined : (e) => handleOfflineTimelineRightMouseDown(e, op.id, d)}
                                                     onMouseMove={plannerStatusSpecialDayViewEnabled ? undefined : (e) => handleOfflineTimelineRightMouseMove(e, op.id, d)}
                                                     onMouseUp={plannerStatusSpecialDayViewEnabled ? undefined : (e) => handleOfflineTimelineRightMouseUp(e, op.id, d)}
-                                                    title={hasPendingOfflineRangeForCell
+                                                    data-schedule-tooltip={hasPendingOfflineRangeForCell
                                                         ? `Офлайн: ${minutesToTime(pendingOfflineRangeStartMinForCell)} — ${minutesToTime(pendingOfflineRangeEndMinForCell)}. Отпустите ПКМ, чтобы подтвердить.`
                                                         : pendingOfflineStartMinForCell != null
                                                             ? `Офлайн: начало ${minutesToTime(pendingOfflineStartMinForCell)}. Протяните правой кнопкой или выберите конец вторым ПКМ.`
@@ -24558,7 +24562,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 >
                                                     {cellScheduleStatus ? (
                                                         <div className="flex items-center justify-center h-full px-1">
-                                                            <div className={`text-sm font-semibold truncate ${cellScheduleStatusTone?.text || 'text-slate-700'}`} title={cellScheduleStatus.label || 'Статус'}>
+                                                            <div className={`text-sm font-semibold truncate ${cellScheduleStatusTone?.text || 'text-slate-700'}`} data-schedule-tooltip={cellScheduleStatus.label || 'Статус'}>
                                                                 {cellScheduleStatus.label || 'Статус'}
                                                             </div>
                                                         </div>
@@ -24575,7 +24579,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 e.stopPropagation();
                                                                 openEditModal(op.id, d);
                                                             }}
-                                                            title="Двойной клик — открыть редактор смены"
+                                                            data-schedule-tooltip="Двойной клик — открыть редактор смены"
                                                         >
                                                             <div className="flex items-center gap-1 h-[34px]">
                                                                 <div className="w-6 shrink-0 text-[9px] uppercase text-slate-500 font-semibold text-right">гр</div>
@@ -24598,7 +24602,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                     left: `${specialTimelineLeftPercent(pendingOfflineRangeStartMinForCell)}%`,
                                                                                     width: `${((pendingOfflineRangeEndMinForCell - pendingOfflineRangeStartMinForCell) / specialTimelineMinutes) * 100}%`
                                                                                 }}
-                                                                                title={`Черновик активности: ${minutesToTime(pendingOfflineRangeStartMinForCell)} — ${minutesToTime(pendingOfflineRangeEndMinForCell)}`}
+                                                                                data-schedule-tooltip={`Черновик активности: ${minutesToTime(pendingOfflineRangeStartMinForCell)} — ${minutesToTime(pendingOfflineRangeEndMinForCell)}`}
                                                                             />
                                                                         )}
                                                                         {pendingOfflineStartMinForCell != null && !hasPendingOfflineRangeForCell && (
@@ -24615,7 +24619,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                     left: `${specialTimelineLeftPercent(seg.startMin)}%`,
                                                                                     width: `${((seg.endMin - seg.startMin) / specialTimelineMinutes) * 100}%`
                                                                                 }}
-                                                                                title={seg.title}
+                                                                                data-schedule-tooltip={seg.title}
                                                                             />
                                                                         ))}
                                                                         {technicalIssueBarsForCell.map((seg, segIdx) => (
@@ -24626,7 +24630,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                     left: `${specialTimelineLeftPercent(seg.startMin)}%`,
                                                                                     width: `${((seg.endMin - seg.startMin) / specialTimelineMinutes) * 100}%`
                                                                                 }}
-                                                                                title={seg.title}
+                                                                                data-schedule-tooltip={seg.title}
                                                                             />
                                                                         ))}
                                                                         {trainingBarsForCell.map((seg, segIdx) => (
@@ -24637,7 +24641,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                     left: `${specialTimelineLeftPercent(seg.startMin)}%`,
                                                                                     width: `${((seg.endMin - seg.startMin) / specialTimelineMinutes) * 100}%`
                                                                                 }}
-                                                                                title={seg.title}
+                                                                                data-schedule-tooltip={seg.title}
                                                                             />
                                                                         ))}
                                                                         {specialTimelineShiftParts.map((p, idx) => {
@@ -24653,7 +24657,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                         background: visual.barGradient,
                                                                                         color: "white",
                                                                                     }}
-                                                                                    title={(() => {
+                                                                                    data-schedule-tooltip={(() => {
                                                                                         if (!srcSeg) return `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
                                                                                         const srcStart = timeToMinutes(srcSeg.start);
                                                                                         const srcEnd = timeToMinutes(srcSeg.end);
@@ -24665,7 +24669,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                     <button
                                                                                         onClick={(e) => { e.stopPropagation(); openEditModal(op.id, p.sourceDate, p.sourceIndex); }}
                                                                                         className="text-[10px] px-1 py-0.5 mr-1 rounded bg-white/20 ml-auto"
-                                                                                        title="Редактировать смену"
+                                                                                        data-schedule-tooltip="Редактировать смену"
+                                                                                        aria-label="Редактировать смену"
                                                                                     >
                                                                                         <FaIcon className="fas fa-pen"></FaIcon>
                                                                                     </button>
@@ -24679,7 +24684,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                             width: `${((b.end - b.start) / specialTimelineMinutes) * 100}%`,
                                                                                             background: "linear-gradient(90deg,#fde68a,#f59e0b)"
                                                                                         }}
-                                                                                        title={getBreakTimelineTitle(b)}
+                                                                                        data-schedule-tooltip={getBreakTimelineTitle(b)}
                                                                                     />
                                                                                 ))}
                                                                             </React.Fragment>
@@ -24693,7 +24698,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                     left: `${specialTimelineLeftPercent(late.start)}%`,
                                                                                     width: `${((late.end - late.start) / specialTimelineMinutes) * 100}%`
                                                                                 }}
-                                                                                title={`Опоздание • ${minutesToTime(late.start)} — ${minutesToTime(late.end)} • ${Math.round(late.lateMin)} мин`}
+                                                                                data-schedule-tooltip={`Опоздание • ${minutesToTime(late.start)} — ${minutesToTime(late.end)} • ${Math.round(late.lateMin)} мин`}
                                                                             />
                                                                         ))}
                                                                         {specialStatusOvertimeBars.map((ot) => (
@@ -24704,7 +24709,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                     left: `${specialTimelineLeftPercent(ot.start)}%`,
                                                                                     width: `${((ot.end - ot.start) / specialTimelineMinutes) * 100}%`
                                                                                 }}
-                                                                                title={`Переработка • ${minutesToTime(ot.start)} — ${minutesToTime(ot.end)} • ${Math.round(ot.min)} мин`}
+                                                                                data-schedule-tooltip={`Переработка • ${minutesToTime(ot.start)} — ${minutesToTime(ot.end)} • ${Math.round(ot.min)} мин`}
                                                                             />
                                                                         ))}
                                                                         {specialTimelineShiftParts.length === 0 && (
@@ -24735,7 +24740,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                     left: `${specialTimelineLeftPercent(pendingOfflineRangeStartMinForCell)}%`,
                                                                                     width: `${((pendingOfflineRangeEndMinForCell - pendingOfflineRangeStartMinForCell) / specialTimelineMinutes) * 100}%`
                                                                                 }}
-                                                                                title={`Черновик активности: ${minutesToTime(pendingOfflineRangeStartMinForCell)} — ${minutesToTime(pendingOfflineRangeEndMinForCell)}`}
+                                                                                data-schedule-tooltip={`Черновик активности: ${minutesToTime(pendingOfflineRangeStartMinForCell)} — ${minutesToTime(pendingOfflineRangeEndMinForCell)}`}
                                                                             />
                                                                         )}
                                                                         {pendingOfflineStartMinForCell != null && !hasPendingOfflineRangeForCell && (
@@ -24755,7 +24760,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                         width: `${((seg.endMin - seg.startMin) / specialTimelineMinutes) * 100}%`,
                                                                                         background: tone.bar
                                                                                     }}
-                                                                                    title={`${seg.stateName} • ${minutesToTime(seg.startMin)} — ${minutesToTime(seg.endMin)}`}
+                                                                                    data-schedule-tooltip={`${seg.stateName} • ${minutesToTime(seg.startMin)} — ${minutesToTime(seg.endMin)}`}
                                                                                 />
                                                                             );
                                                                         })}
@@ -24804,7 +24809,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     left: `${computeLeftPercent(pendingOfflineRangeStartMinForCell)}%`,
                                                                     width: `${((pendingOfflineRangeEndMinForCell - pendingOfflineRangeStartMinForCell) / minutesInDay) * 100}%`
                                                                 }}
-                                                                title={`Черновик активности: ${minutesToTime(pendingOfflineRangeStartMinForCell)} — ${minutesToTime(pendingOfflineRangeEndMinForCell)}`}
+                                                                data-schedule-tooltip={`Черновик активности: ${minutesToTime(pendingOfflineRangeStartMinForCell)} — ${minutesToTime(pendingOfflineRangeEndMinForCell)}`}
                                                             />
                                                         )}
                                                         {pendingOfflineStartMinForCell != null && !hasPendingOfflineRangeForCell && (
@@ -24821,7 +24826,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     left: `${computeLeftPercent(seg.startMin)}%`,
                                                                     width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`
                                                                 }}
-                                                                title={seg.title}
+                                                                data-schedule-tooltip={seg.title}
                                                             />
                                                         ))}
                                                         {technicalIssueBarsForCell.map((seg, segIdx) => (
@@ -24832,7 +24837,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     left: `${computeLeftPercent(seg.startMin)}%`,
                                                                     width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`
                                                                 }}
-                                                                title={seg.title}
+                                                                data-schedule-tooltip={seg.title}
                                                             />
                                                         ))}
                                                         {parts.map((p, idx) => {
@@ -24847,6 +24852,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             background: visual.barGradient,
                                                             color: "white",
                                                             }}
+                                                            data-schedule-tooltip={(() => {
+                                                                if (!srcSeg) return `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
+                                                                const srcStart = timeToMinutes(srcSeg.start);
+                                                                const srcEnd = timeToMinutes(srcSeg.end);
+                                                                const isCrossing = srcEnd <= srcStart;
+                                                                if (isCrossing && srcSeg.end !== '00:00') return `${srcSeg.start} — ${srcSeg.end} (+1)`;
+                                                                return `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
+                                                            })()}
                                                         >
                                                             <div className="px-1 truncate text-[11px] border border-white/30 bg-white/10 rounded-sm z-40" style={{ paddingLeft: 6, paddingRight: 6 }}>{(() => {
                                                                 if (!srcSeg) return `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
@@ -24872,7 +24885,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 color: "#5c3a00",
                                                                 fontWeight: 600,
                                                                 }}
-                                                                title={getBreakTimelineTitle(b)}
+                                                                data-schedule-tooltip={getBreakTimelineTitle(b)}
                                                             />
                                                             ))}
                                                         </div>
@@ -27672,7 +27685,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     width: `${((p.end - p.start) / minutesInDay) * 100}%`,
                                                                     background: visual.barGradient
                                                                 }}
-                                                                title={`${isPractice ? PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL : (isNight ? 'Ночная смена' : 'Смена')} • ${minutesToTime(p.start)} — ${minutesToTime(p.end)}`}
+                                                                data-schedule-tooltip={`${isPractice ? PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL : (isNight ? 'Ночная смена' : 'Смена')} • ${minutesToTime(p.start)} — ${minutesToTime(p.end)}`}
                                                             />
                                                         );
                                                     })}
@@ -27684,7 +27697,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 left: `${computeLeftPercent(b.start)}%`,
                                                                 width: `${((b.end - b.start) / minutesInDay) * 100}%`
                                                             }}
-                                                            title={getBreakTimelineTitle(b)}
+                                                            data-schedule-tooltip={getBreakTimelineTitle(b)}
                                                         />
                                                     ))}
                                                     {previewOfflineBars.map((seg, segIdx) => (
@@ -27695,7 +27708,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 left: `${computeLeftPercent(seg.startMin)}%`,
                                                                 width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`
                                                             }}
-                                                            title={seg.title}
+                                                            data-schedule-tooltip={seg.title}
                                                         />
                                                     ))}
                                                     {previewLateBars.map((late, lateIdx) => (
@@ -27706,7 +27719,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 left: `${computeLeftPercent(late.start)}%`,
                                                                 width: `${((late.end - late.start) / minutesInDay) * 100}%`
                                                             }}
-                                                            title={`Опоздание • ${minutesToTime(late.start)} — ${minutesToTime(late.end)} • ${Math.round(late.lateMin)} мин`}
+                                                            data-schedule-tooltip={`Опоздание • ${minutesToTime(late.start)} — ${minutesToTime(late.end)} • ${Math.round(late.lateMin)} мин`}
                                                         />
                                                     ))}
                                                     {previewOvertimeBars.map((ot) => (
@@ -27717,7 +27730,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 left: `${computeLeftPercent(ot.start)}%`,
                                                                 width: `${((ot.end - ot.start) / minutesInDay) * 100}%`
                                                             }}
-                                                            title={`Переработка • ${minutesToTime(ot.start)} — ${minutesToTime(ot.end)} • ${Math.round(ot.min)} мин`}
+                                                            data-schedule-tooltip={`Переработка • ${minutesToTime(ot.start)} — ${minutesToTime(ot.end)} • ${Math.round(ot.min)} мин`}
                                                         />
                                                     ))}
                                                     {previewParts.length === 0 && (
@@ -27749,7 +27762,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     background: tone.bar
                                                                 }}
                                                                 onClick={() => focusEditJournalStatusSegment(seg, segIdx)}
-                                                                title={`${seg.stateName} • ${minutesToTime(seg.startMin)} — ${minutesToTime(seg.endMin)}`}
+                                                                data-schedule-tooltip={`${seg.stateName} • ${minutesToTime(seg.startMin)} — ${minutesToTime(seg.endMin)}`}
                                                             />
                                                         );
                                                     })}
@@ -29621,7 +29634,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                                                 width: `${((p.end - p.start) / minutesInDay) * 100}%`,
                                                                                                                 background: visual.barGradient
                                                                                                             }}
-                                                                                                            title={`${isPractice ? PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL : (isNight ? 'Ночная смена' : 'Смена')} • ${minutesToTime(p.start)} — ${minutesToTime(p.end)}`}
+                                                                                                            data-schedule-tooltip={`${isPractice ? PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL : (isNight ? 'Ночная смена' : 'Смена')} • ${minutesToTime(p.start)} — ${minutesToTime(p.end)}`}
                                                                                                         />
                                                                                                     );
                                                                                                 })}
@@ -29633,7 +29646,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                                             left: `${computeLeftPercent(b.start)}%`,
                                                                                                             width: `${((b.end - b.start) / minutesInDay) * 100}%`
                                                                                                         }}
-                                                                                                        title={getBreakTimelineTitle(b)}
+                                                                                                        data-schedule-tooltip={getBreakTimelineTitle(b)}
                                                                                                     />
                                                                                                 ))}
                                                                                                 {shiftLateBars.map((late, lateIdx) => (
@@ -29644,7 +29657,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                                             left: `${computeLeftPercent(late.start)}%`,
                                                                                                             width: `${((late.end - late.start) / minutesInDay) * 100}%`
                                                                                                         }}
-                                                                                                        title={`Опоздание • ${minutesToTime(late.start)} — ${minutesToTime(late.end)} • ${Math.round(late.lateMin)} мин`}
+                                                                                                        data-schedule-tooltip={`Опоздание • ${minutesToTime(late.start)} — ${minutesToTime(late.end)} • ${Math.round(late.lateMin)} мин`}
                                                                                                     />
                                                                                                 ))}
                                                                                                 {shiftOvertimeBars.map((ot) => (
@@ -29655,7 +29668,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                                             left: `${computeLeftPercent(ot.start)}%`,
                                                                                                             width: `${((ot.end - ot.start) / minutesInDay) * 100}%`
                                                                                                         }}
-                                                                                                        title={`Переработка • ${minutesToTime(ot.start)} — ${minutesToTime(ot.end)} • ${Math.round(ot.min)} мин`}
+                                                                                                        data-schedule-tooltip={`Переработка • ${minutesToTime(ot.start)} — ${minutesToTime(ot.end)} • ${Math.round(ot.min)} мин`}
                                                                                                     />
                                                                                                 ))}
                                                                                             </div>
@@ -29677,7 +29690,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                                                 width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`,
                                                                                                                 background: tone.bar
                                                                                                             }}
-                                                                                                            title={`${seg.stateName} • ${minutesToTime(seg.startMin)} — ${minutesToTime(seg.endMin)} • ${plannerStatusFormatDuration(seg.durationSec)}`}
+                                                                                                            data-schedule-tooltip={`${seg.stateName} • ${minutesToTime(seg.startMin)} — ${minutesToTime(seg.endMin)} • ${plannerStatusFormatDuration(seg.durationSec)}`}
                                                                                                         />
                                                                                                     );
                                                                                                 })}
