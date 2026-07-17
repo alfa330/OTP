@@ -4737,6 +4737,454 @@ def api_wazzup_authors_map():
         return jsonify({"error": str(error)}), 500
 
 
+# ── Chat2Desk: оценка чатов чат-менеджеров супервайзером (раздел c2d_eval) ────
+# Выбор случайной заявки — из c2d_requests (заполняется ежедневным синком метрик,
+# API-квота не тратится); при открытии чата переписка тянется из API один раз и
+# снапшотится в БД (ретеншн 180 дней). Медиа Chat2Desk лежат на публичных ссылках.
+
+CHAT2DESK_STORAGE_BASE_URL = (os.getenv('CHAT2DESK_STORAGE_BASE_URL')
+                              or 'https://storage-02.chat2desk.kz').strip().rstrip('/')
+C2D_EVAL_MAX_MESSAGE_PAGES = 10  # потолок 2000 сообщений на диалог
+
+
+def _c2d_eval_guard(allow_operator=False):
+    """(requester_id, requester, err). Доступ: админы, СВ, главы отделов; с
+    allow_operator=True — также операторы/стажёры (ЧМ смотрят только свои
+    оценки — скоуп режется в обработчиках)."""
+    requester_id, requester, auth_error = _get_authenticated_requester()
+    if auth_error:
+        message, status_code = auth_error
+        return None, None, (jsonify({"error": message}), status_code)
+    role = _normalize_user_role(requester[3])
+    if _is_admin_role(role) or _is_supervisor_role(role) or _headed_department_id(requester_id) is not None:
+        return requester_id, requester, None
+    if allow_operator and role in ('operator', 'trainee'):
+        return requester_id, requester, None
+    return requester_id, requester, (jsonify({"error": "forbidden"}), 403)
+
+
+def _c2d_eval_scope_department(requester_id, role):
+    """None — без ограничений (глобальный админ); иначе id отдела, данными
+    которого ограничен запрашивающий (как в low_rating_reviews)."""
+    if _is_global_admin_requester(role, requester_id):
+        return None
+    return _department_scope_id_for_requester(requester_id)
+
+
+def _c2d_api_get(path, params=None):
+    """GET к Chat2Desk API с внятными ошибками квоты/авторизации."""
+    authorization = _chat2desk_authorization_header()
+    if not authorization:
+        raise RuntimeError("CHAT2DESK_API_TOKEN не задан")
+    response = requests.get(
+        f"{_chat2desk_api_base_url()}{path}",
+        headers={'Authorization': authorization, 'Accept': 'application/json'},
+        params=params or {},
+        timeout=30)
+    if response.status_code == 429:
+        raise RuntimeError("Chat2Desk: превышен лимит запросов API — попробуйте позже")
+    if response.status_code >= 400:
+        try:
+            payload = response.json() or {}
+            detail = str(payload.get('message') or payload.get('errors')
+                         or payload.get('error') or '')[:200]
+        except Exception:
+            detail = str(response.text or '')[:200]
+        raise RuntimeError(f"Chat2Desk API HTTP {response.status_code}: {detail}")
+    return response.json() or {}
+
+
+def _c2d_parse_api_datetime(value, target_tz):
+    """Время API Chat2Desk ('2026-07-17T10:45:31 UTC') -> naive Asia/Almaty."""
+    if isinstance(value, str):
+        value = value.strip().replace(' UTC', '+00:00')
+    return _chat2desk_parse_datetime(value, target_tz=target_tz)
+
+
+def _c2d_media_url(value):
+    """photo приходит относительным путём ('companies/...'), attachments — полным URL."""
+    text = str(value or '').strip()
+    if not text:
+        return None
+    if text.startswith('http://') or text.startswith('https://'):
+        return text
+    return f"{CHAT2DESK_STORAGE_BASE_URL}/{text.lstrip('/')}"
+
+
+def _c2d_normalize_message(msg, target_tz):
+    created = _c2d_parse_api_datetime(msg.get('created'), target_tz)
+    attachments = [
+        {'name': att.get('name'), 'link': _c2d_media_url(att.get('link'))}
+        for att in (msg.get('attachments') or [])
+        if isinstance(att, dict) and att.get('link')
+    ]
+    return {
+        'id': msg.get('id'),
+        'type': str(msg.get('type') or '').strip(),
+        'text': msg.get('text') or '',
+        'created': created.isoformat() if created else None,
+        'photo': _c2d_media_url(msg.get('photo')),
+        'video': _c2d_media_url(msg.get('video')),
+        'audio': _c2d_media_url(msg.get('audio')),
+        'pdf': _c2d_media_url(msg.get('pdf')),
+        'attachments': attachments,
+        'status': msg.get('status'),
+        'requestId': msg.get('request_id'),
+    }
+
+
+def _c2d_fetch_request_messages(request_id):
+    """Переписка заявки: /v1/requests/{id} -> dialog_id -> /v1/messages?dialog_id.
+    Фильтр по request_id — на нашей стороне (параметр request_id API игнорирует),
+    так остаётся именно «оцениваемая часть» диалога."""
+    request_id = int(request_id)
+    payload = _c2d_api_get(f"/v1/requests/{request_id}")
+    info = payload.get('data') if isinstance(payload.get('data'), dict) else payload
+    dialog_id = (info or {}).get('dialog_id')
+    if not dialog_id:
+        raise RuntimeError("Chat2Desk не вернул dialog_id для заявки")
+    target_tz = _chat2desk_sync_timezone()
+    raw_messages, offset = [], 0
+    for _page in range(C2D_EVAL_MAX_MESSAGE_PAGES):
+        page = _c2d_api_get('/v1/messages', params={
+            'dialog_id': int(dialog_id), 'limit': 200, 'offset': offset})
+        rows = page.get('data') or []
+        if not rows:
+            break
+        raw_messages.extend(rows)
+        offset += len(rows)
+        if len(rows) < 200:
+            break
+        total = (page.get('meta') or {}).get('total')
+        if total is not None and offset >= int(total):
+            break
+    picked = [
+        _c2d_normalize_message(m, target_tz)
+        for m in raw_messages
+        if isinstance(m, dict) and str(m.get('request_id') or '') == str(request_id)
+    ]
+    picked.sort(key=lambda m: (m.get('created') or '', m.get('id') or 0))
+    return int(dialog_id), picked
+
+
+def _c2d_eval_normalize_quotes(quotes, messages):
+    """Валидация цитат: текст обязан дословно (с точностью до пробелов)
+    присутствовать в сообщении, на которое ссылается. Возвращает (list, error)."""
+    def squash(text):
+        return ' '.join(str(text or '').split()).lower()
+
+    by_id = {str(m.get('id')): squash(m.get('text')) for m in (messages or [])}
+    normalized = []
+    for quote in (quotes or []):
+        if not isinstance(quote, dict):
+            continue
+        text = str(quote.get('text') or '').strip()
+        if not text:
+            continue
+        message_id = quote.get('messageId')
+        message_text = by_id.get(str(message_id))
+        if message_text is None:
+            return None, f"Сообщение цитаты не найдено в снапшоте (id {message_id})"
+        if squash(text) not in message_text:
+            return None, "Цитата не совпадает с текстом сообщения — выделите фрагмент заново"
+        normalized.append({
+            'messageId': message_id,
+            'text': text[:2000],
+            'comment': str(quote.get('comment') or '').strip()[:2000] or None,
+        })
+    return normalized, None
+
+
+def _c2d_eval_normalize_criteria(criteria):
+    """Критерии: [{key, label, score 1..5}]; итог — среднее. (list, score, error)."""
+    normalized, scores = [], []
+    for item in (criteria or []):
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get('key') or '').strip()[:64]
+        label = str(item.get('label') or '').strip()[:200]
+        score = item.get('score')
+        if score in (None, ''):
+            continue
+        try:
+            score = float(score)
+        except (TypeError, ValueError):
+            return None, None, "Оценка критерия должна быть числом"
+        if not (1 <= score <= 5):
+            return None, None, "Оценка критерия должна быть от 1 до 5"
+        normalized.append({'key': key, 'label': label, 'score': score})
+        scores.append(score)
+    if not scores:
+        return None, None, "Заполните хотя бы один критерий"
+    return normalized, round(sum(scores) / len(scores), 2), None
+
+
+@app.route('/api/c2d_eval/options', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_c2d_eval_options():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, requester, err = _c2d_eval_guard()
+    if err:
+        return err
+    try:
+        scope_dept = _c2d_eval_scope_department(requester_id, _normalize_user_role(requester[3]))
+        options = db.c2d_filter_options(
+            date_from=(request.args.get('date_from') or '').strip() or None,
+            date_to=(request.args.get('date_to') or '').strip() or None,
+            department_id=scope_dept)
+        return jsonify({"status": "success", **options}), 200
+    except Exception as error:
+        logging.exception("c2d eval options failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/c2d_eval/pick', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_c2d_eval_pick():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, requester, err = _c2d_eval_guard()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+
+    def as_int(key):
+        value = data.get(key)
+        if value in (None, ''):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    try:
+        scope_dept = _c2d_eval_scope_department(requester_id, _normalize_user_role(requester[3]))
+        row, candidates = db.pick_c2d_request(
+            date_from=(data.get('date_from') or '').strip() or None,
+            date_to=(data.get('date_to') or '').strip() or None,
+            operator_id=as_int('operator_id'),
+            channel_id=as_int('channel_id'),
+            transport=(data.get('transport') or '').strip() or None,
+            min_messages=as_int('min_messages'),
+            max_messages=as_int('max_messages'),
+            rating_filter=(data.get('rating_filter') or '').strip() or None,
+            department_id=scope_dept,
+            exclude=(data.get('exclude') or 'mine').strip(),
+            evaluator_id=requester_id)
+        if not row:
+            return jsonify({
+                "status": "empty",
+                "message": "По заданным фильтрам заявок не нашлось — ослабьте условия",
+                "candidates": 0
+            }), 200
+
+        snapshot = db.get_c2d_snapshot(request_id=row['request_id'])
+        if snapshot is None:
+            dialog_id, messages = _c2d_fetch_request_messages(row['request_id'])
+            snapshot_id = db.save_c2d_snapshot(
+                row['request_id'], dialog_id, messages,
+                request_row=row, created_by=requester_id)
+            snapshot = db.get_c2d_snapshot(snapshot_id=snapshot_id)
+        mine = db.list_c2d_evaluations(
+            request_id=row['request_id'], evaluator_id=requester_id, per_page=1)
+        my_evaluation = (mine.get('items') or [None])[0] if mine.get('items') else None
+        return jsonify({
+            "status": "success",
+            "request": row,
+            "snapshot": snapshot,
+            "candidates": candidates,
+            "myEvaluation": my_evaluation,
+        }), 200
+    except RuntimeError as error:
+        logging.warning("c2d eval pick: %s", error)
+        return jsonify({"error": str(error)}), 502
+    except Exception as error:
+        logging.exception("c2d eval pick failed")
+        return jsonify({"error": str(error)}), 500
+
+
+def _c2d_snapshot_access_error(snapshot, requester_id, requester):
+    """403, если снапшот вне зоны видимости запрашивающего."""
+    role = _normalize_user_role(requester[3])
+    if role in ('operator', 'trainee') and not (
+            _is_admin_role(role) or _is_supervisor_role(role)
+            or _headed_department_id(requester_id) is not None):
+        if int(snapshot.get('operator_id') or 0) != int(requester_id):
+            return jsonify({"error": "forbidden"}), 403
+        return None
+    scope_dept = _c2d_eval_scope_department(requester_id, role)
+    if scope_dept is not None:
+        snap_dept = snapshot.get('operator_department_id')
+        if snap_dept is not None and int(snap_dept) != int(scope_dept):
+            return jsonify({"error": "forbidden"}), 403
+    return None
+
+
+@app.route('/api/c2d_eval/snapshots/<int:snapshot_id>', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_c2d_eval_snapshot(snapshot_id):
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, requester, err = _c2d_eval_guard(allow_operator=True)
+    if err:
+        return err
+    try:
+        snapshot = db.get_c2d_snapshot(snapshot_id=snapshot_id)
+        if not snapshot:
+            return jsonify({"error": "Снапшот не найден (возможно, удалён по ретеншну)"}), 404
+        access_error = _c2d_snapshot_access_error(snapshot, requester_id, requester)
+        if access_error:
+            return access_error
+        evaluations = db.list_c2d_evaluations(
+            request_id=snapshot['request_id'], per_page=50)
+        return jsonify({"status": "success", "snapshot": snapshot,
+                        "evaluations": evaluations.get('items') or []}), 200
+    except Exception as error:
+        logging.exception("c2d eval snapshot failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/c2d_eval/snapshots/<int:snapshot_id>/evaluation', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_c2d_eval_save_evaluation(snapshot_id):
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, requester, err = _c2d_eval_guard()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    try:
+        snapshot = db.get_c2d_snapshot(snapshot_id=snapshot_id)
+        if not snapshot:
+            return jsonify({"error": "Снапшот не найден"}), 404
+        access_error = _c2d_snapshot_access_error(snapshot, requester_id, requester)
+        if access_error:
+            return access_error
+
+        criteria, score, criteria_error = _c2d_eval_normalize_criteria(data.get('criteria'))
+        if criteria_error:
+            return jsonify({"error": criteria_error}), 400
+        quotes, quotes_error = _c2d_eval_normalize_quotes(
+            data.get('quotes'), snapshot.get('messages'))
+        if quotes_error:
+            return jsonify({"error": quotes_error}), 400
+        comment = str(data.get('comment') or '').strip()[:4000] or None
+
+        eval_id = db.upsert_c2d_evaluation(
+            snapshot_id=snapshot['id'],
+            request_id=snapshot['request_id'],
+            day=snapshot.get('day'),
+            operator_id=snapshot.get('operator_id'),
+            operator_name=snapshot.get('operator_name'),
+            evaluator_id=requester_id,
+            evaluator_name=str(requester[2] or '').strip() or None,
+            score=score,
+            criteria=criteria,
+            comment=comment,
+            quotes=quotes)
+        return jsonify({"status": "success",
+                        "evaluation": db.get_c2d_evaluation(eval_id)}), 200
+    except Exception as error:
+        logging.exception("c2d eval save failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/c2d_eval/evaluations', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_c2d_eval_evaluations():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, requester, err = _c2d_eval_guard(allow_operator=True)
+    if err:
+        return err
+    try:
+        role = _normalize_user_role(requester[3])
+        is_manager = (_is_admin_role(role) or _is_supervisor_role(role)
+                      or _headed_department_id(requester_id) is not None)
+        operator_id = (request.args.get('operator_id') or '').strip() or None
+        evaluator_id = (request.args.get('evaluator_id') or '').strip() or None
+        department_id = None
+        if is_manager:
+            department_id = _c2d_eval_scope_department(requester_id, role)
+        else:
+            operator_id = requester_id  # ЧМ видит только свои оценки
+            evaluator_id = None
+        result = db.list_c2d_evaluations(
+            date_from=(request.args.get('date_from') or '').strip() or None,
+            date_to=(request.args.get('date_to') or '').strip() or None,
+            operator_id=int(operator_id) if operator_id else None,
+            evaluator_id=int(evaluator_id) if evaluator_id else None,
+            department_id=department_id,
+            page=request.args.get('page') or 1,
+            per_page=request.args.get('per_page') or 20)
+        return jsonify({"status": "success", **result}), 200
+    except Exception as error:
+        logging.exception("c2d eval list failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/c2d_eval/evaluations/<int:eval_id>', methods=['GET', 'DELETE', 'OPTIONS'])
+@require_api_key
+def api_c2d_eval_evaluation(eval_id):
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, requester, err = _c2d_eval_guard(allow_operator=True)
+    if err:
+        return err
+    try:
+        evaluation = db.get_c2d_evaluation(eval_id)
+        if not evaluation:
+            return jsonify({"error": "Оценка не найдена"}), 404
+        role = _normalize_user_role(requester[3])
+        is_manager = (_is_admin_role(role) or _is_supervisor_role(role)
+                      or _headed_department_id(requester_id) is not None)
+
+        if request.method == 'DELETE':
+            can_delete = _is_global_admin_requester(role, requester_id) or \
+                int(evaluation.get('evaluator_id') or 0) == int(requester_id)
+            if not can_delete:
+                return jsonify({"error": "forbidden"}), 403
+            db.delete_c2d_evaluation(eval_id)
+            return jsonify({"status": "success"}), 200
+
+        if not is_manager:
+            if int(evaluation.get('operator_id') or 0) != int(requester_id):
+                return jsonify({"error": "forbidden"}), 403
+        else:
+            scope_dept = _c2d_eval_scope_department(requester_id, role)
+            if scope_dept is not None:
+                eval_dept = evaluation.get('operator_department_id')
+                if eval_dept is not None and int(eval_dept) != int(scope_dept):
+                    return jsonify({"error": "forbidden"}), 403
+        snapshot = None
+        if evaluation.get('snapshot_id'):
+            snapshot = db.get_c2d_snapshot(snapshot_id=evaluation['snapshot_id'])
+        return jsonify({"status": "success", "evaluation": evaluation,
+                        "snapshot": snapshot}), 200
+    except Exception as error:
+        logging.exception("c2d eval get/delete failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/c2d_eval/my_summary', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_c2d_eval_my_summary():
+    """Число оценок текущего пользователя как ЧМ — гейт пункта меню в кабинете."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, _, auth_error = _get_authenticated_requester()
+    if auth_error:
+        message, status_code = auth_error
+        return jsonify({"error": message}), status_code
+    try:
+        return jsonify({"status": "success",
+                        "count": db.count_c2d_evaluations_for_operator(requester_id)}), 200
+    except Exception as error:
+        logging.exception("c2d eval my_summary failed")
+        return jsonify({"error": str(error)}), 500
+
+
 @app.route('/api/resource_fte/overview', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_resource_fte_overview():
@@ -23838,7 +24286,7 @@ def _chat2desk_build_daily_metrics(day_str, operator_lookup, operator_token_inde
     request_stats_rows = _chat2desk_statistics_get(CHAT2DESK_STATISTICS_REPORT_REQUEST_STATS, day_str)
     rating_rows = _chat2desk_statistics_get(CHAT2DESK_STATISTICS_REPORT_RATING, day_str)
     operator_stats_rows = _chat2desk_statistics_get(CHAT2DESK_STATISTICS_REPORT_OPERATOR_STATS, day_str)
-    return _chat2desk_build_metrics_from_statistics_rows(
+    report = _chat2desk_build_metrics_from_statistics_rows(
         day_str,
         None,
         rating_rows,
@@ -23849,6 +24297,59 @@ def _chat2desk_build_daily_metrics(day_str, operator_lookup, operator_token_inde
         preview_limit=STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT,
         request_stats_rows=request_stats_rows
     )
+    # Те же строки идут в c2d_requests (раздел «Оценка чатов ЧМ») — без
+    # дополнительных запросов к API.
+    report['request_stats_rows'] = request_stats_rows
+    return report
+
+
+def _chat2desk_build_request_rows(day_str, request_stats_rows, operator_lookup, operator_token_index):
+    """Нормализует строки request_stats для db.save_c2d_requests: числа/даты/оператор.
+    Строки без request_id пропускаются; без сматченного оператора — сохраняются
+    (operator_id NULL), в выборку случайного чата они не попадают."""
+    target_tz = _chat2desk_sync_timezone()
+
+    def as_int(value):
+        parsed = _chat_metrics_parse_number(value)
+        return int(parsed) if parsed is not None else None
+
+    rows = []
+    for row in (request_stats_rows or []):
+        if not isinstance(row, dict):
+            continue
+        request_id = as_int(row.get('request_id'))
+        if not request_id:
+            continue
+        start_dt = _chat2desk_parse_datetime(row.get('request_start'), target_tz=target_tz)
+        end_dt = _chat2desk_parse_datetime(row.get('request_end'), target_tz=target_tz)
+        raw_name = _chat2desk_row_first(row, 'operator_name', 'operator', 'name')
+        op_id = None
+        if raw_name:
+            op_id, _ = _chat_report_resolve_operator(raw_name, operator_lookup, operator_token_index)
+        rating = _chat_metrics_parse_number(row.get('rating_scale_score'))
+        rows.append({
+            'request_id': request_id,
+            'day': (start_dt.date() if start_dt else _chat_metrics_parse_date(day_str)),
+            'request_start': start_dt,
+            'request_end': end_dt,
+            'request_time': as_int(row.get('request_time')),
+            'reaction_time': as_int(row.get('reaction_time')),
+            'request_type': str(row.get('request_type') or '').strip() or None,
+            'transport': str(row.get('transport') or '').strip() or None,
+            'channel_id': as_int(row.get('channel_id')),
+            'channel_name': str(row.get('channel_name') or '').strip() or None,
+            'client_id': as_int(row.get('client_id')),
+            'client_name': str(row.get('client_name') or '').strip() or None,
+            'client_phone': str(row.get('phone') or '').strip() or None,
+            'c2d_operator_id': as_int(row.get('operator_id')),
+            'c2d_operator_name': str(raw_name or '').strip() or None,
+            'operator_id': int(op_id) if op_id is not None else None,
+            'incoming_messages': as_int(row.get('incoming_messages')),
+            'outgoing_messages': as_int(row.get('outgoing_messages')),
+            'rating_score': float(rating) if rating is not None else None,
+            'rating_text': str(row.get('rating_text') or '').strip() or None,
+        })
+    return rows
 
 
 def _chat2desk_build_status_import_from_operator_events(day_str, event_rows, operator_lookup, preview_limit=None):
@@ -23958,6 +24459,20 @@ def sync_chat2desk_daily_metrics(day=None, date_from=None, date_to=None, trigger
                         imported_by=imported_by,
                         source_batch_id=(save_summary or {}).get('batch_id')
                     )
+                # Заявки — в c2d_requests для раздела «Оценка чатов ЧМ» (упавшее
+                # сохранение не валит синк метрик).
+                c2d_requests_saved = 0
+                try:
+                    c2d_requests_saved = db.save_c2d_requests(
+                        _chat2desk_build_request_rows(
+                            day_str,
+                            report.get('request_stats_rows'),
+                            operator_lookup,
+                            operator_token_index
+                        )
+                    )
+                except Exception:
+                    logging.exception("c2d requests save failed for %s", day_str)
                 day_results.append({
                     'day': day_str,
                     'status': 'success',
@@ -23966,6 +24481,7 @@ def sync_chat2desk_daily_metrics(day=None, date_from=None, date_to=None, trigger
                     'processed': int((save_summary or {}).get('processed') or 0),
                     'low_rating_count': int(report.get('low_rating_count') or 0),
                     'low_rating_saved': int((low_rating_summary or {}).get('processed') or 0),
+                    'c2d_requests_saved': int(c2d_requests_saved or 0),
                     'unmatched_count': int(report.get('unmatched_count') or 0),
                     'excluded_surge_rows': int(report.get('excluded_surge_rows') or 0),
                     'update_fields': update_fields,
@@ -39929,6 +40445,15 @@ async def run_oktell_resource_sync_async(triggered_by='scheduler'):
     )
 
 
+async def run_c2d_eval_retention_async():
+    # Ретеншн раздела «Оценка чатов ЧМ»: заявки 45 дней, снапшоты 180 дней.
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(executor_pool, db.cleanup_c2d_eval_data)
+    except Exception:
+        logging.exception("c2d eval retention failed")
+
+
 async def run_wazzup_retention_async():
     # Ежедневный ретеншн переписки Wazzup (см. db.cleanup_wazzup_messages).
     loop = asyncio.get_event_loop()
@@ -40140,6 +40665,17 @@ if __name__ == '__main__':
         run_wazzup_retention_async,
         CronTrigger(hour=3, minute=30, timezone=ZoneInfo('Asia/Almaty')),
         id='wazzup_retention_daily',
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # Ретеншн раздела «Оценка чатов ЧМ» (Chat2Desk): заявки 45 дней,
+    # снапшоты переписки 180 дней; сами оценки не удаляются.
+    scheduler.add_job(
+        run_c2d_eval_retention_async,
+        CronTrigger(hour=3, minute=40, timezone=ZoneInfo('Asia/Almaty')),
+        id='c2d_eval_retention_daily',
         misfire_grace_time=3600,
         max_instances=1,
         coalesce=True

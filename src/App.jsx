@@ -123,6 +123,7 @@ const FourYouView = lazyWithRetry(() => import('./components/four_you/lenta'));
 const EventsView = lazyWithRetry(() => import('./components/events/EventsView'));
 const CallQaView = lazyWithRetry(() => import('./components/call_qa/CallQaView'));
 const WazzupChatsView = lazyWithRetry(() => import('./components/wazzup/WazzupChatsView'));
+const C2dEvalView = lazyWithRetry(() => import('./components/c2d_eval/C2dEvalView'));
 
 
 if (typeof window !== 'undefined') {
@@ -32891,10 +32892,28 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessLmsSection = canAccessLmsSectionForUser(user);
             const canAccessResourceFteSection = canAccessResourceFteSectionForUser(user);
             const canAccessAiQaSection = canAccessAiQaForUser(user);
+            // Оценка чатов ЧМ (Chat2Desk): оценивают админы/СВ/главы отделов;
+            // ЧМ (роль operator) видит раздел, только если у него есть оценки.
+            const canEvaluateC2dChats = Boolean(user)
+                && (isAdminLikeRole || isSupervisorRole(currentUserRole) || isDepartmentHeadUser)
+                && departmentAllowsView(user, 'c2d_eval');
+            const [c2dEvalMyCount, setC2dEvalMyCount] = useState(0);
+            const canAccessC2dEvalSection = canEvaluateC2dChats || c2dEvalMyCount > 0;
             const canAccessFourYouSection = canAccessFourYouForUser(user);
             const canManageFourYouSection = canManageFourYouForUser(user);
             const canAccessDevLetterSection = canAccessDevLetterForUser(user);
             const canChangeAccountAvatar = isAdminLikeRole || isDepartmentManager;
+            useEffect(() => {
+                // Пункт «Оценки чатов» у оператора появляется, только если его чаты оценивали.
+                if (!user?.id || canEvaluateC2dChats || !['operator', 'trainee'].includes(currentUserRole)) {
+                    setC2dEvalMyCount(0);
+                    return;
+                }
+                axios.get(`${API_BASE_URL}/api/c2d_eval/my_summary`, { headers: withAccessTokenHeader() })
+                    .then((r) => setC2dEvalMyCount(Number(r.data?.count) || 0))
+                    .catch(() => setC2dEvalMyCount(0));
+                // eslint-disable-next-line react-hooks/exhaustive-deps
+            }, [user?.id]);
             const [isAuthInitializing, setIsAuthInitializing] = useState(true);
             const [showAuthEntranceSplash, setShowAuthEntranceSplash] = useState(false);
             const [showOrazAitSplash, setShowOrazAitSplash] = useState(false);
@@ -36246,7 +36265,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     else if (isPlainTrainer) setView('surveys');
                     else setView('hours');
                 }
-            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessFourYouSection]);
+                // c2d_eval: операторов не редиректим — их доступ (наличие оценок)
+                // подтягивается асинхронно, компонент сам покажет пустое состояние.
+                if (view === 'c2d_eval' && !canEvaluateC2dChats
+                        && !['operator', 'trainee'].includes(normalizeRole(user?.role))) {
+                    if (isAdminLikeRole) setView('sv_list');
+                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
+                    else if (isSupervisorRole(user?.role)) setView('operators');
+                    else if (isPlainTrainer) setView('surveys');
+                    else setView('hours');
+                }
+            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessFourYouSection, canEvaluateC2dChats]);
 
             useEffect(() => {
                 // Only mirror `view` into the URL after authentication has
@@ -41643,6 +41672,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </button>
                                                 </li>
                                             )}
+                                            {canEvaluateC2dChats && (
+                                                <li>
+                                                    <button
+                                                        onClick={(e) => handleSidebarViewNavigation(e, 'c2d_eval')}
+                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'c2d_eval' ? 'bg-blue-700' : ''}`}
+                                                    >
+                                                        <FaIcon className="fas fa-comment-dots"></FaIcon> <span className="sidebar-text">Оценка чатов ЧМ</span>
+                                                    </button>
+                                                </li>
+                                            )}
 
                                             {renderSidebarDividerInner()}
 
@@ -41856,6 +41895,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </button>
                                             </li>
                                             )}
+                                            {canEvaluateC2dChats && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'c2d_eval')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'c2d_eval' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-comment-dots"></FaIcon> <span className="sidebar-text">Оценка чатов ЧМ</span>
+                                                </button>
+                                            </li>
+                                            )}
                                             {!departmentRestrictsViews(user) && renderSidebarDividerInner()}
                                             {departmentAllowsView(user, 'work_schedules') && (
                                             <li>
@@ -42012,6 +42061,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'evaluation')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'evaluation' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-chart-bar"></FaIcon> <span className="sidebar-text">Мои оценки</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {c2dEvalMyCount > 0 && (
+                                            <li>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'c2d_eval')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'c2d_eval' ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-comment-dots"></FaIcon> <span className="sidebar-text">Оценки чатов</span>
                                                 </button>
                                             </li>
                                             )}
@@ -42565,6 +42621,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     showToast={showToast}
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
+                                />
+                            </Suspense>
+                        )}
+                        {view === "c2d_eval" && (canAccessC2dEvalSection || ['operator', 'trainee'].includes(currentUserRole)) && (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка оценки чатов…</div>}>
+                                <C2dEvalView
+                                    user={user}
+                                    showToast={showToast}
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    canEvaluate={canEvaluateC2dChats}
                                 />
                             </Suspense>
                         )}
