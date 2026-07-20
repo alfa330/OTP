@@ -4793,6 +4793,53 @@ def api_wazzup_authors_map():
         return jsonify({"error": str(error)}), 500
 
 
+def _wazzup_analytics_date(value):
+    """'YYYY-MM-DD' или None; всё остальное — ошибка (в SQL идёт как ::date)."""
+    value = (value or '').strip()
+    if not value:
+        return None
+    datetime.strptime(value, '%Y-%m-%d')  # ValueError → 400 выше
+    return value
+
+
+@app.route('/api/wazzup/analytics', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_wazzup_analytics():
+    """Показатели менеджеров Wazzup за период: диалоги, сообщения, время ответа."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    _, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        date_from = _wazzup_analytics_date(request.args.get('from'))
+        date_to = _wazzup_analytics_date(request.args.get('to'))
+    except ValueError:
+        return jsonify({"error": "from/to must be YYYY-MM-DD"}), 400
+    try:
+        result = db.wazzup_operator_analytics(date_from=date_from, date_to=date_to)
+        items = [{'key': r['key'], 'userId': r['user_id'],
+                  'name': r['user_name'] or r['author_name'] or r['author_id'],
+                  'authorName': r['author_name'], 'authorId': r['author_id'],
+                  'linked': r['user_id'] is not None, 'isVerifier': r['is_verifier'],
+                  'dialogs': r['dialogs_count'], 'messages': r['messages_count'],
+                  'answeredChats': r['answered_chats'],
+                  'avgResponseSecs': r['avg_response_secs'],
+                  'medianResponseSecs': r['median_response_secs'],
+                  'lastMessageAt': r['last_message_at'].isoformat() if r['last_message_at'] else None}
+                 for r in result['items']]
+        s = result['summary']
+        return jsonify({"status": "success", "items": items,
+                        "summary": {'chats': s['chats'], 'messages': s['messages'],
+                                    'answeredChats': s['answered_chats'],
+                                    'avgResponseSecs': s['avg_response_secs'],
+                                    'medianResponseSecs': s['median_response_secs']},
+                        "from": date_from, "to": date_to}), 200
+    except Exception as error:
+        logging.exception("wazzup analytics failed")
+        return jsonify({"error": str(error)}), 500
+
+
 # ── Wazzup: эпизоды (единица ИИ-оценки) ──────────────────────────────────────
 WAZZUP_EPISODE_GAP_HOURS = float(os.getenv('WAZZUP_EPISODE_GAP_HOURS', '6'))
 

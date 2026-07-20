@@ -13739,6 +13739,119 @@ class Database:
             return [{'id': r[0], 'name': r[1], 'direction_id': r[2], 'direction_name': r[3]}
                     for r in cursor.fetchall()]
 
+    # Общий «скелет» аналитики: окно сообщений → человеческие исходящие →
+    # первый ответ на чат. Используется и построчным, и итоговым запросом,
+    # чтобы обе цифры считались по одному и тому же определению.
+    _WAZZUP_ANALYTICS_CTE = """
+        WITH msgs AS (
+            SELECT m.channel_id, m.chat_id, m.dt, m.is_echo,
+                   m.author_id, m.author_name,
+                   map.user_id, COALESCE(map.is_bot, FALSE) AS is_bot
+              FROM wazzup_messages m
+              LEFT JOIN wazzup_operator_map map ON map.author_id = m.author_id
+             WHERE {window}
+        ),
+        agent_msgs AS (
+            -- исходящие живого менеджера; grp = оператор (если привязан), иначе автор,
+            -- NULL — сообщение, которое некому засчитать (но «первым ответом» быть может)
+            SELECT channel_id, chat_id, dt, author_id, author_name, user_id,
+                   COALESCE('u:' || user_id::text, 'a:' || author_id) AS grp
+              FROM msgs
+             WHERE is_echo AND NOT is_bot
+        ),
+        first_client AS (
+            SELECT channel_id, chat_id, MIN(dt) AS at
+              FROM msgs WHERE NOT is_echo
+             GROUP BY channel_id, chat_id
+        ),
+        first_reply AS (
+            -- одно значение на чат: кто ответил клиенту первым, тому и время
+            SELECT DISTINCT ON (a.channel_id, a.chat_id)
+                   a.grp, EXTRACT(EPOCH FROM (a.dt - c.at)) AS secs
+              FROM agent_msgs a
+              JOIN first_client c
+                ON c.channel_id = a.channel_id AND c.chat_id = a.chat_id
+             WHERE a.dt > c.at
+             ORDER BY a.channel_id, a.chat_id, a.dt
+        )
+    """
+
+    def wazzup_operator_analytics(self, date_from=None, date_to=None):
+        """Аналитика по менеджерам Wazzup за период (границы — даты Алматы).
+
+        • Диалоги — чаты (не эпизоды), где у менеджера есть хотя бы одно сообщение.
+        • Сообщения — его исходящие.
+        • Время ответа — на каждый чат одно значение: первое сообщение менеджера
+          после первого сообщения клиента минус время того сообщения клиента.
+          Засчитывается ответившему первым, поэтому сумма «первых ответов» по
+          строкам ≤ числа диалогов, а сумма диалогов ≥ числа чатов (в одном чате
+          могут писать несколько менеджеров).
+
+        Строки группируются по привязанному оператору (несколько author_id одного
+        человека сливаются в одну строку), непривязанные — по автору. Боты вне выборки.
+        """
+        window, params = ["TRUE"], []
+        if date_from:
+            window.append("m.dt >= (%s::date) AT TIME ZONE 'Asia/Almaty'")
+            params.append(date_from)
+        if date_to:
+            window.append("m.dt < (%s::date + 1) AT TIME ZONE 'Asia/Almaty'")
+            params.append(date_to)
+        cte = self._WAZZUP_ANALYTICS_CTE.format(window=' AND '.join(window))
+        with self._get_cursor() as cursor:
+            cursor.execute(cte + """
+                , totals AS (
+                    SELECT grp,
+                           MAX(user_id) AS user_id,
+                           (array_agg(author_name ORDER BY dt DESC))[1] AS author_name,
+                           (array_agg(author_id ORDER BY dt DESC))[1] AS author_id,
+                           COUNT(*) AS messages_count,
+                           COUNT(DISTINCT (channel_id, chat_id)) AS dialogs_count,
+                           MAX(dt) AS last_message_at
+                      FROM agent_msgs WHERE grp IS NOT NULL GROUP BY grp
+                ),
+                resp AS (
+                    SELECT grp, COUNT(*) AS answered,
+                           AVG(secs) AS avg_secs,
+                           percentile_cont(0.5) WITHIN GROUP (ORDER BY secs) AS median_secs
+                      FROM first_reply WHERE grp IS NOT NULL GROUP BY grp
+                )
+                SELECT t.grp, t.user_id, u.name, t.author_name, t.author_id,
+                       t.messages_count, t.dialogs_count, t.last_message_at,
+                       COALESCE(r.answered, 0), r.avg_secs, r.median_secs,
+                       (u.direction_id = 71) AS is_verifier
+                  FROM totals t
+                  LEFT JOIN resp r ON r.grp = t.grp
+                  LEFT JOIN users u ON u.id = t.user_id
+                 ORDER BY t.dialogs_count DESC, t.messages_count DESC
+            """, params)
+            items = [{'key': r[0], 'user_id': r[1], 'user_name': r[2],
+                      'author_name': r[3], 'author_id': r[4],
+                      'messages_count': r[5], 'dialogs_count': r[6],
+                      'last_message_at': r[7], 'answered_chats': r[8],
+                      'avg_response_secs': float(r[9]) if r[9] is not None else None,
+                      'median_response_secs': float(r[10]) if r[10] is not None else None,
+                      'is_verifier': bool(r[11])}
+                     for r in cursor.fetchall()]
+            # Итог считается по сырым значениям, а не усреднением средних
+            cursor.execute(cte + """
+                SELECT (SELECT COUNT(DISTINCT (channel_id, chat_id))
+                          FROM agent_msgs WHERE grp IS NOT NULL),
+                       (SELECT COUNT(*) FROM agent_msgs WHERE grp IS NOT NULL),
+                       (SELECT AVG(secs) FROM first_reply WHERE grp IS NOT NULL),
+                       (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY secs)
+                          FROM first_reply WHERE grp IS NOT NULL),
+                       (SELECT COUNT(*) FROM first_reply WHERE grp IS NOT NULL)
+            """, params)
+            s = cursor.fetchone()
+        return {
+            'items': items,
+            'summary': {'chats': s[0] or 0, 'messages': s[1] or 0,
+                        'avg_response_secs': float(s[2]) if s[2] is not None else None,
+                        'median_response_secs': float(s[3]) if s[3] is not None else None,
+                        'answered_chats': s[4] or 0},
+        }
+
     # ── Wazzup: сборка эпизодов (единица ИИ-оценки) ──────────────────────────
 
     WAZZUP_EPISODE_LOCK_KEY = 915904140
