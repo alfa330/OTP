@@ -1159,6 +1159,14 @@
         }
         .chat-dock-header { padding: 12px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-shrink: 0; }
         .chat-dock-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 10px 12px; gap: 8px; overflow: hidden; }
+        /* Кнопка-цитата в доке: <button> не наследует шрифт от body (в проекте нет
+           глобального сброса button{font:inherit}), поэтому задаём его явно; hover —
+           аффорданс кликабельности, как у операторской цитаты. */
+        .chat-quote-btn { font: inherit; text-align: left; width: 100%; cursor: pointer;
+            background: var(--surface-2); border: 1px solid var(--border);
+            border-left: 3px solid #f59e0b; border-radius: var(--radius); padding: 8px 10px;
+            transition: background 0.15s ease; }
+        .chat-quote-btn:hover { background: var(--amber-light, #fef3c7); }
         body.chat-dock-open { padding-right: var(--chat-dock-w); }
         @media (max-width: 1024px) {
             :root { --chat-dock-w: 100vw; }
