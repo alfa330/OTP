@@ -3,7 +3,7 @@ import axios from 'axios';
 import {
     Search, RefreshCw, Loader2, AlertCircle, MessageSquare, ExternalLink,
     ChevronUp, Headset, FileText, MapPin, Ban, Users, Bot, Wand2, Link2,
-    Contact2, PhoneMissed,
+    Contact2, PhoneMissed, BarChart3, Download, Timer, ArrowUpDown,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel, iosBtnGhost,
@@ -60,6 +60,50 @@ const previewText = (text) => {
     const m = /^\[(\w+)\]$/.exec(text || '');
     if (m) return MEDIA_LABELS[m[1]] || m[1];
     return text || '—';
+};
+
+// Длительность ответа: секунды → «45 с» / «5 м 30 с» / «2 ч 15 м»
+const fmtDur = (secs) => {
+    if (secs === null || secs === undefined) return '—';
+    const s = Math.round(secs);
+    if (s < 60) return `${s} с`;
+    if (s < 3600) {
+        const m = Math.floor(s / 60);
+        return s % 60 ? `${m} м ${s % 60} с` : `${m} м`;
+    }
+    const h = Math.floor(s / 3600);
+    const m = Math.round((s % 3600) / 60);
+    return m ? `${h} ч ${m} м` : `${h} ч`;
+};
+
+const isoDate = (d) => {
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+};
+
+const daysAgo = (n) => {
+    const d = new Date();
+    d.setDate(d.getDate() - n);
+    return isoDate(d);
+};
+
+// CSV для Excel: BOM + ';' (ru-локаль сама не делит по запятой)
+const csvCell = (v) => {
+    const s = v === null || v === undefined ? '' : String(v);
+    return /[";\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
+
+const downloadCsv = (filename, rows) => {
+    const body = rows.map((r) => r.map(csvCell).join(';')).join('\r\n');
+    const blob = new Blob([`﻿${body}`], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
 };
 
 const initials = (name) => {
@@ -169,7 +213,267 @@ function MessageBubble({ msg }) {
     );
 }
 
-/* Вкладка «Операторы»: привязка авторов Wazzup к нашим операторам.
+const SegButton = ({ active, onClick, icon: Icon, children }) => (
+    <button onClick={onClick}
+            className={`flex items-center gap-1.5 rounded-[9px] px-3.5 py-1.5 text-[12.5px] font-semibold transition-all ${
+                active ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.12)]'
+                       : 'text-slate-500 hover:text-slate-700'}`}>
+        <Icon size={13} /> {children}
+    </button>
+);
+
+/* ── Аналитика по менеджерам ──────────────────────────────────────────────
+ * Диалоги — чаты (не эпизоды) хотя бы с одним его сообщением; время ответа —
+ * одно значение на чат, засчитывается ответившему клиенту первым. */
+
+const ANALYTICS_COLS = [
+    { key: 'name', label: 'Менеджер', num: false },
+    { key: 'dialogs', label: 'Диалоги', num: true, hint: 'Чатов, где есть хотя бы одно его сообщение' },
+    { key: 'messages', label: 'Сообщения', num: true, hint: 'Его исходящие сообщения' },
+    { key: 'avgResponseSecs', label: 'Ср. ответ', num: true, hint: 'Среднее: первый ответ менеджера − первое сообщение клиента в чате' },
+    { key: 'medianResponseSecs', label: 'Медиана', num: true, hint: 'Медиана того же времени — устойчива к единичным «зависшим» чатам' },
+    { key: 'answeredChats', label: 'Первых ответов', num: true, hint: 'По скольким чатам он ответил клиенту первым (база для среднего)' },
+    { key: 'lastMessageAt', label: 'Активность', num: true, hint: 'Последнее сообщение менеджера' },
+];
+
+const PERIOD_PRESETS = [
+    { label: '7 дней', days: 7 },
+    { label: '30 дней', days: 30 },
+    { label: 'Всё', days: null },
+];
+
+// Тот же вид, что iosInput, но со своей шириной: у iosInput ширина зашита
+// в w-full, и дописанный следом w-[…] проигрывает ему в каскаде.
+const dateInput =
+    'w-[150px] shrink-0 rounded-xl border-0 bg-slate-100 px-3 py-2 text-[13px] text-slate-900 transition focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/70';
+
+function AnalyticsTab({ apiBaseUrl, headers, showToast }) {
+    const [from, setFrom] = useState(daysAgo(30));
+    const [to, setTo] = useState(isoDate(new Date()));
+    const [data, setData] = useState(null);          // {items, summary} | null = загрузка
+    const [error, setError] = useState(null);
+    const [filter, setFilter] = useState('');
+    const [sort, setSort] = useState({ key: 'dialogs', dir: 'desc' });
+    const request = useRef({ id: 0 });
+
+    const load = (range = { from, to }) => {
+        const requestId = request.current.id + 1;
+        request.current.id = requestId;
+        setData(null); setError(null);
+        axios.get(`${apiBaseUrl}/api/wazzup/analytics`, {
+            headers: headers(),
+            params: { from: range.from || undefined, to: range.to || undefined },
+        }).then((r) => {
+            if (requestId !== request.current.id) return;
+            setData({ items: r.data.items || [], summary: r.data.summary || {} });
+        }).catch(() => {
+            if (requestId !== request.current.id) return;
+            setError('Не удалось загрузить аналитику');
+        });
+    };
+    useEffect(() => { load(); /* eslint-disable-next-line */ }, [apiBaseUrl]);
+
+    const applyPreset = (days) => {
+        const next = days === null ? { from: '', to: '' }
+                                   : { from: daysAgo(days), to: isoDate(new Date()) };
+        setFrom(next.from); setTo(next.to);
+        load(next);
+    };
+
+    const activePreset = PERIOD_PRESETS.find((p) => (
+        p.days === null ? (!from && !to) : (from === daysAgo(p.days) && to === isoDate(new Date()))
+    ));
+
+    const rows = useMemo(() => {
+        const q = filter.trim().toLowerCase();
+        const list = (data?.items || []).filter((r) => !q || String(r.name || '').toLowerCase().includes(q));
+        const { key, dir } = sort;
+        const mul = dir === 'asc' ? 1 : -1;
+        return [...list].sort((a, b) => {
+            const av = a[key], bv = b[key];
+            // пустые значения (нет ответов / нет привязки) всегда внизу
+            if (av === null || av === undefined) return bv === null || bv === undefined ? 0 : 1;
+            if (bv === null || bv === undefined) return -1;
+            if (key === 'name') return String(av).localeCompare(String(bv), 'ru') * mul;
+            if (key === 'lastMessageAt') return (new Date(av) - new Date(bv)) * mul;
+            return (av - bv) * mul;
+        });
+    }, [data, filter, sort]);
+
+    const toggleSort = (key) => setSort((prev) => (
+        prev.key === key ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+                         : { key, dir: key === 'name' ? 'asc' : 'desc' }
+    ));
+
+    const exportCsv = () => {
+        if (!rows.length) return;
+        // имя файла — ASCII: не все корпоративные почтовики/диски переживают кириллицу
+        downloadCsv(`wazzup_analytics_${from || 'all'}_${to || 'now'}.csv`, [
+            ['Менеджер', 'Автор в Wazzup', 'Привязан', 'Диалоги', 'Сообщения',
+             'Первых ответов', 'Ср. время ответа', 'Ср. время ответа, сек',
+             'Медиана времени ответа', 'Медиана, сек', 'Последняя активность'],
+            ...rows.map((r) => [
+                r.name, r.authorName || '', r.linked ? 'да' : 'нет',
+                r.dialogs, r.messages, r.answeredChats,
+                fmtDur(r.avgResponseSecs),
+                r.avgResponseSecs === null ? '' : Math.round(r.avgResponseSecs),
+                fmtDur(r.medianResponseSecs),
+                r.medianResponseSecs === null ? '' : Math.round(r.medianResponseSecs),
+                r.lastMessageAt ? new Date(r.lastMessageAt).toLocaleString('ru-RU') : '',
+            ]),
+        ]);
+        showToast?.(`Выгружено ${rows.length} строк`, 'success');
+    };
+
+    const summary = data?.summary || {};
+    const cell = (col) => `px-3 py-2.5 ${col.num ? 'text-right tabular-nums' : 'text-left'}`;
+
+    return (
+        <div className="space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex rounded-xl bg-slate-100 p-1">
+                        {PERIOD_PRESETS.map((p) => (
+                            <button key={p.label} onClick={() => applyPreset(p.days)}
+                                    className={`rounded-[9px] px-3 py-1.5 text-[12.5px] font-semibold transition-all ${
+                                        activePreset === p ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.12)]'
+                                                           : 'text-slate-500 hover:text-slate-700'}`}>
+                                {p.label}
+                            </button>
+                        ))}
+                    </div>
+                    <input type="date" value={from} max={to || undefined}
+                           onChange={(e) => { setFrom(e.target.value); load({ from: e.target.value, to }); }}
+                           className={dateInput} />
+                    <span className="text-[13px] text-slate-400">—</span>
+                    <input type="date" value={to} min={from || undefined}
+                           onChange={(e) => { setTo(e.target.value); load({ from, to: e.target.value }); }}
+                           className={dateInput} />
+                </div>
+                <div className="flex items-center gap-2">
+                    <div className="relative">
+                        <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                        <input value={filter} onChange={(e) => setFilter(e.target.value)}
+                               placeholder="Поиск менеджера…"
+                               className={`${iosInput} w-52 py-2 pl-8 text-[13px]`} />
+                    </div>
+                    <button onClick={exportCsv} disabled={!rows.length} className={iosBtnGhost}>
+                        <Download size={13} /> Выгрузить
+                    </button>
+                    <button onClick={() => load()} className={iosBtnGhost}>
+                        <RefreshCw size={13} /> Обновить
+                    </button>
+                </div>
+            </div>
+
+            {data && (
+                <div className="flex flex-wrap items-center gap-2">
+                    <IosBadge tone="slate">{data.items.length} менеджеров</IosBadge>
+                    <IosBadge tone="blue">{summary.chats ?? 0} чатов</IosBadge>
+                    <IosBadge tone="slate">{summary.messages ?? 0} сообщений</IosBadge>
+                    <IosBadge tone="green">
+                        <Timer size={11} /> ср. ответ {fmtDur(summary.avgResponseSecs)}
+                    </IosBadge>
+                    <IosBadge tone="slate">медиана {fmtDur(summary.medianResponseSecs)}</IosBadge>
+                </div>
+            )}
+
+            {data === null && !error && (
+                <div className={`${iosCard} flex items-center justify-center gap-2 py-12 text-[13px] text-slate-400`}>
+                    <Loader2 size={15} className="animate-spin" /> Загрузка…
+                </div>
+            )}
+            {error && (
+                <div className={`${iosCard} flex items-center justify-center gap-2 py-10 text-[13px] text-rose-500`}>
+                    <AlertCircle size={15} /> {error}
+                </div>
+            )}
+
+            {data && (
+                <div className={`${iosCard} overflow-hidden`}>
+                    <div className="max-h-[calc(100vh-330px)] overflow-auto">
+                        <table className="w-full border-collapse text-[13px]">
+                            <thead className="sticky top-0 z-10 bg-white/85 backdrop-blur-xl">
+                                <tr className="border-b border-slate-200/70">
+                                    {ANALYTICS_COLS.map((col) => (
+                                        <th key={col.key} title={col.hint}
+                                            onClick={() => toggleSort(col.key)}
+                                            className={`${cell(col)} cursor-pointer select-none whitespace-nowrap text-[11px] font-semibold uppercase tracking-wider text-slate-500 transition hover:text-slate-800`}>
+                                            <span className={`inline-flex items-center gap-1 ${col.num ? 'flex-row-reverse' : ''}`}>
+                                                {col.label}
+                                                <ArrowUpDown size={10}
+                                                             className={sort.key === col.key ? 'text-blue-500' : 'text-slate-300'} />
+                                            </span>
+                                        </th>
+                                    ))}
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                                {rows.length === 0 && (
+                                    <tr>
+                                        <td colSpan={ANALYTICS_COLS.length}
+                                            className="px-4 py-10 text-center text-[13px] text-slate-400">
+                                            {filter ? 'Никого не найдено' : 'За выбранный период сообщений нет'}
+                                        </td>
+                                    </tr>
+                                )}
+                                {rows.map((r) => (
+                                    <tr key={r.key} className="transition-colors hover:bg-slate-50/80">
+                                        <td className="px-3 py-2">
+                                            <div className="flex items-center gap-2.5">
+                                                <Avatar name={r.name} size="h-8 w-8" muted={!r.linked} />
+                                                <div className="min-w-0">
+                                                    <div className="flex items-center gap-1.5">
+                                                        <span className="truncate font-semibold text-slate-900">{r.name}</span>
+                                                        {r.isVerifier && <IosBadge tone="blue">верификатор</IosBadge>}
+                                                    </div>
+                                                    {!r.linked && (
+                                                        <div className="text-[11px] text-amber-600">не привязан к оператору</div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        </td>
+                                        <td className="px-3 py-2 text-right font-semibold tabular-nums text-slate-900">{r.dialogs}</td>
+                                        <td className="px-3 py-2 text-right tabular-nums text-slate-600">{r.messages}</td>
+                                        <td className="px-3 py-2 text-right tabular-nums font-medium text-slate-900">{fmtDur(r.avgResponseSecs)}</td>
+                                        <td className="px-3 py-2 text-right tabular-nums text-slate-600">{fmtDur(r.medianResponseSecs)}</td>
+                                        <td className="px-3 py-2 text-right tabular-nums text-slate-500">{r.answeredChats}</td>
+                                        <td className="px-3 py-2 text-right tabular-nums text-slate-400">{fmtListDate(r.lastMessageAt)}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                            {rows.length > 0 && (
+                                <tfoot className="sticky bottom-0 bg-slate-50/90 backdrop-blur-xl">
+                                    <tr className="border-t border-slate-200/70 text-[12.5px] font-semibold text-slate-600">
+                                        <td className="px-3 py-2.5">Итого</td>
+                                        <td className="px-3 py-2.5 text-right tabular-nums" title="Уникальных чатов — меньше суммы по строкам, если в чате писали несколько менеджеров">
+                                            {summary.chats ?? 0}
+                                        </td>
+                                        <td className="px-3 py-2.5 text-right tabular-nums">{summary.messages ?? 0}</td>
+                                        <td className="px-3 py-2.5 text-right tabular-nums">{fmtDur(summary.avgResponseSecs)}</td>
+                                        <td className="px-3 py-2.5 text-right tabular-nums">{fmtDur(summary.medianResponseSecs)}</td>
+                                        <td className="px-3 py-2.5 text-right tabular-nums">{summary.answeredChats ?? 0}</td>
+                                        <td />
+                                    </tr>
+                                </tfoot>
+                            )}
+                        </table>
+                    </div>
+                </div>
+            )}
+
+            <p className="px-1 text-[11px] leading-relaxed text-slate-500">
+                Время ответа считается по чату целиком: первое сообщение менеджера после первого
+                сообщения клиента минус время этого сообщения клиента. Засчитывается тому, кто
+                ответил клиенту первым, поэтому «первых ответов» у менеджера обычно меньше, чем
+                диалогов. Диалог — чат (не эпизод), где есть хотя бы одно его сообщение. Авторы,
+                отмеченные ботами на вкладке «Привязка», в расчёт не входят.
+            </p>
+        </div>
+    );
+}
+
+/* Вкладка «Привязка»: привязка авторов Wazzup к нашим операторам.
  * Привязка нужна атрибуции ИИ-оценки; «Бот» исключает авторассылки. */
 function AuthorRow({ author, operators, saving, onSave }) {
     const verifiers = operators.filter((o) => o.isVerifier);
@@ -340,6 +644,25 @@ function AuthorsTab({ apiBaseUrl, headers, showToast }) {
     );
 }
 
+/* Подраздел «Операторы»: аналитика открывается первой — привязка нужна реже,
+ * это разовая настройка. */
+function OperatorsTab({ apiBaseUrl, headers, showToast }) {
+    const [subTab, setSubTab] = useState('analytics');
+    return (
+        <div className="space-y-3">
+            <div className="flex w-fit rounded-xl bg-slate-100 p-1">
+                <SegButton active={subTab === 'analytics'} onClick={() => setSubTab('analytics')}
+                           icon={BarChart3}>Аналитика</SegButton>
+                <SegButton active={subTab === 'mapping'} onClick={() => setSubTab('mapping')}
+                           icon={Link2}>Привязка</SegButton>
+            </div>
+            {subTab === 'analytics'
+                ? <AnalyticsTab apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast} />
+                : <AuthorsTab apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast} />}
+        </div>
+    );
+}
+
 export default function WazzupChatsView(props) {
     const { apiBaseUrl, withAccessTokenHeader, showToast } = props;
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
@@ -477,12 +800,9 @@ export default function WazzupChatsView(props) {
     const activeChannels = (channels || []).filter((c) => (c.chatsCount || 0) > 0 || c.state === 'active');
 
     const segBtn = (key, Icon, label) => (
-        <button onClick={() => setMainTab(key)}
-                className={`flex items-center gap-1.5 rounded-[9px] px-3.5 py-1.5 text-[12.5px] font-semibold transition-all ${
-                    mainTab === key ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.12)]'
-                                    : 'text-slate-500 hover:text-slate-700'}`}>
-            <Icon size={13} /> {label}
-        </button>
+        <SegButton active={mainTab === key} onClick={() => setMainTab(key)} icon={Icon}>
+            {label}
+        </SegButton>
     );
 
     return (
@@ -512,7 +832,7 @@ export default function WazzupChatsView(props) {
             </div>
 
             {mainTab === 'authors' && (
-                <AuthorsTab apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast} />
+                <OperatorsTab apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast} />
             )}
 
             <div className={`${iosCard} flex overflow-hidden`}
