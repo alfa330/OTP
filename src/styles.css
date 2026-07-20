@@ -677,3 +677,32 @@
             pointer-events: auto;
         }
 
+
+/* ── Док переписки справа ──
+   Оценённый чат («Ваши оценки») открывается закреплённой панелью справа, а не
+   модалкой поверх: детали оценки с критериями остаются слева и прокручиваются.
+   Контент страницы поджимается на ширину дока; на узких экранах док
+   разворачивается во весь экран и поджатие отключается. */
+:root { --chat-dock-w: clamp(380px, 34vw, 620px); }
+@keyframes chat-dock-in {
+    from { transform: translateX(24px); opacity: 0; }
+    to   { transform: translateX(0);    opacity: 1; }
+}
+.chat-dock {
+    position: fixed;
+    top: 0; right: 0;
+    width: var(--chat-dock-w);
+    height: 100vh;
+    z-index: 80;
+    display: flex;
+    flex-direction: column;
+    background: #ffffff;
+    border-left: 1px solid rgb(226 232 240);
+    box-shadow: -10px 0 30px -12px rgba(15, 23, 42, 0.25);
+    animation: chat-dock-in 0.2s ease;
+}
+body.chat-dock-open { padding-right: var(--chat-dock-w); }
+@media (max-width: 1024px) {
+    :root { --chat-dock-w: 100vw; }
+    body.chat-dock-open { padding-right: 0; }
+}

@@ -2576,7 +2576,9 @@ const ChatEvaluationModal = ({ isOpen, onClose, operator, chatData, directions, 
     );
 };
 
-/* Просмотр переписки уже оценённого чата (из развёрнутой строки журнала). */
+/* Просмотр переписки уже оценённого чата (из развёрнутой строки журнала).
+ * Док справа, а не модалка: критерии оценки остаются слева и прокручиваются,
+ * пока читаешь переписку. Страница поджимается классом body.chat-dock-open. */
 const ChatViewModal = ({ isOpen, onClose, snapshotId, quotes, userId, title }) => {
     const [snapshot, setSnapshot] = useState(null);
     const [error, setError] = useState('');
@@ -2593,54 +2595,73 @@ const ChatViewModal = ({ isOpen, onClose, snapshotId, quotes, userId, title }) =
             .catch(() => setError('Сетевая ошибка'));
     }, [isOpen, snapshotId, userId]);
 
+    // Док не блокирует страницу (прокрутку журнала не глушим) — только поджимает
+    // её вбок; Esc закрывает.
+    useEffect(() => {
+        if (!isOpen) return;
+        document.body.classList.add('chat-dock-open');
+        const onKeyDown = (e) => { if (e.key === 'Escape') onClose?.(); };
+        window.addEventListener('keydown', onKeyDown);
+        return () => {
+            document.body.classList.remove('chat-dock-open');
+            window.removeEventListener('keydown', onKeyDown);
+        };
+    }, [isOpen, onClose]);
+
     if (!isOpen) return null;
     const wazzupUrl = wazzupChatUrlFromSnapshot(snapshot);
     return (
-        <div className="modal-backdrop" onClick={onClose}>
-            <div className="modal" style={{ maxWidth: 880 }} onClick={e => e.stopPropagation()}>
-                <div className="modal-header">
-                    <div>
-                        <h2><FaIcon className="fas fa-comments" /> Переписка чата</h2>
-                        <div className="modal-header-sub">{title || ''}</div>
+        <aside className="chat-dock">
+            <div className="chat-dock-header">
+                <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text)', display: 'flex', alignItems: 'center', gap: 7 }}>
+                        <FaIcon className="fas fa-comments" /> Переписка чата
                     </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        {wazzupUrl && (
-                            <a className="btn btn-secondary btn-sm"
-                               href={wazzupUrl} target="_blank" rel="noopener noreferrer"
-                               title="Открыть этот чат в Wazzup (там доступна и история старше 45 дней)">
-                                <FaIcon className="fas fa-up-right-from-square" /> В Wazzup
-                            </a>
-                        )}
-                        <button className="close-btn" onClick={onClose}><FaIcon className="fas fa-times" /></button>
-                    </div>
+                    {title ? (
+                        <div style={{ fontSize: 11.5, color: 'var(--text-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{title}</div>
+                    ) : null}
                 </div>
-                <div className="modal-body">
-                    {error ? (
-                        <div style={{ padding: '18px 12px', textAlign: 'center', fontSize: 13, color: 'var(--red)' }}>
-                            <FaIcon className="fas fa-circle-exclamation" /> {error}
-                        </div>
-                    ) : !snapshot ? (
-                        <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--text-3)', fontSize: 13 }}>
-                            <span className="spinner spinner-dark" /> Загрузка переписки…
-                        </div>
-                    ) : (
-                        <>
-                            <ChatThread snapshot={snapshot} quotes={quotes || []} height="min(68vh, 700px)" />
-                            {(quotes || []).length > 0 && (
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 10 }}>
-                                    {(quotes || []).map((q, i) => (
-                                        <div key={i} style={{ borderLeft: '3px solid #f59e0b', background: 'var(--surface-2)', borderRadius: 'var(--radius)', padding: '8px 10px' }}>
-                                            <div style={{ fontSize: 12.5, fontStyle: 'italic', color: 'var(--text)' }}>«{q.text}»</div>
-                                            {q.comment && <div style={{ marginTop: 4, fontSize: 12, color: 'var(--text-2)' }}>{q.comment}</div>}
-                                        </div>
-                                    ))}
-                                </div>
-                            )}
-                        </>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                    {wazzupUrl && (
+                        <a className="btn btn-secondary btn-sm"
+                           href={wazzupUrl} target="_blank" rel="noopener noreferrer"
+                           title="Открыть этот чат в Wazzup (там доступна и история старше 45 дней)">
+                            <FaIcon className="fas fa-up-right-from-square" /> В Wazzup
+                        </a>
                     )}
+                    <button className="close-btn" onClick={onClose} title="Закрыть переписку (Esc)">
+                        <FaIcon className="fas fa-times" />
+                    </button>
                 </div>
             </div>
-        </div>
+            <div className="chat-dock-body">
+                {error ? (
+                    <div style={{ padding: '18px 12px', textAlign: 'center', fontSize: 13, color: 'var(--red)' }}>
+                        <FaIcon className="fas fa-circle-exclamation" /> {error}
+                    </div>
+                ) : !snapshot ? (
+                    <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--text-3)', fontSize: 13 }}>
+                        <span className="spinner spinner-dark" /> Загрузка переписки…
+                    </div>
+                ) : (
+                    <>
+                        <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+                            <ChatThread snapshot={snapshot} quotes={quotes || []} height="100%" />
+                        </div>
+                        {(quotes || []).length > 0 && (
+                            <div style={{ flexShrink: 0, maxHeight: '30vh', overflowY: 'auto', overscrollBehavior: 'contain', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                {(quotes || []).map((q, i) => (
+                                    <div key={i} style={{ borderLeft: '3px solid #f59e0b', background: 'var(--surface-2)', borderRadius: 'var(--radius)', padding: '8px 10px' }}>
+                                        <div style={{ fontSize: 12.5, fontStyle: 'italic', color: 'var(--text)' }}>«{q.text}»</div>
+                                        {q.comment && <div style={{ marginTop: 4, fontSize: 12, color: 'var(--text-2)' }}>{q.comment}</div>}
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </>
+                )}
+            </div>
+        </aside>
     );
 };
 

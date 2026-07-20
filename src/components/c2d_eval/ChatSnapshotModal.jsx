@@ -122,15 +122,15 @@ export default function ChatSnapshotModal({ open, onClose, apiBaseUrl, withAcces
             .catch((e) => setError(e.response?.data?.error || 'Не удалось загрузить переписку (возможно, удалена по ретеншну)'));
     }, [open, snapshotId, apiBaseUrl, withAccessTokenHeader]);
 
-    // Esc закрывает модал; прокрутка страницы под ним заблокирована.
+    // Док не блокирует страницу: прокрутку не глушим (детали оценки с критериями
+    // читаются слева), а лишь поджимаем контент классом на body. Esc закрывает.
     useEffect(() => {
         if (!open) return;
-        const prevOverflow = document.body.style.overflow;
-        document.body.style.overflow = 'hidden';
+        document.body.classList.add('chat-dock-open');
         const onKeyDown = (e) => { if (e.key === 'Escape') onClose?.(); };
         window.addEventListener('keydown', onKeyDown);
         return () => {
-            document.body.style.overflow = prevOverflow;
+            document.body.classList.remove('chat-dock-open');
             window.removeEventListener('keydown', onKeyDown);
         };
     }, [open, onClose]);
@@ -185,9 +185,8 @@ export default function ChatSnapshotModal({ open, onClose, apiBaseUrl, withAcces
     if (!open) return null;
 
     return (
-        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-3" onClick={onClose}>
-            <div className="flex max-h-[92vh] h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl"
-                 onClick={(e) => e.stopPropagation()}>
+        <aside className="chat-dock">
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
                 <div className="flex items-center justify-between gap-2 border-b border-slate-100 px-4 py-3">
                     <div className="min-w-0">
                         <div className="flex items-center gap-2 text-[15px] font-semibold text-slate-900">
@@ -294,6 +293,6 @@ export default function ChatSnapshotModal({ open, onClose, apiBaseUrl, withAcces
                     </div>
                 )}
             </div>
-        </div>
+        </aside>
     );
 }
