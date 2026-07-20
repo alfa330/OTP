@@ -1931,6 +1931,16 @@ const RandomCallModal = ({ isOpen, onClose, operator, userId, selectedMonth, sou
 
 const chatSquash = (text) => String(text || '').split(/\s+/).join(' ').trim().toLowerCase();
 
+// Ссылка на сам чат в веб-приложении Wazzup (там доступна и история старше 45
+// дней) — тот же формат, что в разделе «Чаты Верификаторов» (WazzupChatsView).
+// Ключи берём из wazzup-снапшота: transport = chatType, wz_chat_id, wz_channel_id.
+const WAZZUP_APP_BASE = 'https://app.wazzup24.com/6757-7677';
+const wazzupChatUrlFromSnapshot = (s) => (
+    s && s.source === 'wazzup' && s.wz_chat_id && s.wz_channel_id
+        ? `${WAZZUP_APP_BASE}/chat/${s.transport || 'whatsapp'}/${encodeURIComponent(s.wz_chat_id)}/${s.wz_channel_id}`
+        : null
+);
+
 const chatFmtTime = (iso) => {
     if (!iso) return '';
     const d = new Date(iso);
@@ -2357,6 +2367,7 @@ const ChatEvaluationModal = ({ isOpen, onClose, operator, chatData, directions, 
 
     if (!isOpen || !snapshot) return null;
 
+    const wazzupUrl = wazzupChatUrlFromSnapshot(snapshot);
     const hasCriticalError = criteria.some((c, i) => c.isCritical && scores[i] === 'Error');
     const totalScore = hasCriticalError ? 0 : criteria.reduce((sum, c, i) => {
         if (c.isCritical) return sum;
@@ -2451,6 +2462,13 @@ const ChatEvaluationModal = ({ isOpen, onClose, operator, chatData, directions, 
                       title={hasCriticalError ? 'Критическая ошибка обнуляет итог' : 'Текущий итог по критериям'}>
                     <span className="badge-dot" /> {totalScore} / 100
                 </span>
+                {wazzupUrl && (
+                    <a className="btn btn-secondary btn-sm" style={{ flexShrink: 0 }}
+                       href={wazzupUrl} target="_blank" rel="noopener noreferrer"
+                       title="Открыть этот чат в Wazzup (там доступна и история старше 45 дней)">
+                        <FaIcon className="fas fa-up-right-from-square" /> В Wazzup
+                    </a>
+                )}
                 <button className="btn btn-secondary btn-sm" style={{ flexShrink: 0 }} onClick={() => setShowPanel(v => !v)}>
                     <FaIcon className={`fas fa-${showPanel ? 'chevron-right' : 'clipboard-check'}`} /> {showPanel ? 'Свернуть панель' : `Панель оценки (${criteria.length})`}
                 </button>
@@ -2576,6 +2594,7 @@ const ChatViewModal = ({ isOpen, onClose, snapshotId, quotes, userId, title }) =
     }, [isOpen, snapshotId, userId]);
 
     if (!isOpen) return null;
+    const wazzupUrl = wazzupChatUrlFromSnapshot(snapshot);
     return (
         <div className="modal-backdrop" onClick={onClose}>
             <div className="modal" style={{ maxWidth: 880 }} onClick={e => e.stopPropagation()}>
@@ -2584,7 +2603,16 @@ const ChatViewModal = ({ isOpen, onClose, snapshotId, quotes, userId, title }) =
                         <h2><FaIcon className="fas fa-comments" /> Переписка чата</h2>
                         <div className="modal-header-sub">{title || ''}</div>
                     </div>
-                    <button className="close-btn" onClick={onClose}><FaIcon className="fas fa-times" /></button>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        {wazzupUrl && (
+                            <a className="btn btn-secondary btn-sm"
+                               href={wazzupUrl} target="_blank" rel="noopener noreferrer"
+                               title="Открыть этот чат в Wazzup (там доступна и история старше 45 дней)">
+                                <FaIcon className="fas fa-up-right-from-square" /> В Wazzup
+                            </a>
+                        )}
+                        <button className="close-btn" onClick={onClose}><FaIcon className="fas fa-times" /></button>
+                    </div>
                 </div>
                 <div className="modal-body">
                     {error ? (
