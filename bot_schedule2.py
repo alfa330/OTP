@@ -4699,9 +4699,18 @@ def api_wazzup_chat_messages():
         return jsonify({"error": str(error)}), 500
 
 
+# Казахские буквы → русские аналоги: «Жакуп Нұрасыл» в Wazzup и «Жакуп Нурасыл»
+# в users — один человек, подсказка не должна спотыкаться об алфавит.
+_WAZZUP_KAZ_TRANS = str.maketrans({
+    'ә': 'а', 'ғ': 'г', 'қ': 'к', 'ң': 'н', 'ө': 'о', 'ұ': 'у', 'ү': 'у',
+    'һ': 'х', 'і': 'и',
+})
+
+
 def _wazzup_normalize_name(value):
-    """Нормализация имени для автоподсказки: регистр, ё, повторные пробелы."""
-    return ' '.join(str(value or '').lower().replace('ё', 'е').split())
+    """Нормализация имени для автоподсказки: регистр, ё, казахские буквы, пробелы."""
+    s = str(value or '').lower().replace('ё', 'е').translate(_WAZZUP_KAZ_TRANS)
+    return ' '.join(s.split())
 
 
 def _wazzup_suggest_user(author_name, operators):
@@ -4781,6 +4790,75 @@ def api_wazzup_authors_map():
         return jsonify({"status": "success"}), 200
     except Exception as error:
         logging.exception("wazzup author map failed")
+        return jsonify({"error": str(error)}), 500
+
+
+# ── Wazzup: эпизоды (единица ИИ-оценки) ──────────────────────────────────────
+WAZZUP_EPISODE_GAP_HOURS = float(os.getenv('WAZZUP_EPISODE_GAP_HOURS', '6'))
+
+
+@app.route('/api/wazzup/episodes', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_wazzup_episodes():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    _, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        limit = min(max(int(request.args.get('limit', 50)), 1), 200)
+    except (TypeError, ValueError):
+        limit = 50
+    try:
+        offset = max(int(request.args.get('offset', 0)), 0)
+    except (TypeError, ValueError):
+        offset = 0
+    operator = request.args.get('operator_user_id')
+    try:
+        result = db.list_wazzup_episodes(
+            day=(request.args.get('day') or '').strip() or None,
+            kind=(request.args.get('kind') or '').strip() or None,
+            operator_user_id=int(operator) if operator else None,
+            limit=limit, offset=offset)
+        return jsonify({"status": "success", **result}), 200
+    except Exception as error:
+        logging.exception("wazzup episodes list failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/wazzup/episodes/<int:episode_id>', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_wazzup_episode(episode_id):
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    _, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        episode = db.get_wazzup_episode(episode_id)
+        if not episode:
+            return jsonify({"error": "not found"}), 404
+        return jsonify({"status": "success", "episode": episode}), 200
+    except Exception as error:
+        logging.exception("wazzup episode failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/wazzup/episodes/rebuild', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_wazzup_episodes_rebuild():
+    """Ручной запуск сборки эпизодов (штатно её гоняет ночной cron в 04:00).
+    Идемпотентно: собирает только новые закрытые эпизоды."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    _, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        result = db.build_wazzup_episodes(gap_hours=WAZZUP_EPISODE_GAP_HOURS)
+        return jsonify({"status": "success", **result}), 200
+    except Exception as error:
+        logging.exception("wazzup episodes rebuild failed")
         return jsonify({"error": str(error)}), 500
 
 
@@ -40499,6 +40577,17 @@ async def run_wazzup_retention_async():
     except Exception:
         logging.exception("wazzup retention failed")
 
+
+async def run_wazzup_episodes_async():
+    # Ночная сборка эпизодов Wazzup (04:00 Алматы — затишье 02:00–08:00).
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(
+            executor_pool,
+            lambda: db.build_wazzup_episodes(gap_hours=WAZZUP_EPISODE_GAP_HOURS))
+    except Exception:
+        logging.exception("wazzup episodes build failed")
+
 # === Главный запуск =============================================================================================
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('reject_reval:'))
 async def handle_reject_reval(callback_query: types.CallbackQuery, state: FSMContext):
@@ -40702,6 +40791,17 @@ if __name__ == '__main__':
         run_wazzup_retention_async,
         CronTrigger(hour=3, minute=30, timezone=ZoneInfo('Asia/Almaty')),
         id='wazzup_retention_daily',
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # Сборка эпизодов Wazzup (единица ИИ-оценки Верификаторов) — ежедневно
+    # в 04:00 (Asia/Almaty), после ретеншна, в суточное затишье трафика.
+    scheduler.add_job(
+        run_wazzup_episodes_async,
+        CronTrigger(hour=4, minute=0, timezone=ZoneInfo('Asia/Almaty')),
+        id='wazzup_episodes_daily',
         misfire_grace_time=3600,
         max_instances=1,
         coalesce=True

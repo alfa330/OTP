@@ -3,7 +3,7 @@ import logging
 import psycopg2
 from contextlib import contextmanager
 from passlib.hash import pbkdf2_sha256
-from datetime import datetime, timedelta, date, time as dt_time
+from datetime import datetime, timedelta, date, time as dt_time, timezone as dt_timezone
 import time
 import uuid
 import requests
@@ -2139,6 +2139,47 @@ class Database:
                     updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 );
+            """)
+            # Эпизоды Wazzup: чат нарезан по паузе неактивности (порог откалиброван
+            # по данным: «долина» 4–11 ч, см. build_wazzup_episodes). Единица ИИ-оценки.
+            # Транскрипт фиксируется на момент сборки — оценка воспроизводима, даже
+            # когда исходные сообщения удалит ретеншн.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS wazzup_episodes (
+                    id BIGSERIAL PRIMARY KEY,
+                    channel_id TEXT NOT NULL,
+                    chat_id TEXT NOT NULL,
+                    chat_type TEXT,
+                    contact_name TEXT,
+                    contact_phone TEXT,
+                    started_at TIMESTAMPTZ NOT NULL,
+                    ended_at TIMESTAMPTZ NOT NULL,
+                    messages_count INTEGER NOT NULL,
+                    inbound_count INTEGER NOT NULL,
+                    outbound_count INTEGER NOT NULL,
+                    human_outbound_count INTEGER NOT NULL DEFAULT 0,
+                    kind TEXT NOT NULL CHECK (kind IN ('dialog', 'unanswered', 'outbound_only')),
+                    operator_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    operator_share DOUBLE PRECISION,
+                    authors JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    force_closed BOOLEAN NOT NULL DEFAULT FALSE,
+                    transcript TEXT NOT NULL,
+                    context_tail TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE (channel_id, chat_id, started_at)
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_wazzup_episodes_ended
+                ON wazzup_episodes(ended_at DESC);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_wazzup_episodes_operator
+                ON wazzup_episodes(operator_user_id, ended_at DESC);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_wazzup_episodes_kind
+                ON wazzup_episodes(kind, ended_at DESC);
             """)
             # Chat2Desk: заявки (request_stats) для выборки случайного чата в разделе
             # «Оценка чатов ЧМ». Заполняется ежедневным синком метрик (те же строки,
@@ -13668,6 +13709,282 @@ class Database:
             """, (int(department_id), int(verifier_direction_id)))
             return [{'id': r[0], 'name': r[1], 'direction_id': r[2], 'direction_name': r[3]}
                     for r in cursor.fetchall()]
+
+    # ── Wazzup: сборка эпизодов (единица ИИ-оценки) ──────────────────────────
+
+    WAZZUP_EPISODE_LOCK_KEY = 915904140
+    _WAZZUP_MEDIA_RU = {
+        'image': '[фото]', 'video': '[видео]', 'audio': '[голосовое]',
+        'document': '[документ]', 'geo': '[геолокация]', 'vcard': '[контакт]',
+        'missing_call': '[пропущенный звонок]', 'unsupported': '[вложение]',
+    }
+
+    @classmethod
+    def _render_wazzup_line(cls, msg):
+        """Одна строка транскрипта. Время — Алматы (там работают операторы).
+        Шаблоны WABA помечаются [шаблон]: их текст одобрен заранее, оценивать
+        формулировки бессмысленно; рассылки от ботов помечаются отдельно."""
+        from zoneinfo import ZoneInfo
+        local = msg['dt'].astimezone(ZoneInfo('Asia/Almaty'))
+        stamp = local.strftime('%d.%m %H:%M')
+        if not msg['is_echo']:
+            who = 'Клиент'
+        elif msg['is_bot']:
+            who = f"Рассылка ({msg['author_name'] or 'бот'})"
+        elif msg['type'] == 'wapi_template':
+            who = f"Оператор ({msg['author_name'] or '?'}) [шаблон]"
+        else:
+            who = f"Оператор ({msg['author_name'] or '?'})"
+        parts = []
+        if msg['is_deleted']:
+            parts.append('[удалено]')
+        media = cls._WAZZUP_MEDIA_RU.get(msg['type'])
+        if media:
+            parts.append(media)
+        if msg['text']:
+            parts.append(msg['text'])
+        if not parts:
+            parts.append(f"[{msg['type'] or 'сообщение'}]")
+        return f"[{stamp}] {who}: {' '.join(parts)}"
+
+    def build_wazzup_episodes(self, gap_hours=6, force_close_hours=48,
+                              force_close_msgs=200, context_tail=10, now=None):
+        """Нарезает переписку Wazzup на эпизоды и сохраняет закрытые.
+
+        Эпизод = подряд идущие сообщения чата с паузами < gap_hours (порог — «дно
+        долины» бимодального распределения пауз). Сохраняются только эпизоды,
+        закрытые тишиной (последнее сообщение старше gap_hours на момент прогона)
+        либо принудительно (длительность >= force_close_hours или >= force_close_msgs
+        сообщений — остаток такого чата дособерётся следующими прогонами).
+
+        Идемпотентность: берутся только сообщения с dt позже ended_at последнего
+        эпизода чата + UNIQUE(channel_id, chat_id, started_at). Сообщение,
+        доставленное вебхуком задним числом внутрь уже собранного эпизода,
+        игнорируется (осознанный компромисс — ретраи Wazzup редки и короткие).
+        Конкурентные прогоны исключает advisory-лок (второй тихо выходит)."""
+        if now is None:
+            now = datetime.now(dt_timezone.utc)
+        gap = timedelta(hours=float(gap_hours))
+        force_span = timedelta(hours=float(force_close_hours))
+        stored = 0
+        skipped_open = 0
+        with self._get_cursor() as cursor:
+            cursor.execute("SELECT pg_try_advisory_xact_lock(%s)",
+                           (self.WAZZUP_EPISODE_LOCK_KEY,))
+            if not cursor.fetchone()[0]:
+                logging.warning("wazzup episodes: прогон уже идёт, выходим")
+                return {'stored': 0, 'skipped_open': 0, 'locked': True}
+            cursor.execute("""
+                SELECT channel_id, chat_id, MAX(ended_at)
+                  FROM wazzup_episodes GROUP BY channel_id, chat_id""")
+            last_end = {(r[0], r[1]): r[2] for r in cursor.fetchall()}
+            # Фильтр «новее последнего эпизода чата» — в SQL: на плато ретеншна
+            # таблица держит ~240 тыс. строк, тянуть их в Python каждую ночь
+            # нельзя; штатный прогон читает только последние сутки + открытые хвосты.
+            cursor.execute("""
+                SELECT m.channel_id, m.chat_id, m.chat_type, m.dt, m.is_echo, m.type,
+                       m.text, m.author_id, m.author_name,
+                       map.user_id, COALESCE(map.is_bot, FALSE), m.is_deleted
+                  FROM wazzup_messages m
+                  LEFT JOIN wazzup_operator_map map ON map.author_id = m.author_id
+                  LEFT JOIN (SELECT channel_id, chat_id, MAX(ended_at) AS le
+                               FROM wazzup_episodes
+                              GROUP BY channel_id, chat_id) e
+                    ON e.channel_id = m.channel_id AND e.chat_id = m.chat_id
+                 WHERE e.le IS NULL OR m.dt > e.le
+                 ORDER BY m.channel_id, m.chat_id, m.dt, m.message_id""")
+            chats = {}
+            for r in cursor.fetchall():
+                key = (r[0], r[1])
+                if last_end.get(key) is not None and r[3] <= last_end[key]:
+                    continue
+                chats.setdefault(key, []).append({
+                    'channel_id': r[0], 'chat_id': r[1], 'chat_type': r[2], 'dt': r[3],
+                    'is_echo': r[4], 'type': r[5], 'text': r[6], 'author_id': r[7],
+                    'author_name': r[8], 'user_id': r[9], 'is_bot': r[10],
+                    'is_deleted': r[11],
+                })
+            cursor.execute("""
+                SELECT channel_id, chat_id, contact_name, contact_phone
+                  FROM wazzup_chats""")
+            contacts = {(r[0], r[1]): (r[2], r[3]) for r in cursor.fetchall()}
+            for key, msgs in chats.items():
+                # нарезка по паузе
+                episodes, current = [], [msgs[0]]
+                for m in msgs[1:]:
+                    if m['dt'] - current[-1]['dt'] >= gap:
+                        episodes.append(current)
+                        current = [m]
+                    else:
+                        current.append(m)
+                episodes.append(current)
+                for idx, ep in enumerate(episodes):
+                    is_last = idx == len(episodes) - 1
+                    closed_by_silence = (now - ep[-1]['dt']) >= gap
+                    # принудительная нарезка сверхдлинных: закрываем головы,
+                    # хвост оставляем открытым до тишины
+                    while ep:
+                        force = (len(ep) >= int(force_close_msgs) or
+                                 (ep[-1]['dt'] - ep[0]['dt']) >= force_span)
+                        if not force:
+                            break
+                        head, rest = [ep[0]], ep[1:]
+                        for m in rest:
+                            if (len(head) >= int(force_close_msgs) or
+                                    (m['dt'] - head[0]['dt']) >= force_span):
+                                break
+                            head.append(m)
+                        tail = ep[len(head):]
+                        if not tail:
+                            break
+                        stored += self._store_wazzup_episode_tx(
+                            cursor, head, contacts, force_closed=True,
+                            context_tail=context_tail)
+                        ep = tail
+                    if not ep:
+                        continue
+                    if is_last and not closed_by_silence:
+                        skipped_open += 1
+                        continue
+                    stored += self._store_wazzup_episode_tx(
+                        cursor, ep, contacts, force_closed=False,
+                        context_tail=context_tail)
+        logging.info("wazzup episodes: сохранено %s, открытых пропущено %s",
+                     stored, skipped_open)
+        return {'stored': stored, 'skipped_open': skipped_open, 'locked': False}
+
+    def _store_wazzup_episode_tx(self, cursor, msgs, contacts, force_closed,
+                                 context_tail=10):
+        """Считает атрибуцию, рендерит транскрипт и сохраняет один эпизод."""
+        first, last = msgs[0], msgs[-1]
+        key = (first['channel_id'], first['chat_id'])
+        inbound = sum(1 for m in msgs if not m['is_echo'])
+        outbound = len(msgs) - inbound
+        human_out = [m for m in msgs if m['is_echo'] and not m['is_bot']]
+        # доминирующий оператор — по привязанным исходящим; непривязанные авторы
+        # остаются людьми в транскрипте, но не претендуют на атрибуцию
+        per_user = {}
+        for m in human_out:
+            if m['user_id'] is not None:
+                per_user[m['user_id']] = per_user.get(m['user_id'], 0) + 1
+        operator_user_id = None
+        operator_share = None
+        if per_user:
+            operator_user_id = max(per_user, key=lambda u: (per_user[u], -u))
+            operator_share = round(per_user[operator_user_id] / len(human_out), 3)
+        if inbound and human_out:
+            kind = 'dialog'
+        elif inbound:
+            kind = 'unanswered'
+        else:
+            kind = 'outbound_only'
+        authors = {}
+        for m in msgs:
+            if m['is_echo'] and m['author_id'] is not None:
+                a = authors.setdefault(m['author_id'], {
+                    'author_id': m['author_id'], 'author_name': m['author_name'],
+                    'user_id': m['user_id'], 'is_bot': m['is_bot'], 'messages': 0})
+                a['messages'] += 1
+        transcript = '\n'.join(self._render_wazzup_line(m) for m in msgs)
+        # контекст: хвост переписки ДО эпизода (из прошлых эпизодов этого чата)
+        tail_text = None
+        if context_tail:
+            cursor.execute("""
+                SELECT m.channel_id, m.chat_id, m.chat_type, m.dt, m.is_echo, m.type,
+                       m.text, m.author_id, m.author_name,
+                       map.user_id, COALESCE(map.is_bot, FALSE), m.is_deleted
+                  FROM wazzup_messages m
+                  LEFT JOIN wazzup_operator_map map ON map.author_id = m.author_id
+                 WHERE m.channel_id = %s AND m.chat_id = %s AND m.dt < %s
+                 ORDER BY m.dt DESC LIMIT %s""",
+                (first['channel_id'], first['chat_id'], first['dt'],
+                 int(context_tail)))
+            prev = cursor.fetchall()
+            if prev:
+                prev_msgs = [{
+                    'channel_id': r[0], 'chat_id': r[1], 'chat_type': r[2], 'dt': r[3],
+                    'is_echo': r[4], 'type': r[5], 'text': r[6], 'author_id': r[7],
+                    'author_name': r[8], 'user_id': r[9], 'is_bot': r[10],
+                    'is_deleted': r[11],
+                } for r in reversed(prev)]
+                tail_text = '\n'.join(self._render_wazzup_line(m) for m in prev_msgs)
+        contact_name, contact_phone = contacts.get(key, (None, None))
+        cursor.execute("""
+            INSERT INTO wazzup_episodes (
+                channel_id, chat_id, chat_type, contact_name, contact_phone,
+                started_at, ended_at, messages_count, inbound_count, outbound_count,
+                human_outbound_count, kind, operator_user_id, operator_share,
+                authors, force_closed, transcript, context_tail)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (channel_id, chat_id, started_at) DO NOTHING
+        """, (first['channel_id'], first['chat_id'], first['chat_type'],
+              contact_name, contact_phone, first['dt'], last['dt'], len(msgs),
+              inbound, outbound, len(human_out), kind, operator_user_id,
+              operator_share, Json(list(authors.values())), bool(force_closed),
+              transcript, tail_text))
+        return cursor.rowcount
+
+    def list_wazzup_episodes(self, day=None, kind=None, operator_user_id=None,
+                             limit=50, offset=0):
+        """Список эпизодов для проверки/оценки. day — локальная дата Алматы по ended_at."""
+        where, params = ["TRUE"], []
+        if day:
+            where.append("(ended_at AT TIME ZONE 'Asia/Almaty')::date = %s")
+            params.append(day)
+        if kind:
+            where.append("kind = %s")
+            params.append(kind)
+        if operator_user_id is not None:
+            where.append("operator_user_id = %s")
+            params.append(int(operator_user_id))
+        with self._get_cursor() as cursor:
+            cursor.execute(f"SELECT COUNT(*) FROM wazzup_episodes WHERE {' AND '.join(where)}",
+                           params)
+            total = cursor.fetchone()[0]
+            cursor.execute(f"""
+                SELECT e.id, e.channel_id, e.chat_id, e.contact_name, e.contact_phone,
+                       e.started_at, e.ended_at, e.messages_count, e.inbound_count,
+                       e.outbound_count, e.human_outbound_count, e.kind,
+                       e.operator_user_id, u.name, e.operator_share, e.force_closed,
+                       LEFT(e.transcript, 300)
+                  FROM wazzup_episodes e
+                  LEFT JOIN users u ON u.id = e.operator_user_id
+                 WHERE {' AND '.join(where)}
+                 ORDER BY e.ended_at DESC LIMIT %s OFFSET %s""",
+                params + [min(max(int(limit), 1), 200), max(int(offset), 0)])
+            items = [{'id': r[0], 'channelId': r[1], 'chatId': r[2],
+                      'contactName': r[3], 'contactPhone': r[4],
+                      'startedAt': r[5].isoformat(), 'endedAt': r[6].isoformat(),
+                      'messagesCount': r[7], 'inboundCount': r[8], 'outboundCount': r[9],
+                      'humanOutboundCount': r[10], 'kind': r[11],
+                      'operatorUserId': r[12], 'operatorName': r[13],
+                      'operatorShare': r[14], 'forceClosed': r[15],
+                      'transcriptPreview': r[16]}
+                     for r in cursor.fetchall()]
+        return {'items': items, 'total': total}
+
+    def get_wazzup_episode(self, episode_id):
+        """Полный эпизод с транскриптом и контекстом."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT e.id, e.channel_id, e.chat_id, e.chat_type, e.contact_name,
+                       e.contact_phone, e.started_at, e.ended_at, e.messages_count,
+                       e.inbound_count, e.outbound_count, e.human_outbound_count,
+                       e.kind, e.operator_user_id, u.name, e.operator_share,
+                       e.authors, e.force_closed, e.transcript, e.context_tail
+                  FROM wazzup_episodes e
+                  LEFT JOIN users u ON u.id = e.operator_user_id
+                 WHERE e.id = %s""", (int(episode_id),))
+            r = cursor.fetchone()
+        if not r:
+            return None
+        return {'id': r[0], 'channelId': r[1], 'chatId': r[2], 'chatType': r[3],
+                'contactName': r[4], 'contactPhone': r[5],
+                'startedAt': r[6].isoformat(), 'endedAt': r[7].isoformat(),
+                'messagesCount': r[8], 'inboundCount': r[9], 'outboundCount': r[10],
+                'humanOutboundCount': r[11], 'kind': r[12], 'operatorUserId': r[13],
+                'operatorName': r[14], 'operatorShare': r[15], 'authors': r[16],
+                'forceClosed': r[17], 'transcript': r[18], 'contextTail': r[19]}
 
     # ── Chat2Desk: оценка чатов ЧМ супервайзером (раздел c2d_eval) ────────────
 
