@@ -1923,10 +1923,11 @@ const RandomCallModal = ({ isOpen, onClose, operator, userId, selectedMonth, sou
     );
 };
 
-// ─── Чаты Chat2Desk (чат-менеджеры СЗоВ) ───────────────────────────────────
-// «Случайный чат» вместо «Случайного звонка»: заявка выбирается по фильтрам из
-// c2d_requests, переписка снапшотится, оценка идёт обычной записью журнала с
-// критериями направления ЧМ + цитаты, выделяемые прямо из текста переписки.
+// ─── Оценка чатов: Chat2Desk (ЧМ СЗоВ) и Wazzup (Верификаторы ОП) ───────────
+// «Случайный чат» вместо «Случайного звонка»: кандидат выбирается по фильтрам
+// (заявка c2d_requests либо эпизод wazzup_episodes — источник задаёт
+// random_chat_source направления), переписка снапшотится, оценка идёт обычной
+// записью журнала с критериями направления + цитаты, выделяемые из текста.
 
 const chatSquash = (text) => String(text || '').split(/\s+/).join(' ').trim().toLowerCase();
 
@@ -2158,8 +2159,11 @@ const ChatThread = ({ snapshot, quotes = [], selectable = false, onAddQuote, hei
 };
 
 /* Модалка «Случайный чат»: настройки выборки (период в пределах месяца, длина
- * чата, оценка клиента, без уже оценённых) -> POST /api/c2d_eval/pick. */
-const RandomChatModal = ({ isOpen, onClose, operator, userId, selectedMonth, onPicked }) => {
+ * чата, оценка клиента, без уже оценённых) -> POST /api/c2d_eval/pick.
+ * source='wazzup' (Верификаторы ОП) шлёт в /api/wz_eval/pick; оценки клиента
+ * у Wazzup нет — фильтр скрывается. */
+const RandomChatModal = ({ isOpen, onClose, operator, userId, selectedMonth, onPicked, source = 'chat2desk' }) => {
+    const isWazzup = source === 'wazzup';
     const todayKey = rcToKey(new Date());
     const monthStartKey = rcMonthStartKey(selectedMonth);
     const monthEndKey = rcMonthEndKey(selectedMonth);
@@ -2196,8 +2200,8 @@ const RandomChatModal = ({ isOpen, onClose, operator, userId, selectedMonth, onP
             };
             const maxNum = parseInt(maxMsgs, 10);
             if (Number.isFinite(maxNum) && maxNum > 0) body.max_messages = maxNum;
-            if (ratingFilter) body.rating_filter = ratingFilter;
-            const r = await authFetch(`${API_BASE_URL}/api/c2d_eval/pick`, {
+            if (!isWazzup && ratingFilter) body.rating_filter = ratingFilter;
+            const r = await authFetch(`${API_BASE_URL}/api/${isWazzup ? 'wz_eval' : 'c2d_eval'}/pick`, {
                 method: 'POST',
                 headers: { 'X-User-Id': userId, 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
@@ -2226,13 +2230,13 @@ const RandomChatModal = ({ isOpen, onClose, operator, userId, selectedMonth, onP
                 <div className="modal-header">
                     <div>
                         <h2><FaIcon className="fas fa-shuffle" /> Случайный чат</h2>
-                        <div className="modal-header-sub">{operator?.name || '—'} · Chat2Desk</div>
+                        <div className="modal-header-sub">{operator?.name || '—'} · {isWazzup ? 'WhatsApp (Wazzup)' : 'Chat2Desk'}</div>
                     </div>
                     <button className="close-btn" onClick={onClose}><FaIcon className="fas fa-times" /></button>
                 </div>
                 <div className="modal-body">
                     <label className="label" style={{ marginBottom: 6, display: 'block' }}>
-                        Период (в пределах месяца; заявки хранятся 45 дней)
+                        Период (в пределах месяца; {isWazzup ? 'переписка хранится 45 дней' : 'заявки хранятся 45 дней'})
                     </label>
                     <RcRangeCalendar value={range} onChange={setRange} maxKey={maxKey} minKey={monthStartKey} />
 
@@ -2247,13 +2251,17 @@ const RandomChatModal = ({ isOpen, onClose, operator, userId, selectedMonth, onP
                         </div>
                     </div>
 
-                    <label className="label" style={{ margin: '16px 0 6px', display: 'block' }}>Оценка клиента</label>
-                    <select className="select" value={ratingFilter} onChange={e => setRatingFilter(e.target.value)}>
-                        <option value="">Не важно</option>
-                        <option value="rated">С оценкой клиента</option>
-                        <option value="unrated">Без оценки клиента</option>
-                        <option value="low">Низкая оценка (&lt; 4)</option>
-                    </select>
+                    {!isWazzup && (
+                        <>
+                            <label className="label" style={{ margin: '16px 0 6px', display: 'block' }}>Оценка клиента</label>
+                            <select className="select" value={ratingFilter} onChange={e => setRatingFilter(e.target.value)}>
+                                <option value="">Не важно</option>
+                                <option value="rated">С оценкой клиента</option>
+                                <option value="unrated">Без оценки клиента</option>
+                                <option value="low">Низкая оценка (&lt; 4)</option>
+                            </select>
+                        </>
+                    )}
 
                     <button type="button" onClick={() => setExcludeEvaluated(v => !v)}
                         style={{ marginTop: 16, width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderRadius: 'var(--radius)', cursor: 'pointer',
@@ -2393,7 +2401,7 @@ const ChatEvaluationModal = ({ isOpen, onClose, operator, chatData, directions, 
             const fd = new FormData();
             fd.append('evaluator', userName);
             fd.append('operator', operator?.name || '');
-            fd.append('phone_number', snapshot.client_phone || snapshot.client_name || `chat_${snapshot.request_id}`);
+            fd.append('phone_number', snapshot.client_phone || snapshot.client_name || `chat_${snapshot.request_id ?? snapshot.wz_chat_id ?? snapshot.id}`);
             fd.append('appeal_date', request?.request_start || `${snapshot.day}T00:00:00`);
             fd.append('score', totalScore);
             fd.append('comment', String(generalComment || '').trim());
@@ -2433,7 +2441,7 @@ const ChatEvaluationModal = ({ isOpen, onClose, operator, chatData, directions, 
                         <FaIcon className="fas fa-comments" style={{ flexShrink: 0 }} /> Оценка чата · {operator?.name || '—'}
                     </div>
                     <div style={{ fontSize: 11.5, color: 'var(--text-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        Заявка #{snapshot.request_id} · {request?.day || snapshot.day || ''}
+                        {snapshot.source === 'wazzup' ? 'Эпизод WhatsApp' : `Заявка #${snapshot.request_id}`} · {request?.day || snapshot.day || ''}
                         {request?.rating_score != null ? ` · оценка клиента: ${request.rating_score}` : ''}
                         {' · '}{direction?.name || 'направление не найдено'}
                     </div>
@@ -4820,8 +4828,10 @@ const App = ({ user, initialSelection }) => {
     // отделы/направления кнопку не видят. source управляет модалкой (у TEZ — свои min/max).
     const selectedOperatorDirectionMeta = (directions || []).find(d => Number(d.id) === Number(selectedOperator?.direction_id)) || null;
     const isOperatorModelDirection = !!selectedOperatorDirectionMeta?.random_call_eligible;
-    // «Случайный чат» (Chat2Desk): только чат-менеджеры СЗоВ — признак считает бэкенд.
-    const isChatManagerDirection = !!selectedOperatorDirectionMeta?.random_chat_eligible;
+    // «Случайный чат»: ЧМ СЗоВ (Chat2Desk) и Верификаторы ОП (Wazzup) — признак
+    // и источник (random_chat_source) считает бэкенд.
+    const isRandomChatDirection = !!selectedOperatorDirectionMeta?.random_chat_eligible;
+    const randomChatSource = selectedOperatorDirectionMeta?.random_chat_source || 'chat2desk';
     const sectionTitle = activeSection === 'requests'
         ? 'Журнал запросов'
         : activeSection === 'calibration'
@@ -5807,13 +5817,15 @@ const App = ({ user, initialSelection }) => {
                                 <FaIcon className="fas fa-shuffle" /> Случайный звонок
                             </button>
                         )}
-                        {viewMode === 'normal' && isChatManagerDirection && (
+                        {viewMode === 'normal' && isRandomChatDirection && (
                             <button
                                 className={`btn btn-secondary btn-sm ${!selectedOperator ? 'disabled' : ''}`}
                                 style={{opacity:!selectedOperator?0.4:1,cursor:!selectedOperator?'not-allowed':'pointer'}}
                                 onClick={() => { if (!selectedOperator) return; setShowRandomChatModal(true); }}
                                 disabled={!selectedOperator}
-                                title="Взять случайный чат из Chat2Desk по фильтрам (период, длина, оценка клиента) и оценить его по критериям направления"
+                                title={randomChatSource === 'wazzup'
+                                    ? 'Взять случайный эпизод переписки WhatsApp (Wazzup) по фильтрам (период, длина) и оценить его по критериям направления'
+                                    : 'Взять случайный чат из Chat2Desk по фильтрам (период, длина, оценка клиента) и оценить его по критериям направления'}
                             >
                                 <FaIcon className="fas fa-comments" /> Случайный чат
                             </button>
@@ -6826,6 +6838,7 @@ const App = ({ user, initialSelection }) => {
                 operator={selectedOperator}
                 userId={userId}
                 selectedMonth={selectedMonth}
+                source={randomChatSource}
                 onPicked={(data) => setChatEvalData(data)}
             />
             <ChatEvaluationModal

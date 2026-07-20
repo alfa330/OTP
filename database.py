@@ -4,6 +4,7 @@ import psycopg2
 from contextlib import contextmanager
 from passlib.hash import pbkdf2_sha256
 from datetime import datetime, timedelta, date, time as dt_time, timezone as dt_timezone
+from zoneinfo import ZoneInfo
 import time
 import uuid
 import requests
@@ -2242,6 +2243,34 @@ class Database:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_c2d_snapshots_operator
                 ON c2d_chat_snapshots(operator_id, day);
+            """)
+            # Эпизоды Wazzup (Верификаторы) живут в той же таблице снапшотов:
+            # source='wazzup', ключ — чат + начало эпизода (request_id нет).
+            # Весь конвейер оценки (calls.c2d_snapshot_id, цитаты, просмотр)
+            # работает поверх snapshot_id и не различает источники.
+            cursor.execute("""
+                ALTER TABLE c2d_chat_snapshots ALTER COLUMN request_id DROP NOT NULL;
+            """)
+            cursor.execute("""
+                ALTER TABLE c2d_chat_snapshots
+                ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'chat2desk';
+            """)
+            cursor.execute("""
+                ALTER TABLE c2d_chat_snapshots ADD COLUMN IF NOT EXISTS wz_channel_id TEXT;
+            """)
+            cursor.execute("""
+                ALTER TABLE c2d_chat_snapshots ADD COLUMN IF NOT EXISTS wz_chat_id TEXT;
+            """)
+            cursor.execute("""
+                ALTER TABLE c2d_chat_snapshots ADD COLUMN IF NOT EXISTS episode_start TIMESTAMPTZ;
+            """)
+            cursor.execute("""
+                ALTER TABLE c2d_chat_snapshots ADD COLUMN IF NOT EXISTS episode_end TIMESTAMPTZ;
+            """)
+            cursor.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_wz_snapshots_episode
+                ON c2d_chat_snapshots (wz_channel_id, wz_chat_id, episode_start)
+                WHERE source = 'wazzup';
             """)
             # Оценка чата — обычная запись журнала (calls) с критериями направления
             # ЧМ; чат-специфика — ссылка на снапшот переписки и цитаты
@@ -14239,7 +14268,7 @@ class Database:
             return cursor.fetchone()[0]
 
     def get_c2d_snapshot(self, snapshot_id=None, request_id=None):
-        """Снапшот по id или request_id, с именем ЧМ и оценками."""
+        """Снапшот по id или request_id (Chat2Desk и Wazzup — общая таблица)."""
         cond, param = ("s.id = %s", snapshot_id) if snapshot_id is not None \
             else ("s.request_id = %s", request_id)
         with self._get_cursor() as cursor:
@@ -14248,7 +14277,8 @@ class Database:
                        COALESCE(u.name, s.c2d_operator_name), s.channel_name,
                        s.transport, s.client_name, s.client_phone, s.messages,
                        s.messages_count, s.request_payload, s.created_by, s.created_at,
-                       u.department_id
+                       u.department_id, s.source, s.wz_channel_id, s.wz_chat_id,
+                       s.episode_start, s.episode_end
                   FROM c2d_chat_snapshots s
                   LEFT JOIN users u ON u.id = s.operator_id
                  WHERE {cond}
@@ -14266,7 +14296,153 @@ class Database:
             'request': row[12] or {}, 'created_by': row[13],
             'created_at': row[14].isoformat() if row[14] else None,
             'operator_department_id': row[15],
+            'source': row[16] or 'chat2desk',
+            'wz_channel_id': row[17], 'wz_chat_id': row[18],
+            'episode_start': row[19].isoformat() if row[19] else None,
+            'episode_end': row[20].isoformat() if row[20] else None,
         }
+
+    # ── Wazzup (Верификаторы): случайный эпизод чата для оценки в журнале ─────
+
+    def pick_wazzup_episode(self, operator_id=None, date_from=None, date_to=None,
+                            min_messages=None, max_messages=None,
+                            exclude='any', evaluator_id=None, department_id=None,
+                            exclude_episode_ids=None):
+        """Случайный эпизод Wazzup по фильтрам. Кандидаты — готовые dialog-эпизоды
+        из wazzup_episodes (ночная сборка build_wazzup_episodes) с атрибутированным
+        оператором. exclude как у Chat2Desk: 'any' — без эпизодов, уже оценённых
+        кем-либо (calls -> снапшот с ключами эпизода), 'mine' — оценённых этим
+        проверяющим, 'none' — без исключений. exclude_episode_ids — эпизоды,
+        отсеянные в этом же запросе (переписку съел ретеншн).
+        Возвращает (episode|None, candidates_count)."""
+        where = ["e.kind = 'dialog'", "e.operator_user_id IS NOT NULL"]
+        params = []
+        if operator_id is not None:
+            where.append("e.operator_user_id = %s")
+            params.append(int(operator_id))
+        if department_id is not None:
+            where.append("u.department_id = %s")
+            params.append(int(department_id))
+        if date_from:
+            where.append("(e.started_at AT TIME ZONE 'Asia/Almaty')::date >= %s")
+            params.append(date_from)
+        if date_to:
+            where.append("(e.started_at AT TIME ZONE 'Asia/Almaty')::date <= %s")
+            params.append(date_to)
+        if min_messages is not None:
+            where.append("e.messages_count >= %s")
+            params.append(int(min_messages))
+        if max_messages is not None:
+            where.append("e.messages_count <= %s")
+            params.append(int(max_messages))
+        if exclude_episode_ids:
+            where.append("e.id != ALL(%s)")
+            params.append([int(v) for v in exclude_episode_ids])
+        exclude = str(exclude or 'none').strip().lower()
+        evaluated_exists = """NOT EXISTS (
+            SELECT 1 FROM calls c
+            JOIN c2d_chat_snapshots s ON s.id = c.c2d_snapshot_id
+            WHERE s.source = 'wazzup'
+              AND s.wz_channel_id = e.channel_id AND s.wz_chat_id = e.chat_id
+              AND s.episode_start = e.started_at{extra})"""
+        if exclude == 'mine' and evaluator_id is not None:
+            where.append(evaluated_exists.format(extra=" AND c.evaluator_id = %s"))
+            params.append(int(evaluator_id))
+        elif exclude in ('any', 'mine'):
+            where.append(evaluated_exists.format(extra=""))
+        with self._get_cursor() as cursor:
+            cursor.execute(f"""
+                SELECT e.id, e.channel_id, e.chat_id, e.chat_type,
+                       e.started_at, e.ended_at, e.messages_count, e.inbound_count,
+                       e.operator_user_id, u.name, e.contact_name, e.contact_phone,
+                       COUNT(*) OVER ()
+                  FROM wazzup_episodes e
+                  JOIN users u ON u.id = e.operator_user_id
+                 WHERE {' AND '.join(where)}
+                 ORDER BY random()
+                 LIMIT 1
+            """, params)
+            row = cursor.fetchone()
+        if not row:
+            return None, 0
+        return {
+            'episode_id': row[0], 'channel_id': row[1], 'chat_id': row[2],
+            'chat_type': row[3], 'episode_start': row[4], 'episode_end': row[5],
+            'msg_count': row[6], 'inbound_count': row[7],
+            'operator_id': row[8], 'operator_name': row[9],
+            'client_name': row[10], 'client_phone': row[11],
+        }, int(row[12] or 0)
+
+    def fetch_wazzup_episode_messages(self, channel_id, chat_id, ep_start, ep_end):
+        """Сообщения эпизода (вместе с признаком бота у автора) по возрастанию."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT m.message_id, m.dt, m.is_echo, m.type, m.text, m.content_uri,
+                       m.author_name, COALESCE(map.is_bot, FALSE), m.is_deleted
+                  FROM wazzup_messages m
+                  LEFT JOIN wazzup_operator_map map ON map.author_id = m.author_id
+                 WHERE m.channel_id = %s AND m.chat_id = %s
+                   AND m.dt >= %s AND m.dt <= %s
+                 ORDER BY m.dt, m.message_id
+            """, (str(channel_id), str(chat_id), ep_start, ep_end))
+            return [{
+                'message_id': r[0], 'dt': r[1], 'is_echo': r[2], 'type': r[3],
+                'text': r[4], 'content_uri': r[5], 'author_name': r[6],
+                'is_bot': r[7], 'is_deleted': r[8],
+            } for r in cursor.fetchall()]
+
+    def get_wz_snapshot_id(self, channel_id, chat_id, episode_start):
+        """id уже сохранённого снапшота эпизода Wazzup (или None). Нужен, чтобы
+        переиспользовать снапшот при повторном пике, а не перезатирать его
+        сообщения (у оценённого эпизода на снапшот уже ссылается calls-ряд)."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id FROM c2d_chat_snapshots
+                 WHERE source = 'wazzup' AND wz_channel_id = %s
+                   AND wz_chat_id = %s AND episode_start = %s
+            """, (str(channel_id), str(chat_id), episode_start))
+            row = cursor.fetchone()
+        return row[0] if row else None
+
+    def save_wz_snapshot(self, episode, messages, created_by=None, channel_name=None):
+        """Upsert снапшота эпизода Wazzup (ключ: чат + начало эпизода)."""
+        day = None
+        ep_start = episode.get('episode_start')
+        if ep_start is not None:
+            try:
+                day = ep_start.astimezone(ZoneInfo('Asia/Almaty')).date()
+            except Exception:
+                day = None
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO c2d_chat_snapshots (
+                    source, wz_channel_id, wz_chat_id, episode_start, episode_end,
+                    day, operator_id, c2d_operator_name, channel_name, transport,
+                    client_name, client_phone, messages, messages_count,
+                    request_payload, created_by)
+                VALUES ('wazzup', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (wz_channel_id, wz_chat_id, episode_start) WHERE source = 'wazzup'
+                DO UPDATE SET
+                    episode_end = EXCLUDED.episode_end,
+                    messages = EXCLUDED.messages,
+                    messages_count = EXCLUDED.messages_count,
+                    request_payload = EXCLUDED.request_payload
+                RETURNING id
+            """, (
+                str(episode.get('channel_id')), str(episode.get('chat_id')),
+                episode.get('episode_start'), episode.get('episode_end'),
+                day,
+                int(episode['operator_id']) if episode.get('operator_id') is not None else None,
+                episode.get('operator_name'),
+                channel_name or str(episode.get('channel_id') or ''),
+                episode.get('chat_type') or 'whatsapp',
+                episode.get('client_name'), episode.get('client_phone'),
+                Json(messages or []), len(messages or []),
+                Json({k: (v.isoformat() if hasattr(v, 'isoformat') else v)
+                      for k, v in episode.items()}),
+                int(created_by) if created_by is not None else None,
+            ))
+            return cursor.fetchone()[0]
 
     def get_daily_hours_for_operator_month(self, operator_id: int, month: str):
         """
