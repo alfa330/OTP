@@ -2582,6 +2582,7 @@ const ChatEvaluationModal = ({ isOpen, onClose, operator, chatData, directions, 
 const ChatViewModal = ({ isOpen, onClose, snapshotId, quotes, userId, title }) => {
     const [snapshot, setSnapshot] = useState(null);
     const [error, setError] = useState('');
+    const dockRef = useRef(null);
 
     useEffect(() => {
         if (!isOpen || !snapshotId) return;
@@ -2594,6 +2595,29 @@ const ChatViewModal = ({ isOpen, onClose, snapshotId, quotes, userId, title }) =
             })
             .catch(() => setError('Сетевая ошибка'));
     }, [isOpen, snapshotId, userId]);
+
+    // Клик по цитате — проскроллить чат к сообщению и подсветить его (как в
+    // «Ваших оценках» у операторов). Поиск ограничен доком: в документе может
+    // быть другой экземпляр ленты с теми же data-mid. behavior='auto' —
+    // мгновенный переход при открытии, 'smooth' — по клику (как у операторов).
+    const scrollToMessage = (messageId, behavior = 'smooth') => {
+        if (messageId == null) return;
+        const el = dockRef.current?.querySelector(`[data-mid="${messageId}"]`);
+        if (!el) return;
+        el.scrollIntoView({ behavior, block: 'center' });
+        el.classList.add('chat-msg-flash');
+        setTimeout(() => el.classList.remove('chat-msg-flash'), 1400);
+    };
+
+    // При открытии переписки сразу показать первую цитату СВ (без анимации).
+    useEffect(() => {
+        if (!isOpen || !snapshot) return;
+        const first = (quotes || [])[0]?.messageId;
+        if (first == null) return;
+        const t = setTimeout(() => scrollToMessage(first, 'auto'), 150);
+        return () => clearTimeout(t);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isOpen, snapshot]);
 
     // Док не блокирует страницу (прокрутку журнала не глушим) — только поджимает
     // её вбок; Esc закрывает.
@@ -2611,7 +2635,7 @@ const ChatViewModal = ({ isOpen, onClose, snapshotId, quotes, userId, title }) =
     if (!isOpen) return null;
     const wazzupUrl = wazzupChatUrlFromSnapshot(snapshot);
     return (
-        <aside className="chat-dock">
+        <aside className="chat-dock" ref={dockRef}>
             <div className="chat-dock-header">
                 <div style={{ minWidth: 0 }}>
                     <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text)', display: 'flex', alignItems: 'center', gap: 7 }}>
@@ -2650,11 +2674,14 @@ const ChatViewModal = ({ isOpen, onClose, snapshotId, quotes, userId, title }) =
                         </div>
                         {(quotes || []).length > 0 && (
                             <div style={{ flexShrink: 0, maxHeight: '30vh', overflowY: 'auto', overscrollBehavior: 'contain', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                <span className="label" style={{ marginBottom: 0 }}>Цитаты ({quotes.length}) — клик по тексту прокрутит чат к сообщению</span>
                                 {(quotes || []).map((q, i) => (
-                                    <div key={i} style={{ borderLeft: '3px solid #f59e0b', background: 'var(--surface-2)', borderRadius: 'var(--radius)', padding: '8px 10px' }}>
+                                    <button key={i} type="button" className="chat-quote-btn"
+                                            onClick={() => scrollToMessage(q.messageId)}
+                                            title="Показать это место в переписке">
                                         <div style={{ fontSize: 12.5, fontStyle: 'italic', color: 'var(--text)' }}>«{q.text}»</div>
                                         {q.comment && <div style={{ marginTop: 4, fontSize: 12, color: 'var(--text-2)' }}>{q.comment}</div>}
-                                    </div>
+                                    </button>
                                 ))}
                             </div>
                         )}
