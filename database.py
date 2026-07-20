@@ -14374,13 +14374,17 @@ class Database:
         }, int(row[12] or 0)
 
     def fetch_wazzup_episode_messages(self, channel_id, chat_id, ep_start, ep_end):
-        """Сообщения эпизода (вместе с признаком бота у автора) по возрастанию."""
+        """Сообщения эпизода по возрастанию. matched_name — имя оператора из
+        привязки авторов (wazzup_operator_map -> users): в ленте оценки автора
+        подписываем им, а не ником Wazzup."""
         with self._get_cursor() as cursor:
             cursor.execute("""
                 SELECT m.message_id, m.dt, m.is_echo, m.type, m.text, m.content_uri,
-                       m.author_name, COALESCE(map.is_bot, FALSE), m.is_deleted
+                       m.author_name, COALESCE(map.is_bot, FALSE), m.is_deleted,
+                       u.name
                   FROM wazzup_messages m
                   LEFT JOIN wazzup_operator_map map ON map.author_id = m.author_id
+                  LEFT JOIN users u ON u.id = map.user_id
                  WHERE m.channel_id = %s AND m.chat_id = %s
                    AND m.dt >= %s AND m.dt <= %s
                  ORDER BY m.dt, m.message_id
@@ -14388,7 +14392,7 @@ class Database:
             return [{
                 'message_id': r[0], 'dt': r[1], 'is_echo': r[2], 'type': r[3],
                 'text': r[4], 'content_uri': r[5], 'author_name': r[6],
-                'is_bot': r[7], 'is_deleted': r[8],
+                'is_bot': r[7], 'is_deleted': r[8], 'matched_name': r[9],
             } for r in cursor.fetchall()]
 
     def get_wz_snapshot_id(self, channel_id, chat_id, episode_start):

@@ -5317,6 +5317,14 @@ def _wz_normalize_snapshot_message(msg):
             'name': _WZ_MEDIA_PLACEHOLDERS.get(wz_type, '[файл]').strip('[]'),
             'link': uri,
         })
+    # Автор исходящего: заматченное имя оператора (wazzup_operator_map -> users),
+    # ник Wazzup — только фолбэк для непривязанных авторов и ботов. Эпизод может
+    # вести несколько операторов, поэтому подпись у каждого сообщения своя, а не
+    # одна на весь чат. У входящих автора нет — это клиент.
+    author = None
+    if msg.get('is_echo'):
+        author = (str(msg.get('matched_name') or '').strip()
+                  or str(msg.get('author_name') or '').strip() or None)
     return {
         'id': msg.get('message_id'),
         'type': mtype,
@@ -5329,6 +5337,7 @@ def _wz_normalize_snapshot_message(msg):
         'attachments': attachments,
         'status': None,
         'requestId': None,
+        'author': author,
     }
 
 
@@ -5388,24 +5397,34 @@ def api_wz_eval_pick():
             existing_id = db.get_wz_snapshot_id(
                 episode['channel_id'], episode['chat_id'], episode['episode_start'])
             snapshot = db.get_c2d_snapshot(snapshot_id=existing_id) if existing_id else None
-            if snapshot and snapshot.get('messages'):
-                messages = snapshot['messages']
+            stored = (snapshot or {}).get('messages') or []
+            # Снапшоты, снятые до появления подписи автора, до-обогащаем при
+            # следующем пике (ключа 'author' в старых сообщениях нет вовсе).
+            stale_schema = bool(stored) and not any('author' in m for m in stored)
+            if stored and not stale_schema:
+                messages = stored
             else:
                 raw_messages = db.fetch_wazzup_episode_messages(
                     episode['channel_id'], episode['chat_id'],
                     episode['episode_start'], episode['episode_end'])
-                if not raw_messages:
+                fresh = [_wz_normalize_snapshot_message(m) for m in raw_messages]
+                if stored and len(fresh) < len(stored):
+                    # Ретеншн уже срезал часть переписки — оставляем сохранённую
+                    # ленту как есть, чтобы не обеднить прошлую оценку.
+                    messages = stored
+                elif not fresh:
                     skipped_empty.append(int(episode['episode_id']))
                     logging.info("wz eval pick: эпизод %s без сообщений (ретеншн), пропускаем",
                                  episode['episode_id'])
                     continue
-                messages = [_wz_normalize_snapshot_message(m) for m in raw_messages]
-                channel_names = {ch.get('channelId'): ch.get('name')
-                                 for ch in _wazzup_channels_from_api()}
-                snapshot_id = db.save_wz_snapshot(
-                    episode, messages, created_by=requester_id,
-                    channel_name=channel_names.get(episode['channel_id']))
-                snapshot = db.get_c2d_snapshot(snapshot_id=snapshot_id)
+                else:
+                    messages = fresh
+                    channel_names = {ch.get('channelId'): ch.get('name')
+                                     for ch in _wazzup_channels_from_api()}
+                    snapshot_id = db.save_wz_snapshot(
+                        episode, messages, created_by=requester_id,
+                        channel_name=channel_names.get(episode['channel_id']))
+                    snapshot = db.get_c2d_snapshot(snapshot_id=snapshot_id)
             # messages_count эпизода зафиксирован ночной сборкой; ретеншн мог
             # срезать начало переписки — гарантируем «мин. сообщений» по факту.
             if min_req and len(messages) < min_req:

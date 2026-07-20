@@ -250,9 +250,14 @@ export default function ChatSnapshotModal({ open, onClose, apiBaseUrl, withAcces
                                 <div data-mid={m.id}
                                      className={`max-w-[78%] rounded-2xl px-3 py-2 text-[13.5px] leading-snug shadow-[0_1px_1px_rgba(15,23,42,0.05)] transition-shadow duration-300 ${bubbleClass} ${
                                          isFlashing ? 'ring-4 ring-amber-400/80' : ''}`}>
-                                    {out && snapshot.operator_name && (
+                                    {/* Автор исходящего. У Wazzup он свой у каждого сообщения
+                                        (эпизод могли вести несколько операторов), поэтому там
+                                        подписываем строго m.author: если автор неизвестен —
+                                        лучше без подписи, чем чужим именем. Имя из снапшота —
+                                        фолбэк для Chat2Desk и снапшотов старой схемы. */}
+                                    {out && ('author' in m ? m.author : snapshot.operator_name) && (
                                         <div className="mb-0.5 flex items-center gap-1 text-[11px] font-semibold text-blue-100">
-                                            <Headset size={11} /> {snapshot.operator_name}
+                                            <Headset size={11} /> {'author' in m ? m.author : snapshot.operator_name}
                                         </div>
                                     )}
                                     {auto && (
