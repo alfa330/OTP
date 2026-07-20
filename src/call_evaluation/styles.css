@@ -1138,6 +1138,33 @@
         .info-panel-body ul { padding-left: 18px; margin-bottom: 8px; }
         .info-panel-body li { margin-bottom: 4px; }
 
+        /* ── Док переписки справа ──
+           Оценённый чат открывается не поверх страницы, а закреплённой панелью
+           справа: критерии оценки остаются видимы и прокручиваются слева.
+           Контент журнала поджимается на ширину дока (body.chat-dock-open),
+           на узких экранах док разворачивается во весь экран. */
+        :root { --chat-dock-w: clamp(380px, 34vw, 620px); }
+        .chat-dock {
+            position: fixed;
+            top: 0; right: 0;
+            width: var(--chat-dock-w);
+            height: 100%;
+            background: var(--surface);
+            border-left: 1px solid var(--border);
+            box-shadow: var(--shadow-lg);
+            z-index: 140;
+            display: flex;
+            flex-direction: column;
+            animation: slideIn 0.2s ease;
+        }
+        .chat-dock-header { padding: 12px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-shrink: 0; }
+        .chat-dock-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 10px 12px; gap: 8px; overflow: hidden; }
+        body.chat-dock-open { padding-right: var(--chat-dock-w); }
+        @media (max-width: 1024px) {
+            :root { --chat-dock-w: 100vw; }
+            body.chat-dock-open { padding-right: 0; }
+        }
+
         /* ── Audio player ── */
         .audio-wrap { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px; margin-bottom: 14px; }
         .audio-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-2); margin-bottom: 8px; }
