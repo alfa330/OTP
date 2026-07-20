@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { Loader2, AlertCircle, MessageSquare, X, Bot, FileText, Headset, Eye, EyeOff, Quote } from 'lucide-react';
+import { Loader2, AlertCircle, MessageSquare, X, Bot, FileText, Headset, Eye, EyeOff, Quote, ExternalLink } from 'lucide-react';
 
 /* Просмотр переписки оценённого чата Chat2Desk (снапшот) с подсветкой цитат СВ.
  * Используется в «Мои оценки» чат-менеджера: оценка живёт в журнале (calls),
@@ -33,14 +33,49 @@ function highlightText(text, quoteTexts) {
         : <React.Fragment key={i}>{seg.text}</React.Fragment>);
 }
 
+/* Лайтбокс фото — как в «Чатах Верификаторов»: просмотр поверх модала,
+ * «Открыть оригинал» отдельной кнопкой (без прыжка по ссылке при клике). */
+function ImageLightbox({ url, onClose }) {
+    useEffect(() => {
+        const onKeyDown = (e) => {
+            if (e.key !== 'Escape') return;
+            // capture + stopImmediatePropagation: Esc закрывает только фото,
+            // не задевая Esc-обработчик самого модала переписки.
+            e.stopImmediatePropagation();
+            e.preventDefault();
+            onClose();
+        };
+        window.addEventListener('keydown', onKeyDown, true);
+        return () => window.removeEventListener('keydown', onKeyDown, true);
+    }, [onClose]);
+    return (
+        <div className="fixed inset-0 z-[95] flex cursor-zoom-out flex-col items-center justify-center bg-slate-900/80 p-6"
+             onClick={onClose}>
+            <img src={url} alt="" onClick={(e) => e.stopPropagation()}
+                 className="max-h-[80vh] w-auto max-w-[92vw] cursor-default rounded-2xl bg-white shadow-2xl" />
+            <div className="mt-3 flex items-center gap-3" onClick={(e) => e.stopPropagation()}>
+                <a href={url} target="_blank" rel="noopener noreferrer"
+                   className="inline-flex items-center gap-1.5 rounded-full bg-white/15 px-4 py-2 text-[13px] font-semibold text-white transition hover:bg-white/25">
+                    <ExternalLink size={13} /> Открыть оригинал
+                </a>
+                <button onClick={onClose}
+                        className="inline-flex items-center gap-1.5 rounded-full bg-white px-4 py-2 text-[13px] font-semibold text-slate-800 transition hover:bg-slate-100">
+                    <X size={13} /> Закрыть
+                </button>
+            </div>
+        </div>
+    );
+}
+
 function Media({ msg, light }) {
+    const [zoom, setZoom] = useState(null); // url фото в лайтбоксе
     const chip = `inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-[12.5px] font-medium ${
         light ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-600'}`;
     const pieces = [];
     if (msg.photo) {
         pieces.push(
             <img key="photo" src={msg.photo} alt="" loading="lazy"
-                 onClick={() => window.open(msg.photo, '_blank', 'noopener')}
+                 onClick={() => setZoom(msg.photo)}
                  className="max-h-56 w-auto max-w-full cursor-zoom-in rounded-xl" />
         );
     }
@@ -62,7 +97,12 @@ function Media({ msg, light }) {
         );
     });
     if (!pieces.length) return null;
-    return <div className="flex flex-wrap items-center gap-1.5">{pieces}</div>;
+    return (
+        <>
+            <div className="flex flex-wrap items-center gap-1.5">{pieces}</div>
+            {zoom && <ImageLightbox url={zoom} onClose={() => setZoom(null)} />}
+        </>
+    );
 }
 
 export default function ChatSnapshotModal({ open, onClose, apiBaseUrl, withAccessTokenHeader, snapshotId, quotes = [], title = '', focusMessageId = null }) {

@@ -1964,7 +1964,43 @@ const chatHighlight = (text, quoteTexts) => {
         : <React.Fragment key={i}>{seg.text}</React.Fragment>);
 };
 
+/* Лайтбокс фото — как в «Чатах Верификаторов»: просмотр поверх окна,
+ * оригинал открывается отдельной кнопкой, а не прыжком по ссылке. */
+const ChatImageLightbox = ({ url, onClose }) => {
+    useEffect(() => {
+        const onKeyDown = (e) => {
+            if (e.key !== 'Escape') return;
+            // capture + stopImmediatePropagation: Esc закрывает только фото и не
+            // доходит до Esc-обработчика полноэкранного окна оценки/модалок.
+            e.stopImmediatePropagation();
+            e.preventDefault();
+            onClose();
+        };
+        window.addEventListener('keydown', onKeyDown, true);
+        return () => window.removeEventListener('keydown', onKeyDown, true);
+    }, [onClose]);
+    return (
+        <div onClick={onClose}
+             style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(15,23,42,0.78)',
+                      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+                      padding: 24, cursor: 'zoom-out' }}>
+            <img src={url} alt="" onClick={e => e.stopPropagation()}
+                 style={{ maxWidth: '92vw', maxHeight: '80vh', borderRadius: 12, cursor: 'default',
+                          boxShadow: '0 16px 56px rgba(0,0,0,0.45)', background: '#fff' }} />
+            <div onClick={e => e.stopPropagation()} style={{ marginTop: 14, display: 'flex', gap: 10 }}>
+                <a className="btn btn-secondary btn-sm" href={url} target="_blank" rel="noopener noreferrer">
+                    <FaIcon className="fas fa-up-right-from-square" /> Открыть оригинал
+                </a>
+                <button className="btn btn-primary btn-sm" onClick={onClose}>
+                    <FaIcon className="fas fa-times" /> Закрыть
+                </button>
+            </div>
+        </div>
+    );
+};
+
 const ChatMedia = ({ msg }) => {
+    const [zoom, setZoom] = useState(null); // url фото в лайтбоксе
     const chip = {
         display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 8px',
         borderRadius: 8, background: 'var(--surface-2)', border: '1px solid var(--border)',
@@ -1974,7 +2010,7 @@ const ChatMedia = ({ msg }) => {
     if (msg.photo) {
         pieces.push(
             <img key="photo" src={msg.photo} alt="" loading="lazy"
-                 onClick={() => window.open(msg.photo, '_blank', 'noopener')}
+                 onClick={() => setZoom(msg.photo)}
                  style={{ maxHeight: 220, maxWidth: '100%', borderRadius: 10, cursor: 'zoom-in', display: 'block' }} />
         );
     }
@@ -1986,7 +2022,12 @@ const ChatMedia = ({ msg }) => {
         pieces.push(<a key={`att-${i}`} href={att.link} target="_blank" rel="noopener noreferrer" style={chip}><FaIcon className="fas fa-paperclip" /> {att.name || 'Файл'}</a>);
     });
     if (!pieces.length) return null;
-    return <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>{pieces}</div>;
+    return (
+        <>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>{pieces}</div>
+            {zoom && <ChatImageLightbox url={zoom} onClose={() => setZoom(null)} />}
+        </>
+    );
 };
 
 /* Лента переписки заявки. selectable — включает «Цитировать» по выделению текста
