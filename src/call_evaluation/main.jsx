@@ -2145,6 +2145,13 @@ const ChatThread = ({ snapshot, quotes = [], selectable = false, onAddQuote, hei
                             <div style={{ display: 'flex', justifyContent: (out || auto) ? 'flex-end' : 'flex-start' }}>
                                 <div data-mid={m.id} style={bubbleStyle}>
                                     {auto && <div style={{ fontSize: 10.5, fontWeight: 600, marginBottom: 2, display: 'flex', alignItems: 'center', gap: 4 }}><FaIcon className="fas fa-robot" /> Автоответ</div>}
+                                    {/* Автор исходящего: у эпизода Wazzup их может быть
+                                        несколько, поэтому подпись у каждого сообщения своя. */}
+                                    {!auto && m.author && (
+                                        <div style={{ fontSize: 10.5, fontWeight: 600, marginBottom: 2, opacity: 0.85, display: 'flex', alignItems: 'center', gap: 4 }}>
+                                            <FaIcon className="fas fa-headset" /> {m.author}
+                                        </div>
+                                    )}
                                     {hasMedia && <div style={{ marginBottom: m.text ? 5 : 0 }}><ChatMedia msg={m} /></div>}
                                     {m.text ? chatHighlight(m.text, quotesByMessage[String(m.id)]) : (!hasMedia && <em style={{ opacity: 0.7 }}>[сообщение]</em>)}
                                     <div style={{ fontSize: 10, opacity: 0.65, textAlign: 'right', marginTop: 3 }}>{chatFmtTime(m.created)}</div>
