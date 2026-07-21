@@ -2435,6 +2435,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         // для админов: у них свой department_code не 'tez', и гейт по отделу скрывал план.
         const [tezPlanPerFte, setTezPlanPerFte] = useState(null);
         const [tezPlanReloadKey, setTezPlanReloadKey] = useState(0);
+        // Успешки по оператору/дню для таба «Успешки» в учёте часов ОП:
+        // { [operator_id]: { [деньМесяца]: количество } }.
+        const [tezSuccessMap, setTezSuccessMap] = useState({});
         // Полноэкранные окна ОП TEZ (план успешек / база лидов) — открываются из
         // выпадашки «Работа», чтобы не занимать место в таблице часов.
         const [salesOverlay, setSalesOverlay] = useState(null); // null | 'plan' | 'leads'
@@ -4584,6 +4587,38 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // eslint-disable-next-line react-hooks/exhaustive-deps
         }, [isTezOpContext, tezOpDeptId, month, user?.id, tezPlanReloadKey]);
 
+        // Карта успешек оператор→день для таба «Успешки». Тянем ту же статистику,
+        // что и окно базы лидов (сужение по группе — на стороне сервера).
+        useEffect(() => {
+            if (!isTezOpContext || !user?.id) {
+                setTezSuccessMap({});
+                return;
+            }
+            const [py, pm] = String(month || '').split('-').map((v) => parseInt(v, 10));
+            if (!Number.isFinite(py) || !Number.isFinite(pm)) {
+                setTezSuccessMap({});
+                return;
+            }
+            let cancelled = false;
+            axios
+                .get(`${API_BASE_URL}/api/tez_leads/stats`, {
+                    params: { year: py, month: pm, group_id: selectedGroupId || undefined },
+                    headers: { 'X-User-Id': user.id },
+                })
+                .then((resp) => {
+                    if (cancelled) return;
+                    const map = {};
+                    for (const row of resp?.data?.by_operator_day || []) {
+                        const opId = String(row.operator_id);
+                        (map[opId] || (map[opId] = {}))[String(row.day)] = row.successes;
+                    }
+                    setTezSuccessMap(map);
+                })
+                .catch(() => { if (!cancelled) setTezSuccessMap({}); });
+            return () => { cancelled = true; };
+            // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, [isTezOpContext, selectedGroupId, month, user?.id, tezPlanReloadKey]);
+
         useEffect(() => {
             setChatMetricsSurgeMonth(normalizeMonthKey(month));
         }, [month]);
@@ -4687,22 +4722,33 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         // Метки вкладок по модели. НЕ мутируем общий const TABS — строим производный массив.
         const VIEW_TABS = useMemo(() => {
-            if (!isChatModel) return TABS;
-            // Чат-модель: «Звонки»→«Чаты», убираем «Эффективность» (её у чата нет),
-            // добавляем «Средняя оценка» и «Среднее время ответа» (вводятся в модалке).
-            const out = [];
-            for (const t of TABS) {
-                if (t.key === 'efficiency') continue;
-                if (t.key === 'calls') {
-                    out.push({ ...t, label: 'Чаты' });
-                    out.push({ key: 'avg_score', label: 'Средняя оценка', unit: 'балл' });
-                    out.push({ key: 'response_time', label: 'Среднее время ответа', unit: 'сек' });
-                    continue;
+            if (isChatModel) {
+                // Чат-модель: «Звонки»→«Чаты», убираем «Эффективность» (её у чата нет),
+                // добавляем «Средняя оценка» и «Среднее время ответа» (вводятся в модалке).
+                const out = [];
+                for (const t of TABS) {
+                    if (t.key === 'efficiency') continue;
+                    if (t.key === 'calls') {
+                        out.push({ ...t, label: 'Чаты' });
+                        out.push({ key: 'avg_score', label: 'Средняя оценка', unit: 'балл' });
+                        out.push({ key: 'response_time', label: 'Среднее время ответа', unit: 'сек' });
+                        continue;
+                    }
+                    out.push(t);
                 }
-                out.push(t);
+                return out;
             }
-            return out;
-        }, [isChatModel]);
+            if (isTezOpContext) {
+                // ОП TEZ: добавляем «Успешки» (кол-во успешек по дням) сразу за звонками.
+                const out = [];
+                for (const t of TABS) {
+                    out.push(t);
+                    if (t.key === 'calls') out.push({ key: 'tez_successes', label: 'Успешки', unit: 'шт' });
+                }
+                return out;
+            }
+            return TABS;
+        }, [isChatModel, isTezOpContext]);
 
         const WORKHOURS_METRIC_GROUPS = useMemo(() => {
             const byKey = new Map((VIEW_TABS || []).map(tab => [tab.key, tab]));
@@ -4713,7 +4759,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 tabs: keys.map(key => byKey.get(key)).filter(Boolean)
             });
             return [
-                buildGroup('Работа', 'fa-clock', 'blue', ['work_time', 'break_time', 'calls', 'efficiency']),
+                buildGroup('Работа', 'fa-clock', 'blue', ['work_time', 'break_time', 'calls', 'efficiency', 'tez_successes']),
                 buildGroup('Метрики', 'fa-chart-line', 'cyan', ['avg_score', 'response_time']),
                 buildGroup('Активности', 'fa-layer-group', 'emerald', ['trainings', 'technical_issues', 'offline_activity', 'no_phone']),
                 buildGroup('Деньги', 'fa-coins', 'slate', ['bonuses', 'fines'])
@@ -5067,6 +5113,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         title={`Переведён → ${daySeg.group_name}. Клик: открыть эту группу`}
                     >
                         <FaIcon className="fas fa-lock" style={{ fontSize: '11px' }} />
+                    </div>
+                );
+            }
+
+            if (selectedTab === 'tez_successes') {
+                const count = tezSuccessMap?.[String(op.operator_id)]?.[String(day)] || 0;
+                if (count > 0) {
+                    return (
+                        <div className="w-full h-8 rounded-md flex items-center justify-center bg-emerald-100 text-emerald-800 font-semibold"
+                             title={`Успешек в этот день: ${count}`}>
+                            {count}
+                        </div>
+                    );
+                }
+                return (
+                    <div className={`w-full h-8 rounded-md flex items-center justify-center text-xs ${isFuture ? 'text-gray-300' : 'text-gray-400'}`}>
+                        {isFuture ? '' : '·'}
                     </div>
                 );
             }
@@ -5937,30 +6000,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 </div>
             )}
             <FullscreenSheet
-                open={salesOverlay === 'plan'}
-                onClose={() => setSalesOverlay(null)}
-                icon="fa-bullseye"
-                title="План успешек ОП TEZ"
-                subtitle={`Общий план на 1 FTE · ${month}`}
-            >
-                {tezOpDeptId != null && (
-                    <TezOpPlanPanel
-                        apiBaseUrl={API_BASE_URL}
-                        userId={user.id}
-                        departmentId={tezOpDeptId}
-                        month={month}
-                        canEdit={true}
-                        onSaved={() => setTezPlanReloadKey((k) => k + 1)}
-                    />
-                )}
-            </FullscreenSheet>
-            <FullscreenSheet
                 open={salesOverlay === 'leads'}
                 onClose={() => setSalesOverlay(null)}
                 icon="fa-users"
                 title="База лидов ОП TEZ"
-                subtitle={`Успешки и воронка · ${month}`}
+                subtitle={`План, успешки и воронка · ${month}`}
             >
+                {tezOpDeptId != null && (
+                    <div className="mb-4">
+                        <TezOpPlanPanel
+                            apiBaseUrl={API_BASE_URL}
+                            userId={user.id}
+                            departmentId={tezOpDeptId}
+                            month={month}
+                            canEdit={true}
+                            onSaved={() => setTezPlanReloadKey((k) => k + 1)}
+                        />
+                    </div>
+                )}
                 <TezLeadsPanel
                     apiBaseUrl={API_BASE_URL}
                     userId={user.id}
@@ -6313,7 +6370,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </button>
                                                 </div>
                                             )}
-                                            {!isChatModel && groupHasCalls && (
+                                            {!isChatModel && !isTezOpContext && groupHasCalls && (
                                                 <div className="border-t border-slate-100 mt-1 pt-1.5 px-2 flex flex-col gap-1">
                                                     <button
                                                         type="button"
@@ -6347,24 +6404,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             setHoveredGroup(null);
                                                         }}
                                                         className="flex items-center gap-1.5 px-3 py-1.5 text-left text-xs font-semibold rounded-lg transition border bg-indigo-50 border-indigo-200 text-indigo-800 hover:bg-indigo-100"
-                                                        title="База лидов, воронка и успешки операторов ОП"
+                                                        title="База лидов, план, воронка и успешки операторов ОП"
                                                     >
                                                         <FaIcon className="fas fa-users" />
                                                         База лидов и успешки
-                                                    </button>
-                                                    <button
-                                                        type="button"
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            setSalesOverlay('plan');
-                                                            setPinnedGroups([]);
-                                                            setHoveredGroup(null);
-                                                        }}
-                                                        className="flex items-center gap-1.5 px-3 py-1.5 text-left text-xs font-semibold rounded-lg transition border bg-teal-50 border-teal-200 text-teal-800 hover:bg-teal-100"
-                                                        title="Общий план успешек на 1 FTE"
-                                                    >
-                                                        <FaIcon className="fas fa-bullseye" />
-                                                        План успешек
                                                     </button>
                                                 </div>
                                             )}
@@ -7141,6 +7184,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     {selectedTab === 'calls' && (
                     <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>{isChatModel ? 'Кол-во чатов' : 'КВЗ'}</div>
                     )}
+                    {selectedTab === 'tez_successes' && (
+                    <>
+                        <div className={`${hoursSummaryColClass} w-32 bg-gray-50 text-sm font-medium`}>Успешек</div>
+                        <div className={`${hoursSummaryColClass} w-40 bg-gray-50 text-sm font-medium`}>План / выполнение</div>
+                    </>
+                    )}
                     {selectedTab === 'avg_score' && (
                     <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Средняя оценка</div>
                     )}
@@ -7389,6 +7438,34 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </div>
                                 )}
 
+                                {selectedTab === 'tez_successes' && (() => {
+                                    const dayMap = tezSuccessMap?.[String(op.operator_id)] || {};
+                                    const total = Object.values(dayMap).reduce((a, b) => a + (Number(b) || 0), 0);
+                                    const planRes = calculateTezOpMonthlyPlan({
+                                        planPerFte: tezPlanPerFte,
+                                        rate: op.rate,
+                                        normHours: norm,
+                                        factHours: displayedTotal,
+                                        hireDate: op.hire_date,
+                                        month,
+                                    });
+                                    const plan = planRes?.plan;
+                                    const pct = plan ? (total / plan) * 100 : null;
+                                    const pctClass = pct == null ? 'text-gray-400'
+                                        : pct >= 100 ? 'text-emerald-700'
+                                        : pct >= 60 ? 'text-amber-600' : 'text-rose-600';
+                                    return (
+                                        <>
+                                            <div className={`${hoursSummaryColClass} w-32 text-sm font-semibold ${total > 0 ? 'text-emerald-700' : 'text-gray-400'}`}>
+                                                {total}
+                                            </div>
+                                            <div className={`${hoursSummaryColClass} w-40 text-sm ${pctClass}`}>
+                                                {plan == null ? '—' : `${formatNumber(plan, 1)} · ${pct.toFixed(0)}%`}
+                                            </div>
+                                        </>
+                                    );
+                                })()}
+
                                 {selectedTab === 'avg_score' && (() => {
                                     // Итого = средняя оценка по дням, где она проставлена (не сумма)
                                     const vals = daysArray
@@ -7500,6 +7577,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                         {selectedTab === 'calls' && (
                         <div className={`${hoursSummaryColClass} w-36 text-sm`}>—</div>
+                        )}
+
+                        {selectedTab === 'tez_successes' && (
+                        <>
+                            <div className={`${hoursSummaryColClass} w-32 text-sm font-semibold text-emerald-700`}>
+                                {Object.values(tezSuccessMap || {}).reduce((sum, dm) => sum + Object.values(dm).reduce((a, b) => a + (Number(b) || 0), 0), 0)}
+                            </div>
+                            <div className={`${hoursSummaryColClass} w-40 text-sm`}>
+                                {footerTotals.hasTezPlanRows ? `${footerTotals.sumTezPlan.toLocaleString('ru-RU', { maximumFractionDigits: 1 })} план` : '—'}
+                            </div>
+                        </>
                         )}
 
                         {selectedTab === 'efficiency' && (

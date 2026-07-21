@@ -262,6 +262,11 @@ class GroupFilterTests(unittest.TestCase):
         self.assertIn("def get_tez_operator_successes(self, year, month, group_id=None)", self.src)
         self.assertIn("def get_tez_successes_by_day(self, year, month, group_id=None)", self.src)
 
+    def test_operator_day_view_exists_and_group_aware(self):
+        """Таб «Успешки»: агрегат оператор→день, месяц по дате поездки, с группой."""
+        self.assertIn("def get_tez_successes_operator_day(self, year, month, group_id=None)", self.src)
+        self.assertIn("EXTRACT(DAY FROM s.success_date)", self.src)
+
 
 if __name__ == "__main__":
     unittest.main()

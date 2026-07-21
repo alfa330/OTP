@@ -14017,6 +14017,37 @@ class Database:
             )
             return [{'date': r[0].isoformat(), 'successes': int(r[1] or 0)} for r in cursor.fetchall()]
 
+    def get_tez_successes_operator_day(self, year, month, group_id=None):
+        """Успешки по оператору и дню — для таба «Успешки» в учёте часов.
+
+        Возвращает список {operator_id, day, successes}, где day — число месяца
+        успешки (= дня первой поездки). Месяц берётся по дате поездки, поэтому в
+        таблицу за июль попадут и успешки от июньских лидов с поездкой до 7-го.
+        """
+        params = [int(year), int(month)]
+        group_sql = ''
+        if group_id:
+            group_sql = self._TEZ_GROUP_FILTER_SQL
+            params.append(int(group_id))
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT s.operator_id,
+                       EXTRACT(DAY FROM s.success_date)::int AS day,
+                       COUNT(*) AS successes
+                FROM tez_lead_successes s
+                WHERE s.year = %s AND s.month = %s
+                  AND s.operator_id IS NOT NULL
+                {group_sql}
+                GROUP BY s.operator_id, EXTRACT(DAY FROM s.success_date)
+                """,
+                tuple(params)
+            )
+            return [
+                {'operator_id': int(r[0]), 'day': int(r[1]), 'successes': int(r[2])}
+                for r in cursor.fetchall()
+            ]
+
     def get_tez_leads_detail(self, year, month, status=None, operator_id=None, search=None, limit=2000):
         """Детализация по лидам со связкой звонок -> поездка (для разбора споров)."""
         params = [int(year), int(month)]

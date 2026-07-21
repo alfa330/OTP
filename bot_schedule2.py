@@ -29761,6 +29761,7 @@ def tez_leads_stats():
             "funnel": db.get_tez_lead_funnel(year, month),
             "operators": db.get_tez_operator_successes(year, month, group_id=group_id),
             "by_day": db.get_tez_successes_by_day(year, month, group_id=group_id),
+            "by_operator_day": db.get_tez_successes_operator_day(year, month, group_id=group_id),
             "batches": db.list_tez_lead_batches(year, month),
         })
     except Exception:
