@@ -10,6 +10,7 @@ import DualPeriodBreakdown from './components/salary/DualPeriodBreakdown';
 import SalaryComingSoon from './components/salary/SalaryComingSoon';
 import TezOpPlanPanel from './components/salary/TezOpPlanPanel';
 import TezLeadsPanel from './components/salary/TezLeadsPanel';
+import FullscreenSheet from './components/common/FullscreenSheet';
 import TezOpPlanCell from './components/salary/TezOpPlanCell';
 import TasksView, { PinnedTaskWidget } from './components/tasks/TasksView';
 import SurveysView from './components/surveys/SurveysView';
@@ -2427,41 +2428,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const [offlineActivityModalError, setOfflineActivityModalError] = useState('');
         const isHoursDepartmentHead = isDepartmentHead(user);
         const hoursDepartmentScopeId = isHoursDepartmentHead ? headedDepartmentId(user) : null;
-        // Общий план ОП TEZ: панель показываем управленцам отдела TEZ в учёте часов.
-        const isTezHoursDept = String(user?.department_code ?? user?.departmentCode ?? '').toLowerCase() === 'tez';
+        // Базовый отдел для панелей ОП TEZ (фолбэк, если группа не выбрана).
         const tezPlanDeptId = hoursDepartmentScopeId ?? (user?.department_id ?? user?.departmentId ?? null);
         // План на 1 FTE отдела за месяц — для колонки «План успешек» (модель ОП TEZ).
+        // Сам запрос вынесен ниже (после вычисления группы/модели), чтобы работал и
+        // для админов: у них свой department_code не 'tez', и гейт по отделу скрывал план.
         const [tezPlanPerFte, setTezPlanPerFte] = useState(null);
         const [tezPlanReloadKey, setTezPlanReloadKey] = useState(0);
-        useEffect(() => {
-            if (!isTezHoursDept || tezPlanDeptId == null || !user?.id) {
-                setTezPlanPerFte(null);
-                return;
-            }
-            const [py, pm] = String(month || '').split('-').map((v) => parseInt(v, 10));
-            if (!Number.isFinite(py) || !Number.isFinite(pm)) {
-                setTezPlanPerFte(null);
-                return;
-            }
-            let cancelled = false;
-            axios
-                .get(`${API_BASE_URL}/api/department_plan`, {
-                    params: { department_id: tezPlanDeptId, year: py, month: pm },
-                    headers: { 'X-User-Id': user.id },
-                })
-                .then((resp) => {
-                    if (cancelled) return;
-                    const v = resp?.data?.plan?.plan_per_fte;
-                    setTezPlanPerFte(v === undefined || v === null ? null : Number(v));
-                })
-                .catch(() => {
-                    if (!cancelled) setTezPlanPerFte(null);
-                });
-            return () => {
-                cancelled = true;
-            };
-            // eslint-disable-next-line react-hooks/exhaustive-deps
-        }, [isTezHoursDept, tezPlanDeptId, month, user?.id, tezPlanReloadKey]);
+        // Полноэкранные окна ОП TEZ (план успешек / база лидов) — открываются из
+        // выпадашки «Работа», чтобы не занимать место в таблице часов.
+        const [salesOverlay, setSalesOverlay] = useState(null); // null | 'plan' | 'leads'
         const [selectedSvId, setSelectedSvId] = useState(user?.role === 'sv' ? user.id : '');
         const [reportScope, setReportScope] = useState('by_sv'); // 'by_sv' or 'all' (admin only)
         const [isLoading, setIsLoading] = useState(false);
@@ -4563,7 +4539,50 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             ),
             [operators]
         );
-        const showTezPlanColumn = isTezHoursDept && (hasTezOpRows || activeCalcModelCode === 'tez_op');
+        // Контекст ОП TEZ определяем по МОДЕЛИ выборки, а не по отделу пользователя:
+        // иначе админ (его department_code не 'tez') при выборе группы ОП не видит
+        // ни колонку плана, ни окна успешек. Отдел для запросов берём из выбранной
+        // группы (у неё есть department_id), с фолбэком на прежний tezPlanDeptId.
+        const isTezOpContext = hasTezOpRows || activeCalcModelCode === 'tez_op';
+        const tezOpDeptId = useMemo(() => {
+            if (selectedGroupId && Array.isArray(groupsList)) {
+                const g = groupsList.find(x => String(x.id) === String(selectedGroupId));
+                const dep = g?.department_id ?? g?.departmentId;
+                if (dep != null) return Number(dep);
+            }
+            return tezPlanDeptId;
+        }, [selectedGroupId, groupsList, tezPlanDeptId]);
+        const showTezPlanColumn = isTezOpContext;
+
+        useEffect(() => {
+            if (!isTezOpContext || tezOpDeptId == null || !user?.id) {
+                setTezPlanPerFte(null);
+                return;
+            }
+            const [py, pm] = String(month || '').split('-').map((v) => parseInt(v, 10));
+            if (!Number.isFinite(py) || !Number.isFinite(pm)) {
+                setTezPlanPerFte(null);
+                return;
+            }
+            let cancelled = false;
+            axios
+                .get(`${API_BASE_URL}/api/department_plan`, {
+                    params: { department_id: tezOpDeptId, year: py, month: pm },
+                    headers: { 'X-User-Id': user.id },
+                })
+                .then((resp) => {
+                    if (cancelled) return;
+                    const v = resp?.data?.plan?.plan_per_fte;
+                    setTezPlanPerFte(v === undefined || v === null ? null : Number(v));
+                })
+                .catch(() => {
+                    if (!cancelled) setTezPlanPerFte(null);
+                });
+            return () => {
+                cancelled = true;
+            };
+            // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, [isTezOpContext, tezOpDeptId, month, user?.id, tezPlanReloadKey]);
 
         useEffect(() => {
             setChatMetricsSurgeMonth(normalizeMonthKey(month));
@@ -5917,26 +5936,40 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </div>
                 </div>
             )}
-            {isTezHoursDept && tezPlanDeptId != null && (
-                <TezOpPlanPanel
-                    apiBaseUrl={API_BASE_URL}
-                    userId={user.id}
-                    departmentId={tezPlanDeptId}
-                    month={month}
-                    canEdit={true}
-                    onSaved={() => setTezPlanReloadKey((k) => k + 1)}
-                />
-            )}
-            {showTezPlanColumn && (
+            <FullscreenSheet
+                open={salesOverlay === 'plan'}
+                onClose={() => setSalesOverlay(null)}
+                icon="fa-bullseye"
+                title="План успешек ОП TEZ"
+                subtitle={`Общий план на 1 FTE · ${month}`}
+            >
+                {tezOpDeptId != null && (
+                    <TezOpPlanPanel
+                        apiBaseUrl={API_BASE_URL}
+                        userId={user.id}
+                        departmentId={tezOpDeptId}
+                        month={month}
+                        canEdit={true}
+                        onSaved={() => setTezPlanReloadKey((k) => k + 1)}
+                    />
+                )}
+            </FullscreenSheet>
+            <FullscreenSheet
+                open={salesOverlay === 'leads'}
+                onClose={() => setSalesOverlay(null)}
+                icon="fa-users"
+                title="База лидов ОП TEZ"
+                subtitle={`Успешки и воронка · ${month}`}
+            >
                 <TezLeadsPanel
                     apiBaseUrl={API_BASE_URL}
                     userId={user.id}
-                    departmentId={tezPlanDeptId}
+                    departmentId={tezOpDeptId}
                     groupId={selectedGroupId || null}
                     month={month}
                     canEdit={true}
                 />
-            )}
+            </FullscreenSheet>
             <div className="mb-4 flex flex-wrap items-stretch justify-between gap-3">
                 {/* === Параметры (+ переключатель отчёта в той же линии) === */}
                 <div className="flex flex-wrap items-stretch gap-3">
@@ -6300,6 +6333,38 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     >
                                                         <FaIcon className={`fas ${oktellCallsSyncLoading ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}`} />
                                                         Синхронизация с Oktell
+                                                    </button>
+                                                </div>
+                                            )}
+                                            {isTezOpContext && groupHasCalls && (
+                                                <div className="border-t border-slate-100 mt-1 pt-1.5 px-2 flex flex-col gap-1">
+                                                    <button
+                                                        type="button"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            setSalesOverlay('leads');
+                                                            setPinnedGroups([]);
+                                                            setHoveredGroup(null);
+                                                        }}
+                                                        className="flex items-center gap-1.5 px-3 py-1.5 text-left text-xs font-semibold rounded-lg transition border bg-indigo-50 border-indigo-200 text-indigo-800 hover:bg-indigo-100"
+                                                        title="База лидов, воронка и успешки операторов ОП"
+                                                    >
+                                                        <FaIcon className="fas fa-users" />
+                                                        База лидов и успешки
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            setSalesOverlay('plan');
+                                                            setPinnedGroups([]);
+                                                            setHoveredGroup(null);
+                                                        }}
+                                                        className="flex items-center gap-1.5 px-3 py-1.5 text-left text-xs font-semibold rounded-lg transition border bg-teal-50 border-teal-200 text-teal-800 hover:bg-teal-100"
+                                                        title="Общий план успешек на 1 FTE"
+                                                    >
+                                                        <FaIcon className="fas fa-bullseye" />
+                                                        План успешек
                                                     </button>
                                                 </div>
                                             )}
