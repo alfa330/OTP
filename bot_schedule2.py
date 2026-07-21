@@ -5509,6 +5509,385 @@ def api_wz_eval_pick():
         return jsonify({"error": str(error)}), 500
 
 
+# ── ChatApp (ТП/ОП ТЭЗ): «Случайный чат» в журнале оценок ────────────────────
+# Третий источник чатов после Chat2Desk (ЧМ СЗоВ) и Wazzup (Верификаторы ОП).
+# Отличие от Wazzup: вебхуков нет, всё тянет ночной синк через API, поэтому
+# эпизоды собираются не из вебхучных сообщений, а из выгруженных (chatapp_*).
+# Дальше конвейер общий: снапшот в c2d_chat_snapshots (source='chatapp'),
+# оценка — обычная запись журнала с цитатами.
+#
+# Особенность ТЭЗ: операторы числятся на «ТП линия» (модель operator), а
+# оценивать чат надо по критериям «ТП чат» (модель chat_manager). Поэтому гейт
+# и критерии заданы одной картой «направление оператора -> направление
+# критериев»; она же решает, кому показывать кнопку.
+CHATAPP_EPISODE_GAP_HOURS = float(os.getenv('CHATAPP_EPISODE_GAP_HOURS', '6'))
+CHATAPP_SYNC_DAYS = int(os.getenv('CHATAPP_SYNC_DAYS', '3'))
+# Прод: 83 = «ТП линия» (там сидят техменеджеры), 84 = «ТП чат» (12 чатовых
+# критериев). Когда заведут «ОП чат», сюда добавится пара для «ОП линия» (78).
+CHATAPP_CHAT_DIRECTION_MAP_RAW = os.getenv('CHATAPP_CHAT_DIRECTION_MAP', '83:84')
+
+
+def _chatapp_direction_map():
+    """{id направления оператора: id направления с критериями}."""
+    pairs = {}
+    for chunk in str(CHATAPP_CHAT_DIRECTION_MAP_RAW or '').replace(';', ',').split(','):
+        chunk = chunk.strip()
+        if not chunk or ':' not in chunk:
+            continue
+        left, right = chunk.split(':', 1)
+        try:
+            pairs[int(left)] = int(right)
+        except ValueError:
+            continue
+    return pairs
+
+
+class _ChatAppDbTokenStore:
+    """Пара токенов ChatApp в БД: квота 100 tokens.make в сутки, поэтому
+    держать её в памяти воркера нельзя (рестарт или второй воркер её сожгут)."""
+
+    def load(self):
+        return db.chatapp_token_load()
+
+    def save(self, data):
+        db.chatapp_token_save(data)
+
+
+def _chatapp_client():
+    """(client, cfg, company_id) или (None, cfg, None), если доступы не заданы."""
+    import chatapp_client
+    cfg = chatapp_client.get_config()
+    if not chatapp_client.api_ready(cfg):
+        return None, cfg, None
+    client = chatapp_client.ChatAppClient.from_config(cfg, token_store=_ChatAppDbTokenStore())
+    return client, cfg, client.resolve_company_id(cfg.get('company_id'))
+
+
+_CHATAPP_MEDIA_PLACEHOLDERS = {
+    'image': '[фото]', 'video': '[видео]', 'voice': '[голосовое]',
+    'audio': '[аудио]', 'file': '[документ]', 'files': '[документы]',
+    'sticker': '[стикер]', 'location': '[геолокация]', 'call_log': '[звонок]',
+    'template': '[шаблон]', 'form': '[форма]', 'order': '[заказ]',
+}
+
+
+def _chatapp_normalize_snapshot_message(msg):
+    """Строка chatapp_messages -> формат сообщения снапшота: та же схема, что у
+    Chat2Desk и Wazzup, её рендерит ChatThread и по ней сверяются цитаты."""
+    # naive-локаль Алматы, как у c2d/wazzup: общая лента рендерит одинаковое
+    # настенное время у зрителя в любом часовом поясе.
+    created = (msg['dt'].astimezone(ZoneInfo('Asia/Almaty')).replace(tzinfo=None)
+               if msg.get('dt') else None)
+    if msg.get('side') != 'out':
+        mtype = 'from_client'
+    elif not msg.get('human_out') or msg.get('is_bot'):
+        # приветствие из Bitrix и прочие интеграции — в ленте это «автоответ»,
+        # он прячется тумблером «Без автоответов» и не идёт в атрибуцию
+        mtype = 'autoreply'
+    else:
+        mtype = 'to_client'
+    text = str(msg.get('text') or '')
+    if msg.get('is_deleted'):
+        text = f"[удалено] {text}".strip()
+    link = str(msg.get('file_link') or '').strip() or None
+    kind = str(msg.get('type') or '').strip()
+    if not text and not link:
+        text = _CHATAPP_MEDIA_PLACEHOLDERS.get(kind, '')
+    content_type = str(msg.get('file_content_type') or '')
+    is_image = kind == 'image' or content_type.startswith('image/')
+    is_video = kind == 'video' or content_type.startswith('video/')
+    is_audio = kind in ('audio', 'voice') or content_type.startswith('audio/')
+    attachments = []
+    if link and not (is_image or is_video or is_audio):
+        attachments.append({
+            'name': msg.get('file_name') or _CHATAPP_MEDIA_PLACEHOLDERS.get(kind, '[файл]').strip('[]'),
+            'link': link,
+        })
+    # Автор исходящего: заматченное имя оператора, ник ChatApp — только фолбэк.
+    # Эпизод может вести несколько операторов, поэтому подпись у каждого своя.
+    author = None
+    if msg.get('side') == 'out':
+        author = (str(msg.get('matched_name') or '').strip()
+                  or str(msg.get('author_name') or '').strip() or None)
+    return {
+        'id': msg.get('message_id'),
+        'type': mtype,
+        'text': text,
+        'created': created.isoformat() if created else None,
+        'photo': link if is_image else None,
+        'video': link if is_video else None,
+        'audio': link if is_audio else None,
+        'pdf': None,
+        'attachments': attachments,
+        'status': None,
+        'requestId': None,
+        'author': author,
+    }
+
+
+def sync_chatapp_data(days=None, rebuild_episodes=True):
+    """Ночной синк ChatApp: сотрудники -> пул чатов -> переписка -> эпизоды.
+
+    У списка чатов ChatApp нет фильтра по датам, поэтому пул набирается
+    листанием назад по lastTime. Объёмы маленькие (порядка 200 чатов и 1000
+    сообщений в сутки на обе лицензии), так что тянем всё окно целиком."""
+    import chatapp_client
+    client, cfg, company_id = _chatapp_client()
+    if client is None:
+        logging.info("chatapp sync: доступы не заданы, пропускаем")
+        return {'skipped': 'no_credentials'}
+    if not company_id:
+        raise RuntimeError("ChatApp: не удалось определить companyId")
+    days = int(days or CHATAPP_SYNC_DAYS)
+    since_dt = datetime.now(timezone.utc) - timedelta(days=days)
+    since_ts = int(since_dt.timestamp())
+
+    employees = client.list_employees(company_id)
+    db.sync_chatapp_employees(employees)
+    matched = _chatapp_automatch_authors()
+
+    license_ids = cfg.get('license_ids') or [
+        lic for lic, _mt, _name, _phone in client.active_messenger_licenses()]
+    # Фильтр по лицензиям отдаём API (filter[licenseIds]); если список пуст,
+    # берём все чаты компании, а не отсекаем их все на клиенте.
+    chat_rows = [chatapp_client.chat_row(c)
+                 for c in client.iter_chats(company_id, license_ids, since_ts=since_ts)]
+    db.store_chatapp_chats(chat_rows)
+
+    stored_messages, touched_chats = 0, 0
+    for chat in db.chatapp_chats_needing_messages(since_dt):
+        # Отступаем на паузу эпизода назад от уже вытянутого места: иначе на
+        # границе окна синка эпизод разорвётся надвое.
+        window_start = (chat['synced_until'] or since_dt) - timedelta(
+            hours=CHATAPP_EPISODE_GAP_HOURS)
+        try:
+            raw = client.fetch_messages(chat['license_id'], chat['messenger_type'],
+                                        chat['chat_id'],
+                                        since_ts=int(window_start.timestamp()))
+        except chatapp_client.ChatAppError as error:
+            logging.warning("chatapp sync: чат %s пропущен (%s)", chat['chat_id'], error)
+            continue
+        rows = [chatapp_client.message_row(m, chat['license_id'],
+                                           chat['messenger_type'], chat['chat_id'])
+                for m in raw]
+        rows = [r for r in rows if r['message_id']]
+        stored_messages += db.store_chatapp_messages(rows)
+        touched_chats += 1
+        newest = max((r['dt'] for r in rows), default=None) or chat['last_time']
+        db.mark_chatapp_chat_synced(chat['license_id'], chat['messenger_type'],
+                                    chat['chat_id'], newest)
+
+    result = {'chats': len(chat_rows), 'chats_with_messages': touched_chats,
+              'messages': stored_messages, 'employees': len(employees),
+              'authors_matched': matched}
+    if rebuild_episodes:
+        result['episodes'] = db.build_chatapp_episodes(gap_hours=CHATAPP_EPISODE_GAP_HOURS)
+    logging.info("chatapp sync: %s", result)
+    return result
+
+
+def _chatapp_automatch_authors():
+    """Автопривязка новых сотрудников ChatApp к нашим users по ФИО.
+
+    Порядок слов и казахские буквы у ChatApp и в БД расходятся («Ахан Мұхан» ->
+    «Мухан Ахан Бауыржанулы»), поэтому матчим подмножеством слов — той же
+    механикой, что _wazzup_suggest_user. Ставим только однозначные совпадения:
+    неоднозначные и непривязанные правятся руками в UI."""
+    candidates = db.list_chatapp_operator_candidates()
+    matched = 0
+    for author in db.list_chatapp_authors():
+        if author.get('user_id') or author.get('is_bot'):
+            continue
+        suggestion = _wazzup_suggest_user(author.get('employee_name'), candidates)
+        if suggestion:
+            db.upsert_chatapp_author_map(author['employee_id'], user_id=suggestion['id'])
+            matched += 1
+    return matched
+
+
+def _chatapp_admin_guard():
+    """(requester_id, err) для настройки ChatApp: только админы и главы отделов.
+
+    _ai_qa_guard здесь не годится — он пускает по ОП/СЗоВ, а ChatApp это ТЭЗ."""
+    requester_id, requester, auth_error = _get_authenticated_requester()
+    if auth_error:
+        message, status_code = auth_error
+        return None, (jsonify({"error": message}), status_code)
+    role = _normalize_user_role(requester[3])
+    if _is_admin_role(role) or _headed_department_id(requester_id) is not None:
+        return requester_id, None
+    return requester_id, (jsonify({"error": "forbidden"}), 403)
+
+
+@app.route('/api/chatapp/sync', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_chatapp_sync():
+    """Ручной запуск синка (обычно его крутит ночной джоб)."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    _, err = _chatapp_admin_guard()
+    if err:
+        return err
+    try:
+        data = request.get_json(silent=True) or {}
+        return jsonify({"status": "success", **sync_chatapp_data(days=data.get('days'))}), 200
+    except Exception as error:
+        logging.exception("chatapp sync failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/chatapp/authors', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_chatapp_authors():
+    """Сотрудники ChatApp с привязкой к нашим операторам + подсказки."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    _, err = _chatapp_admin_guard()
+    if err:
+        return err
+    try:
+        operators = db.list_chatapp_operator_candidates()
+        items = []
+        for author in db.list_chatapp_authors():
+            suggested = None
+            if not author.get('user_id'):
+                suggested = _wazzup_suggest_user(author.get('employee_name'), operators)
+            items.append({**author, 'suggested_user': suggested})
+        return jsonify({"status": "success", "authors": items, "operators": operators}), 200
+    except Exception as error:
+        logging.exception("chatapp authors failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/chatapp/authors/map', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_chatapp_authors_map():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _chatapp_admin_guard()
+    if err:
+        return err
+    try:
+        data = request.get_json(silent=True) or {}
+        employee_id = data.get('employee_id')
+        if employee_id in (None, ''):
+            return jsonify({"error": "employee_id обязателен"}), 400
+        user_id = data.get('user_id')
+        db.upsert_chatapp_author_map(
+            int(employee_id),
+            user_id=int(user_id) if user_id not in (None, '') else None,
+            is_bot=data.get('is_bot'),
+            updated_by=requester_id)
+        return jsonify({"status": "success"}), 200
+    except Exception as error:
+        logging.exception("chatapp author map failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/ca_eval/pick', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_ca_eval_pick():
+    """Случайный эпизод ChatApp для оценки — тот же контракт, что у wz_eval/pick."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, requester, err = _c2d_eval_guard()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+
+    def as_int(key):
+        value = data.get(key)
+        if value in (None, ''):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def local_iso(value):
+        if value is None:
+            return None
+        return value.astimezone(ZoneInfo('Asia/Almaty')).replace(tzinfo=None).isoformat()
+
+    try:
+        scope_dept = _c2d_eval_scope_department(requester_id, _normalize_user_role(requester[3]))
+        min_req = as_int('min_messages')
+        skipped_empty = []
+        candidates = 0
+        for _attempt in range(4):
+            episode, candidates = db.pick_chatapp_episode(
+                operator_id=as_int('operator_id'),
+                date_from=(data.get('date_from') or '').strip() or None,
+                date_to=(data.get('date_to') or '').strip() or None,
+                min_messages=min_req,
+                max_messages=as_int('max_messages'),
+                department_id=scope_dept,
+                exclude=(data.get('exclude') or 'mine').strip(),
+                evaluator_id=requester_id,
+                exclude_episode_ids=skipped_empty)
+            if not episode:
+                return jsonify({
+                    "status": "empty",
+                    "message": ("По заданным фильтрам эпизодов не нашлось — ослабьте условия"
+                                if not skipped_empty else
+                                "Подходящие эпизоды нашлись, но их переписка уже удалена ретеншном — возьмите период посвежее"),
+                    "candidates": 0
+                }), 200
+            # Снапшот переиспользуем: у оценённого эпизода на него уже ссылается
+            # calls-ряд, перезапись исказила бы прошлую оценку и цитаты.
+            existing_id = db.get_ca_snapshot_id(
+                episode['license_id'], episode['messenger_type'],
+                episode['chat_id'], episode['episode_start'])
+            snapshot = db.get_c2d_snapshot(snapshot_id=existing_id) if existing_id else None
+            stored = (snapshot or {}).get('messages') or []
+            if stored:
+                messages = stored
+            else:
+                raw_messages = db.fetch_chatapp_episode_messages(
+                    episode['license_id'], episode['messenger_type'],
+                    episode['chat_id'], episode['episode_start'], episode['episode_end'])
+                messages = [_chatapp_normalize_snapshot_message(m) for m in raw_messages]
+                if not messages:
+                    skipped_empty.append(int(episode['episode_id']))
+                    logging.info("ca eval pick: эпизод %s без сообщений (ретеншн), пропускаем",
+                                 episode['episode_id'])
+                    continue
+                snapshot_id = db.save_ca_snapshot(episode, messages, created_by=requester_id)
+                snapshot = db.get_c2d_snapshot(snapshot_id=snapshot_id)
+            if min_req and len(messages) < min_req:
+                skipped_empty.append(int(episode['episode_id']))
+                logging.info("ca eval pick: эпизод %s обрезан ретеншном (%s < %s), пропускаем",
+                             episode['episode_id'], len(messages), min_req)
+                continue
+
+            episode_row = {
+                'episode_id': episode['episode_id'],
+                'request_start': local_iso(episode['episode_start']),
+                'request_end': local_iso(episode['episode_end']),
+                'day': snapshot.get('day') if snapshot else None,
+                'operator_id': episode['operator_id'],
+                'operator_name': episode['operator_name'],
+                'messages_count': len(messages),
+                'inbound_count': episode['inbound_count'],
+            }
+            return jsonify({
+                "status": "success",
+                "request": episode_row,
+                "snapshot": snapshot,
+                "candidates": candidates,
+                "skippedEmpty": len(skipped_empty),
+            }), 200
+
+        return jsonify({
+            "status": "empty",
+            "message": "Несколько эпизодов подряд без сохранившейся переписки — попробуйте другой период",
+            "candidates": candidates
+        }), 200
+    except Exception as error:
+        logging.exception("ca eval pick failed")
+        return jsonify({"error": str(error)}), 500
+
+
 @app.route('/api/resource_fte/overview', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_resource_fte_overview():
@@ -14305,6 +14684,9 @@ def get_directions():
         # «Случайный чат» — два источника: Chat2Desk у чат-менеджеров СЗоВ
         # (ТП чат ТЭЗ живёт в другой системе) и Wazzup у Верификаторов отдела
         # продаж (эпизоды WhatsApp). random_chat_source управляет модалкой.
+        # Третий источник — ChatApp у ТП/ОП ТЭЗ: там кнопка висит на «линейном»
+        # направлении, а критерии приходят от чатового (random_chat_criteria_direction_id).
+        _chatapp_map = _chatapp_direction_map()
         for _d in directions:
             _code = str(_d.get('department_code') or '').strip().lower()
             _model = str(_d.get('calculation_model_code') or '').strip().lower()
@@ -14316,13 +14698,20 @@ def get_directions():
             _d['random_call_eligible'] = _source is not None
             _d['random_call_source'] = _source
             _chat_source = None
+            # Критерии обычно берутся у направления самого оператора; у ChatApp
+            # (ТЭЗ) это не так — см. CHATAPP_CHAT_DIRECTION_MAP.
+            _criteria_direction_id = None
             if _model == 'chat_manager' and _code == C2D_RANDOM_CHAT_DEPARTMENT_CODE:
                 _chat_source = 'chat2desk'
             elif (_code == WZ_RANDOM_CHAT_DEPARTMENT_CODE
                     and WZ_RANDOM_CHAT_DIRECTION_MARKER in str(_d.get('name') or '').lower()):
                 _chat_source = 'wazzup'
+            elif _chatapp_map.get(_d.get('id')) is not None:
+                _chat_source = 'chatapp'
+                _criteria_direction_id = _chatapp_map[_d['id']]
             _d['random_chat_eligible'] = _chat_source is not None
             _d['random_chat_source'] = _chat_source
+            _d['random_chat_criteria_direction_id'] = _criteria_direction_id
         return jsonify({
             "status": "success",
             "directions": directions,
@@ -40947,6 +41336,26 @@ async def run_wazzup_episodes_async():
     except Exception:
         logging.exception("wazzup episodes build failed")
 
+
+async def run_chatapp_sync_async():
+    # Ночной синк ChatApp (ТП/ОП ТЭЗ) со сборкой эпизодов: чаты и переписка
+    # тянутся через API, вебхуков у нас нет. Идёт в пуле — внутри блокирующий
+    # requests, а объём порядка 200 чатов в сутки занимает минуты.
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(executor_pool, sync_chatapp_data)
+    except Exception:
+        logging.exception("chatapp sync failed")
+
+
+async def run_chatapp_retention_async():
+    # Ретеншн ChatApp: сообщения 45 дней, пул чатов 180 (снапшоты живут дольше).
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(executor_pool, db.cleanup_chatapp_data)
+    except Exception:
+        logging.exception("chatapp retention failed")
+
 # === Главный запуск =============================================================================================
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('reject_reval:'))
 async def handle_reject_reval(callback_query: types.CallbackQuery, state: FSMContext):
@@ -41172,6 +41581,25 @@ if __name__ == '__main__':
         run_c2d_eval_retention_async,
         CronTrigger(hour=3, minute=40, timezone=ZoneInfo('Asia/Almaty')),
         id='c2d_eval_retention_daily',
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # ChatApp (ТП/ОП ТЭЗ): синк переписки со сборкой эпизодов в 04:20 — после
+    # ретеншна и сборки Wazzup, всё в том же ночном затишье.
+    scheduler.add_job(
+        run_chatapp_sync_async,
+        CronTrigger(hour=4, minute=20, timezone=ZoneInfo('Asia/Almaty')),
+        id='chatapp_sync_daily',
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
+    scheduler.add_job(
+        run_chatapp_retention_async,
+        CronTrigger(hour=3, minute=45, timezone=ZoneInfo('Asia/Almaty')),
+        id='chatapp_retention_daily',
         misfire_grace_time=3600,
         max_instances=1,
         coalesce=True

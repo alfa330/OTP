@@ -5,6 +5,7 @@ microsip_dnd_shield/
 .vite/
 .env
 .env.codex.local
+.chatapp_token.json
 src/_extracted_script.jsx
 tools_find_tdz.js
 tools_find_tdz.cjs
