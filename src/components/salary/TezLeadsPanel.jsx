@@ -14,6 +14,8 @@ import FaIcon from '../common/FaIcon';
  *  - apiBaseUrl: базовый URL API
  *  - userId: id текущего пользователя (заголовок X-User-Id)
  *  - departmentId: id отдела
+ *  - groupId: id выбранной группы (сужает рейтинг операторов и разбивку по дням;
+ *             воронка и загрузки остаются на уровне отдела — база лидов общая)
  *  - month: 'YYYY-MM'
  *  - canEdit: можно ли загружать базу и запускать сверку
  */
@@ -43,7 +45,7 @@ const RULE_LABELS = {
 
 const fmtDateTime = (value) => (value ? String(value).replace('T', ' ').slice(0, 16) : '—');
 
-const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, month, canEdit = false }) => {
+const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, groupId = null, month, canEdit = false }) => {
   const [stats, setStats] = useState(null);
   const [leads, setLeads] = useState([]);
   const [tab, setTab] = useState('operators');
@@ -62,13 +64,16 @@ const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, month, canEdit =
   const loadStats = useCallback(() => {
     if (!validPeriod || !userId) return Promise.resolve(null);
     return axios
-      .get(`${apiBaseUrl}/api/tez_leads/stats`, { params: { year, month: monthNum }, headers })
+      .get(`${apiBaseUrl}/api/tez_leads/stats`, {
+        params: { year, month: monthNum, group_id: groupId || undefined },
+        headers,
+      })
       .then((resp) => {
         setStats(resp?.data || null);
         return resp?.data || null;
       })
       .catch(() => null);
-  }, [apiBaseUrl, headers, userId, year, monthNum, validPeriod]);
+  }, [apiBaseUrl, headers, userId, year, monthNum, validPeriod, groupId]);
 
   const loadLeads = useCallback(() => {
     if (!validPeriod || !userId) return;
@@ -240,6 +245,13 @@ const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, month, canEdit =
         без нашего звонка и в знаменатель не входят. От всей базы было бы {funnel.conversion_all ?? 0}%.
         Не засчитано по правилу дат: {funnel.not_counted ?? 0}.
       </div>
+
+      {groupId && (
+        <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
+          Выбрана группа: «Операторы» и «По дням» показаны только по ней.
+          Воронка и загрузки — по всему отделу, база лидов общая.
+        </div>
+      )}
 
       <div className="flex gap-1 mb-3">
         {[

@@ -241,5 +241,27 @@ class SchemaTests(unittest.TestCase):
             self.assertIn(f"'{status}'", self.ddl, status)
 
 
+class GroupFilterTests(unittest.TestCase):
+    """Сужение успешек по группе оператора привязано к дате поездки."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+
+    def test_group_filter_uses_membership_interval_on_success_date(self):
+        """Группа берётся из членства, активного в день успешки (не «текущая» группа)."""
+        self.assertIn("_TEZ_GROUP_FILTER_SQL", self.src)
+        self.assertIn("group_operator_memberships gom", self.src)
+        self.assertRegex(
+            self.src,
+            r"s\.success_date >= gom\.start_date\s*\n\s*AND \(gom\.end_date IS NULL OR s\.success_date <= gom\.end_date\)",
+        )
+
+    def test_operator_and_day_views_accept_group(self):
+        """И рейтинг операторов, и разбивка по дням принимают group_id."""
+        self.assertIn("def get_tez_operator_successes(self, year, month, group_id=None)", self.src)
+        self.assertIn("def get_tez_successes_by_day(self, year, month, group_id=None)", self.src)
+
+
 if __name__ == "__main__":
     unittest.main()

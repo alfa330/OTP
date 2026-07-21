@@ -5927,11 +5927,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     onSaved={() => setTezPlanReloadKey((k) => k + 1)}
                 />
             )}
-            {isTezHoursDept && (
+            {showTezPlanColumn && (
                 <TezLeadsPanel
                     apiBaseUrl={API_BASE_URL}
                     userId={user.id}
                     departmentId={tezPlanDeptId}
+                    groupId={selectedGroupId || null}
                     month={month}
                     canEdit={true}
                 />

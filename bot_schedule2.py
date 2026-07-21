@@ -29740,13 +29740,21 @@ def tez_leads_stats():
     year, month = _tez_leads_period_from_request()
     if not year:
         return jsonify({"error": "Некорректный период (year/month)"}), 400
+    # Группа сужает только показатели, привязанные к оператору (рейтинг, по дням):
+    # база лидов грузится на весь отдел, поэтому воронка и загрузки — отделу целиком.
+    group_raw = request.args.get('group_id')
+    try:
+        group_id = int(group_raw) if group_raw else None
+    except (TypeError, ValueError):
+        group_id = None
     try:
         return jsonify({
             "year": year,
             "month": month,
+            "group_id": group_id,
             "funnel": db.get_tez_lead_funnel(year, month),
-            "operators": db.get_tez_operator_successes(year, month),
-            "by_day": db.get_tez_successes_by_day(year, month),
+            "operators": db.get_tez_operator_successes(year, month, group_id=group_id),
+            "by_day": db.get_tez_successes_by_day(year, month, group_id=group_id),
             "batches": db.list_tez_lead_batches(year, month),
         })
     except Exception:
