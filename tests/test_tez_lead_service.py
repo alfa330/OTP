@@ -175,6 +175,34 @@ class CloudflareDetectionTests(unittest.TestCase):
         from tez_first_orders import _looks_like_cloudflare_block
         self.assertFalse(_looks_like_cloudflare_block('{"drivers": []}'))
 
+    def test_cloudflare_403_raises_clean_message(self):
+        """403 с Cloudflare-заглушкой -> понятный RuntimeError (а не NameError/HTML).
+
+        Ветка исполняется только на Cloudflare-пути (прод-IP), поэтому локальный
+        smoke-тест её не задевал — тут прогоняем её напрямую через фейковую сессию.
+        """
+        from tez_first_orders import TezFirstOrdersClient
+
+        class _Resp:
+            status_code = 403
+            text = ('<!DOCTYPE html><html class="no-js" lang="en-US"> '
+                    'error code: 1020 cloudflare')
+
+            def json(self):
+                raise ValueError('not json')
+
+        class _Session:
+            def post(self, *a, **k):
+                return _Resp()
+
+        client = TezFirstOrdersClient(token='x')
+        client.session = _Session()
+        with self.assertRaises(RuntimeError) as ctx:
+            client.fetch_first_orders(['77000409090'])
+        msg = str(ctx.exception)
+        self.assertIn('Cloudflare', msg)
+        self.assertIn('1020', msg)
+
 
 if __name__ == "__main__":
     unittest.main()
