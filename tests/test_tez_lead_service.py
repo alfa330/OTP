@@ -187,6 +187,7 @@ class CloudflareDetectionTests(unittest.TestCase):
             status_code = 403
             text = ('<!DOCTYPE html><html class="no-js" lang="en-US"> '
                     'error code: 1020 cloudflare')
+            headers = {'cf-ray': 'abc123-AKX', 'server': 'cloudflare'}
 
             def json(self):
                 raise ValueError('not json')
@@ -202,6 +203,7 @@ class CloudflareDetectionTests(unittest.TestCase):
         msg = str(ctx.exception)
         self.assertIn('Cloudflare', msg)
         self.assertIn('1020', msg)
+        self.assertIn('abc123-AKX', msg)   # CF-Ray попадает в диагностику
 
 
 if __name__ == "__main__":
