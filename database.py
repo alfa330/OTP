@@ -15434,15 +15434,21 @@ class Database:
             """, rows, page_size=200)
         return len(rows)
 
-    def chatapp_chats_needing_messages(self, since):
-        """Чаты, у которых активность новее, чем уже вытянутая переписка."""
+    def chatapp_chats_needing_messages(self, since, force=False):
+        """Чаты, у которых активность новее, чем уже вытянутая переписка.
+
+        force=True снимает проверку «уже синкали» — нужно, когда период выбран
+        руками в разделе: иначе повторный синк того же диапазона молча ничего
+        не сделает."""
+        fresh_only = "" if force else \
+            "AND (messages_synced_until IS NULL OR messages_synced_until < last_time)"
         with self._get_cursor() as cursor:
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT license_id, messenger_type, chat_id, name, phone,
                        messages_synced_until, last_time
                   FROM chatapp_chats
                  WHERE last_time >= %s
-                   AND (messages_synced_until IS NULL OR messages_synced_until < last_time)
+                   {fresh_only}
                  ORDER BY last_time DESC
             """, (since,))
             return [{'license_id': r[0], 'messenger_type': r[1], 'chat_id': r[2],
@@ -15450,11 +15456,15 @@ class Database:
                     for r in cursor.fetchall()]
 
     def mark_chatapp_chat_synced(self, license_id, messenger_type, chat_id, until):
+        """Отметка «докуда вытянута переписка». Только вперёд: догрузка старого
+        периода не должна откатывать маркер и заставлять перечитывать свежее."""
         with self._get_cursor() as cursor:
             cursor.execute("""
-                UPDATE chatapp_chats SET messages_synced_until = %s
+                UPDATE chatapp_chats
+                   SET messages_synced_until = GREATEST(
+                           COALESCE(messages_synced_until, %s), %s)
                  WHERE license_id = %s AND messenger_type = %s AND chat_id = %s
-            """, (until, int(license_id), str(messenger_type), str(chat_id)))
+            """, (until, until, int(license_id), str(messenger_type), str(chat_id)))
 
     def sync_chatapp_employees(self, employees):
         """Обновить справочник сотрудников ChatApp, не затирая ручную привязку."""

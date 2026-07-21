@@ -5629,8 +5629,12 @@ def _chatapp_normalize_snapshot_message(msg):
     }
 
 
-def sync_chatapp_data(days=None, rebuild_episodes=True):
-    """Ночной синк ChatApp: сотрудники -> пул чатов -> переписка -> эпизоды.
+def sync_chatapp_data(days=None, date_from=None, date_to=None, rebuild_episodes=True):
+    """Синк ChatApp: сотрудники -> пул чатов -> переписка -> эпизоды.
+
+    Период задаётся либо `days` (ночной джоб — последние сутки-трое), либо
+    парой `date_from`/`date_to` из пикера в разделе. Даты — локальные Алматы,
+    как их видит пользователь; `date_to` берём включительно.
 
     У списка чатов ChatApp нет фильтра по датам, поэтому пул набирается
     листанием назад по lastTime. Объёмы маленькие (порядка 200 чатов и 1000
@@ -5642,9 +5646,18 @@ def sync_chatapp_data(days=None, rebuild_episodes=True):
         return {'skipped': 'no_credentials'}
     if not company_id:
         raise RuntimeError("ChatApp: не удалось определить companyId")
-    days = int(days or CHATAPP_SYNC_DAYS)
-    since_dt = datetime.now(timezone.utc) - timedelta(days=days)
+
+    almaty = ZoneInfo('Asia/Almaty')
+    until_dt = None
+    if date_from:
+        since_dt = datetime.fromisoformat(str(date_from)).replace(tzinfo=almaty)
+        if date_to:
+            until_dt = (datetime.fromisoformat(str(date_to)).replace(tzinfo=almaty)
+                        + timedelta(days=1) - timedelta(seconds=1))
+    else:
+        since_dt = datetime.now(timezone.utc) - timedelta(days=int(days or CHATAPP_SYNC_DAYS))
     since_ts = int(since_dt.timestamp())
+    until_ts = int(until_dt.timestamp()) if until_dt else None
 
     employees = client.list_employees(company_id)
     db.sync_chatapp_employees(employees)
@@ -5659,15 +5672,18 @@ def sync_chatapp_data(days=None, rebuild_episodes=True):
     db.store_chatapp_chats(chat_rows)
 
     stored_messages, touched_chats = 0, 0
-    for chat in db.chatapp_chats_needing_messages(since_dt):
-        # Отступаем на паузу эпизода назад от уже вытянутого места: иначе на
-        # границе окна синка эпизод разорвётся надвое.
-        window_start = (chat['synced_until'] or since_dt) - timedelta(
-            hours=CHATAPP_EPISODE_GAP_HOURS)
+    explicit_range = bool(date_from)
+    for chat in db.chatapp_chats_needing_messages(since_dt, force=explicit_range):
+        # Отступаем на паузу эпизода назад от начала окна: иначе на его границе
+        # эпизод разорвётся надвое. При явном периоде идём от его начала, при
+        # ночном прогоне — от того места, докуда уже вытянули этот чат.
+        anchor = since_dt if explicit_range else (chat['synced_until'] or since_dt)
+        window_start = anchor - timedelta(hours=CHATAPP_EPISODE_GAP_HOURS)
         try:
             raw = client.fetch_messages(chat['license_id'], chat['messenger_type'],
                                         chat['chat_id'],
-                                        since_ts=int(window_start.timestamp()))
+                                        since_ts=int(window_start.timestamp()),
+                                        until_ts=until_ts)
         except chatapp_client.ChatAppError as error:
             logging.warning("chatapp sync: чат %s пропущен (%s)", chat['chat_id'], error)
             continue
@@ -5677,9 +5693,13 @@ def sync_chatapp_data(days=None, rebuild_episodes=True):
         rows = [r for r in rows if r['message_id']]
         stored_messages += db.store_chatapp_messages(rows)
         touched_chats += 1
-        newest = max((r['dt'] for r in rows), default=None) or chat['last_time']
-        db.mark_chatapp_chat_synced(chat['license_id'], chat['messenger_type'],
-                                    chat['chat_id'], newest)
+        # Маркер «докуда вытянуто» — бухгалтерия ночного прогона. Ручная
+        # догрузка старого периода его не трогает: она не говорит ничего о том,
+        # прочитан ли свежий хвост чата.
+        if not explicit_range:
+            newest = max((r['dt'] for r in rows), default=None) or chat['last_time']
+            db.mark_chatapp_chat_synced(chat['license_id'], chat['messenger_type'],
+                                        chat['chat_id'], newest)
 
     result = {'chats': len(chat_rows), 'chats_with_messages': touched_chats,
               'messages': stored_messages, 'employees': len(employees),
@@ -5943,7 +5963,15 @@ def api_chatapp_sync():
         return err
     try:
         data = request.get_json(silent=True) or {}
-        return jsonify({"status": "success", **sync_chatapp_data(days=data.get('days'))}), 200
+        date_from = (data.get('date_from') or '').strip() or None
+        date_to = (data.get('date_to') or '').strip() or None
+        if date_from and date_to and date_to < date_from:
+            date_from, date_to = date_to, date_from
+        result = sync_chatapp_data(days=data.get('days'),
+                                   date_from=date_from, date_to=date_to)
+        return jsonify({"status": "success", **result}), 200
+    except ValueError:
+        return jsonify({"error": "Некорректные даты периода"}), 400
     except Exception as error:
         logging.exception("chatapp sync failed")
         return jsonify({"error": str(error)}), 500
