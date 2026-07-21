@@ -29639,6 +29639,117 @@ def update_chat_manager_low_rating_review(review_id):
         return jsonify({"error": "Internal server error"}), 500
 
 
+def _low_rating_chat_request_id(raw_payload):
+    """id заявки с самим разговором. Оценка приезжает отдельной «заявкой»-опросом
+    (request_id — 3 служебных сообщения: вопрос, цифра, спасибо), а оцениваемый
+    разговор лежит в valuation_request_id — проверено живьём на диалоге 19332881."""
+    raw = raw_payload if isinstance(raw_payload, dict) else {}
+    for key in ('valuation_request_id', 'request_id'):
+        try:
+            value = int(str(raw.get(key) or '').strip())
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return None
+
+
+@app.route('/api/chat_manager/low_rating_reviews/<review_id>/chat', methods=['GET'])
+@require_api_key
+def chat_manager_low_rating_review_chat(review_id):
+    """Переписка чата, за который клиент поставил низкую оценку.
+
+    Снапшоты общие с оценкой чатов в «Журнале оценок» (c2d_chat_snapshots, один
+    на request_id): уже открытый/оценённый чат отдаётся из БД, к API Chat2Desk
+    ходим только за новыми (2-3 запроса, квота почти не тратится)."""
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        requester_role = _normalize_user_role(requester[3])
+        headed_dept_id = _headed_department_id(requester_id)
+        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role) or headed_dept_id is not None):
+            return jsonify({"error": "Forbidden"}), 403
+
+        current = db.get_chat_manager_low_rating_review(review_id)
+        if not current:
+            return jsonify({"error": "Review not found"}), 404
+        if not _is_global_admin_requester(requester_role, requester_id):
+            scope_dept = _department_scope_id_for_requester(requester_id)
+            if scope_dept is not None and int(current.get('department_id') or 0) != int(scope_dept):
+                return jsonify({"error": "Forbidden"}), 403
+
+        request_id = _low_rating_chat_request_id(current.get('raw_payload'))
+        if not request_id:
+            return jsonify({"error": "В отчёте Chat2Desk у этой оценки нет ссылки на заявку — переписку не достать"}), 404
+
+        snapshot = db.get_c2d_snapshot(request_id=request_id)
+        if snapshot is not None and not snapshot.get('messages'):
+            snapshot = None  # пустой снапшот старой версии — перечитываем заново
+        cached = snapshot is not None
+
+        if snapshot is None:
+            # Границы разговора: из c2d_requests, если заявка попала в синк метрик
+            # (только последние 45 дней), иначе окном вокруг времени оценки —
+            # клиент ставит её сразу после диалога.
+            request_row = db.get_c2d_request(request_id) or {}
+            request_start = request_row.get('request_start')
+            request_end = request_row.get('request_end')
+            if not request_start:
+                try:
+                    rated_at = datetime.fromisoformat(str(current.get('rated_at') or '')[:19])
+                except ValueError:
+                    rated_at = None
+                if rated_at is not None:
+                    request_start = (rated_at - timedelta(hours=6)).isoformat()
+                    request_end = rated_at.isoformat()
+
+            dialog_id, messages = _c2d_fetch_request_messages(
+                request_id, request_start=request_start, request_end=request_end)
+            if not messages:
+                return jsonify({"error": "Chat2Desk не отдал переписку по этой заявке (возможно, она уже недоступна)"}), 404
+
+            raw = current.get('raw_payload') if isinstance(current.get('raw_payload'), dict) else {}
+            snapshot_row = dict(request_row)
+            # Заявки старше ретеншна c2d_requests в синке нет — тогда шапку
+            # снапшота собираем из самой строки низкой оценки.
+            snapshot_row.setdefault('request_id', request_id)
+            for key, value in (
+                ('day', current.get('day')),
+                ('operator_id', current.get('operator_id')),
+                ('c2d_operator_name', current.get('operator_name')),
+                ('channel_name', current.get('taxi_park') or raw.get('channel_name')),
+                ('transport', raw.get('transport')),
+                ('client_name', raw.get('client_name')),
+                ('client_phone', current.get('phone_number') or raw.get('phone')),
+            ):
+                if not snapshot_row.get(key) and value:
+                    snapshot_row[key] = value
+
+            snapshot_id = db.save_c2d_snapshot(
+                request_id, dialog_id, messages,
+                request_row=snapshot_row, created_by=requester_id)
+            snapshot = db.get_c2d_snapshot(snapshot_id=snapshot_id)
+
+        return jsonify({
+            "status": "success",
+            "snapshot": snapshot,
+            "request_id": request_id,
+            "cached": cached,
+        }), 200
+
+    except RuntimeError as e:
+        logging.warning("low rating chat fetch: %s", e)
+        return jsonify({"error": str(e)}), 502
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error loading chat for low rating review: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 def _low_rating_verdict_label(row):
     """Возвращает (текст, категория) итогового статуса строки низкой оценки."""
     final_status = row.get('final_status')
