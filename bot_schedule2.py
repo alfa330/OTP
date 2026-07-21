@@ -29780,17 +29780,36 @@ def tez_leads_detail():
     if not year:
         return jsonify({"error": "Некорректный период (year/month)"}), 400
     operator_id = request.args.get('operator_id')
+    status = request.args.get('status') or None
+    search = request.args.get('search') or None
+
+    def _int_arg(name, default, lo, hi):
+        try:
+            return max(lo, min(hi, int(request.args.get(name, default))))
+        except (TypeError, ValueError):
+            return default
+
+    page = _int_arg('page', 1, 1, 10_000_000)
+    page_size = _int_arg('page_size', 50, 1, 500)
+    offset = (page - 1) * page_size
+
     try:
+        op_id = int(operator_id) if operator_id else None
+        total = db.count_tez_leads_detail(year, month, status=status, operator_id=op_id, search=search)
         rows = db.get_tez_leads_detail(
             year, month,
-            status=(request.args.get('status') or None),
-            operator_id=int(operator_id) if operator_id else None,
-            search=(request.args.get('search') or None),
+            status=status, operator_id=op_id, search=search,
+            limit=page_size, offset=offset,
         )
     except Exception:
         logging.exception('tez_leads: не удалось собрать детализацию')
         return jsonify({"error": "Internal server error"}), 500
-    return jsonify({"year": year, "month": month, "leads": rows})
+    return jsonify({
+        "year": year, "month": month,
+        "leads": rows,
+        "total": total, "page": page, "page_size": page_size,
+        "pages": (total + page_size - 1) // page_size if page_size else 1,
+    })
 
 
 @app.route('/api/tez_leads/export', methods=['GET'])
