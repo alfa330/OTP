@@ -2129,25 +2129,33 @@ const ChatThread = ({ snapshot, quotes = [], selectable = false, onAddQuote, hei
                     }
                     const out = m.type === 'to_client';
                     const auto = m.type === 'autoreply';
+                    // Внутренний комментарий оператора (Chat2Desk type='comment'):
+                    // клиент его не видит, поэтому это НЕ его реплика — рисуем на
+                    // стороне оператора отдельным стилем, иначе заметка вроде
+                    // «нет ответа/обед» читается как сообщение клиента.
+                    const note = m.type === 'comment';
                     const bubbleStyle = {
                         maxWidth: 'min(78%, 640px)', padding: '7px 10px', borderRadius: 12, fontSize: 13, lineHeight: 1.45,
                         whiteSpace: 'pre-wrap', wordBreak: 'break-word',
                         ...(out
                             ? { background: 'var(--accent)', color: '#fff', borderBottomRightRadius: 4 }
-                            : auto
-                                ? { background: 'var(--surface)', color: 'var(--text-3)', border: '1px dashed var(--border-strong)', borderBottomRightRadius: 4 }
-                                : { background: 'var(--surface)', color: 'var(--text)', border: '1px solid var(--border)', borderBottomLeftRadius: 4 }),
+                            : note
+                                ? { background: '#fffbeb', color: '#78350f', border: '1px dashed #fcd34d', borderBottomRightRadius: 4 }
+                                : auto
+                                    ? { background: 'var(--surface)', color: 'var(--text-3)', border: '1px dashed var(--border-strong)', borderBottomRightRadius: 4 }
+                                    : { background: 'var(--surface)', color: 'var(--text)', border: '1px solid var(--border)', borderBottomLeftRadius: 4 }),
                     };
                     const hasMedia = Boolean(m.photo || m.video || m.audio || m.pdf || (m.attachments || []).length);
                     return (
                         <React.Fragment key={m.id}>
                             {daySep}
-                            <div style={{ display: 'flex', justifyContent: (out || auto) ? 'flex-end' : 'flex-start' }}>
+                            <div style={{ display: 'flex', justifyContent: (out || auto || note) ? 'flex-end' : 'flex-start' }}>
                                 <div data-mid={m.id} style={bubbleStyle}>
                                     {auto && <div style={{ fontSize: 10.5, fontWeight: 600, marginBottom: 2, display: 'flex', alignItems: 'center', gap: 4 }}><FaIcon className="fas fa-robot" /> Автоответ</div>}
+                                    {note && <div style={{ fontSize: 10.5, fontWeight: 600, marginBottom: 2, display: 'flex', alignItems: 'center', gap: 4, color: '#b45309' }}><FaIcon className="fas fa-lock" /> Внутренний комментарий{m.author ? ` · ${m.author}` : ''}</div>}
                                     {/* Автор исходящего: у эпизода Wazzup их может быть
                                         несколько, поэтому подпись у каждого сообщения своя. */}
-                                    {!auto && m.author && (
+                                    {!auto && !note && m.author && (
                                         <div style={{ fontSize: 10.5, fontWeight: 600, marginBottom: 2, opacity: 0.85, display: 'flex', alignItems: 'center', gap: 4 }}>
                                             <FaIcon className="fas fa-headset" /> {m.author}
                                         </div>
