@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import FaIcon from '../common/FaIcon';
+import InfoHint from '../common/InfoHint';
 
 /**
  * База лидов TEZ ОП и статистика успешек.
@@ -164,90 +165,111 @@ const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, groupId = null, 
     { label: 'Загружено лидов', value: funnel.leads_total, hint: `дублей при загрузке: ${funnel.duplicates ?? 0}` },
     { label: 'Обзвонено', value: funnel.dialed, hint: 'есть хотя бы один звонок' },
     { label: 'Дозвонились', value: funnel.reached, hint: 'разговор от 10 сек' },
-    { label: 'Вышли на линию', value: funnel.went_online, hint: 'есть первая поездка' },
-    { label: 'Успешки', value: funnel.successes, hint: `конверсия ${funnel.conversion ?? 0}%`, accent: true },
+    {
+      label: 'Вышли на линию',
+      value: funnel.went_online,
+      hint: `уже работали: ${funnel.already_working ?? 0}`,
+      info: (
+        <>
+          Всего с первой поездкой. Из них <b>{funnel.already_working ?? 0}</b> — «уже работающие»:
+          выехали без нашего звонка, заслуги оператора нет, поэтому в знаменатель конверсии не входят.
+        </>
+      ),
+    },
+    {
+      label: 'Успешки',
+      value: funnel.successes,
+      hint: `конверсия ${funnel.conversion ?? 0}%`,
+      accent: true,
+      info: (
+        <>
+          Конверсия <b>{funnel.conversion ?? 0}%</b> считается от рабочей части базы
+          ({funnel.workable ?? 0} лидов, без «уже работающих»). От всей базы было бы
+          {' '}{funnel.conversion_all ?? 0}%. Не засчитано по правилу дат: {funnel.not_counted ?? 0}.
+        </>
+      ),
+    },
   ];
 
   return (
-    <div className="mb-6 rounded-xl border border-indigo-200 bg-indigo-50/50 px-4 py-4">
-      <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-        <div className="flex items-center gap-2 text-indigo-900 font-semibold">
-          <FaIcon className="fas fa-users" />
-          База лидов ОП TEZ — {month}
-        </div>
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        {canEdit ? (
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".csv,.xlsx,.xlsm"
+              className="text-sm file:mr-3 file:px-3 file:py-2 file:rounded-full file:border-0 file:bg-indigo-100 file:text-indigo-700"
+            />
+            <button
+              onClick={upload}
+              disabled={uploading}
+              className={`inline-flex items-center gap-2 px-4 py-2 rounded-full text-sm font-semibold text-white shadow-sm ${
+                uploading ? 'bg-indigo-300 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'
+              }`}
+            >
+              <FaIcon className="fas fa-upload" />
+              {uploading ? 'Загрузка…' : 'Загрузить базу'}
+            </button>
+            <span className="inline-flex items-center gap-1 text-xs text-slate-500">
+              Колонки: fio, phone
+              <InfoHint title="Формат файла" side="left">
+                CSV или Excel с колонками <b>fio</b> и <b>phone</b>. Шапка необязательна — тогда
+                первая колонка считается именем, вторая телефоном. Телефон в любом формате
+                (8700…, +7 700…, 700…) приводится к 11 цифрам. База помесячная: тот же номер,
+                загруженный повторно за месяц, не создаёт дубль, а увеличивает счётчик загрузок.
+              </InfoHint>
+            </span>
+          </div>
+        ) : <span />}
         <div className="flex flex-wrap items-center gap-2">
           <a
             href={exportUrl}
-            className="px-3 py-2 rounded-lg text-sm font-medium bg-white border border-indigo-200 text-indigo-700 hover:bg-indigo-50"
+            className="inline-flex h-9 items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3.5 text-xs font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100"
           >
-            <FaIcon className="fas fa-file-excel mr-2" />
+            <FaIcon className="fas fa-file-excel" />
             Excel
           </a>
           {canEdit && (
             <button
               onClick={recompute}
               disabled={busy}
-              className={`px-3 py-2 rounded-lg text-sm font-medium text-white ${
-                busy ? 'bg-indigo-300 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'
+              className={`inline-flex h-9 items-center gap-2 rounded-full border border-slate-200 bg-white px-3.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 ${
+                busy ? 'cursor-wait opacity-60' : ''
               }`}
             >
-              <FaIcon className="fas fa-rotate mr-2" />
+              <FaIcon className={`fas ${busy ? 'fa-spinner fa-spin' : 'fa-rotate'}`} />
               Сверить сейчас
             </button>
           )}
         </div>
       </div>
 
-      {canEdit && (
-        <div className="flex flex-col sm:flex-row sm:items-center gap-2 mb-3">
-          <input
-            ref={fileRef}
-            type="file"
-            accept=".csv,.xlsx,.xlsm"
-            className="text-sm file:mr-3 file:px-3 file:py-2 file:rounded-lg file:border-0 file:bg-indigo-100 file:text-indigo-700"
-          />
-          <button
-            onClick={upload}
-            disabled={uploading}
-            className={`px-4 py-2 rounded-lg text-sm font-semibold text-white ${
-              uploading ? 'bg-indigo-300 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'
-            }`}
-          >
-            <FaIcon className="fas fa-upload mr-2" />
-            {uploading ? 'Загрузка…' : 'Загрузить базу'}
-          </button>
-          <span className="text-xs text-indigo-700">Колонки: fio, phone</span>
-        </div>
-      )}
+      {msg && <div className="text-sm font-medium text-indigo-800 bg-indigo-50 border border-indigo-100 rounded-xl px-3 py-2">{msg}</div>}
 
-      {msg && <div className="mb-3 text-sm font-medium text-indigo-800 bg-white rounded-lg px-3 py-2">{msg}</div>}
-
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-2 mb-4">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
         {funnelCards.map((card) => (
           <div
             key={card.label}
-            className={`rounded-lg px-3 py-2 border ${
-              card.accent ? 'bg-emerald-50 border-emerald-200' : 'bg-white border-indigo-100'
+            className={`rounded-2xl px-3 py-2.5 border shadow-sm ${
+              card.accent ? 'bg-emerald-50 border-emerald-200' : 'bg-white border-slate-200'
             }`}
           >
-            <div className="text-xs text-gray-500">{card.label}</div>
-            <div className={`text-xl font-bold ${card.accent ? 'text-emerald-700' : 'text-gray-800'}`}>
+            <div className="flex items-center gap-1 text-xs text-slate-500">
+              {card.label}
+              {card.info && <InfoHint side="left">{card.info}</InfoHint>}
+            </div>
+            <div className={`text-xl font-bold ${card.accent ? 'text-emerald-700' : 'text-slate-800'}`}>
               {card.value ?? 0}
             </div>
-            <div className="text-[11px] text-gray-500">{card.hint}</div>
+            <div className="text-[11px] text-slate-500">{card.hint}</div>
           </div>
         ))}
       </div>
 
-      <div className="text-xs text-indigo-800 mb-3">
-        Конверсия {funnel.conversion ?? 0}% считается от рабочей части базы
-        ({funnel.workable ?? 0} лидов): «уже работающих» — {funnel.already_working ?? 0}, они выехали
-        без нашего звонка и в знаменатель не входят. От всей базы было бы {funnel.conversion_all ?? 0}%.
-        Не засчитано по правилу дат: {funnel.not_counted ?? 0}.
-      </div>
-
       {groupId && (
-        <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
+        <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
           Выбрана группа: «Операторы» и «По дням» показаны только по ней.
           Воронка и загрузки — по всему отделу, база лидов общая.
         </div>
