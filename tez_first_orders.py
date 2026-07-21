@@ -169,12 +169,19 @@ class TezFirstOrdersClient:
                 # токена). С домашнего IP тот же код проходит, с датацентрового
                 # (Render) — челлендж. Лечится только на стороне TEZ APP: вайтлист
                 # исходящего IP сервера или WAF-исключение для /drivers/first-orders.
+                # В сообщение кладём реальную диагностику: HTTP-код, CF-Ray и код
+                # Cloudflare (1010=UA, 1020=IP access rule, 1009=country и т.п.) —
+                # по нему на стороне TEZ APP видно, какое именно правило сработало.
                 m = re.search(r"error code:\s*(\d+)", resp.text, re.I)
-                code = f" (Cloudflare code {m.group(1)})" if m else ""
+                cf_ray = resp.headers.get("cf-ray") or "—"
+                cf_mitig = resp.headers.get("cf-mitigated") or ""
+                code = f", Cloudflare code {m.group(1)}" if m else ""
+                mit = f", mitigated={cf_mitig}" if cf_mitig else ""
                 raise RuntimeError(
-                    f"TEZ APP: запрос заблокирован Cloudflare{code}. Токен ни при чём — "
-                    "нужно добавить исходящий IP сервера в вайтлист на стороне TEZ APP "
-                    "(или снять JS-челлендж с эндпоинта /drivers/first-orders)."
+                    f"TEZ APP: запрос заблокирован Cloudflare (HTTP {resp.status_code}{code}, "
+                    f"CF-Ray {cf_ray}{mit}). Токен ни при чём — нужно добавить исходящий IP "
+                    "сервера в вайтлист на стороне TEZ APP (или снять челлендж с "
+                    "эндпоинта /drivers/first-orders)."
                 )
             if resp.status_code == 401:
                 raise RuntimeError(
