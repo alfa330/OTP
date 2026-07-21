@@ -51,12 +51,19 @@ const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, groupId = null, 
   const [leads, setLeads] = useState([]);
   const [tab, setTab] = useState('operators');
   const [statusFilter, setStatusFilter] = useState('');
+  const [operatorFilter, setOperatorFilter] = useState('');
   const [search, setSearch] = useState('');
   const [uploading, setUploading] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [msg, setMsg] = useState('');
+  const [page, setPage] = useState(1);
+  const [leadsTotal, setLeadsTotal] = useState(0);
+  const [leadsPages, setLeadsPages] = useState(1);
   const fileRef = useRef(null);
   const pollRef = useRef(null);
+
+  const PAGE_SIZE = 50;
 
   const [year, monthNum] = String(month || '').split('-').map((v) => parseInt(v, 10));
   const validPeriod = Number.isFinite(year) && Number.isFinite(monthNum);
@@ -76,23 +83,36 @@ const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, groupId = null, 
       .catch(() => null);
   }, [apiBaseUrl, headers, userId, year, monthNum, validPeriod, groupId]);
 
-  const loadLeads = useCallback(() => {
+  const loadLeads = useCallback((toPage = 1) => {
     if (!validPeriod || !userId) return;
     axios
       .get(`${apiBaseUrl}/api/tez_leads/detail`, {
-        params: { year, month: monthNum, status: statusFilter || undefined, search: search || undefined },
+        params: {
+          year, month: monthNum,
+          status: statusFilter || undefined,
+          operator_id: operatorFilter || undefined,
+          search: search || undefined,
+          page: toPage, page_size: PAGE_SIZE,
+        },
         headers,
       })
-      .then((resp) => setLeads(resp?.data?.leads || []))
-      .catch(() => setLeads([]));
-  }, [apiBaseUrl, headers, userId, year, monthNum, validPeriod, statusFilter, search]);
+      .then((resp) => {
+        const d = resp?.data || {};
+        setLeads(d.leads || []);
+        setLeadsTotal(d.total || 0);
+        setLeadsPages(d.pages || 1);
+        setPage(d.page || toPage);
+      })
+      .catch(() => { setLeads([]); setLeadsTotal(0); setLeadsPages(1); });
+  }, [apiBaseUrl, headers, userId, year, monthNum, validPeriod, statusFilter, operatorFilter, search]);
 
   useEffect(() => {
     loadStats();
   }, [loadStats]);
 
+  // Смена вкладки/фильтров/поиска — всегда с первой страницы.
   useEffect(() => {
-    if (tab === 'leads') loadLeads();
+    if (tab === 'leads') loadLeads(1);
   }, [tab, loadLeads]);
 
   // Проверка базы на «уже работающих» идёт в фоне — дожидаемся её, опрашивая статус.
@@ -158,7 +178,31 @@ const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, groupId = null, 
       .finally(() => setBusy(false));
   }, [apiBaseUrl, headers, year, monthNum, validPeriod, loadStats, loadLeads, tab]);
 
-  const exportUrl = `${apiBaseUrl}/api/tez_leads/export?year=${year}&month=${monthNum}`;
+  // Экспорт качаем через axios (blob): простой <a href> не несёт токен/куки и
+  // упирается в 401, если транспорт авторизации bearer, а не cookie.
+  const exportExcel = useCallback(() => {
+    if (!validPeriod || exporting) return;
+    setExporting(true);
+    axios
+      .get(`${apiBaseUrl}/api/tez_leads/export`, {
+        params: { year, month: monthNum },
+        headers,
+        responseType: 'blob',
+      })
+      .then((resp) => {
+        const url = window.URL.createObjectURL(new Blob([resp.data]));
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `tez_leads_${year}_${String(monthNum).padStart(2, '0')}.xlsx`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(url);
+      })
+      .catch(() => setMsg('Не удалось сформировать выгрузку'))
+      .finally(() => setExporting(false));
+  }, [apiBaseUrl, headers, year, monthNum, validPeriod, exporting]);
+
   const funnel = stats?.funnel || {};
 
   const funnelCards = [
@@ -224,13 +268,15 @@ const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, groupId = null, 
           </div>
         ) : <span />}
         <div className="flex flex-wrap items-center gap-2">
-          <a
-            href={exportUrl}
-            className="inline-flex h-9 items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3.5 text-xs font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100"
+          <button
+            type="button"
+            onClick={exportExcel}
+            disabled={exporting}
+            className={`inline-flex h-9 items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3.5 text-xs font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100 ${exporting ? 'cursor-wait opacity-60' : ''}`}
           >
-            <FaIcon className="fas fa-file-excel" />
+            <FaIcon className={`fas ${exporting ? 'fa-spinner fa-spin' : 'fa-file-excel'}`} />
             Excel
-          </a>
+          </button>
           {canEdit && (
             <button
               onClick={recompute}
@@ -396,12 +442,34 @@ const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, groupId = null, 
                   <option key={key} value={key}>{label}</option>
                 ))}
               </select>
+              <select
+                value={operatorFilter}
+                onChange={(e) => setOperatorFilter(e.target.value)}
+                className="text-sm border rounded-lg px-2 py-1.5 max-w-[220px]"
+              >
+                <option value="">Все операторы</option>
+                {(stats?.operators || []).filter((o) => o.operator_id).map((o) => (
+                  <option key={o.operator_id} value={o.operator_id}>
+                    {o.operator_name} ({o.successes})
+                  </option>
+                ))}
+              </select>
               <input
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="ФИО или номер"
                 className="text-sm border rounded-lg px-2 py-1.5 flex-1 min-w-[180px]"
               />
+              {(statusFilter || operatorFilter || search) && (
+                <button
+                  type="button"
+                  onClick={() => { setStatusFilter(''); setOperatorFilter(''); setSearch(''); }}
+                  className="inline-flex h-8 items-center gap-1 rounded-full border border-slate-200 bg-white px-3 text-xs font-medium text-slate-600 hover:bg-slate-50"
+                >
+                  <FaIcon className="fas fa-xmark" />
+                  Сбросить
+                </button>
+              )}
             </div>
             <table className="min-w-full text-sm">
               <thead className="bg-gray-50 text-gray-600">
@@ -439,6 +507,34 @@ const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, groupId = null, 
                 )}
               </tbody>
             </table>
+            {leadsTotal > 0 && (
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t bg-gray-50 px-3 py-2 text-xs text-slate-600">
+                <span>
+                  {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, leadsTotal)} из {leadsTotal}
+                </span>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => loadLeads(page - 1)}
+                    disabled={page <= 1}
+                    className="inline-flex h-8 items-center gap-1 rounded-full border border-slate-200 bg-white px-3 font-medium text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <FaIcon className="fas fa-chevron-left" />
+                    Назад
+                  </button>
+                  <span className="px-2 tabular-nums">{page} / {leadsPages}</span>
+                  <button
+                    type="button"
+                    onClick={() => loadLeads(page + 1)}
+                    disabled={page >= leadsPages}
+                    className="inline-flex h-8 items-center gap-1 rounded-full border border-slate-200 bg-white px-3 font-medium text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Вперёд
+                    <FaIcon className="fas fa-chevron-right" />
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

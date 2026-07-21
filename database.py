@@ -14048,19 +14048,12 @@ class Database:
                 for r in cursor.fetchall()
             ]
 
-    def get_tez_leads_detail(self, year, month, status=None, operator_id=None, search=None, limit=2000):
-        """Детализация по лидам со связкой звонок -> поездка (для разбора споров)."""
-        params = [int(year), int(month)]
-        sql = """
-            SELECT l.id, l.phone_norm, l.full_name, l.status, l.status_rule, l.upload_count,
-                   d.first_order_at, s.operator_id, COALESCE(u.name, s.operator_name),
-                   s.call_at, s.success_date, s.rule_code
-            FROM tez_leads l
-            JOIN tez_drivers d ON d.phone_norm = l.phone_norm
-            LEFT JOIN tez_lead_successes s ON s.lead_id = l.id
-            LEFT JOIN users u ON u.id = s.operator_id
-            WHERE l.year = %s AND l.month = %s
-        """
+    @staticmethod
+    def _tez_leads_detail_filters(status=None, operator_id=None, search=None):
+        """Общий фрагмент WHERE + параметры для детализации/подсчёта лидов —
+        чтобы страница и её total считались по одинаковым условиям."""
+        sql = ''
+        params = []
         if status:
             sql += " AND l.status = %s"
             params.append(str(status))
@@ -14071,8 +14064,56 @@ class Database:
             sql += " AND (l.full_name ILIKE %s OR l.phone_norm LIKE %s)"
             like = f"%{str(search).strip()}%"
             params.extend([like, like])
-        sql += " ORDER BY d.first_order_at DESC NULLS LAST, l.full_name LIMIT %s"
-        params.append(int(limit))
+        return sql, params
+
+    def count_tez_leads_detail(self, year, month, status=None, operator_id=None, search=None):
+        """Сколько лидов подходит под фильтры детализации (для пагинации)."""
+        filt_sql, filt_params = self._tez_leads_detail_filters(status, operator_id, search)
+        sql = """
+            SELECT COUNT(*)
+            FROM tez_leads l
+            JOIN tez_drivers d ON d.phone_norm = l.phone_norm
+            LEFT JOIN tez_lead_successes s ON s.lead_id = l.id
+            WHERE l.year = %s AND l.month = %s
+        """ + filt_sql
+        with self._get_cursor() as cursor:
+            cursor.execute(sql, tuple([int(year), int(month)] + filt_params))
+            return int(cursor.fetchone()[0] or 0)
+
+    def get_tez_leads_detail(self, year, month, status=None, operator_id=None, search=None, limit=2000, offset=0):
+        """Детализация по лидам со связкой звонок -> поездка (для разбора споров)."""
+        filt_sql, filt_params = self._tez_leads_detail_filters(status, operator_id, search)
+        # У «не засчитанных» (и «в работе») нет строки в tez_lead_successes, поэтому
+        # оператора и звонок берём запасным путём — последний квалифицирующий звонок
+        # ДО поездки (тот же, что рассматривал расчёт успешки). Так в детализации у
+        # not_counted видно, кто звонил и когда, хоть успешка и не засчитана.
+        sql = """
+            SELECT l.id, l.phone_norm, l.full_name, l.status, l.status_rule, l.upload_count,
+                   d.first_order_at,
+                   COALESCE(s.operator_id, lc.operator_id),
+                   COALESCE(u.name, s.operator_name, lu.name),
+                   COALESCE(s.call_at, lc.started_at),
+                   s.success_date, s.rule_code
+            FROM tez_leads l
+            JOIN tez_drivers d ON d.phone_norm = l.phone_norm
+            LEFT JOIN tez_lead_successes s ON s.lead_id = l.id
+            LEFT JOIN users u ON u.id = s.operator_id
+            LEFT JOIN LATERAL (
+                SELECT c.operator_id, c.started_at
+                FROM tez_lead_calls c
+                WHERE c.phone_norm = l.phone_norm
+                  AND c.is_qualifying
+                  AND (d.first_order_at IS NULL OR c.started_at < d.first_order_at)
+                ORDER BY c.started_at DESC
+                LIMIT 1
+            ) lc ON TRUE
+            LEFT JOIN users lu ON lu.id = lc.operator_id
+            WHERE l.year = %s AND l.month = %s
+        """ + filt_sql + """
+            ORDER BY d.first_order_at DESC NULLS LAST, l.full_name
+            LIMIT %s OFFSET %s
+        """
+        params = [int(year), int(month)] + filt_params + [int(limit), int(offset)]
 
         with self._get_cursor() as cursor:
             cursor.execute(sql, tuple(params))
