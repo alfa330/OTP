@@ -124,6 +124,7 @@ const EventsView = lazyWithRetry(() => import('./components/events/EventsView'))
 const CallQaView = lazyWithRetry(() => import('./components/call_qa/CallQaView'));
 const WazzupChatsView = lazyWithRetry(() => import('./components/wazzup/WazzupChatsView'));
 const ChatSnapshotModal = lazyWithRetry(() => import('./components/c2d_eval/ChatSnapshotModal'));
+const ChatThread = lazyWithRetry(() => import('./components/c2d_eval/ChatThread'));
 
 
 if (typeof window !== 'undefined') {
@@ -2533,6 +2534,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const [lowRatingDetail, setLowRatingDetail] = useState(null);
         const lowRatingDetailIdRef = useRef('');
         const [lowRatingExporting, setLowRatingExporting] = useState(false);
+        // Переписка выбранной оценки: снапшот тянем по клику на строку и держим
+        // в памяти вкладки (на сервере он тоже кэшируется — c2d_chat_snapshots).
+        const [lowRatingChat, setLowRatingChat] = useState({ id: '', snapshot: null, loading: false, error: '' });
+        const [lowRatingHideService, setLowRatingHideService] = useState(false);
+        const [lowRatingPanelOpen, setLowRatingPanelOpen] = useState(true);
+        const lowRatingChatCacheRef = useRef({});
+        const lowRatingChatRequestRef = useRef('');
         const chatMetricsInputRef = useRef(null);
 
         const [selectedTab, setSelectedTab] = useState('work_time');
@@ -2970,6 +2978,40 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 fallbackToast(message, 'error');
             } finally {
                 setLowRatingLoading(false);
+            }
+        };
+
+        const fetchLowRatingChat = async (reviewId, { force = false } = {}) => {
+            const key = String(reviewId || '');
+            if (!key || !user?.id) return;
+            lowRatingChatRequestRef.current = key;
+            const cached = lowRatingChatCacheRef.current[key];
+            if (cached && !force) {
+                setLowRatingChat({ id: key, snapshot: cached, loading: false, error: '' });
+                return;
+            }
+            setLowRatingChat({ id: key, snapshot: null, loading: true, error: '' });
+            try {
+                const response = await fetch(
+                    `${API_BASE_URL}/api/chat_manager/low_rating_reviews/${encodeURIComponent(key)}/chat`,
+                    { credentials: 'include', headers: withAccessTokenHeader({ 'X-User-Id': user.id }) }
+                );
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(payload?.error || `HTTP ${response.status}`);
+                const snapshot = payload?.snapshot || null;
+                if (snapshot) lowRatingChatCacheRef.current[key] = snapshot;
+                // Пока грузили — могли переключиться на другую строку.
+                if (lowRatingChatRequestRef.current !== key) return;
+                setLowRatingChat({ id: key, snapshot, loading: false, error: snapshot ? '' : 'Переписка не найдена' });
+            } catch (error) {
+                console.error('fetch low rating chat error:', error);
+                if (lowRatingChatRequestRef.current !== key) return;
+                setLowRatingChat({
+                    id: key,
+                    snapshot: null,
+                    loading: false,
+                    error: error?.message || 'Не удалось загрузить переписку',
+                });
             }
         };
 
@@ -4542,6 +4584,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return null;
         }, [lowRatingReviews, selectedLowRatingReviewId, lowRatingDetail]);
 
+        // Снапшот в состоянии относится именно к выбранной строке (иначе показываем
+        // загрузку, а не чужую переписку).
+        const lowRatingChatReady = Boolean(selectedLowRatingReview)
+            && String(lowRatingChat.id) === String(selectedLowRatingReview.id);
+
         // Открытая строка из списка → запоминаем её как «деталь», чтобы карточка
         // не пропадала, когда строка уходит из текущего фильтра после сохранения.
         useEffect(() => {
@@ -4552,6 +4599,33 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         useEffect(() => {
             lowRatingDetailIdRef.current = lowRatingDetail?.id ? String(lowRatingDetail.id) : '';
         }, [lowRatingDetail]);
+
+        // Выбрали строку — сразу показываем сам чат (первое открытие тянет
+        // переписку из Chat2Desk, дальше отдаётся снапшот из БД).
+        useEffect(() => {
+            if (!showLowRatingReviews || !isChatModel) return;
+            if (!selectedLowRatingReviewId) {
+                lowRatingChatRequestRef.current = '';
+                setLowRatingChat({ id: '', snapshot: null, loading: false, error: '' });
+                return;
+            }
+            fetchLowRatingChat(selectedLowRatingReviewId);
+            // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, [selectedLowRatingReviewId, showLowRatingReviews, isChatModel, user?.id]);
+
+        // Полноэкранная проверка: Esc закрывает (фона-подложки под ней нет),
+        // страница под экраном не прокручивается.
+        useEffect(() => {
+            if (!showLowRatingReviews || typeof document === 'undefined') return;
+            const previousOverflow = document.body.style.overflow;
+            document.body.style.overflow = 'hidden';
+            const onKeyDown = (e) => { if (e.key === 'Escape') setShowLowRatingReviews(false); };
+            window.addEventListener('keydown', onKeyDown);
+            return () => {
+                document.body.style.overflow = previousOverflow;
+                window.removeEventListener('keydown', onKeyDown);
+            };
+        }, [showLowRatingReviews]);
 
         useEffect(() => {
             if (!selectedLowRatingReview) {
@@ -6415,23 +6489,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             </div>
 
             {isChatModel && showLowRatingReviews && (
-                <div
-                    className="fixed inset-0 z-[135] flex items-center justify-center bg-slate-950/35 p-3 backdrop-blur-sm sm:p-6"
-                    onClick={() => setShowLowRatingReviews(false)}
-                >
-                    <div
-                        className="flex h-[calc(100vh-1.5rem)] max-h-[90vh] w-full max-w-6xl flex-col overflow-hidden rounded-[30px] border border-white/70 bg-white/95 shadow-[0_30px_90px_rgba(15,23,42,0.24)] ring-1 ring-slate-900/5 backdrop-blur-xl sm:h-[90vh]"
-                        onClick={(e) => e.stopPropagation()}
-                    >
-                        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200/70 px-5 py-4 sm:px-6">
-                            <div className="flex min-w-0 items-start gap-3">
-                                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-slate-900 text-white shadow-sm">
+                <div className="fixed inset-0 z-[135] flex bg-slate-100">
+                    <div className="flex h-full w-full min-w-0 flex-col overflow-hidden">
+                        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-3 sm:px-5">
+                            <div className="flex min-w-0 items-center gap-3">
+                                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl bg-slate-900 text-white shadow-sm">
                                     <FaIcon className="fas fa-star-half-alt" aria-hidden="true" />
                                 </span>
                                 <div className="min-w-0">
-                                    <h3 className="text-base font-semibold text-slate-900">Низкие оценки Chat2Desk</h3>
-                                    <p className="mt-1 text-xs leading-5 text-slate-500">
-                                        Откройте строку, проверьте детали и сохраните свою проверку. В списке виден только счетчик уже сделанных проверок.
+                                    <h3 className="text-base font-semibold text-slate-900">Проверка низких оценок · Chat2Desk</h3>
+                                    <p className="text-xs leading-5 text-slate-500">
+                                        Выберите строку слева — откроется сама переписка, вердикт выносится снизу.
                                     </p>
                                 </div>
                             </div>
@@ -6466,7 +6534,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             </div>
                         </div>
 
-                        <div className="border-b border-slate-200/70 bg-slate-50/80 px-5 py-3 sm:px-6">
+                        <div className="border-b border-slate-200 bg-white/80 px-4 py-2.5 sm:px-5">
                             <div className="flex flex-wrap items-center justify-between gap-3">
                                 <div className="flex min-w-0 flex-wrap items-center gap-2">
                                     <DateRangePicker
@@ -6554,33 +6622,33 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             </div>
                         </div>
 
-                        <div className="min-h-0 flex-1 overflow-hidden p-4 sm:p-5">
+                        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
                             {lowRatingError && (
-                                <div className="mb-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-medium text-rose-700">
+                                <div className="border-b border-rose-200 bg-rose-50 px-4 py-2 text-xs font-medium text-rose-700">
                                     <FaIcon className="fas fa-triangle-exclamation mr-1" aria-hidden="true" />
                                     {lowRatingError}
                                 </div>
                             )}
 
-                            <div className="grid h-full min-h-0 grid-cols-1 gap-4 lg:grid-cols-[360px_minmax(0,1fr)]">
-                                <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[24px] border border-slate-200 bg-slate-50/80">
-                                    <div className="flex items-center justify-between gap-2 border-b border-slate-200 px-4 py-3">
-                                        <div>
+                            <div className="flex min-h-0 flex-1 overflow-hidden">
+                                <aside className="flex w-[290px] shrink-0 flex-col overflow-hidden border-r border-slate-200 bg-white xl:w-[330px]">
+                                    <div className="flex items-center justify-between gap-2 border-b border-slate-200 px-4 py-2.5">
+                                        <div className="min-w-0">
                                             <div className="text-sm font-semibold text-slate-900">Журнал</div>
-                                            <div className="text-xs text-slate-500">
+                                            <div className="truncate text-[11px] text-slate-500">
                                                 {rangePickerFormatRu(lowRatingRange.start)} — {rangePickerFormatRu(lowRatingRange.end)} · {Number(lowRatingPagination.total || 0)} строк
                                             </div>
                                         </div>
                                         {lowRatingLoading && <FaIcon className="fas fa-spinner fa-spin text-slate-400" aria-hidden="true" />}
                                     </div>
 
-                                    <div className="min-h-0 flex-1 overflow-y-scroll overscroll-contain p-3 pr-2 ios-modal-scroll">
+                                    <div className="min-h-0 flex-1 overflow-y-scroll overscroll-contain p-2.5 ios-modal-scroll">
                                         {lowRatingLoading ? (
-                                            <div className="rounded-3xl border border-slate-200 bg-white px-4 py-8 text-center text-sm font-medium text-slate-500">
+                                            <div className="rounded-2xl border border-slate-200 bg-white px-4 py-8 text-center text-sm font-medium text-slate-500">
                                                 Загружаем...
                                             </div>
                                         ) : lowRatingReviews.length === 0 ? (
-                                            <div className="rounded-3xl border border-dashed border-slate-200 bg-white px-4 py-8 text-center text-sm text-slate-500">
+                                            <div className="rounded-2xl border border-dashed border-slate-200 bg-white px-4 py-8 text-center text-sm text-slate-500">
                                                 Для выбранного фильтра строк нет.
                                             </div>
                                         ) : (
@@ -6592,39 +6660,40 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             key={row.id}
                                                             type="button"
                                                             onClick={() => setSelectedLowRatingReviewId(String(row.id))}
-                                                            className={`w-full rounded-3xl border p-3 text-left transition ${
+                                                            title="Открыть переписку этого чата"
+                                                            className={`w-full rounded-2xl border p-3 text-left transition ${
                                                                 selected
-                                                                    ? 'border-slate-900 bg-white shadow-sm ring-2 ring-slate-900/10'
+                                                                    ? 'border-slate-900 bg-slate-50 shadow-sm ring-2 ring-slate-900/10'
                                                                     : 'border-slate-200 bg-white hover:border-slate-300 hover:shadow-sm'
                                                             }`}
                                                         >
-                                                            <div className="flex items-start justify-between gap-3">
+                                                            <div className="flex items-start justify-between gap-2">
                                                                 <div className="min-w-0">
-                                                                    <div className="truncate text-sm font-semibold text-slate-900" title={row.operator_name || ''}>
+                                                                    <div className="truncate text-[13px] font-semibold text-slate-900" title={row.operator_name || ''}>
                                                                         {row.operator_name || '—'}
                                                                     </div>
-                                                                    <div className="mt-1 truncate text-xs text-slate-500">
+                                                                    <div className="mt-0.5 truncate text-[11px] text-slate-500">
                                                                         {row.phone_number || row.phone_normalized || '—'} · {row.taxi_park || row.direction_name || '—'}
                                                                     </div>
                                                                 </div>
-                                                                <span className="inline-flex h-9 min-w-9 items-center justify-center rounded-full bg-rose-50 px-2 text-sm font-bold text-rose-700 ring-1 ring-rose-200">
+                                                                <span className="inline-flex h-8 min-w-8 items-center justify-center rounded-full bg-rose-50 px-2 text-sm font-bold text-rose-700 ring-1 ring-rose-200">
                                                                     {Number(row.score || 0).toLocaleString('ru-RU', { maximumFractionDigits: 1 })}
                                                                 </span>
                                                             </div>
-                                                            <div className="mt-3 flex flex-wrap items-center gap-2">
-                                                                <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-bold ring-1 ${lowRatingFinalClass(row)}`}>
+                                                            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                                                                <span className={`inline-flex rounded-full px-2 py-0.5 text-[10.5px] font-bold ring-1 ${lowRatingFinalClass(row)}`}>
                                                                     {lowRatingFinalLabel(row)}
                                                                 </span>
-                                                                <span className="inline-flex rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-600">
+                                                                <span className="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-[10.5px] font-semibold text-slate-600">
                                                                     Проверок: {Number(row.review_count || 0)}
                                                                 </span>
                                                                 {row.my_review_status && (
-                                                                    <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-semibold ring-1 ${lowRatingStatusClass(row.my_review_status)}`}>
+                                                                    <span className={`inline-flex rounded-full px-2 py-0.5 text-[10.5px] font-semibold ring-1 ${lowRatingStatusClass(row.my_review_status)}`}>
                                                                         Моя: {lowRatingStatusLabel(row.my_review_status)}
                                                                     </span>
                                                                 )}
                                                             </div>
-                                                            <div className="mt-2 text-[11px] text-slate-400">
+                                                            <div className="mt-1.5 text-[10.5px] text-slate-400">
                                                                 {formatLowRatingDateTime(row.rated_at || row.day)}
                                                             </div>
                                                         </button>
@@ -6634,7 +6703,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         )}
                                     </div>
 
-                                    <div className="flex items-center justify-between gap-2 border-t border-slate-200 bg-white px-4 py-3">
+                                    <div className="flex items-center justify-between gap-2 border-t border-slate-200 bg-white px-4 py-2.5">
                                         <button
                                             type="button"
                                             className="flex h-8 w-8 items-center justify-center rounded-full bg-slate-100 text-slate-600 transition hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-40"
@@ -6657,213 +6726,274 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <FaIcon className="fas fa-chevron-right" aria-hidden="true" />
                                         </button>
                                     </div>
-                                </div>
+                                </aside>
 
-                                <div className="min-h-0 overflow-y-auto overscroll-contain rounded-[24px] border border-slate-200 bg-white p-4 sm:p-5">
+                                <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
                                     {!selectedLowRatingReview ? (
-                                        <div className="flex h-full min-h-[360px] items-center justify-center rounded-3xl border border-dashed border-slate-200 bg-slate-50 text-sm text-slate-500">
-                                            Выберите строку слева.
+                                        <div className="flex flex-1 flex-col items-center justify-center gap-3 text-slate-400">
+                                            <FaIcon className="fas fa-comments text-3xl" aria-hidden="true" />
+                                            <div className="text-sm">Выберите оценку слева — откроется сама переписка.</div>
                                         </div>
                                     ) : (
-                                        <div className="space-y-4">
-                                            <div className="flex flex-wrap items-start justify-between gap-3">
-                                                <div>
-                                                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Оценка</div>
-                                                    <div className="mt-1 text-2xl font-bold text-slate-900">
-                                                        {Number(selectedLowRatingReview.score || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 })}
+                                        <>
+                                            <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 bg-white px-4 py-2.5">
+                                                <span className="inline-flex h-9 min-w-9 items-center justify-center rounded-2xl bg-rose-50 px-2 text-base font-bold text-rose-700 ring-1 ring-rose-200">
+                                                    {Number(selectedLowRatingReview.score || 0).toLocaleString('ru-RU', { maximumFractionDigits: 1 })}
+                                                </span>
+                                                <div className="min-w-0">
+                                                    <div className="truncate text-sm font-semibold text-slate-900">
+                                                        {selectedLowRatingReview.operator_name || '—'}
+                                                    </div>
+                                                    <div className="truncate text-[11px] text-slate-500">
+                                                        {formatLowRatingDateTime(selectedLowRatingReview.rated_at || selectedLowRatingReview.day)}
+                                                        {' · '}{selectedLowRatingReview.taxi_park || selectedLowRatingReview.direction_name || '—'}
+                                                        {' · '}{selectedLowRatingReview.phone_number || selectedLowRatingReview.phone_normalized || '—'}
+                                                        {selectedLowRatingReview.department_name ? ` · ${selectedLowRatingReview.department_name}` : ''}
                                                     </div>
                                                 </div>
-                                                <span className={`inline-flex rounded-full px-3 py-1.5 text-xs font-bold ring-1 ${lowRatingFinalClass(selectedLowRatingReview)}`}>
+                                                <span className={`ml-auto inline-flex rounded-full px-3 py-1 text-[11px] font-bold ring-1 ${lowRatingFinalClass(selectedLowRatingReview)}`}>
                                                     {lowRatingFinalLabel(selectedLowRatingReview)}
                                                 </span>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setLowRatingHideService(prev => !prev)}
+                                                    className={`inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-[11px] font-semibold transition ${
+                                                        lowRatingHideService
+                                                            ? 'bg-slate-900 text-white'
+                                                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                                    }`}
+                                                    title="Скрыть системные сообщения и автоответы"
+                                                >
+                                                    <FaIcon className={`fas ${lowRatingHideService ? 'fa-eye' : 'fa-eye-slash'}`} aria-hidden="true" />
+                                                    {lowRatingHideService ? 'Автоответы' : 'Без автоответов'}
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => fetchLowRatingChat(selectedLowRatingReview.id, { force: true })}
+                                                    disabled={lowRatingChat.loading}
+                                                    className="inline-flex h-8 items-center gap-1.5 rounded-full bg-slate-100 px-3 text-[11px] font-semibold text-slate-600 transition hover:bg-slate-200 disabled:cursor-wait disabled:opacity-60"
+                                                    title="Перечитать переписку"
+                                                >
+                                                    <FaIcon className={`fas ${lowRatingChat.loading ? 'fa-spinner fa-spin' : 'fa-rotate'}`} aria-hidden="true" />
+                                                    Переписка
+                                                </button>
                                             </div>
 
-                                            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                                                {[
-                                                    ['Оператор', selectedLowRatingReview.operator_name],
-                                                    ['Номер', selectedLowRatingReview.phone_number || selectedLowRatingReview.phone_normalized],
-                                                    ['Таксопарк', selectedLowRatingReview.taxi_park || selectedLowRatingReview.direction_name],
-                                                    ['Дата', formatLowRatingDateTime(selectedLowRatingReview.rated_at || selectedLowRatingReview.day)],
-                                                    ['Отдел', selectedLowRatingReview.department_name],
-                                                    ['Проверок сделано', Number(selectedLowRatingReview.review_count || 0)],
-                                                ].map(([label, value]) => (
-                                                    <div key={label} className="rounded-3xl bg-slate-50 px-4 py-3 ring-1 ring-slate-200/70">
-                                                        <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{label}</div>
-                                                        <div className="mt-1 min-h-[20px] text-sm font-semibold text-slate-800">{value || '—'}</div>
-                                                    </div>
-                                                ))}
-                                            </div>
-
-                                            {(selectedLowRatingReview.client_comment || selectedLowRatingReview.rating_text) && (
-                                                <div className="rounded-3xl bg-slate-50 px-4 py-3 ring-1 ring-slate-200/70">
-                                                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Комментарий клиента</div>
-                                                    <div className="mt-2 text-sm leading-6 text-slate-700">
-                                                        {selectedLowRatingReview.client_comment || selectedLowRatingReview.rating_text}
+                                            {selectedLowRatingReview.client_comment && (
+                                                <div className="flex items-start gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-[12.5px] leading-5 text-amber-900">
+                                                    <FaIcon className="fas fa-comment-dots mt-0.5 shrink-0" aria-hidden="true" />
+                                                    <div className="min-w-0 break-words">
+                                                        <span className="font-semibold">Комментарий клиента: </span>
+                                                        {selectedLowRatingReview.client_comment}
                                                     </div>
                                                 </div>
                                             )}
 
-                                            {(() => {
-                                                const reviewEntries = Array.isArray(selectedLowRatingReview.review_entries)
-                                                    ? selectedLowRatingReview.review_entries
-                                                    : [];
-                                                return (
-                                                    <div className="rounded-[28px] border border-slate-200 bg-slate-50/80 p-4">
-                                                        <div className="mb-3 flex items-center justify-between gap-2">
-                                                            <div>
-                                                                <div className="text-sm font-semibold text-slate-900">Проверки</div>
-                                                                <div className="text-xs text-slate-500">Вердикты и комментарии видны всем проверяющим.</div>
-                                                            </div>
-                                                            <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-600 ring-1 ring-slate-200">
-                                                                {reviewEntries.length}
-                                                            </span>
+                                            <div className="flex min-h-0 flex-1 justify-center overflow-hidden bg-[#f2f2f7]">
+                                                <div className="flex min-h-0 w-full max-w-4xl flex-col overflow-hidden">
+                                                    <Suspense fallback={(
+                                                        <div className="flex flex-1 items-center justify-center text-sm text-slate-400">
+                                                            Загрузка переписки…
                                                         </div>
-                                                        {reviewEntries.length ? (
-                                                            <div className="max-h-60 space-y-2 overflow-y-auto pr-1 ios-modal-scroll">
-                                                                {reviewEntries.map((entry, index) => (
-                                                                    <div key={`${entry.reviewer_id || 'reviewer'}-${entry.updated_at || index}`} className="rounded-3xl bg-white px-4 py-3 ring-1 ring-slate-200">
-                                                                        <div className="flex flex-wrap items-center justify-between gap-2">
-                                                                            <div className="min-w-0">
-                                                                                <div className="truncate text-sm font-semibold text-slate-900">
-                                                                                    {entry.reviewer_name || 'Проверяющий'}{entry.is_mine ? ' · вы' : ''}
-                                                                                </div>
-                                                                                <div className="mt-0.5 text-[11px] text-slate-400">
-                                                                                    {formatLowRatingDateTime(entry.updated_at)}
-                                                                                </div>
-                                                                            </div>
-                                                                            <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-semibold ring-1 ${lowRatingStatusClass(entry.status)}`}>
-                                                                                {lowRatingStatusLabel(entry.status)}
-                                                                            </span>
-                                                                        </div>
-                                                                        <div className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-700">
-                                                                            {entry.comment || 'Без комментария'}
-                                                                        </div>
-                                                                    </div>
-                                                                ))}
+                                                    )}>
+                                                        <ChatThread
+                                                            snapshot={lowRatingChatReady ? lowRatingChat.snapshot : null}
+                                                            loading={!lowRatingChatReady || lowRatingChat.loading}
+                                                            error={lowRatingChatReady ? lowRatingChat.error : ''}
+                                                            hideService={lowRatingHideService}
+                                                            emptyText="В этом чате нет сообщений"
+                                                        />
+                                                    </Suspense>
+                                                </div>
+                                            </div>
+
+                                            <div className="shrink-0 border-t border-slate-200 bg-white shadow-[0_-10px_24px_-20px_rgba(15,23,42,0.6)]">
+                                                <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2">
+                                                    <div className="flex flex-wrap items-center gap-2">
+                                                        <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                                                            Вердикт по оценке
+                                                        </span>
+                                                        {selectedLowRatingReview.my_review_status && (
+                                                            <span className={`inline-flex rounded-full px-2.5 py-0.5 text-[11px] font-semibold ring-1 ${lowRatingStatusClass(selectedLowRatingReview.my_review_status)}`}>
+                                                                Моя: {lowRatingStatusLabel(selectedLowRatingReview.my_review_status)}
+                                                            </span>
+                                                        )}
+                                                        <span className="inline-flex rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-semibold text-slate-600">
+                                                            Проверок: {Number(selectedLowRatingReview.review_count || 0)}
+                                                        </span>
+                                                    </div>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setLowRatingPanelOpen(prev => !prev)}
+                                                        className="inline-flex h-8 items-center gap-2 rounded-full bg-slate-100 px-3 text-[11px] font-semibold text-slate-600 transition hover:bg-slate-200"
+                                                    >
+                                                        <FaIcon className={`fas ${lowRatingPanelOpen ? 'fa-chevron-down' : 'fa-chevron-up'}`} aria-hidden="true" />
+                                                        {lowRatingPanelOpen ? 'Свернуть' : 'Вынести вердикт'}
+                                                    </button>
+                                                </div>
+
+                                                {lowRatingPanelOpen && (
+                                                    <div className={`grid max-h-[42vh] gap-3 overflow-y-auto border-t border-slate-100 bg-slate-50/60 px-4 py-3 lg:grid-cols-2 ${
+                                                        selectedLowRatingReview.can_finalize ? 'xl:grid-cols-3' : ''
+                                                    }`}>
+                                                        <div className="flex flex-col rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
+                                                            <div className="mb-2 flex items-center justify-between gap-2">
+                                                                <div>
+                                                                    <div className="text-sm font-semibold text-slate-900">Моя проверка</div>
+                                                                    <div className="text-[11px] text-slate-500">Решение можно изменить в любой момент.</div>
+                                                                </div>
+                                                                {lowRatingSavingKey === `${selectedLowRatingReview.id}:review` && (
+                                                                    <FaIcon className="fas fa-spinner fa-spin text-slate-400" aria-hidden="true" />
+                                                                )}
                                                             </div>
-                                                        ) : (
-                                                            <div className="rounded-3xl bg-white px-4 py-3 text-sm text-slate-500 ring-1 ring-slate-200">
-                                                                Проверок пока нет.
+                                                            <div className="mb-2 grid grid-cols-2 gap-2">
+                                                                {LOW_RATING_REVIEW_OPTIONS.filter(option => option.value).map(option => {
+                                                                    const active = lowRatingReviewDraft.status === option.value;
+                                                                    return (
+                                                                        <button
+                                                                            key={option.value}
+                                                                            type="button"
+                                                                            className={`rounded-xl px-3 py-2 text-[13px] font-semibold transition ${
+                                                                                active
+                                                                                    ? option.value === 'valid'
+                                                                                        ? 'bg-rose-600 text-white shadow-sm'
+                                                                                        : 'bg-emerald-600 text-white shadow-sm'
+                                                                                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                                                            }`}
+                                                                            onClick={() => setLowRatingReviewDraft(prev => ({ ...prev, status: option.value }))}
+                                                                        >
+                                                                            {option.label}
+                                                                        </button>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                            <textarea
+                                                                className="min-h-[68px] w-full flex-1 resize-y rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[13px] leading-5 text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-slate-300 focus:bg-white focus:ring-4 focus:ring-slate-100"
+                                                                value={lowRatingReviewDraft.comment || ''}
+                                                                onChange={(e) => setLowRatingReviewDraft(prev => ({ ...prev, comment: e.target.value }))}
+                                                                placeholder="Комментарий к проверке"
+                                                                maxLength={4000}
+                                                            />
+                                                            <div className="mt-2 flex justify-end">
+                                                                <button
+                                                                    type="button"
+                                                                    className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-[13px] font-semibold text-white shadow-sm transition ${lowRatingSavingKey === `${selectedLowRatingReview.id}:review` ? 'cursor-wait bg-slate-400' : 'bg-slate-900 hover:bg-slate-800'}`}
+                                                                    onClick={() => saveLowRatingReview(selectedLowRatingReview)}
+                                                                    disabled={lowRatingSavingKey === `${selectedLowRatingReview.id}:review`}
+                                                                >
+                                                                    <FaIcon className={`fas ${lowRatingSavingKey === `${selectedLowRatingReview.id}:review` ? 'fa-spinner fa-spin' : (selectedLowRatingReview.my_review_status ? 'fa-pen' : 'fa-save')}`} aria-hidden="true" />
+                                                                    {selectedLowRatingReview.my_review_status ? 'Изменить решение' : 'Сохранить проверку'}
+                                                                </button>
+                                                            </div>
+                                                        </div>
+
+                                                        {(() => {
+                                                            const reviewEntries = Array.isArray(selectedLowRatingReview.review_entries)
+                                                                ? selectedLowRatingReview.review_entries
+                                                                : [];
+                                                            return (
+                                                                <div className="flex flex-col rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
+                                                                    <div className="mb-2 flex items-center justify-between gap-2">
+                                                                        <div>
+                                                                            <div className="text-sm font-semibold text-slate-900">Проверки</div>
+                                                                            <div className="text-[11px] text-slate-500">Вердикты видны всем проверяющим.</div>
+                                                                        </div>
+                                                                        <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-semibold text-slate-600">
+                                                                            {reviewEntries.length}
+                                                                        </span>
+                                                                    </div>
+                                                                    {reviewEntries.length ? (
+                                                                        <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1 ios-modal-scroll">
+                                                                            {reviewEntries.map((entry, index) => (
+                                                                                <div key={`${entry.reviewer_id || 'reviewer'}-${entry.updated_at || index}`} className="rounded-xl bg-slate-50 px-3 py-2 ring-1 ring-slate-200">
+                                                                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                                                                        <div className="min-w-0">
+                                                                                            <div className="truncate text-[13px] font-semibold text-slate-900">
+                                                                                                {entry.reviewer_name || 'Проверяющий'}{entry.is_mine ? ' · вы' : ''}
+                                                                                            </div>
+                                                                                            <div className="text-[10.5px] text-slate-400">
+                                                                                                {formatLowRatingDateTime(entry.updated_at)}
+                                                                                            </div>
+                                                                                        </div>
+                                                                                        <span className={`inline-flex rounded-full px-2 py-0.5 text-[10.5px] font-semibold ring-1 ${lowRatingStatusClass(entry.status)}`}>
+                                                                                            {lowRatingStatusLabel(entry.status)}
+                                                                                        </span>
+                                                                                    </div>
+                                                                                    <div className="mt-1 whitespace-pre-wrap text-[12.5px] leading-5 text-slate-700">
+                                                                                        {entry.comment || 'Без комментария'}
+                                                                                    </div>
+                                                                                </div>
+                                                                            ))}
+                                                                        </div>
+                                                                    ) : (
+                                                                        <div className="rounded-xl bg-slate-50 px-3 py-2 text-[13px] text-slate-500 ring-1 ring-slate-200">
+                                                                            Проверок пока нет.
+                                                                        </div>
+                                                                    )}
+                                                                    {!selectedLowRatingReview.can_finalize && (
+                                                                        <div className="mt-2 rounded-xl bg-slate-50 px-3 py-2 text-[12px] leading-5 text-slate-600 ring-1 ring-slate-200">
+                                                                            <span className="font-semibold">Итог: </span>
+                                                                            {lowRatingFinalLabel(selectedLowRatingReview)}
+                                                                            {selectedLowRatingReview.final_comment ? ` · ${selectedLowRatingReview.final_comment}` : ''}
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            );
+                                                        })()}
+
+                                                        {selectedLowRatingReview.can_finalize && (
+                                                            <div className="flex flex-col rounded-2xl border border-cyan-200 bg-cyan-50/60 p-3 shadow-sm">
+                                                                <div className="mb-2">
+                                                                    <div className="text-sm font-semibold text-slate-900">Итоговое решение</div>
+                                                                    <div className="text-[11px] text-slate-500">Две проверки разошлись — решает руководитель.</div>
+                                                                </div>
+                                                                <div className="mb-2 grid grid-cols-2 gap-2">
+                                                                    {LOW_RATING_REVIEW_OPTIONS.filter(option => option.value).map(option => {
+                                                                        const active = lowRatingFinalDraft.status === option.value;
+                                                                        return (
+                                                                            <button
+                                                                                key={option.value}
+                                                                                type="button"
+                                                                                className={`rounded-xl px-3 py-2 text-[13px] font-semibold transition ${
+                                                                                    active
+                                                                                        ? option.value === 'valid'
+                                                                                            ? 'bg-rose-600 text-white shadow-sm'
+                                                                                            : 'bg-emerald-600 text-white shadow-sm'
+                                                                                        : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100'
+                                                                                }`}
+                                                                                onClick={() => setLowRatingFinalDraft(prev => ({ ...prev, status: option.value }))}
+                                                                            >
+                                                                                {option.label}
+                                                                            </button>
+                                                                        );
+                                                                    })}
+                                                                </div>
+                                                                <textarea
+                                                                    className="min-h-[68px] w-full flex-1 resize-y rounded-xl border border-slate-200 bg-white px-3 py-2 text-[13px] leading-5 text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-slate-300 focus:ring-4 focus:ring-cyan-100"
+                                                                    value={lowRatingFinalDraft.comment || ''}
+                                                                    onChange={(e) => setLowRatingFinalDraft(prev => ({ ...prev, comment: e.target.value }))}
+                                                                    placeholder="Комментарий к итоговому решению"
+                                                                    maxLength={4000}
+                                                                />
+                                                                <div className="mt-2 flex justify-end">
+                                                                    <button
+                                                                        type="button"
+                                                                        className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-[13px] font-semibold text-white shadow-sm transition ${lowRatingSavingKey === `${selectedLowRatingReview.id}:final` ? 'cursor-wait bg-cyan-400' : 'bg-cyan-600 hover:bg-cyan-700'}`}
+                                                                        onClick={() => saveLowRatingFinalDecision(selectedLowRatingReview)}
+                                                                        disabled={lowRatingSavingKey === `${selectedLowRatingReview.id}:final`}
+                                                                    >
+                                                                        <FaIcon className={`fas ${lowRatingSavingKey === `${selectedLowRatingReview.id}:final` ? 'fa-spinner fa-spin' : 'fa-check'}`} aria-hidden="true" />
+                                                                        Сохранить итог
+                                                                    </button>
+                                                                </div>
                                                             </div>
                                                         )}
                                                     </div>
-                                                );
-                                            })()}
-
-                                            <div className="rounded-[28px] border border-slate-200 bg-white p-4 shadow-sm">
-                                                <div className="mb-3 flex items-center justify-between gap-2">
-                                                    <div>
-                                                        <div className="text-sm font-semibold text-slate-900">Моя проверка</div>
-                                                        <div className="text-xs text-slate-500">Эти поля видит и меняет только текущий пользователь. Решение можно изменить в любой момент — даже после сохранения.</div>
-                                                    </div>
-                                                    {lowRatingSavingKey === `${selectedLowRatingReview.id}:review` && (
-                                                        <FaIcon className="fas fa-spinner fa-spin text-slate-400" aria-hidden="true" />
-                                                    )}
-                                                </div>
-                                                <div className="mb-3 flex flex-wrap gap-2">
-                                                    {LOW_RATING_REVIEW_OPTIONS.filter(option => option.value).map(option => {
-                                                        const active = lowRatingReviewDraft.status === option.value;
-                                                        return (
-                                                            <button
-                                                                key={option.value}
-                                                                type="button"
-                                                                className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
-                                                                    active
-                                                                        ? option.value === 'valid'
-                                                                            ? 'bg-rose-600 text-white'
-                                                                            : 'bg-emerald-600 text-white'
-                                                                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                                                                }`}
-                                                                onClick={() => setLowRatingReviewDraft(prev => ({ ...prev, status: option.value }))}
-                                                            >
-                                                                {option.label}
-                                                            </button>
-                                                        );
-                                                    })}
-                                                </div>
-                                                <textarea
-                                                    className="min-h-[96px] w-full resize-y rounded-3xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-slate-300 focus:bg-white focus:ring-4 focus:ring-slate-100"
-                                                    value={lowRatingReviewDraft.comment || ''}
-                                                    onChange={(e) => setLowRatingReviewDraft(prev => ({ ...prev, comment: e.target.value }))}
-                                                    placeholder="Комментарий к проверке"
-                                                    maxLength={4000}
-                                                />
-                                                <div className="mt-3 flex justify-end">
-                                                    <button
-                                                        type="button"
-                                                        className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold text-white shadow-sm transition ${lowRatingSavingKey === `${selectedLowRatingReview.id}:review` ? 'cursor-wait bg-slate-400' : 'bg-slate-900 hover:bg-slate-800'}`}
-                                                        onClick={() => saveLowRatingReview(selectedLowRatingReview)}
-                                                        disabled={lowRatingSavingKey === `${selectedLowRatingReview.id}:review`}
-                                                    >
-                                                        <FaIcon className={`fas ${lowRatingSavingKey === `${selectedLowRatingReview.id}:review` ? 'fa-spinner fa-spin' : (selectedLowRatingReview.my_review_status ? 'fa-pen' : 'fa-save')}`} aria-hidden="true" />
-                                                        {selectedLowRatingReview.my_review_status ? 'Изменить решение' : 'Сохранить проверку'}
-                                                    </button>
-                                                </div>
-                                            </div>
-
-                                            <div className="rounded-[28px] border border-slate-200 bg-slate-50/80 p-4">
-                                                <div className="mb-3 flex items-center justify-between gap-2">
-                                                    <div>
-                                                        <div className="text-sm font-semibold text-slate-900">Итоговое решение</div>
-                                                        <div className="text-xs text-slate-500">
-                                                            {selectedLowRatingReview.can_finalize ? 'Есть расхождение двух проверок. Доступно финальное решение.' : 'Финальное решение доступно только при расхождении двух проверок.'}
-                                                        </div>
-                                                    </div>
-                                                    <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-600 ring-1 ring-slate-200">
-                                                        {selectedLowRatingReview.final_source === 'consensus' ? 'Совпадение' : ['manager', 'head'].includes(selectedLowRatingReview.final_source) ? 'Руководитель' : 'Ожидает'}
-                                                    </span>
-                                                </div>
-                                                {selectedLowRatingReview.can_finalize ? (
-                                                    <>
-                                                        <div className="mb-3 flex flex-wrap gap-2">
-                                                            {LOW_RATING_REVIEW_OPTIONS.filter(option => option.value).map(option => {
-                                                                const active = lowRatingFinalDraft.status === option.value;
-                                                                return (
-                                                                    <button
-                                                                        key={option.value}
-                                                                        type="button"
-                                                                        className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
-                                                                            active
-                                                                                ? option.value === 'valid'
-                                                                                    ? 'bg-rose-600 text-white'
-                                                                                    : 'bg-emerald-600 text-white'
-                                                                                : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100'
-                                                                        }`}
-                                                                        onClick={() => setLowRatingFinalDraft(prev => ({ ...prev, status: option.value }))}
-                                                                    >
-                                                                        {option.label}
-                                                                    </button>
-                                                                );
-                                                            })}
-                                                        </div>
-                                                        <textarea
-                                                            className="min-h-[82px] w-full resize-y rounded-3xl border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-slate-300 focus:ring-4 focus:ring-slate-100"
-                                                            value={lowRatingFinalDraft.comment || ''}
-                                                            onChange={(e) => setLowRatingFinalDraft(prev => ({ ...prev, comment: e.target.value }))}
-                                                            placeholder="Комментарий к итоговому решению"
-                                                            maxLength={4000}
-                                                        />
-                                                        <div className="mt-3 flex justify-end">
-                                                            <button
-                                                                type="button"
-                                                                className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold text-white shadow-sm transition ${lowRatingSavingKey === `${selectedLowRatingReview.id}:final` ? 'cursor-wait bg-cyan-400' : 'bg-cyan-600 hover:bg-cyan-700'}`}
-                                                                onClick={() => saveLowRatingFinalDecision(selectedLowRatingReview)}
-                                                                disabled={lowRatingSavingKey === `${selectedLowRatingReview.id}:final`}
-                                                            >
-                                                                <FaIcon className={`fas ${lowRatingSavingKey === `${selectedLowRatingReview.id}:final` ? 'fa-spinner fa-spin' : 'fa-check'}`} aria-hidden="true" />
-                                                                Сохранить итог
-                                                            </button>
-                                                        </div>
-                                                    </>
-                                                ) : (
-                                                    <div className="rounded-3xl bg-white px-4 py-3 text-sm text-slate-600 ring-1 ring-slate-200">
-                                                        {selectedLowRatingReview.final_comment || 'Финальное решение пока не требует вашего действия.'}
-                                                    </div>
                                                 )}
                                             </div>
-                                        </div>
+                                        </>
                                     )}
-                                </div>
+                                </section>
                             </div>
                         </div>
                     </div>
