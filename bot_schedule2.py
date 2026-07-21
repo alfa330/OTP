@@ -29884,6 +29884,10 @@ def tez_leads_recompute():
             db, year, month, binotel_client, _tez_op_operator_resolver()
         )
         outcomes = tez_lead_service.recompute_outcomes(db, year, month)
+    except RuntimeError as exc:
+        # Понятные причины (Cloudflare-блок, нет токена и т.п.) показываем как есть.
+        logging.warning('tez_leads: ручной пересчёт прерван: %s', exc)
+        return jsonify({"error": str(exc)}), 502
     except Exception:
         logging.exception('tez_leads: ручной пересчёт не удался')
         return jsonify({"error": "Не удалось выполнить сверку"}), 502

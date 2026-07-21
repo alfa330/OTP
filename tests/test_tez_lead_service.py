@@ -163,5 +163,18 @@ class RecomputeOutcomesTests(unittest.TestCase):
         self.assertEqual(stats['success'], 0)
 
 
+class CloudflareDetectionTests(unittest.TestCase):
+    """403 от TEZ APP c Cloudflare-заглушкой должен опознаваться (а не течь в UI сырым)."""
+
+    def test_detects_cloudflare_page(self):
+        from tez_first_orders import _looks_like_cloudflare_block
+        cf = '<!DOCTYPE html><html class="no-js" lang="en-US"> error code: 1020 cloudflare'
+        self.assertTrue(_looks_like_cloudflare_block(cf))
+
+    def test_ignores_normal_json(self):
+        from tez_first_orders import _looks_like_cloudflare_block
+        self.assertFalse(_looks_like_cloudflare_block('{"drivers": []}'))
+
+
 if __name__ == "__main__":
     unittest.main()

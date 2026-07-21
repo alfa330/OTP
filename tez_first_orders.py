@@ -46,11 +46,37 @@ DEFAULT_API_URL = "https://api.tezapp.org"
 HTTP_TIMEOUT = 60
 # Ограничение эндпоинта: от 1 до 100 водителей за запрос.
 MAX_BATCH_SIZE = 100
-# Cloudflare перед API режет неизвестные User-Agent (403, error code 1010).
+# Cloudflare перед API фильтрует запросы по «браузерности» клиента. Одного
+# User-Agent мало — добавляем полный набор заголовков настоящего Chrome, иначе
+# по fingerprint прилетает 403 (страница-заглушка Cloudflare, коды 1010/1020 и
+# т.п.). Полностью JS-челлендж этим не обходится (нужен вайтлист IP на стороне
+# TEZ APP), но обычные bot-фильтры так проходятся.
 BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
+BROWSER_HEADERS = {
+    "User-Agent": BROWSER_USER_AGENT,
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Origin": "https://api.tezapp.org",
+    "Referer": "https://api.tezapp.org/",
+    "sec-ch-ua": '"Chromium";v="131", "Not_A Brand";v="24", "Google Chrome";v="131"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
+}
+
+
+def _looks_like_cloudflare_block(text):
+    """Похоже ли тело ответа на страницу-заглушку Cloudflare (а не на JSON API)."""
+    low = str(text or "").lower()
+    return any(marker in low for marker in (
+        "cloudflare", "cf-ray", "cf-error", "error code:",
+        "attention required", "just a moment", 'class="no-js"',
+    ))
 RETRY_STATUSES = {429, 500, 502, 503, 504}
 MAX_RETRIES = 3
 RETRY_PAUSE = 3.0
@@ -114,11 +140,9 @@ class TezFirstOrdersClient:
     def _post_batch(self, drivers):
         """Один запрос на <=100 водителей. Возвращает список строк ответа."""
         url = f"{self.base_url}/drivers/first-orders"
-        headers = {
-            "X-Integration-Token": self.token,
-            "Content-Type": "application/json",
-            "User-Agent": BROWSER_USER_AGENT,
-        }
+        headers = dict(BROWSER_HEADERS)
+        headers["X-Integration-Token"] = self.token
+        headers["Content-Type"] = "application/json"
         body = json.dumps({"drivers": drivers}, ensure_ascii=False).encode("utf-8")
 
         last_error = None
@@ -139,11 +163,17 @@ class TezFirstOrdersClient:
                     raise RuntimeError(f"TEZ APP: не JSON в ответе: {resp.text[:300]}")
                 return payload.get("drivers") or []
 
-            if resp.status_code == 403 and "1010" in resp.text:
-                # Отдельное сообщение: этот случай ни с чем не спутать полезно.
+            if resp.status_code in (403, 503) and _looks_like_cloudflare_block(resp.text):
+                # Cloudflare заблокировал запрос на своём периметре (до проверки
+                # токена). С домашнего IP тот же код проходит, с датацентрового
+                # (Render) — челлендж. Лечится только на стороне TEZ APP: вайтлист
+                # исходящего IP сервера или WAF-исключение для /drivers/first-orders.
+                m = re.search(r"error code:\s*(\d+)", resp.text, re.I)
+                code = f" (Cloudflare code {m.group(1)})" if m else ""
                 raise RuntimeError(
-                    "TEZ APP: 403 error code 1010 — Cloudflare отклонил клиента по "
-                    "User-Agent (токен тут ни при чём)"
+                    f"TEZ APP: запрос заблокирован Cloudflare{code}. Токен ни при чём — "
+                    "нужно добавить исходящий IP сервера в вайтлист на стороне TEZ APP "
+                    "(или снять JS-челлендж с эндпоинта /drivers/first-orders)."
                 )
             if resp.status_code == 401:
                 raise RuntimeError(
@@ -155,7 +185,8 @@ class TezFirstOrdersClient:
                 time.sleep(RETRY_PAUSE * attempt)
                 continue
 
-            raise RuntimeError(f"TEZ APP HTTP {resp.status_code}: {resp.text[:300]}")
+            snippet = resp.text[:200].replace("\n", " ").strip()
+            raise RuntimeError(f"TEZ APP HTTP {resp.status_code}: {snippet}")
 
         raise RuntimeError(f"TEZ APP first-orders: не удалось получить ответ ({last_error})")
 
