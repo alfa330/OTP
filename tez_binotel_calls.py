@@ -52,6 +52,9 @@ DEFAULT_API_URL = "https://api.binotel.com/api/4.0"
 HTTP_TIMEOUT = 40
 # Binotel: list-of-calls-by-internal-number-for-period ограничен окном в 7 дней.
 MAX_WINDOW_DAYS = 7
+# history-by-external-number принимает массив номеров: 300 проходит, 1000 даёт
+# «Request is too large». Берём с запасом.
+MAX_EXTERNAL_NUMBERS_PER_REQUEST = 200
 # callType в ответе Binotel: 0 = входящий, 1 = исходящий.
 CALL_TYPE_INCOMING = 0
 CALL_TYPE_OUTGOING = 1
@@ -276,6 +279,34 @@ class BinotelApiClient:
                 seen.add(call["general_call_id"])
                 out.append(call)
             cur = chunk_stop + 1
+        return out
+
+    def list_calls_by_external_numbers(self, phones):
+        """Вся история звонков по номерам КЛИЕНТОВ (stats/history-by-external-number).
+
+        В отличие от list_calls_by_internal_number период не задаётся вообще —
+        метод отдаёт всю историю по каждому номеру. Именно поэтому для успешек
+        ОП не нужно зеркалить весь трафик компании: список интересующих номеров
+        известен заранее (это база лидов), и один запрос закрывает сразу пачку.
+
+        Проверено на живом API: 99 номеров -> 677 звонков; 300 номеров метод
+        принимает, 1000 отвергает («Request is too large»). Шлём по
+        MAX_EXTERNAL_NUMBERS_PER_REQUEST с запасом.
+        """
+        numbers = [str(p).strip() for p in (phones or []) if str(p or '').strip()]
+        if not numbers:
+            return []
+        out = []
+        seen = set()
+        for start in range(0, len(numbers), MAX_EXTERNAL_NUMBERS_PER_REQUEST):
+            chunk = numbers[start:start + MAX_EXTERNAL_NUMBERS_PER_REQUEST]
+            payload = self._post("stats/history-by-external-number", {"externalNumbers": chunk})
+            for raw in self._extract_call_details(payload):
+                call = self._normalize_call(raw)
+                if not call or call["general_call_id"] in seen:
+                    continue
+                seen.add(call["general_call_id"])
+                out.append(call)
         return out
 
     def get_call_record_url(self, general_call_id):

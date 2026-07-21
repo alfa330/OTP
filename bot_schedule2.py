@@ -46,6 +46,7 @@ from database import (
     PROXY_STATUS_LABELS,
     normalize_proxy_status_value,
     normalize_role_value,
+    CALCULATION_MODEL_TEZ_OP,
     get_calculation_model_catalog,
     get_calculation_model_metrics,
     CALCULATION_MODEL_ALLOWED,
@@ -29540,6 +29541,313 @@ def import_work_schedules_excel():
         return jsonify({"error": "Internal server error"}), 500
 
 
+# ═══════════════════════ Успешки TEZ ОП: база лидов ═══════════════════════
+# Пайплайн целиком живёт в tez_lead_service; здесь только HTTP-обвязка, права
+# и резолвер «имя сотрудника Binotel -> оператор ОП».
+
+TEZ_LEADS_MAX_FILE_SIZE_MB = 15
+TEZ_LEADS_MAX_FILE_SIZE_BYTES = TEZ_LEADS_MAX_FILE_SIZE_MB * 1024 * 1024
+
+
+def _tez_op_operator_resolver():
+    """Колбэк resolve(employee_name, call_date) -> id оператора ОП либо None.
+
+    Матчим ПО ИМЕНИ (один sip со временем закрепляют за разными операторами) и
+    только при однозначном совпадении. Дополнительно проверяем, что на дату
+    звонка оператор был именно в модели ОП: по решению владельца звонки ТП/линии
+    не должны перехватывать успешку у отдела продаж.
+    """
+    operator_lookup = _status_import_build_operator_lookup(exclude_chat_managers=True)
+    model_cache = {}
+
+    def resolve(employee_name, call_date):
+        name = str(employee_name or '').strip()
+        if not name:
+            return None
+        matches = _status_import_resolve_operator_matches(name, operator_lookup)
+        if len(matches) != 1:
+            return None
+        operator_id = int(matches[0]['id'])
+        cache_key = (operator_id, call_date)
+        if cache_key not in model_cache:
+            try:
+                models = db.get_operator_calculation_models_as_of([operator_id], call_date) or {}
+            except Exception:
+                logging.exception('tez_leads: не удалось определить модель оператора %s', operator_id)
+                models = {}
+            model_cache[cache_key] = models.get(operator_id)
+        return operator_id if model_cache[cache_key] == CALCULATION_MODEL_TEZ_OP else None
+
+    return resolve
+
+
+def _tez_leads_first_orders_client():
+    import tez_first_orders
+    if not tez_first_orders.api_ready():
+        raise RuntimeError('TEZ_DRIVERS_API_TOKEN не задан — проверка первых заказов недоступна')
+    return tez_first_orders.TezFirstOrdersClient.from_config()
+
+
+def _tez_leads_binotel_client():
+    import tez_binotel_calls
+    if not tez_binotel_calls.api_ready():
+        raise RuntimeError('TEZ_BINOTEL_API_KEY/SECRET не заданы — история звонков недоступна')
+    return tez_binotel_calls.BinotelApiClient.from_config()
+
+
+def _tez_leads_period_from_request():
+    """year/month из запроса; по умолчанию — текущий месяц по Алматы."""
+    now = datetime.now(ZoneInfo('Asia/Almaty'))
+    try:
+        year = int(request.values.get('year') or now.year)
+        month = int(request.values.get('month') or now.month)
+    except (TypeError, ValueError):
+        return None, None
+    if not (2000 <= year <= 2100) or not (1 <= month <= 12):
+        return None, None
+    return year, month
+
+
+def _tez_leads_require_manager():
+    """Права: база лидов — инструмент СВ и админов. Возвращает (user_id, error_response)."""
+    requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+    if not requester_id:
+        return None, (jsonify({"error": "Unauthorized"}), 401)
+    requester_id = int(requester_id)
+    user_data = db.get_user(id=requester_id)
+    if not user_data:
+        return None, (jsonify({"error": "User not found"}), 404)
+    if not (_is_admin_role(user_data[3]) or _is_supervisor_role(user_data[3])):
+        return None, (jsonify({"error": "Forbidden"}), 403)
+    return requester_id, None
+
+
+@app.route('/api/tez_leads/upload', methods=['POST'])
+@require_api_key
+def tez_leads_upload():
+    """Загрузка базы лидов (fio + phone) в помесячную накопительную базу.
+
+    Проверка «кто уже работает» запускается сразу, но в фоне: файл на несколько
+    тысяч строк — это десятки запросов к TEZ APP, и держать на них HTTP-ответ
+    незачем. Прогресс виден по check_status загрузки.
+    """
+    requester_id, error = _tez_leads_require_manager()
+    if error:
+        return error
+
+    year, month = _tez_leads_period_from_request()
+    if not year:
+        return jsonify({"error": "Некорректный период (year/month)"}), 400
+
+    file_storage = request.files.get('file')
+    if not file_storage:
+        return jsonify({"error": "file is required"}), 400
+
+    file_name, file_ext = _status_import_secure_filename_and_ext(
+        file_storage.filename, fallback_filename='leads.xlsx'
+    )
+    if file_ext not in ('.csv', '.xlsx', '.xlsm'):
+        return jsonify({"error": "Поддерживаются только .csv, .xlsx и .xlsm"}), 400
+
+    raw_bytes = file_storage.read(TEZ_LEADS_MAX_FILE_SIZE_BYTES + 1)
+    if not raw_bytes:
+        return jsonify({"error": "Файл пустой"}), 400
+    if len(raw_bytes) > TEZ_LEADS_MAX_FILE_SIZE_BYTES:
+        return jsonify({"error": f"Файл слишком большой. Лимит: {TEZ_LEADS_MAX_FILE_SIZE_MB} MB"}), 413
+
+    import tez_lead_service
+    try:
+        rows = tez_lead_service.parse_leads_file(raw_bytes, file_ext)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        logging.exception('tez_leads: разбор файла не удался')
+        return jsonify({"error": "Не удалось разобрать файл"}), 400
+
+    department_id = request.values.get('department_id')
+    try:
+        counts = tez_lead_service.import_lead_batch(
+            db,
+            int(department_id) if department_id else None,
+            year, month, requester_id, file_name, rows
+        )
+    except Exception:
+        logging.exception('tez_leads: импорт строк не удался')
+        return jsonify({"error": "Не удалось сохранить базу лидов"}), 500
+
+    batch_id = counts['batch_id']
+
+    def _background_check():
+        try:
+            client = _tez_leads_first_orders_client()
+            tez_lead_service.check_batch_already_working(db, batch_id, year, month, client)
+        except Exception as exc:
+            logging.exception('tez_leads: фоновая проверка загрузки %s не удалась', batch_id)
+            try:
+                db.set_tez_lead_batch_check_state(batch_id, 'error', error=str(exc))
+            except Exception:
+                pass
+
+    threading.Thread(target=_background_check, name=f'tez-leads-check-{batch_id}', daemon=True).start()
+
+    return jsonify({
+        "batch_id": batch_id,
+        "year": year,
+        "month": month,
+        "rows_total": counts['rows_total'],
+        "rows_new": counts['rows_new'],
+        "rows_duplicate": counts['rows_duplicate'],
+        "rows_invalid": counts['rows_invalid'],
+        "check_status": "pending",
+    })
+
+
+@app.route('/api/tez_leads/stats', methods=['GET'])
+@require_api_key
+def tez_leads_stats():
+    """Воронка по базе месяца + рейтинг операторов + успешки по дням + загрузки."""
+    requester_id, error = _tez_leads_require_manager()
+    if error:
+        return error
+    year, month = _tez_leads_period_from_request()
+    if not year:
+        return jsonify({"error": "Некорректный период (year/month)"}), 400
+    try:
+        return jsonify({
+            "year": year,
+            "month": month,
+            "funnel": db.get_tez_lead_funnel(year, month),
+            "operators": db.get_tez_operator_successes(year, month),
+            "by_day": db.get_tez_successes_by_day(year, month),
+            "batches": db.list_tez_lead_batches(year, month),
+        })
+    except Exception:
+        logging.exception('tez_leads: не удалось собрать статистику')
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/tez_leads/detail', methods=['GET'])
+@require_api_key
+def tez_leads_detail():
+    """Детализация по лидам со связкой звонок -> поездка."""
+    requester_id, error = _tez_leads_require_manager()
+    if error:
+        return error
+    year, month = _tez_leads_period_from_request()
+    if not year:
+        return jsonify({"error": "Некорректный период (year/month)"}), 400
+    operator_id = request.args.get('operator_id')
+    try:
+        rows = db.get_tez_leads_detail(
+            year, month,
+            status=(request.args.get('status') or None),
+            operator_id=int(operator_id) if operator_id else None,
+            search=(request.args.get('search') or None),
+        )
+    except Exception:
+        logging.exception('tez_leads: не удалось собрать детализацию')
+        return jsonify({"error": "Internal server error"}), 500
+    return jsonify({"year": year, "month": month, "leads": rows})
+
+
+@app.route('/api/tez_leads/export', methods=['GET'])
+@require_api_key
+def tez_leads_export():
+    """Выгрузка детализации в Excel — для разбора спорных случаев с операторами."""
+    requester_id, error = _tez_leads_require_manager()
+    if error:
+        return error
+    year, month = _tez_leads_period_from_request()
+    if not year:
+        return jsonify({"error": "Некорректный период (year/month)"}), 400
+
+    status_labels = {
+        'new': 'Новый',
+        'in_progress': 'В работе',
+        'already_working': 'Уже работающий',
+        'success': 'Успешка',
+        'not_counted': 'Не засчитана',
+    }
+    rule_labels = {
+        'same_month': 'Звонок в месяце поездки',
+        'prev_month_week1': 'Звонок в прошлом месяце, поездка до 7-го',
+        'no_call_before_trip': 'Нет звонка до поездки',
+        'trip_after_day7': 'Поездка позже 7-го числа',
+    }
+
+    try:
+        rows = db.get_tez_leads_detail(year, month, limit=50000)
+    except Exception:
+        logging.exception('tez_leads: экспорт не удался')
+        return jsonify({"error": "Internal server error"}), 500
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = f'Лиды {month:02d}.{year}'[:31]
+    headers = ['ФИО', 'Телефон', 'Статус', 'Правило', 'Загрузок',
+               'Первая поездка', 'Оператор', 'Звонок', 'Дата успешки']
+    for col, title in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=col, value=title)
+        cell.font = Font(bold=True, color='FFFFFF')
+        cell.fill = PatternFill(fill_type='solid', fgColor='1F2937')
+        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+
+    for idx, row in enumerate(rows, start=2):
+        ws.cell(row=idx, column=1, value=row['full_name'])
+        ws.cell(row=idx, column=2, value=row['phone'])
+        ws.cell(row=idx, column=3, value=status_labels.get(row['status'], row['status']))
+        ws.cell(row=idx, column=4, value=rule_labels.get(row['status_rule'], row['status_rule'] or ''))
+        ws.cell(row=idx, column=5, value=row['upload_count'])
+        ws.cell(row=idx, column=6, value=(row['first_order_at'] or '').replace('T', ' ')[:19])
+        ws.cell(row=idx, column=7, value=row['operator_name'])
+        ws.cell(row=idx, column=8, value=(row['call_at'] or '').replace('T', ' ')[:19])
+        ws.cell(row=idx, column=9, value=row['success_date'] or '')
+
+    for col, width in enumerate([34, 16, 18, 40, 10, 20, 28, 20, 14], start=1):
+        ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = width
+
+    stream = BytesIO()
+    wb.save(stream)
+    stream.seek(0)
+    return send_file(
+        stream,
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        as_attachment=True,
+        download_name=f'tez_leads_{year}_{month:02d}.xlsx'
+    )
+
+
+@app.route('/api/tez_leads/recompute', methods=['POST'])
+@require_api_key
+def tez_leads_recompute():
+    """Ручной прогон сверки за период (то же, что делает ночная джоба)."""
+    requester_id, error = _tez_leads_require_manager()
+    if error:
+        return error
+    year, month = _tez_leads_period_from_request()
+    if not year:
+        return jsonify({"error": "Некорректный период (year/month)"}), 400
+
+    import tez_lead_service
+    try:
+        first_orders_client = _tez_leads_first_orders_client()
+        binotel_client = _tez_leads_binotel_client()
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 503
+
+    try:
+        orders = tez_lead_service.sync_first_orders(db, year, month, first_orders_client)
+        calls = tez_lead_service.sync_calls_for_converted(
+            db, year, month, binotel_client, _tez_op_operator_resolver()
+        )
+        outcomes = tez_lead_service.recompute_outcomes(db, year, month)
+    except Exception:
+        logging.exception('tez_leads: ручной пересчёт не удался')
+        return jsonify({"error": "Не удалось выполнить сверку"}), 502
+
+    return jsonify({"first_orders": orders, "calls": calls, "outcomes": outcomes})
+
+
 @app.route('/api/work_schedules/import_statuses_csv', methods=['POST'])
 @require_api_key
 def import_work_schedules_statuses_csv():
@@ -41712,6 +42020,30 @@ if __name__ == '__main__':
         except Exception as e:
             logging.exception(f"Error running tez_status_sync_job: {e}")
 
+    async def tez_op_successes_job():
+        # Ночная сверка успешек ОП: TEZ APP (кто выехал) -> Binotel (кто звонил
+        # выехавшим) -> пересчёт. Порядок именно такой: спрашивать про поездки
+        # приходится по всей базе месяца, а звонки нужны лишь по единицам,
+        # которые за сутки реально вышли на линию.
+        try:
+            import tez_lead_service
+            loop = asyncio.get_event_loop()
+
+            def _run():
+                first_orders_client = _tez_leads_first_orders_client()
+                binotel_client = _tez_leads_binotel_client()
+                return tez_lead_service.run_nightly(
+                    db, first_orders_client, binotel_client, _tez_op_operator_resolver()
+                )
+
+            summary = await loop.run_in_executor(executor_pool, _run)
+            logging.info(f"tez_op_successes result: {summary}")
+        except RuntimeError as e:
+            # Нет ключей в окружении — джоба просто ничего не делает.
+            logging.warning(f"tez_op_successes skipped: {e}")
+        except Exception as e:
+            logging.exception(f"Error running tez_op_successes_job: {e}")
+
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         generate_weekly_report, 
@@ -41760,6 +42092,17 @@ if __name__ == '__main__':
         tez_status_sync_job,
         CronTrigger(hour=1, minute=0, timezone=ZoneInfo('Asia/Almaty')),
         id='tez_status_sync_daily',
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # Сверка успешек ОП — в 01:30, после синка статусов TEZ.
+    # Без TEZ_DRIVERS_API_TOKEN / TEZ_BINOTEL_* job — no-op (см. tez_op_successes_job).
+    scheduler.add_job(
+        tez_op_successes_job,
+        CronTrigger(hour=1, minute=30, timezone=ZoneInfo('Asia/Almaty')),
+        id='tez_op_successes_daily',
         misfire_grace_time=3600,
         max_instances=1,
         coalesce=True
