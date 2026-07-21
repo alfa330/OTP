@@ -9,6 +9,7 @@ import SalaryCalculationResult from './components/salary/SalaryCalculationResult
 import DualPeriodBreakdown from './components/salary/DualPeriodBreakdown';
 import SalaryComingSoon from './components/salary/SalaryComingSoon';
 import TezOpPlanPanel from './components/salary/TezOpPlanPanel';
+import TezLeadsPanel from './components/salary/TezLeadsPanel';
 import TezOpPlanCell from './components/salary/TezOpPlanCell';
 import TasksView, { PinnedTaskWidget } from './components/tasks/TasksView';
 import SurveysView from './components/surveys/SurveysView';
@@ -123,6 +124,7 @@ const FourYouView = lazyWithRetry(() => import('./components/four_you/lenta'));
 const EventsView = lazyWithRetry(() => import('./components/events/EventsView'));
 const CallQaView = lazyWithRetry(() => import('./components/call_qa/CallQaView'));
 const WazzupChatsView = lazyWithRetry(() => import('./components/wazzup/WazzupChatsView'));
+const ChatAppChatsView = lazyWithRetry(() => import('./components/chatapp/ChatAppChatsView'));
 const ChatSnapshotModal = lazyWithRetry(() => import('./components/c2d_eval/ChatSnapshotModal'));
 const ChatThread = lazyWithRetry(() => import('./components/c2d_eval/ChatThread'));
 
@@ -1283,6 +1285,27 @@ const canAccessAiQaForUser = (userLike) => (
     isOpSalesSupervisorForAiQa(userLike) ||
     AI_QA_EXTRA_ACCESS_USER_IDS.has(Number(userLike?.id))
 );
+
+// Раздел «Чаты ChatApp» — переписка ТП и ОП ТЭЗ. Доступ: админы, глава отдела
+// ТЭЗ и СВ этого же отдела. СВ и главу режем по отделу намеренно (граница
+// отдела в проекте строгая); ту же проверку делает _chatapp_guard на бэкенде.
+const CHATAPP_DEPARTMENT_ID = 560;
+const CHATAPP_DEPARTMENT_CODE = 'tez';
+
+const isChatAppDepartmentHead = (userLike) => (
+    isDepartmentHead(userLike) && (
+        Number(headedDepartmentId(userLike)) === CHATAPP_DEPARTMENT_ID ||
+        aiQaHeadDepartmentCodesOf(userLike).includes(CHATAPP_DEPARTMENT_CODE)
+    )
+);
+
+const canAccessChatAppForUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    if (role === 'super_admin' || role === 'admin') return true;
+    if (isChatAppDepartmentHead(userLike)) return true;
+    return isSupervisorRole(role)
+        && Number(userLike?.department_id ?? userLike?.departmentId) === CHATAPP_DEPARTMENT_ID;
+};
 
 const DEV_LETTER_ACCESS_OPERATOR_NAME = '\u041d\u0443\u0440\u0448\u043e\u0432\u0430 \u0410\u0439\u0448\u0430 \u041a\u0430\u043d\u0430\u0433\u0430\u0442\u043a\u044b\u0437\u044b';
 const normalizeDevLetterAccessName = (value) =>
@@ -5902,6 +5925,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     month={month}
                     canEdit={true}
                     onSaved={() => setTezPlanReloadKey((k) => k + 1)}
+                />
+            )}
+            {isTezHoursDept && (
+                <TezLeadsPanel
+                    apiBaseUrl={API_BASE_URL}
+                    userId={user.id}
+                    departmentId={tezPlanDeptId}
+                    month={month}
+                    canEdit={true}
                 />
             )}
             <div className="mb-4 flex flex-wrap items-stretch justify-between gap-3">
@@ -33037,6 +33069,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessLmsSection = canAccessLmsSectionForUser(user);
             const canAccessResourceFteSection = canAccessResourceFteSectionForUser(user);
             const canAccessAiQaSection = canAccessAiQaForUser(user);
+            const canAccessChatAppSection = canAccessChatAppForUser(user);
             const canAccessFourYouSection = canAccessFourYouForUser(user);
             // Просмотр переписки оценённого чата Chat2Desk из «Мои оценки»
             // (оценки чатов ЧМ живут в журнале оценок: calls.c2d_snapshot_id).
@@ -36336,6 +36369,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     (requestedViewFromUrl !== 'resource_fte' || canAccessResourceFteSection) &&
                     (requestedViewFromUrl !== 'ai_qa' || canAccessAiQaSection) &&
                     (requestedViewFromUrl !== 'wazzup_chats' || canAccessAiQaSection) &&
+                    (requestedViewFromUrl !== 'chatapp_chats' || canAccessChatAppSection) &&
                     (requestedViewFromUrl !== 'four_you' || canAccessFourYouSection);
                 if (canOpenRequestedView) {
                     setView(requestedViewFromUrl);
@@ -36346,7 +36380,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                 else if (isSupervisorRole(user?.role)) setView('operators');
                 else setView('hours');
-            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessFourYouSection, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessChatAppSection, canAccessFourYouSection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks' || !requestedTaskIdFromLocation) return;
@@ -36386,6 +36420,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                     else if (isSupervisorRole(user?.role)) setView('operators');
                     else if (isPlainTrainer) setView('surveys');
+                    else setView('hours');
+                }
+                if (view === 'chatapp_chats' && !canAccessChatAppSection) {
+                    if (isAdminLikeRole) setView('sv_list');
+                    else if (isSupervisorRole(user?.role)) setView('operators');
                     else setView('hours');
                 }
                 if (view === 'four_you' && !canAccessFourYouSection) {
@@ -41332,11 +41371,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return;
                 }
                 if ((view === 'ai_qa' || view === 'wazzup_chats') && canAccessAiQaSection) return;
+                if (view === 'chatapp_chats' && canAccessChatAppSection) return;
                 if (departmentAllowsView(user, view)) return;
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) setView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessChatAppSection, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -41792,6 +41832,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </button>
                                                 </li>
                                             )}
+                                            {canAccessChatAppSection && (
+                                                <li>
+                                                    <button
+                                                        onClick={(e) => handleSidebarViewNavigation(e, 'chatapp_chats')}
+                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'chatapp_chats' ? 'bg-blue-700' : ''}`}
+                                                    >
+                                                        <FaIcon className="fas fa-comment-dots"></FaIcon> <span className="sidebar-text">Чаты ChatApp</span>
+                                                    </button>
+                                                </li>
+                                            )}
 
                                             {renderSidebarDividerInner()}
 
@@ -42002,6 +42052,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'wazzup_chats' ? 'bg-blue-700' : ''}`}
                                                 >
                                                     <FaIcon className="fas fa-comments"></FaIcon> <span className="sidebar-text">Чаты Верификаторов</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {/* СВ и глава отдела ТЭЗ: админы видят этот пункт в своей ветке выше */}
+                                            {canAccessChatAppSection && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'chatapp_chats')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'chatapp_chats' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-comment-dots"></FaIcon> <span className="sidebar-text">Чаты ChatApp</span>
                                                 </button>
                                             </li>
                                             )}
@@ -42710,6 +42771,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {view === "wazzup_chats" && canAccessAiQaSection && (
                             <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка чатов…</div>}>
                                 <WazzupChatsView
+                                    user={user}
+                                    showToast={showToast}
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                />
+                            </Suspense>
+                        )}
+                        {view === "chatapp_chats" && canAccessChatAppSection && (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка чатов…</div>}>
+                                <ChatAppChatsView
                                     user={user}
                                     showToast={showToast}
                                     apiBaseUrl={API_BASE_URL}
