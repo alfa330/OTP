@@ -3957,6 +3957,124 @@ class Database:
                 SET operator_field_schema = '[{"key":"taxipro_id","label":"TaxiPro ID","type":"text"}]'::jsonb
                 WHERE code = 'szov' AND operator_field_schema = '[]'::jsonb;
 
+                -- ======================= Успешки TEZ ОП =======================
+                -- База лидов помесячная (СВ грузит её в учёте часов, внутри месяца
+                -- загрузок несколько), а факт первой поездки — свойство САМОГО
+                -- водителя, а не месяца. Поэтому два уровня: tez_drivers хранит
+                -- первую поездку по номеру один раз на всё время, tez_leads —
+                -- принадлежность номера базе конкретного месяца.
+                CREATE TABLE IF NOT EXISTS tez_drivers (
+                    phone_norm VARCHAR(16) PRIMARY KEY,
+                    first_order_at TIMESTAMP WITH TIME ZONE,
+                    first_order_checked_at TIMESTAMP WITH TIME ZONE,
+                    check_attempts INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+
+                CREATE TABLE IF NOT EXISTS tez_lead_batches (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL,
+                    year INTEGER NOT NULL,
+                    month INTEGER NOT NULL,
+                    uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    file_name TEXT NOT NULL DEFAULT '',
+                    rows_total INTEGER NOT NULL DEFAULT 0,
+                    rows_new INTEGER NOT NULL DEFAULT 0,
+                    rows_duplicate INTEGER NOT NULL DEFAULT 0,
+                    rows_invalid INTEGER NOT NULL DEFAULT 0,
+                    already_working INTEGER NOT NULL DEFAULT 0,
+                    check_status VARCHAR(20) NOT NULL DEFAULT 'pending'
+                        CHECK (check_status IN ('pending', 'running', 'done', 'error')),
+                    check_error TEXT,
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+
+                CREATE TABLE IF NOT EXISTS tez_leads (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    year INTEGER NOT NULL,
+                    month INTEGER NOT NULL,
+                    phone_norm VARCHAR(16) NOT NULL REFERENCES tez_drivers(phone_norm) ON DELETE CASCADE,
+                    full_name TEXT NOT NULL DEFAULT '',
+                    first_batch_id UUID REFERENCES tez_lead_batches(id) ON DELETE SET NULL,
+                    last_batch_id UUID REFERENCES tez_lead_batches(id) ON DELETE SET NULL,
+                    upload_count INTEGER NOT NULL DEFAULT 1,
+                    status VARCHAR(20) NOT NULL DEFAULT 'new'
+                        CHECK (status IN ('new', 'in_progress', 'already_working', 'success', 'not_counted')),
+                    status_rule VARCHAR(32),
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    UNIQUE(year, month, phone_norm)
+                );
+
+                -- Каждая строка каждой загрузки: отсюда видно, сколько раз номер
+                -- приходил повторно и когда именно (владелец просил историю дублей).
+                CREATE TABLE IF NOT EXISTS tez_lead_batch_rows (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    batch_id UUID NOT NULL REFERENCES tez_lead_batches(id) ON DELETE CASCADE,
+                    row_number INTEGER NOT NULL DEFAULT 0,
+                    raw_full_name TEXT NOT NULL DEFAULT '',
+                    raw_phone TEXT NOT NULL DEFAULT '',
+                    phone_norm VARCHAR(16),
+                    lead_id UUID REFERENCES tez_leads(id) ON DELETE SET NULL,
+                    row_status VARCHAR(20) NOT NULL
+                        CHECK (row_status IN ('new', 'duplicate', 'invalid')),
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+
+                -- Звонки храним ТОЛЬКО по номерам из базы лидов (Binotel умеет
+                -- отдавать историю по номеру клиента — stats/history-by-external-number,
+                -- поэтому зеркалить весь трафик компании не нужно). is_qualifying —
+                -- вычисляемый флаг: смена порога длительности пересчитывается локально.
+                CREATE TABLE IF NOT EXISTS tez_lead_calls (
+                    general_call_id VARCHAR(32) PRIMARY KEY,
+                    phone_norm VARCHAR(16) NOT NULL,
+                    started_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                    call_type SMALLINT NOT NULL DEFAULT -1,
+                    billsec INTEGER NOT NULL DEFAULT 0,
+                    waitsec INTEGER NOT NULL DEFAULT 0,
+                    disposition VARCHAR(32) NOT NULL DEFAULT '',
+                    internal_number VARCHAR(64) NOT NULL DEFAULT '',
+                    employee_name TEXT NOT NULL DEFAULT '',
+                    employee_email TEXT NOT NULL DEFAULT '',
+                    operator_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    is_qualifying BOOLEAN NOT NULL DEFAULT FALSE,
+                    fetched_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+
+                -- Успешка: связка «кто звонил и когда -> кто вышел на линию и когда».
+                -- UNIQUE(lead_id) закрепляет инвариант «один лид = максимум одна успешка».
+                CREATE TABLE IF NOT EXISTS tez_lead_successes (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    lead_id UUID NOT NULL UNIQUE REFERENCES tez_leads(id) ON DELETE CASCADE,
+                    phone_norm VARCHAR(16) NOT NULL,
+                    operator_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    operator_name TEXT NOT NULL DEFAULT '',
+                    call_general_id VARCHAR(32),
+                    call_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                    first_order_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                    success_date DATE NOT NULL,
+                    year INTEGER NOT NULL,
+                    month INTEGER NOT NULL,
+                    rule_code VARCHAR(32) NOT NULL,
+                    is_late BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_tez_drivers_pending_check
+                    ON tez_drivers(first_order_checked_at) WHERE first_order_at IS NULL;
+                CREATE INDEX IF NOT EXISTS idx_tez_leads_period_status ON tez_leads(year, month, status);
+                CREATE INDEX IF NOT EXISTS idx_tez_leads_phone ON tez_leads(phone_norm);
+                CREATE INDEX IF NOT EXISTS idx_tez_lead_batch_rows_batch ON tez_lead_batch_rows(batch_id);
+                CREATE INDEX IF NOT EXISTS idx_tez_lead_batches_period ON tez_lead_batches(year, month, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_tez_lead_calls_phone_started ON tez_lead_calls(phone_norm, started_at);
+                CREATE INDEX IF NOT EXISTS idx_tez_lead_calls_qualifying
+                    ON tez_lead_calls(phone_norm, started_at) WHERE is_qualifying;
+                CREATE INDEX IF NOT EXISTS idx_tez_successes_operator_period
+                    ON tez_lead_successes(operator_id, year, month);
+                CREATE INDEX IF NOT EXISTS idx_tez_successes_date ON tez_lead_successes(success_date);
+
                 -- Бэкофилл привязки направлений к отделу: всё, что без отдела — в СЗоВ
                 -- (исторически направления создавались до разделения на отделы).
                 UPDATE directions
@@ -13412,6 +13530,527 @@ class Database:
             'updated_by': int(row[4]) if row[4] is not None else None,
             'updated_at': row[5].isoformat() if hasattr(row[5], 'isoformat') else (str(row[5]) if row[5] else None),
         }
+
+    # ─────────────────────── Успешки TEZ ОП: база лидов ───────────────────────
+
+    def create_tez_lead_batch(self, department_id, year, month, uploaded_by, file_name=''):
+        """Заводит запись о загрузке базы лидов и возвращает её id."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO tez_lead_batches
+                    (department_id, year, month, uploaded_by, file_name, check_status)
+                VALUES (%s, %s, %s, %s, %s, 'pending')
+                RETURNING id
+                """,
+                (
+                    int(department_id) if department_id is not None else None,
+                    int(year), int(month),
+                    int(uploaded_by) if uploaded_by is not None else None,
+                    str(file_name or '')[:255],
+                )
+            )
+            return str(cursor.fetchone()[0])
+
+    def import_tez_lead_rows(self, batch_id, year, month, rows):
+        """Записывает строки загрузки и накатывает их на помесячную базу лидов.
+
+        rows — список кортежей (row_number, raw_full_name, raw_phone, phone_norm),
+        где phone_norm=None означает невалидный номер.
+
+        База помесячная: один и тот же номер в июньской и июльской базе — это два
+        разных лида. Повторная загрузка того же номера в тот же месяц не создаёт
+        дубль, а увеличивает upload_count (владелец просил историю дублей).
+        """
+        counts = {'rows_total': 0, 'rows_new': 0, 'rows_duplicate': 0, 'rows_invalid': 0}
+        with self._get_cursor() as cursor:
+            for row_number, raw_name, raw_phone, phone_norm in rows or []:
+                counts['rows_total'] += 1
+                clean_name = str(raw_name or '').strip()[:255]
+
+                if not phone_norm:
+                    counts['rows_invalid'] += 1
+                    cursor.execute(
+                        """
+                        INSERT INTO tez_lead_batch_rows
+                            (batch_id, row_number, raw_full_name, raw_phone, phone_norm,
+                             lead_id, row_status)
+                        VALUES (%s, %s, %s, %s, NULL, NULL, 'invalid')
+                        """,
+                        (batch_id, int(row_number or 0), clean_name, str(raw_phone or '')[:64])
+                    )
+                    continue
+
+                # Факт первой поездки — свойство водителя, а не месяца базы.
+                cursor.execute(
+                    "INSERT INTO tez_drivers (phone_norm) VALUES (%s) ON CONFLICT (phone_norm) DO NOTHING",
+                    (phone_norm,)
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO tez_leads
+                        (year, month, phone_norm, full_name, first_batch_id, last_batch_id, upload_count)
+                    VALUES (%s, %s, %s, %s, %s, %s, 1)
+                    ON CONFLICT (year, month, phone_norm) DO UPDATE SET
+                        upload_count = tez_leads.upload_count + 1,
+                        last_batch_id = EXCLUDED.last_batch_id,
+                        full_name = CASE
+                            WHEN tez_leads.full_name = '' THEN EXCLUDED.full_name
+                            ELSE tez_leads.full_name
+                        END,
+                        updated_at = CURRENT_TIMESTAMP
+                    RETURNING id, (xmax = 0) AS inserted
+                    """,
+                    (int(year), int(month), phone_norm, clean_name, batch_id, batch_id)
+                )
+                lead_id, inserted = cursor.fetchone()
+                if inserted:
+                    counts['rows_new'] += 1
+                    row_status = 'new'
+                else:
+                    counts['rows_duplicate'] += 1
+                    row_status = 'duplicate'
+
+                cursor.execute(
+                    """
+                    INSERT INTO tez_lead_batch_rows
+                        (batch_id, row_number, raw_full_name, raw_phone, phone_norm, lead_id, row_status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (batch_id, int(row_number or 0), clean_name,
+                     str(raw_phone or '')[:64], phone_norm, lead_id, row_status)
+                )
+
+            cursor.execute(
+                """
+                UPDATE tez_lead_batches
+                SET rows_total = %s, rows_new = %s, rows_duplicate = %s, rows_invalid = %s
+                WHERE id = %s
+                """,
+                (counts['rows_total'], counts['rows_new'],
+                 counts['rows_duplicate'], counts['rows_invalid'], batch_id)
+            )
+        return counts
+
+    def set_tez_lead_batch_check_state(self, batch_id, check_status, error=None, already_working=None):
+        """Отмечает стадию фоновой проверки базы на «уже работающих»."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE tez_lead_batches
+                SET check_status = %s,
+                    check_error = %s,
+                    already_working = COALESCE(%s, already_working)
+                WHERE id = %s
+                """,
+                (str(check_status or 'pending'),
+                 str(error)[:2000] if error else None,
+                 int(already_working) if already_working is not None else None,
+                 batch_id)
+            )
+
+    def list_tez_lead_batches(self, year, month):
+        """Загрузки базы за месяц (свежие сверху)."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT b.id, b.file_name, b.rows_total, b.rows_new, b.rows_duplicate,
+                       b.rows_invalid, b.already_working, b.check_status, b.check_error,
+                       b.created_at, u.name
+                FROM tez_lead_batches b
+                LEFT JOIN users u ON u.id = b.uploaded_by
+                WHERE b.year = %s AND b.month = %s
+                ORDER BY b.created_at DESC
+                """,
+                (int(year), int(month))
+            )
+            return [{
+                'id': str(r[0]),
+                'file_name': r[1],
+                'rows_total': int(r[2] or 0),
+                'rows_new': int(r[3] or 0),
+                'rows_duplicate': int(r[4] or 0),
+                'rows_invalid': int(r[5] or 0),
+                'already_working': int(r[6] or 0),
+                'check_status': r[7],
+                'check_error': r[8],
+                'created_at': r[9].isoformat() if hasattr(r[9], 'isoformat') else str(r[9] or ''),
+                'uploaded_by_name': r[10] or '',
+            } for r in cursor.fetchall()]
+
+    def get_tez_phones_pending_first_order(self, year, month, batch_id=None, limit=None):
+        """Номера месяца, у которых первая поездка ещё не найдена.
+
+        Именно они идут в TEZ APP API. Как только дата найдена, номер выпадает
+        отсюда навсегда: first_order_at неизменна.
+        """
+        params = [int(year), int(month)]
+        sql = """
+            SELECT DISTINCT l.phone_norm
+            FROM tez_leads l
+            JOIN tez_drivers d ON d.phone_norm = l.phone_norm
+            WHERE l.year = %s AND l.month = %s AND d.first_order_at IS NULL
+        """
+        if batch_id:
+            sql += " AND (l.first_batch_id = %s OR l.last_batch_id = %s)"
+            params.extend([batch_id, batch_id])
+        sql += " ORDER BY l.phone_norm"
+        if limit:
+            sql += " LIMIT %s"
+            params.append(int(limit))
+        with self._get_cursor() as cursor:
+            cursor.execute(sql, tuple(params))
+            return [r[0] for r in cursor.fetchall()]
+
+    def save_tez_first_orders(self, first_orders):
+        """Сохраняет ответы TEZ APP. first_orders — dict phone_norm -> datetime|None.
+
+        Проверенные, но ещё не выехавшие номера тоже помечаются (checked_at), иначе
+        их не отличить от никогда не проверявшихся.
+        """
+        found = 0
+        with self._get_cursor() as cursor:
+            for phone_norm, first_order_at in (first_orders or {}).items():
+                cursor.execute(
+                    """
+                    INSERT INTO tez_drivers (phone_norm, first_order_at, first_order_checked_at, check_attempts)
+                    VALUES (%s, %s, CURRENT_TIMESTAMP, 1)
+                    ON CONFLICT (phone_norm) DO UPDATE SET
+                        first_order_at = COALESCE(tez_drivers.first_order_at, EXCLUDED.first_order_at),
+                        first_order_checked_at = CURRENT_TIMESTAMP,
+                        check_attempts = tez_drivers.check_attempts + 1,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (phone_norm, first_order_at)
+                )
+                if first_order_at is not None:
+                    found += 1
+        return found
+
+    def get_tez_phones_needing_calls(self, year, month):
+        """Номера, по которым пора поднять историю звонков из Binotel.
+
+        Это те, у кого поездка уже найдена, но статус лида ещё не посчитан
+        (успешка/не засчитана/уже работающий). Их единицы за ночь — отсюда и
+        один запрос в Binotel вместо зеркала всех звонков компании.
+        """
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT DISTINCT l.phone_norm
+                FROM tez_leads l
+                JOIN tez_drivers d ON d.phone_norm = l.phone_norm
+                WHERE l.year = %s AND l.month = %s
+                  AND d.first_order_at IS NOT NULL
+                  AND l.status IN ('new', 'in_progress')
+                ORDER BY l.phone_norm
+                """,
+                (int(year), int(month))
+            )
+            return [r[0] for r in cursor.fetchall()]
+
+    def save_tez_lead_calls(self, calls):
+        """Upsert звонков по номерам из базы лидов (ключ — generalCallID)."""
+        saved = 0
+        with self._get_cursor() as cursor:
+            for call in calls or []:
+                cursor.execute(
+                    """
+                    INSERT INTO tez_lead_calls
+                        (general_call_id, phone_norm, started_at, call_type, billsec, waitsec,
+                         disposition, internal_number, employee_name, employee_email,
+                         operator_id, is_qualifying)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (general_call_id) DO UPDATE SET
+                        operator_id = EXCLUDED.operator_id,
+                        is_qualifying = EXCLUDED.is_qualifying,
+                        employee_name = EXCLUDED.employee_name,
+                        fetched_at = CURRENT_TIMESTAMP
+                    """,
+                    (
+                        str(call.get('general_call_id'))[:32],
+                        call.get('phone_norm'),
+                        call.get('started_at'),
+                        int(call.get('call_type', -1)),
+                        int(call.get('billsec') or 0),
+                        int(call.get('waitsec') or 0),
+                        str(call.get('disposition') or '')[:32],
+                        str(call.get('internal_number') or '')[:64],
+                        str(call.get('employee_name') or '')[:255],
+                        str(call.get('employee_email') or '')[:255],
+                        int(call['operator_id']) if call.get('operator_id') else None,
+                        bool(call.get('is_qualifying')),
+                    )
+                )
+                saved += 1
+        return saved
+
+    def get_tez_leads_for_recompute(self, year, month):
+        """Лиды месяца вместе с первой поездкой и всеми их звонками.
+
+        Возвращает список dict'ов, готовых для compute_lead_outcome.
+        """
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT l.id, l.phone_norm, l.full_name, d.first_order_at
+                FROM tez_leads l
+                JOIN tez_drivers d ON d.phone_norm = l.phone_norm
+                WHERE l.year = %s AND l.month = %s
+                """,
+                (int(year), int(month))
+            )
+            leads = [{
+                'id': str(r[0]),
+                'phone_norm': r[1],
+                'full_name': r[2] or '',
+                'first_order_at': r[3],
+                'calls': [],
+            } for r in cursor.fetchall()]
+            if not leads:
+                return []
+
+            by_phone = {}
+            for lead in leads:
+                by_phone.setdefault(lead['phone_norm'], []).append(lead)
+
+            cursor.execute(
+                """
+                SELECT c.phone_norm, c.general_call_id, c.started_at, c.call_type,
+                       c.billsec, c.operator_id, c.employee_name
+                FROM tez_lead_calls c
+                WHERE c.phone_norm = ANY(%s)
+                ORDER BY c.started_at
+                """,
+                (list(by_phone.keys()),)
+            )
+            for r in cursor.fetchall():
+                call = {
+                    'general_call_id': r[1],
+                    'started_at': r[2],
+                    'call_type': int(r[3] if r[3] is not None else -1),
+                    'billsec': int(r[4] or 0),
+                    'operator_id': int(r[5]) if r[5] is not None else None,
+                    'employee_name': r[6] or '',
+                }
+                for lead in by_phone.get(r[0], []):
+                    lead['calls'].append(call)
+        return leads
+
+    def apply_tez_lead_outcomes(self, year, month, outcomes):
+        """Записывает пересчитанные статусы лидов и успешки.
+
+        outcomes — список dict'ов с ключами lead_id, phone_norm, status, rule,
+        operator_id, operator_name, call_general_id, call_at, first_order_at,
+        success_date. Операция идемпотентна: успешка привязана к лиду через
+        UNIQUE(lead_id), а лид, переставший быть успешкой, свою запись теряет.
+        """
+        stats = {'success': 0, 'already_working': 0, 'not_counted': 0, 'in_progress': 0, 'new': 0}
+        with self._get_cursor() as cursor:
+            for item in outcomes or []:
+                status = item.get('status') or 'new'
+                stats[status] = stats.get(status, 0) + 1
+                cursor.execute(
+                    """
+                    UPDATE tez_leads
+                    SET status = %s, status_rule = %s, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    """,
+                    (status, item.get('rule'), item['lead_id'])
+                )
+
+                if status != 'success':
+                    cursor.execute("DELETE FROM tez_lead_successes WHERE lead_id = %s", (item['lead_id'],))
+                    continue
+
+                cursor.execute(
+                    """
+                    INSERT INTO tez_lead_successes
+                        (lead_id, phone_norm, operator_id, operator_name, call_general_id,
+                         call_at, first_order_at, success_date, year, month, rule_code, is_late)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (lead_id) DO UPDATE SET
+                        operator_id = EXCLUDED.operator_id,
+                        operator_name = EXCLUDED.operator_name,
+                        call_general_id = EXCLUDED.call_general_id,
+                        call_at = EXCLUDED.call_at,
+                        first_order_at = EXCLUDED.first_order_at,
+                        success_date = EXCLUDED.success_date,
+                        year = EXCLUDED.year,
+                        month = EXCLUDED.month,
+                        rule_code = EXCLUDED.rule_code,
+                        is_late = EXCLUDED.is_late,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (
+                        item['lead_id'], item.get('phone_norm'),
+                        int(item['operator_id']) if item.get('operator_id') else None,
+                        str(item.get('operator_name') or '')[:255],
+                        item.get('call_general_id'),
+                        item.get('call_at'), item.get('first_order_at'),
+                        item.get('success_date'),
+                        int(item.get('success_year') or year), int(item.get('success_month') or month),
+                        str(item.get('rule') or '')[:32],
+                        bool(item.get('is_late')),
+                    )
+                )
+        return stats
+
+    def get_tez_lead_funnel(self, year, month):
+        """Воронка по базе месяца: загружено -> обзвонено -> дозвонились -> выехали -> успешки."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    COUNT(*) AS leads_total,
+                    COUNT(*) FILTER (WHERE d.first_order_at IS NOT NULL) AS went_online,
+                    COUNT(*) FILTER (WHERE l.status = 'already_working') AS already_working,
+                    COUNT(*) FILTER (WHERE l.status = 'success') AS successes,
+                    COUNT(*) FILTER (WHERE l.status = 'not_counted') AS not_counted,
+                    COUNT(*) FILTER (WHERE l.status = 'in_progress') AS in_progress,
+                    COALESCE(SUM(l.upload_count) - COUNT(*), 0) AS duplicates
+                FROM tez_leads l
+                JOIN tez_drivers d ON d.phone_norm = l.phone_norm
+                WHERE l.year = %s AND l.month = %s
+                """,
+                (int(year), int(month))
+            )
+            row = cursor.fetchone() or (0,) * 7
+
+            cursor.execute(
+                """
+                SELECT
+                    COUNT(DISTINCT l.phone_norm) FILTER (WHERE c.general_call_id IS NOT NULL) AS dialed,
+                    COUNT(DISTINCT l.phone_norm) FILTER (WHERE c.is_qualifying) AS reached
+                FROM tez_leads l
+                LEFT JOIN tez_lead_calls c ON c.phone_norm = l.phone_norm
+                WHERE l.year = %s AND l.month = %s
+                """,
+                (int(year), int(month))
+            )
+            calls_row = cursor.fetchone() or (0, 0)
+
+        leads_total = int(row[0] or 0)
+        already_working = int(row[2] or 0)
+        successes = int(row[3] or 0)
+        # Владелец: конверсию считаем от рабочей части базы, а «уже работающих»
+        # показываем отдельным числом как оценку качества самой базы.
+        workable = max(leads_total - already_working, 0)
+        return {
+            'leads_total': leads_total,
+            'duplicates': int(row[6] or 0),
+            'dialed': int(calls_row[0] or 0),
+            'reached': int(calls_row[1] or 0),
+            'went_online': int(row[1] or 0),
+            'already_working': already_working,
+            'in_progress': int(row[5] or 0),
+            'not_counted': int(row[4] or 0),
+            'successes': successes,
+            'workable': workable,
+            'conversion': round(successes / workable * 100, 1) if workable else 0.0,
+            'conversion_all': round(successes / leads_total * 100, 1) if leads_total else 0.0,
+        }
+
+    def get_tez_operator_successes(self, year, month):
+        """Рейтинг операторов по успешкам месяца (месяц берётся по дате поездки)."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT s.operator_id,
+                       COALESCE(u.name, s.operator_name) AS operator_name,
+                       COUNT(*) AS successes,
+                       MIN(s.success_date) AS first_success,
+                       MAX(s.success_date) AS last_success
+                FROM tez_lead_successes s
+                LEFT JOIN users u ON u.id = s.operator_id
+                WHERE s.year = %s AND s.month = %s
+                GROUP BY s.operator_id, COALESCE(u.name, s.operator_name)
+                ORDER BY successes DESC, operator_name
+                """,
+                (int(year), int(month))
+            )
+            return [{
+                'operator_id': int(r[0]) if r[0] is not None else None,
+                'operator_name': r[1] or '',
+                'successes': int(r[2] or 0),
+                'first_success': r[3].isoformat() if r[3] else None,
+                'last_success': r[4].isoformat() if r[4] else None,
+            } for r in cursor.fetchall()]
+
+    def get_tez_successes_by_day(self, year, month):
+        """Успешки по дням — дата = день выполнения первой поездки."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT s.success_date, COUNT(*)
+                FROM tez_lead_successes s
+                WHERE s.year = %s AND s.month = %s
+                GROUP BY s.success_date
+                ORDER BY s.success_date
+                """,
+                (int(year), int(month))
+            )
+            return [{'date': r[0].isoformat(), 'successes': int(r[1] or 0)} for r in cursor.fetchall()]
+
+    def get_tez_leads_detail(self, year, month, status=None, operator_id=None, search=None, limit=2000):
+        """Детализация по лидам со связкой звонок -> поездка (для разбора споров)."""
+        params = [int(year), int(month)]
+        sql = """
+            SELECT l.id, l.phone_norm, l.full_name, l.status, l.status_rule, l.upload_count,
+                   d.first_order_at, s.operator_id, COALESCE(u.name, s.operator_name),
+                   s.call_at, s.success_date, s.rule_code
+            FROM tez_leads l
+            JOIN tez_drivers d ON d.phone_norm = l.phone_norm
+            LEFT JOIN tez_lead_successes s ON s.lead_id = l.id
+            LEFT JOIN users u ON u.id = s.operator_id
+            WHERE l.year = %s AND l.month = %s
+        """
+        if status:
+            sql += " AND l.status = %s"
+            params.append(str(status))
+        if operator_id:
+            sql += " AND s.operator_id = %s"
+            params.append(int(operator_id))
+        if search:
+            sql += " AND (l.full_name ILIKE %s OR l.phone_norm LIKE %s)"
+            like = f"%{str(search).strip()}%"
+            params.extend([like, like])
+        sql += " ORDER BY d.first_order_at DESC NULLS LAST, l.full_name LIMIT %s"
+        params.append(int(limit))
+
+        with self._get_cursor() as cursor:
+            cursor.execute(sql, tuple(params))
+            return [{
+                'lead_id': str(r[0]),
+                'phone': r[1],
+                'full_name': r[2] or '',
+                'status': r[3],
+                'status_rule': r[4],
+                'upload_count': int(r[5] or 1),
+                'first_order_at': r[6].isoformat() if r[6] else None,
+                'operator_id': int(r[7]) if r[7] is not None else None,
+                'operator_name': r[8] or '',
+                'call_at': r[9].isoformat() if r[9] else None,
+                'success_date': r[10].isoformat() if r[10] else None,
+                'rule_code': r[11],
+            } for r in cursor.fetchall()]
+
+    def get_tez_success_counts_for_operators(self, operator_ids, year, month):
+        """{operator_id: успешек за месяц} — для подстановки факта в план ОП."""
+        ids = [int(v) for v in (operator_ids or []) if v is not None]
+        if not ids:
+            return {}
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT operator_id, COUNT(*)
+                FROM tez_lead_successes
+                WHERE year = %s AND month = %s AND operator_id = ANY(%s)
+                GROUP BY operator_id
+                """,
+                (int(year), int(month), ids)
+            )
+            return {int(r[0]): int(r[1] or 0) for r in cursor.fetchall()}
 
     def save_chat_manager_daily_metrics(self, metrics, imported_by=None, preserve_missing=False, update_fields=None):
         """Сохраняет дневные метрики чат-менеджеров (upsert по (operator_id, day)).
