@@ -5963,6 +5963,12 @@ def api_chatapp_sync():
         return err
     try:
         data = request.get_json(silent=True) or {}
+        # rebuild_only — пересобрать эпизоды из уже скачанных сообщений, не
+        # трогая API. Нужно, когда длинный синк прервался до сборки (build идёт
+        # в самом конце): переписка уже в БД, а эпизодов нет. Дёшево и быстро.
+        if data.get('rebuild_only'):
+            result = db.build_chatapp_episodes(gap_hours=CHATAPP_EPISODE_GAP_HOURS)
+            return jsonify({"status": "success", "rebuilt": True, "episodes": result}), 200
         date_from = (data.get('date_from') or '').strip() or None
         date_to = (data.get('date_to') or '').strip() or None
         if date_from and date_to and date_to < date_from:

@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
     Search, RefreshCw, Loader2, AlertCircle, MessageSquare, Users, Bot, Wand2,
-    Link2, FileText, Download, CloudDownload, Inbox, KeyRound,
+    Link2, FileText, Download, CloudDownload, Inbox, KeyRound, Layers,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel, iosBtnGhost, iosBtnPrimary,
@@ -359,6 +359,7 @@ export default function ChatAppChatsView(props) {
     const [threadHasMore, setThreadHasMore] = useState(false);
     const [threadLoadingMore, setThreadLoadingMore] = useState(false);
     const [syncing, setSyncing] = useState(false);
+    const [rebuilding, setRebuilding] = useState(false);
     // Период синка по умолчанию — последние 7 дней: ночной джоб берёт трое
     // суток, так что неделя перекрывает его с запасом и не тянет лишнего.
     const [syncRange, setSyncRange] = useState(() => {
@@ -459,6 +460,24 @@ export default function ChatAppChatsView(props) {
             });
     };
 
+    // Пересборка эпизодов из уже скачанных сообщений (в API не ходит). Нужна,
+    // когда длинный синк прервался до сборки — переписка есть, эпизодов нет.
+    const runRebuild = () => {
+        if (rebuilding) return;
+        setRebuilding(true);
+        axios.post(`${apiBaseUrl}/api/chatapp/sync`, { rebuild_only: true }, { headers: headers() })
+            .then((r) => {
+                setRebuilding(false);
+                const n = r.data?.episodes?.stored ?? 0;
+                showToast?.(`Эпизоды пересобраны: +${n}`, 'success');
+                loadOverview();
+            })
+            .catch((e) => {
+                setRebuilding(false);
+                showToast?.(e?.response?.data?.error || 'Не удалось пересобрать эпизоды', 'error');
+            });
+    };
+
     // Пресеты пикера под синк: «Весь период» тут не годится — синк всегда
     // тянет конкретное окно, а ретеншн переписки всё равно 45 дней.
     const syncPresets = useMemo(() => {
@@ -550,6 +569,11 @@ export default function ChatAppChatsView(props) {
                         {syncing ? <Loader2 size={13} className="animate-spin" /> : <CloudDownload size={13} />}
                         {syncing ? 'Синхронизирую…' : 'Синхронизировать'}
                     </button>
+                    <button onClick={runRebuild} disabled={rebuilding} className={iosBtnGhost}
+                            title="Пересобрать эпизоды из уже скачанной переписки (без обращения к ChatApp)">
+                        {rebuilding ? <Loader2 size={13} className="animate-spin" /> : <Layers size={13} />}
+                        Эпизоды
+                    </button>
                     {mainTab === 'chats' && (
                         <button onClick={refreshAll} className={iosBtnGhost}>
                             <RefreshCw size={13} /> Обновить
@@ -573,6 +597,11 @@ export default function ChatAppChatsView(props) {
                     <IosBadge tone="slate">
                         {overview.episodesAttributed}/{overview.episodes} эпизодов с оператором
                     </IosBadge>
+                    {overview.episodes === 0 && overview.messages > 0 && (
+                        <IosBadge tone="amber">
+                            эпизоды не собраны — нажмите «Эпизоды»
+                        </IosBadge>
+                    )}
                     {overview.authorsUnmapped > 0 && (
                         <IosBadge tone="amber">без привязки: {overview.authorsUnmapped}</IosBadge>
                     )}
