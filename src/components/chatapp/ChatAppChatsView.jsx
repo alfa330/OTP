@@ -8,6 +8,7 @@ import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel, iosBtnGhost, iosBtnPrimary,
     IosBadge, IosModal,
 } from '../ui/ios';
+import { IosDateRangePicker, isoDate, rangeLabel } from '../ui/DateRangePicker';
 
 /* Чаты ChatApp (ТП/ОП ТЭЗ): переписка «как в мессенджере» + привязка
  * сотрудников ChatApp к нашим операторам.
@@ -358,6 +359,14 @@ export default function ChatAppChatsView(props) {
     const [threadHasMore, setThreadHasMore] = useState(false);
     const [threadLoadingMore, setThreadLoadingMore] = useState(false);
     const [syncing, setSyncing] = useState(false);
+    // Период синка по умолчанию — последние 7 дней: ночной джоб берёт трое
+    // суток, так что неделя перекрывает его с запасом и не тянет лишнего.
+    const [syncRange, setSyncRange] = useState(() => {
+        const to = new Date();
+        const from = new Date();
+        from.setDate(from.getDate() - 6);
+        return { from: isoDate(from), to: isoDate(to) };
+    });
     const chatsRequest = useRef({ id: 0, controller: null });
     const threadRequest = useRef({ id: 0, controller: null });
     const threadBox = useRef(null);
@@ -430,11 +439,10 @@ export default function ChatAppChatsView(props) {
     useEffect(() => { loadOverview(); loadChats(); /* eslint-disable-next-line */ }, [apiBaseUrl]);
 
     const runSync = () => {
-        if (syncing) return;
+        if (syncing || !syncRange.from) return;
         setSyncing(true);
-        // Первый прогон обычно глубже суточного: 30 дней покрывают весь ретеншн
-        // переписки, дальше ночному джобу хватает своих CHATAPP_SYNC_DAYS.
-        axios.post(`${apiBaseUrl}/api/chatapp/sync`, { days: overview?.chats ? undefined : 30 },
+        axios.post(`${apiBaseUrl}/api/chatapp/sync`,
+                   { date_from: syncRange.from, date_to: syncRange.to || syncRange.from },
                    { headers: headers() })
             .then((r) => {
                 setSyncing(false);
@@ -450,6 +458,22 @@ export default function ChatAppChatsView(props) {
                 showToast?.(e?.response?.data?.error || 'Синхронизация не удалась', 'error');
             });
     };
+
+    // Пресеты пикера под синк: «Весь период» тут не годится — синк всегда
+    // тянет конкретное окно, а ретеншн переписки всё равно 45 дней.
+    const syncPresets = useMemo(() => {
+        const back = (n) => () => {
+            const to = new Date();
+            const from = new Date();
+            from.setDate(from.getDate() - (n - 1));
+            return { from: isoDate(from), to: isoDate(to) };
+        };
+        return [
+            { label: '7 дней', range: back(7) },
+            { label: '30 дней', range: back(30) },
+            { label: '45 дней', range: back(45) },
+        ];
+    }, []);
 
     const pickLicense = (id) => {
         setLicenseId(id);
@@ -512,7 +536,17 @@ export default function ChatAppChatsView(props) {
                             Операторы
                         </SegButton>
                     </div>
-                    <button onClick={runSync} disabled={syncing} className={iosBtnPrimary}>
+                    {/* Глубже 45 дней выбирать нечего: наш ретеншн переписки
+                        всё равно удалит её ближайшей ночью. */}
+                    <IosDateRangePicker
+                        from={syncRange.from} to={syncRange.to}
+                        max={isoDate(new Date())}
+                        min={isoDate(new Date(Date.now() - 45 * 864e5))}
+                        presets={syncPresets}
+                        onChange={setSyncRange} />
+                    <button onClick={runSync} disabled={syncing || !syncRange.from}
+                            title={`Забрать переписку за ${rangeLabel(syncRange.from, syncRange.to)}`}
+                            className={iosBtnPrimary}>
                         {syncing ? <Loader2 size={13} className="animate-spin" /> : <CloudDownload size={13} />}
                         {syncing ? 'Синхронизирую…' : 'Синхронизировать'}
                     </button>
