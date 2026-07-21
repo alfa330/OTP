@@ -13951,11 +13951,29 @@ class Database:
             'conversion_all': round(successes / leads_total * 100, 1) if leads_total else 0.0,
         }
 
-    def get_tez_operator_successes(self, year, month):
+    # Успешка принадлежит группе через оператора и ДАТУ ПОЕЗДКИ: членство в группе
+    # хранится интервалами, поэтому берём ту группу, в которой оператор состоял в
+    # день успешки (тот же принцип, что у стемпинга daily_hours.group_id).
+    _TEZ_GROUP_FILTER_SQL = """
+              AND EXISTS (
+                  SELECT 1 FROM group_operator_memberships gom
+                  WHERE gom.operator_id = s.operator_id
+                    AND gom.group_id = %s
+                    AND s.success_date >= gom.start_date
+                    AND (gom.end_date IS NULL OR s.success_date <= gom.end_date)
+              )
+    """
+
+    def get_tez_operator_successes(self, year, month, group_id=None):
         """Рейтинг операторов по успешкам месяца (месяц берётся по дате поездки)."""
+        params = [int(year), int(month)]
+        group_sql = ''
+        if group_id:
+            group_sql = self._TEZ_GROUP_FILTER_SQL
+            params.append(int(group_id))
         with self._get_cursor() as cursor:
             cursor.execute(
-                """
+                f"""
                 SELECT s.operator_id,
                        COALESCE(u.name, s.operator_name) AS operator_name,
                        COUNT(*) AS successes,
@@ -13964,10 +13982,11 @@ class Database:
                 FROM tez_lead_successes s
                 LEFT JOIN users u ON u.id = s.operator_id
                 WHERE s.year = %s AND s.month = %s
+                {group_sql}
                 GROUP BY s.operator_id, COALESCE(u.name, s.operator_name)
                 ORDER BY successes DESC, operator_name
                 """,
-                (int(year), int(month))
+                tuple(params)
             )
             return [{
                 'operator_id': int(r[0]) if r[0] is not None else None,
@@ -13977,18 +13996,24 @@ class Database:
                 'last_success': r[4].isoformat() if r[4] else None,
             } for r in cursor.fetchall()]
 
-    def get_tez_successes_by_day(self, year, month):
+    def get_tez_successes_by_day(self, year, month, group_id=None):
         """Успешки по дням — дата = день выполнения первой поездки."""
+        params = [int(year), int(month)]
+        group_sql = ''
+        if group_id:
+            group_sql = self._TEZ_GROUP_FILTER_SQL
+            params.append(int(group_id))
         with self._get_cursor() as cursor:
             cursor.execute(
-                """
+                f"""
                 SELECT s.success_date, COUNT(*)
                 FROM tez_lead_successes s
                 WHERE s.year = %s AND s.month = %s
+                {group_sql}
                 GROUP BY s.success_date
                 ORDER BY s.success_date
                 """,
-                (int(year), int(month))
+                tuple(params)
             )
             return [{'date': r[0].isoformat(), 'successes': int(r[1] or 0)} for r in cursor.fetchall()]
 
