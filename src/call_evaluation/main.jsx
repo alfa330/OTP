@@ -2183,12 +2183,19 @@ const ChatThread = ({ snapshot, quotes = [], selectable = false, onAddQuote, hei
     );
 };
 
+/* Источники «Случайного чата». Отличаются эндпоинтом пика и тем, есть ли у
+ * канала оценка клиента: CSAT собирают только в Chat2Desk (у Wazzup его нет,
+ * у ChatApp /v1/feedbacks пуст), поэтому у остальных фильтр скрыт. */
+const CHAT_SOURCE_META = {
+    chat2desk: { endpoint: 'c2d_eval', label: 'Chat2Desk', retention: 'заявки хранятся 45 дней', hasRating: true },
+    wazzup: { endpoint: 'wz_eval', label: 'WhatsApp (Wazzup)', retention: 'переписка хранится 45 дней', hasRating: false },
+    chatapp: { endpoint: 'ca_eval', label: 'WhatsApp (ChatApp)', retention: 'переписка хранится 45 дней', hasRating: false },
+};
+
 /* Модалка «Случайный чат»: настройки выборки (период в пределах месяца, длина
- * чата, оценка клиента, без уже оценённых) -> POST /api/c2d_eval/pick.
- * source='wazzup' (Верификаторы ОП) шлёт в /api/wz_eval/pick; оценки клиента
- * у Wazzup нет — фильтр скрывается. */
+ * чата, оценка клиента, без уже оценённых) -> POST /api/<endpoint>/pick. */
 const RandomChatModal = ({ isOpen, onClose, operator, userId, selectedMonth, onPicked, source = 'chat2desk' }) => {
-    const isWazzup = source === 'wazzup';
+    const sourceMeta = CHAT_SOURCE_META[source] || CHAT_SOURCE_META.chat2desk;
     const todayKey = rcToKey(new Date());
     const monthStartKey = rcMonthStartKey(selectedMonth);
     const monthEndKey = rcMonthEndKey(selectedMonth);
@@ -2225,8 +2232,8 @@ const RandomChatModal = ({ isOpen, onClose, operator, userId, selectedMonth, onP
             };
             const maxNum = parseInt(maxMsgs, 10);
             if (Number.isFinite(maxNum) && maxNum > 0) body.max_messages = maxNum;
-            if (!isWazzup && ratingFilter) body.rating_filter = ratingFilter;
-            const r = await authFetch(`${API_BASE_URL}/api/${isWazzup ? 'wz_eval' : 'c2d_eval'}/pick`, {
+            if (sourceMeta.hasRating && ratingFilter) body.rating_filter = ratingFilter;
+            const r = await authFetch(`${API_BASE_URL}/api/${sourceMeta.endpoint}/pick`, {
                 method: 'POST',
                 headers: { 'X-User-Id': userId, 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
@@ -2255,13 +2262,13 @@ const RandomChatModal = ({ isOpen, onClose, operator, userId, selectedMonth, onP
                 <div className="modal-header">
                     <div>
                         <h2><FaIcon className="fas fa-shuffle" /> Случайный чат</h2>
-                        <div className="modal-header-sub">{operator?.name || '—'} · {isWazzup ? 'WhatsApp (Wazzup)' : 'Chat2Desk'}</div>
+                        <div className="modal-header-sub">{operator?.name || '—'} · {sourceMeta.label}</div>
                     </div>
                     <button className="close-btn" onClick={onClose}><FaIcon className="fas fa-times" /></button>
                 </div>
                 <div className="modal-body">
                     <label className="label" style={{ marginBottom: 6, display: 'block' }}>
-                        Период (в пределах месяца; {isWazzup ? 'переписка хранится 45 дней' : 'заявки хранятся 45 дней'})
+                        Период (в пределах месяца; {sourceMeta.retention})
                     </label>
                     <RcRangeCalendar value={range} onChange={setRange} maxKey={maxKey} minKey={monthStartKey} />
 
@@ -2276,7 +2283,7 @@ const RandomChatModal = ({ isOpen, onClose, operator, userId, selectedMonth, onP
                         </div>
                     </div>
 
-                    {!isWazzup && (
+                    {sourceMeta.hasRating && (
                         <>
                             <label className="label" style={{ margin: '16px 0 6px', display: 'block' }}>Оценка клиента</label>
                             <select className="select" value={ratingFilter} onChange={e => setRatingFilter(e.target.value)}>
@@ -2322,7 +2329,14 @@ const RandomChatModal = ({ isOpen, onClose, operator, userId, selectedMonth, onP
 const ChatEvaluationModal = ({ isOpen, onClose, operator, chatData, directions, selectedMonth, userId, userName, onSubmitted }) => {
     const snapshot = chatData?.snapshot || null;
     const request = chatData?.request || null;
-    const direction = (directions || []).find(d => Number(d.id) === Number(operator?.direction_id)) || null;
+    // Обычно критерии берутся у направления самого оператора. Исключение — ТЭЗ:
+    // техменеджеры числятся на «ТП линия», а чат оценивается по критериям «ТП
+    // чат». Подмену считает бэкенд (random_chat_criteria_direction_id), сюда
+    // приходит уже готовый id; оценка ляжет в журнал с ним же, и критерии в
+    // журнале подтянутся правильные — они join-ятся от calls.direction_id.
+    const operatorDirection = (directions || []).find(d => Number(d.id) === Number(operator?.direction_id)) || null;
+    const criteriaDirectionId = operatorDirection?.random_chat_criteria_direction_id ?? operator?.direction_id;
+    const direction = (directions || []).find(d => Number(d.id) === Number(criteriaDirectionId)) || operatorDirection;
     const criteria = direction?.criteria || [];
 
     const [scores, setScores] = useState([]);
@@ -5914,9 +5928,9 @@ const App = ({ user, initialSelection }) => {
                                 style={{opacity:!selectedOperator?0.4:1,cursor:!selectedOperator?'not-allowed':'pointer'}}
                                 onClick={() => { if (!selectedOperator) return; setShowRandomChatModal(true); }}
                                 disabled={!selectedOperator}
-                                title={randomChatSource === 'wazzup'
-                                    ? 'Взять случайный эпизод переписки WhatsApp (Wazzup) по фильтрам (период, длина) и оценить его по критериям направления'
-                                    : 'Взять случайный чат из Chat2Desk по фильтрам (период, длина, оценка клиента) и оценить его по критериям направления'}
+                                title={randomChatSource === 'chat2desk'
+                                    ? 'Взять случайный чат из Chat2Desk по фильтрам (период, длина, оценка клиента) и оценить его по критериям направления'
+                                    : `Взять случайный эпизод переписки ${CHAT_SOURCE_META[randomChatSource]?.label || 'WhatsApp'} по фильтрам (период, длина) и оценить его по критериям направления`}
                             >
                                 <FaIcon className="fas fa-comments" /> Случайный чат
                             </button>
