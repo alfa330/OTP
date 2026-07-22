@@ -29908,6 +29908,14 @@ def tez_leads_upload():
 
     threading.Thread(target=_background_check, name=f'tez-leads-check-{batch_id}', daemon=True).start()
 
+    # Битые/не-КЗ номера (нормализатор вернул None) показываем сразу при загрузке,
+    # чтобы СВ увидел, какие строки не попали в базу, и мог их поправить.
+    # rows = (row_number, fio, raw_phone, phone_norm); None = невалидный.
+    invalid_rows = [
+        {"row": r[0], "full_name": r[1], "phone": r[2]}
+        for r in rows if r[3] is None
+    ]
+
     return jsonify({
         "batch_id": batch_id,
         "year": year,
@@ -29916,6 +29924,7 @@ def tez_leads_upload():
         "rows_new": counts['rows_new'],
         "rows_duplicate": counts['rows_duplicate'],
         "rows_invalid": counts['rows_invalid'],
+        "invalid_rows": invalid_rows[:200],
         "check_status": "pending",
     })
 
