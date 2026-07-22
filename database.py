@@ -26612,6 +26612,106 @@ class Database:
             'reaggregated_months': months,
         }
 
+    def update_group_membership_start_date(self, group_id, member_id, kind='operator',
+                                           start_date=None):
+        """Правит дату вступления в группу у ОТКРЫТОГО членства (оператора или СВ).
+
+        Закрытые членства не трогаем — меняется только «сейчас действующее»:
+        - у оператора открытое членство ровно одно, поэтому прошлое, закрытое встык
+          (end_date = старт − 1 день), двигается вместе — в таймлайне не появляется
+          ни дыры, ни нахлёста;
+        - daily_hours на сдвинутом отрезке перестамповываются на нужную группу, а
+          затронутые месяцы переагрегируются (как в reassign_operator_history) —
+          иначе часы остались бы висеть на прежней группе;
+        - у СВ членств может быть несколько (ведёт разные группы), цепочки нет —
+          только проверка, что не наезжаем на прошлое членство в этой же группе.
+        """
+        kind = (kind or 'operator').strip().lower()
+        if kind not in ('operator', 'supervisor'):
+            raise ValueError("kind must be 'operator' or 'supervisor'")
+        if isinstance(start_date, str):
+            try:
+                start_date = datetime.strptime(start_date.strip(), '%Y-%m-%d').date()
+            except ValueError:
+                raise ValueError("Некорректная дата (ожидается YYYY-MM-DD)")
+        if not isinstance(start_date, date):
+            raise ValueError("Дата обязательна")
+        if start_date > date.today():
+            raise ValueError("Дата вступления не может быть в будущем")
+        group_id = int(group_id)
+        member_id = int(member_id)
+        is_op = kind == 'operator'
+        table = 'group_operator_memberships' if is_op else 'group_supervisor_memberships'
+        col = 'operator_id' if is_op else 'supervisor_id'
+        months = []
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "SELECT id, start_date FROM " + table + """ m
+                WHERE m.group_id = %s AND m.""" + col + """ = %s AND m.end_date IS NULL
+                ORDER BY m.start_date DESC, m.id DESC LIMIT 1""",
+                (group_id, member_id),
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("Активное членство в этой группе не найдено")
+            membership_id, old_start = int(row[0]), row[1]
+            if old_start == start_date:
+                return {
+                    'changed': False, 'old_start_date': str(old_start),
+                    'start_date': str(start_date), 'reaggregated_months': [],
+                }
+            # Предыдущее закрытое членство: у оператора — по любой группе (это звено
+            # той же цепочки), у СВ — только по этой же группе.
+            cursor.execute(
+                "SELECT id, group_id, start_date, end_date FROM " + table + """ m
+                WHERE m.""" + col + """ = %s AND m.id <> %s AND m.end_date IS NOT NULL
+                  AND m.end_date < %s AND (%s OR m.group_id = %s)
+                ORDER BY m.end_date DESC, m.id DESC LIMIT 1""",
+                (member_id, membership_id, old_start, is_op, group_id),
+            )
+            prev = cursor.fetchone()
+            prev_group_id = int(prev[1]) if prev else None
+            if prev and start_date <= prev[2]:
+                raise ValueError("Дата раньше начала предыдущего членства")
+            if prev and is_op and prev[3] == old_start - timedelta(days=1):
+                cursor.execute(
+                    "UPDATE " + table + " SET end_date = %s WHERE id = %s",
+                    (start_date - timedelta(days=1), int(prev[0])),
+                )
+            elif prev and start_date <= prev[3]:
+                raise ValueError("Дата пересекается с предыдущим членством")
+            cursor.execute(
+                "UPDATE " + table + " SET start_date = %s WHERE id = %s",
+                (start_date, membership_id),
+            )
+            if is_op:
+                lo = min(old_start, start_date)
+                hi = max(old_start, start_date) - timedelta(days=1)
+                # Сдвиг назад — дни отрезка забирает эта группа; вперёд — отдаёт
+                # прежней (или никому, если её нет).
+                target_group_id = group_id if start_date < old_start else prev_group_id
+                cursor.execute(
+                    """SELECT DISTINCT TO_CHAR(day, 'YYYY-MM') FROM daily_hours
+                       WHERE operator_id = %s AND day >= %s AND day <= %s ORDER BY 1""",
+                    (member_id, lo, hi),
+                )
+                months = [m[0] for m in (cursor.fetchall() or [])]
+                cursor.execute(
+                    """UPDATE daily_hours SET group_id = %s
+                       WHERE operator_id = %s AND day >= %s AND day <= %s""",
+                    (target_group_id, member_id, lo, hi),
+                )
+                for m in months:
+                    self._aggregate_month_from_daily_tx(cursor, member_id, m)
+            else:
+                self._sync_group_operators_supervisor_tx(cursor, group_id)
+        return {
+            'changed': True,
+            'old_start_date': str(old_start),
+            'start_date': str(start_date),
+            'reaggregated_months': months,
+        }
+
     def _load_operator_calculation_models_tx(self, cursor, operator_ids, as_of=None):
         """
         Модель расчёта по операторам.

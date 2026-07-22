@@ -118,6 +118,37 @@ class CrudTests(unittest.TestCase):
             self.assertIn(r, BOT, f"missing route: {r}")
 
 
+class MemberStartDateEditTests(unittest.TestCase):
+    """Дата вступления участника правится прямо в разделе «Состав» группы."""
+
+    def test_db_method_moves_chain_and_restamps_hours(self):
+        self.assertIn(
+            "def update_group_membership_start_date(self, group_id, member_id, kind='operator',", DB
+        )
+        method = DB.split("def update_group_membership_start_date(", 1)[1].split(
+            "def _load_operator_calculation_models_tx(", 1
+        )[0]
+        # прошлое членство, закрытое встык, двигается вместе — без дыр/нахлёстов
+        self.assertIn("prev[3] == old_start - timedelta(days=1)", method)
+        # часы за сдвинутые дни переезжают в нужную группу, месяцы пересчитываются
+        self.assertIn("UPDATE daily_hours SET group_id = %s", method)
+        self.assertIn("_aggregate_month_from_daily_tx(cursor, member_id, m)", method)
+
+    def test_endpoint_exists_and_is_scoped(self):
+        self.assertIn(
+            "@app.route('/api/admin/groups/<int:group_id>/member_start_date', methods=['POST'])", BOT
+        )
+        ep = BOT.split("def update_group_member_start_date_endpoint(", 1)[1].split("@app.route", 1)[0]
+        self.assertIn("_ensure_group_manager()", ep)
+        self.assertIn("_ensure_group_in_requester_scope(group_id, rid, role)", ep)
+        self.assertIn("db.update_group_membership_start_date(", ep)
+
+    def test_frontend_edits_date_inline_in_members(self):
+        self.assertIn("/member_start_date", GROUPS_VIEW)
+        self.assertIn("submitDateEdit", GROUPS_VIEW)
+        self.assertIn("renderMemberRow", GROUPS_VIEW)
+
+
 class ModelChangeTests(unittest.TestCase):
     """Смена модели группы с журналом и откатом (данные не теряются)."""
 

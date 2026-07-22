@@ -15360,6 +15360,41 @@ def group_members_endpoint(group_id):
         return jsonify({"error": "Internal server error"}), 500
 
 
+@app.route('/api/admin/groups/<int:group_id>/member_start_date', methods=['POST'])
+@require_api_key
+def update_group_member_start_date_endpoint(group_id):
+    """Правка даты вступления участника в группу прямо в разделе «Состав».
+    Двигает открытое членство (и смежное прошлое — встык), перестамповывает часы."""
+    try:
+        rid, role, guard_err = _ensure_group_manager()
+        if guard_err:
+            resp, code = guard_err
+            return resp, code
+        scope_err = _ensure_group_in_requester_scope(group_id, rid, role)
+        if scope_err:
+            resp, code = scope_err
+            return resp, code
+        data = request.get_json(silent=True) or {}
+        member_id = data.get('member_id')
+        start_date = (data.get('start_date') or '').strip()
+        kind = (data.get('kind') or 'operator').strip().lower()
+        if not member_id:
+            return jsonify({"error": "member_id is required"}), 400
+        if not start_date:
+            return jsonify({"error": "start_date is required"}), 400
+        if kind not in ('operator', 'supervisor'):
+            return jsonify({"error": "kind must be operator or supervisor"}), 400
+        result = db.update_group_membership_start_date(
+            group_id, int(member_id), kind=kind, start_date=start_date
+        )
+        return jsonify({"status": "success", "group": db.get_group(group_id), **result}), 200
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as e:
+        logging.error(f"Error updating group member start date: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/admin/operators/<int:operator_id>/reassign_history', methods=['POST'])
 @require_api_key
 def reassign_operator_history_endpoint(operator_id):

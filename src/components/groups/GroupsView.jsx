@@ -28,6 +28,18 @@ const monthLabelRu = (ym) => {
     return `${MONTHS_RU_NOM[Number(m[2]) - 1] || m[2]} ${m[1]}`;
 };
 
+// «2026-06-01» → «01.06.2026» (дата вступления в группу).
+const fmtDate = (ymd) => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(ymd || ''));
+    return m ? `${m[3]}.${m[2]}.${m[1]}` : '';
+};
+
+// Дата вступления — только прошлое/сегодня (бэк это же и валидирует).
+const todayYmd = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
 // ISO → «27.06.2026, 15:40» (для журнала смены модели).
 const fmtDateTime = (iso) => {
     if (!iso) return '';
@@ -72,6 +84,8 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     const [addSvId, setAddSvId] = useState('');
     const [effDate, setEffDate] = useState('');
     const [memberBusy, setMemberBusy] = useState(false);
+    // Инлайн-правка даты вступления: { kind: 'operator'|'supervisor', id, value }
+    const [dateEdit, setDateEdit] = useState(null);
     // Исторический состав: '' = текущий (живой), 'YYYY-MM' = замороженный снимок месяца
     const [membersMonth, setMembersMonth] = useState('');
     const [snap, setSnap] = useState(null);
@@ -346,7 +360,7 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     const openMembers = async (group) => {
         setMembersGroup(group);
         setAddOpId(''); setAddSvId(''); setEffDate('');
-        setMembersMonth(''); setSnap(null);
+        setMembersMonth(''); setSnap(null); setDateEdit(null);
         setMembersLoading(true);
         try {
             const { ok, data } = await api(`/api/admin/groups/${group.id}/members`);
@@ -356,7 +370,7 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
             setMembersLoading(false);
         }
     };
-    const closeMembers = () => { setMembersGroup(null); setMembers({ operators: [], supervisors: [] }); setMembersMonth(''); setSnap(null); };
+    const closeMembers = () => { setMembersGroup(null); setMembers({ operators: [], supervisors: [] }); setMembersMonth(''); setSnap(null); setDateEdit(null); };
 
     // Последние 12 месяцев + «текущий» для исторического состава за выбранный месяц
     const monthOptions = useMemo(() => {
@@ -372,6 +386,7 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
 
     const selectMembersMonth = async (month) => {
         setMembersMonth(month);
+        setDateEdit(null);
         if (!month || !membersGroup) { setSnap(null); return; }
         setSnapLoading(true);
         try {
@@ -415,6 +430,39 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     };
     const removeSupervisor = (svId) => mutateMember('supervisors', { supervisor_id: svId, remove: true, end_date: effDate || null });
 
+    /* ─── дата вступления участника (инлайн, прямо в строке состава) ─── */
+    const isEditingDate = (kind, id) => !!dateEdit && dateEdit.kind === kind && dateEdit.id === id;
+    const toggleDateEdit = (kind, m) => setDateEdit(
+        isEditingDate(kind, m.id) ? null : { kind, id: m.id, value: m.start_date || '' }
+    );
+
+    const submitDateEdit = async () => {
+        if (!dateEdit || !membersGroup) return;
+        const value = (dateEdit.value || '').trim();
+        if (!value) { showToastRef.current?.('Укажите дату вступления', 'error'); return; }
+        setMemberBusy(true);
+        try {
+            const { ok, data } = await api(`/api/admin/groups/${membersGroup.id}/member_start_date`, {
+                method: 'POST',
+                body: { kind: dateEdit.kind, member_id: dateEdit.id, start_date: value },
+            });
+            if (ok) {
+                setDateEdit(null);
+                showToastRef.current?.(
+                    data.changed ? `Дата вступления изменена на ${fmtDate(value)}` : 'Дата не изменилась',
+                    data.changed ? 'success' : 'info'
+                );
+                await refreshMembers(membersGroup.id);
+            } else {
+                showToastRef.current?.(data.error || 'Не удалось изменить дату', 'error');
+            }
+        } catch {
+            showToastRef.current?.('Ошибка сети', 'error');
+        } finally {
+            setMemberBusy(false);
+        }
+    };
+
     const memberOpIds = new Set((members.operators || []).map((o) => o.id));
     const memberSvIds = new Set((members.supervisors || []).map((s) => s.id));
 
@@ -423,22 +471,89 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     const opsActive = (members.operators || []).filter((o) => !isFiredMember(o));
     const opsFired = (members.operators || []).filter((o) => isFiredMember(o));
 
-    const renderOpRow = (o, idx) => (
-        <div key={o.id} className="flex items-center justify-between gap-2 px-3 py-2 hover:bg-slate-50">
-            <span className="flex min-w-0 items-center gap-2 text-[13.5px] text-slate-700">
-                <span className="w-5 shrink-0 text-right text-[12px] text-slate-300">{idx + 1}</span>
-                <span className="truncate">{o.name}</span>
-            </span>
+    // Чип с датой вступления — он же кнопка инлайн-редактора.
+    const dateChip = (kind, m) => {
+        const editing = isEditingDate(kind, m.id);
+        return (
             <button
-                className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 disabled:opacity-50"
-                onClick={() => removeOperator(o.id)}
-                disabled={memberBusy}
-                title="Исключить"
+                type="button"
+                onClick={() => toggleDateEdit(kind, m)}
+                title="Изменить дату вступления в группу"
+                className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11.5px] font-medium transition ${
+                    editing
+                        ? 'bg-blue-50 text-blue-700 ring-1 ring-blue-200'
+                        : m.start_date
+                            ? 'bg-slate-100 text-slate-500 hover:bg-slate-200 hover:text-slate-700'
+                            : 'bg-amber-50 text-amber-700 ring-1 ring-amber-100 hover:bg-amber-100'
+                }`}
             >
-                <FaIcon className="fas fa-xmark" />
+                <FaIcon className="fas fa-calendar-day" />
+                <span className="tabular-nums">{m.start_date ? `с ${fmtDate(m.start_date)}` : 'дата не указана'}</span>
+                <FaIcon className={`fas fa-pen text-[9px] transition-opacity ${editing ? 'opacity-100' : 'opacity-0 group-hover:opacity-50'}`} />
             </button>
+        );
+    };
+
+    // Редактор даты раскрывается прямо под строкой участника — не уводя в отдельную модалку.
+    const dateEditor = (kind, m) => {
+        if (!isEditingDate(kind, m.id)) return null;
+        return (
+            <div className="flex flex-wrap items-center gap-2 border-t border-slate-100 bg-slate-50/80 px-3 py-2.5 pl-10">
+                <span className="text-[11.5px] font-medium text-slate-500">В группе с</span>
+                <input
+                    type="date"
+                    autoFocus
+                    max={todayYmd()}
+                    className="rounded-lg bg-white px-2.5 py-1.5 text-[13px] text-slate-900 ring-1 ring-slate-200 transition focus:outline-none focus:ring-2 focus:ring-blue-500/70"
+                    value={dateEdit.value}
+                    onChange={(e) => setDateEdit({ ...dateEdit, value: e.target.value })}
+                    onKeyDown={(e) => {
+                        if (e.key === 'Enter') submitDateEdit();
+                        if (e.key === 'Escape') setDateEdit(null);
+                    }}
+                />
+                <button
+                    className={`${iosBtnPrimary} !px-3.5 !py-1.5 !text-[12.5px]`}
+                    onClick={submitDateEdit}
+                    disabled={memberBusy || !dateEdit.value}
+                >
+                    Сохранить
+                </button>
+                <button className={`${iosBtnGhost} !px-2.5 !py-1.5 !text-[12.5px]`} onClick={() => setDateEdit(null)} disabled={memberBusy}>
+                    Отмена
+                </button>
+            </div>
+        );
+    };
+
+    const renderMemberRow = ({ kind, m, idx = null, icon = null, onRemove, removeTitle }) => (
+        <div key={`${kind}-${m.id}`} className={isEditingDate(kind, m.id) ? 'bg-blue-50/30' : ''}>
+            <div className="group flex items-center gap-2 px-3 py-2 transition hover:bg-slate-50">
+                <span className="flex min-w-0 flex-1 items-center gap-2 text-[13.5px] text-slate-700">
+                    {idx === null
+                        ? <FaIcon className={`${icon} shrink-0 text-slate-400`} />
+                        : <span className="w-5 shrink-0 text-right text-[12px] tabular-nums text-slate-300">{idx + 1}</span>}
+                    <span className="truncate">{m.name}</span>
+                </span>
+                {dateChip(kind, m)}
+                <button
+                    className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 disabled:opacity-50"
+                    onClick={onRemove}
+                    disabled={memberBusy}
+                    title={removeTitle}
+                >
+                    <FaIcon className="fas fa-xmark" />
+                </button>
+            </div>
+            {dateEditor(kind, m)}
         </div>
     );
+
+    const renderOpRow = (o, idx) => renderMemberRow({
+        kind: 'operator', m: o, idx,
+        onRemove: () => removeOperator(o.id),
+        removeTitle: 'Исключить',
+    });
 
     return (
         <div className="p-4 sm:p-6" style={{ fontFamily: APPLE_FONT }}>
@@ -709,7 +824,7 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                 open={!!membersGroup}
                 onClose={closeMembers}
                 title={membersGroup ? `Состав: ${membersGroup.name}` : 'Состав группы'}
-                subtitle="Дата вступления/исключения применяется к добавлению/удалению ниже"
+                subtitle="Дата у каждого участника — когда он вошёл в группу; нажмите на неё, чтобы поправить"
                 maxWidth="max-w-2xl"
             >
                 <div className="space-y-4">
@@ -760,8 +875,11 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                     ) : (
                     <>
                     <div>
-                        <div className={iosGroupLabel}>Дата изменения (необязательно, по умолчанию сегодня)</div>
+                        <div className={iosGroupLabel}>Дата для добавления / исключения (по умолчанию сегодня)</div>
                         <input type="date" className={`${iosInput} max-w-xs`} value={effDate} onChange={(e) => setEffDate(e.target.value)} />
+                        <p className="mt-1 px-1 text-[11.5px] text-slate-400">
+                            Применяется к кнопкам «Добавить» и «✕» ниже. Дату уже состоящего в группе участника меняйте чипом с датой в его строке.
+                        </p>
                     </div>
 
                     {membersLoading ? (
@@ -773,17 +891,11 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                                 <div className="rounded-xl ring-1 ring-slate-200 bg-white divide-y divide-slate-100 overflow-hidden">
                                     {(members.supervisors || []).length === 0 ? (
                                         <div className="px-3 py-2 text-[13px] text-slate-400">нет</div>
-                                    ) : (members.supervisors || []).map((s) => (
-                                        <div key={s.id} className="flex items-center justify-between gap-2 px-3 py-2 hover:bg-slate-50">
-                                            <span className="flex min-w-0 items-center gap-2 text-[13.5px] text-slate-700">
-                                                <FaIcon className="fas fa-user-tie text-slate-400" />
-                                                <span className="truncate">{s.name}</span>
-                                            </span>
-                                            <button className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 disabled:opacity-50" onClick={() => removeSupervisor(s.id)} disabled={memberBusy} title="Открепить">
-                                                <FaIcon className="fas fa-xmark" />
-                                            </button>
-                                        </div>
-                                    ))}
+                                    ) : (members.supervisors || []).map((s) => renderMemberRow({
+                                        kind: 'supervisor', m: s, icon: 'fas fa-user-tie',
+                                        onRemove: () => removeSupervisor(s.id),
+                                        removeTitle: 'Открепить',
+                                    }))}
                                 </div>
                                 <div className="flex items-center gap-2">
                                     <CustomSelect
@@ -833,6 +945,7 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                                 </div>
                                 <p className="text-[11.5px] text-slate-400">
                                     Перевод оператора в эту группу автоматически закрывает его прошлую основную группу.
+                                    При правке даты вступления часы за сдвинутые дни переносятся между группами, а затронутые месяцы пересчитываются.
                                 </p>
                             </section>
                         </>
