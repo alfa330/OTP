@@ -187,6 +187,9 @@ class ClocksterMarkOverridesDbTests(unittest.TestCase):
         self.assertIn("close_at = shift_end or (mark_at + max_open)", func)
         # Реальная следующая отметка раньше границы — не вмешиваемся.
         self.assertIn("next_mark['event_at'] <= close_at", func)
+        # И отдельно: уход отмечен, но позже конца смены (переработка) — реальные
+        # данные важнее авто-закрытия, иначе уход подменялся бы концом смены.
+        self.assertIn("not next_mark['is_in'] and next_mark['event_at'] <= mark_at + max_open", func)
 
     def test_auto_marks_are_not_editable(self):
         # Авто-закрытие не правится руками: правильный путь — добавить свою
