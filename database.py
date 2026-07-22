@@ -4153,6 +4153,12 @@ class Database:
                 ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS month_first_order_at TIMESTAMP WITH TIME ZONE;
                 ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS prev_month_first_order_at TIMESTAMP WITH TIME ZONE;
                 ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS first_order_checked_at TIMESTAMP WITH TIME ZONE;
+                -- Отметка «звонки по этому лиду уже подняли из Binotel». Гейтить
+                -- докачку звонков статусом нельзя: лид со СТАРЫМ статусом
+                -- (already_working от прежней логики) иначе никогда не получит
+                -- свежие звонки и навсегда останется без успешки. Дата поездки уже
+                -- известна, звонки до неё в прошлом — одной докачки достаточно.
+                ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS calls_synced_at TIMESTAMP WITH TIME ZONE;
 
                 CREATE INDEX IF NOT EXISTS idx_tez_leads_pending_order_check
                     ON tez_leads(year, month) WHERE month_first_order_at IS NULL;
@@ -13825,9 +13831,12 @@ class Database:
     def get_tez_phones_needing_calls(self, year, month):
         """Номера, по которым пора поднять историю звонков из Binotel.
 
-        Это те, у кого заказ в месяце есть, в прошлом месяце заказов НЕ было
-        (иначе привлечения не было и звонки не нужны), а статус ещё не посчитан.
-        Их единицы за ночь — отсюда и один запрос в Binotel вместо зеркала
+        Это те, у кого заказ в месяце есть, а в прошлом месяце заказов НЕ было
+        (иначе привлечения не было и звонки не нужны) и по кому звонки ещё не
+        поднимали. Гейт именно по `calls_synced_at`, а НЕ по статусу: лид со
+        старым статусом (например already_working от прежней логики) иначе
+        никогда не получил бы звонки и навсегда остался бы без успешки.
+        Их единицы за ночь — отсюда один запрос в Binotel вместо зеркала
         всех звонков компании.
         """
         with self._get_cursor() as cursor:
@@ -13838,12 +13847,29 @@ class Database:
                 WHERE l.year = %s AND l.month = %s
                   AND l.month_first_order_at IS NOT NULL
                   AND l.prev_month_first_order_at IS NULL
-                  AND l.status IN ('new', 'in_progress')
+                  AND l.calls_synced_at IS NULL
                 ORDER BY l.phone_norm
                 """,
                 (int(year), int(month))
             )
             return [r[0] for r in cursor.fetchall()]
+
+    def mark_tez_leads_calls_synced(self, year, month, phones):
+        """Отмечает, что звонки по этим номерам уже подняты (одной докачки хватает:
+        дата поездки известна, а звонки до неё в прошлом и не изменятся)."""
+        nums = [p for p in (phones or []) if p]
+        if not nums:
+            return 0
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE tez_leads
+                SET calls_synced_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+                WHERE year = %s AND month = %s AND phone_norm = ANY(%s)
+                """,
+                (int(year), int(month), nums)
+            )
+            return cursor.rowcount
 
     def save_tez_lead_calls(self, calls):
         """Upsert звонков по номерам из базы лидов (ключ — generalCallID)."""

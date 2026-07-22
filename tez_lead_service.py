@@ -197,6 +197,10 @@ def sync_calls_for_converted(db, year, month, binotel_client, resolve_operator,
             ),
         })
     saved = db.save_tez_lead_calls(prepared)
+    # Помечаем ВСЕ запрошенные номера, а не только те, по которым нашлись звонки:
+    # «звонков нет» — это тоже результат, иначе такие лиды переспрашивались бы
+    # в Binotel каждую ночь без конца.
+    db.mark_tez_leads_calls_synced(year, month, phones)
     return {'phones': len(phones), 'calls': saved}
 
 

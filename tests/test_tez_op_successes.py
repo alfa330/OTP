@@ -315,6 +315,20 @@ class GroupFilterTests(unittest.TestCase):
         self.assertIn("def get_tez_operator_successes(self, year, month, group_id=None)", self.src)
         self.assertIn("def get_tez_successes_by_day(self, year, month, group_id=None)", self.src)
 
+    def test_calls_fetch_is_not_gated_by_status(self):
+        """Докачка звонков гейтится по calls_synced_at, а НЕ по статусу лида.
+
+        Иначе лиды со старым статусом (already_working от прежней логики) никогда
+        не получили бы звонки и не смогли бы стать успешками при пересчёте.
+        """
+        src = self.src
+        start = src.index("def get_tez_phones_needing_calls")
+        body = src[start:start + 1600]
+        self.assertIn("l.calls_synced_at IS NULL", body)
+        self.assertNotIn("l.status IN ('new', 'in_progress')", body)
+        self.assertIn("def mark_tez_leads_calls_synced", src)
+        self.assertIn("calls_synced_at TIMESTAMP WITH TIME ZONE", src)
+
     def test_operator_day_view_exists_and_group_aware(self):
         """Таб «Успешки»: агрегат оператор→день, месяц по дате поездки, с группой."""
         self.assertIn("def get_tez_successes_operator_day(self, year, month, group_id=None)", self.src)
