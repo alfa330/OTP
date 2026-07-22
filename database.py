@@ -26612,6 +26612,41 @@ class Database:
             'reaggregated_months': months,
         }
 
+    # «День не пустой»: в нём есть хоть какие-то учтённые данные, а не строка-заглушка.
+    _DAILY_HOURS_NON_EMPTY = (
+        "work_time > 0 OR training_time > 0 OR talk_time > 0 "
+        "OR break_time > 0 OR calls > 0 OR fine_amount > 0"
+    )
+
+    def _assert_no_operator_hours_in_window_tx(self, cursor, operator_id, lo, hi):
+        """Стоп-кран для сдвига границы членства.
+
+        Если в окне [lo, hi] у оператора уже есть непустые daily_hours — эти дни
+        сейчас учитывает соседняя группа, и сдвиг даты перевесил бы их на другую.
+        При опечатке в дате часы молча пропали бы из той группы, где их вели
+        (а при отсутствии соседнего членства — вообще из всех выборок, group_id
+        стал бы NULL). Осознанный перенос истории — это reassign_operator_history,
+        а не побочный эффект правки даты, поэтому здесь просто запрещаем.
+        """
+        cursor.execute(
+            """SELECT MIN(day), MAX(day), COUNT(*) FROM daily_hours
+               WHERE operator_id = %s AND day >= %s AND day <= %s
+                 AND (""" + self._DAILY_HOURS_NON_EMPTY + ")",
+            (int(operator_id), lo, hi),
+        )
+        d_min, d_max, cnt = cursor.fetchone() or (None, None, 0)
+        if not cnt:
+            return
+        span = (
+            d_min.strftime('%d.%m.%Y') if d_min == d_max
+            else "{} — {}".format(d_min.strftime('%d.%m.%Y'), d_max.strftime('%d.%m.%Y'))
+        )
+        raise ValueError(
+            "Нельзя: за {} у оператора уже есть учтённые часы ({} дн.), и сейчас "
+            "эти дни числятся за другой группой. Сдвиг даты перевесил бы их, "
+            "поэтому правка заблокирована — проверьте дату.".format(span, int(cnt))
+        )
+
     def update_group_membership_start_date(self, group_id, member_id, kind='operator',
                                            start_date=None):
         """Правит дату вступления в группу у ОТКРЫТОГО членства (оператора или СВ).
@@ -26620,9 +26655,11 @@ class Database:
         - у оператора открытое членство ровно одно, поэтому прошлое, закрытое встык
           (end_date = старт − 1 день), двигается вместе — в таймлайне не появляется
           ни дыры, ни нахлёста;
-        - daily_hours на сдвинутом отрезке перестамповываются на нужную группу, а
-          затронутые месяцы переагрегируются (как в reassign_operator_history) —
-          иначе часы остались бы висеть на прежней группе;
+        - сдвиг по дням с УЖЕ учтёнными часами запрещён — см.
+          _assert_no_operator_hours_in_window_tx (защита от опечатки в дате);
+        - пустые daily_hours на сдвинутом отрезке перестамповываются на нужную
+          группу, затронутые месяцы переагрегируются (как в
+          reassign_operator_history) — иначе они остались бы на прежней группе;
         - у СВ членств может быть несколько (ведёт разные группы), цепочки нет —
           только проверка, что не наезжаем на прошлое членство в этой же группе.
         """
@@ -26671,22 +26708,32 @@ class Database:
             )
             prev = cursor.fetchone()
             prev_group_id = int(prev[1]) if prev else None
+            # Прошлое членство, закрытое встык, двигается вместе со стартом — это
+            # звено той же цепочки, а не соседний интервал, на который мы наезжаем.
+            move_prev = bool(prev) and is_op and prev[3] == old_start - timedelta(days=1)
             if prev and start_date <= prev[2]:
                 raise ValueError("Дата раньше начала предыдущего членства")
-            if prev and is_op and prev[3] == old_start - timedelta(days=1):
+            if prev and not move_prev and start_date <= prev[3]:
+                raise ValueError("Дата пересекается с предыдущим членством")
+
+            # Отрезок, который сдвиг границы перевешивает на другую группу.
+            lo = min(old_start, start_date)
+            hi = max(old_start, start_date) - timedelta(days=1)
+            # Всё, что пишем, — только после валидации: часы за этот отрезок
+            # трогать нельзя (см. _assert_no_operator_hours_in_window_tx).
+            if is_op:
+                self._assert_no_operator_hours_in_window_tx(cursor, member_id, lo, hi)
+
+            if move_prev:
                 cursor.execute(
                     "UPDATE " + table + " SET end_date = %s WHERE id = %s",
                     (start_date - timedelta(days=1), int(prev[0])),
                 )
-            elif prev and start_date <= prev[3]:
-                raise ValueError("Дата пересекается с предыдущим членством")
             cursor.execute(
                 "UPDATE " + table + " SET start_date = %s WHERE id = %s",
                 (start_date, membership_id),
             )
             if is_op:
-                lo = min(old_start, start_date)
-                hi = max(old_start, start_date) - timedelta(days=1)
                 # Сдвиг назад — дни отрезка забирает эта группа; вперёд — отдаёт
                 # прежней (или никому, если её нет).
                 target_group_id = group_id if start_date < old_start else prev_group_id
