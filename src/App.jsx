@@ -12649,7 +12649,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // таймлайна + ручные правки (тип/добавить/удалить). Правки сохраняются в
             // оверрайдах на бэке и переживают ночной ре-синк Clockster.
             const canManageAttendanceMarks = isOpPlanner || isAdminLikePlanner;
-            const [attendanceMarks, setAttendanceMarks] = useState({ key: '', list: [], loading: false, error: '', available: true });
+            const [attendanceMarks, setAttendanceMarks] = useState({ key: '', list: [], loading: false, error: '', available: false });
             const [attendanceMarkDraft, setAttendanceMarkDraft] = useState({ time: '', kind: 'in' });
             const [attendanceMarkBusy, setAttendanceMarkBusy] = useState(false);
             const [isLoading, setIsLoading] = useState(false);
@@ -16998,7 +16998,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // === Отметки Clockster в модалке таймлайна дня (только ОП) ===
             const fetchAttendanceMarks = async (opId, dateKey) => {
                 const key = `${opId}|${dateKey}`;
-                setAttendanceMarks(prev => ({ ...prev, key, loading: true, error: '' }));
+                // available=false до успешного ответа: отдел ОПЕРАТОРА знает только
+                // бэкенд (в планировщике у оператора есть направление, но не отдел),
+                // поэтому секцию показываем строго по факту 200. Иначе админ, открыв
+                // оператора СЗоВ/ТЭЗ, видел бы её мелькание до ответа 400.
+                setAttendanceMarks(prev => ({ ...prev, key, loading: true, error: '', available: false }));
                 try {
                     const response = await fetch(`${API_BASE_URL}/api/attendance_marks?operator_id=${opId}&date=${dateKey}`, {
                         credentials: 'include',

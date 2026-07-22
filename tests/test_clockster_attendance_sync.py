@@ -228,6 +228,15 @@ class ClocksterFrontendTests(unittest.TestCase):
         self.assertIn("const addAttendanceMark = ()", self.src)
         self.assertIn("/api/attendance_marks", self.src)
 
+    def test_section_shown_only_after_successful_load(self):
+        # Отдел ОПЕРАТОРА знает только бэкенд (в планировщике у оператора есть
+        # направление, но не отдел), поэтому секция рендерится строго по факту 200 —
+        # иначе админ видел бы её мелькание на операторах СЗоВ/ТЭЗ.
+        self.assertIn("available: false });", self.src)
+        func = self.src[self.src.index("const fetchAttendanceMarks = async (opId, dateKey)"):][:1600]
+        self.assertIn("loading: true, error: '', available: false", func)
+        self.assertIn("loading: false, error: '', available: true", func)
+
 
 if __name__ == "__main__":
     unittest.main()
