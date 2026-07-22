@@ -134,6 +134,23 @@ class MemberStartDateEditTests(unittest.TestCase):
         self.assertIn("UPDATE daily_hours SET group_id = %s", method)
         self.assertIn("_aggregate_month_from_daily_tx(cursor, member_id, m)", method)
 
+    def test_shift_over_days_with_hours_is_blocked_before_any_write(self):
+        """Опечатка в дате не должна уносить часы в соседнюю группу."""
+        self.assertIn("def _assert_no_operator_hours_in_window_tx(self, cursor, operator_id, lo, hi)", DB)
+        self.assertIn("_DAILY_HOURS_NON_EMPTY", DB)
+        method = DB.split("def update_group_membership_start_date(", 1)[1].split(
+            "def _load_operator_calculation_models_tx(", 1
+        )[0]
+        # гвард стоит ДО первого UPDATE — иначе часть правки успела бы записаться
+        guard_at = method.index("_assert_no_operator_hours_in_window_tx(cursor, member_id, lo, hi)")
+        self.assertLess(guard_at, method.index("UPDATE " + '" + table + "' + " SET end_date"))
+        self.assertLess(guard_at, method.index("UPDATE " + '" + table + "' + " SET start_date"))
+
+    def test_frontend_shows_block_reason_inline_not_in_toast(self):
+        # причину отказа надо прочитать и исправить дату — тост живёт 5 секунд
+        self.assertIn("error: data.error || 'Не удалось изменить дату'", GROUPS_VIEW)
+        self.assertIn("dateEdit.error", GROUPS_VIEW)
+
     def test_endpoint_exists_and_is_scoped(self):
         self.assertIn(
             "@app.route('/api/admin/groups/<int:group_id>/member_start_date', methods=['POST'])", BOT

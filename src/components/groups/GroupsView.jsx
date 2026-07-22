@@ -454,7 +454,9 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                 );
                 await refreshMembers(membersGroup.id);
             } else {
-                showToastRef.current?.(data.error || 'Не удалось изменить дату', 'error');
+                // Отказ показываем прямо в редакторе: тост живёт 5 секунд, а это
+                // причина, которую нужно прочитать и исправить дату.
+                setDateEdit((prev) => (prev ? { ...prev, error: data.error || 'Не удалось изменить дату' } : prev));
             }
         } catch {
             showToastRef.current?.('Ошибка сети', 'error');
@@ -498,30 +500,40 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     const dateEditor = (kind, m) => {
         if (!isEditingDate(kind, m.id)) return null;
         return (
-            <div className="flex flex-wrap items-center gap-2 border-t border-slate-100 bg-slate-50/80 px-3 py-2.5 pl-10">
-                <span className="text-[11.5px] font-medium text-slate-500">В группе с</span>
-                <input
-                    type="date"
-                    autoFocus
-                    max={todayYmd()}
-                    className="rounded-lg bg-white px-2.5 py-1.5 text-[13px] text-slate-900 ring-1 ring-slate-200 transition focus:outline-none focus:ring-2 focus:ring-blue-500/70"
-                    value={dateEdit.value}
-                    onChange={(e) => setDateEdit({ ...dateEdit, value: e.target.value })}
-                    onKeyDown={(e) => {
-                        if (e.key === 'Enter') submitDateEdit();
-                        if (e.key === 'Escape') setDateEdit(null);
-                    }}
-                />
-                <button
-                    className={`${iosBtnPrimary} !px-3.5 !py-1.5 !text-[12.5px]`}
-                    onClick={submitDateEdit}
-                    disabled={memberBusy || !dateEdit.value}
-                >
-                    Сохранить
-                </button>
-                <button className={`${iosBtnGhost} !px-2.5 !py-1.5 !text-[12.5px]`} onClick={() => setDateEdit(null)} disabled={memberBusy}>
-                    Отмена
-                </button>
+            <div className="border-t border-slate-100 bg-slate-50/80 px-3 py-2.5 pl-10">
+                <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[11.5px] font-medium text-slate-500">В группе с</span>
+                    <input
+                        type="date"
+                        autoFocus
+                        max={todayYmd()}
+                        className={`rounded-lg bg-white px-2.5 py-1.5 text-[13px] text-slate-900 ring-1 transition focus:outline-none focus:ring-2 ${
+                            dateEdit.error ? 'ring-rose-300 focus:ring-rose-400' : 'ring-slate-200 focus:ring-blue-500/70'
+                        }`}
+                        value={dateEdit.value}
+                        onChange={(e) => setDateEdit({ ...dateEdit, value: e.target.value, error: null })}
+                        onKeyDown={(e) => {
+                            if (e.key === 'Enter') submitDateEdit();
+                            if (e.key === 'Escape') setDateEdit(null);
+                        }}
+                    />
+                    <button
+                        className={`${iosBtnPrimary} !px-3.5 !py-1.5 !text-[12.5px]`}
+                        onClick={submitDateEdit}
+                        disabled={memberBusy || !dateEdit.value}
+                    >
+                        Сохранить
+                    </button>
+                    <button className={`${iosBtnGhost} !px-2.5 !py-1.5 !text-[12.5px]`} onClick={() => setDateEdit(null)} disabled={memberBusy}>
+                        Отмена
+                    </button>
+                </div>
+                {dateEdit.error && (
+                    <div className="mt-2 flex items-start gap-2 rounded-lg bg-rose-50 px-2.5 py-2 text-[12px] leading-snug text-rose-700 ring-1 ring-rose-100">
+                        <FaIcon className="fas fa-triangle-exclamation mt-px shrink-0" />
+                        <span>{dateEdit.error}</span>
+                    </div>
+                )}
             </div>
         );
     };
@@ -945,7 +957,7 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                                 </div>
                                 <p className="text-[11.5px] text-slate-400">
                                     Перевод оператора в эту группу автоматически закрывает его прошлую основную группу.
-                                    При правке даты вступления часы за сдвинутые дни переносятся между группами, а затронутые месяцы пересчитываются.
+                                    Дату вступления можно сдвинуть только по дням без учтённых часов: если за период уже есть данные, правка блокируется — чтобы опечатка в дате не унесла часы из группы, где их вели.
                                 </p>
                             </section>
                         </>
