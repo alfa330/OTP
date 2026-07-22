@@ -138,9 +138,13 @@ class ClocksterImporterSourceTests(unittest.TestCase):
         self.assertIn("def delete_attendance_mark_endpoint(event_id):", self.src)
         # Общий гард: админ или СВ/глава отдела продаж; оператор — только из ОП.
         self.assertIn("def _attendance_marks_guard(operator_id):", self.src)
-        guard = self.src[self.src.index("def _attendance_marks_guard(operator_id):"):][:1600]
+        guard = self.src[self.src.index("def _attendance_marks_guard(operator_id):"):][:2000]
         self.assertIn("_clockster_department_id()", guard)
         self.assertIn("только для отдела продаж", guard)
+        # Граница отдела через scope-хелпер: глава ОП без своего department_id
+        # должен проходить, глава чужого отдела — нет.
+        self.assertIn("_is_global_admin_requester(role, requester_id)", guard)
+        self.assertIn("_department_scope_id_for_requester(requester_id) != dept_id", guard)
 
 
 class ClocksterMarkOverridesDbTests(unittest.TestCase):
@@ -211,6 +215,12 @@ class ClocksterFrontendTests(unittest.TestCase):
         self.assertIn("Отметки Clockster", self.src)
         # Кнопка видна планировщику отдела продаж и админам.
         self.assertIn("(isOpPlanner || isAdminLikePlanner)", self.src)
+
+    def test_op_planner_covers_department_head(self):
+        # СВ и глава отдела ОП: у главы свой department_id может быть не проставлен,
+        # поэтому учитываем и возглавляемый отдел.
+        self.assertIn("plannerHeadedDepartmentCode", self.src)
+        self.assertIn("plannerDepartmentCode === 'op' || plannerHeadedDepartmentCode === 'op'", self.src)
 
     def test_clipped_to_endpoint_limit(self):
         func = self.src[self.src.index("const syncPlannerClocksterStatuses = async ()"):][:3500]

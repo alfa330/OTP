@@ -12513,7 +12513,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const isTezPlanner = plannerDepartmentCode === 'tez';
             // Отдел продаж: отметки прихода/ухода живут в Clockster (face-терминал) —
             // в меню «⋮» есть свой синк, часы/опоздания считаются по сменам iCORE.
-            const isOpPlanner = plannerDepartmentCode === 'op';
+            // Глава отдела учитывается по возглавляемому отделу: свой department_id
+            // у него может быть не проставлен.
+            const plannerHeadedDepartmentCode = String(user?.headed_department_code ?? user?.headedDepartmentCode ?? '').toLowerCase();
+            const isOpPlanner = plannerDepartmentCode === 'op' || plannerHeadedDepartmentCode === 'op';
             const isAdminLikePlanner = isAdminLikeRoleFn(user?.role);
             // Фронт офисы не используют Oktell/Binotel/Chat2Desk — в меню «⋮»
             // скрыты все кнопки синхронизаций и статусов Chat2Desk.
