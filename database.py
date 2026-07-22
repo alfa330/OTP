@@ -33816,8 +33816,13 @@ class Database:
                 if close_at <= mark_at:
                     continue
                 next_mark = marks[idx + 1] if idx + 1 < len(marks) else None
-                if next_mark is not None and next_mark['event_at'] <= close_at:
-                    continue
+                if next_mark is not None:
+                    if next_mark['event_at'] <= close_at:
+                        continue  # следующая отметка раньше границы — сегмент закроется сам
+                    if not next_mark['is_in'] and next_mark['event_at'] <= mark_at + max_open:
+                        # Уход отмечен, просто позже конца смены (переработка) —
+                        # это реальные данные, подменять их авто-закрытием нельзя.
+                        continue
                 insert_rows.append((op_id, close_at, close_at.date(),
                                     ATTENDANCE_MARK_OUT_STATUS_KEY, ATTENDANCE_MARK_AUTO_NOTE))
 
