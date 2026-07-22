@@ -12656,6 +12656,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [attendanceMarks, setAttendanceMarks] = useState({ key: '', list: [], loading: false, error: '', available: false });
             const [attendanceMarkDraft, setAttendanceMarkDraft] = useState({ time: '', kind: 'in' });
             const [attendanceMarkBusy, setAttendanceMarkBusy] = useState(false);
+            // Пояснения к отметкам держим свёрнутыми под «ⓘ»: в списке важны сами
+            // отметки, а не текст вокруг них.
+            const [attendanceHintOpen, setAttendanceHintOpen] = useState(false);
             const [isLoading, setIsLoading] = useState(false);
             const [bulkActionState, setBulkActionState] = useState({ loading: false, action: '' });
             const [dayAggregateLoading, setDayAggregateLoading] = useState(false);
@@ -17006,7 +17009,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // бэкенд (в планировщике у оператора есть направление, но не отдел),
                 // поэтому секцию показываем строго по факту 200. Иначе админ, открыв
                 // оператора СЗоВ/ТЭЗ, видел бы её мелькание до ответа 400.
-                setAttendanceMarks(prev => ({ ...prev, key, loading: true, error: '', available: false }));
+                // Но при ПЕРЕзагрузке того же дня (после правки отметки) доступность
+                // сохраняем — иначе таб «Отметки» на миг исчезает и модалку сбрасывает
+                // на «Смены» прямо во время работы.
+                setAttendanceMarks(prev => ({
+                    ...prev,
+                    key,
+                    loading: true,
+                    error: '',
+                    available: prev.key === key ? prev.available : false
+                }));
                 try {
                     const response = await fetch(`${API_BASE_URL}/api/attendance_marks?operator_id=${opId}&date=${dateKey}`, {
                         credentials: 'include',
@@ -17117,13 +17129,45 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return (
                     <div style={{ fontFamily: APPLE_FONT }} className={compact ? 'mb-3' : ''}>
                         <div className="flex items-end justify-between gap-2 mb-1.5">
-                            <div className={iosGroupLabel}>Отметки за день</div>
+                            <div className="flex items-center gap-1">
+                                <span className={iosGroupLabel}>Отметки за день</span>
+                                <button
+                                    type="button"
+                                    onClick={() => setAttendanceHintOpen(v => !v)}
+                                    className={`grid h-[18px] w-[18px] place-items-center rounded-full transition ${
+                                        attendanceHintOpen ? 'bg-blue-100 text-blue-600' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600'
+                                    }`}
+                                    title="Как это работает"
+                                    aria-label="Как это работает"
+                                    aria-expanded={attendanceHintOpen ? 'true' : 'false'}
+                                >
+                                    <FaIcon className="fas fa-circle-info text-[11px]"></FaIcon>
+                                </button>
+                            </div>
                             {marks.length > 0 && (
                                 <span className="px-1 text-[11px] tabular-nums text-slate-400">
                                     {marks.filter(m => m.kind === 'in').length} прих. · {marks.filter(m => m.kind === 'out').length} ух.
                                 </span>
                             )}
                         </div>
+
+                        {attendanceHintOpen && (
+                            <div className="mb-2 space-y-1.5 rounded-xl bg-blue-50/70 px-3 py-2.5 text-[11.5px] leading-relaxed text-blue-900/80 ring-1 ring-blue-100">
+                                <p>
+                                    Терминал Clockster один на вход и выход, поэтому тип отметки иногда определяется
+                                    неверно — переключите его кнопкой <FaIcon className="fas fa-random mx-0.5 text-[10px]"></FaIcon>.
+                                </p>
+                                <p>Правки сохраняются и не теряются при ночной синхронизации.</p>
+                                <p>
+                                    Часы и опоздание пересчитываются сразу: отработанным считается пересечение
+                                    смены с промежутком «приход → уход».
+                                </p>
+                                <p>
+                                    «Уход (авто)» появляется, когда уход не отмечен — добавьте свою отметку ухода,
+                                    и авто-закрытие исчезнет.
+                                </p>
+                            </div>
+                        )}
 
                         <div className={`${iosCard} overflow-hidden`}>
                             {attendanceMarks.loading ? (
@@ -17165,11 +17209,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             {meta.label}
                                                         </span>
                                                     </div>
-                                                    {isAuto && (
-                                                        <div className="mt-0.5 text-[11.5px] text-slate-400">
-                                                            Уход не отмечен — смена закрыта автоматически
-                                                        </div>
-                                                    )}
                                                 </div>
 
                                                 {mark.manual && !isAuto && <IosBadge tone="blue">вручную</IosBadge>}
@@ -17241,12 +17280,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     Добавить
                                 </button>
                             </div>
-
-                            <p className="mt-2 px-1 text-[11.5px] leading-relaxed text-slate-500">
-                                Терминал Clockster один на вход и выход, поэтому тип отметки иногда определяется
-                                неверно — переключите его кнопкой <FaIcon className="fas fa-random mx-0.5 text-[10px]"></FaIcon>.
-                                Правки сохраняются и не теряются при ночной синхронизации.
-                            </p>
                         </>
                         )}
                     </div>
@@ -19391,10 +19424,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const modalShowAttendanceTab = modalShowTabs && canManageAttendanceMarks && attendanceMarks.available;
             const modalTabAttendance = modalShowAttendanceTab && modalActiveTab === 'attendance';
             // Таб пропал (другой оператор / массовое выделение) — не оставляем модалку
-            // на пустой вкладке.
+            // на пустой вкладке. Во время загрузки не дёргаем: иначе правка отметки
+            // (которая перезапрашивает список) выкидывала бы со вкладки.
             useEffect(() => {
-                if (modalActiveTab === 'attendance' && !modalShowAttendanceTab) setModalActiveTab('shifts');
-            }, [modalActiveTab, modalShowAttendanceTab]);
+                if (modalActiveTab === 'attendance' && !modalShowAttendanceTab && !attendanceMarks.loading) {
+                    setModalActiveTab('shifts');
+                }
+            }, [modalActiveTab, modalShowAttendanceTab, attendanceMarks.loading]);
             const modalActiveScheduleStatus = useMemo(() => {
                 if (isBulkSelectionModal) return null;
                 if (!modalState?.opId || !modalState?.date) return null;
@@ -25840,13 +25876,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     {!isBulkSelectionModal && modalTabAttendance && (
                     <div className="mb-6">
                         {renderAttendanceMarksSection()}
-                        <div className="mt-3 flex items-start gap-2 rounded-xl bg-blue-50/70 px-3 py-2.5 ring-1 ring-blue-100">
-                            <FaIcon className="fas fa-circle-info mt-0.5 text-[12px] text-blue-500"></FaIcon>
-                            <p className="text-[11.5px] leading-relaxed text-blue-900/80" style={{ fontFamily: APPLE_FONT }}>
-                                Часы и опоздание пересчитываются сразу после правки: отработанным считается
-                                пересечение смены с промежутком «приход → уход».
-                            </p>
-                        </div>
                     </div>
                     )}
 

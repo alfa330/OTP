@@ -238,8 +238,15 @@ class ClocksterFrontendTests(unittest.TestCase):
         self.assertEqual(self.src.count("renderAttendanceMarksSection"), 3)
         # Отметки грузятся при открытии модалки дня, а не только панели таймлайна.
         self.assertIn("!modalState.open || !modalState.opId || !modalState.date", self.src)
-        # Пропал таб — не остаёмся на пустой вкладке.
-        self.assertIn("if (modalActiveTab === 'attendance' && !modalShowAttendanceTab) setModalActiveTab('shifts');", self.src)
+        # Пропал таб — не остаёмся на пустой вкладке, но только когда загрузка
+        # завершена (иначе правка отметки выкидывала бы со вкладки).
+        self.assertIn("modalActiveTab === 'attendance' && !modalShowAttendanceTab && !attendanceMarks.loading", self.src)
+
+    def test_tab_survives_mark_edit(self):
+        # Правка отметки перезапрашивает список; доступность секции при этом должна
+        # сохраняться, иначе таб «Отметки» схлопывается и модалку кидает на «Смены».
+        func = self.src[self.src.index("const fetchAttendanceMarks = async (opId, dateKey)"):][:2000]
+        self.assertIn("available: prev.key === key ? prev.available : false", func)
 
     def test_attendance_marks_section_in_timeline_modal(self):
         # Секция отметок: список за день, смена типа (приход↔уход), добавление и
@@ -265,13 +272,30 @@ class ClocksterFrontendTests(unittest.TestCase):
         self.assertIn("rounded-xl bg-slate-100 p-0.5", func)
         self.assertNotIn("<select", func)
 
+    def test_long_hints_hidden_behind_info_button(self):
+        # Пояснения свёрнуты под «ⓘ» — в списке важны сами отметки, а не текст.
+        self.assertIn("const [attendanceHintOpen, setAttendanceHintOpen]", self.src)
+        func_start = self.src.index("const renderAttendanceMarksSection = ")
+        func = self.src[func_start:func_start + 14000]
+        self.assertIn("setAttendanceHintOpen(v => !v)", func)
+        self.assertIn("attendanceHintOpen && (", func)
+        self.assertIn("fa-circle-info", func)
+        # Тексты живут только внутри свёрнутого блока: снаружи их быть не должно.
+        hint_start = func.index("attendanceHintOpen && (")
+        hint_end = func.index("</div>\n                        )}", hint_start)
+        hint_block = func[hint_start:hint_end]
+        for phrase in ("один на вход и выход", "ночной синхронизации", "пересечение", "авто-закрытие исчезнет"):
+            self.assertIn(phrase, hint_block)
+            self.assertEqual(func.count(phrase), 1, f"{phrase!r} должен встречаться только в подсказке")
+
     def test_section_shown_only_after_successful_load(self):
         # Отдел ОПЕРАТОРА знает только бэкенд (в планировщике у оператора есть
         # направление, но не отдел), поэтому секция рендерится строго по факту 200 —
         # иначе админ видел бы её мелькание на операторах СЗоВ/ТЭЗ.
         self.assertIn("available: false });", self.src)
-        func = self.src[self.src.index("const fetchAttendanceMarks = async (opId, dateKey)"):][:1600]
-        self.assertIn("loading: true, error: '', available: false", func)
+        func = self.src[self.src.index("const fetchAttendanceMarks = async (opId, dateKey)"):][:2000]
+        # Новый оператор/дата — до ответа секции нет; успех — available: true.
+        self.assertIn("available: prev.key === key ? prev.available : false", func)
         self.assertIn("loading: false, error: '', available: true", func)
 
 
