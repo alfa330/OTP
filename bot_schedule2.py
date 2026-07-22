@@ -30019,6 +30019,7 @@ def tez_leads_export():
         'prev_month_week1': 'Звонок в прошлом месяце, поездка до 7-го',
         'no_call_before_trip': 'Нет звонка до поездки',
         'trip_after_day7': 'Поездка позже 7-го числа',
+        'active_prev_month': 'Были заказы в прошлом месяце — уже работал',
     }
 
     try:

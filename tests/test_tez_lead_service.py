@@ -94,17 +94,18 @@ class FakeDb:
 
 
 class RecomputeOutcomesTests(unittest.TestCase):
-    def _lead(self, lead_id, first_order_at, calls):
+    def _lead(self, lead_id, month_first_order_at, calls, prev_month_first_order_at=None):
         return {
             'id': lead_id,
             'phone_norm': '77000000000',
             'full_name': 'Тест',
-            'first_order_at': first_order_at,
+            'month_first_order_at': month_first_order_at,
+            'prev_month_first_order_at': prev_month_first_order_at,
             'calls': calls,
         }
 
     def test_success_is_written_with_trip_month(self):
-        """Лид июньской базы с поездкой 3 июля даёт успешку, помеченную ИЮЛЕМ."""
+        """Звонок в июне + поездка 3 июля (в первые 7 дней) -> успешка июля."""
         call = {
             'general_call_id': 'g1',
             'started_at': datetime(2026, 6, 25, 10, 0, tzinfo=ALMATY_TZ),
@@ -113,7 +114,7 @@ class RecomputeOutcomesTests(unittest.TestCase):
         lead = self._lead('L1', datetime(2026, 7, 3, 9, 0, tzinfo=ALMATY_TZ), [call])
         db = FakeDb([lead])
 
-        stats = tez_lead_service.recompute_outcomes(db, 2026, 6)
+        stats = tez_lead_service.recompute_outcomes(db, 2026, 7)
 
         self.assertEqual(stats['success'], 1)
         item = db.applied[0]
@@ -122,6 +123,21 @@ class RecomputeOutcomesTests(unittest.TestCase):
         self.assertEqual(item['success_year'], 2026)
         self.assertEqual(item['success_month'], 7)
         self.assertEqual(item['success_date'], date(2026, 7, 3))
+
+    def test_active_prev_month_is_already_working(self):
+        """Заказ в прошлом месяце -> «уже работающий», успешка не пишется."""
+        call = {
+            'general_call_id': 'g1',
+            'started_at': datetime(2026, 7, 2, tzinfo=ALMATY_TZ),
+            'call_type': 1, 'billsec': 60, 'operator_id': 7, 'employee_name': 'Оп',
+        }
+        lead = self._lead('L5', datetime(2026, 7, 10, tzinfo=ALMATY_TZ), [call],
+                          prev_month_first_order_at=datetime(2026, 6, 20, tzinfo=ALMATY_TZ))
+        db = FakeDb([lead])
+        stats = tez_lead_service.recompute_outcomes(db, 2026, 7)
+        self.assertEqual(stats['already_working'], 1)
+        self.assertEqual(stats['success'], 0)
+        self.assertIsNone(db.applied[0]['operator_id'])
 
     def test_already_working_has_no_operator(self):
         lead = self._lead('L2', datetime(2026, 6, 10, tzinfo=ALMATY_TZ), [])
@@ -163,6 +179,64 @@ class RecomputeOutcomesTests(unittest.TestCase):
         self.assertEqual(stats['success'], 0)
 
 
+class FirstOrdersContractTests(unittest.TestCase):
+    """Контракт TEZ APP: month обязателен в теле, в ответе две оконные даты."""
+
+    def _client_with_capture(self, payload):
+        import json as _json
+        from tez_first_orders import TezFirstOrdersClient
+        sent = {}
+
+        class _Resp:
+            status_code = 200
+            text = ''
+            headers = {}
+
+            def json(self):
+                return payload
+
+        class _Session:
+            def post(self, url, data=None, headers=None, timeout=None):
+                sent.update(_json.loads(data.decode('utf-8')))
+                return _Resp()
+
+        client = TezFirstOrdersClient(token='x')
+        client.session = _Session()
+        return client, sent
+
+    def test_month_is_sent_in_body(self):
+        """Без month API отвечает 400 — параметр обязан уходить в запросе."""
+        client, sent = self._client_with_capture({'drivers': []})
+        client.fetch_first_orders(['77000409090'], month='2026-07')
+        self.assertEqual(sent.get('month'), '2026-07')
+        self.assertEqual(sent['drivers'][0]['phone'], '+77000409090')
+
+    def test_month_is_validated(self):
+        from tez_first_orders import TezFirstOrdersClient
+        client = TezFirstOrdersClient(token='x')
+        for bad in ('', None, '2026', '07-2026'):
+            with self.assertRaises(ValueError):
+                client.fetch_first_orders(['77000409090'], month=bad)
+
+    def test_parses_both_window_dates(self):
+        payload = {'drivers': [{
+            'phone': '+77000409090',
+            'month_first_order_at': '2026-07-03T09:00:00+05:00',
+            'previous_month_first_order_at': '2026-06-20T10:00:00+05:00',
+        }]}
+        client, _ = self._client_with_capture(payload)
+        res = client.fetch_first_orders(['77000409090'], month='2026-07')
+        row = res['77000409090']
+        self.assertEqual(row['month'].day, 3)
+        self.assertEqual(row['prev'].day, 20)
+
+    def test_missing_driver_marked_checked(self):
+        """Номер, которого нет в ответе, всё равно помечается проверенным."""
+        client, _ = self._client_with_capture({'drivers': []})
+        res = client.fetch_first_orders(['77000409090'], month='2026-07')
+        self.assertEqual(res['77000409090'], {'month': None, 'prev': None})
+
+
 class CloudflareDetectionTests(unittest.TestCase):
     """403 от TEZ APP c Cloudflare-заглушкой должен опознаваться (а не течь в UI сырым)."""
 
@@ -199,7 +273,7 @@ class CloudflareDetectionTests(unittest.TestCase):
         client = TezFirstOrdersClient(token='x')
         client.session = _Session()
         with self.assertRaises(RuntimeError) as ctx:
-            client.fetch_first_orders(['77000409090'])
+            client.fetch_first_orders(['77000409090'], month='2026-07')
         msg = str(ctx.exception)
         self.assertIn('Cloudflare', msg)
         self.assertIn('1020', msg)

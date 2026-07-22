@@ -4146,6 +4146,16 @@ class Database:
                     updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 );
 
+                -- Даты заказов ОКОННЫЕ (TEZ APP отдаёт первый заказ в запрошенном
+                -- месяце и в предыдущем), поэтому живут на лиде, а не на водителе:
+                -- один номер в июньской и июльской базе имеет разные даты.
+                -- tez_drivers.first_order_at остаётся как реестр номеров/легаси.
+                ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS month_first_order_at TIMESTAMP WITH TIME ZONE;
+                ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS prev_month_first_order_at TIMESTAMP WITH TIME ZONE;
+                ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS first_order_checked_at TIMESTAMP WITH TIME ZONE;
+
+                CREATE INDEX IF NOT EXISTS idx_tez_leads_pending_order_check
+                    ON tez_leads(year, month) WHERE month_first_order_at IS NULL;
                 CREATE INDEX IF NOT EXISTS idx_tez_drivers_pending_check
                     ON tez_drivers(first_order_checked_at) WHERE first_order_at IS NULL;
                 CREATE INDEX IF NOT EXISTS idx_tez_leads_period_status ON tez_leads(year, month, status);
@@ -13763,17 +13773,16 @@ class Database:
             } for r in cursor.fetchall()]
 
     def get_tez_phones_pending_first_order(self, year, month, batch_id=None, limit=None):
-        """Номера месяца, у которых первая поездка ещё не найдена.
+        """Номера месяца, у которых заказ в отчётном месяце ещё не найден.
 
-        Именно они идут в TEZ APP API. Как только дата найдена, номер выпадает
-        отсюда навсегда: first_order_at неизменна.
+        Именно они идут в TEZ APP. Как только дата в месяце найдена, номер
+        выпадает отсюда: первый заказ внутри месяца больше не изменится.
         """
         params = [int(year), int(month)]
         sql = """
             SELECT DISTINCT l.phone_norm
             FROM tez_leads l
-            JOIN tez_drivers d ON d.phone_norm = l.phone_norm
-            WHERE l.year = %s AND l.month = %s AND d.first_order_at IS NULL
+            WHERE l.year = %s AND l.month = %s AND l.month_first_order_at IS NULL
         """
         if batch_id:
             sql += " AND (l.first_batch_id = %s OR l.last_batch_id = %s)"
@@ -13786,46 +13795,49 @@ class Database:
             cursor.execute(sql, tuple(params))
             return [r[0] for r in cursor.fetchall()]
 
-    def save_tez_first_orders(self, first_orders):
-        """Сохраняет ответы TEZ APP. first_orders — dict phone_norm -> datetime|None.
+    def save_tez_first_orders(self, year, month, first_orders):
+        """Сохраняет оконные ответы TEZ APP на лидах отчётного месяца.
 
+        first_orders — dict phone_norm -> {'month': datetime|None, 'prev': datetime|None}.
         Проверенные, но ещё не выехавшие номера тоже помечаются (checked_at), иначе
         их не отличить от никогда не проверявшихся.
         """
         found = 0
         with self._get_cursor() as cursor:
-            for phone_norm, first_order_at in (first_orders or {}).items():
+            for phone_norm, dates in (first_orders or {}).items():
+                month_at = (dates or {}).get('month')
+                prev_at = (dates or {}).get('prev')
                 cursor.execute(
                     """
-                    INSERT INTO tez_drivers (phone_norm, first_order_at, first_order_checked_at, check_attempts)
-                    VALUES (%s, %s, CURRENT_TIMESTAMP, 1)
-                    ON CONFLICT (phone_norm) DO UPDATE SET
-                        first_order_at = COALESCE(tez_drivers.first_order_at, EXCLUDED.first_order_at),
+                    UPDATE tez_leads
+                    SET month_first_order_at = COALESCE(month_first_order_at, %s),
+                        prev_month_first_order_at = %s,
                         first_order_checked_at = CURRENT_TIMESTAMP,
-                        check_attempts = tez_drivers.check_attempts + 1,
                         updated_at = CURRENT_TIMESTAMP
+                    WHERE year = %s AND month = %s AND phone_norm = %s
                     """,
-                    (phone_norm, first_order_at)
+                    (month_at, prev_at, int(year), int(month), phone_norm)
                 )
-                if first_order_at is not None:
+                if month_at is not None:
                     found += 1
         return found
 
     def get_tez_phones_needing_calls(self, year, month):
         """Номера, по которым пора поднять историю звонков из Binotel.
 
-        Это те, у кого поездка уже найдена, но статус лида ещё не посчитан
-        (успешка/не засчитана/уже работающий). Их единицы за ночь — отсюда и
-        один запрос в Binotel вместо зеркала всех звонков компании.
+        Это те, у кого заказ в месяце есть, в прошлом месяце заказов НЕ было
+        (иначе привлечения не было и звонки не нужны), а статус ещё не посчитан.
+        Их единицы за ночь — отсюда и один запрос в Binotel вместо зеркала
+        всех звонков компании.
         """
         with self._get_cursor() as cursor:
             cursor.execute(
                 """
                 SELECT DISTINCT l.phone_norm
                 FROM tez_leads l
-                JOIN tez_drivers d ON d.phone_norm = l.phone_norm
                 WHERE l.year = %s AND l.month = %s
-                  AND d.first_order_at IS NOT NULL
+                  AND l.month_first_order_at IS NOT NULL
+                  AND l.prev_month_first_order_at IS NULL
                   AND l.status IN ('new', 'in_progress')
                 ORDER BY l.phone_norm
                 """,
@@ -13877,9 +13889,9 @@ class Database:
         with self._get_cursor() as cursor:
             cursor.execute(
                 """
-                SELECT l.id, l.phone_norm, l.full_name, d.first_order_at
+                SELECT l.id, l.phone_norm, l.full_name,
+                       l.month_first_order_at, l.prev_month_first_order_at
                 FROM tez_leads l
-                JOIN tez_drivers d ON d.phone_norm = l.phone_norm
                 WHERE l.year = %s AND l.month = %s
                 """,
                 (int(year), int(month))
@@ -13888,7 +13900,8 @@ class Database:
                 'id': str(r[0]),
                 'phone_norm': r[1],
                 'full_name': r[2] or '',
-                'first_order_at': r[3],
+                'month_first_order_at': r[3],
+                'prev_month_first_order_at': r[4],
                 'calls': [],
             } for r in cursor.fetchall()]
             if not leads:
@@ -13987,19 +14000,19 @@ class Database:
                 """
                 SELECT
                     COUNT(*) AS leads_total,
-                    COUNT(*) FILTER (WHERE d.first_order_at IS NOT NULL) AS went_online,
+                    COUNT(*) FILTER (WHERE l.month_first_order_at IS NOT NULL) AS went_online,
                     COUNT(*) FILTER (WHERE l.status = 'already_working') AS already_working,
                     COUNT(*) FILTER (WHERE l.status = 'success') AS successes,
                     COUNT(*) FILTER (WHERE l.status = 'not_counted') AS not_counted,
                     COUNT(*) FILTER (WHERE l.status = 'in_progress') AS in_progress,
-                    COALESCE(SUM(l.upload_count) - COUNT(*), 0) AS duplicates
+                    COALESCE(SUM(l.upload_count) - COUNT(*), 0) AS duplicates,
+                    COUNT(*) FILTER (WHERE l.prev_month_first_order_at IS NOT NULL) AS active_prev_month
                 FROM tez_leads l
-                JOIN tez_drivers d ON d.phone_norm = l.phone_norm
                 WHERE l.year = %s AND l.month = %s
                 """,
                 (int(year), int(month))
             )
-            row = cursor.fetchone() or (0,) * 7
+            row = cursor.fetchone() or (0,) * 8
 
             cursor.execute(
                 """
@@ -14031,6 +14044,7 @@ class Database:
             'not_counted': int(row[4] or 0),
             'successes': successes,
             'workable': workable,
+            'active_prev_month': int(row[7] or 0),
             'conversion': round(successes / workable * 100, 1) if workable else 0.0,
             'conversion_all': round(successes / leads_total * 100, 1) if leads_total else 0.0,
         }
@@ -14173,13 +14187,13 @@ class Database:
         # not_counted видно, кто звонил и когда, хоть успешка и не засчитана.
         sql = """
             SELECT l.id, l.phone_norm, l.full_name, l.status, l.status_rule, l.upload_count,
-                   d.first_order_at,
+                   l.month_first_order_at,
                    COALESCE(s.operator_id, lc.operator_id),
                    COALESCE(u.name, s.operator_name, lu.name),
                    COALESCE(s.call_at, lc.started_at),
-                   s.success_date, s.rule_code
+                   s.success_date, s.rule_code,
+                   l.prev_month_first_order_at
             FROM tez_leads l
-            JOIN tez_drivers d ON d.phone_norm = l.phone_norm
             LEFT JOIN tez_lead_successes s ON s.lead_id = l.id
             LEFT JOIN users u ON u.id = s.operator_id
             LEFT JOIN LATERAL (
@@ -14187,14 +14201,14 @@ class Database:
                 FROM tez_lead_calls c
                 WHERE c.phone_norm = l.phone_norm
                   AND c.is_qualifying
-                  AND (d.first_order_at IS NULL OR c.started_at < d.first_order_at)
+                  AND (l.month_first_order_at IS NULL OR c.started_at < l.month_first_order_at)
                 ORDER BY c.started_at DESC
                 LIMIT 1
             ) lc ON TRUE
             LEFT JOIN users lu ON lu.id = lc.operator_id
             WHERE l.year = %s AND l.month = %s
         """ + filt_sql + """
-            ORDER BY d.first_order_at DESC NULLS LAST, l.full_name
+            ORDER BY l.month_first_order_at DESC NULLS LAST, l.full_name
             LIMIT %s OFFSET %s
         """
         params = [int(year), int(month)] + filt_params + [int(limit), int(offset)]
@@ -14214,6 +14228,7 @@ class Database:
                 'call_at': r[9].isoformat() if r[9] else None,
                 'success_date': r[10].isoformat() if r[10] else None,
                 'rule_code': r[11],
+                'prev_month_first_order_at': r[12].isoformat() if r[12] else None,
             } for r in cursor.fetchall()]
 
     def get_tez_success_counts_for_operators(self, operator_ids, year, month):

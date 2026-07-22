@@ -2,8 +2,9 @@
 
   - метод: POST {base}/drivers/first-orders
   - авторизация: заголовок X-Integration-Token (JWT/X-Admin-Token не нужны)
-  - тело: {"drivers": [{"full_name": ..., "phone": "+7701..."}, ...]}
-  - ответ: {"drivers": [{..., "first_order_at": "2026-03-14T10:35:21+05:00"|null}]}
+  - тело: {"month": "YYYY-MM", "drivers": [{"full_name": ..., "phone": "+7701..."}]}
+  - ответ: {"drivers": [{..., "month_first_order_at": ...|null,
+                              "previous_month_first_order_at": ...|null}]}
   - лимит: от 1 до 100 водителей в одном запросе
 
 ВАЖНО (проверено на живом API):
@@ -13,7 +14,10 @@
      токен. Это легко принять за проблему с ключом — поэтому UA зашит в клиент.
   3. Токенов три (test/stage/prod), и для хоста api.tezapp.org подходит ТОЛЬКО
      prod: остальные дают 401.
-  4. first_order_at неизменна: узнав её однажды, повторно спрашивать номер не надо.
+  4. `month` ОБЯЗАТЕЛЕН: без него API отвечает 400 (error_code 30001).
+  5. Даты оконные (месяц запроса + предыдущий), а не «за всё время», поэтому
+     привязаны к месяцу базы лида. Первый заказ ВНУТРИ месяца уже не изменится —
+     найдя его, номер можно больше не переспрашивать.
 
 ENV (окружение или .env.codex.local):
     TEZ_DRIVERS_API_TOKEN=<prod-токен>     # в .env.codex.local лежит под именем
@@ -138,13 +142,13 @@ class TezFirstOrdersClient:
         cfg = config or get_config()
         return cls(cfg.get("token"), cfg.get("base_url"))
 
-    def _post_batch(self, drivers):
-        """Один запрос на <=100 водителей. Возвращает список строк ответа."""
+    def _post_batch(self, drivers, month):
+        """Один запрос на <=100 водителей за период month ('YYYY-MM')."""
         url = f"{self.base_url}/drivers/first-orders"
         headers = dict(BROWSER_HEADERS)
         headers["X-Integration-Token"] = self.token
         headers["Content-Type"] = "application/json"
-        body = json.dumps({"drivers": drivers}, ensure_ascii=False).encode("utf-8")
+        body = json.dumps({"month": month, "drivers": drivers}, ensure_ascii=False).encode("utf-8")
 
         last_error = None
         for attempt in range(1, MAX_RETRIES + 1):
@@ -198,17 +202,25 @@ class TezFirstOrdersClient:
 
         raise RuntimeError(f"TEZ APP first-orders: не удалось получить ответ ({last_error})")
 
-    def fetch_first_orders(self, phones, full_names=None, progress=None):
-        """Даты первых заказов по списку телефонов.
+    def fetch_first_orders(self, phones, month, full_names=None, progress=None):
+        """Оконные даты заказов по списку телефонов.
+
+        month — обязательный период 'YYYY-MM'. API считает окно в два месяца и
+        возвращает по каждому водителю ДВЕ даты: первый заказ в самом месяце и
+        первый заказ в предыдущем. Без month эндпоинт отвечает 400 (error_code
+        30001), поэтому параметр не опциональный.
 
         phones — любые формы записи номера, нормализуются внутри.
         full_names — необязательный dict phone_norm -> ФИО (API его не проверяет,
         но с ним удобнее читать сырые ответы при разборе спорных случаев).
 
-        Возвращает dict phone_norm -> datetime (Алматы) либо None. Невалидные
-        номера в результат не попадают — их отдаёт отдельным списком свойство
+        Возвращает dict phone_norm -> {'month': datetime|None, 'prev': datetime|None}.
+        Невалидные номера в результат не попадают — их отдаёт свойство
         `.last_invalid`.
         """
+        month = str(month or "").strip()
+        if not re.fullmatch(r"\d{4}-\d{2}", month):
+            raise ValueError("month обязателен и должен быть в формате YYYY-MM")
         normalized, invalid = [], []
         seen = set()
         for raw in phones or []:
@@ -231,15 +243,18 @@ class TezFirstOrdersClient:
                 {"full_name": names.get(p) or "-", "phone": to_e164(p)}
                 for p in chunk
             ]
-            rows = self._post_batch(drivers)
+            rows = self._post_batch(drivers, month)
             for row in rows:
                 norm = normalize_kz_phone(row.get("phone"))
                 if norm:
-                    out[norm] = parse_first_order_at(row.get("first_order_at"))
+                    out[norm] = {
+                        "month": parse_first_order_at(row.get("month_first_order_at")),
+                        "prev": parse_first_order_at(row.get("previous_month_first_order_at")),
+                    }
             # Номера, которых почему-то не оказалось в ответе, тоже помечаем
             # проверенными — иначе они будут переспрашиваться каждую ночь.
             for p in chunk:
-                out.setdefault(p, None)
+                out.setdefault(p, {"month": None, "prev": None})
 
             if progress:
                 progress(min(start + len(chunk), total), total)
@@ -251,6 +266,7 @@ class TezFirstOrdersClient:
 def _main():
     parser = argparse.ArgumentParser(description="Проверка TEZ APP /drivers/first-orders")
     parser.add_argument("--phones", required=True, help="номера через запятую")
+    parser.add_argument("--month", required=True, help="период YYYY-MM (обязателен для API)")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -259,9 +275,14 @@ def _main():
         raise SystemExit("TEZ_DRIVERS_API_TOKEN не задан (env или .env.codex.local)")
 
     client = TezFirstOrdersClient.from_config(cfg)
-    result = client.fetch_first_orders([p for p in args.phones.split(",") if p.strip()])
-    for phone, dt in sorted(result.items(), key=lambda kv: (kv[1] is None, kv[1] or 0)):
-        print(f"{phone}\t{dt.isoformat() if dt else '—'}")
+    result = client.fetch_first_orders(
+        [p for p in args.phones.split(",") if p.strip()], month=args.month
+    )
+    print(f"{'номер':<14}{'заказ в ' + args.month:<34}заказ в пред. месяце")
+    for phone, dates in sorted(result.items()):
+        cur = dates["month"].isoformat() if dates["month"] else "—"
+        prev = dates["prev"].isoformat() if dates["prev"] else "—"
+        print(f"{phone:<14}{cur:<34}{prev}")
     if client.last_invalid:
         print("невалидные номера:", ", ".join(str(x) for x in client.last_invalid))
 
