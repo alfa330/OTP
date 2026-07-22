@@ -189,7 +189,9 @@ def run_sync(importer, date_start=None, date_end=None, config=None, logger=None)
         return {"skipped": True, "reason": "no_credentials"}
     rows, (date_start, date_end) = fetch_attendance_rows(date_start, date_end, cfg)
     log.info("Clockster sync: %s..%s, отметок=%d", date_start, date_end, len(rows))
-    summary = importer(rows)
+    # Окно передаётся importer-у: ручные правки (оверрайды) применяются по нему,
+    # даже если у оператора в Clockster не было ни одной отметки за период.
+    summary = importer(rows, date_start, date_end)
     log.info("Clockster sync: импорт завершён: %s", summary)
     return summary
 

@@ -88,7 +88,7 @@ class ClocksterImporterSourceTests(unittest.TestCase):
     def test_importer_scopes_to_sales_department(self):
         self.assertIn("CLOCKSTER_SYNC_DEPARTMENT_CODE", self.src)
         self.assertIn("def _clockster_attendance_sync_importer(", self.src)
-        func = self.src[self.src.index("def _clockster_attendance_sync_importer("):][:4000]
+        func = self.src[self.src.index("def _clockster_attendance_sync_importer("):][:9000]
         # Матчинг ограничен сотрудниками отдела продаж — иначе replace-семантика
         # импорта стёрла бы Oktell-статусы СЗоВ, отметившихся в Clockster.
         self.assertIn("get_department_member_ids", func)
@@ -96,6 +96,16 @@ class ClocksterImporterSourceTests(unittest.TestCase):
         self.assertIn("_status_import_resolve_operator_matches", func)
         self.assertIn("db.save_operator_status_import", func)
         self.assertIn("'clockster'", func)
+
+    def test_importer_applies_manual_overrides(self):
+        # Терминал один на вход/выход — тип отметки правится руками; ре-синк
+        # должен воспроизводить правки (delete/set_kind/add), а не откатывать их.
+        func = self.src[self.src.index("def _clockster_attendance_sync_importer("):][:9000]
+        self.assertIn("list_attendance_mark_overrides", func)
+        self.assertIn("'delete'", func)
+        self.assertIn("'set_kind'", func)
+        self.assertIn("'add'", func)
+        self.assertIn("'clockster-manual'", func)
 
     def test_mark_states_map_to_operator_profile(self):
         # Приход — рабочий статус операторского профиля, уход — офлайн.
@@ -115,6 +125,46 @@ class ClocksterImporterSourceTests(unittest.TestCase):
         self.assertIn("clockster_attendance_sync_daily", self.src)
         self.assertIn("async def clockster_attendance_sync_job():", self.src)
 
+    def test_attendance_marks_endpoints(self):
+        # CRUD отметок для модалки таймлайна: список, добавление, смена типа, удаление.
+        self.assertIn("def get_attendance_marks_endpoint():", self.src)
+        self.assertIn("def add_attendance_mark_endpoint():", self.src)
+        self.assertIn("def update_attendance_mark_endpoint(event_id):", self.src)
+        self.assertIn("def delete_attendance_mark_endpoint(event_id):", self.src)
+        # Общий гард: админ или СВ/глава отдела продаж; оператор — только из ОП.
+        self.assertIn("def _attendance_marks_guard(operator_id):", self.src)
+        guard = self.src[self.src.index("def _attendance_marks_guard(operator_id):"):][:1600]
+        self.assertIn("_clockster_department_id()", guard)
+        self.assertIn("только для отдела продаж", guard)
+
+
+class ClocksterMarkOverridesDbTests(unittest.TestCase):
+    """Слой БД для ручных правок отметок (database.py, исходные ассерты)."""
+
+    def setUp(self):
+        self.src = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+
+    def test_overrides_table_and_constants(self):
+        self.assertIn("CREATE TABLE IF NOT EXISTS attendance_mark_overrides", self.src)
+        self.assertIn("UNIQUE(operator_id, event_at)", self.src)
+        self.assertIn("ATTENDANCE_MARK_IN_STATUS_KEY = 'готов'", self.src)
+        self.assertIn("ATTENDANCE_MARK_OUT_STATUS_KEY = 'выключен'", self.src)
+        self.assertIn("ATTENDANCE_MARK_MANUAL_NOTE = 'clockster-manual'", self.src)
+
+    def test_crud_methods(self):
+        self.assertIn("def list_attendance_mark_overrides(self, operator_ids, date_from, date_to):", self.src)
+        self.assertIn("def get_attendance_marks(self, operator_id, day):", self.src)
+        self.assertIn("def apply_attendance_mark_change(self, operator_id, action, event_id=None, event_at=None,", self.src)
+
+    def test_apply_rebuilds_and_recalculates(self):
+        func = self.src[self.src.index("def apply_attendance_mark_change("):][:7000]
+        # Правка сразу перестраивает сегменты и пересчитывает часы за день±1.
+        self.assertIn("_rebuild_operator_status_segments_tx", func)
+        self.assertIn("_recalculate_auto_daily_hours_tx", func)
+        # Ручная отметка: смена типа сохраняет 'add'-оверрайд, удаление — снимает его.
+        self.assertIn("'add' if was_manual else 'set_kind'", func)
+        self.assertIn("DELETE FROM attendance_mark_overrides", func)
+
 
 class ClocksterFrontendTests(unittest.TestCase):
     """Кнопка синка в планировщике графиков (App.jsx)."""
@@ -133,6 +183,17 @@ class ClocksterFrontendTests(unittest.TestCase):
         func = self.src[self.src.index("const syncPlannerClocksterStatuses = async ()"):][:3500]
         self.assertIn("CLOCKSTER_SYNC_MAX_DAYS", func)
         self.assertIn("slice(-CLOCKSTER_SYNC_MAX_DAYS)", func)
+
+    def test_attendance_marks_section_in_timeline_modal(self):
+        # Секция «Отметки Clockster» в модалке таймлайна дня: список отметок дня,
+        # смена типа (приход↔уход), добавление и удаление — только для ОП/админов.
+        self.assertIn("canManageAttendanceMarks", self.src)
+        self.assertIn("Отметки Clockster (приход/уход)", self.src)
+        self.assertIn("const fetchAttendanceMarks = async (opId, dateKey)", self.src)
+        self.assertIn("const toggleAttendanceMarkKind = (mark)", self.src)
+        self.assertIn("const deleteAttendanceMark = (mark)", self.src)
+        self.assertIn("const addAttendanceMark = ()", self.src)
+        self.assertIn("/api/attendance_marks", self.src)
 
 
 if __name__ == "__main__":

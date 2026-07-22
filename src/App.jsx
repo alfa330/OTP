@@ -12645,6 +12645,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [showEditStatusJournal, setShowEditStatusJournal] = useState(false);
             const [editTimelineFocusedStatusKey, setEditTimelineFocusedStatusKey] = useState('');
             const [showDayBreaksModal, setShowDayBreaksModal] = useState(false);
+            // Отметки Clockster (приход/уход, только ОП): список отметок дня в модалке
+            // таймлайна + ручные правки (тип/добавить/удалить). Правки сохраняются в
+            // оверрайдах на бэке и переживают ночной ре-синк Clockster.
+            const canManageAttendanceMarks = isOpPlanner || isAdminLikePlanner;
+            const [attendanceMarks, setAttendanceMarks] = useState({ key: '', list: [], loading: false, error: '', available: true });
+            const [attendanceMarkDraft, setAttendanceMarkDraft] = useState({ time: '', kind: 'in' });
+            const [attendanceMarkBusy, setAttendanceMarkBusy] = useState(false);
             const [isLoading, setIsLoading] = useState(false);
             const [bulkActionState, setBulkActionState] = useState({ loading: false, action: '' });
             const [dayAggregateLoading, setDayAggregateLoading] = useState(false);
@@ -16987,6 +16994,99 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setPlannerOktellSyncLoading(false);
                 }
             };
+
+            // === Отметки Clockster в модалке таймлайна дня (только ОП) ===
+            const fetchAttendanceMarks = async (opId, dateKey) => {
+                const key = `${opId}|${dateKey}`;
+                setAttendanceMarks(prev => ({ ...prev, key, loading: true, error: '' }));
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/attendance_marks?operator_id=${opId}&date=${dateKey}`, {
+                        credentials: 'include',
+                        headers: withAccessTokenHeader({ 'X-User-Id': user?.id })
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+                    setAttendanceMarks({ key, list: payload?.marks || [], loading: false, error: '', available: true });
+                } catch (error) {
+                    setAttendanceMarks({ key, list: [], loading: false, error: error?.message || 'Не удалось загрузить отметки', available: false });
+                }
+            };
+
+            useEffect(() => {
+                if (!canManageAttendanceMarks || !showEditTimelineModal || !modalState.opId || !modalState.date) return;
+                setAttendanceMarkDraft({ time: '', kind: 'in' });
+                fetchAttendanceMarks(modalState.opId, String(modalState.date));
+                // eslint-disable-next-line react-hooks/exhaustive-deps
+            }, [canManageAttendanceMarks, showEditTimelineModal, modalState.opId, modalState.date]);
+
+            // После правки отметки таймлайн/итоги пересчитаны на бэке — принудительно
+            // перезагружаем статусы видимого диапазона (тот же приём, что у синков).
+            const refreshPlannerAfterAttendanceMarkChange = async (dateKey) => {
+                plannerLoadedStatusRangeKeysRef.current = new Set();
+                plannerLoadingStatusRangeKeysRef.current = new Set();
+                plannerActiveStatusWindowKeyRef.current = '';
+                const rangeStart = String(plannerStatusFetchRange?.start || dateKey || '').trim();
+                const rangeEnd = String(plannerStatusFetchRange?.end || dateKey || '').trim();
+                if (rangeStart && rangeEnd) {
+                    await fetchPlannerImportedStatusesForRange(rangeStart, rangeEnd, { force: true });
+                }
+            };
+
+            const mutateAttendanceMark = async ({ method, path, body }) => {
+                if (attendanceMarkBusy || !modalState.opId || !modalState.date) return;
+                setAttendanceMarkBusy(true);
+                try {
+                    const response = await fetch(`${API_BASE_URL}${path}`, {
+                        method,
+                        credentials: 'include',
+                        headers: withAccessTokenHeader({ 'Content-Type': 'application/json', 'X-User-Id': user?.id }),
+                        body: body ? JSON.stringify(body) : undefined
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+                    await fetchAttendanceMarks(modalState.opId, String(modalState.date));
+                    await refreshPlannerAfterAttendanceMarkChange(String(modalState.date));
+                    emitAppToast(payload?.message || 'Отметка обновлена', 'success');
+                } catch (error) {
+                    console.error('Error mutating attendance mark:', error);
+                    emitAppToast(error?.message || 'Не удалось изменить отметку', 'error');
+                } finally {
+                    setAttendanceMarkBusy(false);
+                }
+            };
+
+            const addAttendanceMark = () => {
+                const timeText = String(attendanceMarkDraft.time || '').trim();
+                if (!/^\d{2}:\d{2}$/.test(timeText)) {
+                    emitAppToast('Укажите время отметки (ЧЧ:ММ)', 'warning');
+                    return;
+                }
+                mutateAttendanceMark({
+                    method: 'POST',
+                    path: '/api/attendance_marks',
+                    body: {
+                        operator_id: modalState.opId,
+                        event_at: `${modalState.date} ${timeText}:00`,
+                        kind: attendanceMarkDraft.kind === 'out' ? 'out' : 'in'
+                    }
+                });
+            };
+
+            const toggleAttendanceMarkKind = (mark) => mutateAttendanceMark({
+                method: 'PUT',
+                path: `/api/attendance_marks/${mark.id}`,
+                body: { operator_id: modalState.opId, kind: mark.kind === 'in' ? 'out' : 'in' }
+            });
+
+            const deleteAttendanceMark = (mark) => mutateAttendanceMark({
+                method: 'DELETE',
+                path: `/api/attendance_marks/${mark.id}`,
+                body: { operator_id: modalState.opId }
+            });
 
             // === Синхронизация отметок Clockster (приход/уход отдела продаж) за видимый диапазон ===
             const CLOCKSTER_SYNC_MAX_DAYS = 10;
@@ -28103,6 +28203,91 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <div className="text-[11px] text-slate-400">Нет статусов в пределах смены</div>
                                         )}
                                     </div>
+
+                                    {canManageAttendanceMarks && attendanceMarks.available && (
+                                    <div className="mb-3 rounded-lg border border-indigo-200 bg-indigo-50/40 p-2">
+                                        <div className="flex items-center justify-between gap-2 mb-1">
+                                            <div className="text-[11px] font-semibold text-indigo-800">
+                                                <FaIcon className="fas fa-user-clock mr-1"></FaIcon>
+                                                Отметки Clockster (приход/уход)
+                                            </div>
+                                            <div className="text-[10px] text-indigo-700/70">
+                                                Терминал один на вход и выход — тип отметки можно исправить; правки переживают ночной синк
+                                            </div>
+                                        </div>
+                                        {attendanceMarks.loading ? (
+                                            <div className="text-[11px] text-slate-500 py-1">Загрузка отметок...</div>
+                                        ) : (
+                                        <>
+                                            {(attendanceMarks.list || []).length === 0 && (
+                                                <div className="text-[11px] text-slate-500 py-1">За этот день отметок нет.</div>
+                                            )}
+                                            <div className="flex flex-wrap gap-1.5">
+                                                {(attendanceMarks.list || []).map((mark) => {
+                                                    const isIn = mark.kind === 'in';
+                                                    const timeText = String(mark.event_at || '').slice(11, 16);
+                                                    return (
+                                                        <span
+                                                            key={`att-mark-${mark.id}`}
+                                                            className={`inline-flex items-center gap-1.5 pl-2 pr-1 py-1 rounded-lg border text-[11px] ${isIn ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : 'border-slate-300 bg-white text-slate-700'}`}
+                                                        >
+                                                            <FaIcon className={`fas ${isIn ? 'fa-arrow-right' : 'fa-sign-out-alt'} text-[9px]`}></FaIcon>
+                                                            <span className="font-semibold tabular-nums">{timeText}</span>
+                                                            <span>{isIn ? 'Приход' : 'Уход'}</span>
+                                                            {mark.manual && (
+                                                                <span className="px-1 rounded bg-indigo-100 text-indigo-700 text-[9px]">ручная</span>
+                                                            )}
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => toggleAttendanceMarkKind(mark)}
+                                                                disabled={attendanceMarkBusy}
+                                                                className="w-5 h-5 flex items-center justify-center rounded hover:bg-black/10 disabled:opacity-50"
+                                                                title={isIn ? 'Сменить на «Уход»' : 'Сменить на «Приход»'}
+                                                            >
+                                                                <FaIcon className="fas fa-random text-[9px]"></FaIcon>
+                                                            </button>
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => deleteAttendanceMark(mark)}
+                                                                disabled={attendanceMarkBusy}
+                                                                className="w-5 h-5 flex items-center justify-center rounded hover:bg-rose-100 text-rose-600 disabled:opacity-50"
+                                                                title="Удалить отметку"
+                                                            >
+                                                                <FaIcon className="fas fa-times text-[9px]"></FaIcon>
+                                                            </button>
+                                                        </span>
+                                                    );
+                                                })}
+                                            </div>
+                                            <div className="mt-2 pt-2 border-t border-indigo-100 flex items-center gap-2 flex-wrap">
+                                                <input
+                                                    type="time"
+                                                    value={attendanceMarkDraft.time}
+                                                    onChange={(e) => setAttendanceMarkDraft(prev => ({ ...prev, time: e.target.value }))}
+                                                    className="px-2 py-1 rounded border border-slate-300 text-[12px] bg-white"
+                                                />
+                                                <select
+                                                    value={attendanceMarkDraft.kind}
+                                                    onChange={(e) => setAttendanceMarkDraft(prev => ({ ...prev, kind: e.target.value }))}
+                                                    className="px-2 py-1 rounded border border-slate-300 text-[12px] bg-white"
+                                                >
+                                                    <option value="in">Приход</option>
+                                                    <option value="out">Уход</option>
+                                                </select>
+                                                <button
+                                                    type="button"
+                                                    onClick={addAttendanceMark}
+                                                    disabled={attendanceMarkBusy || !attendanceMarkDraft.time}
+                                                    className="px-3 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-medium disabled:opacity-50 flex items-center gap-1.5"
+                                                >
+                                                    <FaIcon className={`fas ${attendanceMarkBusy ? 'fa-spinner fa-spin' : 'fa-plus'} text-[10px]`}></FaIcon>
+                                                    Добавить отметку
+                                                </button>
+                                            </div>
+                                        </>
+                                        )}
+                                    </div>
+                                    )}
 
                                     <div className="flex items-start gap-2">
                                         <div className="w-14 shrink-0">

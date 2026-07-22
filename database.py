@@ -600,6 +600,14 @@ SCHEDULE_AUTO_FLAG_ALLOWED = {
 SCHEDULE_AUTO_WORK_STATUS_KEYS = {'готов', 'занят', 'занята', 'перезвон', 'зарезервировано'}
 SCHEDULE_AUTO_TALK_STATUS_KEYS = {'занят', 'занята'}
 SCHEDULE_AUTO_BREAK_STATUS_KEYS = {'перерыв', 'авто'}
+
+# Отметки Clockster (приход/уход отдела продаж): терминал один на вход и выход,
+# Clockster сам угадывает тип отметки и ошибается — поэтому отметки правятся
+# руками (attendance_mark_overrides) и мапятся на статусы операторского профиля.
+ATTENDANCE_MARK_IN_STATUS_KEY = 'готов'
+ATTENDANCE_MARK_OUT_STATUS_KEY = 'выключен'
+ATTENDANCE_MARK_SYNC_NOTE = 'clockster'
+ATTENDANCE_MARK_MANUAL_NOTE = 'clockster-manual'
 SCHEDULE_AUTO_NO_PHONE_STATUS_KEY = 'без телефона'
 SCHEDULE_AUTO_TRAINING_STATUS_KEY = 'тренинг'
 CHAT_MANAGER_WORK_STATUS_KEYS = {'online', 'holiday', 'онлайн', 'закрытие чатов'}
@@ -2884,6 +2892,23 @@ class Database:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_operator_status_segments_operator_date
                 ON operator_status_segments(operator_id, status_date);
+            """)
+            # Ручные правки отметок Clockster (приход/уход отдела продаж).
+            # Синк Clockster работает как replace по оператору+датам, поэтому правка
+            # только события была бы стёрта ночным ре-синком: оверрайд хранит само
+            # исправление ((оператор, время) → удалить/сменить тип/добавить) и
+            # применяется импортёром при каждом синке поверх сырых отметок API.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS attendance_mark_overrides (
+                    id SERIAL PRIMARY KEY,
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    event_at TIMESTAMP NOT NULL,
+                    action VARCHAR(16) NOT NULL CHECK (action IN ('delete', 'set_kind', 'add')),
+                    mark_kind VARCHAR(8) NULL CHECK (mark_kind IN ('in', 'out')),
+                    created_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(operator_id, event_at)
+                );
             """)
             # NOTE: indexes idx_operator_status_events_imported_by,
             # idx_operator_status_segments_imported_by, idx_operator_status_segments_status_key
@@ -33628,6 +33653,158 @@ class Database:
             'date_to': date_to_obj.strftime('%Y-%m-%d') if date_to_obj else None,
             'segment_rebuild': segment_rebuild_summary,
             'auto_aggregation': auto_aggregation_summary
+        }
+
+    # ──────────────── Отметки Clockster (приход/уход отдела продаж) ────────────────
+
+    def list_attendance_mark_overrides(self, operator_ids, date_from, date_to):
+        """Ручные правки отметок Clockster по операторам за период (включительно).
+
+        Применяются импортёром синка ПОВЕРХ сырых отметок API при каждом
+        ре-синке: delete — пропустить отметку, set_kind — сменить тип
+        (приход/уход), add — добавить отметку, которой в Clockster нет.
+        """
+        op_ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
+        if not op_ids:
+            return []
+        start_obj = self._normalize_schedule_date(date_from)
+        end_obj = self._normalize_schedule_date(date_to)
+        if end_obj < start_obj:
+            start_obj, end_obj = end_obj, start_obj
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT operator_id, event_at, action, mark_kind
+                FROM attendance_mark_overrides
+                WHERE operator_id = ANY(%s)
+                  AND event_at >= %s
+                  AND event_at < %s
+                ORDER BY operator_id, event_at
+            """, (
+                op_ids,
+                datetime.combine(start_obj, dt_time.min),
+                datetime.combine(end_obj + timedelta(days=1), dt_time.min)
+            ))
+            return [
+                {
+                    'operator_id': int(row[0]),
+                    'event_at': row[1],
+                    'action': str(row[2] or ''),
+                    'mark_kind': str(row[3] or '') or None
+                }
+                for row in cursor.fetchall()
+            ]
+
+    def get_attendance_marks(self, operator_id, day):
+        """Отметки Clockster оператора за день (события с note clockster*)."""
+        day_obj = self._normalize_schedule_date(day)
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, event_at, status_key, state_note
+                FROM operator_status_events
+                WHERE operator_id = %s
+                  AND event_date = %s
+                  AND state_note LIKE 'clockster%%'
+                ORDER BY event_at, id
+            """, (int(operator_id), day_obj))
+            marks = []
+            for row in cursor.fetchall():
+                status_key = str(row[2] or '').strip().lower()
+                marks.append({
+                    'id': int(row[0]),
+                    'event_at': row[1].strftime('%Y-%m-%d %H:%M:%S') if isinstance(row[1], datetime) else str(row[1]),
+                    'kind': 'in' if status_key == ATTENDANCE_MARK_IN_STATUS_KEY else 'out',
+                    'manual': str(row[3] or '') == ATTENDANCE_MARK_MANUAL_NOTE
+                })
+            return marks
+
+    def apply_attendance_mark_change(self, operator_id, action, event_id=None, event_at=None,
+                                     mark_kind=None, changed_by=None):
+        """Ручная правка отметки Clockster: правит событие, пишет оверрайд (чтобы
+        ночной ре-синк воспроизвёл правку — импорт работает как replace) и в той же
+        транзакции перестраивает сегменты и пересчитывает часы за день±1."""
+        operator_id = int(operator_id)
+        action_norm = str(action or '').strip().lower()
+        if action_norm not in ('add', 'set_kind', 'delete'):
+            raise ValueError("action must be add/set_kind/delete")
+        kind_norm = str(mark_kind or '').strip().lower() or None
+        if action_norm in ('add', 'set_kind') and kind_norm not in ('in', 'out'):
+            raise ValueError("mark_kind must be 'in' or 'out'")
+
+        def _status_key_for_kind(kind_value):
+            return ATTENDANCE_MARK_IN_STATUS_KEY if kind_value == 'in' else ATTENDANCE_MARK_OUT_STATUS_KEY
+
+        with self._get_cursor() as cursor:
+            override_action = None
+            override_kind = None
+            if action_norm == 'add':
+                if not isinstance(event_at, datetime):
+                    raise ValueError("event_at is required for add")
+                mark_at = event_at.replace(microsecond=0)
+                cursor.execute("""
+                    INSERT INTO operator_status_events (
+                        operator_id, event_at, event_date, status_key, state_note, event_kind, imported_by
+                    ) VALUES (%s, %s, %s, %s, %s, 'status', %s)
+                """, (
+                    operator_id, mark_at, mark_at.date(),
+                    _status_key_for_kind(kind_norm), ATTENDANCE_MARK_MANUAL_NOTE, changed_by
+                ))
+                day_obj = mark_at.date()
+                override_action, override_kind = 'add', kind_norm
+            else:
+                cursor.execute("""
+                    SELECT id, event_at, state_note
+                    FROM operator_status_events
+                    WHERE id = %s AND operator_id = %s AND state_note LIKE 'clockster%%'
+                """, (int(event_id), operator_id))
+                row = cursor.fetchone()
+                if not row:
+                    raise ValueError("Отметка не найдена")
+                mark_at = row[1]
+                day_obj = mark_at.date()
+                was_manual = str(row[2] or '') == ATTENDANCE_MARK_MANUAL_NOTE
+                if action_norm == 'set_kind':
+                    cursor.execute(
+                        "UPDATE operator_status_events SET status_key = %s WHERE id = %s",
+                        (_status_key_for_kind(kind_norm), row[0])
+                    )
+                    # Смена типа руками добавленной отметки остаётся оверрайдом 'add' —
+                    # иначе ре-синк потерял бы саму отметку (в Clockster её нет).
+                    override_action = 'add' if was_manual else 'set_kind'
+                    override_kind = kind_norm
+                else:  # delete
+                    cursor.execute("DELETE FROM operator_status_events WHERE id = %s", (row[0],))
+                    if was_manual:
+                        # Удаление ручной отметки = снять её оверрайд 'add'.
+                        cursor.execute("""
+                            DELETE FROM attendance_mark_overrides
+                            WHERE operator_id = %s AND event_at = %s
+                        """, (operator_id, mark_at))
+                    else:
+                        override_action = 'delete'
+
+            if override_action is not None:
+                cursor.execute("""
+                    INSERT INTO attendance_mark_overrides (operator_id, event_at, action, mark_kind, created_by)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (operator_id, event_at)
+                    DO UPDATE SET action = EXCLUDED.action,
+                                  mark_kind = EXCLUDED.mark_kind,
+                                  created_by = EXCLUDED.created_by,
+                                  created_at = CURRENT_TIMESTAMP
+                """, (operator_id, mark_at, override_action, override_kind, changed_by))
+
+            rebuild = self._rebuild_operator_status_segments_tx(
+                cursor, [operator_id],
+                day_obj - timedelta(days=1), day_obj + timedelta(days=1)
+            )
+            recalc = self._recalculate_auto_daily_hours_tx(
+                cursor, [operator_id],
+                day_obj - timedelta(days=1), day_obj + timedelta(days=1)
+            )
+        return {
+            'day': day_obj.strftime('%Y-%m-%d'),
+            'segments_saved': int(rebuild.get('segments_saved') or 0),
+            'auto_aggregation': recalc
         }
 
     def save_schedule_status_period(
