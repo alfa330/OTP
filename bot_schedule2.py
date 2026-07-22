@@ -27980,6 +27980,20 @@ def _work_schedule_operator_requester():
     return requester_id, user_data, None
 
 
+# Отделы, операторам которых нельзя видеть смены коллег по отделу/направлению:
+# «Смены коллег» и обмены сменами закрыты (фронт скрывает табы, здесь — запрет API).
+# Зеркалит COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENTS в src/utils/departmentViews.js.
+COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENT_CODES = {'front_office'}
+
+
+def _operator_colleague_schedules_hidden(requester_id):
+    try:
+        _, department_code = db.get_user_department(requester_id)
+    except Exception:
+        return False
+    return str(department_code or '').strip().lower() in COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENT_CODES
+
+
 def _ws_query_bool(name, default=False):
     raw = request.args.get(name)
     if raw is None:
@@ -28046,6 +28060,8 @@ def get_direction_work_schedules():
         requester_id, user_data, err = _work_schedule_operator_requester()
         if err:
             return jsonify({"error": err[0]}), err[1]
+        if _operator_colleague_schedules_hidden(requester_id):
+            return jsonify({"error": "Forbidden: colleague schedules are unavailable for your department"}), 403
 
         direction_name = user_data[4]  # d.name from get_user()
         if not direction_name:
@@ -28100,6 +28116,8 @@ def get_shift_swap_candidates():
         requester_id, _user_data, err = _work_schedule_operator_requester()
         if err:
             return jsonify({"error": err[0]}), err[1]
+        if _operator_colleague_schedules_hidden(requester_id):
+            return jsonify({"error": "Forbidden: shift swaps are unavailable for your department"}), 403
 
         swap_date = request.args.get('swap_date')
         end_date = request.args.get('end_date')
@@ -28151,6 +28169,8 @@ def shift_swap_requests():
         requester_id, _user_data, err = _work_schedule_operator_requester()
         if err:
             return jsonify({"error": err[0]}), err[1]
+        if _operator_colleague_schedules_hidden(requester_id):
+            return jsonify({"error": "Forbidden: shift swaps are unavailable for your department"}), 403
 
         if request.method == 'GET':
             raw_limit = request.args.get('limit')
@@ -28214,6 +28234,8 @@ def respond_shift_swap_request():
         requester_id, _user_data, err = _work_schedule_operator_requester()
         if err:
             return jsonify({"error": err[0]}), err[1]
+        if _operator_colleague_schedules_hidden(requester_id):
+            return jsonify({"error": "Forbidden: shift swaps are unavailable for your department"}), 403
 
         data = request.get_json(silent=True) or {}
         request_id = data.get('request_id')

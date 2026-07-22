@@ -34,6 +34,11 @@ const SALES_HEAD_VIEWS = [
     ...SALES_SUPERVISOR_VIEWS.slice(4),
 ];
 
+// Фронт офисы: менеджеры ведут только учёт сотрудников и графики работы,
+// сотрудники видят только свой профиль и «Мои смены» (без смен коллег).
+const FRONT_OFFICE_OPERATOR_VIEWS = ['profile', 'work_schedules'];
+const FRONT_OFFICE_MANAGER_VIEWS = ['manage_operators', 'work_schedules'];
+
 const VIEW_ALIASES = {
     sv_list: 'manage_operators',
     manage_users: 'manage_operators',
@@ -75,11 +80,27 @@ export const DEPARTMENT_VIEW_ALLOWLIST = {
         head: SALES_HEAD_VIEWS,
         sv: SALES_SUPERVISOR_VIEWS,
     },
+    front_office: {
+        operator: FRONT_OFFICE_OPERATOR_VIEWS,
+        trainee: FRONT_OFFICE_OPERATOR_VIEWS,
+        head: FRONT_OFFICE_MANAGER_VIEWS,
+        sv: FRONT_OFFICE_MANAGER_VIEWS,
+    },
 };
 
 export const departmentCodeOf = (user) => {
     const code = user?.department_code ?? user?.departmentCode;
     return code ? String(code).toLowerCase() : null;
+};
+
+// Отделы, операторам которых нельзя видеть смены коллег по отделу/направлению:
+// в «Мои смены» скрываются табы «Замены» и «Смены коллег» вместе с кнопками
+// обмена; бэкенд зеркалит это запретом /work_schedules/direction и shift_swap.
+const COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENTS = new Set(['front_office']);
+
+export const departmentHidesColleagueSchedules = (user) => {
+    const code = departmentCodeOf(user);
+    return Boolean(code && COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENTS.has(code));
 };
 
 // Возвращает массив разрешённых разделов для пользователя, либо null (без ограничений).
