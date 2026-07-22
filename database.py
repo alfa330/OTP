@@ -608,6 +608,13 @@ ATTENDANCE_MARK_IN_STATUS_KEY = 'готов'
 ATTENDANCE_MARK_OUT_STATUS_KEY = 'выключен'
 ATTENDANCE_MARK_SYNC_NOTE = 'clockster'
 ATTENDANCE_MARK_MANUAL_NOTE = 'clockster-manual'
+# Синтетический уход, которым закрывается «приход» без парной отметки: без него
+# статус «готов» тянется до следующей отметки (порой через несколько суток) —
+# день выглядит как круглосуточная смена, а если на «прихваченный» день стоит
+# смена, в неё начисляются несуществующие часы.
+ATTENDANCE_MARK_AUTO_NOTE = 'clockster-auto'
+# Граница закрытия, когда смены на этот день нет (типовая максимальная смена).
+ATTENDANCE_MARK_MAX_OPEN_HOURS = 12
 SCHEDULE_AUTO_NO_PHONE_STATUS_KEY = 'без телефона'
 SCHEDULE_AUTO_TRAINING_STATUS_KEY = 'тренинг'
 CHAT_MANAGER_WORK_STATUS_KEYS = {'online', 'holiday', 'онлайн', 'закрытие чатов'}
@@ -33694,6 +33701,161 @@ class Database:
                 for row in cursor.fetchall()
             ]
 
+    def get_shift_bounds_for_operators(self, operator_ids, date_from, date_to):
+        """Абсолютные границы смен операторов за период (ночные смены — с переходом
+        через полночь). Нужны синку Clockster: «приход» без парной отметки ухода
+        закрывается концом смены, иначе статус «готов» течёт в следующие сутки."""
+        op_ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
+        if not op_ids:
+            return []
+        start_obj = self._normalize_schedule_date(date_from)
+        end_obj = self._normalize_schedule_date(date_to)
+        if end_obj < start_obj:
+            start_obj, end_obj = end_obj, start_obj
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT operator_id, shift_date, start_time, end_time
+                FROM work_shifts
+                WHERE operator_id = ANY(%s)
+                  AND shift_date >= %s
+                  AND shift_date <= %s
+                ORDER BY operator_id, shift_date, start_time
+            """, (op_ids, start_obj - timedelta(days=1), end_obj))
+            bounds = []
+            for op_id, shift_date_value, start_time_value, end_time_value in cursor.fetchall() or []:
+                if shift_date_value is None:
+                    continue
+                start_min, end_min = self._schedule_interval_minutes(start_time_value, end_time_value)
+                day_start = datetime.combine(shift_date_value, dt_time.min)
+                bounds.append({
+                    'operator_id': int(op_id),
+                    'start_at': day_start + timedelta(minutes=int(start_min)),
+                    'end_at': day_start + timedelta(minutes=int(end_min))
+                })
+            return bounds
+
+    def _normalize_attendance_marks_tx(self, cursor, operator_ids, date_from, date_to):
+        """Закрывает «висящие» приходы Clockster синтетическими уходами.
+
+        Уход ставится в конец смены, которая охватывает отметку прихода; если
+        смены нет — через ATTENDANCE_MARK_MAX_OPEN_HOURS. Если следующая отметка
+        (реальная или добавленная руками) приходит раньше этой границы, ничего не
+        трогаем. Прошлые синтетические уходы удаляются и пересоздаются, поэтому
+        функция идемпотентна и корректно реагирует на ручные правки.
+        """
+        op_ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
+        if not op_ids:
+            return 0
+        start_obj = self._normalize_schedule_date(date_from)
+        end_obj = self._normalize_schedule_date(date_to)
+        if end_obj < start_obj:
+            start_obj, end_obj = end_obj, start_obj
+        # Хвост: приход последнего дня закрывается уже в следующих сутках.
+        window_start = datetime.combine(start_obj, dt_time.min)
+        window_end = datetime.combine(end_obj + timedelta(days=2), dt_time.min)
+
+        cursor.execute("""
+            DELETE FROM operator_status_events
+            WHERE operator_id = ANY(%s)
+              AND state_note = %s
+              AND event_at >= %s
+              AND event_at < %s
+        """, (op_ids, ATTENDANCE_MARK_AUTO_NOTE, window_start, window_end))
+
+        cursor.execute("""
+            SELECT operator_id, event_at, status_key
+            FROM operator_status_events
+            WHERE operator_id = ANY(%s)
+              AND state_note LIKE 'clockster%%'
+              AND event_at >= %s
+              AND event_at < %s
+            ORDER BY operator_id, event_at, id
+        """, (op_ids, window_start, window_end))
+        marks_by_operator = {}
+        for op_id, event_at, status_key in cursor.fetchall() or []:
+            marks_by_operator.setdefault(int(op_id), []).append({
+                'event_at': event_at,
+                'is_in': str(status_key or '').strip().lower() == ATTENDANCE_MARK_IN_STATUS_KEY
+            })
+        if not marks_by_operator:
+            return 0
+
+        cursor.execute("""
+            SELECT operator_id, shift_date, start_time, end_time
+            FROM work_shifts
+            WHERE operator_id = ANY(%s)
+              AND shift_date >= %s
+              AND shift_date <= %s
+            ORDER BY operator_id, shift_date, start_time
+        """, (op_ids, start_obj - timedelta(days=1), end_obj + timedelta(days=1)))
+        shifts_by_operator = {}
+        for op_id, shift_date_value, start_time_value, end_time_value in cursor.fetchall() or []:
+            if shift_date_value is None:
+                continue
+            start_min, end_min = self._schedule_interval_minutes(start_time_value, end_time_value)
+            day_start = datetime.combine(shift_date_value, dt_time.min)
+            shifts_by_operator.setdefault(int(op_id), []).append({
+                'start_at': day_start + timedelta(minutes=int(start_min)),
+                'end_at': day_start + timedelta(minutes=int(end_min))
+            })
+
+        max_open = timedelta(hours=ATTENDANCE_MARK_MAX_OPEN_HOURS)
+        insert_rows = []
+        for op_id, marks in marks_by_operator.items():
+            shifts = sorted(shifts_by_operator.get(op_id) or [], key=lambda s: s['start_at'])
+            for idx, mark in enumerate(marks):
+                if not mark['is_in']:
+                    continue
+                mark_at = mark['event_at']
+                shift_end = next(
+                    (s['end_at'] for s in shifts
+                     if s['end_at'] > mark_at and s['start_at'] <= mark_at + max_open),
+                    None
+                )
+                close_at = shift_end or (mark_at + max_open)
+                if close_at <= mark_at:
+                    continue
+                next_mark = marks[idx + 1] if idx + 1 < len(marks) else None
+                if next_mark is not None and next_mark['event_at'] <= close_at:
+                    continue
+                insert_rows.append((op_id, close_at, close_at.date(),
+                                    ATTENDANCE_MARK_OUT_STATUS_KEY, ATTENDANCE_MARK_AUTO_NOTE))
+
+        if insert_rows:
+            execute_values(
+                cursor,
+                """
+                INSERT INTO operator_status_events (
+                    operator_id, event_at, event_date, status_key, state_note, event_kind
+                )
+                VALUES %s
+                """,
+                [(row[0], row[1], row[2], row[3], row[4], 'status') for row in insert_rows],
+                template="(%s, %s, %s, %s, %s, %s)",
+                page_size=STATUS_IMPORT_INSERT_PAGE_SIZE
+            )
+        return len(insert_rows)
+
+    def normalize_attendance_marks(self, operator_ids, date_from, date_to):
+        """Нормализация отметок Clockster + пересборка сегментов и часов за период."""
+        op_ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
+        if not op_ids:
+            return {'auto_closed': 0}
+        start_obj = self._normalize_schedule_date(date_from)
+        end_obj = self._normalize_schedule_date(date_to)
+        if end_obj < start_obj:
+            start_obj, end_obj = end_obj, start_obj
+        with self._get_cursor() as cursor:
+            auto_closed = self._normalize_attendance_marks_tx(cursor, op_ids, start_obj, end_obj)
+            if auto_closed:
+                self._rebuild_operator_status_segments_tx(
+                    cursor, op_ids, start_obj - timedelta(days=1), end_obj + timedelta(days=1)
+                )
+                self._recalculate_auto_daily_hours_tx(
+                    cursor, op_ids, start_obj - timedelta(days=1), end_obj + timedelta(days=1)
+                )
+        return {'auto_closed': int(auto_closed)}
+
     def get_attendance_marks(self, operator_id, day):
         """Отметки Clockster оператора за день (события с note clockster*)."""
         day_obj = self._normalize_schedule_date(day)
@@ -33709,11 +33871,16 @@ class Database:
             marks = []
             for row in cursor.fetchall():
                 status_key = str(row[2] or '').strip().lower()
+                note = str(row[3] or '')
                 marks.append({
                     'id': int(row[0]),
                     'event_at': row[1].strftime('%Y-%m-%d %H:%M:%S') if isinstance(row[1], datetime) else str(row[1]),
                     'kind': 'in' if status_key == ATTENDANCE_MARK_IN_STATUS_KEY else 'out',
-                    'manual': str(row[3] or '') == ATTENDANCE_MARK_MANUAL_NOTE
+                    'manual': note == ATTENDANCE_MARK_MANUAL_NOTE,
+                    # Авто-уход правке не подлежит: он существует только пока нет
+                    # настоящей отметки ухода. Нужен другой момент — СВ добавляет
+                    # свою отметку, и авто-уход исчезает сам при нормализации.
+                    'auto': note == ATTENDANCE_MARK_AUTO_NOTE
                 })
             return marks
 
@@ -33759,6 +33926,11 @@ class Database:
                 row = cursor.fetchone()
                 if not row:
                     raise ValueError("Отметка не найдена")
+                if str(row[2] or '') == ATTENDANCE_MARK_AUTO_NOTE:
+                    raise ValueError(
+                        "Это автоматическое закрытие смены — добавьте отметку ухода "
+                        "нужным временем, и оно пропадёт само"
+                    )
                 mark_at = row[1]
                 day_obj = mark_at.date()
                 was_manual = str(row[2] or '') == ATTENDANCE_MARK_MANUAL_NOTE
@@ -33793,6 +33965,11 @@ class Database:
                                   created_at = CURRENT_TIMESTAMP
                 """, (operator_id, mark_at, override_action, override_kind, changed_by))
 
+            # Правка отметки меняет картину «висящих» приходов: пере-нормализуем
+            # (добавленный уход снимет авто-закрытие, добавленный приход — получит его).
+            auto_closed = self._normalize_attendance_marks_tx(
+                cursor, [operator_id], day_obj - timedelta(days=1), day_obj + timedelta(days=1)
+            )
             rebuild = self._rebuild_operator_status_segments_tx(
                 cursor, [operator_id],
                 day_obj - timedelta(days=1), day_obj + timedelta(days=1)
@@ -33804,6 +33981,7 @@ class Database:
         return {
             'day': day_obj.strftime('%Y-%m-%d'),
             'segments_saved': int(rebuild.get('segments_saved') or 0),
+            'auto_closed': int(auto_closed),
             'auto_aggregation': recalc
         }
 

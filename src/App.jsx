@@ -28226,6 +28226,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 {(attendanceMarks.list || []).map((mark) => {
                                                     const isIn = mark.kind === 'in';
                                                     const timeText = String(mark.event_at || '').slice(11, 16);
+                                                    // Авто-закрытие смены правке не подлежит: оно живёт, только пока
+                                                    // нет настоящей отметки ухода (добавьте свою — авто исчезнет).
+                                                    if (mark.auto) {
+                                                        return (
+                                                            <span
+                                                                key={`att-mark-${mark.id}`}
+                                                                className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border border-dashed border-slate-300 bg-slate-50 text-slate-500 text-[11px]"
+                                                                title="Уход не отмечен — смена закрыта автоматически. Добавьте отметку ухода нужным временем, и это закрытие исчезнет."
+                                                            >
+                                                                <FaIcon className="fas fa-wand-magic-sparkles text-[9px]"></FaIcon>
+                                                                <span className="font-semibold tabular-nums">{timeText}</span>
+                                                                <span>Уход (авто)</span>
+                                                            </span>
+                                                        );
+                                                    }
                                                     return (
                                                         <span
                                                             key={`att-mark-${mark.id}`}
