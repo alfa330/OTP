@@ -19,6 +19,37 @@ const CALCULATION_MODELS = [
     icon: 'fa-comments',
     chip: 'emerald',
   },
+  // Модели направлений отдела продаж: пока только учёт отработанных часов и
+  // штрафы (опоздания). Коды должны совпадать с CALCULATION_MODEL_OP_* бэка,
+  // иначе normalizeCalculationModelCode сбросит модель направления в operator.
+  {
+    code: 'op_verificator',
+    name: 'ОП — Верификатор',
+    description: 'Направление «Верификатор»: ручной учёт отработанных часов и штрафы (опоздания).',
+    icon: 'fa-user-check',
+    chip: 'amber',
+  },
+  {
+    code: 'op_yandex_reg',
+    name: 'ОП — Яндекс Регистрация',
+    description: 'Направление «Яндекс Регистрация»: ручной учёт отработанных часов и штрафы (опоздания).',
+    icon: 'fa-id-card',
+    chip: 'amber',
+  },
+  {
+    code: 'op_osnova',
+    name: 'ОП — Основа',
+    description: 'Направление «Основа ОП»: ручной учёт отработанных часов и штрафы (опоздания).',
+    icon: 'fa-layer-group',
+    chip: 'amber',
+  },
+  {
+    code: 'op_potok',
+    name: 'ОП — Поток',
+    description: 'Направление «Поток»: ручной учёт отработанных часов и штрафы (опоздания).',
+    icon: 'fa-random',
+    chip: 'amber',
+  },
 ];
 
 const EMPTY_DESCRIPTION = 'Нет описания';

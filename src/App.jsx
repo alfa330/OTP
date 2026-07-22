@@ -1977,6 +1977,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         { key: "fines", label: "Штрафы", unit: "₸" }
         ];
 
+        // Модели с зашитыми ветками вкладок (VIEW_TABS): их состав не трогаем.
+        // Все остальные модели (напр. направления ОП) строят вкладки из реестра
+        // метрик бэка (calculation_model_metrics) — добавление метрики модели на
+        // бэке само расширяет экран учёта часов.
+        const LEGACY_TAB_MODEL_CODES = new Set(['', 'operator', 'chat_manager', 'tez_line', 'tez_op']);
+
         function parseTimeToMinutes(t) {
         if (!t) return null;
         const m = t.match(/(\d{1,2}):(\d{2})/);
@@ -4725,6 +4731,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         // Метки вкладок по модели. НЕ мутируем общий const TABS — строим производный массив.
         const VIEW_TABS = useMemo(() => {
+            // Реестровые модели (не из LEGACY-набора): показываем только метрики,
+            // объявленные для модели в calculation_model_metrics. Пока реестр не
+            // загружен — легаси-поведение (полный TABS).
+            if (activeCalcModelCode && !LEGACY_TAB_MODEL_CODES.has(activeCalcModelCode)) {
+                const registryMetrics = calcModelMetrics?.[activeCalcModelCode];
+                if (Array.isArray(registryMetrics) && registryMetrics.length) {
+                    const registryKeys = new Set(registryMetrics.map((m) => m?.key));
+                    return TABS.filter((t) => registryKeys.has(t.key));
+                }
+            }
             if (isChatModel) {
                 // Чат-модель: «Звонки»→«Чаты», убираем «Эффективность» (её у чата нет),
                 // добавляем «Средняя оценка» и «Среднее время ответа» (вводятся в модалке).
@@ -4751,7 +4767,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return out;
             }
             return TABS;
-        }, [isChatModel, isTezOpContext]);
+        }, [isChatModel, isTezOpContext, activeCalcModelCode, calcModelMetrics]);
+
+        // Смена группы/модели может убрать выбранную вкладку (напр. «Звонки» у
+        // моделей ОП) — откатываемся на «Отработанные часы» (есть у всех моделей).
+        useEffect(() => {
+            if (!VIEW_TABS.some((t) => t.key === selectedTab)) {
+                setSelectedTab('work_time');
+            }
+        }, [VIEW_TABS, selectedTab]);
 
         const WORKHOURS_METRIC_GROUPS = useMemo(() => {
             const byKey = new Map((VIEW_TABS || []).map(tab => [tab.key, tab]));

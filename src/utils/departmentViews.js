@@ -22,6 +22,8 @@ const SALES_SUPERVISOR_VIEWS = [
     'call_division',
     'ai_qa',
     'work_schedules',
+    // Учёт часов открыт СВ ОП (модели направлений ОП: часы + штрафы).
+    'sv_hours',
     'trainings',
     'technical_issues',
     'surveys',
