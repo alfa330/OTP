@@ -75,6 +75,15 @@ BROWSER_HEADERS = {
 }
 
 
+class TezBadRequest(RuntimeError):
+    """400 от TEZ APP — как правило невалидный номер в теле запроса.
+
+    Важно: API валидирует ВЕСЬ батч, поэтому один плохой номер из 100 роняет
+    запрос целиком. Отдельный класс нужен, чтобы вызывающий мог разбить батч
+    пополам и потерять только реально битые номера, а не всю сотню.
+    """
+
+
 def _looks_like_cloudflare_block(text):
     """Похоже ли тело ответа на страницу-заглушку Cloudflare (а не на JSON API)."""
     low = str(text or "").lower()
@@ -192,6 +201,12 @@ class TezFirstOrdersClient:
                     "TEZ APP: 401 — неверный X-Integration-Token (для api.tezapp.org "
                     "подходит только prod-токен)"
                 )
+            if resp.status_code == 400:
+                # Валидируется весь батч — один плохой номер роняет сотню. Бросаем
+                # особый класс, чтобы fetch_first_orders разбил батч и потерял
+                # только реально битые номера.
+                snippet = resp.text[:200].replace("\n", " ").strip()
+                raise TezBadRequest(f"TEZ APP 400: {snippet}")
             if resp.status_code in RETRY_STATUSES and attempt < MAX_RETRIES:
                 last_error = f"HTTP {resp.status_code}"
                 time.sleep(RETRY_PAUSE * attempt)
@@ -236,14 +251,27 @@ class TezFirstOrdersClient:
 
         names = full_names or {}
         out = {}
+        rejected = []
         total = len(normalized)
-        for start in range(0, total, MAX_BATCH_SIZE):
-            chunk = normalized[start:start + MAX_BATCH_SIZE]
-            drivers = [
-                {"full_name": names.get(p) or "-", "phone": to_e164(p)}
-                for p in chunk
-            ]
-            rows = self._post_batch(drivers, month)
+
+        def _fetch_chunk(chunk):
+            """Запрашивает пачку номеров; на 400 (битый номер в батче) делит
+            пополам, чтобы вычислить и изолировать реально невалидные номера,
+            а не терять всю сотню."""
+            if not chunk:
+                return
+            drivers = [{"full_name": names.get(p) or "-", "phone": to_e164(p)} for p in chunk]
+            try:
+                rows = self._post_batch(drivers, month)
+            except TezBadRequest:
+                if len(chunk) == 1:
+                    # Один номер и он же битый — по нему у нас данных не будет.
+                    rejected.append(chunk[0])
+                    return
+                mid = len(chunk) // 2
+                _fetch_chunk(chunk[:mid])
+                _fetch_chunk(chunk[mid:])
+                return
             for row in rows:
                 norm = normalize_kz_phone(row.get("phone"))
                 if norm:
@@ -256,10 +284,19 @@ class TezFirstOrdersClient:
             for p in chunk:
                 out.setdefault(p, {"month": None, "prev": None})
 
+        for start in range(0, total, MAX_BATCH_SIZE):
+            chunk = normalized[start:start + MAX_BATCH_SIZE]
+            _fetch_chunk(chunk)
+
             if progress:
                 progress(min(start + len(chunk), total), total)
             if start + MAX_BATCH_SIZE < total:
                 time.sleep(BATCH_PAUSE)
+
+        # Номера, которые TEZ APP отверг как невалидные (прошли наш нормализатор,
+        # но API их не принял) — добавляем к списку невалидных для отчёта.
+        if rejected:
+            self.last_invalid = list(self.last_invalid) + rejected
         return out
 
 
