@@ -242,15 +242,28 @@ class ClocksterFrontendTests(unittest.TestCase):
         self.assertIn("if (modalActiveTab === 'attendance' && !modalShowAttendanceTab) setModalActiveTab('shifts');", self.src)
 
     def test_attendance_marks_section_in_timeline_modal(self):
-        # Секция «Отметки Clockster» в модалке таймлайна дня: список отметок дня,
-        # смена типа (приход↔уход), добавление и удаление — только для ОП/админов.
+        # Секция отметок: список за день, смена типа (приход↔уход), добавление и
+        # удаление — только для ОП/админов; та же секция и в панели таймлайна.
         self.assertIn("canManageAttendanceMarks", self.src)
-        self.assertIn("Отметки Clockster (приход/уход)", self.src)
+        self.assertIn("Отметки за день", self.src)
         self.assertIn("const fetchAttendanceMarks = async (opId, dateKey)", self.src)
         self.assertIn("const toggleAttendanceMarkKind = (mark)", self.src)
         self.assertIn("const deleteAttendanceMark = (mark)", self.src)
         self.assertIn("const addAttendanceMark = ()", self.src)
         self.assertIn("/api/attendance_marks", self.src)
+
+    def test_section_uses_project_ios_design_system(self):
+        # Секция собрана из примитивов components/ui/ios, а не собственной вёрстки:
+        # так таб выглядит как остальной сайт (macOS/iOS).
+        self.assertIn("from './components/ui/ios'", self.src)
+        func_start = self.src.index("const renderAttendanceMarksSection = ")
+        func = self.src[func_start:func_start + 14000]
+        for primitive in ("APPLE_FONT", "iosCard", "iosGroupLabel", "iosInput", "iosBtnPrimary", "IosBadge"):
+            self.assertIn(primitive, func)
+        # Сегментированный контрол типа вместо <select> и сгруппированный список.
+        self.assertIn("divide-y divide-slate-100", func)
+        self.assertIn("rounded-xl bg-slate-100 p-0.5", func)
+        self.assertNotIn("<select", func)
 
     def test_section_shown_only_after_successful_load(self):
         # Отдел ОПЕРАТОРА знает только бэкенд (в планировщике у оператора есть

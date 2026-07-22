@@ -24,6 +24,7 @@ import OrazAitSplash from './components/common/OrazAitSplash';
 import ScheduleTimelineTooltip from './components/common/ScheduleTimelineTooltip';
 import sidebarLogo from './components/common/sidebar-logo.svg';
 import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
+import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, IosBadge } from './components/ui/ios';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId } from './utils/roles';
 import { departmentAllowsView, departmentHidesColleagueSchedules, departmentRestrictsViews, departmentUsesSimpleEmployeeAccounting, firstAllowedView } from './utils/departmentViews';
 import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan } from './utils/salaryFormula';
@@ -17103,105 +17104,154 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             // Секция отметок рисуется в двух местах: таб «Отметки» модалки дня
             // (основное) и панель таймлайна (там рядом видны полосы статусов).
-            const renderAttendanceMarksSection = ({ compact = false } = {}) => (
-                <div className={`rounded-lg border border-indigo-200 bg-indigo-50/40 p-2 ${compact ? 'mb-3' : 'mb-0'}`}>
-                    <div className="flex items-center justify-between gap-2 mb-1 flex-wrap">
-                        <div className="text-[11px] font-semibold text-indigo-800">
-                            <FaIcon className="fas fa-user-clock mr-1"></FaIcon>
-                            Отметки Clockster (приход/уход)
+            // Секция отметок в стиле дизайн-системы проекта (components/ui/ios):
+            // сгруппированный список строк, сегментированный контрол типа, мягкие
+            // карточки. Рисуется в двух местах: таб «Отметки» модалки дня (основное)
+            // и панель таймлайна (там рядом видны полосы статусов).
+            const renderAttendanceMarksSection = ({ compact = false } = {}) => {
+                const marks = attendanceMarks.list || [];
+                const kindMeta = (mark) => (mark.kind === 'in'
+                    ? { label: 'Приход', icon: 'fa-arrow-right', dot: 'bg-emerald-50 text-emerald-600 ring-emerald-100' }
+                    : { label: 'Уход', icon: 'fa-sign-out-alt', dot: 'bg-slate-100 text-slate-500 ring-slate-200' });
+
+                return (
+                    <div style={{ fontFamily: APPLE_FONT }} className={compact ? 'mb-3' : ''}>
+                        <div className="flex items-end justify-between gap-2 mb-1.5">
+                            <div className={iosGroupLabel}>Отметки за день</div>
+                            {marks.length > 0 && (
+                                <span className="px-1 text-[11px] tabular-nums text-slate-400">
+                                    {marks.filter(m => m.kind === 'in').length} прих. · {marks.filter(m => m.kind === 'out').length} ух.
+                                </span>
+                            )}
                         </div>
-                        <div className="text-[10px] text-indigo-700/70">
-                            Терминал один на вход и выход — тип отметки можно исправить; правки переживают ночной синк
+
+                        <div className={`${iosCard} overflow-hidden`}>
+                            {attendanceMarks.loading ? (
+                                <div className="flex items-center gap-2 px-4 py-3.5 text-[13px] text-slate-400">
+                                    <FaIcon className="fas fa-spinner fa-spin text-[12px]"></FaIcon>
+                                    Загрузка отметок…
+                                </div>
+                            ) : marks.length === 0 ? (
+                                <div className="flex flex-col items-center gap-1 px-4 py-6 text-center">
+                                    <div className="grid h-9 w-9 place-items-center rounded-full bg-slate-100 text-slate-400">
+                                        <FaIcon className="fas fa-door-open text-[13px]"></FaIcon>
+                                    </div>
+                                    <div className="text-[13px] font-medium text-slate-500">Отметок за этот день нет</div>
+                                    <div className="text-[12px] text-slate-400">Их можно добавить вручную ниже</div>
+                                </div>
+                            ) : (
+                                <ul className="divide-y divide-slate-100">
+                                    {marks.map((mark) => {
+                                        const meta = kindMeta(mark);
+                                        const timeText = String(mark.event_at || '').slice(11, 16);
+                                        // Авто-закрытие правке не подлежит: оно живёт, только пока нет
+                                        // настоящей отметки ухода (добавьте свою — авто исчезнет).
+                                        const isAuto = !!mark.auto;
+                                        return (
+                                            <li
+                                                key={`att-mark-${mark.id}`}
+                                                className={`flex items-center gap-3 px-3.5 py-2.5 ${isAuto ? 'bg-slate-50/60' : 'bg-white'}`}
+                                            >
+                                                <div className={`grid h-8 w-8 shrink-0 place-items-center rounded-full ring-1 ${isAuto ? 'bg-white text-slate-400 ring-slate-200' : meta.dot}`}>
+                                                    <FaIcon className={`fas ${isAuto ? 'fa-wand-magic-sparkles' : meta.icon} text-[12px]`}></FaIcon>
+                                                </div>
+
+                                                <div className="min-w-0 flex-1">
+                                                    <div className="flex items-baseline gap-2">
+                                                        <span className={`text-[15px] font-semibold tabular-nums ${isAuto ? 'text-slate-500' : 'text-slate-900'}`}>
+                                                            {timeText}
+                                                        </span>
+                                                        <span className={`text-[13px] ${isAuto ? 'text-slate-400' : 'text-slate-500'}`}>
+                                                            {meta.label}
+                                                        </span>
+                                                    </div>
+                                                    {isAuto && (
+                                                        <div className="mt-0.5 text-[11.5px] text-slate-400">
+                                                            Уход не отмечен — смена закрыта автоматически
+                                                        </div>
+                                                    )}
+                                                </div>
+
+                                                {mark.manual && !isAuto && <IosBadge tone="blue">вручную</IosBadge>}
+                                                {isAuto && <IosBadge tone="slate">авто</IosBadge>}
+
+                                                {!isAuto && (
+                                                    <div className="flex shrink-0 items-center gap-1">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => toggleAttendanceMarkKind(mark)}
+                                                            disabled={attendanceMarkBusy}
+                                                            className="grid h-8 w-8 place-items-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 active:scale-95 disabled:opacity-40"
+                                                            title={mark.kind === 'in' ? 'Сменить на «Уход»' : 'Сменить на «Приход»'}
+                                                        >
+                                                            <FaIcon className="fas fa-random text-[12px]"></FaIcon>
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => deleteAttendanceMark(mark)}
+                                                            disabled={attendanceMarkBusy}
+                                                            className="grid h-8 w-8 place-items-center rounded-full text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 active:scale-95 disabled:opacity-40"
+                                                            title="Удалить отметку"
+                                                        >
+                                                            <FaIcon className="fas fa-times text-[12px]"></FaIcon>
+                                                        </button>
+                                                    </div>
+                                                )}
+                                            </li>
+                                        );
+                                    })}
+                                </ul>
+                            )}
                         </div>
-                    </div>
-                    {attendanceMarks.loading ? (
-                        <div className="text-[11px] text-slate-500 py-1">Загрузка отметок...</div>
-                    ) : (
-                    <>
-                        {(attendanceMarks.list || []).length === 0 && (
-                            <div className="text-[11px] text-slate-500 py-1">За этот день отметок нет.</div>
+
+                        {!attendanceMarks.loading && (
+                        <>
+                            <div className={`${iosGroupLabel} mt-4 mb-1.5 block`}>Добавить отметку</div>
+                            <div className={`${iosCard} flex flex-wrap items-center gap-2 p-3`}>
+                                <input
+                                    type="time"
+                                    value={attendanceMarkDraft.time}
+                                    onChange={(e) => setAttendanceMarkDraft(prev => ({ ...prev, time: e.target.value }))}
+                                    className={`${iosInput} w-auto min-w-[104px] flex-none tabular-nums`}
+                                />
+                                <div className="inline-flex flex-none rounded-xl bg-slate-100 p-0.5">
+                                    {[{ key: 'in', label: 'Приход' }, { key: 'out', label: 'Уход' }].map(opt => {
+                                        const active = attendanceMarkDraft.kind === opt.key;
+                                        return (
+                                            <button
+                                                key={opt.key}
+                                                type="button"
+                                                onClick={() => setAttendanceMarkDraft(prev => ({ ...prev, kind: opt.key }))}
+                                                className={`rounded-[10px] px-3.5 py-2 text-[13px] font-medium transition-all ${
+                                                    active ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+                                                }`}
+                                            >
+                                                {opt.label}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={addAttendanceMark}
+                                    disabled={attendanceMarkBusy || !attendanceMarkDraft.time}
+                                    className={`${iosBtnPrimary} ml-auto`}
+                                >
+                                    <FaIcon className={`fas ${attendanceMarkBusy ? 'fa-spinner fa-spin' : 'fa-plus'} text-[11px]`}></FaIcon>
+                                    Добавить
+                                </button>
+                            </div>
+
+                            <p className="mt-2 px-1 text-[11.5px] leading-relaxed text-slate-500">
+                                Терминал Clockster один на вход и выход, поэтому тип отметки иногда определяется
+                                неверно — переключите его кнопкой <FaIcon className="fas fa-random mx-0.5 text-[10px]"></FaIcon>.
+                                Правки сохраняются и не теряются при ночной синхронизации.
+                            </p>
+                        </>
                         )}
-                        <div className="flex flex-wrap gap-1.5">
-                            {(attendanceMarks.list || []).map((mark) => {
-                                const isIn = mark.kind === 'in';
-                                const timeText = String(mark.event_at || '').slice(11, 16);
-                                // Авто-закрытие смены правке не подлежит: оно живёт, только пока
-                                // нет настоящей отметки ухода (добавьте свою — авто исчезнет).
-                                if (mark.auto) {
-                                    return (
-                                        <span
-                                            key={`att-mark-${mark.id}`}
-                                            className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border border-dashed border-slate-300 bg-slate-50 text-slate-500 text-[11px]"
-                                            title="Уход не отмечен — смена закрыта автоматически. Добавьте отметку ухода нужным временем, и это закрытие исчезнет."
-                                        >
-                                            <FaIcon className="fas fa-wand-magic-sparkles text-[9px]"></FaIcon>
-                                            <span className="font-semibold tabular-nums">{timeText}</span>
-                                            <span>Уход (авто)</span>
-                                        </span>
-                                    );
-                                }
-                                return (
-                                    <span
-                                        key={`att-mark-${mark.id}`}
-                                        className={`inline-flex items-center gap-1.5 pl-2 pr-1 py-1 rounded-lg border text-[11px] ${isIn ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : 'border-slate-300 bg-white text-slate-700'}`}
-                                    >
-                                        <FaIcon className={`fas ${isIn ? 'fa-arrow-right' : 'fa-sign-out-alt'} text-[9px]`}></FaIcon>
-                                        <span className="font-semibold tabular-nums">{timeText}</span>
-                                        <span>{isIn ? 'Приход' : 'Уход'}</span>
-                                        {mark.manual && (
-                                            <span className="px-1 rounded bg-indigo-100 text-indigo-700 text-[9px]">ручная</span>
-                                        )}
-                                        <button
-                                            type="button"
-                                            onClick={() => toggleAttendanceMarkKind(mark)}
-                                            disabled={attendanceMarkBusy}
-                                            className="w-5 h-5 flex items-center justify-center rounded hover:bg-black/10 disabled:opacity-50"
-                                            title={isIn ? 'Сменить на «Уход»' : 'Сменить на «Приход»'}
-                                        >
-                                            <FaIcon className="fas fa-random text-[9px]"></FaIcon>
-                                        </button>
-                                        <button
-                                            type="button"
-                                            onClick={() => deleteAttendanceMark(mark)}
-                                            disabled={attendanceMarkBusy}
-                                            className="w-5 h-5 flex items-center justify-center rounded hover:bg-rose-100 text-rose-600 disabled:opacity-50"
-                                            title="Удалить отметку"
-                                        >
-                                            <FaIcon className="fas fa-times text-[9px]"></FaIcon>
-                                        </button>
-                                    </span>
-                                );
-                            })}
-                        </div>
-                        <div className="mt-2 pt-2 border-t border-indigo-100 flex items-center gap-2 flex-wrap">
-                            <input
-                                type="time"
-                                value={attendanceMarkDraft.time}
-                                onChange={(e) => setAttendanceMarkDraft(prev => ({ ...prev, time: e.target.value }))}
-                                className="px-2 py-1 rounded border border-slate-300 text-[12px] bg-white"
-                            />
-                            <select
-                                value={attendanceMarkDraft.kind}
-                                onChange={(e) => setAttendanceMarkDraft(prev => ({ ...prev, kind: e.target.value }))}
-                                className="px-2 py-1 rounded border border-slate-300 text-[12px] bg-white"
-                            >
-                                <option value="in">Приход</option>
-                                <option value="out">Уход</option>
-                            </select>
-                            <button
-                                type="button"
-                                onClick={addAttendanceMark}
-                                disabled={attendanceMarkBusy || !attendanceMarkDraft.time}
-                                className="px-3 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-medium disabled:opacity-50 flex items-center gap-1.5"
-                            >
-                                <FaIcon className={`fas ${attendanceMarkBusy ? 'fa-spinner fa-spin' : 'fa-plus'} text-[10px]`}></FaIcon>
-                                Добавить отметку
-                            </button>
-                        </div>
-                    </>
-                    )}
-                </div>
-            );
+                    </div>
+                );
+            };
 
             // === Синхронизация отметок Clockster (приход/уход отдела продаж) за видимый диапазон ===
             const CLOCKSTER_SYNC_MAX_DAYS = 10;
@@ -25790,9 +25840,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     {!isBulkSelectionModal && modalTabAttendance && (
                     <div className="mb-6">
                         {renderAttendanceMarksSection()}
-                        <div className="mt-2 text-[11px] text-slate-500">
-                            Часы и опоздание за день пересчитываются сразу после правки: работа считается
-                            как пересечение смены с промежутком «приход → уход».
+                        <div className="mt-3 flex items-start gap-2 rounded-xl bg-blue-50/70 px-3 py-2.5 ring-1 ring-blue-100">
+                            <FaIcon className="fas fa-circle-info mt-0.5 text-[12px] text-blue-500"></FaIcon>
+                            <p className="text-[11.5px] leading-relaxed text-blue-900/80" style={{ fontFamily: APPLE_FONT }}>
+                                Часы и опоздание пересчитываются сразу после правки: отработанным считается
+                                пересечение смены с промежутком «приход → уход».
+                            </p>
                         </div>
                     </div>
                     )}
