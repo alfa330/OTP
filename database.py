@@ -169,12 +169,28 @@ CALCULATION_MODEL_CHAT_MANAGER = 'chat_manager'
 CALCULATION_MODEL_TEZ_LINE = 'tez_line'
 CALCULATION_MODEL_TEZ_OP = 'tez_op'
 CALCULATION_MODEL_TEZ_CODES = {CALCULATION_MODEL_TEZ_LINE, CALCULATION_MODEL_TEZ_OP}
+# Модели отдела продаж (ОП): по одной модели на направление отдела
+# («Верификатор», «Яндекс Регистрация», «Основа ОП», «Поток»). Пока в них
+# только ручной учёт отработанных часов и штрафы (опоздания фиксируются
+# штрафом); новые метрики добавляются в CALCULATION_MODEL_METRICS по мере
+# запуска. Часы считаются по операторскому статус-профилю (default-ветка
+# _status_profile_for_calculation_model).
+CALCULATION_MODEL_OP_VERIFICATOR = 'op_verificator'
+CALCULATION_MODEL_OP_YANDEX_REG = 'op_yandex_reg'
+CALCULATION_MODEL_OP_OSNOVA = 'op_osnova'
+CALCULATION_MODEL_OP_POTOK = 'op_potok'
+CALCULATION_MODEL_OP_SALES_CODES = {
+    CALCULATION_MODEL_OP_VERIFICATOR,
+    CALCULATION_MODEL_OP_YANDEX_REG,
+    CALCULATION_MODEL_OP_OSNOVA,
+    CALCULATION_MODEL_OP_POTOK,
+}
 CALCULATION_MODEL_ALLOWED = {
     CALCULATION_MODEL_OPERATOR,
     CALCULATION_MODEL_CHAT_MANAGER,
     CALCULATION_MODEL_TEZ_LINE,
     CALCULATION_MODEL_TEZ_OP
-}
+} | CALCULATION_MODEL_OP_SALES_CODES
 CALCULATION_MODEL_DESCRIPTIONS = {
     CALCULATION_MODEL_OPERATOR: {
         'code': CALCULATION_MODEL_OPERATOR,
@@ -195,6 +211,26 @@ CALCULATION_MODEL_DESCRIPTIONS = {
         'code': CALCULATION_MODEL_TEZ_OP,
         'name': 'TEZ — ОП',
         'description': 'TEZ-модель «ОП»: рабочие часы по выгрузке статусов TEZ, качество и месячный план (% выполнения по сделкам).'
+    },
+    CALCULATION_MODEL_OP_VERIFICATOR: {
+        'code': CALCULATION_MODEL_OP_VERIFICATOR,
+        'name': 'ОП — Верификатор',
+        'description': 'Модель направления «Верификатор» отдела продаж: ручной учёт отработанных часов и штрафы (опоздания).'
+    },
+    CALCULATION_MODEL_OP_YANDEX_REG: {
+        'code': CALCULATION_MODEL_OP_YANDEX_REG,
+        'name': 'ОП — Яндекс Регистрация',
+        'description': 'Модель направления «Яндекс Регистрация» отдела продаж: ручной учёт отработанных часов и штрафы (опоздания).'
+    },
+    CALCULATION_MODEL_OP_OSNOVA: {
+        'code': CALCULATION_MODEL_OP_OSNOVA,
+        'name': 'ОП — Основа',
+        'description': 'Модель направления «Основа ОП» отдела продаж: ручной учёт отработанных часов и штрафы (опоздания).'
+    },
+    CALCULATION_MODEL_OP_POTOK: {
+        'code': CALCULATION_MODEL_OP_POTOK,
+        'name': 'ОП — Поток',
+        'description': 'Модель направления «Поток» отдела продаж: ручной учёт отработанных часов и штрафы (опоздания).'
     }
 }
 
@@ -237,6 +273,10 @@ def get_calculation_model_catalog() -> List[Dict[str, str]]:
         dict(CALCULATION_MODEL_DESCRIPTIONS[CALCULATION_MODEL_CHAT_MANAGER]),
         dict(CALCULATION_MODEL_DESCRIPTIONS[CALCULATION_MODEL_TEZ_LINE]),
         dict(CALCULATION_MODEL_DESCRIPTIONS[CALCULATION_MODEL_TEZ_OP]),
+        dict(CALCULATION_MODEL_DESCRIPTIONS[CALCULATION_MODEL_OP_VERIFICATOR]),
+        dict(CALCULATION_MODEL_DESCRIPTIONS[CALCULATION_MODEL_OP_YANDEX_REG]),
+        dict(CALCULATION_MODEL_DESCRIPTIONS[CALCULATION_MODEL_OP_OSNOVA]),
+        dict(CALCULATION_MODEL_DESCRIPTIONS[CALCULATION_MODEL_OP_POTOK]),
     ]
 
 
@@ -279,6 +319,11 @@ _CALC_METRICS_TAIL = [
     _calc_metric('bonuses', 'Бонусы', '₸', 'manual', 'daily_bonuses'),
     _calc_metric('fines', 'Штрафы', '₸', 'manual', 'daily_fines'),
 ]
+# Минимальный набор моделей направлений ОП: часы работы + штрафы (опоздания).
+_CALC_METRICS_OP_SALES = [
+    _calc_metric('work_time', 'Отработанные часы', 'ч', 'manual', 'daily_hours.work_time'),
+    _calc_metric('fines', 'Штрафы', '₸', 'manual', 'daily_fines'),
+]
 
 CALCULATION_MODEL_METRICS = {
     CALCULATION_MODEL_OPERATOR: _CALC_METRICS_HEAD + [
@@ -296,6 +341,13 @@ CALCULATION_MODEL_METRICS = {
     # (active+work in crm = работа, break in work = перерыв), остальное — общий хвост.
     CALCULATION_MODEL_TEZ_LINE: _CALC_METRICS_HEAD + _CALC_METRICS_TAIL,
     CALCULATION_MODEL_TEZ_OP: _CALC_METRICS_HEAD + _CALC_METRICS_TAIL,
+    # Модели направлений ОП: пока только отработанные часы (ручной ввод) и
+    # штрафы (учёт опозданий). Состав вкладок учёта часов фронт берёт из этого
+    # реестра, поэтому новая метрика = новая строка здесь.
+    CALCULATION_MODEL_OP_VERIFICATOR: list(_CALC_METRICS_OP_SALES),
+    CALCULATION_MODEL_OP_YANDEX_REG: list(_CALC_METRICS_OP_SALES),
+    CALCULATION_MODEL_OP_OSNOVA: list(_CALC_METRICS_OP_SALES),
+    CALCULATION_MODEL_OP_POTOK: list(_CALC_METRICS_OP_SALES),
 }
 
 
