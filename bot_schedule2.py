@@ -5751,15 +5751,16 @@ def _chatapp_department_id():
 def _chatapp_guard():
     """(requester_id, err) для раздела «Чаты ChatApp».
 
-    Доступ: админы (любые), глава отдела ТЭЗ и СВ отдела ТЭЗ. СВ и главу режем
-    по отделу намеренно — граница отдела в проекте держится строго, и чужому
-    СВ переписка ТЭЗ не нужна. _ai_qa_guard здесь не годится: он про ОП/СЗоВ."""
+    Доступ: глобальные админы, глава отдела ТЭЗ и СВ отдела ТЭЗ. СВ и главу
+    режем по отделу намеренно — граница отдела в проекте держится строго, и
+    главе/СВ чужого отдела переписка ТЭЗ не нужна. _ai_qa_guard здесь не
+    годится: он про ОП/СЗоВ."""
     requester_id, requester, auth_error = _get_authenticated_requester()
     if auth_error:
         message, status_code = auth_error
         return None, (jsonify({"error": message}), status_code)
     role = _normalize_user_role(requester[3])
-    if _is_admin_role(role):
+    if _is_global_admin_requester(role, requester_id):
         return requester_id, None
     department_id = _chatapp_department_id()
     if department_id is not None:
@@ -28420,9 +28421,10 @@ def get_work_schedule_break_rules():
         if not (_is_admin_role(role) or _is_supervisor_role(role) or _headed_department_id(requester_id) is not None):
             return jsonify({"error": "Forbidden"}), 403
 
-        # Изоляция отделов: админ/супер-админ видят правила перерывов всех
-        # направлений; глава отдела / супервайзер — только направлений своего отдела.
-        if _is_admin_role(role):
+        # Изоляция отделов: глобальный админ видит правила перерывов всех
+        # направлений; глава отдела (в т.ч. с базовой admin-ролью) и
+        # супервайзер — только направлений своего отдела.
+        if _is_global_admin_requester(role, requester_id):
             scope_dept = None
         else:
             scope_dept = _headed_department_id(requester_id) or db.get_user_department_id(requester_id)
