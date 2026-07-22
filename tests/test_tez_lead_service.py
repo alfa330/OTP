@@ -236,6 +236,41 @@ class FirstOrdersContractTests(unittest.TestCase):
         res = client.fetch_first_orders(['77000409090'], month='2026-07')
         self.assertEqual(res['77000409090'], {'month': None, 'prev': None})
 
+    def test_bad_number_does_not_sink_whole_batch(self):
+        """400 из-за одного битого номера не должен терять остальные из батча:
+        клиент делит батч пополам и изолирует только битый номер."""
+        from tez_first_orders import TezFirstOrdersClient
+        bad = '77000000001'   # этот номер API «отвергает»
+
+        class _OkResp:
+            status_code = 200; text = ''; headers = {}
+            def __init__(self, drivers): self._d = drivers
+            def json(self): return {'drivers': self._d}
+
+        class _BadResp:
+            status_code = 400
+            text = '{"error":"bad phone","error_code":30168}'
+            headers = {}
+            def json(self): return {}
+
+        class _Session:
+            def post(self, url, data=None, headers=None, timeout=None):
+                import json as _json
+                phones = [d['phone'] for d in _json.loads(data.decode())['drivers']]
+                if '+' + bad in phones:
+                    return _BadResp()
+                return _OkResp([{'phone': p, 'month_first_order_at': None,
+                                 'previous_month_first_order_at': None} for p in phones])
+
+        client = TezFirstOrdersClient(token='x')
+        client.session = _Session()
+        res = client.fetch_first_orders(['77000409090', bad, '77023227108'], month='2026-07')
+        # хорошие номера получены, битый — в last_invalid, а не потоплен весь батч
+        self.assertIn('77000409090', res)
+        self.assertIn('77023227108', res)
+        self.assertNotIn(bad, res)
+        self.assertIn(bad, client.last_invalid)
+
 
 class CloudflareDetectionTests(unittest.TestCase):
     """403 от TEZ APP c Cloudflare-заглушкой должен опознаваться (а не течь в UI сырым)."""
