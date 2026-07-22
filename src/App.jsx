@@ -25,7 +25,7 @@ import ScheduleTimelineTooltip from './components/common/ScheduleTimelineTooltip
 import sidebarLogo from './components/common/sidebar-logo.svg';
 import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId } from './utils/roles';
-import { departmentAllowsView, departmentRestrictsViews, firstAllowedView } from './utils/departmentViews';
+import { departmentAllowsView, departmentHidesColleagueSchedules, departmentRestrictsViews, firstAllowedView } from './utils/departmentViews';
 import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan } from './utils/salaryFormula';
 
 const CHUNK_RELOAD_STORAGE_KEY = 'otp_chunk_reload_attempted';
@@ -14107,6 +14107,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const cellMinWidth = viewMode === 'month' ? 110 : viewMode === 'week' ? 110 : undefined;
             const plannerStatusSpecialDayViewEnabled = viewMode === 'day' && !!plannerStatusSpecialViewEnabled;
             const isOperatorSelfSchedules = user?.role === 'operator';
+            // Фронт офисы: оператору нельзя видеть смены коллег — табы
+            // «Замены»/«Смены коллег» и кнопки обмена сменами скрыты.
+            const operatorColleagueShiftsHidden = isOperatorSelfSchedules && departmentHidesColleagueSchedules(user);
             const operatorTodayKey = todayDateStr(new Date());
             const makeSelectedCellKey = (opId, date) => `${String(opId)}|${date}`;
             const sortSelectedTargets = (targets = []) => (
@@ -20490,7 +20493,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const swapNextDayDate = swapForm.swapDate ? todayDateStr(addDays(parseDateStr(swapForm.swapDate), 1)) : '';
             const swapEndsNextDay = !!swapForm.swapDate && String(swapForm.endDate || '') === String(swapNextDayDate || '');
             const loadSwapRequests = useCallback(async ({ silent = false } = {}) => {
-                if (!isOperatorSelfSchedules || !user) return;
+                if (!isOperatorSelfSchedules || !user || operatorColleagueShiftsHidden) return;
                 if (!silent) {
                     setSwapRequestsLoading(true);
                 }
@@ -20517,13 +20520,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         setSwapRequestsLoading(false);
                     }
                 }
-            }, [isOperatorSelfSchedules, user]);
+            }, [isOperatorSelfSchedules, user, operatorColleagueShiftsHidden]);
             useEffect(() => {
                 if (!isOperatorSelfSchedules || !user) return;
                 loadSwapRequests({ silent: false });
             }, [isOperatorSelfSchedules, user, loadSwapRequests]);
+            // Если сменам коллег закрыт доступ — не даём остаться на скрытых табах.
             useEffect(() => {
-                if (!isOperatorSelfSchedules || !user || operatorSelfTab !== 'direction') return;
+                if (operatorColleagueShiftsHidden && operatorSelfTab !== 'schedule') {
+                    setOperatorSelfTab('schedule');
+                }
+            }, [operatorColleagueShiftsHidden, operatorSelfTab]);
+            useEffect(() => {
+                if (!isOperatorSelfSchedules || !user || operatorColleagueShiftsHidden || operatorSelfTab !== 'direction') return;
                 let cancelled = false;
                 const fetchDirectionSched = async () => {
                     try {
@@ -20551,7 +20560,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 };
                 fetchDirectionSched();
                 return () => { cancelled = true; };
-            }, [isOperatorSelfSchedules, user, operatorSelfTab, directionSchedWeekStart]);
+            }, [isOperatorSelfSchedules, user, operatorColleagueShiftsHidden, operatorSelfTab, directionSchedWeekStart]);
             useEffect(() => {
                 if (!isOperatorSelfSchedules || !user) return;
                 if (!swapTimeValidation.isValid) {
@@ -21848,6 +21857,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 </div>
                                                             ))
                                                         )}
+                                                        {!operatorColleagueShiftsHidden && (
                                                         <button
                                                             type="button"
                                                             onClick={() => handleOpenSwapModalForOwnShift(dayCard, seg)}
@@ -21857,6 +21867,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             <FaIcon className="fas fa-right-left text-[10px]"></FaIcon>
                                                             Обменять{shifts.length > 1 ? '' : ' смену'}
                                                         </button>
+                                                        )}
                                                     </div>
                                                 );
                                             })}
@@ -21927,6 +21938,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <FaIcon className="fas fa-calendar-user text-blue-600"></FaIcon>
                                                 Мои смены
                                             </h2>
+                                            {!operatorColleagueShiftsHidden && (
                                             <div className="flex items-center rounded-lg border border-slate-200 bg-white overflow-hidden shadow-sm">
                                                 <button
                                                     onClick={() => {
@@ -21957,6 +21969,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     Смены коллег
                                                 </button>
                                             </div>
+                                            )}
                                         </div>
                                         {operatorSelfTab === 'schedule' && (
                                             <div className="flex items-center gap-1.5 w-full sm:w-auto">
@@ -22307,6 +22320,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                     <span className="text-[15px] font-semibold leading-tight tabular-nums text-slate-900">{shiftTimeTextRu(seg)}</span>
                                                                                     <span className="text-[12px] text-slate-400">{plannerShiftTypeLabel(seg.shift_type ?? seg.shiftType)} · {formatHoursRu(seg.durationMin)}</span>
                                                                                 </div>
+                                                                                {!operatorColleagueShiftsHidden && (
                                                                                 <button
                                                                                     type="button"
                                                                                     onClick={() => handleOpenSwapModalForOwnShift(dayCard, seg)}
@@ -22315,6 +22329,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                     <FaIcon className="fas fa-right-left text-[10px]"></FaIcon>
                                                                                     Обменять
                                                                                 </button>
+                                                                                )}
                                                                             </div>
                                                                             {segBreaks.length === 0 ? (
                                                                                 <div className="mt-1 pl-[18px] text-[12px] text-slate-400">Без перерывов</div>
