@@ -30480,7 +30480,12 @@ def _attendance_marks_guard(operator_id):
         return None, (jsonify({"error": f"Отдел '{CLOCKSTER_SYNC_DEPARTMENT_CODE}' не найден"}), 404)
     if db.get_user_department_id(int(operator_id)) != dept_id:
         return None, (jsonify({"error": "Отметки Clockster ведутся только для отдела продаж"}), 400)
-    if not _is_admin_role(role) and db.get_user_department_id(requester_id) != dept_id:
+    # Граница отдела: глобальный админ — везде, СВ и глава отдела — только у себя.
+    # Скоуп берём через _department_scope_id_for_requester (возглавляемый отдел
+    # приоритетнее собственного), иначе глава ОП без своего department_id получал
+    # бы 403, а глава чужого отдела — доступ к отметкам ОП.
+    if not _is_global_admin_requester(role, requester_id) \
+            and _department_scope_id_for_requester(requester_id) != dept_id:
         return None, (jsonify({"error": "Forbidden: operator is not in your department"}), 403)
     return requester_id, None
 
