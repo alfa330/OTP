@@ -227,6 +227,20 @@ class ClocksterFrontendTests(unittest.TestCase):
         self.assertIn("CLOCKSTER_SYNC_MAX_DAYS", func)
         self.assertIn("slice(-CLOCKSTER_SYNC_MAX_DAYS)", func)
 
+    def test_attendance_tab_in_day_modal(self):
+        # Основное место правки — таб «Отметки» в модалке дня (панель таймлайна
+        # рисует ту же секцию для контекста). Таб только у операторов ОП.
+        self.assertIn("const modalShowAttendanceTab = modalShowTabs && canManageAttendanceMarks && attendanceMarks.available;", self.src)
+        self.assertIn("{ key: 'attendance', label: 'Отметки', icon: 'fa-door-open' }", self.src)
+        self.assertIn("modalTabAttendance && (", self.src)
+        # Одна реализация секции на оба места.
+        self.assertIn("const renderAttendanceMarksSection = ", self.src)
+        self.assertEqual(self.src.count("renderAttendanceMarksSection"), 3)
+        # Отметки грузятся при открытии модалки дня, а не только панели таймлайна.
+        self.assertIn("!modalState.open || !modalState.opId || !modalState.date", self.src)
+        # Пропал таб — не остаёмся на пустой вкладке.
+        self.assertIn("if (modalActiveTab === 'attendance' && !modalShowAttendanceTab) setModalActiveTab('shifts');", self.src)
+
     def test_attendance_marks_section_in_timeline_modal(self):
         # Секция «Отметки Clockster» в модалке таймлайна дня: список отметок дня,
         # смена типа (приход↔уход), добавление и удаление — только для ОП/админов.

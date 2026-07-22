@@ -17021,12 +17021,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             };
 
+            // Грузим отметки при открытии модалки дня (одиночный день, не bulk) —
+            // от этого зависит и появление таба «Отметки», и секция в таймлайне.
             useEffect(() => {
-                if (!canManageAttendanceMarks || !showEditTimelineModal || !modalState.opId || !modalState.date) return;
+                if (!canManageAttendanceMarks || !modalState.open || !modalState.opId || !modalState.date
+                    || modalState.multipleDates) {
+                    return;
+                }
                 setAttendanceMarkDraft({ time: '', kind: 'in' });
                 fetchAttendanceMarks(modalState.opId, String(modalState.date));
                 // eslint-disable-next-line react-hooks/exhaustive-deps
-            }, [canManageAttendanceMarks, showEditTimelineModal, modalState.opId, modalState.date]);
+            }, [canManageAttendanceMarks, modalState.open, modalState.opId, modalState.date, modalState.multipleDates]);
+
 
             // После правки отметки таймлайн/итоги пересчитаны на бэке — принудительно
             // перезагружаем статусы видимого диапазона (тот же приём, что у синков).
@@ -17094,6 +17100,108 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 path: `/api/attendance_marks/${mark.id}`,
                 body: { operator_id: modalState.opId }
             });
+
+            // Секция отметок рисуется в двух местах: таб «Отметки» модалки дня
+            // (основное) и панель таймлайна (там рядом видны полосы статусов).
+            const renderAttendanceMarksSection = ({ compact = false } = {}) => (
+                <div className={`rounded-lg border border-indigo-200 bg-indigo-50/40 p-2 ${compact ? 'mb-3' : 'mb-0'}`}>
+                    <div className="flex items-center justify-between gap-2 mb-1 flex-wrap">
+                        <div className="text-[11px] font-semibold text-indigo-800">
+                            <FaIcon className="fas fa-user-clock mr-1"></FaIcon>
+                            Отметки Clockster (приход/уход)
+                        </div>
+                        <div className="text-[10px] text-indigo-700/70">
+                            Терминал один на вход и выход — тип отметки можно исправить; правки переживают ночной синк
+                        </div>
+                    </div>
+                    {attendanceMarks.loading ? (
+                        <div className="text-[11px] text-slate-500 py-1">Загрузка отметок...</div>
+                    ) : (
+                    <>
+                        {(attendanceMarks.list || []).length === 0 && (
+                            <div className="text-[11px] text-slate-500 py-1">За этот день отметок нет.</div>
+                        )}
+                        <div className="flex flex-wrap gap-1.5">
+                            {(attendanceMarks.list || []).map((mark) => {
+                                const isIn = mark.kind === 'in';
+                                const timeText = String(mark.event_at || '').slice(11, 16);
+                                // Авто-закрытие смены правке не подлежит: оно живёт, только пока
+                                // нет настоящей отметки ухода (добавьте свою — авто исчезнет).
+                                if (mark.auto) {
+                                    return (
+                                        <span
+                                            key={`att-mark-${mark.id}`}
+                                            className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border border-dashed border-slate-300 bg-slate-50 text-slate-500 text-[11px]"
+                                            title="Уход не отмечен — смена закрыта автоматически. Добавьте отметку ухода нужным временем, и это закрытие исчезнет."
+                                        >
+                                            <FaIcon className="fas fa-wand-magic-sparkles text-[9px]"></FaIcon>
+                                            <span className="font-semibold tabular-nums">{timeText}</span>
+                                            <span>Уход (авто)</span>
+                                        </span>
+                                    );
+                                }
+                                return (
+                                    <span
+                                        key={`att-mark-${mark.id}`}
+                                        className={`inline-flex items-center gap-1.5 pl-2 pr-1 py-1 rounded-lg border text-[11px] ${isIn ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : 'border-slate-300 bg-white text-slate-700'}`}
+                                    >
+                                        <FaIcon className={`fas ${isIn ? 'fa-arrow-right' : 'fa-sign-out-alt'} text-[9px]`}></FaIcon>
+                                        <span className="font-semibold tabular-nums">{timeText}</span>
+                                        <span>{isIn ? 'Приход' : 'Уход'}</span>
+                                        {mark.manual && (
+                                            <span className="px-1 rounded bg-indigo-100 text-indigo-700 text-[9px]">ручная</span>
+                                        )}
+                                        <button
+                                            type="button"
+                                            onClick={() => toggleAttendanceMarkKind(mark)}
+                                            disabled={attendanceMarkBusy}
+                                            className="w-5 h-5 flex items-center justify-center rounded hover:bg-black/10 disabled:opacity-50"
+                                            title={isIn ? 'Сменить на «Уход»' : 'Сменить на «Приход»'}
+                                        >
+                                            <FaIcon className="fas fa-random text-[9px]"></FaIcon>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => deleteAttendanceMark(mark)}
+                                            disabled={attendanceMarkBusy}
+                                            className="w-5 h-5 flex items-center justify-center rounded hover:bg-rose-100 text-rose-600 disabled:opacity-50"
+                                            title="Удалить отметку"
+                                        >
+                                            <FaIcon className="fas fa-times text-[9px]"></FaIcon>
+                                        </button>
+                                    </span>
+                                );
+                            })}
+                        </div>
+                        <div className="mt-2 pt-2 border-t border-indigo-100 flex items-center gap-2 flex-wrap">
+                            <input
+                                type="time"
+                                value={attendanceMarkDraft.time}
+                                onChange={(e) => setAttendanceMarkDraft(prev => ({ ...prev, time: e.target.value }))}
+                                className="px-2 py-1 rounded border border-slate-300 text-[12px] bg-white"
+                            />
+                            <select
+                                value={attendanceMarkDraft.kind}
+                                onChange={(e) => setAttendanceMarkDraft(prev => ({ ...prev, kind: e.target.value }))}
+                                className="px-2 py-1 rounded border border-slate-300 text-[12px] bg-white"
+                            >
+                                <option value="in">Приход</option>
+                                <option value="out">Уход</option>
+                            </select>
+                            <button
+                                type="button"
+                                onClick={addAttendanceMark}
+                                disabled={attendanceMarkBusy || !attendanceMarkDraft.time}
+                                className="px-3 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-medium disabled:opacity-50 flex items-center gap-1.5"
+                            >
+                                <FaIcon className={`fas ${attendanceMarkBusy ? 'fa-spinner fa-spin' : 'fa-plus'} text-[10px]`}></FaIcon>
+                                Добавить отметку
+                            </button>
+                        </div>
+                    </>
+                    )}
+                </div>
+            );
 
             // === Синхронизация отметок Clockster (приход/уход отдела продаж) за видимый диапазон ===
             const CLOCKSTER_SYNC_MAX_DAYS = 10;
@@ -19227,6 +19335,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const modalTabShifts = !modalShowTabs || modalActiveTab === 'shifts';
             const modalTabStatus = !modalShowTabs || modalActiveTab === 'status';
             const modalTabControl = !modalShowTabs || modalActiveTab === 'control';
+            // Таб «Отметки» (приход/уход из Clockster) есть только у операторов ОП:
+            // available выставляется по факту успешного ответа бэкенда, который и
+            // знает отдел оператора.
+            const modalShowAttendanceTab = modalShowTabs && canManageAttendanceMarks && attendanceMarks.available;
+            const modalTabAttendance = modalShowAttendanceTab && modalActiveTab === 'attendance';
+            // Таб пропал (другой оператор / массовое выделение) — не оставляем модалку
+            // на пустой вкладке.
+            useEffect(() => {
+                if (modalActiveTab === 'attendance' && !modalShowAttendanceTab) setModalActiveTab('shifts');
+            }, [modalActiveTab, modalShowAttendanceTab]);
             const modalActiveScheduleStatus = useMemo(() => {
                 if (isBulkSelectionModal) return null;
                 if (!modalState?.opId || !modalState?.date) return null;
@@ -25626,6 +25744,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {[
                                     { key: 'shifts', label: 'Смены', icon: 'fa-clock' },
                                     { key: 'status', label: 'Статус', icon: 'fa-user-clock' },
+                                    ...(modalShowAttendanceTab ? [{ key: 'attendance', label: 'Отметки', icon: 'fa-door-open' }] : []),
                                     { key: 'control', label: 'Контроль', icon: 'fa-shield-alt' }
                                 ].map(tab => {
                                     const active = modalActiveTab === tab.key;
@@ -25665,6 +25784,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 )}
                             </div>
                         </label>
+                    </div>
+                    )}
+
+                    {!isBulkSelectionModal && modalTabAttendance && (
+                    <div className="mb-6">
+                        {renderAttendanceMarksSection()}
+                        <div className="mt-2 text-[11px] text-slate-500">
+                            Часы и опоздание за день пересчитываются сразу после правки: работа считается
+                            как пересечение смены с промежутком «приход → уход».
+                        </div>
                     </div>
                     )}
 
@@ -28211,105 +28340,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         )}
                                     </div>
 
-                                    {canManageAttendanceMarks && attendanceMarks.available && (
-                                    <div className="mb-3 rounded-lg border border-indigo-200 bg-indigo-50/40 p-2">
-                                        <div className="flex items-center justify-between gap-2 mb-1">
-                                            <div className="text-[11px] font-semibold text-indigo-800">
-                                                <FaIcon className="fas fa-user-clock mr-1"></FaIcon>
-                                                Отметки Clockster (приход/уход)
-                                            </div>
-                                            <div className="text-[10px] text-indigo-700/70">
-                                                Терминал один на вход и выход — тип отметки можно исправить; правки переживают ночной синк
-                                            </div>
-                                        </div>
-                                        {attendanceMarks.loading ? (
-                                            <div className="text-[11px] text-slate-500 py-1">Загрузка отметок...</div>
-                                        ) : (
-                                        <>
-                                            {(attendanceMarks.list || []).length === 0 && (
-                                                <div className="text-[11px] text-slate-500 py-1">За этот день отметок нет.</div>
-                                            )}
-                                            <div className="flex flex-wrap gap-1.5">
-                                                {(attendanceMarks.list || []).map((mark) => {
-                                                    const isIn = mark.kind === 'in';
-                                                    const timeText = String(mark.event_at || '').slice(11, 16);
-                                                    // Авто-закрытие смены правке не подлежит: оно живёт, только пока
-                                                    // нет настоящей отметки ухода (добавьте свою — авто исчезнет).
-                                                    if (mark.auto) {
-                                                        return (
-                                                            <span
-                                                                key={`att-mark-${mark.id}`}
-                                                                className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border border-dashed border-slate-300 bg-slate-50 text-slate-500 text-[11px]"
-                                                                title="Уход не отмечен — смена закрыта автоматически. Добавьте отметку ухода нужным временем, и это закрытие исчезнет."
-                                                            >
-                                                                <FaIcon className="fas fa-wand-magic-sparkles text-[9px]"></FaIcon>
-                                                                <span className="font-semibold tabular-nums">{timeText}</span>
-                                                                <span>Уход (авто)</span>
-                                                            </span>
-                                                        );
-                                                    }
-                                                    return (
-                                                        <span
-                                                            key={`att-mark-${mark.id}`}
-                                                            className={`inline-flex items-center gap-1.5 pl-2 pr-1 py-1 rounded-lg border text-[11px] ${isIn ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : 'border-slate-300 bg-white text-slate-700'}`}
-                                                        >
-                                                            <FaIcon className={`fas ${isIn ? 'fa-arrow-right' : 'fa-sign-out-alt'} text-[9px]`}></FaIcon>
-                                                            <span className="font-semibold tabular-nums">{timeText}</span>
-                                                            <span>{isIn ? 'Приход' : 'Уход'}</span>
-                                                            {mark.manual && (
-                                                                <span className="px-1 rounded bg-indigo-100 text-indigo-700 text-[9px]">ручная</span>
-                                                            )}
-                                                            <button
-                                                                type="button"
-                                                                onClick={() => toggleAttendanceMarkKind(mark)}
-                                                                disabled={attendanceMarkBusy}
-                                                                className="w-5 h-5 flex items-center justify-center rounded hover:bg-black/10 disabled:opacity-50"
-                                                                title={isIn ? 'Сменить на «Уход»' : 'Сменить на «Приход»'}
-                                                            >
-                                                                <FaIcon className="fas fa-random text-[9px]"></FaIcon>
-                                                            </button>
-                                                            <button
-                                                                type="button"
-                                                                onClick={() => deleteAttendanceMark(mark)}
-                                                                disabled={attendanceMarkBusy}
-                                                                className="w-5 h-5 flex items-center justify-center rounded hover:bg-rose-100 text-rose-600 disabled:opacity-50"
-                                                                title="Удалить отметку"
-                                                            >
-                                                                <FaIcon className="fas fa-times text-[9px]"></FaIcon>
-                                                            </button>
-                                                        </span>
-                                                    );
-                                                })}
-                                            </div>
-                                            <div className="mt-2 pt-2 border-t border-indigo-100 flex items-center gap-2 flex-wrap">
-                                                <input
-                                                    type="time"
-                                                    value={attendanceMarkDraft.time}
-                                                    onChange={(e) => setAttendanceMarkDraft(prev => ({ ...prev, time: e.target.value }))}
-                                                    className="px-2 py-1 rounded border border-slate-300 text-[12px] bg-white"
-                                                />
-                                                <select
-                                                    value={attendanceMarkDraft.kind}
-                                                    onChange={(e) => setAttendanceMarkDraft(prev => ({ ...prev, kind: e.target.value }))}
-                                                    className="px-2 py-1 rounded border border-slate-300 text-[12px] bg-white"
-                                                >
-                                                    <option value="in">Приход</option>
-                                                    <option value="out">Уход</option>
-                                                </select>
-                                                <button
-                                                    type="button"
-                                                    onClick={addAttendanceMark}
-                                                    disabled={attendanceMarkBusy || !attendanceMarkDraft.time}
-                                                    className="px-3 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-medium disabled:opacity-50 flex items-center gap-1.5"
-                                                >
-                                                    <FaIcon className={`fas ${attendanceMarkBusy ? 'fa-spinner fa-spin' : 'fa-plus'} text-[10px]`}></FaIcon>
-                                                    Добавить отметку
-                                                </button>
-                                            </div>
-                                        </>
-                                        )}
-                                    </div>
-                                    )}
+                                    {canManageAttendanceMarks && attendanceMarks.available && renderAttendanceMarksSection({ compact: true })}
 
                                     <div className="flex items-start gap-2">
                                         <div className="w-14 shrink-0">
