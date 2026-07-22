@@ -24051,6 +24051,84 @@ def _tez_status_sync_importer(csv_text):
     )
 
 
+# Отметки Clockster (face-терминал) синкаются только для отдела продаж:
+# приход = рабочий статус операторского профиля, уход = офлайн.
+CLOCKSTER_SYNC_DEPARTMENT_CODE = (os.getenv('CLOCKSTER_SYNC_DEPARTMENT_CODE') or 'op').strip().lower() or 'op'
+CLOCKSTER_MARK_IN_STATE = 'Готов'
+CLOCKSTER_MARK_OUT_STATE = 'Выключен'
+
+
+def _clockster_department_id():
+    return next(
+        (d.get('id') for d in (db.get_departments() or [])
+         if str(d.get('code') or '').strip().lower() == CLOCKSTER_SYNC_DEPARTMENT_CODE),
+        None
+    )
+
+
+def _clockster_attendance_sync_importer(rows):
+    """Колбэк синка Clockster: отметки прихода/ухода → события статусов.
+
+    Матчинг по ФИО ограничен сотрудниками отдела продаж: в Clockster
+    отмечается весь офис, а импорт статусов работает как replace по
+    оператору+датам — без ограничения отметки, скажем, СВ СЗоВ стёрли бы его
+    Oktell-статусы. Приход = «Готов», уход = «Выключен»: сегменты между
+    событиями строит стандартный rebuild, часы/опоздания/штрафы считает
+    авто-агрегация по сменам графика (модели направлений ОП: часы + штрафы).
+    """
+    dept_id = _clockster_department_id()
+    if not dept_id:
+        return {
+            "message": f"Отдел '{CLOCKSTER_SYNC_DEPARTMENT_CODE}' не найден",
+            "matched_events": 0,
+        }
+    member_ids = db.get_department_member_ids(dept_id)
+    operator_lookup = _status_import_build_operator_lookup(restrict_to_ids=member_ids)
+
+    events = []
+    unmatched_counts = {}
+    for row in (rows or []):
+        name = str(row.get('employee_name') or '').strip()
+        event_at = row.get('event_at')
+        if not name or not isinstance(event_at, datetime):
+            continue
+        matches = _status_import_resolve_operator_matches(name, operator_lookup)
+        if len(matches) != 1:
+            # Не наш отдел или незаведённый сотрудник — просто копим для сводки.
+            unmatched_counts[name] = unmatched_counts.get(name, 0) + 1
+            continue
+        events.append({
+            'operator_id': int(matches[0]['id']),
+            'event_at': event_at,
+            'state_name': CLOCKSTER_MARK_IN_STATE if int(row.get('status') or 0) == 1 else CLOCKSTER_MARK_OUT_STATE,
+            'state_note': 'clockster',
+        })
+
+    if not events:
+        return {
+            "message": "Нет отметок по сотрудникам отдела продаж",
+            "matched_events": 0,
+            "unmatched_names_count": len(unmatched_counts),
+        }
+    summary = db.save_operator_status_import(
+        events=events,
+        segments=[],
+        imported_by=None,
+        summary={
+            'source_rows': len(rows or []),
+            'valid_events': len(events),
+            'invalid_rows_count': sum(unmatched_counts.values()),
+            'meta': {
+                'api': 'clockster_attendance_sync',
+                'source': 'clockster',
+                'unmatched_names': sorted(unmatched_counts)[:30],
+            },
+        },
+    )
+    summary['unmatched_names_count'] = len(unmatched_counts)
+    return summary
+
+
 def _chat_metrics_parse_date(value, default_date=None):
     text = str(value or '').strip()
     if not text and default_date:
@@ -30338,6 +30416,74 @@ def sync_work_schedules_statuses_oktell():
     except Exception as e:
         logging.error(f"Error syncing Oktell operator statuses: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/work_schedules/sync_statuses_clockster', methods=['POST'])
+@require_api_key
+def sync_work_schedules_statuses_clockster():
+    """Ручная синхронизация отметок прихода/ухода Clockster (отдел продаж) за период (до 10 дней)."""
+    lock_acquired = False
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not (_is_admin_role(requester[3]) or _is_supervisor_role(requester[3])):
+            return jsonify({"error": "Forbidden"}), 403
+
+        payload = request.get_json(silent=True) or {}
+        raw_from = (
+            payload.get('date_from') or payload.get('start_date') or
+            request.args.get('date_from') or request.args.get('start_date')
+        )
+        raw_to = (
+            payload.get('date_to') or payload.get('end_date') or
+            request.args.get('date_to') or request.args.get('end_date')
+        )
+        if not raw_from or not raw_to:
+            return jsonify({"error": "date_from and date_to are required (YYYY-MM-DD)"}), 400
+        try:
+            d_from = datetime.strptime(str(raw_from)[:10], '%Y-%m-%d').date()
+            d_to = datetime.strptime(str(raw_to)[:10], '%Y-%m-%d').date()
+        except Exception:
+            return jsonify({"error": "date_from and date_to must be YYYY-MM-DD"}), 400
+        if d_to < d_from:
+            return jsonify({"error": "date_to must be greater than or equal to date_from"}), 400
+        if (d_to - d_from).days + 1 > 10:
+            return jsonify({"error": "Период синхронизации Clockster не может быть больше 10 дней"}), 400
+
+        import clockster_attendance_sync
+        cfg = clockster_attendance_sync.get_config()
+        if not cfg.get('token'):
+            return jsonify({"error": "CLOCKSTER_API_TOKEN не задан"}), 400
+
+        if not STATUS_IMPORT_LOCK.acquire(blocking=False):
+            return jsonify({
+                "error": "Импорт статусов уже выполняется. Повторите через несколько секунд."
+            }), 429
+        lock_acquired = True
+
+        summary = clockster_attendance_sync.run_sync(
+            _clockster_attendance_sync_importer,
+            date_start=d_from.strftime('%Y-%m-%d'),
+            date_end=d_to.strftime('%Y-%m-%d'),
+            config=cfg,
+        )
+        return jsonify({
+            "status": "success",
+            "message": "Отметки Clockster синхронизированы",
+            "import": summary,
+            "range": {
+                "date_from": d_from.strftime('%Y-%m-%d'),
+                "date_to": d_to.strftime('%Y-%m-%d'),
+            },
+        }), 200
+    except Exception as e:
+        logging.error(f"Error syncing Clockster attendance: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+    finally:
+        if lock_acquired:
+            STATUS_IMPORT_LOCK.release()
 
 
 @app.route('/api/work_schedules/sync_statuses_binotel', methods=['POST'])
@@ -42110,6 +42256,23 @@ if __name__ == '__main__':
         except Exception as e:
             logging.exception(f"Error running tez_status_sync_job: {e}")
 
+    async def clockster_attendance_sync_job():
+        # Ежедневная выгрузка отметок прихода/ухода Clockster (отдел продаж) →
+        # события статусов → авто-пересчёт часов/опозданий по графикам.
+        try:
+            import clockster_attendance_sync
+            loop = asyncio.get_event_loop()
+            summary = await loop.run_in_executor(
+                executor_pool,
+                lambda: clockster_attendance_sync.run_sync(
+                    _clockster_attendance_sync_importer,
+                    logger=logging.getLogger('clockster_sync'),
+                ),
+            )
+            logging.info(f"clockster_attendance_sync result: {summary}")
+        except Exception as e:
+            logging.exception(f"Error running clockster_attendance_sync_job: {e}")
+
     async def tez_op_successes_job():
         # Ночная сверка успешек ОП: TEZ APP (кто выехал) -> Binotel (кто звонил
         # выехавшим) -> пересчёт. Порядок именно такой: спрашивать про поездки
@@ -42182,6 +42345,18 @@ if __name__ == '__main__':
         tez_status_sync_job,
         CronTrigger(hour=1, minute=0, timezone=ZoneInfo('Asia/Almaty')),
         id='tez_status_sync_daily',
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # Авто-выгрузка отметок Clockster (приход/уход отдела продаж) ежедневно в
+    # 01:10 (Asia/Almaty), окно [сегодня-2 … сегодня] — захватывает ночные
+    # смены и поздние уходы. Без CLOCKSTER_API_TOKEN job просто no-op.
+    scheduler.add_job(
+        clockster_attendance_sync_job,
+        CronTrigger(hour=1, minute=10, timezone=ZoneInfo('Asia/Almaty')),
+        id='clockster_attendance_sync_daily',
         misfire_grace_time=3600,
         max_instances=1,
         coalesce=True

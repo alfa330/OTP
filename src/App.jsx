@@ -12511,6 +12511,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // Отдел TEZ грузит статусы вручную (CSV/XLSX) и не использует синки Oktell/Chat2Desk.
             const plannerDepartmentCode = String(user?.department_code ?? user?.departmentCode ?? '').toLowerCase();
             const isTezPlanner = plannerDepartmentCode === 'tez';
+            // Отдел продаж: отметки прихода/ухода живут в Clockster (face-терминал) —
+            // в меню «⋮» есть свой синк, часы/опоздания считаются по сменам iCORE.
+            const isOpPlanner = plannerDepartmentCode === 'op';
             const isAdminLikePlanner = isAdminLikeRoleFn(user?.role);
             // Фронт офисы не используют Oktell/Binotel/Chat2Desk — в меню «⋮»
             // скрыты все кнопки синхронизаций и статусов Chat2Desk.
@@ -16982,6 +16985,68 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     emitAppToast(message, 'error');
                 } finally {
                     setPlannerOktellSyncLoading(false);
+                }
+            };
+
+            // === Синхронизация отметок Clockster (приход/уход отдела продаж) за видимый диапазон ===
+            const CLOCKSTER_SYNC_MAX_DAYS = 10;
+            const syncPlannerClocksterStatuses = async () => {
+                if (!user?.id || plannerStatusApiSyncLoading || plannerStatusAnomalyLoading || plannerOktellSyncLoading) return;
+                const visibleDaysSorted = (Array.isArray(visibleRange) ? [...visibleRange] : [])
+                    .map(day => String(day || '').trim())
+                    .filter(day => /^\d{4}-\d{2}-\d{2}$/.test(day))
+                    .sort((a, b) => a.localeCompare(b));
+                if (visibleDaysSorted.length === 0) {
+                    emitAppToast('Нет дат для синхронизации отметок Clockster', 'warning');
+                    return;
+                }
+                // Лимит эндпоинта — 10 дней: при более широком видимом диапазоне
+                // синкаем его последние (самые свежие) 10 дней.
+                const clippedDays = visibleDaysSorted.slice(-CLOCKSTER_SYNC_MAX_DAYS);
+                const syncStart = clippedDays[0];
+                const syncEnd = clippedDays[clippedDays.length - 1];
+
+                setPlannerStatusApiSyncLoading(true);
+                setPlannerStatusAnomalyError('');
+                setPlannerStatusImportSummary(null);
+                setPlannerStatusAnomalyOnly(false);
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/sync_statuses_clockster`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: withAccessTokenHeader({
+                            'Content-Type': 'application/json',
+                            'X-User-Id': user?.id
+                        }),
+                        body: JSON.stringify({ date_from: syncStart, date_to: syncEnd })
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+                    setPlannerStatusImportSummary({ ...(payload?.import || {}), message: payload?.message || '' });
+                    setPlannerStatusAnomalyFileName(syncStart === syncEnd
+                        ? `Clockster ${syncStart}`
+                        : `Clockster ${syncStart} - ${syncEnd}`);
+
+                    // Не замораживаем планировщик снапшотом «анализа»: сбрасываем кэш окон
+                    // и перезагружаем видимый диапазон (см. Chat2Desk/Binotel синки выше).
+                    plannerLoadedStatusRangeKeysRef.current = new Set();
+                    plannerLoadingStatusRangeKeysRef.current = new Set();
+                    plannerActiveStatusWindowKeyRef.current = '';
+                    const rangeStart = String(plannerStatusFetchRange?.start || syncStart || '').trim();
+                    const rangeEnd = String(plannerStatusFetchRange?.end || syncEnd || '').trim();
+                    if (rangeStart && rangeEnd) {
+                        await fetchPlannerImportedStatusesForRange(rangeStart, rangeEnd, { force: true });
+                    }
+                    emitAppToast(payload?.message || 'Отметки Clockster синхронизированы', 'success');
+                } catch (error) {
+                    console.error('Error syncing Clockster attendance:', error);
+                    const message = error?.message || 'Не удалось синхронизировать отметки Clockster';
+                    setPlannerStatusAnomalyError(message);
+                    emitAppToast(message, 'error');
+                } finally {
+                    setPlannerStatusApiSyncLoading(false);
                 }
             };
 
@@ -24070,6 +24135,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 {excelTransferState.importing ? 'Импорт...' : 'Импорт Excel'}
                                             </button>
 
+                                            {!plannerSyncActionsHidden && (isOpPlanner || isAdminLikePlanner) && (
+                                            <button
+                                                onClick={() => {
+                                                    setShowPlannerTopActionsMenu(false);
+                                                    syncPlannerClocksterStatuses();
+                                                }}
+                                                disabled={plannerStatusApiSyncLoading || plannerStatusAnomalyLoading || plannerOktellSyncLoading}
+                                                className="w-full px-3 py-2 rounded-xl border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                                                title="Синхронизировать отметки прихода/ухода отдела продаж из Clockster за видимый диапазон (до 10 дней)"
+                                            >
+                                                <FaIcon className={`fas ${plannerStatusApiSyncLoading ? 'fa-spinner fa-spin' : 'fa-user-clock'}`}></FaIcon>
+                                                {plannerStatusApiSyncLoading ? 'Синхронизация...' : 'Отметки Clockster'}
+                                            </button>
+                                            )}
                                             {!plannerSyncActionsHidden && (isTezPlanner || isAdminLikePlanner) && (
                                             <button
                                                 onClick={() => {
