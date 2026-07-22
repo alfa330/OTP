@@ -58,6 +58,7 @@ const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, groupId = null, 
   const [busy, setBusy] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [msg, setMsg] = useState('');
+  const [invalidRows, setInvalidRows] = useState([]);
   const [page, setPage] = useState(1);
   const [leadsTotal, setLeadsTotal] = useState(0);
   const [leadsPages, setLeadsPages] = useState(1);
@@ -147,6 +148,7 @@ const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, groupId = null, 
 
     setUploading(true);
     setMsg('');
+    setInvalidRows([]);
     axios
       .post(`${apiBaseUrl}/api/tez_leads/upload`, form, { headers })
       .then((resp) => {
@@ -155,6 +157,7 @@ const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, groupId = null, 
           `Загружено ${d.rows_total}: новых ${d.rows_new}, дублей ${d.rows_duplicate}, ` +
           `невалидных ${d.rows_invalid}. Идёт проверка на уже работающих…`
         );
+        setInvalidRows(d.invalid_rows || []);
         if (fileRef.current) fileRef.current.value = '';
         loadStats();
         if (d.batch_id) pollBatch(d.batch_id);
@@ -297,6 +300,48 @@ const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, groupId = null, 
       </div>
 
       {msg && <div className="text-sm font-medium text-indigo-800 bg-indigo-50 border border-indigo-100 rounded-xl px-3 py-2">{msg}</div>}
+
+      {invalidRows.length > 0 && (
+        <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-sm font-semibold text-rose-800">
+              <FaIcon className="fas fa-triangle-exclamation" />
+              Невалидные номера — не попали в базу ({invalidRows.length})
+            </div>
+            <button
+              type="button"
+              onClick={() => setInvalidRows([])}
+              className="text-xs text-rose-600 hover:text-rose-800"
+            >
+              скрыть
+            </button>
+          </div>
+          <p className="mt-1 text-xs text-rose-700">
+            Пустые ячейки или не казахстанский формат (номер не приводится к 11 цифрам 77…).
+            Поправьте в файле и загрузите повторно.
+          </p>
+          <div className="mt-2 max-h-48 overflow-y-auto rounded-lg bg-white/70 border border-rose-100">
+            <table className="min-w-full text-xs">
+              <thead className="text-rose-500">
+                <tr>
+                  <th className="text-left px-2 py-1 font-medium">Строка</th>
+                  <th className="text-left px-2 py-1 font-medium">ФИО</th>
+                  <th className="text-left px-2 py-1 font-medium">Номер в файле</th>
+                </tr>
+              </thead>
+              <tbody>
+                {invalidRows.map((r, i) => (
+                  <tr key={i} className="border-t border-rose-50">
+                    <td className="px-2 py-1 text-slate-400 tabular-nums">{r.row}</td>
+                    <td className="px-2 py-1">{r.full_name || '—'}</td>
+                    <td className="px-2 py-1 font-mono text-rose-700">{r.phone || '(пусто)'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
         {funnelCards.map((card) => (
