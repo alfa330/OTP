@@ -34,10 +34,10 @@ const SALES_HEAD_VIEWS = [
     ...SALES_SUPERVISOR_VIEWS.slice(4),
 ];
 
-// Фронт офисы: менеджеры ведут только учёт сотрудников и графики работы,
-// сотрудники видят только свой профиль и «Мои смены» (без смен коллег).
+// Фронт офисы: менеджеры ведут только учёт сотрудников, свои группы и графики
+// работы; сотрудники видят только свой профиль и «Мои смены» (без смен коллег).
 const FRONT_OFFICE_OPERATOR_VIEWS = ['profile', 'work_schedules'];
-const FRONT_OFFICE_MANAGER_VIEWS = ['manage_operators', 'work_schedules'];
+const FRONT_OFFICE_MANAGER_VIEWS = ['manage_operators', 'groups', 'work_schedules'];
 
 const VIEW_ALIASES = {
     sv_list: 'manage_operators',
@@ -101,6 +101,16 @@ const COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENTS = new Set(['front_office']);
 export const departmentHidesColleagueSchedules = (user) => {
     const code = departmentCodeOf(user);
     return Boolean(code && COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENTS.has(code));
+};
+
+// Отделы с упрощённым «Учётом сотрудников» у главы: без пунктов «Супервайзеры»
+// и «Тренеры» — сразу список сотрудников (manage_users), в разделе они
+// называются «Сотрудники», а не «Операторы».
+const SIMPLE_EMPLOYEE_ACCOUNTING_DEPARTMENTS = new Set(['front_office']);
+
+export const departmentUsesSimpleEmployeeAccounting = (user) => {
+    const code = departmentCodeOf(user);
+    return Boolean(code && SIMPLE_EMPLOYEE_ACCOUNTING_DEPARTMENTS.has(code));
 };
 
 // Возвращает массив разрешённых разделов для пользователя, либо null (без ограничений).

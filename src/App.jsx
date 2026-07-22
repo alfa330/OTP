@@ -25,7 +25,7 @@ import ScheduleTimelineTooltip from './components/common/ScheduleTimelineTooltip
 import sidebarLogo from './components/common/sidebar-logo.svg';
 import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId } from './utils/roles';
-import { departmentAllowsView, departmentHidesColleagueSchedules, departmentRestrictsViews, firstAllowedView } from './utils/departmentViews';
+import { departmentAllowsView, departmentHidesColleagueSchedules, departmentRestrictsViews, departmentUsesSimpleEmployeeAccounting, firstAllowedView } from './utils/departmentViews';
 import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan } from './utils/salaryFormula';
 
 const CHUNK_RELOAD_STORAGE_KEY = 'otp_chunk_reload_attempted';
@@ -1302,7 +1302,10 @@ const isChatAppDepartmentHead = (userLike) => (
 
 const canAccessChatAppForUser = (userLike) => {
     const role = normalizeRole(userLike?.role);
-    if (role === 'super_admin' || role === 'admin') return true;
+    if (role === 'super_admin') return true;
+    // Глава отдела с базовой admin-ролью — не глобальный админ: главам чужих
+    // отделов переписка ТЭЗ недоступна (глава ТЭЗ проходит проверкой ниже).
+    if (role === 'admin' && !isDepartmentHead(userLike)) return true;
     if (isChatAppDepartmentHead(userLike)) return true;
     return isSupervisorRole(role)
         && Number(userLike?.department_id ?? userLike?.departmentId) === CHATAPP_DEPARTMENT_ID;
@@ -12485,6 +12488,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const plannerDepartmentCode = String(user?.department_code ?? user?.departmentCode ?? '').toLowerCase();
             const isTezPlanner = plannerDepartmentCode === 'tez';
             const isAdminLikePlanner = isAdminLikeRoleFn(user?.role);
+            // Фронт офисы не используют Oktell/Binotel/Chat2Desk — в меню «⋮»
+            // скрыты все кнопки синхронизаций и статусов Chat2Desk.
+            const plannerSyncActionsHidden = plannerDepartmentCode === 'front_office';
             // Тренер открывает «Графики работы» строго на просмотр: любые
             // редактирующие действия скрыты, бэкенд тоже отклоняет запись.
             // Состав операторов задаёт сервер (отделы СЗоВ и ОП), поэтому seed
@@ -24040,7 +24046,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 {excelTransferState.importing ? 'Импорт...' : 'Импорт Excel'}
                                             </button>
 
-                                            {(isTezPlanner || isAdminLikePlanner) && (
+                                            {!plannerSyncActionsHidden && (isTezPlanner || isAdminLikePlanner) && (
                                             <button
                                                 onClick={() => {
                                                     setShowPlannerTopActionsMenu(false);
@@ -24054,7 +24060,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 Синхронизация с Binotel
                                             </button>
                                             )}
-                                            {!isTezPlanner && (
+                                            {!plannerSyncActionsHidden && !isTezPlanner && (
                                             <button
                                                 onClick={() => {
                                                     setShowPlannerTopActionsMenu(false);
@@ -24069,7 +24075,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </button>
                                             )}
 
-                                            {!isTezPlanner && (
+                                            {!plannerSyncActionsHidden && !isTezPlanner && (
                                             <button
                                                 onClick={() => {
                                                     setShowPlannerTopActionsMenu(false);
@@ -24084,7 +24090,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </button>
                                             )}
 
-                                            {!isTezPlanner && (
+                                            {!plannerSyncActionsHidden && !isTezPlanner && (
                                             <button
                                                 onClick={() => {
                                                     setShowPlannerTopActionsMenu(false);
@@ -41537,6 +41543,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     ['manage_operators', 'manage_users', 'sv_list', 'manage_trainers'].includes(view)
                 ) {
                     if (view === 'manage_operators') setView('manage_users');
+                    // Упрощённый учёт (front_office): пунктов «Супервайзеры»/«Тренеры» нет.
+                    else if (departmentUsesSimpleEmployeeAccounting(user) && ['sv_list', 'manage_trainers'].includes(view)) setView('manage_users');
                     return;
                 }
                 if ((view === 'ai_qa' || view === 'wazzup_chats') && canAccessAiQaSection) return;
@@ -42111,7 +42119,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     {isDepartmentManager && !isAdminLikeRole && (
                                         <>
                                             {canAccessLmsSection && !departmentRestrictsViews(user) && renderSidebarDividerInner()}
-                                            {isDepartmentHeadUser && (
+                                            {isDepartmentHeadUser && departmentUsesSimpleEmployeeAccounting(user) && (
+                                            <li>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'manage_users')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${['sv_list', 'manage_users', 'manage_trainers'].includes(view) ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-user-cog"></FaIcon> <span className="sidebar-text">Учет сотрудников</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {isDepartmentHeadUser && !departmentUsesSimpleEmployeeAccounting(user) && (
                                             <li className="relative" ref={sidebarEmployeesRef}>
                                                 <button
                                                     onClick={stableSidebarHandleToggleEmployeesDropdown}
@@ -42160,6 +42175,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'manage_operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-user-edit"></FaIcon> <span className="sidebar-text">Учет сотрудников</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {/* «Группы» у главы: только если отдел явно разрешает раздел в своём
+                                                allowlist (front_office); бэкенд /api/groups и так режет по отделу. */}
+                                            {isDepartmentHeadUser && departmentRestrictsViews(user) && departmentAllowsView(user, 'groups') && (
+                                            <li>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'groups')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'groups' ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-object-group"></FaIcon> <span className="sidebar-text">Группы</span>
                                                 </button>
                                             </li>
                                             )}
@@ -43693,7 +43717,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {(view === 'manage_users' || view === 'employees') && (
                                 <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                     <div className="flex items-center justify-between mb-6">
-                                    <h2 className="text-2xl font-semibold text-gray-800">Операторы</h2>
+                                    <h2 className="text-2xl font-semibold text-gray-800">{departmentUsesSimpleEmployeeAccounting(user) ? 'Сотрудники' : 'Операторы'}</h2>
 
                                     <div className="flex items-center gap-3">
                                         {canFilterByDepartment && (departments || []).length > 0 && (
@@ -43728,7 +43752,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         }}
                                         className="inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition"
                                         >
-                                        <FaIcon className="fas fa-user-plus"></FaIcon> Добавить оператора
+                                        <FaIcon className="fas fa-user-plus"></FaIcon> {departmentUsesSimpleEmployeeAccounting(user) ? 'Добавить сотрудника' : 'Добавить оператора'}
                                         </button>
 
                                         {/* Generate Report Button */}
@@ -44585,6 +44609,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 ))}
                             </>
                         )}
+                        {/* Глава отдела: «Группы» своего отдела (бэкенд режет список по отделу) */}
+                        {( view === "groups" && !isAdminLikeRole && isDepartmentHeadUser && departmentRestrictsViews(user) && departmentAllowsView(user, 'groups') && (
+                            <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
+                                <GroupsView
+                                    user={user}
+                                    showToast={showToast}
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                />
+                            </Suspense>
+                        ))}
                         {/* Глава отдела: Мониторинговая шкала, ограниченная своим отделом */}
                         {( view === "monitoring_scale" && !isAdminLikeRole && isDepartmentManager && isDepartmentHeadUser && (
                             <MonitoringScaleView

@@ -32,7 +32,7 @@ class FrontOfficeViewAllowlistTests(unittest.TestCase):
         source = _read(DEPARTMENT_VIEWS_PATH)
 
         self.assertIn("const FRONT_OFFICE_OPERATOR_VIEWS = ['profile', 'work_schedules'];", source)
-        self.assertIn("const FRONT_OFFICE_MANAGER_VIEWS = ['manage_operators', 'work_schedules'];", source)
+        self.assertIn("const FRONT_OFFICE_MANAGER_VIEWS = ['manage_operators', 'groups', 'work_schedules'];", source)
         self.assertIn("front_office: {", source)
 
         entry = source.split("front_office: {", 1)[1].split("},", 1)[0]
@@ -48,6 +48,63 @@ class FrontOfficeViewAllowlistTests(unittest.TestCase):
         self.assertIn("export const departmentHidesColleagueSchedules = (user) =>", source)
         self.assertIn("COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENTS.has(code)", source)
 
+    def test_simple_employee_accounting_helper(self):
+        source = _read(DEPARTMENT_VIEWS_PATH)
+
+        self.assertIn("const SIMPLE_EMPLOYEE_ACCOUNTING_DEPARTMENTS = new Set(['front_office']);", source)
+        self.assertIn("export const departmentUsesSimpleEmployeeAccounting = (user) =>", source)
+        self.assertIn("SIMPLE_EMPLOYEE_ACCOUNTING_DEPARTMENTS.has(code)", source)
+
+
+class FrontOfficeHeadSidebarTests(unittest.TestCase):
+    """Глава front_office: упрощённый «Учёт сотрудников» (один пункт, без
+    «Супервайзеры»/«Тренеры»), раздел «Группы» своего отдела, без ChatApp."""
+
+    def test_chatapp_gate_excludes_foreign_department_heads(self):
+        app = _read(APP_PATH)
+        self.assertIn("if (role === 'admin' && !isDepartmentHead(userLike)) return true;", app)
+        gate_start = app.index("const canAccessChatAppForUser =")
+        gate = app[gate_start:app.index("};", gate_start)]
+        self.assertNotIn("role === 'super_admin' || role === 'admin'", gate)
+
+        guard = _function_source(BOT_PATH, "_chatapp_guard")
+        self.assertIn("_is_global_admin_requester(role, requester_id)", guard)
+        self.assertNotIn("if _is_admin_role(role):", guard)
+
+    def test_simple_employee_accounting_sidebar_and_labels(self):
+        app = _read(APP_PATH)
+        self.assertIn("{isDepartmentHeadUser && departmentUsesSimpleEmployeeAccounting(user) && (", app)
+        self.assertIn("{isDepartmentHeadUser && !departmentUsesSimpleEmployeeAccounting(user) && (", app)
+        self.assertIn(
+            "else if (departmentUsesSimpleEmployeeAccounting(user) && ['sv_list', 'manage_trainers'].includes(view)) setView('manage_users');",
+            app,
+        )
+        self.assertIn("{departmentUsesSimpleEmployeeAccounting(user) ? 'Сотрудники' : 'Операторы'}", app)
+        self.assertIn("{departmentUsesSimpleEmployeeAccounting(user) ? 'Добавить сотрудника' : 'Добавить оператора'}", app)
+
+    def test_groups_section_for_restricted_department_head(self):
+        app = _read(APP_PATH)
+        self.assertIn(
+            "{isDepartmentHeadUser && departmentRestrictsViews(user) && departmentAllowsView(user, 'groups') && (",
+            app,
+        )
+        self.assertIn(
+            "view === \"groups\" && !isAdminLikeRole && isDepartmentHeadUser && departmentRestrictsViews(user) && departmentAllowsView(user, 'groups')",
+            app,
+        )
+
+    def test_planner_sync_actions_hidden_for_front_office(self):
+        app = _read(APP_PATH)
+        self.assertIn("const plannerSyncActionsHidden = plannerDepartmentCode === 'front_office';", app)
+        self.assertIn("{!plannerSyncActionsHidden && (isTezPlanner || isAdminLikePlanner) && (", app)
+        self.assertEqual(app.count("{!plannerSyncActionsHidden && !isTezPlanner && ("), 3)
+
+    def test_break_rules_read_is_scoped_for_department_heads(self):
+        endpoint = _function_source(BOT_PATH, "get_work_schedule_break_rules")
+        self.assertIn("if _is_global_admin_requester(role, requester_id):", endpoint)
+        self.assertNotIn("if _is_admin_role(role):", endpoint)
+        self.assertIn("db.get_work_schedule_break_rules(department_id=scope_dept)", endpoint)
+
 
 class FrontOfficeMyShiftsFrontendTests(unittest.TestCase):
     """«Мои смены» оператора front_office: без табов «Замены»/«Смены коллег»
@@ -57,7 +114,7 @@ class FrontOfficeMyShiftsFrontendTests(unittest.TestCase):
         source = _read(APP_PATH)
 
         self.assertIn(
-            "import { departmentAllowsView, departmentHidesColleagueSchedules, departmentRestrictsViews, firstAllowedView } from './utils/departmentViews';",
+            "import { departmentAllowsView, departmentHidesColleagueSchedules, departmentRestrictsViews, departmentUsesSimpleEmployeeAccounting, firstAllowedView } from './utils/departmentViews';",
             source,
         )
         self.assertIn(
