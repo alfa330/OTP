@@ -7,16 +7,21 @@
 ни считали.
 
 Правила успешки (согласованы с владельцем, см. память tez-op-successes-project):
-  1. Квалифицирующий звонок = исходящий, отвеченный, billsec >= 10 сек,
+  1. Водитель НЕ должен был выполнять заказы в прошлом месяце
+     (prev_month_first_order_at пуст) — иначе он уже работал, привлечения нет.
+  2. В отчётном месяце заказ есть (month_first_order_at заполнен).
+  3. Квалифицирующий звонок = исходящий, отвеченный, billsec >= 10 сек,
      сделанный оператором отдела ОП (operator_id должен быть уже разрезолвен).
-  2. Успешка достаётся ПОСЛЕДНЕМУ квалифицирующему звонку перед первой поездкой.
-  3. Если месяц звонка совпадает с месяцем поездки — успешка.
-  4. Если звонок был в более раннем месяце — успешка только когда поездка
+  4. Успешка достаётся ПОСЛЕДНЕМУ квалифицирующему звонку перед поездкой.
+  5. Если месяц звонка совпадает с месяцем поездки — успешка.
+  6. Если звонок был в более раннем месяце — успешка только когда поездка
      состоялась в первые 7 дней месяца включительно.
-  5. Дата успешки = день первой поездки (Asia/Almaty), а не день обнаружения.
+  7. Дата успешки = день поездки (Asia/Almaty), а не день обнаружения.
 
-Из правил следует, что один лид даёт максимум одну успешку за всё время:
-первая поездка у водителя ровно одна.
+TEZ APP отдаёт даты ОКНОМ на два месяца: `month_first_order_at` (первый заказ в
+запрошенном месяце) и `previous_month_first_order_at` (первый заказ в предыдущем).
+Поэтому дата привязана к месяцу базы лида, а не к водителю «за всё время»: один и
+тот же номер в июньской и июльской базе имеет разные даты и считается независимо.
 """
 
 import re
@@ -52,6 +57,7 @@ RULE_SAME_MONTH = "same_month"                    # звонок в месяце
 RULE_PREV_MONTH_FIRST_WEEK = "prev_month_week1"   # звонок раньше, поездка до 7-го
 REASON_NO_CALL_BEFORE_TRIP = "no_call_before_trip"
 REASON_TRIP_TOO_LATE = "trip_after_day7"
+REASON_ACTIVE_PREV_MONTH = "active_prev_month"    # были заказы в прошлом месяце
 
 
 def normalize_kz_phone(raw):
@@ -123,10 +129,12 @@ def _month_key(value):
     return (value.year, value.month)
 
 
-def compute_lead_outcome(first_order_at, calls, min_billsec=DEFAULT_MIN_BILLSEC):
-    """Считает статус лида по первой поездке и списку его звонков.
+def compute_lead_outcome(month_first_order_at, prev_month_first_order_at, calls,
+                         min_billsec=DEFAULT_MIN_BILLSEC):
+    """Считает статус лида по оконным датам заказов и списку его звонков.
 
-    first_order_at — datetime первой завершённой поездки либо None.
+    month_first_order_at — первый заказ в отчётном месяце либо None.
+    prev_month_first_order_at — первый заказ в предыдущем месяце либо None.
     calls — список dict'ов со started_at / call_type / billsec / operator_id
             (+ произвольные поля вроде general_call_id, они просто прокидываются).
 
@@ -156,7 +164,17 @@ def compute_lead_outcome(first_order_at, calls, min_billsec=DEFAULT_MIN_BILLSEC)
         qualifying.append(enriched)
     qualifying.sort(key=lambda c: c["started_at"])
 
-    trip_at = as_almaty(first_order_at)
+    trip_at = as_almaty(month_first_order_at)
+    prev_at = as_almaty(prev_month_first_order_at)
+
+    # Водитель уже работал в прошлом месяце — привлечения не было, что бы ни
+    # показывал текущий месяц. Проверяем это ДО всего остального.
+    if prev_at is not None:
+        result["first_order_at"] = trip_at
+        result["status"] = STATUS_ALREADY_WORKING
+        result["rule"] = REASON_ACTIVE_PREV_MONTH
+        return result
+
     if trip_at is None:
         result["status"] = STATUS_IN_PROGRESS if qualifying else STATUS_NEW
         return result
@@ -165,7 +183,7 @@ def compute_lead_outcome(first_order_at, calls, min_billsec=DEFAULT_MIN_BILLSEC)
 
     before_trip = [c for c in qualifying if c["started_at"] < trip_at]
     if not before_trip:
-        # Водитель выехал сам либо работал ещё до того, как попал в базу.
+        # Водитель выехал сам — заказ в месяце есть, но нашего звонка до него не было.
         result["status"] = STATUS_ALREADY_WORKING
         result["rule"] = REASON_NO_CALL_BEFORE_TRIP
         return result

@@ -123,8 +123,10 @@ def check_batch_already_working(db, batch_id, year, month, first_orders_client, 
     try:
         phones = db.get_tez_phones_pending_first_order(year, month, batch_id=batch_id)
         if phones:
-            first_orders = first_orders_client.fetch_first_orders(phones)
-            db.save_tez_first_orders(first_orders)
+            first_orders = first_orders_client.fetch_first_orders(
+                phones, month=f"{int(year)}-{int(month):02d}"
+            )
+            db.save_tez_first_orders(year, month, first_orders)
         outcomes = recompute_outcomes(db, year, month, min_billsec=min_billsec)
         db.set_tez_lead_batch_check_state(
             batch_id, 'done', already_working=outcomes.get('already_working', 0)
@@ -137,12 +139,19 @@ def check_batch_already_working(db, batch_id, year, month, first_orders_client, 
 
 
 def sync_first_orders(db, year, month, first_orders_client):
-    """Шаг 1 ночной джобы: спрашиваем TEZ APP по всем ещё не выехавшим лидам месяца."""
+    """Шаг 1 ночной джобы: спрашиваем TEZ APP по всем ещё не выехавшим лидам месяца.
+
+    TEZ APP считает окно в два месяца, поэтому одним запросом получаем и заказ в
+    отчётном месяце, и заказ в предыдущем (последний нужен, чтобы отсечь тех,
+    кто уже работал).
+    """
     phones = db.get_tez_phones_pending_first_order(year, month)
     if not phones:
         return {'checked': 0, 'found': 0}
-    first_orders = first_orders_client.fetch_first_orders(phones)
-    found = db.save_tez_first_orders(first_orders)
+    first_orders = first_orders_client.fetch_first_orders(
+        phones, month=f"{int(year)}-{int(month):02d}"
+    )
+    found = db.save_tez_first_orders(year, month, first_orders)
     return {'checked': len(phones), 'found': found}
 
 
@@ -209,7 +218,12 @@ def recompute_outcomes(db, year, month, min_billsec=DEFAULT_MIN_BILLSEC, month_c
 
     outcomes = []
     for lead in leads:
-        outcome = compute_lead_outcome(lead['first_order_at'], lead['calls'], min_billsec=min_billsec)
+        outcome = compute_lead_outcome(
+            lead['month_first_order_at'],
+            lead['prev_month_first_order_at'],
+            lead['calls'],
+            min_billsec=min_billsec,
+        )
         item = {
             'lead_id': lead['id'],
             'phone_norm': lead['phone_norm'],

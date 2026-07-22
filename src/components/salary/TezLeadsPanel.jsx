@@ -42,6 +42,7 @@ const RULE_LABELS = {
   prev_month_week1: 'Звонок в прошлом месяце, поездка до 7-го',
   no_call_before_trip: 'Нет звонка до поездки',
   trip_after_day7: 'Поездка позже 7-го числа',
+  active_prev_month: 'Были заказы в прошлом месяце — уже работал',
 };
 
 const fmtDateTime = (value) => (value ? String(value).replace('T', ' ').slice(0, 16) : '—');
@@ -210,13 +211,16 @@ const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, groupId = null, 
     { label: 'Обзвонено', value: funnel.dialed, hint: 'есть хотя бы один звонок' },
     { label: 'Дозвонились', value: funnel.reached, hint: 'разговор от 10 сек' },
     {
-      label: 'Вышли на линию',
+      label: 'Заказ в этом месяце',
       value: funnel.went_online,
-      hint: `уже работали: ${funnel.already_working ?? 0}`,
+      hint: `работали и в прошлом: ${funnel.active_prev_month ?? 0}`,
       info: (
         <>
-          Всего с первой поездкой. Из них <b>{funnel.already_working ?? 0}</b> — «уже работающие»:
-          выехали без нашего звонка, заслуги оператора нет, поэтому в знаменатель конверсии не входят.
+          Водители, у которых есть заказ в отчётном месяце. Из них
+          {' '}<b>{funnel.active_prev_month ?? 0}</b> выполняли заказы и в прошлом месяце —
+          значит уже работали, привлечения не было. Всего «уже работающих»
+          (вместе с теми, кто выехал без нашего звонка): <b>{funnel.already_working ?? 0}</b>;
+          в знаменатель конверсии они не входят.
         </>
       ),
     },
