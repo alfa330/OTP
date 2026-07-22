@@ -24166,7 +24166,13 @@ def _clockster_attendance_sync_importer(rows, date_start=None, date_end=None):
             },
         },
     )
+    # «Приход» без парной отметки ухода закрываем сами (иначе статус «готов»
+    # течёт в следующие сутки и тянет за собой несуществующие часы).
+    auto_closed = db.normalize_attendance_marks(
+        sorted({int(item['operator_id']) for item in events}), window_from, window_to
+    )
     summary['unmatched_names_count'] = len(unmatched_counts)
+    summary['auto_closed_marks'] = int(auto_closed.get('auto_closed') or 0)
     return summary
 
 

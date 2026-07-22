@@ -107,6 +107,11 @@ class ClocksterImporterSourceTests(unittest.TestCase):
         self.assertIn("'add'", func)
         self.assertIn("'clockster-manual'", func)
 
+    def test_importer_closes_open_marks(self):
+        func = self.src[self.src.index("def _clockster_attendance_sync_importer("):][:9000]
+        self.assertIn("db.normalize_attendance_marks", func)
+        self.assertIn("auto_closed_marks", func)
+
     def test_mark_states_map_to_operator_profile(self):
         # Приход — рабочий статус операторского профиля, уход — офлайн.
         self.assertIn("CLOCKSTER_MARK_IN_STATE = 'Готов'", self.src)
@@ -159,11 +164,36 @@ class ClocksterMarkOverridesDbTests(unittest.TestCase):
     def test_apply_rebuilds_and_recalculates(self):
         func = self.src[self.src.index("def apply_attendance_mark_change("):][:7000]
         # Правка сразу перестраивает сегменты и пересчитывает часы за день±1.
+        self.assertIn("_normalize_attendance_marks_tx", func)
         self.assertIn("_rebuild_operator_status_segments_tx", func)
         self.assertIn("_recalculate_auto_daily_hours_tx", func)
         # Ручная отметка: смена типа сохраняет 'add'-оверрайд, удаление — снимает его.
         self.assertIn("'add' if was_manual else 'set_kind'", func)
         self.assertIn("DELETE FROM attendance_mark_overrides", func)
+
+    def test_auto_close_of_open_marks(self):
+        # Приход без парной отметки ухода закрывается сам — иначе «готов» течёт
+        # в следующие сутки и тянет несуществующие часы на чужие смены.
+        self.assertIn("ATTENDANCE_MARK_AUTO_NOTE = 'clockster-auto'", self.src)
+        self.assertIn("ATTENDANCE_MARK_MAX_OPEN_HOURS = 12", self.src)
+        self.assertIn("def _normalize_attendance_marks_tx(self, cursor, operator_ids, date_from, date_to):", self.src)
+        self.assertIn("def normalize_attendance_marks(self, operator_ids, date_from, date_to):", self.src)
+        func = self.src[self.src.index("def _normalize_attendance_marks_tx("):][:5000]
+        # Идемпотентность: прошлые авто-уходы удаляются и пересоздаются.
+        self.assertIn("DELETE FROM operator_status_events", func)
+        self.assertIn("FROM work_shifts", func)
+        # Закрываем концом смены, охватывающей приход; иначе — по лимиту часов.
+        self.assertIn("s['end_at'] > mark_at", func)
+        self.assertIn("close_at = shift_end or (mark_at + max_open)", func)
+        # Реальная следующая отметка раньше границы — не вмешиваемся.
+        self.assertIn("next_mark['event_at'] <= close_at", func)
+
+    def test_auto_marks_are_not_editable(self):
+        # Авто-закрытие не правится руками: правильный путь — добавить свою
+        # отметку ухода, тогда авто-закрытие исчезает при нормализации.
+        func = self.src[self.src.index("def apply_attendance_mark_change("):][:7000]
+        self.assertIn("ATTENDANCE_MARK_AUTO_NOTE", func)
+        self.assertIn("автоматическое закрытие смены", func)
 
 
 class ClocksterFrontendTests(unittest.TestCase):
