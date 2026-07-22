@@ -100,8 +100,10 @@ def review_queue_list(limit: int = 30, allowed_direction_ids=None) -> list[dict]
     проверял. Причины считаются из сохранённой карточки; сортировка — сначала критичное,
     внутри — свежее. stale=True — сохранённая оценка не совпадает с актуальной
     конфигурацией (промпт/шкала/база знаний/RAG-режим изменились или immutable-прогона
-    нет), поэтому открытие карточки автоматически переоценит звонок. Если миграция меты
-    ещё не прошла — fallback на «последние звонки»."""
+    нет); открытие покажет прежнюю оценку с пометкой «устарела», переоценка — только
+    кнопкой «Переоценить» (исключение — карточки без immutable-прогона: их открытие
+    оценит звонок заново). Если миграция меты ещё не прошла — fallback на
+    «последние звонки»."""
     conn = None
     try:
         conn = config.connect_ro()
@@ -207,14 +209,17 @@ def _direction_identity_context(direction_id: int) -> dict | None:
 
 
 def _flag_stale_evaluations(items: list[dict]) -> None:
-    """Помечает элементы очереди, чью сохранённую оценку открытие пересчитает заново.
+    """Помечает элементы очереди, чья сохранённая оценка устарела относительно
+    актуальной конфигурации ИИ.
 
-    Открытие карточки (review_payload) отдаёт кэш только при точном совпадении
-    evaluation_fingerprint с актуальной конфигурацией. Здесь ожидаемый fingerprint
-    восстанавливается без записи в БД: транскрипт-компонент берётся из последнего
-    прогона (аудио и ASR-конфиг звонка неизменны в норме), остальные — из текущего
-    состояния направления. stale: True — открытие переоценит; False — кэш совпадёт;
-    None — определить не удалось."""
+    Открытие карточки (review_payload) отдаёт «свежий» кэш только при точном
+    совпадении evaluation_fingerprint с актуальной конфигурацией; при несовпадении
+    показывается прежняя оценка с пометкой «устарела» (переоценка — только кнопкой
+    «Переоценить»). Здесь ожидаемый fingerprint восстанавливается без записи в БД:
+    транскрипт-компонент берётся из последнего прогона (аудио и ASR-конфиг звонка
+    неизменны в норме), остальные — из текущего состояния направления.
+    stale: True — карточка откроется с пометкой «оценка устарела»; False — кэш
+    совпадёт; None — определить не удалось."""
     contexts: dict[int, dict | None] = {}
     for item in items:
         # Нет успешного immutable-прогона (карточка из старого кэша) —
@@ -243,7 +248,7 @@ def _flag_stale_evaluations(items: list[dict]) -> None:
                 ctx["mode"] == "canary"
                 and bucket < max(0, min(100, ctx["canary_percent"])))
             if use_rag and not ctx["snapshot_hash"]:
-                continue  # снапшота под текущую шкалу ещё нет — открытие создаст новый
+                continue  # снапшота под текущую шкалу ещё нет — прогон заведомо устарел
             expected, _, _ = _evaluation_identity(
                 transcript_hash=transcript_identity, direction=ctx["direction"],
                 knowledge_snapshot={"content_hash": ctx["snapshot_hash"]}, use_rag=use_rag)
@@ -836,6 +841,11 @@ def review_payload(call_id: int, refresh: bool = False) -> dict:
     The immutable cache key includes prompt, scale, criterion configuration,
     retrieval settings and the knowledge snapshot.  ``refresh`` creates another
     immutable run with the same fingerprint; it never overwrites audit history.
+
+    Opening a card never re-evaluates a call that already has a succeeded run:
+    a fingerprint mismatch serves the latest run flagged ``_stale`` instead, and
+    a fresh run is started only via ``refresh=True`` (кнопка «Переоценить») or
+    when the call has no succeeded runs at all.
     """
     call_id = int(call_id)
     with _call_lock(call_id):
@@ -950,15 +960,34 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool) -> dict:
             cached_run = None
             if config.RAG_TRACE_REQUIRED:
                 raise RuntimeError("схема immutable evaluation cache не применена")
+        serving_stale = False
         if cached_run:
             cached = dict(cached_run["payload"] or {})
             cached["criteria"] = [dict(item) for item in (cached.get("criteria") or [])]
             if (not cached_run.get("is_latest") or
                     not _hydrate_cached_card_binding(cached, cached_run)):
-                logging.info(
-                    "ai-qa: immutable cache run %s is stale/incompatible; evaluating a fresh run",
-                    cached_run.get("id"))
                 cached_run = None
+        if not cached_run:
+            # Сохранённая оценка не совпала с актуальной конфигурацией (или прогона
+            # под текущий fingerprint нет). Открытие карточки НЕ переоценивает звонок:
+            # отдаём последний прогон с пометкой «оценка устарела», пересчёт — только
+            # явной кнопкой «Переоценить» (refresh=True). Свежая оценка при открытии
+            # запускается лишь когда успешных прогонов у звонка нет вовсе.
+            try:
+                latest_run = runtime_store.get_latest_evaluation(call_id=call_id)
+            except runtime_store.RuntimeSchemaUnavailable:
+                latest_run = None
+            if latest_run:
+                cached = dict(latest_run["payload"] or {})
+                cached["criteria"] = [dict(item) for item in (cached.get("criteria") or [])]
+                if _hydrate_cached_card_binding(cached, latest_run):
+                    cached_run = latest_run
+                    serving_stale = (
+                        str(latest_run.get("evaluation_fingerprint")) != str(fingerprint))
+                else:
+                    logging.info(
+                        "ai-qa: latest run %s payload is incompatible; evaluating a fresh run",
+                        latest_run.get("id"))
         if cached_run:
             transcript_cached = (
                 runtime_store.get_transcript_by_id(cached_run["transcript_cache_id"])
@@ -968,11 +997,17 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool) -> dict:
                 cached["languages"] = transcript_cached.get("languages") or cached.get("languages") or {}
                 cached["asr_mean_conf"] = transcript_cached.get("mean_conf") or 0
             cached["_transcript_cache_id"] = cached_run["transcript_cache_id"]
-            cached["_transcript_hash"] = transcript_hash
+            if not serving_stale:
+                # У устаревшего прогона свой транскрипт-компонент — не подменяем его
+                # хэшем текущей конфигурации ASR.
+                cached["_transcript_hash"] = transcript_hash
             cached["_audio_path"] = audio_path
             cached["_cached"] = True
+            cached["_stale"] = serving_stale
+            if serving_stale and isinstance(cached.get("evaluation"), dict):
+                cached["evaluation"]["stale"] = True
             cached["audio_url"] = _signed_url(audio_path)
-            if rollout["shadow_enabled"]:
+            if rollout["shadow_enabled"] and not serving_stale:
                 _schedule_shadow_variant(
                     call_id=call_id, direction_id=direction_id, direction=direction, asm=asm,
                     transcript_cache_id=transcript_cache_id, transcript_hash=transcript_hash,
@@ -986,9 +1021,11 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool) -> dict:
                 _cache_put(call_id, model, cached)
             return cached
 
-    # Пометка для ревьюера: звонок уже оценивался, но прежний результат не совпал
-    # с актуальной конфигурацией (или прогона нет в immutable-кэше) — это переоценка
-    # устаревшей оценки, а не первая оценка звонка.
+    # Пометка для ревьюера: звонок уже оценивался, но пригодного immutable-прогона
+    # не нашлось (карточка из старого кэша до immutable-хранилища либо повреждённый
+    # payload) — это переоценка устаревшей оценки, а не первая оценка звонка.
+    # Штатное несовпадение fingerprint сюда не попадает: такие карточки открываются
+    # без переоценки (см. ветку serving_stale выше).
     previous_evaluation_stale = False
     if not refresh:
         try:

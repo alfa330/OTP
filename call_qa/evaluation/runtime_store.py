@@ -306,6 +306,44 @@ def get_cached_evaluation(*, call_id: int, evaluation_fingerprint: str,
         conn.close()
 
 
+def get_latest_evaluation(*, call_id: int,
+                          run_kinds=("standard", "force", "batch")) -> dict | None:
+    """Последний успешный прогон звонка независимо от evaluation_fingerprint.
+
+    Нужен, чтобы открытие карточки показывало устаревшую оценку с пометкой,
+    а не запускало платную переоценку: пересчёт — только явной кнопкой
+    «Переоценить». Форма результата совпадает с get_cached_evaluation."""
+    conn = config.connect_ro()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT e.id::text,e.payload,e.knowledge_revision,e.knowledge_snapshot_id,
+                          e.scale_revision_id,e.created_at,e.run_kind,e.transcript_cache_id,
+                          e.pair_id::text,e.evaluation_fingerprint::text,s.criteria_manifest
+                     FROM ai_evaluation_runs e
+                     LEFT JOIN qa_scale_revisions s ON s.id=e.scale_revision_id
+                    WHERE e.call_id=%s AND e.status='succeeded'
+                      AND e.run_kind = ANY(%s)
+                    ORDER BY e.created_at DESC, e.id::text DESC
+                    LIMIT 1""",
+                (int(call_id), list(run_kinds)),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return {"id": row[0], "payload": row[1] or {}, "knowledge_revision": row[2],
+                    "knowledge_snapshot_id": row[3], "scale_revision_id": row[4],
+                    "created_at": row[5], "run_kind": row[6], "transcript_cache_id": row[7],
+                    "pair_id": row[8], "evaluation_fingerprint": row[9],
+                    "scale_manifest": row[10] or [], "is_latest": True}
+    except Exception as exc:
+        if is_schema_compat_error(exc):
+            raise RuntimeSchemaUnavailable("ai_evaluation_runs schema is unavailable") from exc
+        raise
+    finally:
+        conn.close()
+
+
 def latest_evaluation_fingerprint(call_id: int) -> str | None:
     """Fingerprint последнего успешного прогона звонка (без учёта конфигурации) —
     чтобы отличить переоценку устаревшей оценки от первой оценки звонка."""

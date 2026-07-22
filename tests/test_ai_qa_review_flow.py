@@ -40,7 +40,8 @@ class ReviewReasonsTests(unittest.TestCase):
 
 
 class QueueStalenessTests(unittest.TestCase):
-    """Флаг stale: очередь честно предупреждает, что открытие переоценит звонок."""
+    """Флаг stale: очередь честно предупреждает, что оценка устарела
+    (открытие покажет её без пересчёта; переоценка — только кнопкой)."""
 
     def test_card_without_immutable_run_is_stale(self):
         # Карточки, созданные до immutable-кэша, не имеют прогона —
@@ -74,8 +75,8 @@ class QueueStalenessTests(unittest.TestCase):
         self.assertIsNone(items[0]["stale"])
 
     def test_missing_snapshot_with_rag_active_is_stale(self):
-        # RAG включён, а снапшота под текущую шкалу нет: открытие создаст новый
-        # снапшот и новый fingerprint — оценка заведомо пересчитается.
+        # RAG включён, а снапшота под текущую шкалу нет: прогона под актуальную
+        # конфигурацию заведомо не существует — оценка устарела.
         ctx = {"direction": {"id": 74}, "mode": "active", "canary_percent": 0,
                "snapshot_hash": None}
         with mock.patch.object(call_qa_api, "_direction_identity_context", return_value=ctx):
@@ -161,6 +162,15 @@ class ReviewFlowContractTests(unittest.TestCase):
         self.assertIn("_previous_evaluation_stale", self.api_src)
         self.assertIn("latest_evaluation_fingerprint", self.api_src)
         self.assertIn("_previous_evaluation_stale", self.view_src)
+
+    def test_stale_card_is_served_without_auto_reevaluation(self):
+        # Несовпавший fingerprint при открытии НЕ запускает переоценку: бэкенд отдаёт
+        # последний прогон с пометкой _stale, пересчёт — только кнопкой «Переоценить»
+        # (refresh=True). Фронтенд показывает бейдж по этому флагу.
+        self.assertIn("def get_latest_evaluation", self.runtime_src)
+        self.assertIn("runtime_store.get_latest_evaluation(call_id=call_id)", self.api_src)
+        self.assertIn('cached["_stale"] = serving_stale', self.api_src)
+        self.assertIn("callData._stale", self.view_src)
 
 
 if __name__ == "__main__":
