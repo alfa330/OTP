@@ -24066,7 +24066,7 @@ def _clockster_department_id():
     )
 
 
-def _clockster_attendance_sync_importer(rows):
+def _clockster_attendance_sync_importer(rows, date_start=None, date_end=None):
     """Колбэк синка Clockster: отметки прихода/ухода → события статусов.
 
     Матчинг по ФИО ограничен сотрудниками отдела продаж: в Clockster
@@ -24075,6 +24075,11 @@ def _clockster_attendance_sync_importer(rows):
     Oktell-статусы. Приход = «Готов», уход = «Выключен»: сегменты между
     событиями строит стандартный rebuild, часы/опоздания/штрафы считает
     авто-агрегация по сменам графика (модели направлений ОП: часы + штрафы).
+
+    Терминал Clockster один на вход и выход, тип отметки система угадывает и
+    ошибается — поэтому поверх сырых отметок применяются ручные правки
+    (attendance_mark_overrides: delete/set_kind/add), сделанные в модалке
+    таймлайна дня. Так ре-синк воспроизводит правки, а не откатывает их.
     """
     dept_id = _clockster_department_id()
     if not dept_id:
@@ -24085,8 +24090,23 @@ def _clockster_attendance_sync_importer(rows):
     member_ids = db.get_department_member_ids(dept_id)
     operator_lookup = _status_import_build_operator_lookup(restrict_to_ids=member_ids)
 
+    # Окно оверрайдов: аргументы синка, иначе — по датам самих отметок.
+    window_from = _oktell_parse_date(date_start)
+    window_to = _oktell_parse_date(date_end)
+    row_dates = [row['event_at'].date() for row in (rows or []) if isinstance(row.get('event_at'), datetime)]
+    if window_from is None:
+        window_from = min(row_dates) if row_dates else datetime.now().date()
+    if window_to is None:
+        window_to = max(row_dates) if row_dates else datetime.now().date()
+    overrides = db.list_attendance_mark_overrides(member_ids, window_from, window_to)
+    override_map = {(item['operator_id'], item['event_at']): item for item in overrides}
+
+    def _state_for_kind(kind_value):
+        return CLOCKSTER_MARK_IN_STATE if kind_value == 'in' else CLOCKSTER_MARK_OUT_STATE
+
     events = []
     unmatched_counts = {}
+    consumed_overrides = set()
     for row in (rows or []):
         name = str(row.get('employee_name') or '').strip()
         event_at = row.get('event_at')
@@ -24097,11 +24117,32 @@ def _clockster_attendance_sync_importer(rows):
             # Не наш отдел или незаведённый сотрудник — просто копим для сводки.
             unmatched_counts[name] = unmatched_counts.get(name, 0) + 1
             continue
+        operator_id = int(matches[0]['id'])
+        kind = 'in' if int(row.get('status') or 0) == 1 else 'out'
+        override = override_map.get((operator_id, event_at))
+        if override is not None:
+            consumed_overrides.add((operator_id, event_at))
+            if override['action'] == 'delete':
+                continue
+            if override['action'] in ('set_kind', 'add') and override.get('mark_kind'):
+                kind = override['mark_kind']
         events.append({
-            'operator_id': int(matches[0]['id']),
+            'operator_id': operator_id,
             'event_at': event_at,
-            'state_name': CLOCKSTER_MARK_IN_STATE if int(row.get('status') or 0) == 1 else CLOCKSTER_MARK_OUT_STATE,
+            'state_name': _state_for_kind(kind),
             'state_note': 'clockster',
+        })
+
+    # Руками добавленные отметки (которых нет в Clockster) — отдельными событиями.
+    for item in overrides:
+        key = (item['operator_id'], item['event_at'])
+        if item['action'] != 'add' or key in consumed_overrides:
+            continue
+        events.append({
+            'operator_id': item['operator_id'],
+            'event_at': item['event_at'],
+            'state_name': _state_for_kind(item.get('mark_kind') or 'in'),
+            'state_note': 'clockster-manual',
         })
 
     if not events:
@@ -30415,6 +30456,152 @@ def sync_work_schedules_statuses_oktell():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error syncing Oktell operator statuses: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+def _attendance_marks_guard(operator_id):
+    """Доступ к отметкам Clockster: админ, либо СВ/глава отдела продаж.
+    Возвращает (requester_id, None) или (None, (resp, code))."""
+    requester_id, requester, auth_error = _get_authenticated_requester()
+    if auth_error:
+        message, status_code = auth_error
+        return None, (jsonify({"error": message}), status_code)
+    role = _normalize_user_role(requester[3])
+    if not (_is_admin_role(role) or _is_supervisor_role(role) or _headed_department_id(requester_id) is not None):
+        return None, (jsonify({"error": "Forbidden"}), 403)
+    dept_id = _clockster_department_id()
+    if dept_id is None:
+        return None, (jsonify({"error": f"Отдел '{CLOCKSTER_SYNC_DEPARTMENT_CODE}' не найден"}), 404)
+    if db.get_user_department_id(int(operator_id)) != dept_id:
+        return None, (jsonify({"error": "Отметки Clockster ведутся только для отдела продаж"}), 400)
+    if not _is_admin_role(role) and db.get_user_department_id(requester_id) != dept_id:
+        return None, (jsonify({"error": "Forbidden: operator is not in your department"}), 403)
+    return requester_id, None
+
+
+@app.route('/api/attendance_marks', methods=['GET'])
+@require_api_key
+def get_attendance_marks_endpoint():
+    """Отметки Clockster оператора ОП за день (для модалки таймлайна)."""
+    try:
+        operator_id = request.args.get('operator_id')
+        date_str = request.args.get('date')
+        if not operator_id or not str(operator_id).isdigit() or not date_str:
+            return jsonify({"error": "operator_id and date are required"}), 400
+        requester_id, guard_err = _attendance_marks_guard(int(operator_id))
+        if guard_err:
+            resp, code = guard_err
+            return resp, code
+        try:
+            day = datetime.strptime(str(date_str)[:10], '%Y-%m-%d').date()
+        except Exception:
+            return jsonify({"error": "date must be YYYY-MM-DD"}), 400
+        return jsonify({
+            "status": "success",
+            "marks": db.get_attendance_marks(int(operator_id), day)
+        }), 200
+    except Exception as e:
+        logging.error(f"Error fetching attendance marks: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/attendance_marks', methods=['POST'])
+@require_api_key
+def add_attendance_mark_endpoint():
+    """Добавить отметку прихода/ухода руками (сохранится и после ре-синка)."""
+    try:
+        payload = request.get_json(silent=True) or {}
+        operator_id = payload.get('operator_id')
+        event_at_raw = str(payload.get('event_at') or '').strip()
+        kind = str(payload.get('kind') or '').strip().lower()
+        if not operator_id or not str(operator_id).isdigit():
+            return jsonify({"error": "operator_id is required"}), 400
+        if kind not in ('in', 'out'):
+            return jsonify({"error": "kind must be 'in' or 'out'"}), 400
+        try:
+            event_at = datetime.fromisoformat(event_at_raw.replace('T', ' '))
+        except Exception:
+            return jsonify({"error": "event_at must be YYYY-MM-DD HH:MM[:SS]"}), 400
+        requester_id, guard_err = _attendance_marks_guard(int(operator_id))
+        if guard_err:
+            resp, code = guard_err
+            return resp, code
+        result = db.apply_attendance_mark_change(
+            int(operator_id), 'add', event_at=event_at, mark_kind=kind, changed_by=requester_id
+        )
+        return jsonify({
+            "status": "success",
+            "message": "Отметка добавлена",
+            "result": result,
+            "marks": db.get_attendance_marks(int(operator_id), event_at.date())
+        }), 200
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as e:
+        logging.error(f"Error adding attendance mark: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/attendance_marks/<int:event_id>', methods=['PUT'])
+@require_api_key
+def update_attendance_mark_endpoint(event_id):
+    """Сменить тип отметки (приход ↔ уход)."""
+    try:
+        payload = request.get_json(silent=True) or {}
+        operator_id = payload.get('operator_id')
+        kind = str(payload.get('kind') or '').strip().lower()
+        if not operator_id or not str(operator_id).isdigit():
+            return jsonify({"error": "operator_id is required"}), 400
+        if kind not in ('in', 'out'):
+            return jsonify({"error": "kind must be 'in' or 'out'"}), 400
+        requester_id, guard_err = _attendance_marks_guard(int(operator_id))
+        if guard_err:
+            resp, code = guard_err
+            return resp, code
+        result = db.apply_attendance_mark_change(
+            int(operator_id), 'set_kind', event_id=int(event_id), mark_kind=kind, changed_by=requester_id
+        )
+        day = datetime.strptime(result['day'], '%Y-%m-%d').date()
+        return jsonify({
+            "status": "success",
+            "message": "Тип отметки изменён",
+            "result": result,
+            "marks": db.get_attendance_marks(int(operator_id), day)
+        }), 200
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as e:
+        logging.error(f"Error updating attendance mark: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/attendance_marks/<int:event_id>', methods=['DELETE'])
+@require_api_key
+def delete_attendance_mark_endpoint(event_id):
+    """Удалить отметку (ложное срабатывание терминала и т.п.)."""
+    try:
+        payload = request.get_json(silent=True) or {}
+        operator_id = payload.get('operator_id') or request.args.get('operator_id')
+        if not operator_id or not str(operator_id).isdigit():
+            return jsonify({"error": "operator_id is required"}), 400
+        requester_id, guard_err = _attendance_marks_guard(int(operator_id))
+        if guard_err:
+            resp, code = guard_err
+            return resp, code
+        result = db.apply_attendance_mark_change(
+            int(operator_id), 'delete', event_id=int(event_id), changed_by=requester_id
+        )
+        day = datetime.strptime(result['day'], '%Y-%m-%d').date()
+        return jsonify({
+            "status": "success",
+            "message": "Отметка удалена",
+            "result": result,
+            "marks": db.get_attendance_marks(int(operator_id), day)
+        }), 200
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as e:
+        logging.error(f"Error deleting attendance mark: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 
