@@ -14238,12 +14238,16 @@ class Database:
         # not_counted видно, кто звонил и когда, хоть успешка и не засчитана.
         sql = """
             SELECT l.id, l.phone_norm, l.full_name, l.status, l.status_rule, l.upload_count,
-                   l.month_first_order_at,
+                   -- Даты храним в UTC (TIMESTAMPTZ), но показывать надо в Asia/Almaty
+                   -- (UTC+5). AT TIME ZONE переводит в местное настенное время, иначе
+                   -- в интерфейсе время уезжает на −5 часов (и у полуночных поездок
+                   -- сдвигается день).
+                   l.month_first_order_at AT TIME ZONE 'Asia/Almaty',
                    COALESCE(s.operator_id, lc.operator_id),
                    COALESCE(u.name, s.operator_name, lu.name),
-                   COALESCE(s.call_at, lc.started_at),
+                   COALESCE(s.call_at, lc.started_at) AT TIME ZONE 'Asia/Almaty',
                    s.success_date, s.rule_code,
-                   l.prev_month_first_order_at
+                   l.prev_month_first_order_at AT TIME ZONE 'Asia/Almaty'
             FROM tez_leads l
             LEFT JOIN tez_lead_successes s ON s.lead_id = l.id
             LEFT JOIN users u ON u.id = s.operator_id

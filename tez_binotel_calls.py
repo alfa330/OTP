@@ -52,9 +52,15 @@ DEFAULT_API_URL = "https://api.binotel.com/api/4.0"
 HTTP_TIMEOUT = 40
 # Binotel: list-of-calls-by-internal-number-for-period ограничен окном в 7 дней.
 MAX_WINDOW_DAYS = 7
-# history-by-external-number принимает массив номеров: 300 проходит, 1000 даёт
-# «Request is too large». Берём с запасом.
-MAX_EXTERNAL_NUMBERS_PER_REQUEST = 200
+# history-by-external-number принимает массив номеров, НО режет ответ по общему
+# числу ЗВОНКОВ (~500): при превышении часть номеров молча выпадает из ответа с
+# нулём звонков (проверено 2026-07-22: 95 номеров -> 504 звонка, выпало 45; 30
+# номеров -> 344 звонка, все на месте). Поэтому шлём маленькими пачками и, если
+# ответ подошёл к лимиту, делим пачку пополам — иначе теряются звонки, а с ними
+# успешки. Одиночный номер не делим (у лида столько звонков не бывает).
+MAX_EXTERNAL_NUMBERS_PER_REQUEST = 25
+# Порог, при достижении которого ответ мог быть обрезан -> дробим пачку.
+EXTERNAL_NUMBERS_TRUNCATION_GUARD = 400
 # callType в ответе Binotel: 0 = входящий, 1 = исходящий.
 CALL_TYPE_INCOMING = 0
 CALL_TYPE_OUTGOING = 1
@@ -298,15 +304,29 @@ class BinotelApiClient:
             return []
         out = []
         seen = set()
-        for start in range(0, len(numbers), MAX_EXTERNAL_NUMBERS_PER_REQUEST):
-            chunk = numbers[start:start + MAX_EXTERNAL_NUMBERS_PER_REQUEST]
+
+        def _fetch(chunk):
+            """Тянет историю по пачке номеров; если ответ подошёл к лимиту выдачи
+            (значит часть номеров могла выпасть) — делит пачку пополам и повторяет,
+            пока не станет надёжно. Одиночный номер уже не делим."""
+            if not chunk:
+                return
             payload = self._post("stats/history-by-external-number", {"externalNumbers": chunk})
-            for raw in self._extract_call_details(payload):
+            details = self._extract_call_details(payload)
+            if len(details) >= EXTERNAL_NUMBERS_TRUNCATION_GUARD and len(chunk) > 1:
+                mid = len(chunk) // 2
+                _fetch(chunk[:mid])
+                _fetch(chunk[mid:])
+                return
+            for raw in details:
                 call = self._normalize_call(raw)
                 if not call or call["general_call_id"] in seen:
                     continue
                 seen.add(call["general_call_id"])
                 out.append(call)
+
+        for start in range(0, len(numbers), MAX_EXTERNAL_NUMBERS_PER_REQUEST):
+            _fetch(numbers[start:start + MAX_EXTERNAL_NUMBERS_PER_REQUEST])
         return out
 
     def get_call_record_url(self, general_call_id):
