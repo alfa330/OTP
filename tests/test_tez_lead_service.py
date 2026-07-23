@@ -272,6 +272,58 @@ class FirstOrdersContractTests(unittest.TestCase):
         self.assertIn(bad, client.last_invalid)
 
 
+class BinotelBatchTruncationTests(unittest.TestCase):
+    """history-by-external-number режет ответ по числу звонков и роняет номера;
+    клиент должен дробить пачку, чтобы не терять звонки (а с ними успешки)."""
+
+    def _client(self, calls_by_phone, guard):
+        import tez_binotel_calls as tbc
+
+        class _Client(tbc.BinotelApiClient):
+            def __init__(self):
+                self.api_key = 'k'; self.api_secret = 's'
+                self.base_url = tbc.DEFAULT_API_URL; self.tz = tbc.DEFAULT_TZ
+                self.timeout = 10; self.session = None
+                self.requests = []
+
+            def _post(self, endpoint, params):
+                nums = params['externalNumbers']
+                self.requests.append(list(nums))
+                details = []
+                for n in nums:
+                    details.extend(calls_by_phone.get(n, []))
+                # Эмуляция обрезки: если суммарно звонков >= лимита, отдаём только
+                # первые `guard`, теряя хвостовые номера (как реальный Binotel).
+                if len(details) >= guard:
+                    details = details[:guard]
+                return {"status": "success", "callDetails": details}
+
+        return _Client()
+
+    def test_batch_split_recovers_dropped_numbers(self):
+        import tez_binotel_calls as tbc
+        # 6 номеров по 100 звонков = 600 > guard(400): без дробления часть выпадет.
+        calls = {}
+        gid = 0
+        for i in range(6):
+            phone = f"7700000000{i}"
+            arr = []
+            for _ in range(100):
+                gid += 1
+                arr.append({"generalCallID": str(gid), "callType": "1", "billsec": "30",
+                            "externalNumber": phone, "startTime": "1784571656",
+                            "employeeData": {"name": "Оп"}})
+            calls[phone] = arr
+        client = self._client(calls, guard=400)
+        # маленький порог/размер, чтобы форсировать дробление
+        tbc.MAX_EXTERNAL_NUMBERS_PER_REQUEST = 6
+        tbc.EXTERNAL_NUMBERS_TRUNCATION_GUARD = 400
+        got = client.list_calls_by_external_numbers(list(calls.keys()))
+        got_phones = {c["external_number"] for c in got}
+        self.assertEqual(len(got_phones), 6, "ни один номер не должен потеряться")
+        self.assertEqual(len(got), 600, "все звонки должны вернуться после дробления")
+
+
 class CloudflareDetectionTests(unittest.TestCase):
     """403 от TEZ APP c Cloudflare-заглушкой должен опознаваться (а не течь в UI сырым)."""
 
