@@ -115,6 +115,7 @@ const lazyWithRetry = (importer) =>
 const DisputeModal = lazyWithRetry(() => import('./components/modals/DisputeModal'));
 const HistoryModal = lazyWithRetry(() => import('./components/modals/HistoryModal'));
 const UserEditModal = lazyWithRetry(() => import('./components/modals/UserEditModal'));
+const SipSettingsModal = lazyWithRetry(() => import('./components/modals/SipSettingsModal'));
 const AccountAvatarModal = lazyWithRetry(() => import('./components/modals/AccountAvatarModal'));
 const SalaryCalculatorChat = lazyWithRetry(() => import('./components/salary/SalaryCalculatorChat'));
 const SalaryCalculatorTez = lazyWithRetry(() => import('./components/salary/SalaryCalculatorTez'));
@@ -33669,6 +33670,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessAiQaSection = canAccessAiQaForUser(user);
             const canAccessChatAppSection = canAccessChatAppForUser(user);
             const canAccessFourYouSection = canAccessFourYouForUser(user);
+            // Панель «Настройки SIP» (iCORE Phone): админ / глава отдела / СВ отдела продаж
+            const canAccessSipSettings = isAdminLikeRole || isDepartmentHeadUser || isOpSalesSupervisorForAiQa(user);
             // Просмотр переписки оценённого чата Chat2Desk из «Мои оценки»
             // (оценки чатов ЧМ живут в журнале оценок: calls.c2d_snapshot_id).
             const [myEvalChatView, setMyEvalChatView] = useState(null); // {snapshotId, quotes, title}
@@ -33800,6 +33803,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [revokingSessionId, setRevokingSessionId] = useState('');
             const adminSessionsRequestIdRef = useRef(0);
             const [showUserEditModal, setShowUserEditModal] = useState(false);
+            const [showSipSettingsModal, setShowSipSettingsModal] = useState(false);
             const [userToEdit, setUserToEdit] = useState(null);
             // Группы для модалки создания сотрудника: оператор зачисляется в группу,
             // супервайзер наследуется от группы (бэкенд скоупит список по отделу).
@@ -42412,6 +42416,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <FaIcon className="fas fa-sliders-h"></FaIcon> <span className="sidebar-text">Мониторинговая шкала</span>
                                                 </button>
                                             </li>
+                                            {canAccessSipSettings && (
+                                                <li>
+                                                    <button
+                                                        onClick={() => setShowSipSettingsModal(true)}
+                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3`}
+                                                    >
+                                                        <FaIcon className="fas fa-headset"></FaIcon> <span className="sidebar-text">Настройки SIP</span>
+                                                    </button>
+                                                </li>
+                                            )}
                                             {canAccessAiQaSection && (
                                                 <li>
                                                     <button
@@ -42648,6 +42662,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'monitoring_scale' ? 'bg-blue-700' : ''}`}
                                                 >
                                                     <FaIcon className="fas fa-chart-bar"></FaIcon> <span className="sidebar-text">Мониторинговая шкала</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {canAccessSipSettings && (
+                                            <li>
+                                                <button
+                                                    onClick={() => setShowSipSettingsModal(true)}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3`}
+                                                >
+                                                    <FaIcon className="fas fa-headset"></FaIcon> <span className="sidebar-text">Настройки SIP</span>
                                                 </button>
                                             </li>
                                             )}
@@ -48718,6 +48742,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     groups={userModalGroups}
                                     user={user}
                                     onSave={saveUserChanges}
+                                />
+                            </Suspense>
+                        )}
+                        {showSipSettingsModal && (
+                            <Suspense fallback={null}>
+                                <SipSettingsModal
+                                    isOpen={showSipSettingsModal}
+                                    onClose={() => setShowSipSettingsModal(false)}
+                                    apiBase={API_BASE_URL}
+                                    getAuthHeaders={(extra = {}) => withAccessTokenHeader({ 'Content-Type': 'application/json', 'X-User-Id': user?.id, ...extra })}
+                                    canEdit={canAccessSipSettings}
                                 />
                             </Suspense>
                         )}
