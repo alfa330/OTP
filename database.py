@@ -3294,6 +3294,31 @@ class Database:
                     settings JSONB NOT NULL DEFAULT '{}'::jsonb
                 );
             """)
+            # Настройки SIP для iCORE Phone: общий сервер/домен + база пароля.
+            # Пароль оператора = base_password + users.sip_number. Singleton + аудит.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS sip_config (
+                    id INTEGER PRIMARY KEY DEFAULT 1,
+                    sip_server VARCHAR(255) NOT NULL DEFAULT '',
+                    base_password VARCHAR(255) NOT NULL DEFAULT '',
+                    updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    CONSTRAINT sip_config_singleton CHECK (id = 1)
+                );
+            """)
+            cursor.execute("""
+                INSERT INTO sip_config (id)
+                VALUES (1)
+                ON CONFLICT (id) DO NOTHING;
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS sip_config_history (
+                    id SERIAL PRIMARY KEY,
+                    changed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    changed_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    settings JSONB NOT NULL DEFAULT '{}'::jsonb
+                );
+            """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS resource_saved_schedule_plans (
                     id SERIAL PRIMARY KEY,
@@ -17813,6 +17838,80 @@ class Database:
                 VALUES (%s, %s::jsonb)
             """, (user_id, snapshot))
         return self.get_call_distribution_settings()
+
+    def get_sip_config(self) -> dict:
+        """Глобальные настройки SIP для iCORE Phone (singleton id=1)."""
+        with self._get_cursor() as cur:
+            cur.execute("""
+                SELECT s.sip_server, s.base_password, s.updated_by, s.updated_at, u.name
+                FROM sip_config s
+                LEFT JOIN users u ON u.id = s.updated_by
+                WHERE s.id = 1
+            """)
+            r = cur.fetchone()
+        if not r:
+            return {"sip_server": "", "base_password": "", "updated_by": None,
+                    "updated_by_name": None, "updated_at": None}
+        return {
+            "sip_server": r[0] or "",
+            "base_password": r[1] or "",
+            "updated_by": r[2],
+            "updated_by_name": r[4],
+            "updated_at": r[3].isoformat() if r[3] else None,
+        }
+
+    def update_sip_config(self, payload: dict, user_id: Optional[int] = None) -> dict:
+        """Обновить настройки SIP + записать изменение в историю (пароль в истории маскируется)."""
+        current = self.get_sip_config()
+        sip_server = current["sip_server"]
+        base_password = current["base_password"]
+        payload = payload or {}
+        if payload.get('sip_server') is not None:
+            sip_server = str(payload['sip_server']).strip()
+        if payload.get('base_password') is not None:
+            base_password = str(payload['base_password'])
+
+        def _mask(s):
+            s = s or ""
+            if len(s) <= 6:
+                return "*" * len(s)
+            return s[:3] + "*" * (len(s) - 5) + s[-2:]
+
+        snapshot = json.dumps({"sip_server": sip_server, "base_password": _mask(base_password)})
+        with self._get_cursor() as cur:
+            cur.execute("""
+                UPDATE sip_config
+                SET sip_server = %s, base_password = %s,
+                    updated_by = %s, updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                WHERE id = 1
+            """, (sip_server, base_password, user_id))
+            cur.execute("""
+                INSERT INTO sip_config_history (changed_by, settings)
+                VALUES (%s, %s::jsonb)
+            """, (user_id, snapshot))
+        return self.get_sip_config()
+
+    def get_sip_config_history(self, limit: int = 100) -> list:
+        """История изменений настроек SIP (для вкладки «История» в панели)."""
+        limit = max(1, min(int(limit or 100), 500))
+        with self._get_cursor() as cur:
+            cur.execute("""
+                SELECT h.changed_at, h.changed_by, u.name, h.settings
+                FROM sip_config_history h
+                LEFT JOIN users u ON u.id = h.changed_by
+                ORDER BY h.changed_at DESC, h.id DESC
+                LIMIT %s
+            """, (limit,))
+            rows = cur.fetchall()
+        out = []
+        for r in rows:
+            out.append({
+                "changed_at": r[0].isoformat() if r[0] else None,
+                "changed_by": r[1],
+                "changed_by_name": r[2],
+                "settings": r[3] or {},
+            })
+        return out
 
     def get_imported_call_keys_for_month(self, month: str) -> dict:
         """{operator_id: set(external_id)} за месяц — чтобы добор пула не дублировал звонки."""

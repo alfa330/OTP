@@ -19636,6 +19636,104 @@ def call_distribution_settings_endpoint():
         return jsonify({"error": "Internal server error"}), 500
 
 
+def _can_manage_sip_config(requester_id, role) -> bool:
+    """Кто управляет настройками SIP (панель «Настройки SIP» в iCORE):
+    админ/супер-админ, глава отдела или супервайзер отдела продаж (367)."""
+    if _is_admin_role(role):
+        return True
+    if _headed_department_id(requester_id) is not None:
+        return True
+    if _is_supervisor_role(role) and requester_id:
+        try:
+            dept_id = db.get_user_department_id(requester_id)
+        except Exception:
+            dept_id = None
+        return dept_id is not None and int(dept_id) == AI_QA_OP_DEPARTMENT_ID
+    return False
+
+
+@app.route('/api/sip_config', methods=['GET', 'PUT', 'OPTIONS'])
+@require_api_key
+def sip_config_endpoint():
+    """Глобальные настройки SIP для iCORE Phone: сервер/домен + база пароля.
+    Пароль оператора = base_password + sip_number.
+    Доступ: админ / глава отдела / СВ отдела продаж. Изменения пишутся в историю."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        role = requester[3]
+        if not _can_manage_sip_config(requester_id, role):
+            return jsonify({"error": "Forbidden"}), 403
+        if request.method == 'GET':
+            return jsonify({"status": "success", "settings": db.get_sip_config()}), 200
+        payload = request.get_json(silent=True) or {}
+        settings = db.update_sip_config(payload, user_id=requester_id)
+        return jsonify({"status": "success", "settings": settings}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error in sip_config: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/sip_config/history', methods=['GET', 'OPTIONS'])
+@require_api_key
+def sip_config_history_endpoint():
+    """История изменений настроек SIP (вкладка «История»). Доступ как у панели."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        role = requester[3]
+        if not _can_manage_sip_config(requester_id, role):
+            return jsonify({"error": "Forbidden"}), 403
+        limit = request.args.get('limit', default=100, type=int)
+        return jsonify({"status": "success", "history": db.get_sip_config_history(limit=limit)}), 200
+    except Exception as e:
+        logging.error(f"Error in sip_config history: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/operator/sip_settings', methods=['GET', 'OPTIONS'])
+@require_api_key
+def operator_sip_settings_endpoint():
+    """SIP-настройки залогиненного оператора для регистрации в iCORE Phone."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        sip_number = db.get_user_sip_number(requester_id)
+        if not sip_number:
+            return jsonify({"error": "SIP-номер не назначен. Обратитесь к руководителю."}), 409
+        cfg = db.get_sip_config()
+        server = (cfg.get("sip_server") or "").strip()
+        base = cfg.get("base_password") or ""
+        if not server or not base:
+            return jsonify({"error": "Настройки SIP ещё не сконфигурированы."}), 409
+        return jsonify({
+            "status": "success",
+            "settings": {
+                "server": server,
+                "username": sip_number,
+                "password": f"{base}{sip_number}",
+                "transport": "UDP",
+            }
+        }), 200
+    except Exception as e:
+        logging.error(f"Error in operator sip_settings: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/call_distribution/status', methods=['GET', 'OPTIONS'])
 @require_api_key
 def call_distribution_status():
