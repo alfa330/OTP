@@ -1,7 +1,10 @@
 import ast
 import logging
+import threading
+import time
 import unittest
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
@@ -45,6 +48,7 @@ def _oktell_audio_namespace(response=None):
         "_oktell_download_record",
         "_oktell_fetch_record_to_gcs",
         "_oktell_store_record",
+        "_oktell_prepare_distribution_audio",
     }
     module = ast.parse(BOT_PATH.read_text(encoding="utf-8"))
     selected = [
@@ -58,11 +62,15 @@ def _oktell_audio_namespace(response=None):
         "quote": quote,
         "urlparse": urlparse,
         "logging": logging,
+        "threading": threading,
+        "time": time,
+        "ThreadPoolExecutor": ThreadPoolExecutor,
         "requests": fake_requests,
         "db": fake_db,
-        "OKTELL_API_URL": "http://89.107.98.195:8085/query",
+        "OKTELL_API_URL": "http://oktell-proxy.test:8085/query",
         "OKTELL_API_TOKEN": "secret-token",
         "OKTELL_API_TIMEOUT_SECONDS": 60,
+        "OKTELL_AUDIO_FETCH_WORKERS": 4,
         "_oktell_api_ready": lambda: True,
         "_upload_external_record_to_gcs": lambda *_args, **_kwargs: "bucket/Uploads/test.mp3",
     }
@@ -77,7 +85,7 @@ class OktellRecordAudioTests(unittest.TestCase):
         ns = _oktell_audio_namespace()
         self.assertEqual(
             ns["_oktell_record_url"](CONN_ID),
-            f"http://89.107.98.195:8085/record/{CONN_ID}",
+            f"http://oktell-proxy.test:8085/record/{CONN_ID}",
         )
 
     def test_download_uses_api_key_and_accepts_mp3(self):
@@ -86,7 +94,7 @@ class OktellRecordAudioTests(unittest.TestCase):
 
         self.assertEqual(ns["_oktell_download_record"](CONN_ID), (audio, "audio/mpeg"))
         url, kwargs = ns["_fake_requests"].calls[0]
-        self.assertEqual(url, f"http://89.107.98.195:8085/record/{CONN_ID}")
+        self.assertEqual(url, f"http://oktell-proxy.test:8085/record/{CONN_ID}")
         self.assertEqual(kwargs["headers"], {"X-API-Key": "secret-token"})
         self.assertEqual(kwargs["timeout"], 60)
 
@@ -151,6 +159,103 @@ class OktellRecordAudioTests(unittest.TestCase):
         effect = frontend[effect_start:effect_start + 900]
         self.assertNotIn("!existingEvaluation?.audio_path", effect)
         self.assertIn("getImportedAudioUrl(existingEvaluation.id, userId)", effect)
+
+    def test_distribution_keeps_only_calls_with_ready_audio(self):
+        ns = _oktell_audio_namespace()
+        ready_id = CONN_ID
+        missing_id = "5026d1f7-e9b9-41bd-87df-aa3f83b360d5"
+        failed_id = "b1e5a329-f84c-4ad8-bee4-ccfdd9a0afcc"
+
+        def fetch(conn_id):
+            if conn_id == ready_id:
+                return f"bucket/Uploads/oktell-{conn_id}.mp3"
+            if conn_id == failed_id:
+                raise RuntimeError("proxy unavailable")
+            return None
+
+        ns["_oktell_fetch_record_to_gcs"] = fetch
+        payload = {
+            "month": "2026-07",
+            "distribution": [{
+                "operator": "Test Operator",
+                "calls": [
+                    {"id": ready_id, "phone": "77010000001"},
+                    {"id": missing_id, "phone": "77010000002"},
+                    {"id": failed_id, "phone": "77010000003"},
+                    {"id": "not-a-uuid", "phone": "77010000004"},
+                ],
+            }],
+        }
+
+        prepared, result = ns["_oktell_prepare_distribution_audio"](payload)
+        calls = prepared["distribution"][0]["calls"]
+        self.assertEqual([call["id"] for call in calls], [ready_id])
+        self.assertEqual(
+            calls[0]["audioPath"],
+            f"bucket/Uploads/oktell-{ready_id}.mp3",
+        )
+        self.assertEqual(calls[0]["notes"], "distribution:oktell")
+        self.assertEqual(result["requested"], 4)
+        self.assertEqual(result["ready"], 1)
+        self.assertEqual(result["missing"], 1)
+        self.assertEqual(result["failed"], 2)
+
+    def test_distribution_downloads_use_bounded_queue(self):
+        ns = _oktell_audio_namespace()
+        ns["OKTELL_AUDIO_FETCH_WORKERS"] = 2
+        lock = threading.Lock()
+        active = {"value": 0, "peak": 0}
+
+        def fetch(conn_id):
+            with lock:
+                active["value"] += 1
+                active["peak"] = max(active["peak"], active["value"])
+            time.sleep(0.01)
+            with lock:
+                active["value"] -= 1
+            return f"bucket/Uploads/oktell-{conn_id}.mp3"
+
+        ns["_oktell_fetch_record_to_gcs"] = fetch
+        call_ids = [str(uuid.UUID(int=index + 1)) for index in range(8)]
+        payload = {
+            "month": "2026-07",
+            "distribution": [{
+                "operator": "Test Operator",
+                "calls": [{"id": conn_id} for conn_id in call_ids],
+            }],
+        }
+
+        _prepared, result = ns["_oktell_prepare_distribution_audio"](payload)
+        self.assertEqual(result["ready"], 8)
+        self.assertLessEqual(active["peak"], 2)
+
+    def test_distribution_database_import_persists_audio_path(self):
+        source = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+        module = ast.parse(source)
+        database_class = next(
+            node for node in module.body
+            if isinstance(node, ast.ClassDef) and node.name == "Database"
+        )
+        method = next(
+            node for node in database_class.body
+            if isinstance(node, ast.FunctionDef) and node.name == "import_calls_from_distribution"
+        )
+        method_source = ast.get_source_segment(source, method)
+        self.assertIn("audio_path = c.get('audioPath') or c.get('audio_path')", method_source)
+        self.assertIn("audio_path = COALESCE(EXCLUDED.audio_path, imported_calls.audio_path)", method_source)
+
+    def test_both_distribution_paths_prepare_audio(self):
+        source = BOT_PATH.read_text(encoding="utf-8")
+        manual_start = source.index("def shuffle_imported_calls(")
+        manual_end = source.index("\n@app.route('/api/eval_calls/sync_oktell'", manual_start)
+        manual = source[manual_start:manual_end]
+        self.assertIn("_oktell_prepare_distribution_audio(payload)", manual)
+
+        sync_start = source.index("def sync_oktell_evaluation_calls(")
+        sync_end = source.index("\ndef _ws_time_to_minutes", sync_start)
+        sync_worker = source[sync_start:sync_end]
+        self.assertIn("_oktell_prepare_distribution_audio({", sync_worker)
+        self.assertIn("'audio_ready': grand_audio_ready", sync_worker)
 
 
 if __name__ == "__main__":

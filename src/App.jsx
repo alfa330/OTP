@@ -8873,8 +8873,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setCdRunning(true); setCdError(''); setCdRunResult(null);
                 try {
                     const r = await axios.post(`${API_BASE_URL}/api/eval_calls/sync_oktell`, { month: selectedMonth }, { headers: cdHeaders() });
-                    setCdRunResult(r.data?.sync || null);
-                    cdToast(r.data?.message || 'Распределение выполнено', 'success');
+                    const syncResult = r.data?.sync || null;
+                    setCdRunResult(syncResult);
+                    const audioSkipped = Number(syncResult?.audio_missing || 0) + Number(syncResult?.audio_failed || 0);
+                    cdToast(
+                        audioSkipped > 0
+                            ? `Распределение выполнено, без аудио пропущено: ${audioSkipped}`
+                            : (r.data?.message || 'Распределение выполнено с аудио'),
+                        audioSkipped > 0 ? 'warning' : 'success'
+                    );
                     await loadCdStatus(selectedMonth);
                 } catch (e) {
                     const m = e?.response?.data?.error || 'Не удалось запустить распределение';
@@ -9931,7 +9938,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 });
 
                 if (data && (data.status === 'success' || data.status === 'ok' || resp.status === 200)) {
-                if (typeof showToast === 'function') showToast?.('Распределение успешно отправлено', 'success');
+                const audioSkipped = Number(data?.audio_missing || 0) + Number(data?.audio_failed || 0);
+                if (typeof showToast === 'function') {
+                    showToast?.(
+                        audioSkipped > 0
+                            ? `Распределено с аудио; пропущено без записи: ${audioSkipped}`
+                            : 'Распределение с аудио успешно выполнено',
+                        audioSkipped > 0 ? 'warning' : 'success'
+                    );
+                }
                 // select picked calls in UI
                 const s = new Set(selectedCalls);
                 shuffleSummary.distribution.forEach(d => { (d.picked || []).forEach(c => s.add(c.id)); });
@@ -10128,7 +10143,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                           className="mt-4 inline-flex h-11 w-full items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-blue-600 to-indigo-600 text-sm font-semibold text-white shadow-lg shadow-blue-500/20 transition hover:from-blue-700 hover:to-indigo-700 disabled:opacity-60"
                         >
                           <FaIcon className={`fa-solid ${cdRunning ? 'fa-spinner fa-spin' : 'fa-shuffle'}`} />
-                          {cdRunning ? 'Распределяем…' : 'Запустить распределение'}
+                          {cdRunning ? 'Получаем аудио по очереди…' : 'Запустить распределение'}
                         </button>
                       )}
 
@@ -10136,6 +10151,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         <div className="mt-3 rounded-2xl border border-emerald-100 bg-emerald-50 px-3.5 py-2.5 text-[13px] text-emerald-700">
                           Добавлено <b>{cdRunResult.added ?? 0}</b> звонков для <b>{cdRunResult.operators ?? 0}</b> операторов
                           {Array.isArray(cdRunResult.months) && cdRunResult.months.length ? ` (${cdRunResult.months.join(', ')})` : ''}.
+                          {' '}Аудио готово: <b>{cdRunResult.audio_ready ?? 0}</b>
+                          {(Number(cdRunResult.audio_missing || 0) + Number(cdRunResult.audio_failed || 0)) > 0
+                            ? <> · без аудио пропущено: <b>{Number(cdRunResult.audio_missing || 0) + Number(cdRunResult.audio_failed || 0)}</b></>
+                            : null}.
                         </div>
                       )}
                     </div>
@@ -11014,6 +11033,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     {shuffleResult.payload && (
                                     <>
                                         {typeof shuffleResult.payload.imported !== 'undefined' && <div>Импортировано: <strong>{shuffleResult.payload.imported}</strong></div>}
+                                        {typeof shuffleResult.payload.audio_ready !== 'undefined' && <div>Аудио готово: <strong>{shuffleResult.payload.audio_ready}</strong></div>}
+                                        {typeof shuffleResult.payload.audio_missing !== 'undefined' && <div>Без записи: <strong>{shuffleResult.payload.audio_missing}</strong></div>}
+                                        {typeof shuffleResult.payload.audio_failed !== 'undefined' && <div>Ошибки аудио: <strong>{shuffleResult.payload.audio_failed}</strong></div>}
                                         {typeof shuffleResult.payload.updated !== 'undefined' && <div>Обновлено: <strong>{shuffleResult.payload.updated}</strong></div>}
                                         {typeof shuffleResult.payload.skipped !== 'undefined' && <div>Пропущено: <strong>{shuffleResult.payload.skipped}</strong></div>}
                                     </>
@@ -11067,7 +11089,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             className="px-4 py-2 rounded-lg text-sm bg-gradient-to-br from-green-600 to-green-500 text-white shadow-sm disabled:opacity-60 disabled:cursor-not-allowed"
                             aria-busy={shuffling}
                             >
-                            {shuffling ? 'Отправка…' : 'Подтвердить и отправить'}
+                            {shuffling ? 'Получаем аудио по очереди…' : 'Подтвердить и отправить'}
                             </button>
                         )}
                         </div>
