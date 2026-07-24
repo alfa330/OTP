@@ -18987,17 +18987,108 @@ def delete_draft_evaluation(evaluation_id):
         return jsonify({"error": f"Internal server error"}), 500
 
 
-def _binotel_upload_record_to_gcs(audio_bytes, content_type='audio/mpeg'):
-    """Заливает запись разговора Binotel в GCS. Возвращает audio_path 'bucket/blob'."""
+def _upload_external_record_to_gcs(audio_bytes, filename, content_type='audio/mpeg'):
+    if not audio_bytes:
+        raise ValueError("Audio payload is empty")
     bucket_name = (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET') or '').strip()
     if not bucket_name:
         raise RuntimeError("GOOGLE_CLOUD_STORAGE_BUCKET is not configured")
     upload_folder = os.getenv('UPLOAD_FOLDER', 'Uploads/')
-    filename = secure_filename(f"tez-{uuid.uuid4()}.mp3")
-    blob_path = f"{upload_folder}{filename}"
+    safe_filename = secure_filename(filename)
+    if not safe_filename:
+        raise ValueError("Audio filename is invalid")
+    blob_path = f"{upload_folder}{safe_filename}"
     blob = get_gcs_client().bucket(bucket_name).blob(blob_path)
     blob.upload_from_string(audio_bytes, content_type=content_type or 'audio/mpeg')
     return f"{bucket_name}/{blob_path}"
+
+
+def _binotel_upload_record_to_gcs(audio_bytes, content_type='audio/mpeg'):
+    """Заливает запись разговора Binotel в GCS. Возвращает audio_path 'bucket/blob'."""
+    return _upload_external_record_to_gcs(
+        audio_bytes,
+        f"tez-{uuid.uuid4()}.mp3",
+        content_type,
+    )
+
+
+def _oktell_normalize_conn_id(conn_id):
+    """Return the canonical UUID used by the Oktell record endpoint."""
+    return str(uuid.UUID(str(conn_id or '').strip()))
+
+
+def _oktell_record_url(conn_id):
+    """Build /record/{conn_id} next to the configured Oktell /query endpoint."""
+    normalized_id = _oktell_normalize_conn_id(conn_id)
+    parsed = urlparse(OKTELL_API_URL)
+    if not parsed.scheme or not parsed.netloc:
+        raise RuntimeError("OKTELL_IP is not a valid absolute URL")
+    base_path = parsed.path.rstrip('/')
+    if base_path.endswith('/query'):
+        base_path = base_path[:-len('/query')]
+    record_path = f"{base_path}/record/{quote(normalized_id, safe='')}"
+    return parsed._replace(
+        path=record_path,
+        params='',
+        query='',
+        fragment='',
+    ).geturl()
+
+
+def _oktell_download_record(conn_id):
+    """Download one MP3 from the Oktell proxy, or return None for a missing file."""
+    if not _oktell_api_ready():
+        raise RuntimeError("OKTELL_IP/OKTELL_API_TOKEN is not set")
+    normalized_id = _oktell_normalize_conn_id(conn_id)
+    response = requests.get(
+        _oktell_record_url(normalized_id),
+        headers={"X-API-Key": OKTELL_API_TOKEN},
+        timeout=OKTELL_API_TIMEOUT_SECONDS,
+    )
+    if response.status_code == 404:
+        return None
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"Oktell record proxy HTTP {response.status_code}: {response.text[:300]}"
+        )
+
+    audio_bytes = response.content
+    content_type = str(response.headers.get('Content-Type') or '').split(';', 1)[0].strip().lower()
+    if not audio_bytes:
+        return None
+    if not content_type.startswith('audio/'):
+        raise RuntimeError(f"Oktell record proxy returned {content_type or 'unknown content type'}")
+    looks_like_mp3 = (
+        audio_bytes.startswith(b'ID3')
+        or (len(audio_bytes) >= 2 and audio_bytes[0] == 0xFF and (audio_bytes[1] & 0xE0) == 0xE0)
+    )
+    if not looks_like_mp3:
+        raise RuntimeError("Oktell record proxy returned invalid MP3 data")
+    return audio_bytes, content_type
+
+
+def _oktell_fetch_record_to_gcs(conn_id):
+    """Fetch an Oktell MP3 and return its stable GCS bucket/blob path."""
+    normalized_id = _oktell_normalize_conn_id(conn_id)
+    downloaded = _oktell_download_record(normalized_id)
+    if not downloaded:
+        return None
+    audio_bytes, content_type = downloaded
+    return _upload_external_record_to_gcs(
+        audio_bytes,
+        f"oktell-{normalized_id}.mp3",
+        content_type,
+    )
+
+
+def _oktell_store_record(imported_id, conn_id):
+    """Fetch an Oktell recording and attach its GCS path to imported_calls."""
+    audio_path = _oktell_fetch_record_to_gcs(conn_id)
+    if not audio_path:
+        return None
+    db.set_imported_call_audio_path(imported_id, audio_path)
+    logging.info("oktell record stored: imported_call=%s -> %s", imported_id, audio_path)
+    return audio_path
 
 
 def _binotel_store_record(imported_id, general_call_id):
@@ -19301,6 +19392,8 @@ def fetch_random_evaluation_call():
         # 3) исключаем то, что уже в оценках/пуле, и кладём до `count` новых звонков
         existing = db.get_imported_call_external_ids_for_operator(operator_id)
         created_list = []
+        audio_missing = 0
+        audio_errors = 0
         for c in sample:
             if len(created_list) >= count:
                 break
@@ -19317,11 +19410,23 @@ def fetch_random_evaluation_call():
                     continue
             if not month:
                 continue
+            try:
+                audio_path = _oktell_fetch_record_to_gcs(conn_id)
+            except Exception:
+                audio_errors += 1
+                logging.exception("random_call: Oktell audio fetch failed (conn_id=%s)", conn_id)
+                if audio_errors >= 3:
+                    break
+                continue
+            if not audio_path:
+                audio_missing += 1
+                continue
             new_id = db.import_single_random_call(
                 operator_id=operator_id, operator_name=operator_name,
                 external_id=conn_id, month=month, datetime_raw=c.get('dt_raw'),
                 phone=c.get('phone'), duration_sec=c.get('talk_sec'),
-                notes=f"random:{requester_id}",
+                notes=f"random:{requester_id}:oktell",
+                audio_path=audio_path,
             )
             existing.add(conn_id)  # чтобы не выбрать тот же дважды (и на гонке — пропустить)
             if new_id:
@@ -19334,9 +19439,15 @@ def fetch_random_evaluation_call():
                     "phone": c.get('phone'),
                     "duration_sec": c.get('talk_sec'),
                     "direction": "in" if int(c.get('ct') or 0) == 5 else "out",
+                    "audio_path": audio_path,
+                    "audio_pending": False,
                 })
 
         if not created_list:
+            if audio_errors:
+                return jsonify({"error": "Не удалось получить аудиозапись из Oktell, попробуйте ещё раз"}), 502
+            if audio_missing:
+                return jsonify({"error": "У выбранных звонков аудиозапись ещё не готова или недоступна"}), 404
             return jsonify({"error": "Новых звонков по этим критериям не осталось — все уже в оценках"}), 404
 
         return jsonify({
@@ -19409,9 +19520,11 @@ def get_audio_file(evaluation_id):
 @app.route('/api/imported_calls/<int:imported_id>/audio', methods=['GET'])
 @require_api_key
 def get_imported_call_audio_file(imported_id):
-    """Signed URL записи неоценённого (импортированного) звонка — TEZ/Binotel кладёт
-    её в GCS фоново. Доступ как у /api/audio: админ/глава отдела/СВ/оператор с доступом
-    к оператору; для операторов — QR-подтверждение чувствительных данных."""
+    """Signed URL записи неоценённого звонка из Binotel или Oktell.
+
+    Если старый импортированный звонок ещё не имеет audio_path, запись докачивается
+    из исходной телефонии и сохраняется в GCS перед выдачей ссылки.
+    """
     try:
         requester_id = getattr(g, 'user_id', None)
         if not requester_id:
@@ -19440,15 +19553,45 @@ def get_imported_call_audio_file(imported_id):
 
         audio_path = rec.get('audio_path')
         if not audio_path:
-            # Докачка по требованию для TEZ/Binotel: фон мог не отработать (рестарт
-            # воркера, рейт-лимит) или запись ещё готовилась в момент создания звонка.
             ext_id = rec.get('external_id')
-            if ext_id and str(rec.get('notes') or '').endswith(':binotel'):
-                try:
-                    audio_path = _binotel_store_record(imported_id, str(ext_id))
-                except Exception:
-                    logging.exception("binotel on-demand record fetch failed (imported_call=%s)", imported_id)
-                    audio_path = None
+            notes = str(rec.get('notes') or '')
+            if ext_id:
+                if notes.endswith(':binotel'):
+                    try:
+                        audio_path = _binotel_store_record(imported_id, str(ext_id))
+                    except Exception:
+                        logging.exception("binotel on-demand record fetch failed (imported_call=%s)", imported_id)
+                        audio_path = None
+                else:
+                    is_oktell = notes.endswith(':oktell')
+                    if not is_oktell:
+                        try:
+                            _dept_id, dept_code = db.get_user_department(rec["operator_id"])
+                            is_oktell = (
+                                str(dept_code or '').strip().lower()
+                                == OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE
+                            )
+                        except Exception:
+                            logging.exception(
+                                "failed to resolve imported-call source (imported_call=%s)",
+                                imported_id,
+                            )
+                    if is_oktell:
+                        try:
+                            audio_path = _oktell_store_record(imported_id, str(ext_id))
+                        except (TypeError, ValueError):
+                            logging.warning(
+                                "invalid Oktell conn_id on imported call %s: %s",
+                                imported_id,
+                                ext_id,
+                            )
+                            audio_path = None
+                        except Exception:
+                            logging.exception(
+                                "oktell on-demand record fetch failed (imported_call=%s)",
+                                imported_id,
+                            )
+                            audio_path = None
             if not audio_path:
                 return jsonify({"error": "Запись ещё готовится или недоступна",
                                 "code": "AUDIO_NOT_READY"}), 404
