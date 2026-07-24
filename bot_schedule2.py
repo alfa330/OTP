@@ -251,6 +251,7 @@ OKTELL_API_TOKEN = (os.getenv('OKTELL_API_TOKEN') or '').strip()
 OKTELL_SYNC_ENABLED = _env_bool('OKTELL_SYNC_ENABLED', True)
 OKTELL_SYNC_TIMEZONE = (os.getenv('OKTELL_SYNC_TIMEZONE') or 'Asia/Almaty').strip() or 'Asia/Almaty'
 OKTELL_API_TIMEOUT_SECONDS = _env_int('OKTELL_API_TIMEOUT_SECONDS', 60, minimum=5, maximum=300)
+OKTELL_AUDIO_FETCH_WORKERS = _env_int('OKTELL_AUDIO_FETCH_WORKERS', 4, minimum=1, maximum=16)
 OKTELL_API_PAGE_SIZE = _env_int('OKTELL_API_PAGE_SIZE', 1000, minimum=1, maximum=1000)
 OKTELL_API_MAX_PAGES = _env_int('OKTELL_API_MAX_PAGES', 500, minimum=1, maximum=5000)
 OKTELL_SYNC_MAX_RANGE_DAYS = _env_int('OKTELL_SYNC_MAX_RANGE_DAYS', 3, minimum=1, maximum=31)
@@ -19091,6 +19092,117 @@ def _oktell_store_record(imported_id, conn_id):
     return audio_path
 
 
+def _oktell_prepare_distribution_audio(payload):
+    """Attach GCS audio paths to a distribution and omit calls without audio."""
+    if not isinstance(payload, dict):
+        raise ValueError("Distribution payload must be an object")
+
+    started = time.time()
+    distribution = payload.get('distribution') or []
+    requested = 0
+    ordered_ids = []
+    seen_ids = set()
+    invalid_ids = []
+
+    for operator_row in distribution:
+        for call in (operator_row.get('calls') or []):
+            requested += 1
+            raw_id = call.get('id') if isinstance(call, dict) else None
+            try:
+                conn_id = _oktell_normalize_conn_id(raw_id)
+            except (TypeError, ValueError, AttributeError):
+                invalid_ids.append(str(raw_id or ''))
+                continue
+            if conn_id not in seen_ids:
+                seen_ids.add(conn_id)
+                ordered_ids.append(conn_id)
+
+    audio_paths = {}
+    fetch_errors = {}
+    repeated_error_stop = threading.Event()
+    error_lock = threading.Lock()
+    error_count = {'value': 0}
+
+    def _fetch_one(conn_id):
+        if repeated_error_stop.is_set():
+            return conn_id, None, "Batch stopped after repeated Oktell audio errors"
+        try:
+            return conn_id, _oktell_fetch_record_to_gcs(conn_id), None
+        except Exception as exc:
+            with error_lock:
+                error_count['value'] += 1
+                if error_count['value'] >= 3:
+                    repeated_error_stop.set()
+            return conn_id, None, str(exc)[:300]
+
+    if ordered_ids:
+        worker_count = min(OKTELL_AUDIO_FETCH_WORKERS, len(ordered_ids))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            for conn_id, audio_path, error in executor.map(_fetch_one, ordered_ids):
+                audio_paths[conn_id] = audio_path
+                if error:
+                    fetch_errors[conn_id] = error
+                    logging.warning(
+                        "Oktell distribution audio fetch failed (conn_id=%s): %s",
+                        conn_id,
+                        error,
+                    )
+
+    ready = 0
+    missing = 0
+    failed = 0
+    prepared_distribution = []
+    for operator_row in distribution:
+        prepared_calls = []
+        for call in (operator_row.get('calls') or []):
+            raw_id = call.get('id') if isinstance(call, dict) else None
+            try:
+                conn_id = _oktell_normalize_conn_id(raw_id)
+            except (TypeError, ValueError, AttributeError):
+                failed += 1
+                continue
+
+            audio_path = audio_paths.get(conn_id)
+            if not audio_path:
+                if conn_id in fetch_errors:
+                    failed += 1
+                else:
+                    missing += 1
+                continue
+
+            prepared_call = dict(call)
+            prepared_call['audioPath'] = audio_path
+            prepared_call['notes'] = prepared_call.get('notes') or 'distribution:oktell'
+            prepared_calls.append(prepared_call)
+            ready += 1
+
+        prepared_operator_row = dict(operator_row)
+        prepared_operator_row['calls'] = prepared_calls
+        prepared_distribution.append(prepared_operator_row)
+
+    errors = [
+        {"external_id": conn_id, "error": error}
+        for conn_id, error in fetch_errors.items()
+    ]
+    errors.extend(
+        {"external_id": raw_id, "error": "Invalid Oktell conn_id"}
+        for raw_id in invalid_ids
+    )
+    errors = errors[:50]
+
+    prepared_payload = dict(payload)
+    prepared_payload['distribution'] = prepared_distribution
+    return prepared_payload, {
+        "requested": requested,
+        "unique": len(ordered_ids),
+        "ready": ready,
+        "missing": missing,
+        "failed": failed,
+        "errors": errors,
+        "elapsed_seconds": round(time.time() - started, 2),
+    }
+
+
 def _binotel_store_record(imported_id, general_call_id):
     """Тянет ссылку на запись Binotel (живёт ~15 мин), скачивает mp3, кладёт в GCS и
     проставляет imported_calls.audio_path. Возвращает audio_path или None (записи нет /
@@ -19659,16 +19771,40 @@ def shuffle_imported_calls():
         return jsonify({"error": "Missing required fields: month and distribution"}), 400
 
     try:
-        result = db.import_calls_from_distribution(payload, importer_id=importer_id)
+        prepared_payload, audio_result = _oktell_prepare_distribution_audio(payload)
+        if audio_result["requested"] and not audio_result["ready"]:
+            status_code = 502 if audio_result["failed"] else 404
+            return jsonify({
+                "status": "error",
+                "error": "Не удалось получить аудио выбранных звонков из Oktell",
+                "audio_requested": audio_result["requested"],
+                "audio_ready": audio_result["ready"],
+                "audio_missing": audio_result["missing"],
+                "audio_failed": audio_result["failed"],
+                "errors": audio_result["errors"],
+            }), status_code
+
+        result = db.import_calls_from_distribution(prepared_payload, importer_id=importer_id)
+        errors = list(result.get("errors") or []) + list(audio_result.get("errors") or [])
+        skipped = (
+            int(result.get("skipped") or 0)
+            + int(audio_result.get("missing") or 0)
+            + int(audio_result.get("failed") or 0)
+        )
 
         return jsonify({
             "status": "ok",
             "month": payload.get("month"),
             "imported": result.get("imported"),
             "updated": result.get("updated"),
-            "skipped": result.get("skipped"),
+            "skipped": skipped,
             "missing_operators": result.get("missing_operators"),
-            "errors": result.get("errors"),
+            "errors": errors,
+            "audio_requested": audio_result.get("requested"),
+            "audio_ready": audio_result.get("ready"),
+            "audio_missing": audio_result.get("missing"),
+            "audio_failed": audio_result.get("failed"),
+            "audio_elapsed_seconds": audio_result.get("elapsed_seconds"),
             "timestamp": datetime.now().isoformat()
         }), 200
 
@@ -27721,6 +27857,10 @@ def sync_oktell_evaluation_calls(month=None, date_from=None, date_to=None, trigg
         per_month = []
         grand_added = 0
         grand_ops = 0
+        grand_audio_requested = 0
+        grand_audio_ready = 0
+        grand_audio_missing = 0
+        grand_audio_failed = 0
         for mstr in months:
             mstart, mnext = _oktell_eval_month_bounds(mstr)
             # 1) операторы с подходящими записанными звонками за месяц
@@ -27738,7 +27878,15 @@ def sync_oktell_evaluation_calls(month=None, date_from=None, date_to=None, trigg
                 matched.append((str(r.get('auserid')), otp_id,
                                 m[0].get('name') or nm, int(r.get('available') or 0)))
             if not matched:
-                per_month.append({'month': mstr, 'operators': 0, 'added': 0})
+                per_month.append({
+                    'month': mstr,
+                    'operators': 0,
+                    'added': 0,
+                    'audio_requested': 0,
+                    'audio_ready': 0,
+                    'audio_missing': 0,
+                    'audio_failed': 0,
+                })
                 continue
             # 3) норма (по часам месяца mstr) и существующий пул -> сколько добрать
             matched_op_ids = [x[1] for x in matched]
@@ -27767,7 +27915,6 @@ def sync_oktell_evaluation_calls(month=None, date_from=None, date_to=None, trigg
                     sampled.setdefault(str(row.get('auserid')), []).append(row)
             # 5) собрать распределение (исключая уже лежащие в пуле; добор до NORM)
             distribution = []
-            month_added = 0
             for auserid, need in need_by_auserid.items():
                 otp_id, otp_name, available, target = auserid_to_op[auserid]
                 ex = existing.get(otp_id, set())
@@ -27781,19 +27928,61 @@ def sync_oktell_evaluation_calls(month=None, date_from=None, date_to=None, trigg
                     'calls': [{'id': c.get('conn_id'), 'datetimeRaw': c.get('dt_raw'),
                                'phone': c.get('phone'), 'durationSec': c.get('talk_sec')} for c in chosen],
                 })
-                month_added += len(chosen)
+            month_added = 0
+            ready_operators = 0
+            audio_result = {
+                'requested': 0,
+                'ready': 0,
+                'missing': 0,
+                'failed': 0,
+            }
             if distribution:
-                db.import_calls_from_distribution({'month': mstr, 'distribution': distribution}, importer_id=importer_id)
+                prepared_payload, audio_result = _oktell_prepare_distribution_audio({
+                    'month': mstr,
+                    'distribution': distribution,
+                })
+                import_result = db.import_calls_from_distribution(
+                    prepared_payload,
+                    importer_id=importer_id,
+                )
+                month_added = int(import_result.get('imported') or 0)
+                ready_operators = sum(
+                    1 for row in prepared_payload.get('distribution', [])
+                    if row.get('calls')
+                )
             grand_added += month_added
-            grand_ops += len(distribution)
-            per_month.append({'month': mstr, 'operators': len(distribution), 'added': month_added})
-            logging.info("Eval distribution month=%s operators=%s added=%s", mstr, len(distribution), month_added)
+            grand_ops += ready_operators
+            grand_audio_requested += int(audio_result.get('requested') or 0)
+            grand_audio_ready += int(audio_result.get('ready') or 0)
+            grand_audio_missing += int(audio_result.get('missing') or 0)
+            grand_audio_failed += int(audio_result.get('failed') or 0)
+            per_month.append({
+                'month': mstr,
+                'operators': ready_operators,
+                'added': month_added,
+                'audio_requested': int(audio_result.get('requested') or 0),
+                'audio_ready': int(audio_result.get('ready') or 0),
+                'audio_missing': int(audio_result.get('missing') or 0),
+                'audio_failed': int(audio_result.get('failed') or 0),
+            })
+            logging.info(
+                "Eval distribution month=%s operators=%s added=%s audio_missing=%s audio_failed=%s",
+                mstr,
+                ready_operators,
+                month_added,
+                audio_result.get('missing') or 0,
+                audio_result.get('failed') or 0,
+            )
         return {
             'status': 'success',
             'triggered_by': triggered_by,
             'months': months,
             'operators': grand_ops,
             'added': grand_added,
+            'audio_requested': grand_audio_requested,
+            'audio_ready': grand_audio_ready,
+            'audio_missing': grand_audio_missing,
+            'audio_failed': grand_audio_failed,
             'per_month': per_month,
             'min_duration_sec': min_d,
             'max_duration_sec': max_d,

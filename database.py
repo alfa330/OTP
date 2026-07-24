@@ -17726,13 +17726,17 @@ class Database:
                     phone = c.get('phone')
                     phone_norm = _normalize_phone(phone)
                     duration = c.get('durationSec')
+                    audio_path = c.get('audioPath') or c.get('audio_path')
+                    notes = c.get('notes')
 
                     try:
                         cur.execute("""
                             INSERT INTO imported_calls
                             (external_id, operator_name, operator_id, month, datetime_raw,
-                            phone_number, phone_normalized, duration_sec, desired, available, status, imported_at)
-                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'not_evaluated', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                            phone_number, phone_normalized, duration_sec, desired, available,
+                            status, imported_at, audio_path, notes)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'not_evaluated',
+                                    CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty',%s,%s)
                             ON CONFLICT (external_id, month) DO UPDATE
                             SET operator_name = EXCLUDED.operator_name,
                                 operator_id = COALESCE(EXCLUDED.operator_id, imported_calls.operator_id),
@@ -17742,10 +17746,13 @@ class Database:
                                 duration_sec = COALESCE(EXCLUDED.duration_sec, imported_calls.duration_sec),
                                 desired = COALESCE(EXCLUDED.desired, imported_calls.desired),
                                 available = COALESCE(EXCLUDED.available, imported_calls.available),
+                                audio_path = COALESCE(EXCLUDED.audio_path, imported_calls.audio_path),
+                                notes = COALESCE(EXCLUDED.notes, imported_calls.notes),
                                 status = COALESCE(imported_calls.status, 'not_evaluated'),
                                 imported_at = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'
                             """,
-                            (external_id, op_name, operator_id, month, parsed_dt, phone, phone_norm, duration, desired, available)
+                            (external_id, op_name, operator_id, month, parsed_dt, phone,
+                             phone_norm, duration, desired, available, audio_path, notes)
                         )
                         # cur.rowcount может быть ненадёжен для ON CONFLICT; просто учитываем как imported/updated логически
                         imported += 1
