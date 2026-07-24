@@ -2900,6 +2900,20 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_operator_status_segments_operator_date
                 ON operator_status_segments(operator_id, status_date);
             """)
+            # iCORE Phone (live-пуш статусов оператора): идемпотентность по
+            # client_event_id. Телефон шлёт каждое событие с уникальным id и
+            # ретраит из офлайн-очереди при разрывах сети — уникальный индекс не
+            # даёт повтору задвоить событие. Колонка nullable: у исторических
+            # событий (импорт CSV) её нет, индекс частичный (только NOT NULL).
+            cursor.execute("""
+                ALTER TABLE operator_status_events
+                ADD COLUMN IF NOT EXISTS client_event_id VARCHAR(64) NULL;
+            """)
+            cursor.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_operator_status_events_client_event
+                ON operator_status_events(operator_id, client_event_id)
+                WHERE client_event_id IS NOT NULL;
+            """)
             # Ручные правки отметок Clockster (приход/уход отдела продаж).
             # Синк Clockster работает как replace по оператору+датам, поэтому правка
             # только события была бы стёрта ночным ре-синком: оверрайд хранит само
@@ -33951,6 +33965,120 @@ class Database:
             'date_to': date_to_obj.strftime('%Y-%m-%d') if date_to_obj else None,
             'segment_rebuild': segment_rebuild_summary,
             'auto_aggregation': auto_aggregation_summary
+        }
+
+    def append_operator_status_event(self, operator_id, event_at, status_key,
+                                     state_note=None, event_kind=None,
+                                     client_event_id=None):
+        """Добавить ОДНО событие статуса оператора (live-пуш из iCORE Phone).
+
+        В отличие от save_operator_status_import (который работает как replace
+        целого дня и предназначен для пакетного импорта CSV), это аддитивная
+        вставка одного события с локальным пересчётом сегментов и дневных часов
+        ТОЛЬКО по этому оператору и вокруг затронутого дня (±1 сутки — событие
+        может закрывать сегмент прошлых суток или открывать хвост следующих).
+
+        Идемпотентность: при переданном client_event_id повторная отправка того
+        же (operator_id, client_event_id) НЕ создаёт дубликат и НЕ пересчитывает
+        (возвращает {'duplicate': True}). Вставка защищена частичным уникальным
+        индексом + ON CONFLICT DO NOTHING, поэтому безопасна и при гонке
+        параллельных ретраев из офлайн-очереди телефона.
+
+        Всё выполняется в одной транзакции (вставка + rebuild сегментов +
+        пересчёт часов), чтобы не оставлять сегменты/часы рассогласованными.
+        """
+        try:
+            operator_id = int(operator_id)
+        except Exception:
+            raise ValueError("operator_id must be an integer")
+
+        if isinstance(event_at, datetime):
+            event_at_obj = event_at
+        elif isinstance(event_at, str):
+            text = event_at.strip()
+            if not text:
+                raise ValueError("event_at is required")
+            try:
+                event_at_obj = datetime.fromisoformat(text)
+            except Exception:
+                raise ValueError("event_at must be an ISO-8601 datetime")
+        else:
+            raise ValueError("event_at must be a datetime or ISO-8601 string")
+        # Событие храним как naive-ЛОКАЛЬНОЕ время (Asia/Almaty), как и импорт
+        # CSV: из event_at выводится event_date и сегменты сопоставляются со
+        # сменами (work_shifts, локальные). Телефон работает по локальным часам
+        # оператора и шлёт naive-локаль — сохраняем как есть. Если вдруг пришло
+        # tz-aware значение, приводим к Алматы и снимаем tzinfo (НЕ к UTC, иначе
+        # событие уедет на другой день/час относительно всей остальной аналитики).
+        if event_at_obj.tzinfo is not None:
+            event_at_obj = event_at_obj.astimezone(ZoneInfo('Asia/Almaty')).replace(tzinfo=None)
+
+        event_date_obj = event_at_obj.date()
+        norm_status_key = self._normalize_import_status_key(status_key)
+        if not norm_status_key:
+            raise ValueError("status_key is required")
+        norm_note = str(state_note or '').strip() or None
+        if norm_note and len(norm_note) > 255:
+            norm_note = norm_note[:255]
+        norm_kind = self._status_import_event_kind_from_key(norm_status_key, event_kind)
+        norm_client_id = None
+        if client_event_id is not None:
+            norm_client_id = str(client_event_id).strip() or None
+            if norm_client_id and len(norm_client_id) > 64:
+                norm_client_id = norm_client_id[:64]
+
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO operator_status_events
+                    (operator_id, event_at, event_date, status_key, state_note,
+                     event_kind, imported_by, client_event_id)
+                VALUES (%s, %s, %s, %s, %s, %s, NULL, %s)
+                ON CONFLICT (operator_id, client_event_id)
+                    WHERE client_event_id IS NOT NULL
+                    DO NOTHING
+                RETURNING id
+                """,
+                (operator_id, event_at_obj, event_date_obj, norm_status_key,
+                 norm_note, norm_kind, norm_client_id)
+            )
+            inserted = cursor.fetchone()
+            if inserted is None:
+                # Повтор с тем же client_event_id — событие уже есть, ничего не
+                # пересчитываем (данные не изменились).
+                return {
+                    'duplicate': True,
+                    'operator_id': operator_id,
+                    'event_date': event_date_obj.strftime('%Y-%m-%d'),
+                    'status_key': norm_status_key,
+                }
+            new_id = int(inserted[0])
+
+            rebuild_start = event_date_obj - timedelta(days=1)
+            rebuild_end = event_date_obj + timedelta(days=1)
+            rebuilt = self._rebuild_operator_status_segments_tx(
+                cursor=cursor,
+                operator_ids=[operator_id],
+                start_date=rebuild_start,
+                end_date=rebuild_end,
+                imported_by=None
+            )
+            auto = self._recalculate_auto_daily_hours_tx(
+                cursor=cursor,
+                operator_ids=[operator_id],
+                start_date=rebuild_start,
+                end_date=rebuild_end
+            )
+
+        return {
+            'duplicate': False,
+            'event_id': new_id,
+            'operator_id': operator_id,
+            'event_date': event_date_obj.strftime('%Y-%m-%d'),
+            'status_key': norm_status_key,
+            'event_kind': norm_kind,
+            'segments_saved': int((rebuilt or {}).get('segments_saved') or 0),
+            'auto_aggregation': auto,
         }
 
     # ──────────────── Отметки Clockster (приход/уход отдела продаж) ────────────────
