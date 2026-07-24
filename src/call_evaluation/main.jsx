@@ -2767,6 +2767,11 @@ const EvaluationModal = ({
     const [durationMismatch, setDurationMismatch] = useState(false);
     const calibrationOperatorsCacheRef = useRef(new Map());
     const isLocked = !!(existingEvaluation?.isReevaluation || existingEvaluation?.is_imported);
+    const hasAttachedImportedAudio = !!(
+        existingEvaluation?.is_imported
+        && !callFile
+        && (existingEvaluation?.audio_path || audioUrl)
+    );
     const isCalibrationAddCallMode = submitMode === 'calibration_add_call';
     const calibrationOperatorPool = isCalibrationAddCallMode ? calibrationOperators : operators;
     const activeOperator = isCalibrationAddCallMode
@@ -3043,7 +3048,7 @@ const EvaluationModal = ({
         (isCalibrationAddCallMode && !calibrationRoomId) ||
         (currentDir?.hasFileUpload && !callFile && !audioUrl) ||
         scores.some((s,i) => (s==='Error'||s==='Incorrect') && !comments[i]?.trim()) ||
-        durationMismatch;
+        (!hasAttachedImportedAudio && durationMismatch);
 
     const handleSubmit = async (draft = false) => {
         setIsSubmitting(true);
@@ -3233,7 +3238,7 @@ const EvaluationModal = ({
                     {currentDir?.hasFileUpload && (
                         <>
                             <div className="section-divider">Аудиозапись</div>
-                            {!existingEvaluation?.isReevaluation && (
+                            {!existingEvaluation?.isReevaluation && !hasAttachedImportedAudio && (
                                 <div className="file-input-wrap" style={{marginBottom: 10}}>
                                     <label htmlFor="audioFile" className={`file-input-label ${callFile ? 'has-file' : ''}`}>
                                         <FaIcon className={`fas ${callFile ? 'fa-check-circle' : 'fa-cloud-upload-alt'}`} />
@@ -3248,14 +3253,14 @@ const EvaluationModal = ({
                                     <audio controls style={{width:'100%'}}><source src={audioUrl} type="audio/mpeg" /></audio>
                                 </div>
                             )}
-                            {(expectedDuration || actualDuration) && (
+                            {!hasAttachedImportedAudio && (expectedDuration || actualDuration) && (
                                 <div className="duration-info">
                                     <span>Ожидаемая: <strong>{fmtSec(expectedDuration)}</strong></span>
                                     <span>Фактическая: <strong>{fmtSec(actualDuration) || '—'}</strong></span>
                                 </div>
                             )}
-                            {durationMismatch && <div className="duration-error"><FaIcon className="fas fa-exclamation-circle" />{audioError}</div>}
-                            {audioError && !durationMismatch && <div className="error-text">{audioError}</div>}
+                            {!hasAttachedImportedAudio && durationMismatch && <div className="duration-error"><FaIcon className="fas fa-exclamation-circle" />{audioError}</div>}
+                            {audioError && (hasAttachedImportedAudio || !durationMismatch) && <div className="error-text">{audioError}</div>}
                         </>
                     )}
 

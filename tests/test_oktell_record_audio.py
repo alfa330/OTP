@@ -160,6 +160,19 @@ class OktellRecordAudioTests(unittest.TestCase):
         self.assertNotIn("!existingEvaluation?.audio_path", effect)
         self.assertIn("getImportedAudioUrl(existingEvaluation.id, userId)", effect)
 
+    def test_attached_import_audio_hides_upload_and_duration_check(self):
+        frontend = FRONTEND_PATH.read_text(encoding="utf-8")
+        self.assertIn("const hasAttachedImportedAudio = !!(", frontend)
+        self.assertIn(
+            "!existingEvaluation?.isReevaluation && !hasAttachedImportedAudio",
+            frontend,
+        )
+        self.assertIn(
+            "!hasAttachedImportedAudio && (expectedDuration || actualDuration)",
+            frontend,
+        )
+        self.assertIn("(!hasAttachedImportedAudio && durationMismatch)", frontend)
+
     def test_distribution_keeps_only_calls_with_ready_audio(self):
         ns = _oktell_audio_namespace()
         ready_id = CONN_ID
