@@ -17767,7 +17767,7 @@ class Database:
         для кнопки «Случайный звонок» в журнале. Возвращает id новой строки или None, если
         такой звонок уже импортирован (ON CONFLICT (external_id, month)).
 
-        audio_path — путь к записи в GCS (для TEZ/Binotel); может дозаписываться фоново
+        audio_path — путь к записи в GCS (для Binotel/Oktell); может дозаписываться
         через set_imported_call_audio_path после создания строки."""
         parsed_dt = _parse_datetime_raw(datetime_raw)
         phone_norm = _normalize_phone(phone)
@@ -17795,8 +17795,7 @@ class Database:
 
     def get_imported_call_audio(self, imported_id):
         """Возвращает {operator_id, audio_path, status, external_id, notes} импортированного
-        звонка или None. external_id/notes нужны для докачки записи Binotel по требованию
-        (external_id = generalCallID; notes оканчивается на ':binotel' для TEZ-звонков)."""
+        звонка или None. external_id/notes нужны для докачки записи из Binotel/Oktell."""
         with self._get_cursor() as cur:
             cur.execute(
                 "SELECT operator_id, audio_path, status, external_id, notes FROM imported_calls WHERE id = %s",

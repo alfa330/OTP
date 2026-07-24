@@ -395,7 +395,9 @@ class TezBinotelRandomCallTests(unittest.TestCase):
     def test_audio_endpoint_has_on_demand_fetch(self):
         bot_src = _read(BOT_PATH)
         self.assertIn("def _binotel_store_record(", bot_src)   # синхронное ядро докачки
-        ep = bot_src[bot_src.index("def get_imported_call_audio_file("):][:2500]
+        ep_start = bot_src.index("def get_imported_call_audio_file(")
+        ep_end = bot_src.index("\n@app.route('/api/admin/shuffle'", ep_start)
+        ep = bot_src[ep_start:ep_end]
         self.assertIn("_binotel_store_record(", ep)            # докачка по требованию
         self.assertIn("AUDIO_NOT_READY", ep)
 

@@ -603,7 +603,7 @@ const getAudioUrl = async (evalId, userId) => {
     } catch { return null; }
 };
 
-// Аудио неоценённого (импортированного) звонка — TEZ/Binotel кладёт запись в GCS.
+// Аудио неоценённого (импортированного) звонка из Binotel или Oktell.
 // Не кэшируем по общему audioUrlCache: id импортированного звонка живёт в своей
 // таблице и может пересекаться с id обычной оценки.
 const getImportedAudioUrl = async (importedId, userId) => {
@@ -2969,12 +2969,17 @@ const EvaluationModal = ({
         getAudioUrl(existingEvaluation.id, userId).then(url => { if (url) setAudioUrl(url); else setAudioError('Не удалось загрузить аудио'); });
     }, [existingEvaluation, userId, currentDir?.hasFileUpload]);
 
-    // Импортированный (неоценённый) звонок с записью в GCS (TEZ/Binotel): подгружаем
-    // аудио, чтобы СВ мог послушать прямо в модалке — файл вручную загружать не нужно.
+    // Для старых импортов audio_path может быть пустым: сервер сам докачает запись
+    // из Binotel/Oktell, сохранит её в GCS и вернёт временную ссылку.
     useEffect(() => {
-        if (!existingEvaluation?.is_imported || !existingEvaluation?.audio_path || !existingEvaluation?.id || !userId) return;
+        if (!existingEvaluation?.is_imported || !existingEvaluation?.id || !userId) return;
         let alive = true;
-        getImportedAudioUrl(existingEvaluation.id, userId).then(url => { if (alive && url) setAudioUrl(url); });
+        setAudioError(null);
+        getImportedAudioUrl(existingEvaluation.id, userId).then(url => {
+            if (!alive) return;
+            if (url) setAudioUrl(url);
+            else setAudioError('Не удалось загрузить аудио');
+        });
         return () => { alive = false; };
     }, [existingEvaluation, userId]);
 
