@@ -19734,6 +19734,63 @@ def operator_sip_settings_endpoint():
         return jsonify({"error": "Internal server error"}), 500
 
 
+@app.route('/api/operator/status_event', methods=['POST', 'OPTIONS'])
+@require_api_key
+def operator_status_event_endpoint():
+    """Live-пуш события статуса оператора из iCORE Phone (учёт часов в iCORE).
+
+    Оператор шлёт СВОИ события — identity берётся из токена (requester_id),
+    поэтому подделать чужого оператора нельзя. Каждое событие несёт
+    client_event_id; вставка идемпотентна, поэтому телефон безопасно ретраит
+    из офлайн-очереди при разрывах сети без задвоения.
+
+    Тело запроса (JSON):
+      status_key      — ключ статуса: готов | перезвон | тренинг | перерыв |
+                        занят (в разговоре) | выключен (выход). Обязателен.
+      event_at        — ISO-8601 локальное время события (naive, часы оператора).
+                        Если не задано — берётся серверное now().
+      event_kind      — 'status' | 'action' (по умолчанию выводится из ключа).
+      state_note      — необязательная заметка.
+      client_event_id — уникальный id события для идемпотентности (<=64).
+    """
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        data = request.get_json(silent=True) or {}
+        status_key = str(data.get('status_key') or '').strip()
+        if not status_key:
+            return jsonify({"error": "status_key is required"}), 400
+
+        event_at_raw = str(data.get('event_at') or '').strip()
+        if event_at_raw:
+            try:
+                event_at_value = datetime.fromisoformat(event_at_raw)
+            except Exception:
+                return jsonify({"error": "event_at must be an ISO-8601 datetime"}), 400
+        else:
+            event_at_value = datetime.now()
+
+        result = db.append_operator_status_event(
+            operator_id=requester_id,
+            event_at=event_at_value,
+            status_key=status_key,
+            state_note=data.get('state_note'),
+            event_kind=data.get('event_kind'),
+            client_event_id=data.get('client_event_id'),
+        )
+        return jsonify({"status": "success", "result": result}), 200
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as e:
+        logging.error(f"Error in operator status_event: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/call_distribution/status', methods=['GET', 'OPTIONS'])
 @require_api_key
 def call_distribution_status():
