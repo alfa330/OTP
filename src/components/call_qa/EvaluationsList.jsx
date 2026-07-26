@@ -1,44 +1,50 @@
 import React, { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
-import { ChevronRight, Bot, User2, Shuffle, Loader2, ClipboardList, AlertCircle, RefreshCw } from 'lucide-react';
+import { ChevronRight, Bot, User2, Shuffle, Loader2, ClipboardList, AlertCircle, RefreshCw, ChevronDown } from 'lucide-react';
 import { APPLE_FONT, iosCard, iosBtnPrimary, iosBtnSecondary, IosBadge } from '../ui/ios';
 
-/* Оценки: список уже оценённых ИИ звонков (реальные данные из кэша) + кнопка
+/* Оценки: список уже оценённых ИИ звонков (реальные данные из кэша), новые сверху,
+ * постраничная подгрузка «Показать ещё» — можно посмотреть все. Плюс кнопка
  * «Случайный звонок» — берёт случайный оценённый человеком звонок ОП и прогоняет ИИ. */
+
+const PAGE = 50;
 
 export default function EvaluationsList(props) {
     const { apiBaseUrl, withAccessTokenHeader, onOpen, showToast } = props;
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
-    const [data, setData] = useState(null);   // null = загрузка
+    const [items, setItems] = useState(null);   // null = первичная загрузка
+    const [total, setTotal] = useState(0);
     const [error, setError] = useState(null);
+    const [moreBusy, setMoreBusy] = useState(false);
     const [busy, setBusy] = useState(false);
     const loadRequest = useRef({ id: 0, controller: null });
     const randomRequest = useRef({ id: 0, controller: null });
 
-    const load = () => {
+    const fetchPage = (offset, append) => {
         loadRequest.current.controller?.abort();
         const controller = new AbortController();
         const requestId = loadRequest.current.id + 1;
         loadRequest.current = { id: requestId, controller };
-        setData(null); setError(null);
-        if (!apiBaseUrl) {
-            setData([]); setError('Сервис оценок не настроен');
-            return;
-        }
-        axios.get(`${apiBaseUrl}/api/ai-qa/evaluations`, { headers: headers(), signal: controller.signal })
+        if (append) setMoreBusy(true); else { setItems(null); setError(null); }
+        if (!apiBaseUrl) { setItems([]); setError('Сервис оценок не настроен'); return; }
+        axios.get(`${apiBaseUrl}/api/ai-qa/evaluations?limit=${PAGE}&offset=${offset}`,
+            { headers: headers(), signal: controller.signal })
             .then((r) => {
-                if (requestId === loadRequest.current.id) setData(r.data.items || []);
+                if (requestId !== loadRequest.current.id) return;
+                const page = r.data.items || [];
+                setTotal(typeof r.data.total === 'number' ? r.data.total : page.length);
+                setItems((prev) => (append && Array.isArray(prev) ? [...prev, ...page] : page));
             })
             .catch((requestError) => {
-                if (!axios.isCancel(requestError) && requestId === loadRequest.current.id) {
-                    setData([]);
-                    setError(requestError?.response?.data?.error || 'Не удалось загрузить оценки');
-                }
-            });
+                if (axios.isCancel(requestError) || requestId !== loadRequest.current.id) return;
+                if (append) showToast?.('Не удалось подгрузить ещё', 'error');
+                else { setItems([]); setError(requestError?.response?.data?.error || 'Не удалось загрузить оценки'); }
+            })
+            .finally(() => { if (requestId === loadRequest.current.id) setMoreBusy(false); });
     };
 
     useEffect(() => {
-        load();
+        fetchPage(0, false);
         return () => {
             loadRequest.current.controller?.abort();
             randomRequest.current.controller?.abort();
@@ -67,19 +73,28 @@ export default function EvaluationsList(props) {
             });
     };
 
+    const loaded = Array.isArray(items) ? items.length : 0;
+    const hasMore = loaded > 0 && loaded < total;
+
     return (
         <div style={{ fontFamily: APPLE_FONT }} className="space-y-3">
             <div className="flex flex-col items-stretch justify-between gap-3 sm:flex-row sm:items-center">
                 <p className="text-[13px] text-slate-500">
-                    Звонки, уже оценённые ИИ. Можно взять случайный из оценённых человеком и проверить ИИ.
+                    Звонки, уже оценённые ИИ{total ? ` · всего ${total}` : ''}. Можно взять случайный из оценённых человеком и проверить ИИ.
                 </p>
-                <button type="button" onClick={randomCall} disabled={busy} className={iosBtnPrimary + ' shrink-0'}>
-                    {busy ? <Loader2 size={15} className="animate-spin" /> : <Shuffle size={15} />}
-                    {busy ? 'Подбираю звонок…' : 'Оценить случайный звонок'}
-                </button>
+                <div className="flex shrink-0 items-center gap-2">
+                    <button type="button" onClick={() => fetchPage(0, false)} disabled={items === null}
+                        className={iosBtnSecondary} title="Обновить список">
+                        <RefreshCw size={14} className={items === null ? 'animate-spin' : ''} />
+                    </button>
+                    <button type="button" onClick={randomCall} disabled={busy} className={iosBtnPrimary}>
+                        {busy ? <Loader2 size={15} className="animate-spin" /> : <Shuffle size={15} />}
+                        {busy ? 'Подбираю звонок…' : 'Оценить случайный звонок'}
+                    </button>
+                </div>
             </div>
 
-            {data === null ? (
+            {items === null ? (
                 <div className={`${iosCard} flex items-center justify-center gap-2 px-6 py-12 text-slate-500`} role="status">
                     <Loader2 size={20} className="animate-spin" aria-hidden="true" />Загрузка оценок…
                 </div>
@@ -87,9 +102,9 @@ export default function EvaluationsList(props) {
                 <div className={`${iosCard} flex flex-col items-center gap-3 px-6 py-12 text-center`} role="alert">
                     <AlertCircle size={25} className="text-rose-500" />
                     <p className="text-[13px] font-medium text-slate-700">{error}</p>
-                    <button type="button" onClick={load} className={iosBtnSecondary}><RefreshCw size={14} />Повторить</button>
+                    <button type="button" onClick={() => fetchPage(0, false)} className={iosBtnSecondary}><RefreshCw size={14} />Повторить</button>
                 </div>
-            ) : data.length === 0 ? (
+            ) : items.length === 0 ? (
                 <div className={`${iosCard} flex flex-col items-center gap-2 px-6 py-14 text-center`}>
                     <ClipboardList size={26} className="text-slate-300" />
                     <p className="text-[13px] text-slate-500">Пока ни одного звонка не оценено ИИ.</p>
@@ -97,7 +112,7 @@ export default function EvaluationsList(props) {
                 </div>
             ) : (
                 <div className="space-y-2">
-                    {data.map((m) => (
+                    {items.map((m) => (
                         <button key={m.id} type="button" onClick={() => onOpen?.(m)}
                             className={`${iosCard} flex w-full flex-col items-stretch gap-2.5 p-3.5 text-left transition hover:ring-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 active:scale-[0.995] sm:flex-row sm:items-center sm:gap-3`}>
                             <div className="min-w-0 flex-1">
@@ -125,9 +140,17 @@ export default function EvaluationsList(props) {
                             </div>
                         </button>
                     ))}
-                    {data.length >= 100 && (
-                        <p className="px-1 pt-1 text-[11.5px] text-slate-500">Показаны последние 100 оценок.</p>
-                    )}
+
+                    <div className="flex flex-col items-center gap-2 pt-1">
+                        {hasMore ? (
+                            <button type="button" onClick={() => fetchPage(loaded, true)} disabled={moreBusy}
+                                className={iosBtnSecondary}>
+                                {moreBusy ? <Loader2 size={14} className="animate-spin" /> : <ChevronDown size={14} />}
+                                {moreBusy ? 'Загрузка…' : `Показать ещё (осталось ${total - loaded})`}
+                            </button>
+                        ) : null}
+                        <p className="text-[11.5px] text-slate-400">Показано {loaded} из {total}</p>
+                    </div>
                 </div>
             )}
         </div>

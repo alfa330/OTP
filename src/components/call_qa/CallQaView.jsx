@@ -135,6 +135,8 @@ export default function CallQaView(props) {
     const [reviewInteraction, setReviewInteraction] = useState({ dirty: false, busy: false });
     const [queue, setQueue] = useState(null);      // null = загрузка
     const [queueErr, setQueueErr] = useState(false);
+    const [queueTotal, setQueueTotal] = useState(0);
+    const [queueMoreBusy, setQueueMoreBusy] = useState(false);
 
     const [selected, setSelected] = useState(null);
     const [callData, setCallData] = useState(null);
@@ -155,12 +157,22 @@ export default function CallQaView(props) {
         setTab(nextTab);
     };
 
-    const loadQueue = () => {
-        setQueue(null); setQueueErr(false);
-        if (!apiBaseUrl) { setQueueErr(true); setQueue([]); return; }
-        axios.get(`${apiBaseUrl}/api/ai-qa/review-queue`, { headers: headers() })
-            .then((r) => setQueue(r.data.items || []))
-            .catch(() => { setQueue([]); setQueueErr(true); });
+    const QUEUE_PAGE = 30;
+    const loadQueue = (offset = 0, append = false) => {
+        if (append) setQueueMoreBusy(true); else { setQueue(null); setQueueErr(false); }
+        if (!apiBaseUrl) { setQueueErr(true); setQueue([]); setQueueMoreBusy(false); return; }
+        axios.get(`${apiBaseUrl}/api/ai-qa/review-queue`,
+            { params: { limit: QUEUE_PAGE, offset }, headers: headers() })
+            .then((r) => {
+                const page = r.data.items || [];
+                setQueueTotal(typeof r.data.total === 'number' ? r.data.total : page.length);
+                setQueue((prev) => (append && Array.isArray(prev) ? [...prev, ...page] : page));
+            })
+            .catch(() => {
+                if (append) showToast?.('Не удалось подгрузить ещё', 'error');
+                else { setQueue([]); setQueueErr(true); }
+            })
+            .finally(() => setQueueMoreBusy(false));
     };
 
     useEffect(() => {
@@ -278,7 +290,12 @@ export default function CallQaView(props) {
                   evaluation_fingerprint: call._evaluation_fingerprint,
                   items }, { headers: headers() });
             showToast?.(items.length ? 'Разбор сохранён как черновик' : 'Подтверждено', 'success');
-            setQueue((current) => (Array.isArray(current) ? current.filter((item) => item.id !== call.id) : current));
+            setQueue((current) => {
+                if (!Array.isArray(current)) return current;
+                const next = current.filter((item) => item.id !== call.id);
+                if (next.length !== current.length) setQueueTotal((t) => Math.max(0, t - 1));
+                return next;
+            });
             resetCall();
             return true;
         } catch (error) {
@@ -368,9 +385,17 @@ export default function CallQaView(props) {
                                     при открытии показывается прежняя оценка, пересчёт запускается только кнопкой «Переоценить» в карточке.
                                 </p>
                             )}
-                            {queue.length >= 30 && (
-                                <p className="px-1 text-[11.5px] text-slate-500">Показаны первые 30 звонков по приоритету ревью.</p>
-                            )}
+                            <div className="flex flex-col items-center gap-2 pt-1">
+                                {queue.length < queueTotal && (
+                                    <button type="button" onClick={() => loadQueue(queue.length, true)}
+                                        disabled={queueMoreBusy} className={iosBtnSecondary}>
+                                        {queueMoreBusy ? 'Загрузка…' : `Показать ещё (осталось ${queueTotal - queue.length})`}
+                                    </button>
+                                )}
+                                <p className="px-1 text-[11.5px] text-slate-400">
+                                    Показано {queue.length} из {queueTotal} · сначала критичные
+                                </p>
+                            </div>
                         </div>
                     )
             ) : tab === 'overview' ? (
