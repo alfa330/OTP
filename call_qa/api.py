@@ -95,17 +95,21 @@ def direction_in_scope(direction_id, allowed_direction_ids) -> bool:
     return bool(row and row[0] is not None and int(row[0]) in allowed)
 
 
-def review_queue_list(limit: int = 30, allowed_direction_ids=None) -> list[dict]:
+_QUEUE_FETCH_CAP = 3000  # верх глобальной сортировки по критичности до постраничной нарезки
+
+
+def review_queue_list(limit: int = 30, offset: int = 0, allowed_direction_ids=None) -> list[dict]:
     """Очередь ревью: ИИ-оценённые звонки (текущий тег модели), которые человек ещё не
     проверял. Причины считаются из сохранённой карточки; сортировка — сначала критичное,
-    внутри — свежее. stale=True — сохранённая оценка не совпадает с актуальной
-    конфигурацией (промпт/шкала/база знаний/RAG-режим изменились или immutable-прогона
-    нет); открытие покажет прежнюю оценку с пометкой «устарела», переоценка — только
-    кнопкой «Переоценить» (исключение — карточки без immutable-прогона: их открытие
-    оценит звонок заново). Если миграция меты ещё не прошла — fallback на
-    «последние звонки»."""
+    внутри — свежее; постранично (limit/offset) поверх глобального порядка. stale=True —
+    сохранённая оценка не совпадает с актуальной конфигурацией (промпт/шкала/база
+    знаний/RAG-режим изменились или immutable-прогона нет); открытие покажет прежнюю
+    оценку с пометкой «устарела», переоценка — только кнопкой «Переоценить» (исключение —
+    карточки без immutable-прогона: их открытие оценит звонок заново). Если миграция меты
+    ещё не прошла — fallback на «последние звонки»."""
     conn = None
     try:
+        limit = max(1, min(int(limit), 200)); offset = max(0, int(offset))
         conn = config.connect_ro()
         cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
         scope_sql, scope_params = "", ()
@@ -134,7 +138,7 @@ def review_queue_list(limit: int = 30, allowed_direction_ids=None) -> list[dict]
                  ) run ON true
                 WHERE rc.model = %s AND m.review_outcome IS NULL""" + scope_sql + """
                 ORDER BY rc.created_at DESC LIMIT %s""",
-            (config.CLAUDE_MODEL, *scope_params, max(limit * 3, limit)),  # запас: часть окажется «чистой»
+            (config.CLAUDE_MODEL, *scope_params, _QUEUE_FETCH_CAP),
         )
         rows = cur.fetchall(); cur.close(); conn.close()
         prio = review_queue.REASON_PRIORITY
@@ -147,7 +151,7 @@ def review_queue_list(limit: int = 30, allowed_direction_ids=None) -> list[dict]
                           "_ts": r[7], "_direction_id": r[8],
                           "_run_fp": r[9], "_run_components": r[10]})
         items.sort(key=lambda i: (i["_sev"], -(i["_ts"].timestamp() if i["_ts"] else 0)))
-        items = items[:limit]
+        items = items[offset:offset + limit]
         _flag_stale_evaluations(items)
         for i in items:
             for key in ("_sev", "_ts", "_direction_id", "_run_fp", "_run_components"):
@@ -159,6 +163,40 @@ def review_queue_list(limit: int = 30, allowed_direction_ids=None) -> list[dict]
             return _recent_calls_fallback(limit, allowed_direction_ids)
         logging.exception("ai-qa: очередь ревью недоступна")
         raise
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def review_queue_count(allowed_direction_ids=None) -> int:
+    """Сколько всего звонков в очереди ревью (не проверены человеком) — для пагинации."""
+    conn = None
+    try:
+        conn = config.connect_ro()
+        cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+        scope_sql, scope_params = "", ()
+        if allowed_direction_ids is not None:
+            family = _scope_family(cur, allowed_direction_ids)
+            if not family:
+                cur.close(); conn.close()
+                return 0
+            scope_sql, scope_params = " AND c.direction_id = ANY(%s)", (family,)
+        cur.execute(
+            """SELECT COUNT(*) FROM ai_review_cache rc
+                 JOIN calls c ON c.id = rc.call_id
+                 LEFT JOIN ai_evaluation_meta m ON m.call_id = rc.call_id AND m.model = rc.model
+                WHERE rc.model = %s AND m.review_outcome IS NULL""" + scope_sql,
+            (config.CLAUDE_MODEL, *scope_params))
+        n = cur.fetchone()[0]; cur.close(); conn.close()
+        return int(n or 0)
+    except Exception as exc:
+        if runtime_store.is_schema_compat_error(exc):
+            return 0
+        logging.exception("ai-qa: счётчик очереди недоступен")
+        return 0
     finally:
         if conn is not None:
             try:
@@ -2621,12 +2659,44 @@ def random_call(allowed_direction_ids=None) -> dict:
             "datetime": row[3], "human_score": row[4]}
 
 
-def evaluations_list(limit=100, allowed_direction_ids=None) -> list[dict]:
-    """Уже оценённые ИИ звонки (из кэша) — реальные данные, пусто пока ничего не оценено.
-    Один звонок = одна строка (последняя оценка), иначе звонки, оценённые несколькими
-    версиями модели, дублировались в списке."""
+def evaluations_count(allowed_direction_ids=None) -> int:
+    """Сколько всего звонков оценено ИИ (в рамках доступных направлений) — для пагинации."""
     conn = None
     try:
+        conn = config.connect_ro()
+        cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+        scope_sql, scope_params = "", ()
+        if allowed_direction_ids is not None:
+            family = _scope_family(cur, allowed_direction_ids)
+            if not family:
+                cur.close(); conn.close()
+                return 0
+            scope_sql, scope_params = " WHERE c.direction_id = ANY(%s)", (family,)
+        cur.execute(
+            """SELECT COUNT(*) FROM (SELECT DISTINCT rc.call_id FROM ai_review_cache rc
+                 JOIN calls c ON c.id = rc.call_id""" + scope_sql + ") t", scope_params)
+        n = cur.fetchone()[0]; cur.close(); conn.close()
+        return int(n or 0)
+    except Exception:
+        logging.exception("ai-qa evaluations count failed")
+        raise
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def evaluations_list(limit=100, offset=0, allowed_direction_ids=None) -> list[dict]:
+    """Уже оценённые ИИ звонки (из кэша) — реальные данные, пусто пока ничего не оценено.
+    Один звонок = одна строка (последняя оценка), иначе звонки, оценённые несколькими
+    версиями модели, дублировались в списке. Сортировка — сначала новые; поддержана
+    постраничная выдача (limit/offset)."""
+    conn = None
+    try:
+        limit = max(1, min(int(limit), 500))
+        offset = max(0, int(offset))
         conn = config.connect_ro()
         cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
         scope_sql, scope_params = "", ()
@@ -2645,7 +2715,7 @@ def evaluations_list(limit=100, allowed_direction_ids=None) -> list[dict]:
                  JOIN calls c ON c.id = t.call_id
                  LEFT JOIN directions d ON c.direction_id = d.id
                  LEFT JOIN users u ON c.operator_id = u.id""" + scope_sql + """
-                ORDER BY t.created_at DESC LIMIT %s""", (*scope_params, limit))
+                ORDER BY t.created_at DESC LIMIT %s OFFSET %s""", (*scope_params, limit, offset))
         rows = cur.fetchall(); cur.close(); conn.close()
         return [{"id": r[0], "direction": r[1], "operator": r[2] or "—",
                  "datetime": r[3], "human": r[4],

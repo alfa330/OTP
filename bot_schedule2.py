@@ -4184,10 +4184,14 @@ def api_ai_qa_review_queue():
     if err:
         return err
     try:
-        from call_qa.api import review_queue_list
-        items = review_queue_list(limit=int(request.args.get('limit', 30)),
-                                  allowed_direction_ids=_ai_qa_direction_scope(requester_id))
-        return jsonify({"status": "success", "items": items}), 200
+        from call_qa.api import review_queue_list, review_queue_count
+        scope = _ai_qa_direction_scope(requester_id)
+        limit = int(request.args.get('limit', 30))
+        offset = int(request.args.get('offset', 0))
+        items = review_queue_list(limit=limit, offset=offset, allowed_direction_ids=scope)
+        total = review_queue_count(allowed_direction_ids=scope)
+        return jsonify({"status": "success", "items": items,
+                        "total": total, "limit": limit, "offset": offset}), 200
     except Exception as error:
         logging.exception("ai-qa review-queue failed")
         return jsonify({"error": str(error)}), 500
@@ -4491,10 +4495,14 @@ def api_ai_qa_evaluations():
     if err:
         return err
     try:
-        from call_qa.api import evaluations_list
-        return jsonify({"status": "success",
-                        "items": evaluations_list(limit=int(request.args.get('limit', 100)),
-                                                  allowed_direction_ids=_ai_qa_direction_scope(requester_id))}), 200
+        from call_qa.api import evaluations_list, evaluations_count
+        scope = _ai_qa_direction_scope(requester_id)
+        limit = int(request.args.get('limit', 50))
+        offset = int(request.args.get('offset', 0))
+        items = evaluations_list(limit=limit, offset=offset, allowed_direction_ids=scope)
+        total = evaluations_count(allowed_direction_ids=scope)
+        return jsonify({"status": "success", "items": items,
+                        "total": total, "limit": limit, "offset": offset}), 200
     except Exception as error:
         logging.exception("ai-qa evaluations failed")
         return jsonify({"error": str(error)}), 500

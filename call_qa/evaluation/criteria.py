@@ -59,17 +59,29 @@ def load_direction(direction_id: int) -> dict:
     ``id`` — канонический (стабильный) id направления: для архивной версии шкалы
     это id живой строки (directions.canonical_id). Все производные идентичности
     (criterion_id, scale_hash) и связки (rollout, база знаний, scale revisions)
-    считаются от канонического id, поэтому оценка старого звонка по архивной
-    шкале остаётся в том же направлении, что и текущие звонки. ``row_id`` —
-    фактическая строка, из которой загружены критерии."""
+    считаются от канонического id.
+
+    КРИТЕРИИ ВСЕГДА берутся из ЖИВОЙ (канонической) строки направления — т.е.
+    ИИ оценивает по ТЕКУЩЕЙ мониторинговой шкале, даже если звонок привязан к
+    архивной строке (старой версии критериев). Так батч и интерактив всегда
+    подтягивают актуальные критерии/веса. ``row_id`` — строка, из которой
+    реально загружены критерии (после редиректа на каноническую)."""
     conn = config.connect_ro()
     cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
     cur.execute("SELECT id, name, criteria, canonical_id FROM directions WHERE id=%s", (direction_id,))
-    row = cur.fetchone(); cur.close(); conn.close()
+    row = cur.fetchone()
     if not row:
+        cur.close(); conn.close()
         raise ValueError(f"направление {direction_id} не найдено")
     canonical_id = int(row[3] or row[0])
-    raw = row[2] or []
+    row_id, name, raw = row[0], row[1], (row[2] or [])
+    if canonical_id != row_id:
+        # передан архивный id → грузим критерии живой (канонической) строки
+        cur.execute("SELECT name, criteria FROM directions WHERE id=%s", (canonical_id,))
+        crow = cur.fetchone()
+        if crow is not None and crow[1] is not None:
+            name, raw, row_id = crow[0], (crow[1] or []), canonical_id
+    cur.close(); conn.close()
     crits = []
     name_counts = {}
     for i, c in enumerate(raw):
@@ -86,5 +98,5 @@ def load_direction(direction_id: int) -> dict:
             "is_critical": bool(c.get("isCritical")),
             "deficiency": c.get("deficiency"),
         })
-    return {"id": canonical_id, "row_id": row[0], "name": row[1], "criteria": crits,
-            "scale_hash": scale_fingerprint(canonical_id, row[1], crits)}
+    return {"id": canonical_id, "row_id": row_id, "name": name, "criteria": crits,
+            "scale_hash": scale_fingerprint(canonical_id, name, crits)}
