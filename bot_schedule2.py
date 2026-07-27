@@ -30260,6 +30260,40 @@ def import_work_schedules_excel():
 
 TEZ_LEADS_MAX_FILE_SIZE_MB = 15
 TEZ_LEADS_MAX_FILE_SIZE_BYTES = TEZ_LEADS_MAX_FILE_SIZE_MB * 1024 * 1024
+TEZ_LEADS_BATCH_REASON_MAX_LENGTH = 2000
+
+
+def _tez_leads_display_filename(raw_filename, fallback_filename='leads.xlsx'):
+    """Безопасное отображаемое имя файла без потери кириллицы.
+
+    secure_filename нужен для проверки расширения, но удаляет кириллицу и для
+    обычного «Лиды Алматы.xlsx» оставляет общий fallback. Сам файл на диск здесь
+    не пишется, поэтому для аудита сохраняем очищенный basename исходного имени.
+    """
+    fallback = str(fallback_filename or 'leads.xlsx').strip() or 'leads.xlsx'
+    basename = str(raw_filename or '').replace('\\', '/').rsplit('/', 1)[-1]
+    basename = re.sub(r'[\x00-\x1f\x7f]+', '', basename)
+    basename = ' '.join(basename.split()).strip(' .')
+    if not basename:
+        basename = fallback
+    if len(basename) > 255:
+        root, ext = os.path.splitext(basename)
+        ext = ext[:20]
+        basename = root[:max(1, 255 - len(ext))] + ext
+    return basename
+
+
+def _tez_leads_excel_text_cell(ws, row, column, value):
+    """Записывает текст как текст, не позволяя Excel выполнить его как формулу."""
+    cell = ws.cell(
+        row=row,
+        column=column,
+        value='' if value is None else str(value),
+    )
+    # openpyxl автоматически помечает строки с "=" как formula. Источник и
+    # ФИО приходят из загруженного пользователем файла, поэтому тип задаём явно.
+    cell.data_type = 's'
+    return cell
 
 
 def _tez_op_operator_resolver():
@@ -30356,8 +30390,12 @@ def tez_leads_upload():
     if not file_storage:
         return jsonify({"error": "file is required"}), 400
 
-    file_name, file_ext = _status_import_secure_filename_and_ext(
+    safe_file_name, file_ext = _status_import_secure_filename_and_ext(
         file_storage.filename, fallback_filename='leads.xlsx'
+    )
+    file_name = _tez_leads_display_filename(
+        file_storage.filename,
+        fallback_filename=safe_file_name,
     )
     if file_ext not in ('.csv', '.xlsx', '.xlsm'):
         return jsonify({"error": "Поддерживаются только .csv, .xlsx и .xlsm"}), 400
@@ -30535,8 +30573,9 @@ def tez_leads_export():
     wb = Workbook()
     ws = wb.active
     ws.title = f'Лиды {month:02d}.{year}'[:31]
-    headers = ['ФИО', 'Телефон', 'Статус', 'Правило', 'Загрузок',
-               'Первая поездка', 'Оператор', 'Звонок', 'Дата успешки']
+    headers = ['ФИО', 'Телефон', 'Источник', 'Статус', 'Правило', 'Загрузок',
+               'Первая поездка', 'Оператор', 'Звонок', 'Время разговора',
+               'Дата успешки']
     for col, title in enumerate(headers, start=1):
         cell = ws.cell(row=1, column=col, value=title)
         cell.font = Font(bold=True, color='FFFFFF')
@@ -30544,17 +30583,44 @@ def tez_leads_export():
         cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
 
     for idx, row in enumerate(rows, start=2):
-        ws.cell(row=idx, column=1, value=row['full_name'])
-        ws.cell(row=idx, column=2, value=row['phone'])
-        ws.cell(row=idx, column=3, value=status_labels.get(row['status'], row['status']))
-        ws.cell(row=idx, column=4, value=rule_labels.get(row['status_rule'], row['status_rule'] or ''))
-        ws.cell(row=idx, column=5, value=row['upload_count'])
-        ws.cell(row=idx, column=6, value=(row['first_order_at'] or '').replace('T', ' ')[:19])
-        ws.cell(row=idx, column=7, value=row['operator_name'])
-        ws.cell(row=idx, column=8, value=(row['call_at'] or '').replace('T', ' ')[:19])
-        ws.cell(row=idx, column=9, value=row['success_date'] or '')
+        _tez_leads_excel_text_cell(ws, idx, 1, row['full_name'])
+        _tez_leads_excel_text_cell(ws, idx, 2, row['phone'])
+        _tez_leads_excel_text_cell(ws, idx, 3, row.get('source_file_name') or '')
+        _tez_leads_excel_text_cell(
+            ws, idx, 4, status_labels.get(row['status'], row['status'])
+        )
+        _tez_leads_excel_text_cell(
+            ws,
+            idx,
+            5,
+            rule_labels.get(row['status_rule'], row['status_rule'] or ''),
+        )
+        ws.cell(row=idx, column=6, value=row['upload_count'])
+        _tez_leads_excel_text_cell(
+            ws, idx, 7, (row['first_order_at'] or '').replace('T', ' ')[:19]
+        )
+        _tez_leads_excel_text_cell(ws, idx, 8, row['operator_name'])
+        _tez_leads_excel_text_cell(
+            ws, idx, 9, (row['call_at'] or '').replace('T', ' ')[:19]
+        )
+        duration_seconds = row.get('talk_duration_seconds')
+        duration_cell = ws.cell(
+            row=idx,
+            column=10,
+            value=(
+                timedelta(seconds=max(int(duration_seconds), 0))
+                if duration_seconds is not None
+                else ''
+            ),
+        )
+        if duration_seconds is not None:
+            duration_cell.number_format = '[h]:mm:ss'
+        _tez_leads_excel_text_cell(ws, idx, 11, row['success_date'] or '')
 
-    for col, width in enumerate([34, 16, 18, 40, 10, 20, 28, 20, 14], start=1):
+    for col, width in enumerate(
+        [34, 16, 34, 18, 40, 10, 20, 28, 20, 18, 14],
+        start=1,
+    ):
         ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = width
 
     stream = BytesIO()
@@ -30601,6 +30667,186 @@ def tez_leads_recompute():
         return jsonify({"error": "Не удалось выполнить сверку"}), 502
 
     return jsonify({"first_orders": orders, "calls": calls, "outcomes": outcomes})
+
+
+def _tez_leads_batch_uuid(batch_id):
+    """Валидирует id загрузки как UUID — иначе psycopg упадёт на неверном типе."""
+    try:
+        return str(uuid.UUID(str(batch_id)))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _tez_leads_parse_batch_reason(require_reason=False):
+    """Строго читает JSON-object и валидирует audit reason для batch-действия."""
+    raw_body = request.get_data(cache=True)
+    if not raw_body:
+        payload = {}
+    else:
+        if not request.is_json:
+            return None, (jsonify({"error": "Ожидается JSON-объект"}), 400)
+        try:
+            payload = request.get_json(silent=False)
+        except Exception:
+            return None, (jsonify({"error": "Некорректный JSON"}), 400)
+        if not isinstance(payload, dict):
+            return None, (jsonify({"error": "Тело запроса должно быть JSON-объектом"}), 400)
+
+    if 'reason' not in payload:
+        if require_reason:
+            return None, (jsonify({"error": "reason is required"}), 400)
+        return '', None
+
+    raw_reason = payload.get('reason')
+    if not isinstance(raw_reason, str):
+        return None, (jsonify({"error": "reason должен быть строкой"}), 400)
+    if len(raw_reason) > TEZ_LEADS_BATCH_REASON_MAX_LENGTH:
+        return None, (jsonify({
+            "error": f"reason не должен превышать {TEZ_LEADS_BATCH_REASON_MAX_LENGTH} символов"
+        }), 400)
+
+    reason = raw_reason.strip()
+    if require_reason and not reason:
+        return None, (jsonify({"error": "reason не может быть пустой"}), 400)
+    return reason, None
+
+
+def _tez_leads_require_batch_manager(batch_id):
+    """Проверяет manager-role и department scope конкретной загрузки.
+
+    Глобальный администратор может управлять любой загрузкой. Остальные менеджеры
+    (СВ либо формальный глава отдела) — только загрузкой ровно своего отдела.
+    Исторические загрузки без department_id доступны только глобальному админу.
+    """
+    requester_id, requester, auth_error = _get_authenticated_requester()
+    if auth_error:
+        message, status_code = auth_error
+        return None, None, None, (jsonify({"error": message}), status_code)
+
+    requester_role = _normalize_user_role(
+        requester.get('role') if isinstance(requester, dict) else requester[3]
+    )
+    headed_department_id = _headed_department_id(requester_id)
+    is_global_admin = _is_global_admin_requester(requester_role, requester_id)
+    is_department_manager = (
+        _is_supervisor_role(requester_role)
+        or headed_department_id is not None
+    )
+    if not (is_global_admin or is_department_manager):
+        return None, None, None, (jsonify({"error": "Forbidden"}), 403)
+
+    uid = _tez_leads_batch_uuid(batch_id)
+    if not uid:
+        return None, None, None, (jsonify({"error": "Некорректный id загрузки"}), 400)
+
+    try:
+        metadata = db.get_tez_lead_batch_metadata(uid)
+    except Exception:
+        logging.exception('tez_leads: не удалось проверить загрузку %s', uid)
+        return None, None, None, (jsonify({"error": "Не удалось проверить загрузку"}), 500)
+    if metadata is None:
+        return None, None, None, (jsonify({"error": "Загрузка не найдена"}), 404)
+    if not isinstance(metadata, dict):
+        logging.error('tez_leads: некорректные метаданные загрузки %s', uid)
+        return None, None, None, (jsonify({"error": "Не удалось проверить загрузку"}), 500)
+
+    if not is_global_admin:
+        batch_department_id = metadata.get('department_id')
+        if batch_department_id is None:
+            return None, None, None, (jsonify({"error": "Forbidden"}), 403)
+        try:
+            scope_department_id = _department_scope_id_for_requester(requester_id)
+            same_department = (
+                scope_department_id is not None
+                and int(scope_department_id) == int(batch_department_id)
+            )
+        except (TypeError, ValueError):
+            same_department = False
+        except Exception:
+            logging.exception('tez_leads: не удалось определить отдел пользователя %s', requester_id)
+            return None, None, None, (jsonify({"error": "Не удалось проверить права"}), 500)
+        if not same_department:
+            return None, None, None, (jsonify({"error": "Forbidden"}), 403)
+
+    return requester_id, uid, metadata, None
+
+
+@app.route('/api/tez_leads/batches/<batch_id>/delete', methods=['POST'])
+@require_api_key
+def tez_leads_batch_delete(batch_id):
+    """Удаляет загруженную базу: лиды уходят в архив, история остаётся.
+
+    Удаление обратимо — см. /restore. Причину просим сохранять всегда: по ней
+    потом видно, была это ошибочная загрузка или чистка дубля.
+    """
+    requester_id, uid, _, error = _tez_leads_require_batch_manager(batch_id)
+    if error:
+        return error
+
+    reason, error = _tez_leads_parse_batch_reason(require_reason=True)
+    if error:
+        return error
+
+    try:
+        result = db.delete_tez_lead_batch(uid, requester_id, reason=reason)
+    except Exception:
+        logging.exception('tez_leads: удаление загрузки %s не удалось', uid)
+        return jsonify({"error": "Не удалось удалить базу"}), 500
+
+    if result is None:
+        return jsonify({"error": "Загрузка не найдена"}), 404
+    if result.get('already_deleted'):
+        return jsonify({"error": "Эта загрузка уже удалена"}), 409
+
+    logging.info('tez_leads: пользователь %s удалил загрузку %s '
+                 '(лидов удалено %s, оставлено %s, успешек %s)',
+                 requester_id, uid, result.get('leads_removed'), result.get('leads_kept'),
+                 result.get('successes_removed'))
+    return jsonify(result)
+
+
+@app.route('/api/tez_leads/batches/<batch_id>/restore', methods=['POST'])
+@require_api_key
+def tez_leads_batch_restore(batch_id):
+    """Откатывает удаление базы — лиды и успешки возвращаются из архива."""
+    requester_id, uid, _, error = _tez_leads_require_batch_manager(batch_id)
+    if error:
+        return error
+
+    reason, error = _tez_leads_parse_batch_reason(require_reason=False)
+    if error:
+        return error
+
+    try:
+        result = db.restore_tez_lead_batch(uid, requester_id, reason=reason)
+    except Exception:
+        logging.exception('tez_leads: восстановление загрузки %s не удалось', uid)
+        return jsonify({"error": "Не удалось восстановить базу"}), 500
+
+    if result is None:
+        return jsonify({"error": "Загрузка не найдена"}), 404
+    if result.get('not_deleted'):
+        return jsonify({"error": "Эта загрузка не была удалена"}), 409
+
+    logging.info('tez_leads: пользователь %s восстановил загрузку %s (лидов %s, успешек %s, слито %s)',
+                 requester_id, uid, result.get('leads_restored'),
+                 result.get('successes_restored'), result.get('leads_merged'))
+    return jsonify(result)
+
+
+@app.route('/api/tez_leads/batches/<batch_id>/history', methods=['GET'])
+@require_api_key
+def tez_leads_batch_history(batch_id):
+    """Кто и когда удалял/восстанавливал эту загрузку."""
+    _, uid, _, error = _tez_leads_require_batch_manager(batch_id)
+    if error:
+        return error
+
+    try:
+        return jsonify({"batch_id": uid, "events": db.get_tez_lead_batch_events(uid)})
+    except Exception:
+        logging.exception('tez_leads: история загрузки %s недоступна', uid)
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/work_schedules/import_statuses_csv', methods=['POST'])

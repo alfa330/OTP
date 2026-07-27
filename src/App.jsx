@@ -2480,6 +2480,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         // Успешки по оператору/дню для таба «Успешки» в учёте часов ОП:
         // { [operator_id]: { [деньМесяца]: количество } }.
         const [tezSuccessMap, setTezSuccessMap] = useState({});
+        const [tezSuccessReloadKey, setTezSuccessReloadKey] = useState(0);
         // Полноэкранные окна ОП TEZ (план успешек / база лидов) — открываются из
         // выпадашки «Работа», чтобы не занимать место в таблице часов.
         const [salesOverlay, setSalesOverlay] = useState(null); // null | 'plan' | 'leads'
@@ -4684,7 +4685,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 .catch(() => { if (!cancelled) setTezSuccessMap({}); });
             return () => { cancelled = true; };
             // eslint-disable-next-line react-hooks/exhaustive-deps
-        }, [isTezOpContext, selectedGroupId, month, user?.id, tezPlanReloadKey]);
+        }, [isTezOpContext, selectedGroupId, month, user?.id, tezPlanReloadKey, tezSuccessReloadKey]);
 
         useEffect(() => {
             setChatMetricsSurgeMonth(normalizeMonthKey(month));
@@ -6114,6 +6115,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     groupId={selectedGroupId || null}
                     month={month}
                     canEdit={true}
+                    onDataChanged={() => setTezSuccessReloadKey((key) => key + 1)}
                 />
             </FullscreenSheet>
             <div className="mb-4 flex flex-wrap items-stretch justify-between gap-3">

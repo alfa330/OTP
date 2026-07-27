@@ -84,6 +84,9 @@ const daysAgo = (n) => {
     return isoDate(d);
 };
 
+// Обе границы включены: «7 дней» = сегодня и шесть предыдущих дней.
+const presetStart = (days) => daysAgo(Math.max(0, days - 1));
+
 // CSV для Excel: BOM + ';' (ru-локаль сама не делит по запятой)
 const csvCell = (v) => {
     const s = v === null || v === undefined ? '' : String(v);
@@ -220,12 +223,12 @@ const SegButton = ({ active, onClick, icon: Icon, children }) => (
 );
 
 /* ── Аналитика по менеджерам ──────────────────────────────────────────────
- * Диалоги — чаты (не эпизоды) хотя бы с одним его сообщением; время ответа —
- * одно значение на чат, засчитывается ответившему клиенту первым. */
+ * Диалоги повторяют агрегацию Wazzup: активные чаты считаются отдельно за
+ * каждый день. Время ответа — локальная оценка по доступным webhook-событиям. */
 
 const ANALYTICS_COLS = [
     { key: 'name', label: 'Менеджер', num: false },
-    { key: 'dialogs', label: 'Диалоги', num: true, hint: 'Чатов, где есть хотя бы одно его сообщение' },
+    { key: 'dialogs', label: 'Диалоги', num: true, hint: 'Сумма активных чатов по дням; чат в разные дни считается повторно' },
     { key: 'messages', label: 'Сообщения', num: true, hint: 'Его исходящие сообщения' },
     { key: 'avgResponseSecs', label: 'Ср. ответ', num: true, hint: 'Среднее: первый ответ менеджера − первое сообщение клиента в чате' },
     { key: 'medianResponseSecs', label: 'Медиана', num: true, hint: 'Медиана того же времени — устойчива к единичным «зависшим» чатам' },
@@ -249,7 +252,7 @@ const PERIOD_PRESETS = [
 
 
 function AnalyticsTab({ apiBaseUrl, headers, showToast }) {
-    const [from, setFrom] = useState(daysAgo(30));
+    const [from, setFrom] = useState(presetStart(30));
     const [to, setTo] = useState(isoDate(new Date()));
     const [data, setData] = useState(null);          // {items, summary} | null = загрузка
     const [error, setError] = useState(null);
@@ -276,13 +279,15 @@ function AnalyticsTab({ apiBaseUrl, headers, showToast }) {
 
     const applyPreset = (days) => {
         const next = days === null ? { from: '', to: '' }
-                                   : { from: daysAgo(days), to: isoDate(new Date()) };
+                                   : { from: presetStart(days), to: isoDate(new Date()) };
         setFrom(next.from); setTo(next.to);
         load(next);
     };
 
     const activePreset = PERIOD_PRESETS.find((p) => (
-        p.days === null ? (!from && !to) : (from === daysAgo(p.days) && to === isoDate(new Date()))
+        p.days === null
+            ? (!from && !to)
+            : (from === presetStart(p.days) && to === isoDate(new Date()))
     ));
 
     const rows = useMemo(() => {
@@ -444,7 +449,7 @@ function AnalyticsTab({ apiBaseUrl, headers, showToast }) {
                                 <tfoot className="sticky bottom-0 bg-slate-50/90 backdrop-blur-xl">
                                     <tr className="border-t border-slate-200/70 text-[12.5px] font-semibold text-slate-600">
                                         <td className="px-3 py-2.5">Итого</td>
-                                        <td className="px-3 py-2.5 text-right tabular-nums" title="Уникальных чатов — меньше суммы по строкам, если в чате писали несколько менеджеров">
+                                        <td className="px-3 py-2.5 text-right tabular-nums" title="Сумма активных чатов менеджеров по дням">
                                             {summary.chats ?? 0}
                                         </td>
                                         <td className="px-3 py-2.5 text-right tabular-nums">{summary.messages ?? 0}</td>
@@ -461,10 +466,10 @@ function AnalyticsTab({ apiBaseUrl, headers, showToast }) {
             )}
 
             <p className="px-1 text-[11px] leading-relaxed text-slate-500">
-                Время ответа считается по чату целиком: первое сообщение менеджера после первого
-                сообщения клиента минус время этого сообщения клиента. Засчитывается тому, кто
-                ответил клиенту первым, поэтому «первых ответов» у менеджера обычно меньше, чем
-                диалогов. Диалог — чат (не эпизод), где есть хотя бы одно его сообщение. Авторы,
+                Диалоги считаются отдельно за каждый день, как в Wazzup. Время ответа здесь —
+                оценка по доступным сообщениям: первый исходящий после первого входящего в чате.
+                Wazzup дополнительно учитывает ответственного по сделке, кнопку «конверт»,
+                рабочее время и источник ответа, поэтому время может отличаться. Авторы,
                 отмеченные ботами на вкладке «Привязка», в расчёт не входят.
             </p>
         </div>

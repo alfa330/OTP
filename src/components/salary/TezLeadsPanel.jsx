@@ -18,7 +18,8 @@ import InfoHint from '../common/InfoHint';
  *  - groupId: id выбранной группы (сужает рейтинг операторов и разбивку по дням;
  *             воронка и загрузки остаются на уровне отдела — база лидов общая)
  *  - month: 'YYYY-MM'
- *  - canEdit: можно ли загружать базу и запускать сверку
+ *  - canEdit: можно ли загружать, удалять/восстанавливать базу и запускать сверку
+ *  - onDataChanged: уведомление после удаления/восстановления для внешних витрин
  */
 
 const STATUS_LABELS = {
@@ -45,9 +46,231 @@ const RULE_LABELS = {
   active_prev_month: 'Были заказы в прошлом месяце — уже работал',
 };
 
-const fmtDateTime = (value) => (value ? String(value).replace('T', ' ').slice(0, 16) : '—');
+const ALMATY_DATE_TIME_FORMATTER = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Almaty',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23',
+});
 
-const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, groupId = null, month, canEdit = false }) => {
+const fmtDateTime = (value) => {
+  if (!value) return '—';
+  const raw = String(value);
+  // Старые значения в БД встречаются без offset. Их нельзя трактовать как время
+  // браузера: сохраняем прежнее отображение «как записано». Новые aware timestamps
+  // приводим к единой бизнес-зоне Алматы.
+  if (!/(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw)) {
+    return raw.replace('T', ' ').slice(0, 16);
+  }
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) {
+    return raw.replace('T', ' ').slice(0, 16);
+  }
+  const parts = Object.fromEntries(
+    ALMATY_DATE_TIME_FORMATTER.formatToParts(parsed)
+      .filter((part) => part.type !== 'literal')
+      .map((part) => [part.type, part.value])
+  );
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
+};
+
+/**
+ * Подтверждение удаления/отката загрузки. Причину спрашиваем только при удалении:
+ * она уходит в журнал и потом видна в строке загрузки, поэтому «почему убрали базу»
+ * не приходится восстанавливать по памяти.
+ */
+const BatchActionDialog = ({
+  mode,
+  batch,
+  busy,
+  disabled,
+  reason,
+  error,
+  onReason,
+  onCancel,
+  onConfirm,
+}) => {
+  const dialogRef = useRef(null);
+  const reasonRef = useRef(null);
+  const removing = mode === 'delete';
+  const reasonInvalid = removing && !reason.trim();
+
+  useEffect(() => {
+    if (!batch) return undefined;
+    const previousFocus = document.activeElement;
+    const target = removing
+      ? reasonRef.current
+      : dialogRef.current?.querySelector('[data-primary-action]');
+    target?.focus();
+    return () => {
+      if (
+        typeof HTMLElement !== 'undefined' &&
+        previousFocus instanceof HTMLElement &&
+        document.contains(previousFocus)
+      ) {
+        previousFocus.focus();
+      }
+    };
+  }, [batch, removing]);
+
+  // FullscreenSheet тоже слушает Escape на document. Перехватываем событие в
+  // capture-фазе, чтобы Escape закрыл только подтверждение, а не весь экран.
+  useEffect(() => {
+    if (!batch) return undefined;
+    const handleEscape = (event) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (!busy) onCancel();
+    };
+    document.addEventListener('keydown', handleEscape, true);
+    return () => document.removeEventListener('keydown', handleEscape, true);
+  }, [batch, busy, onCancel]);
+
+  if (!batch) return null;
+
+  const trapFocus = (event) => {
+    if (event.key !== 'Tab') return;
+    const focusable = Array.from(
+      dialogRef.current?.querySelectorAll(
+        'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      ) || []
+    );
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 p-4">
+      <form
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="tez-batch-action-title"
+        aria-describedby={`tez-batch-action-description${error ? ' tez-batch-action-error' : ''}`}
+        aria-busy={busy}
+        onKeyDown={trapFocus}
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!busy && !disabled && !reasonInvalid) onConfirm();
+        }}
+        className="w-full max-w-md rounded-2xl bg-white p-5 shadow-xl"
+      >
+        <h3
+          id="tez-batch-action-title"
+          className={`flex items-center gap-2 text-base font-semibold ${removing ? 'text-rose-700' : 'text-emerald-700'}`}
+        >
+          <FaIcon
+            className={`fas ${removing ? 'fa-trash-can' : 'fa-rotate-left'}`}
+            aria-hidden="true"
+          />
+          {removing ? 'Удалить загруженную базу?' : 'Восстановить базу?'}
+        </h3>
+        <p className="mt-2 text-sm text-slate-600">
+          Файл <b className="break-all">{batch.file_name || '—'}</b> ({batch.rows_total} строк,
+          загрузил {batch.uploaded_by_name || '—'} {fmtDateTime(batch.created_at)}).
+        </p>
+        <p
+          id="tez-batch-action-description"
+          className={`mt-2 rounded-xl border px-3 py-2 text-xs ${
+            removing
+              ? 'border-amber-200 bg-amber-50 text-amber-800'
+              : 'border-emerald-200 bg-emerald-50 text-emerald-800'
+          }`}
+        >
+          {removing ? (
+            <>
+              Лиды, пришедшие только из этой загрузки, уйдут из базы вместе с их успешками —
+              воронка и рейтинг операторов пересчитаются. Лиды, которые есть и в других
+              загрузках, останутся. Действие <b>обратимо</b>: загрузка сохранится в истории
+              с кнопкой «Восстановить».
+            </>
+          ) : (
+            <>
+              Лиды и успешки вернутся из архива. Если за это время тот же номер завела
+              другая загрузка, лид не задвоится — строки подклеятся к существующему.
+              Для таких слияний актуальный результат восстановит кнопка «Сверить сейчас».
+            </>
+          )}
+        </p>
+        {removing && (
+          <label className="mt-3 block">
+            <span className="text-xs font-medium text-slate-600">Причина (попадёт в историю)</span>
+            <input
+              ref={reasonRef}
+              value={reason}
+              onChange={(e) => onReason(e.target.value)}
+              placeholder="например: загрузили не тот файл"
+              className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+              maxLength={2000}
+              required
+              aria-invalid={reasonInvalid}
+              aria-describedby="tez-batch-reason-hint"
+            />
+            <span id="tez-batch-reason-hint" className="mt-1 flex justify-between gap-2 text-[11px] text-slate-500">
+              <span>Обязательное поле</span>
+              <span>{reason.length}/2000</span>
+            </span>
+          </label>
+        )}
+        {error && (
+          <div
+            id="tez-batch-action-error"
+            role="alert"
+            className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800"
+          >
+            {error}
+          </div>
+        )}
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+          >
+            Отмена
+          </button>
+          <button
+            type="submit"
+            data-primary-action
+            disabled={busy || disabled || reasonInvalid}
+            className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold text-white disabled:opacity-60 ${
+              removing ? 'bg-rose-600 hover:bg-rose-700' : 'bg-emerald-600 hover:bg-emerald-700'
+            }`}
+          >
+            <FaIcon
+              className={`fas ${busy ? 'fa-spinner fa-spin' : removing ? 'fa-trash-can' : 'fa-rotate-left'}`}
+              aria-hidden="true"
+            />
+            {busy ? (removing ? 'Удаляем…' : 'Восстанавливаем…') : removing ? 'Удалить' : 'Восстановить'}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+};
+
+const TezLeadsPanel = ({
+  apiBaseUrl = '',
+  userId,
+  departmentId,
+  groupId = null,
+  month,
+  canEdit = false,
+  onDataChanged,
+}) => {
   const [stats, setStats] = useState(null);
   const [leads, setLeads] = useState([]);
   const [tab, setTab] = useState('operators');
@@ -62,28 +285,79 @@ const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, groupId = null, 
   const [page, setPage] = useState(1);
   const [leadsTotal, setLeadsTotal] = useState(0);
   const [leadsPages, setLeadsPages] = useState(1);
+  const [statsLoading, setStatsLoading] = useState(false);
+  const [statsError, setStatsError] = useState('');
+  const [statsLoadedScope, setStatsLoadedScope] = useState('');
+  const [batchAction, setBatchAction] = useState(null); // {mode, batch, scopeKey}
+  const [batchReason, setBatchReason] = useState('');
+  const [batchActionError, setBatchActionError] = useState('');
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [showDeleted, setShowDeleted] = useState(true);
+  const [historyState, setHistoryState] = useState({
+    batchId: null,
+    status: 'idle',
+    events: [],
+    error: '',
+  });
   const fileRef = useRef(null);
   const pollRef = useRef(null);
+  const statsRequestRef = useRef(0);
+  const historyRequestRef = useRef(0);
+  const activeScopeRef = useRef('');
 
   const PAGE_SIZE = 50;
 
   const [year, monthNum] = String(month || '').split('-').map((v) => parseInt(v, 10));
   const validPeriod = Number.isFinite(year) && Number.isFinite(monthNum);
   const headers = useMemo(() => ({ 'X-User-Id': userId }), [userId]);
+  const statsScopeKey = validPeriod && userId
+    ? [apiBaseUrl, userId, departmentId ?? '', groupId ?? '', year, monthNum].join('|')
+    : '';
+  activeScopeRef.current = statsScopeKey;
 
   const loadStats = useCallback(() => {
-    if (!validPeriod || !userId) return Promise.resolve(null);
+    if (statsScopeKey !== activeScopeRef.current) return Promise.resolve(null);
+    const requestId = ++statsRequestRef.current;
+    if (!statsScopeKey) {
+      setStats(null);
+      setStatsLoadedScope('');
+      setStatsLoading(false);
+      return Promise.resolve(null);
+    }
+    setStatsLoading(true);
+    setStatsError('');
     return axios
       .get(`${apiBaseUrl}/api/tez_leads/stats`, {
         params: { year, month: monthNum, group_id: groupId || undefined },
         headers,
       })
       .then((resp) => {
-        setStats(resp?.data || null);
-        return resp?.data || null;
+        if (
+          requestId !== statsRequestRef.current ||
+          statsScopeKey !== activeScopeRef.current
+        ) return null;
+        const data = resp?.data || null;
+        setStats(data);
+        setStatsLoadedScope(data ? statsScopeKey : '');
+        return data;
       })
-      .catch(() => null);
-  }, [apiBaseUrl, headers, userId, year, monthNum, validPeriod, groupId]);
+      .catch((err) => {
+        if (
+          requestId !== statsRequestRef.current ||
+          statsScopeKey !== activeScopeRef.current
+        ) return null;
+        setStats(null);
+        setStatsLoadedScope('');
+        setStatsError(err?.response?.data?.error || 'Не удалось загрузить данные базы');
+        return null;
+      })
+      .finally(() => {
+        if (
+          requestId === statsRequestRef.current &&
+          statsScopeKey === activeScopeRef.current
+        ) setStatsLoading(false);
+      });
+  }, [apiBaseUrl, headers, year, monthNum, groupId, statsScopeKey]);
 
   const loadLeads = useCallback((toPage = 1) => {
     if (!validPeriod || !userId) return;
@@ -109,8 +383,36 @@ const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, groupId = null, 
   }, [apiBaseUrl, headers, userId, year, monthNum, validPeriod, statusFilter, operatorFilter, search]);
 
   useEffect(() => {
+    // Смена месяца/группы/пользователя мгновенно инвалидирует старые данные и
+    // любые открытые действия. Поздние ответы прежнего scope игнорируются по id.
+    statsRequestRef.current += 1;
+    historyRequestRef.current += 1;
+    setStats(null);
+    setStatsLoadedScope('');
+    setStatsError('');
+    setBatchAction(null);
+    setBatchReason('');
+    setBatchActionError('');
+    setBatchBusy(false);
+    setHistoryState({ batchId: null, status: 'idle', events: [], error: '' });
+    setLeads([]);
+    setLeadsTotal(0);
+    setLeadsPages(1);
+    setPage(1);
     loadStats();
-  }, [loadStats]);
+    return () => {
+      statsRequestRef.current += 1;
+      historyRequestRef.current += 1;
+    };
+  }, [loadStats, statsScopeKey]);
+
+  useEffect(() => {
+    if (!canEdit) {
+      setBatchAction(null);
+      setBatchReason('');
+      setBatchActionError('');
+    }
+  }, [canEdit]);
 
   // Смена вкладки/фильтров/поиска — всегда с первой страницы.
   useEffect(() => {
@@ -182,6 +484,176 @@ const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, groupId = null, 
       .finally(() => setBusy(false));
   }, [apiBaseUrl, headers, year, monthNum, validPeriod, loadStats, loadLeads, tab]);
 
+  const statsIsCurrent = Boolean(stats && statsLoadedScope === statsScopeKey);
+  const currentStats = statsIsCurrent ? stats : null;
+  const batches = currentStats?.batches || [];
+  const batchActionsEnabled = canEdit && statsIsCurrent && !statsLoading && !batchBusy;
+
+  const closeBatchAction = useCallback(() => {
+    if (batchBusy) return;
+    setBatchAction(null);
+    setBatchReason('');
+    setBatchActionError('');
+  }, [batchBusy]);
+
+  const openBatchAction = useCallback((mode, batch) => {
+    const currentBatch = batches.find((item) => String(item.id) === String(batch?.id));
+    const expectedDeleted = mode === 'restore';
+    if (
+      !batchActionsEnabled ||
+      !currentBatch ||
+      Boolean(currentBatch.is_deleted) !== expectedDeleted
+    ) {
+      setMsg('Данные загрузок обновляются. Повторите действие после загрузки списка.');
+      loadStats();
+      return;
+    }
+    setBatchReason('');
+    setBatchActionError('');
+    setBatchAction({ mode, batch: currentBatch, scopeKey: statsScopeKey });
+  }, [batchActionsEnabled, batches, loadStats, statsScopeKey]);
+
+  // Удаление/откат меняют состав базы, поэтому перечитываем и воронку, и лиды:
+  // счётчики в карточках иначе останутся от прежнего состава.
+  const confirmBatchAction = useCallback(async () => {
+    if (!batchAction) return;
+    const { mode, batch, scopeKey: actionScope } = batchAction;
+    const reason = batchReason.trim();
+    if (mode === 'delete' && !reason) {
+      setBatchActionError('Укажите причину удаления.');
+      return;
+    }
+    if (reason.length > 2000) {
+      setBatchActionError('Причина не должна быть длиннее 2000 символов.');
+      return;
+    }
+    const currentBatch = batches.find((item) => String(item.id) === String(batch.id));
+    const expectedDeleted = mode === 'restore';
+    if (
+      !canEdit ||
+      statsLoading ||
+      !statsIsCurrent ||
+      actionScope !== statsScopeKey ||
+      !currentBatch ||
+      Boolean(currentBatch.is_deleted) !== expectedDeleted
+    ) {
+      setBatchActionError('Состояние загрузки изменилось. Обновите список и повторите действие.');
+      loadStats();
+      return;
+    }
+
+    setBatchBusy(true);
+    setBatchActionError('');
+    setMsg('');
+    try {
+      const resp = await axios.post(
+        `${apiBaseUrl}/api/tez_leads/batches/${batch.id}/${mode}`,
+        { reason: mode === 'delete' ? reason : reason.slice(0, 2000) },
+        { headers }
+      );
+      if (actionScope !== activeScopeRef.current) return;
+      const d = resp?.data || {};
+      setMsg(
+        mode === 'delete'
+          ? `База «${batch.file_name}» удалена: лидов убрано ${d.leads_removed ?? 0}, ` +
+            `успешек снято ${d.successes_removed ?? 0}, оставлено (есть в других загрузках) ${d.leads_kept ?? 0}. ` +
+            'Откатить можно кнопкой «Восстановить».'
+          : `База «${batch.file_name}» восстановлена: лидов ${d.leads_restored ?? 0}, ` +
+            `успешек ${d.successes_restored ?? 0}` +
+            (d.leads_merged ? `, слито с уже существующими ${d.leads_merged}` : '') +
+            '. Рекомендуем нажать «Сверить сейчас».'
+      );
+      historyRequestRef.current += 1;
+      setHistoryState({ batchId: null, status: 'idle', events: [], error: '' });
+      setBatchAction(null);
+      setBatchReason('');
+      setBatchActionError('');
+      onDataChanged?.();
+      loadStats();
+      if (tab === 'leads') loadLeads(1);
+    } catch (err) {
+      if (actionScope !== activeScopeRef.current) return;
+      const errorMessage = err?.response?.data?.error || 'Не удалось выполнить операцию';
+      if (err?.response?.status === 409) {
+        setBatchActionError(`${errorMessage}. Обновляем список…`);
+        const refreshed = await loadStats();
+        if (actionScope !== activeScopeRef.current) return;
+        if (refreshed) {
+          setBatchAction(null);
+          setBatchReason('');
+          setBatchActionError('');
+          setMsg(`${errorMessage}. Список загрузок обновлён.`);
+        } else {
+          setBatchActionError(`${errorMessage}. Не удалось обновить список загрузок.`);
+        }
+      } else {
+        setBatchActionError(errorMessage);
+      }
+    } finally {
+      if (actionScope === activeScopeRef.current) setBatchBusy(false);
+    }
+  }, [
+    apiBaseUrl,
+    headers,
+    batchAction,
+    batchReason,
+    batches,
+    canEdit,
+    statsLoading,
+    statsIsCurrent,
+    statsScopeKey,
+    loadStats,
+    loadLeads,
+    tab,
+    onDataChanged,
+  ]);
+
+  const toggleHistory = useCallback(async (batchId, forceReload = false) => {
+    if (!statsIsCurrent || statsScopeKey !== activeScopeRef.current) return;
+    if (historyState.batchId === batchId && !forceReload) {
+      historyRequestRef.current += 1;
+      setHistoryState({ batchId: null, status: 'idle', events: [], error: '' });
+      return;
+    }
+
+    const requestId = ++historyRequestRef.current;
+    const requestScope = statsScopeKey;
+    setHistoryState({ batchId, status: 'loading', events: [], error: '' });
+    try {
+      const resp = await axios.get(
+        `${apiBaseUrl}/api/tez_leads/batches/${batchId}/history`,
+        { headers }
+      );
+      if (
+        requestId !== historyRequestRef.current ||
+        requestScope !== activeScopeRef.current
+      ) return;
+      setHistoryState({
+        batchId,
+        status: 'loaded',
+        events: resp?.data?.events || [],
+        error: '',
+      });
+    } catch (err) {
+      if (
+        requestId !== historyRequestRef.current ||
+        requestScope !== activeScopeRef.current
+      ) return;
+      setHistoryState({
+        batchId,
+        status: 'error',
+        events: [],
+        error: err?.response?.data?.error || 'Не удалось загрузить историю',
+      });
+    }
+  }, [
+    apiBaseUrl,
+    headers,
+    historyState.batchId,
+    statsIsCurrent,
+    statsScopeKey,
+  ]);
+
   // Экспорт качаем через axios (blob): простой <a href> не несёт токен/куки и
   // упирается в 401, если транспорт авторизации bearer, а не cookie.
   const exportExcel = useCallback(() => {
@@ -207,7 +679,23 @@ const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, groupId = null, 
       .finally(() => setExporting(false));
   }, [apiBaseUrl, headers, year, monthNum, validPeriod, exporting]);
 
-  const funnel = stats?.funnel || {};
+  const funnel = currentStats?.funnel || {};
+  const deletedCount = useMemo(() => batches.filter((b) => b.is_deleted).length, [batches]);
+  const visibleBatches = useMemo(
+    () => (showDeleted ? batches : batches.filter((b) => !b.is_deleted)),
+    [batches, showDeleted]
+  );
+  const selectedActionBatch = batchAction
+    ? batches.find((item) => String(item.id) === String(batchAction.batch?.id))
+    : null;
+  const batchActionDisabled = Boolean(batchAction) && (
+    !canEdit ||
+    statsLoading ||
+    !statsIsCurrent ||
+    batchAction.scopeKey !== statsScopeKey ||
+    !selectedActionBatch ||
+    Boolean(selectedActionBatch.is_deleted) !== (batchAction.mode === 'restore')
+  );
 
   const funnelCards = [
     { label: 'Загружено лидов', value: funnel.leads_total, hint: `дублей при загрузке: ${funnel.duplicates ?? 0}` },
@@ -244,6 +732,20 @@ const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, groupId = null, 
 
   return (
     <div className="space-y-4">
+      <BatchActionDialog
+        mode={batchAction?.mode}
+        batch={batchAction?.batch}
+        busy={batchBusy}
+        disabled={batchActionDisabled}
+        reason={batchReason}
+        error={batchActionError || (batchAction ? statsError : '')}
+        onReason={(value) => {
+          setBatchReason(value);
+          if (batchActionError) setBatchActionError('');
+        }}
+        onCancel={closeBatchAction}
+        onConfirm={confirmBatchAction}
+      />
       <div className="flex flex-wrap items-center justify-between gap-2">
         {canEdit ? (
           <div className="flex flex-col sm:flex-row sm:items-center gap-2">
@@ -299,7 +801,32 @@ const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, groupId = null, 
         </div>
       </div>
 
-      {msg && <div className="text-sm font-medium text-indigo-800 bg-indigo-50 border border-indigo-100 rounded-xl px-3 py-2">{msg}</div>}
+      {msg && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="text-sm font-medium text-indigo-800 bg-indigo-50 border border-indigo-100 rounded-xl px-3 py-2"
+        >
+          {msg}
+        </div>
+      )}
+
+      {statsError && (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800"
+        >
+          <span>{statsError}</span>
+          <button
+            type="button"
+            onClick={loadStats}
+            disabled={statsLoading}
+            className="rounded-full border border-rose-200 bg-white px-3 py-1 text-xs font-semibold hover:bg-rose-100 disabled:opacity-60"
+          >
+            Повторить
+          </button>
+        </div>
+      )}
 
       {invalidRows.length > 0 && (
         <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2.5">
@@ -401,7 +928,7 @@ const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, groupId = null, 
               </tr>
             </thead>
             <tbody>
-              {(stats?.operators || []).map((row) => (
+              {(currentStats?.operators || []).map((row) => (
                 <tr key={row.operator_id || row.operator_name} className="border-t">
                   <td className="px-3 py-2">{row.operator_name || '—'}</td>
                   <td className="px-3 py-2 text-right font-semibold">{row.successes}</td>
@@ -409,7 +936,7 @@ const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, groupId = null, 
                   <td className="px-3 py-2 text-gray-500">{row.last_success || '—'}</td>
                 </tr>
               ))}
-              {!(stats?.operators || []).length && (
+              {!(currentStats?.operators || []).length && (
                 <tr><td colSpan={4} className="px-3 py-6 text-center text-gray-400">Успешек за месяц пока нет</td></tr>
               )}
             </tbody>
@@ -425,13 +952,13 @@ const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, groupId = null, 
               </tr>
             </thead>
             <tbody>
-              {(stats?.by_day || []).map((row) => (
+              {(currentStats?.by_day || []).map((row) => (
                 <tr key={row.date} className="border-t">
                   <td className="px-3 py-2">{row.date}</td>
                   <td className="px-3 py-2 text-right font-semibold">{row.successes}</td>
                 </tr>
               ))}
-              {!(stats?.by_day || []).length && (
+              {!(currentStats?.by_day || []).length && (
                 <tr><td colSpan={2} className="px-3 py-6 text-center text-gray-400">Нет данных</td></tr>
               )}
             </tbody>
@@ -439,43 +966,178 @@ const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, groupId = null, 
         )}
 
         {tab === 'batches' && (
-          <table className="min-w-full text-sm">
-            <thead className="bg-gray-50 text-gray-600">
-              <tr>
-                <th className="text-left px-3 py-2">Файл</th>
-                <th className="text-left px-3 py-2">Загрузил</th>
-                <th className="text-right px-3 py-2">Строк</th>
-                <th className="text-right px-3 py-2">Новых</th>
-                <th className="text-right px-3 py-2">Дублей</th>
-                <th className="text-right px-3 py-2">Битых</th>
-                <th className="text-right px-3 py-2">Уже работают</th>
-                <th className="text-left px-3 py-2">Когда</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(stats?.batches || []).map((b) => (
-                <tr key={b.id} className="border-t">
-                  <td className="px-3 py-2">{b.file_name}</td>
-                  <td className="px-3 py-2">{b.uploaded_by_name || '—'}</td>
-                  <td className="px-3 py-2 text-right">{b.rows_total}</td>
-                  <td className="px-3 py-2 text-right">{b.rows_new}</td>
-                  <td className="px-3 py-2 text-right">{b.rows_duplicate}</td>
-                  <td className="px-3 py-2 text-right">{b.rows_invalid}</td>
-                  <td className="px-3 py-2 text-right">
-                    {b.check_status === 'done' ? b.already_working : (
-                      <span className="text-gray-400">
-                        {b.check_status === 'error' ? 'ошибка' : 'проверка…'}
-                      </span>
-                    )}
-                  </td>
-                  <td className="px-3 py-2 text-gray-500">{fmtDateTime(b.created_at)}</td>
+          <div>
+            {deletedCount > 0 && (
+              <div className="flex items-center justify-between gap-2 border-b bg-gray-50 px-3 py-2">
+                <span className="text-xs text-slate-500">
+                  Удалённых загрузок: {deletedCount}. Они остаются в истории и восстанавливаются в один клик.
+                </span>
+                <label className="inline-flex cursor-pointer items-center gap-1.5 text-xs font-medium text-slate-600">
+                  <input
+                    type="checkbox"
+                    checked={showDeleted}
+                    onChange={(e) => setShowDeleted(e.target.checked)}
+                    className="rounded border-slate-300"
+                  />
+                  Показывать удалённые
+                </label>
+              </div>
+            )}
+            <table className="min-w-full text-sm">
+              <thead className="bg-gray-50 text-gray-600">
+                <tr>
+                  <th className="text-left px-3 py-2">Файл</th>
+                  <th className="text-left px-3 py-2">Загрузил</th>
+                  <th className="text-right px-3 py-2">Строк</th>
+                  <th className="text-right px-3 py-2">Новых</th>
+                  <th className="text-right px-3 py-2">Дублей</th>
+                  <th className="text-right px-3 py-2">Битых</th>
+                  <th className="text-right px-3 py-2">Уже работают</th>
+                  <th className="text-left px-3 py-2">Когда</th>
+                  <th className="text-right px-3 py-2">
+                    <span className="sr-only">Действия</span>
+                  </th>
                 </tr>
-              ))}
-              {!(stats?.batches || []).length && (
-                <tr><td colSpan={8} className="px-3 py-6 text-center text-gray-400">Базу за этот месяц ещё не загружали</td></tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {visibleBatches.map((b) => (
+                  <React.Fragment key={b.id}>
+                    <tr className={`border-t ${b.is_deleted ? 'bg-rose-50/50 text-slate-400' : ''}`}>
+                      <td className="px-3 py-2">
+                        <span className={b.is_deleted ? 'line-through' : ''}>{b.file_name}</span>
+                        {b.is_deleted && (
+                          <span className="ml-2 rounded bg-rose-100 px-1.5 py-0.5 text-[11px] font-medium text-rose-700 no-underline">
+                            удалена
+                          </span>
+                        )}
+                        {!b.is_deleted && b.restored_at && (
+                          <span className="ml-2 rounded bg-emerald-100 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700">
+                            восстановлена
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2">{b.uploaded_by_name || '—'}</td>
+                      <td className="px-3 py-2 text-right">{b.rows_total}</td>
+                      <td className="px-3 py-2 text-right">{b.rows_new}</td>
+                      <td className="px-3 py-2 text-right">{b.rows_duplicate}</td>
+                      <td className="px-3 py-2 text-right">{b.rows_invalid}</td>
+                      <td className="px-3 py-2 text-right">
+                        {b.check_status === 'done' ? b.already_working : (
+                          <span className="text-gray-400">
+                            {b.check_status === 'error' ? 'ошибка' : 'проверка…'}
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-gray-500">{fmtDateTime(b.created_at)}</td>
+                      <td className="whitespace-nowrap px-3 py-2 text-right">
+                        <button
+                          type="button"
+                          onClick={() => toggleHistory(b.id)}
+                          title="История удалений и восстановлений"
+                          aria-label={`История загрузки ${b.file_name || ''}`}
+                          aria-expanded={historyState.batchId === b.id}
+                          aria-controls={`tez-batch-history-${b.id}`}
+                          className="mr-1 inline-flex h-7 w-7 items-center justify-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+                        >
+                          <FaIcon className="fas fa-clock-rotate-left" aria-hidden="true" />
+                        </button>
+                        {canEdit && (b.is_deleted ? (
+                          <button
+                            type="button"
+                            onClick={() => openBatchAction('restore', b)}
+                            disabled={!batchActionsEnabled}
+                            className="inline-flex h-7 items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:cursor-wait disabled:opacity-50"
+                          >
+                            <FaIcon className="fas fa-rotate-left" aria-hidden="true" />
+                            Восстановить
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => openBatchAction('delete', b)}
+                            disabled={!batchActionsEnabled}
+                            className="inline-flex h-7 items-center gap-1 rounded-full border border-rose-200 bg-white px-2.5 text-xs font-semibold text-rose-600 hover:bg-rose-50 disabled:cursor-wait disabled:opacity-50"
+                          >
+                            <FaIcon className="fas fa-trash-can" aria-hidden="true" />
+                            Удалить
+                          </button>
+                        ))}
+                      </td>
+                    </tr>
+                    {b.is_deleted && (
+                      <tr className="bg-rose-50/50">
+                        <td colSpan={9} className="px-3 pb-2 text-xs text-rose-700">
+                          Удалил: <b>{b.deleted_by_name || '—'}</b>, {fmtDateTime(b.deleted_at)}
+                          {b.delete_reason ? ` · причина: ${b.delete_reason}` : ' · причина не указана'}
+                        </td>
+                      </tr>
+                    )}
+                    {historyState.batchId === b.id && (
+                      <tr id={`tez-batch-history-${b.id}`} className="bg-slate-50">
+                        <td colSpan={9} className="px-3 py-2">
+                          {historyState.status === 'loading' ? (
+                            <span
+                              role="status"
+                              className="inline-flex items-center gap-1.5 text-xs text-slate-500"
+                            >
+                              <FaIcon className="fas fa-spinner fa-spin" aria-hidden="true" />
+                              Загружаем историю…
+                            </span>
+                          ) : historyState.status === 'error' ? (
+                            <div
+                              role="alert"
+                              className="flex flex-wrap items-center justify-between gap-2 text-xs text-rose-700"
+                            >
+                              <span>{historyState.error}</span>
+                              <button
+                                type="button"
+                                onClick={() => toggleHistory(b.id, true)}
+                                className="rounded-full border border-rose-200 bg-white px-2.5 py-1 font-semibold hover:bg-rose-50"
+                              >
+                                Повторить
+                              </button>
+                            </div>
+                          ) : historyState.events.length ? (
+                            <ul className="space-y-1 text-xs text-slate-600">
+                              {historyState.events.map((e) => (
+                                <li key={e.id} className="flex flex-wrap gap-x-2">
+                                  <span className="tabular-nums text-slate-400">{fmtDateTime(e.created_at)}</span>
+                                  <span className={`font-semibold ${e.action === 'delete' ? 'text-rose-700' : 'text-emerald-700'}`}>
+                                    {e.action === 'delete' ? 'удаление' : 'восстановление'}
+                                  </span>
+                                  <span>{e.actor_name || '—'}</span>
+                                  <span className="text-slate-400">
+                                    {e.action === 'delete'
+                                      ? `лидов убрано ${e.leads_removed}, оставлено ${e.leads_kept}, успешек ${e.successes_removed}`
+                                      : `лидов возвращено ${e.leads_restored}, успешек ${e.successes_restored}` +
+                                        (e.leads_merged ? `, слито ${e.leads_merged}` : '')}
+                                  </span>
+                                  {e.reason && <span className="italic">«{e.reason}»</span>}
+                                </li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <span className="text-xs text-slate-400">Загрузку не удаляли — история пуста.</span>
+                          )}
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                ))}
+                {!visibleBatches.length && (
+                  <tr>
+                    <td colSpan={9} className="px-3 py-6 text-center text-gray-400">
+                      {statsLoading
+                        ? 'Загружаем список…'
+                        : deletedCount
+                          ? 'Все загрузки этого месяца удалены — включите «Показывать удалённые»'
+                          : 'Базу за этот месяц ещё не загружали'}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         )}
 
         {tab === 'leads' && (
@@ -497,7 +1159,7 @@ const TezLeadsPanel = ({ apiBaseUrl = '', userId, departmentId, groupId = null, 
                 className="text-sm border rounded-lg px-2 py-1.5 max-w-[220px]"
               >
                 <option value="">Все операторы</option>
-                {(stats?.operators || []).filter((o) => o.operator_id).map((o) => (
+                {(currentStats?.operators || []).filter((o) => o.operator_id).map((o) => (
                   <option key={o.operator_id} value={o.operator_id}>
                     {o.operator_name} ({o.successes})
                   </option>
