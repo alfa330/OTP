@@ -4,6 +4,7 @@ import { motion } from 'framer-motion';
 import {
     Sparkles, ListChecks, ClipboardList, SlidersHorizontal, Database, ChevronLeft,
     ShieldAlert, Gauge, Server, Clock, Loader2, AlertCircle, RotateCcw, Volume1, CheckCircle2,
+    MessageSquare, ImageOff, Users,
 } from 'lucide-react';
 import { APPLE_FONT, iosCard, iosBtnGhost, iosBtnSecondary, IosBadge } from '../ui/ios';
 import { isDepartmentHead, normalizeRole } from '../../utils/roles';
@@ -12,6 +13,7 @@ import QaDashboard from './QaDashboard';
 import EvaluationsList from './EvaluationsList';
 import CriteriaClassification from './CriteriaClassification';
 import AdjudicationsRag from './AdjudicationsRag';
+import ChatQueue from './ChatQueue';
 
 /* Контейнер раздела «ИИ-оценка» (App.jsx: view === "ai_qa"; доступ: super_admin,
  * главы ОП/СЗоВ, СВ ОП — последним бэкенд отдаёт только их направления, а вкладки
@@ -21,16 +23,23 @@ import AdjudicationsRag from './AdjudicationsRag';
 const TABS = [
     { key: 'overview',  label: 'Обзор',          Icon: Gauge },
     { key: 'queue',     label: 'Очередь ревью',  Icon: ListChecks },
+    { key: 'chats',     label: 'Чаты',           Icon: MessageSquare },
     { key: 'evals',     label: 'Оценки',         Icon: ClipboardList },
     { key: 'criteria',  label: 'Критерии',       Icon: SlidersHorizontal },
     { key: 'rag',       label: 'База разборов',  Icon: Database },
 ];
+
+// Тип субъекта оценки: звонок или эпизод переписки (см. call_qa/config.SUBJECT_*).
+const SUBJECT_CHAT = 'wz_episode';
+const isChat = (subject) => subject === SUBJECT_CHAT;
+const subjectTitle = (subject, id) => (isChat(subject) ? `Чат #${id}` : `Звонок #${id}`);
 
 const REASON = {
     critical: { tone: 'red',   label: 'Критический', Icon: ShieldAlert },
     lowconf:  { tone: 'amber', label: 'Низкая увер.', Icon: Clock },
     pending:  { tone: 'blue',  label: 'Ждёт API',    Icon: Server },
     asr:      { tone: 'amber', label: 'Слабый звук', Icon: Volume1 },
+    media:    { tone: 'amber', label: 'Вложение не прочитано', Icon: ImageOff },
     ok:       { tone: 'green', label: 'Без флагов',  Icon: CheckCircle2 },
     new:      { tone: 'slate', label: 'Новый',       Icon: Sparkles },
 };
@@ -80,7 +89,10 @@ function QueueList({ items, onOpen }) {
                     className={`${iosCard} flex w-full flex-col items-stretch justify-between gap-2.5 p-3.5 text-left transition hover:ring-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 active:scale-[0.995] sm:flex-row sm:items-center`}>
                     <div className="min-w-0">
                         <div className="flex items-center gap-2">
-                            <span className="text-[14px] font-semibold text-slate-900">Звонок #{c.id}</span>
+                            {isChat(c.subject) && <MessageSquare size={14} className="shrink-0 text-blue-500" />}
+                            <span className="text-[14px] font-semibold text-slate-900">
+                                {subjectTitle(c.subject, c.id)}
+                            </span>
                             <IosBadge tone="slate">{c.direction}</IosBadge>
                         </div>
                         <p className="mt-0.5 text-[12px] text-slate-400">{c.operator} · {c.datetime}</p>
@@ -194,15 +206,20 @@ export default function CallQaView(props) {
         setCallErr(null);
         if (!apiBaseUrl) { setCallErr('Бэкенд недоступен'); setCallLoading(false); return; }
         setCallLoading(true);
+        const subject = c.subject || 'call';
         axios.get(`${apiBaseUrl}/api/ai-qa/call/${c.id}`, {
-            params: refresh ? { refresh: 1 } : {}, headers: headers(), signal: controller.signal,
+            params: { ...(refresh ? { refresh: 1 } : {}), subject },
+            headers: headers(), signal: controller.signal,
         })
             .then((r) => {
                 if (requestId === callRequest.current.id) setCallData(r.data.call);
             })
             .catch((e) => {
                 if (!axios.isCancel(e) && requestId === callRequest.current.id) {
-                    setCallErr(e?.response?.data?.error || 'Не удалось загрузить оценку звонка');
+                    // 409 — оценить нельзя по существу (в эпизоде отвечали несколько
+                    // операторов и т.п.): показываем причину, а не «ошибку загрузки».
+                    setCallErr(e?.response?.data?.error
+                        || `Не удалось загрузить оценку ${isChat(subject) ? 'чата' : 'звонка'}`);
                 }
             })
             .finally(() => {
@@ -236,7 +253,8 @@ export default function CallQaView(props) {
     const requestReevaluation = () => {
         if (!selected || callLoading || reviewInteraction.busy) return;
         if (reviewInteraction.dirty &&
-            !window.confirm('Переоценить звонок? Несохранённые исправления будут потеряны.')) return;
+            !window.confirm(`Переоценить ${isChat(selected.subject) ? 'чат' : 'звонок'}? `
+                + 'Несохранённые исправления будут потеряны.')) return;
         setReviewInteraction({ dirty: false, busy: false });
         openCall(selected, true);
     };
@@ -285,6 +303,7 @@ export default function CallQaView(props) {
         try {
             await axios.post(`${apiBaseUrl}/api/ai-qa/adjudicate`,
                 { call_id: call.id, direction_id: call.direction_id,
+                  subject_kind: call.subject_kind || 'call',
                   evaluation_run_id: call._evaluation_run_id,
                   scale_revision_id: call._scale_revision_id,
                   evaluation_fingerprint: call._evaluation_fingerprint,
@@ -292,7 +311,9 @@ export default function CallQaView(props) {
             showToast?.(items.length ? 'Разбор сохранён как черновик' : 'Подтверждено', 'success');
             setQueue((current) => {
                 if (!Array.isArray(current)) return current;
-                const next = current.filter((item) => item.id !== call.id);
+                const kind = call.subject_kind || 'call';
+                const next = current.filter(
+                    (item) => item.id !== call.id || (item.subject || 'call') !== kind);
                 if (next.length !== current.length) setQueueTotal((t) => Math.max(0, t - 1));
                 return next;
             });
@@ -311,11 +332,11 @@ export default function CallQaView(props) {
                     <Sparkles size={20} />
                 </div>
                 <div>
-                    <h1 className="text-[19px] font-semibold text-slate-900">ИИ-оценка звонков</h1>
+                    <h1 className="text-[19px] font-semibold text-slate-900">ИИ-оценка</h1>
                     <p className="text-[12.5px] text-slate-400">
                         {isScopedSupervisor
-                            ? 'Автоматическая проверка качества · ваши направления'
-                            : 'Автоматическая проверка качества · отдел продаж'}
+                            ? 'Звонки и чаты · ваши направления'
+                            : 'Звонки и чаты · отдел продаж'}
                     </p>
                 </div>
             </div>
@@ -353,7 +374,9 @@ export default function CallQaView(props) {
                         )}
                     </div>
                     {callLoading ? (
-                        <Spinner text={`Оцениваю звонок #${selected.id} — распознавание и анализ…`} />
+                        <Spinner text={isChat(selected.subject)
+                            ? `Оцениваю чат #${selected.id} — читаю вложения и анализирую…`
+                            : `Оцениваю звонок #${selected.id} — распознавание и анализ…`} />
                     ) : callErr ? (
                         <ErrorCard text={callErr} onRetry={() => openCall(selected)} />
                     ) : (
@@ -398,6 +421,9 @@ export default function CallQaView(props) {
                             </div>
                         </div>
                     )
+            ) : tab === 'chats' ? (
+                <ChatQueue apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
+                           showToast={showToast} onOpen={openCall} />
             ) : tab === 'overview' ? (
                 <QaDashboard apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader} />
             ) : tab === 'evals' ? (

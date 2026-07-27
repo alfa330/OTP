@@ -80,7 +80,7 @@ export default function EvaluationsList(props) {
         <div style={{ fontFamily: APPLE_FONT }} className="space-y-3">
             <div className="flex flex-col items-stretch justify-between gap-3 sm:flex-row sm:items-center">
                 <p className="text-[13px] text-slate-500">
-                    Звонки, уже оценённые ИИ{total ? ` · всего ${total}` : ''}. Можно взять случайный из оценённых человеком и проверить ИИ.
+                    Звонки и чаты, уже оценённые ИИ{total ? ` · всего ${total}` : ''}. Можно взять случайный звонок из оценённых человеком и проверить ИИ.
                 </p>
                 <div className="flex shrink-0 items-center gap-2">
                     <button type="button" onClick={() => fetchPage(0, false)} disabled={items === null}
@@ -107,7 +107,7 @@ export default function EvaluationsList(props) {
             ) : items.length === 0 ? (
                 <div className={`${iosCard} flex flex-col items-center gap-2 px-6 py-14 text-center`}>
                     <ClipboardList size={26} className="text-slate-300" />
-                    <p className="text-[13px] text-slate-500">Пока ни одного звонка не оценено ИИ.</p>
+                    <p className="text-[13px] text-slate-500">Пока ничего не оценено ИИ.</p>
                     <p className="text-[12px] text-slate-400">Нажмите «Случайный звонок», чтобы протестировать оценку.</p>
                 </div>
             ) : (
@@ -117,7 +117,9 @@ export default function EvaluationsList(props) {
                             className={`${iosCard} flex w-full flex-col items-stretch gap-2.5 p-3.5 text-left transition hover:ring-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 active:scale-[0.995] sm:flex-row sm:items-center sm:gap-3`}>
                             <div className="min-w-0 flex-1">
                                 <div className="flex items-center gap-2">
-                                    <span className="text-[14px] font-semibold text-slate-900">#{m.id}</span>
+                                    <span className="text-[14px] font-semibold text-slate-900">
+                                        {m.subject === 'wz_episode' ? `Чат #${m.id}` : `#${m.id}`}
+                                    </span>
                                     <IosBadge tone="slate">{m.direction}</IosBadge>
                                     <IosBadge tone="green"><Bot size={11} />оценено ИИ</IosBadge>
                                 </div>

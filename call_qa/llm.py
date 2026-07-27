@@ -20,22 +20,31 @@ def _headers() -> dict:
     return {"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
 
 
-def build_body(*, model, system, user, schema, max_tokens=8000, cache_system=False) -> dict:
+def build_body(*, model, system, user, schema, max_tokens=8000, cache_system=False,
+               effort=None, thinking=None) -> dict:
     """Тело запроса /v1/messages. cache_system=True вешает prompt-cache на системный блок
-    (повторяющийся промпт: и в обычных вызовах, и в батче — скидки складываются)."""
+    (повторяющийся промпт: и в обычных вызовах, и в батче — скидки складываются).
+
+    user — строка или список content-блоков (для картинок: {"type":"image", ...}).
+    effort/thinking переопределяют дефолты для дешёвых вспомогательных вызовов
+    (описание вложений): рассуждать над картинкой не нужно, а effort='high'
+    удваивал бы её цену."""
     sys_block = {"type": "text", "text": system}
     if cache_system:
         sys_block["cache_control"] = {"type": "ephemeral"}
-    return {
+    body = {
         "model": model,
         "max_tokens": max_tokens,
         "system": [sys_block],
         "messages": [{"role": "user", "content": user}],
         "output_config": {
-            "effort": config.CLAUDE_EFFORT,
+            "effort": effort or config.CLAUDE_EFFORT,
             "format": {"type": "json_schema", "schema": schema},
         },
     }
+    if thinking is not None:
+        body["thinking"] = thinking
+    return body
 
 
 def parse_message(message: dict) -> dict:

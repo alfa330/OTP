@@ -192,16 +192,18 @@ def _adjudication_embed_text(criterion_name, situation, excerpt, reason, not_cov
 
 def save_adjudication(*, direction_id, criterion_idx, criterion_name, call_id,
                       excerpt, ai_verdict, correct_verdict, reason,
-                      not_covered=None, situation=None, situation_tag=None, created_by=None) -> int:
+                      not_covered=None, situation=None, situation_tag=None, created_by=None,
+                      subject_kind=None) -> int:
     """Авто-сохранение разбора человека (+ embedding). Вызывается из экшена ревью."""
     vec = _embed(_adjudication_embed_text(criterion_name, situation, excerpt, reason, not_covered))
     with _rw_conn() as c, c.cursor() as cur:
         cur.execute(
             """INSERT INTO qa_adjudications
-               (direction_id, criterion_idx, criterion_name, call_id, excerpt,
+               (direction_id, criterion_idx, criterion_name, subject_kind, call_id, excerpt,
                 ai_verdict, correct_verdict, reason, not_covered, situation, situation_tag, embedding, created_by)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector,%s) RETURNING id""",
-            (direction_id, criterion_idx, criterion_name, call_id, excerpt,
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector,%s) RETURNING id""",
+            (direction_id, criterion_idx, criterion_name,
+             str(subject_kind or config.SUBJECT_CALL), call_id, excerpt,
              ai_verdict, correct_verdict, reason, not_covered or None, situation or None,
              situation_tag, _vec(vec), created_by),
         )

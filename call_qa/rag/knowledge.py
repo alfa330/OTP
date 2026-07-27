@@ -16,6 +16,7 @@ from typing import Any
 
 from psycopg2.extras import Json
 
+from .. import config
 from ..evaluation.fingerprint import canonical_json, content_hash
 
 
@@ -336,8 +337,15 @@ def create_adjudication_case(conn, *, direction_id: int, criterion_id: str,
                              evidence_end_ms=None, transcript_hash=None, situation=None,
                              not_covered=None, case_status=None, supersedes_case_id=None,
                              created_by=None, verified_by=None, metadata=None,
-                             legacy_adjudication_id=None) -> str:
+                             legacy_adjudication_id=None,
+                             subject_kind=None) -> str:
     evidence_status = str(evidence_status)
+    subject_kind = str(subject_kind or config.SUBJECT_CALL)
+    # Опечатка в типе субъекта создала бы третий класс кейсов, невидимый и
+    # выборкам, и дедупликации, — поэтому значение проверяется здесь, а не
+    # только CHECK-ом в БД (сюда ходят и скрипты, и будущие API).
+    if subject_kind not in config.SUBJECT_KINDS:
+        raise KnowledgeValidationError(f"invalid subject_kind: {subject_kind}")
     if evidence_status not in EVIDENCE_STATUSES:
         raise KnowledgeValidationError(f"invalid evidence_status: {evidence_status}")
     if not str(reason or "").strip():
@@ -350,7 +358,7 @@ def create_adjudication_case(conn, *, direction_id: int, criterion_id: str,
     case_status = case_status or ("verified" if verified_by is not None else "submitted")
     if case_status not in CASE_STATUSES:
         raise KnowledgeValidationError(f"invalid case_status: {case_status}")
-    digest = content_hash({
+    digest_payload = {
         "direction_id": int(direction_id), "criterion_id": str(criterion_id),
         "call_id": call_id,
         "evaluation_run_id": str(evaluation_run_id) if evaluation_run_id else None,
@@ -358,22 +366,29 @@ def create_adjudication_case(conn, *, direction_id: int, criterion_id: str,
         "evidence_excerpt": evidence_excerpt or "", "evidence_status": evidence_status,
         "reason": str(reason).strip(), "situation": situation, "not_covered": not_covered,
         "transcript_hash": transcript_hash, "legacy_adjudication_id": legacy_adjudication_id,
-    })
+    }
+    # Дайджест звонка оставлен байт-в-байт прежним: он же ключ дедупликации, и
+    # добавление поля превратило бы повторную отправку старого разбора в новый.
+    # Для других типов субъекта тип входит в дайджест — id эпизода и id звонка
+    # могут совпасть численно.
+    if subject_kind != config.SUBJECT_CALL:
+        digest_payload["subject_kind"] = subject_kind
+    digest = content_hash(digest_payload)
     case_id = str(uuid.uuid4())
     with conn.cursor() as cur:
         cur.execute(
             """INSERT INTO qa_adjudication_cases
                    (id,direction_id,criterion_id,criterion_idx,criterion_name,scale_revision_id,
-                    call_id,evaluation_run_id,ai_verdict,correct_verdict,evidence_excerpt,
+                    subject_kind,call_id,evaluation_run_id,ai_verdict,correct_verdict,evidence_excerpt,
                     verified_excerpt,evidence_status,evidence_start_offset,evidence_end_offset,
                     evidence_start_ms,evidence_end_ms,transcript_hash,situation,reason,not_covered,
                     case_status,content_hash,supersedes_case_id,legacy_adjudication_id,
                     created_by,verified_by,verified_at,metadata)
-                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                          %s,%s,%s,%s,%s,%s,%s,CASE WHEN %s IS NULL THEN NULL ELSE now() END,%s)
                  ON CONFLICT DO NOTHING RETURNING id::text""",
             (case_id, int(direction_id), str(criterion_id), criterion_idx, criterion_name,
-             scale_revision_id, call_id, evaluation_run_id, ai_verdict, correct_verdict,
+             scale_revision_id, subject_kind, call_id, evaluation_run_id, ai_verdict, correct_verdict,
              evidence_excerpt or "", evidence_status == "verified", evidence_status,
              evidence_start_offset, evidence_end_offset, evidence_start_ms, evidence_end_ms,
              transcript_hash, situation, str(reason).strip(), not_covered, case_status, digest,
@@ -385,9 +400,10 @@ def create_adjudication_case(conn, *, direction_id: int, criterion_id: str,
             return row[0]
         cur.execute(
             """SELECT id::text FROM qa_adjudication_cases
-                WHERE call_id IS NOT DISTINCT FROM %s AND direction_id=%s AND criterion_id=%s
+                WHERE subject_kind=%s AND call_id IS NOT DISTINCT FROM %s
+                  AND direction_id=%s AND criterion_id=%s
                   AND content_hash=%s ORDER BY created_at DESC LIMIT 1""",
-            (call_id, int(direction_id), str(criterion_id), digest),
+            (subject_kind, call_id, int(direction_id), str(criterion_id), digest),
         )
         existing = cur.fetchone()
         if not existing:

@@ -4,13 +4,19 @@ import {
     Check, X, Minus, Clock, Sparkles, Server, User2, Headphones,
     Quote, ShieldAlert, ChevronDown, Languages, Save, RotateCcw, Wand2, Loader2,
     Database, Search, Timer, Hash, AlertTriangle, ShieldCheck,
+    MessageSquare, Paperclip, ImageOff, Users,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosInput, iosBtnPrimary, iosBtnGhost, IosBadge,
 } from '../ui/ios';
 
-/* Карточка ревью одного звонка — центральный экран взаимодействия с ИИ.
- * Данные приходят только с бэкенда (props.call). Мок-данных нет. */
+/* Карточка ревью одного субъекта оценки — центральный экран взаимодействия с ИИ.
+ * Субъект — звонок (аудио + диаризация) либо эпизод переписки Wazzup у
+ * Верификаторов (сообщения + содержимое вложений). Форма данных одна: строки
+ * транскрипта, критерии, отпечатки прогона. Данные приходят только с бэкенда
+ * (props.call). Мок-данных нет. */
+
+const SUBJECT_CHAT = 'wz_episode';
 
 const scoreTone = (s) => (s == null ? 'slate' : s >= 70 ? 'green' : s >= 50 ? 'amber' : 'red');
 const formatTimestamp = (ms) => {
@@ -86,22 +92,53 @@ function VerdictChip({ verdict }) {
     return <IosBadge tone={v.tone}><v.Icon size={12} strokeWidth={2.5} />{v.label}</IosBadge>;
 }
 
-const TranscriptLine = memo(function TranscriptLine({ line, onSeek }) {
-    const isOp = line.speaker === 'operator';
+// Кто говорит: у звонка две стороны, у чата к ним добавляются чужой сотрудник
+// (в эпизоде мог ответить кто-то ещё — за него оператор не отвечает) и рассылка.
+const SPEAKER = {
+    operator:       { label: 'Оператор',         side: 'left',  cls: 'bg-blue-50 text-slate-800 ring-1 ring-blue-100',   head: 'text-blue-600' },
+    other_operator: { label: 'Другой сотрудник', side: 'left',  cls: 'bg-violet-50 text-slate-800 ring-1 ring-violet-100', head: 'text-violet-600' },
+    bot:            { label: 'Рассылка',         side: 'left',  cls: 'bg-slate-50 text-slate-500 ring-1 ring-slate-200',  head: 'text-slate-400' },
+    client:         { label: 'Клиент',           side: 'right', cls: 'bg-slate-100 text-slate-700',                        head: 'text-slate-500' },
+};
+
+function LineMedia({ media }) {
+    if (!media?.url) return null;
+    if (media.kind === 'image') {
+        return (
+            <a href={media.url} target="_blank" rel="noreferrer" className="mt-1.5 block">
+                <img src={media.url} alt={media.label || 'вложение'} loading="lazy"
+                     className="max-h-44 w-auto rounded-xl ring-1 ring-slate-200" />
+            </a>
+        );
+    }
+    if (media.kind === 'audio') {
+        return <audio controls preload="none" src={media.url} className="mt-1.5 h-8 w-full" aria-label="Голосовое сообщение" />;
+    }
     return (
-        <div className={`flex ${isOp ? 'justify-start' : 'justify-end'}`}>
-            <div className={`max-w-[88%] rounded-2xl px-3.5 py-2 text-[13.5px] leading-relaxed ${
-                isOp ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-100' : 'bg-slate-100 text-slate-700'
-            }`}>
-                <div className={`mb-0.5 flex items-center justify-between gap-3 text-[10.5px] font-semibold uppercase tracking-wide ${isOp ? 'text-blue-600' : 'text-slate-500'}`}>
-                    <span>{isOp ? 'Оператор' : 'Клиент'}</span>
-                    {line.start_ms != null && (
+        <a href={media.url} target="_blank" rel="noreferrer"
+           className="mt-1.5 inline-flex items-center gap-1 rounded-lg bg-white/70 px-2 py-1 text-[11.5px] font-medium text-slate-600 ring-1 ring-slate-200 hover:text-slate-900">
+            <Paperclip size={11} />{media.label || 'вложение'}
+        </a>
+    );
+}
+
+const TranscriptLine = memo(function TranscriptLine({ line, onSeek }) {
+    const meta = SPEAKER[line.speaker] || SPEAKER.client;
+    const isLeft = meta.side === 'left';
+    return (
+        <div className={`flex ${isLeft ? 'justify-start' : 'justify-end'}`}>
+            <div className={`max-w-[88%] rounded-2xl px-3.5 py-2 text-[13.5px] leading-relaxed ${meta.cls}`}>
+                <div className={`mb-0.5 flex items-center justify-between gap-3 text-[10.5px] font-semibold uppercase tracking-wide ${meta.head}`}>
+                    <span>{meta.label}{line.author ? ` · ${line.author}` : ''}</span>
+                    {line.start_ms != null ? (
                         <button type="button" onClick={() => onSeek?.(line.start_ms)}
                             className="rounded px-1 py-0.5 font-medium tabular-nums text-slate-500 hover:bg-white/70 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60"
                             aria-label={`Перейти к ${formatTimestamp(line.start_ms)} записи`}>
                             {formatTimestamp(line.start_ms)}
                         </button>
-                    )}
+                    ) : line.ts ? (
+                        <span className="font-medium tabular-nums text-slate-400">{line.ts}</span>
+                    ) : null}
                 </div>
                 <span>
                     {(line.seg || []).map((s, i) => s.c != null && s.c < 0.5
@@ -109,10 +146,58 @@ const TranscriptLine = memo(function TranscriptLine({ line, onSeek }) {
                                 className="rounded bg-amber-100 px-0.5 text-amber-800 decoration-amber-400 decoration-dotted underline">{s.t}</mark>
                         : <span key={i}>{s.t}</span>)}
                 </span>
+                <LineMedia media={line.media} />
             </div>
         </div>
     );
 });
+
+/* Метаданные эпизода вместо языков/уверенности ASR: проверяющему важны клиент,
+ * доля ответов оцениваемого оператора (порог атрибуции) и судьба вложений. */
+function ChatMeta({ call }) {
+    const chat = call.chat || {};
+    const media = call.media || {};
+    const share = chat.operator_share != null ? Math.round(Number(chat.operator_share) * 100) : null;
+    const expired = media.source === 'expired';
+    return (
+        <div className="mt-3 space-y-1.5">
+            <div className="flex flex-wrap items-center gap-2 text-[11.5px] text-slate-500">
+                <MessageSquare size={13} className="text-slate-400" />
+                <span>{chat.contact_name || chat.contact_phone || 'клиент без имени'}</span>
+                {chat.messages_count != null && (
+                    <span className="rounded-md bg-slate-100 px-1.5 py-0.5 font-medium">
+                        {chat.messages_count} сообщений
+                    </span>
+                )}
+                {share != null && (
+                    <span className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 font-medium ${
+                        share >= 90 ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}
+                          title="Доля ответов оцениваемого оператора среди всех ответов сотрудников в эпизоде">
+                        <Users size={11} />ответы оператора · {share}%
+                    </span>
+                )}
+            </div>
+            {(media.total ? (
+                <div className="flex flex-wrap items-center gap-2 text-[11.5px] text-slate-500">
+                    <Paperclip size={13} className="text-slate-400" />
+                    <span>вложений {media.total}: прочитано {media.ready || 0}</span>
+                    {media.failed ? (
+                        <span className="inline-flex items-center gap-1 rounded-md bg-amber-50 px-1.5 py-0.5 font-medium text-amber-700">
+                            <ImageOff size={11} />не прочитано {media.failed}
+                        </span>
+                    ) : null}
+                </div>
+            ) : null)}
+            {expired && (
+                <p className="rounded-xl bg-amber-50 px-2.5 py-1.5 text-[11.5px] text-amber-800">
+                    Сырые сообщения этого чата уже удалены ретеншном (45 дней): содержимое
+                    вложений недоступно, оценка сделана по тексту переписки. Не штрафуйте
+                    оператора за то, чего не видно.
+                </p>
+            )}
+        </div>
+    );
+}
 
 const fieldCls = `${iosInput} px-3 py-2 text-[12.5px]`;
 
@@ -497,6 +582,7 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
     if (!call) return null;
 
     const pendingCount = (call.criteria || []).filter((c) => c.source !== 'transcript').length;
+    const isChat = (call.subject_kind || 'call') === SUBJECT_CHAT;
 
     return (
         <div style={{ fontFamily: APPLE_FONT }} className="grid grid-cols-1 gap-4 lg:grid-cols-[1.05fr_1fr]">
@@ -505,7 +591,10 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
                     <div className="flex items-start justify-between gap-3">
                         <div>
                             <div className="flex items-center gap-2">
-                                <span className="text-[15px] font-semibold text-slate-900">Звонок #{call.id}</span>
+                                {isChat && <MessageSquare size={15} className="shrink-0 text-blue-500" />}
+                                <span className="text-[15px] font-semibold text-slate-900">
+                                    {isChat ? `Чат #${call.id}` : `Звонок #${call.id}`}
+                                </span>
                                 <IosBadge tone="slate">{call.direction}</IosBadge>
                             </div>
                             <p className="mt-0.5 text-[12.5px] text-slate-500">{call.operator} · {call.datetime}</p>
@@ -519,17 +608,19 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
                             )}
                         </div>
                     </div>
-                    <div className="mt-3 flex items-center gap-2 text-[11.5px] text-slate-500">
-                        <Languages size={13} />
-                        {Object.entries(call.languages || {}).map(([l, p]) => (
-                            <span key={l} className="rounded-md bg-slate-100 px-1.5 py-0.5 font-medium text-slate-500">
-                                {l.toUpperCase()} {p}%
-                            </span>
-                        ))}
-                        {call.asr_mean_conf != null && (
-                            <span className="ml-auto">распознавание · {Math.round(call.asr_mean_conf * 100)}%</span>
-                        )}
-                    </div>
+                    {isChat ? <ChatMeta call={call} /> : (
+                        <div className="mt-3 flex items-center gap-2 text-[11.5px] text-slate-500">
+                            <Languages size={13} />
+                            {Object.entries(call.languages || {}).map(([l, p]) => (
+                                <span key={l} className="rounded-md bg-slate-100 px-1.5 py-0.5 font-medium text-slate-500">
+                                    {l.toUpperCase()} {p}%
+                                </span>
+                            ))}
+                            {call.asr_mean_conf != null && (
+                                <span className="ml-auto">распознавание · {Math.round(call.asr_mean_conf * 100)}%</span>
+                            )}
+                        </div>
+                    )}
                     {call.audio_url && (
                         <div className="mt-3 flex items-center gap-2">
                             <Headphones size={15} className="shrink-0 text-slate-400" />
@@ -542,17 +633,22 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
 
                 <div className={`${iosCard} flex max-h-[60vh] flex-col p-0`}>
                     <div className="border-b border-slate-100 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-                        Транскрипт · диаризация
+                        {isChat ? 'Переписка · эпизод' : 'Транскрипт · диаризация'}
                     </div>
-                    <div className="flex-1 space-y-2 overflow-y-auto px-4 py-3" tabIndex={0} aria-label="Транскрипт звонка">
+                    <div className="flex-1 space-y-2 overflow-y-auto px-4 py-3" tabIndex={0}
+                         aria-label={isChat ? 'Переписка эпизода' : 'Транскрипт звонка'}>
                         {(call.transcript || []).length > 0
                             ? call.transcript.map((l, i) => <TranscriptLine key={i} line={l} onSeek={call.audio_url ? seekAudio : undefined} />)
                             : <div className="flex min-h-32 items-center justify-center text-center text-[13px] text-slate-500">
-                                Транскрипт отсутствует. Не подтверждайте оценку, пока данные не будут загружены.
+                                {isChat
+                                    ? 'Переписка недоступна. Не подтверждайте оценку, пока данные не будут загружены.'
+                                    : 'Транскрипт отсутствует. Не подтверждайте оценку, пока данные не будут загружены.'}
                               </div>}
                     </div>
                     <div className="border-t border-slate-100 px-4 py-2 text-[11px] text-slate-500">
-                        <mark className="rounded bg-amber-100 px-1 text-amber-800">жёлтым</mark> — где ИИ не уверен в распознавании (не учитывается против оператора)
+                        {isChat
+                            ? 'Содержимое фото и голосовых приведено текстом в квадратных скобках — именно его видела модель.'
+                            : (<><mark className="rounded bg-amber-100 px-1 text-amber-800">жёлтым</mark> — где ИИ не уверен в распознавании (не учитывается против оператора)</>)}
                     </div>
                 </div>
             </div>
@@ -606,7 +702,8 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
                 <div className="sticky bottom-0 mt-3 flex flex-col gap-2 rounded-2xl bg-white/95 px-3 py-2.5 ring-1 ring-slate-200/70 backdrop-blur-xl sm:flex-row sm:items-center sm:justify-between" aria-live="polite">
                     <span className={`text-[12.5px] ${incompleteCorrections.length ? 'font-medium text-amber-700' : 'text-slate-500'}`}>
                         {!canSubmit
-                            ? `Подтверждение недоступно: ${!hasCriteria ? 'нет критериев' : 'нет транскрипта'}`
+                            ? `Подтверждение недоступно: ${!hasCriteria ? 'нет критериев'
+                                : isChat ? 'нет переписки' : 'нет транскрипта'}`
                             : incompleteCorrections.length > 0
                             ? <>Нужно завершить: <b>{incompleteCorrections.length}</b> — заполните правило и подтверждение</>
                             : corrections.length > 0

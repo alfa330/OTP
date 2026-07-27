@@ -1,16 +1,25 @@
 # -*- coding: utf-8 -*-
-"""Пакетная фоновая ИИ-оценка уже оценённых людьми звонков через Anthropic Batch API (−50%).
+"""Пакетная фоновая ИИ-оценка через Anthropic Batch API (−50% на все токены).
 
 Зачем: теневой режим — массовая сверка ИИ↔человек за прошлый период + прогрев кэша карточек.
-Поток: выборка звонков месяца (fallback на следующий, если мало) → GCS → Soniox ASR
-(параллельно) → ОДИН батч в /v1/messages/batches → поллинг → сборка карточек →
-ai_review_cache (карточки открываются мгновенно, дашборд согласия получает данные).
+
+Два субъекта оценки (--subject):
+  call       — звонки: выборка месяца → GCS → Soniox ASR (параллельно) → батч оценок;
+  wz_episode — эпизоды переписки Wazzup у Верификаторов: выборка пригодных эпизодов
+               (доля ответов одного оператора ≥ порога) → ОТДЕЛЬНЫЙ батч описаний
+               вложений (картинки через vision-модель, голосовые через Soniox) →
+               транскрипт с содержанием вложений → батч оценок.
+
+Скидка Batch −50% распространяется на ВСЕ токены, включая токены изображений,
+поэтому ночной прогон описывает вложения вдвое дешевле интерактивного открытия
+карточки.
 
 Устойчивость: транскрипты и batch_id сохраняются в --workdir; повторный запуск продолжает
-с места остановки (уже закэшированные под текущим тегом звонки пропускаются всегда).
+с места остановки (уже закэшированные под текущим fingerprint субъекты пропускаются).
 
 Запуск:  python -m call_qa.batch_eval --month 2026-06 --fallback-month 2026-07 --min-calls 50
-Нужны env: ключ Claude, SONIOX_API_KEY, GOOGLE_APPLICATION_CREDENTIALS_CONTENT,
+         python -m call_qa.batch_eval --subject wz_episode --month 2026-07
+Нужны env: ключ Claude, SONIOX_API_KEY, GOOGLE_APPLICATION_CREDENTIALS_CONTENT (для звонков),
            read-write БД (DATABASE_URL или POSTGRES_*)."""
 from __future__ import annotations
 import os
@@ -26,6 +35,8 @@ import httpx
 
 from . import config
 from . import llm
+from . import media as media_mod
+from . import subjects as subjects_mod
 from .asr import soniox
 from .evaluation import criteria as criteria_mod
 from .evaluation import criterion_config as cc
@@ -35,6 +46,13 @@ from .evaluation.fingerprint import content_hash, transcript_fingerprint
 from .rag import knowledge
 from .api import (_download, _lines_from_tokens, _ai_score, _cache_put, _meta_upsert,
                   _audio_object_fingerprint, _evaluation_identity)
+
+_SUBJECT_PREFIX = {config.SUBJECT_CALL: "call", config.SUBJECT_WZ_EPISODE: "wz"}
+
+
+def _subject_key(subject: dict) -> str:
+    """Ключ чекпоинта: id звонка и id эпизода — независимые последовательности."""
+    return f"{subject.get('subject_kind') or config.SUBJECT_CALL}:{subject['id']}"
 
 _BATCH_PRICE_ENV = {
     "input": "CLAUDE_BATCH_INPUT_USD_PER_MTOK",
@@ -132,7 +150,8 @@ def select_calls(month: str, fallback_month: str | None, min_calls: int, limit: 
                 ORDER BY c.created_at""",
             (config.op_direction_id_family(cur), lo, hi))
         rows = cur.fetchall(); cur.close(); conn.close()
-        return [{"id": r[0], "direction_id": r[1], "direction": r[2], "operator": r[3] or "—",
+        return [{"id": r[0], "subject_kind": config.SUBJECT_CALL,
+                 "direction_id": r[1], "direction": r[2], "operator": r[3] or "—",
                  "datetime": r[4], "human_score": r[5], "audio_path": r[6]} for r in rows]
 
     calls = q(month)
@@ -147,16 +166,67 @@ def select_calls(month: str, fallback_month: str | None, min_calls: int, limit: 
     return calls
 
 
+def select_episodes(month: str, fallback_month: str | None, min_calls: int,
+                    limit: int | None) -> list[dict]:
+    """Эпизоды чатов Верификаторов за месяц, пригодные для честной оценки.
+
+    Отсекаются эпизоды, где отвечали несколько операторов: приписать такую
+    переписку одному человеку нельзя (порог config.WZ_MIN_OPERATOR_SHARE)."""
+    def q(mon):
+        lo, hi = _month_bounds(mon)
+        conn = config.connect_ro(); cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+        try:
+            wz_family = subjects_mod.wz_direction_family(cur)
+            if not wz_family:
+                log("не найдено направление Верификаторов — нечего выбирать")
+                return []
+            cur.execute(
+                """SELECT e.id, u.direction_id, d.name, u.name,
+                          TO_CHAR(e.ended_at AT TIME ZONE 'Asia/Almaty','DD.MM.YYYY, HH24:MI'),
+                          e.operator_share, e.human_outbound_count
+                     FROM wazzup_episodes e
+                     JOIN users u ON u.id = e.operator_user_id
+                     LEFT JOIN directions d ON d.id = u.direction_id
+                    WHERE e.kind = 'dialog' AND u.direction_id = ANY(%s)
+                      AND e.operator_share >= %s AND e.human_outbound_count >= %s
+                      AND (e.ended_at AT TIME ZONE 'Asia/Almaty') >= %s
+                      AND (e.ended_at AT TIME ZONE 'Asia/Almaty') < %s
+                    ORDER BY e.ended_at""",
+                (wz_family, config.WZ_MIN_OPERATOR_SHARE,
+                 config.WZ_MIN_OPERATOR_MESSAGES, lo, hi))
+            rows = cur.fetchall()
+        finally:
+            cur.close(); conn.close()
+        return [{"id": r[0], "subject_kind": config.SUBJECT_WZ_EPISODE,
+                 "direction_id": r[1], "direction": r[2], "operator": r[3] or "—",
+                 "datetime": r[4], "human_score": None, "audio_path": None,
+                 "operator_share": r[5], "human_outbound_count": r[6]} for r in rows]
+
+    items = q(month)
+    log(f"выборка {month}: {len(items)} эпизодов чатов "
+        f"(порог доли ответов оператора {round(config.WZ_MIN_OPERATOR_SHARE * 100)}%)")
+    if len(items) < min_calls and fallback_month:
+        extra = q(fallback_month)
+        log(f"мало (<{min_calls}) → добавляю {fallback_month}: +{len(extra)}")
+        items += extra
+    if limit:
+        items = items[:limit]
+        log(f"ограничение --limit: берём первые {len(items)}")
+    return items
+
+
 def asr_stage(calls: list[dict], workdir: str, workers: int) -> dict:
     """GCS → Soniox для всех звонков (параллельно). Готовые транскрипты копятся в
     transcripts.jsonl — при перезапуске не распознаются заново. Возвращает {call_id: rec}."""
     path = os.path.join(workdir, "transcripts.jsonl")
-    done: dict[int, dict] = {}
+    done: dict[str, dict] = {}
     if os.path.exists(path):
         with open(path, encoding="utf-8") as f:
             for line in f:
                 rec = json.loads(line)
-                done[rec["call_id"]] = rec
+                # чекпоинты прежних версий не знают о типе субъекта — это звонки
+                rec.setdefault("subject_kind", config.SUBJECT_CALL)
+                done[f"{rec['subject_kind']}:{rec['call_id']}"] = rec
         log(f"ASR: {len(done)} транскриптов уже готово (из {path})")
     checkpoints = done
     done = {}
@@ -177,11 +247,12 @@ def asr_stage(calls: list[dict], workdir: str, workers: int) -> dict:
         cached = runtime_store.get_transcript(
             call_id=call["id"], audio_fingerprint_value=audio_fp,
             asr_provider="soniox", asr_model=config.SONIOX_MODEL,
-            asr_config_hash=asr_cfg_hash,
+            asr_config_hash=asr_cfg_hash, subject_kind=config.SUBJECT_CALL,
         )
         if cached:
             rec = {
-                "call_id": call["id"], "toks": cached.get("tokens") or [],
+                "call_id": call["id"], "subject_kind": config.SUBJECT_CALL,
+                "toks": cached.get("tokens") or [],
                 "segments": cached.get("segments") or [],
                 "asm": {"text": cached["text"], "languages": cached.get("languages") or {},
                         "mean_conf": cached.get("mean_conf"),
@@ -192,7 +263,7 @@ def asr_stage(calls: list[dict], workdir: str, workers: int) -> dict:
                 "asr_config_hash": asr_cfg_hash,
             }
         else:
-            checkpoint = checkpoints.get(call["id"]) or {}
+            checkpoint = checkpoints.get(f"{config.SUBJECT_CALL}:{call['id']}") or {}
             if (checkpoint.get("audio_fingerprint") == audio_fp and
                     checkpoint.get("asr_config_hash") == asr_cfg_hash and
                     (checkpoint.get("asm") or {}).get("text")):
@@ -212,7 +283,8 @@ def asr_stage(calls: list[dict], workdir: str, workers: int) -> dict:
                 asm = {"text": assembled["text"], "languages": assembled["languages"],
                        "mean_conf": assembled["mean_conf"],
                        "low_conf_spans": assembled["low_conf_spans"]}
-                rec = {"call_id": call["id"], "toks": slim, "asm": asm}
+                rec = {"call_id": call["id"], "subject_kind": config.SUBJECT_CALL,
+                       "toks": slim, "asm": asm}
             segments = rec.get("segments") or _lines_from_tokens(slim)
             transcript_hash = content_hash(asm["text"])
             duration_ms = max((int(token.get("end_time_ms") or 0) for token in slim),
@@ -225,10 +297,13 @@ def asr_stage(calls: list[dict], workdir: str, workers: int) -> dict:
                 payload={"asr_config": asr_cfg, "source": "batch"},
                 languages=asm.get("languages"), mean_conf=asm.get("mean_conf"),
                 low_conf_spans=asm.get("low_conf_spans"), duration_ms=duration_ms,
+                subject_kind=config.SUBJECT_CALL,
             )
             rec.update({"segments": segments, "transcript_cache_id": transcript_cache_id,
                         "transcript_hash": transcript_hash,
                         "audio_fingerprint": audio_fp, "asr_config_hash": asr_cfg_hash})
+        rec.setdefault("source_model", config.SONIOX_MODEL)
+        rec.setdefault("source_config", runtime_store.asr_config())
         with lock_write:
             with open(path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -237,17 +312,164 @@ def asr_stage(calls: list[dict], workdir: str, workers: int) -> dict:
     ok = fail = 0
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = {ex.submit(_retry, (lambda c=c: one(c)), tries=2, delay=15,
-                          what=f"ASR call {c['id']}"): c["id"] for c in todo}
+                          what=f"ASR call {c['id']}"): c for c in todo}
         for fu in as_completed(futs):
-            cid = futs[fu]
+            call = futs[fu]
+            cid = call["id"]
             try:
-                done[cid] = fu.result(); ok += 1
+                done[_subject_key(call)] = fu.result(); ok += 1
             except Exception as e:
                 fail += 1
                 log(f"ASR FAIL call={cid}: {e}")
             if (ok + fail) % 20 == 0:
                 log(f"ASR: {ok + fail}/{len(todo)} (ошибок {fail})")
     log(f"ASR готово: +{ok}, ошибок {fail}, всего транскриптов {len(done)}")
+    return done
+
+
+def media_batch_stage(episodes: list[dict], workdir: str) -> int:
+    """Описывает ВСЕ картинки выбранных эпизодов одним Batch-запросом (−50%).
+
+    Отдельная стадия и отдельный маркер: смешивать описания вложений с оценками в
+    одном манифесте нельзя — process_results требует терминального результата для
+    каждого custom_id и проверяет неизменность моделей оценки, а описания идут
+    другой (более дешёвой) моделью.
+
+    Голосовые расшифровываются не здесь: Soniox — не Batch API, у него нет
+    пакетной скидки, поэтому они распознаются в общем потоке транскриптов."""
+    marker = os.path.join(workdir, "media_batch_done")
+    if os.path.exists(marker):
+        log("описания вложений уже выполнены в этом workdir — пропуск")
+        return 0
+    pending, seen = [], set()
+    for episode in episodes:
+        try:
+            subject = subjects_mod.load(config.SUBJECT_WZ_EPISODE, episode["id"])
+            messages = subjects_mod.fetch_episode_messages(subject)
+        except Exception as exc:
+            log(f"эпизод {episode['id']}: не удалось прочитать сообщения ({exc})")
+            continue
+        for item in media_mod.plan(messages):
+            if item["media_kind"] != "image":
+                continue
+            key = (item["message_id"], item["source_hash"])
+            if key in seen:
+                continue
+            seen.add(key)
+            pending.append(item)
+    if not pending:
+        log("картинок к описанию нет")
+        open(marker, "w", encoding="utf-8").close()
+        return 0
+    cached = media_mod._lookup(pending)
+    todo = [item for item in pending
+            if (cached.get((item["message_id"], item["source_hash"])) or {}).get("status") != "ready"]
+    log(f"вложения: всего картинок {len(pending)}, к описанию {len(todo)} "
+        f"(остальные уже расшифрованы)")
+    if todo:
+        # id уже отправленных частей батча переживают обрыв: без этого повтор
+        # отправил бы те же картинки вторым батчем и заплатил дважды.
+        state_path = os.path.join(workdir, "media_batches.json")
+
+        def _resume():
+            if not os.path.exists(state_path):
+                return {}
+            try:
+                with open(state_path, encoding="utf-8") as fh:
+                    return json.load(fh)
+            except Exception:
+                return {}
+
+        def _remember(key, batch_id):
+            state = _resume()
+            state[key] = batch_id
+            with open(state_path, "w", encoding="utf-8") as fh:
+                json.dump(state, fh)
+                fh.flush()
+                os.fsync(fh.fileno())
+
+        results = media_mod.annotate_images_batch(
+            todo, log=log, resume=_resume, remember=_remember)
+        ready = sum(1 for r in (results or {}).values() if r.get("status") == "ready")
+        log(f"вложения: описано {ready} из {len(todo)}")
+        if os.path.exists(state_path):
+            os.remove(state_path)
+    open(marker, "w", encoding="utf-8").close()
+    return len(todo)
+
+
+def episode_transcript_stage(episodes: list[dict], workdir: str, workers: int) -> dict:
+    """Транскрипты эпизодов с содержанием вложений → immutable-кэш.
+
+    К этому моменту картинки уже описаны батчем; здесь добираются голосовые
+    (Soniox, параллельно) и собирается текст, который увидит модель."""
+    path = os.path.join(workdir, "transcripts.jsonl")
+    done: dict[str, dict] = {}
+    if not episodes:
+        return done
+    log(f"транскрипты эпизодов: {len(episodes)} ({workers} параллельно)…")
+    lock_write = __import__("threading").Lock()
+
+    def one(episode):
+        subject = subjects_mod.load(config.SUBJECT_WZ_EPISODE, episode["id"])
+        subjects_mod.require_evaluable(subject)
+        prepared = subjects_mod.prepare_wz_transcript(subject)
+        cfg_hash = prepared["source_config_hash"]
+        cached = runtime_store.get_transcript(
+            call_id=episode["id"], audio_fingerprint_value=prepared["source_identity"],
+            asr_provider=prepared["provider"], asr_model=prepared["model"],
+            asr_config_hash=cfg_hash, subject_kind=config.SUBJECT_WZ_EPISODE)
+        if cached:
+            transcript_cache_id = cached["id"]
+            transcript_hash = cached["transcript_hash"]
+            text, segments = cached["text"], cached.get("segments") or []
+        else:
+            text, segments = prepared["text"], prepared["lines"]
+            transcript_hash = content_hash(text)
+            transcript_cache_id = runtime_store.put_transcript(
+                call_id=episode["id"], audio_fingerprint_value=prepared["source_identity"],
+                asr_provider=prepared["provider"], asr_model=prepared["model"],
+                asr_config_hash=cfg_hash, transcript_hash=transcript_hash, text=text,
+                segments=segments, tokens=None,
+                payload={"source_config": prepared["source_config"], "source": "batch",
+                         "media_source": prepared["media_source"],
+                         "media_stats": prepared["media_stats"],
+                         "source_identity": prepared["source_identity"]},
+                languages=None, mean_conf=None, low_conf_spans=None, duration_ms=None,
+                subject_kind=config.SUBJECT_WZ_EPISODE)
+        rec = {
+            "call_id": episode["id"], "subject_kind": config.SUBJECT_WZ_EPISODE,
+            "toks": [], "segments": segments,
+            "asm": {"text": text, "languages": {}, "mean_conf": None, "low_conf_spans": []},
+            "transcript_cache_id": transcript_cache_id,
+            "transcript_hash": transcript_hash,
+            "audio_fingerprint": prepared["source_identity"],
+            "asr_config_hash": cfg_hash,
+            "source_model": prepared["model"], "source_config": prepared["source_config"],
+            "media": dict(prepared["media_stats"], source=prepared["media_source"]),
+        }
+        with lock_write:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        return rec
+
+    ok = fail = 0
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(_retry, (lambda e=e: one(e)), tries=2, delay=10,
+                          what=f"транскрипт эпизода {e['id']}"): e for e in episodes}
+        for fu in as_completed(futs):
+            episode = futs[fu]
+            try:
+                done[_subject_key(episode)] = fu.result(); ok += 1
+            except subjects_mod.SubjectNotEvaluable as exc:
+                fail += 1
+                log(f"эпизод {episode['id']} пропущен: {exc}")
+            except Exception as exc:
+                fail += 1
+                log(f"ТРАНСКРИПТ FAIL эпизод={episode['id']}: {exc}")
+            if (ok + fail) % 20 == 0:
+                log(f"транскрипты: {ok + fail}/{len(episodes)} (ошибок {fail})")
+    log(f"транскрипты готовы: +{ok}, ошибок/пропусков {fail}")
     return done
 
 
@@ -289,15 +511,16 @@ def submit_batch(calls: list[dict], transcripts: dict, workdir: str, get_dir) ->
         entries = {}
         # Sorting by direction improves provider-side system-prompt cache reuse.
         for call in sorted(calls, key=lambda c: c["direction_id"] or 0):
-            rec = transcripts.get(call["id"])
+            subject_kind = call.get("subject_kind") or config.SUBJECT_CALL
+            rec = transcripts.get(_subject_key(call))
             if not rec:
                 continue
             info = get_dir(call["direction_id"])
             snapshot = info["snapshot"]
             transcript_identity = transcript_fingerprint(
                 audio_fingerprint=rec["audio_fingerprint"],
-                asr_model=config.SONIOX_MODEL,
-                asr_config=runtime_store.asr_config(),
+                asr_model=rec.get("source_model") or config.SONIOX_MODEL,
+                asr_config=rec.get("source_config") or runtime_store.asr_config(),
                 transcript=rec["asm"]["text"],
             )
             fingerprint, components, retrieval_cfg = _evaluation_identity(
@@ -306,10 +529,10 @@ def submit_batch(calls: list[dict], transcripts: dict, workdir: str, get_dir) ->
             )
             cached = runtime_store.get_cached_evaluation(
                 call_id=call["id"], evaluation_fingerprint=fingerprint,
-                run_kinds=("standard", "force", "batch"),
+                run_kinds=("standard", "force", "batch"), subject_kind=subject_kind,
             )
             if cached:
-                log(f"call {call['id']}: точный evaluation fingerprint уже готов — пропуск")
+                log(f"{subject_kind} {call['id']}: точный evaluation fingerprint уже готов — пропуск")
                 continue
             prepared = evaluator.prepare_rag_context(
                 info["direction"], info["t_crits"], rec["asm"]["text"],
@@ -320,9 +543,9 @@ def submit_batch(calls: list[dict], transcripts: dict, workdir: str, get_dir) ->
                 asr_low_spans=rec["asm"]["low_conf_spans"], use_rag=True,
                 model=config.CLAUDE_MODEL_BULK, rag_text=prepared["rag_text"],
             )
-            custom_id = f"call-{call['id']}"
+            custom_id = f"{_SUBJECT_PREFIX.get(subject_kind, subject_kind)}-{call['id']}"
             entries[custom_id] = {
-                "call": call, "direction": info["direction"],
+                "call": call, "subject_kind": subject_kind, "direction": info["direction"],
                 "t_crits": info["t_crits"],
                 "scale_revision_id": info["scale_revision_id"],
                 "snapshot": snapshot,
@@ -414,12 +637,14 @@ def process_results(batch: dict, calls: list[dict], transcripts: dict, workdir: 
             raise RuntimeError(f"unexpected Batch result custom_id={custom_id!r}")
         cid = int(entry["call"]["id"])
         call = entry["call"]
+        subject_kind = (entry.get("subject_kind")
+                        or call.get("subject_kind") or config.SUBJECT_CALL)
         direction = entry["direction"]
-        rec = transcripts.get(cid)
+        rec = transcripts.get(f"{subject_kind}:{cid}")
         if not rec:
             cached_transcript = runtime_store.get_transcript_by_id(entry["transcript_cache_id"])
             if not cached_transcript:
-                raise RuntimeError(f"immutable transcript missing for call {cid}")
+                raise RuntimeError(f"immutable transcript missing for {subject_kind} {cid}")
             rec = {
                 "toks": cached_transcript.get("tokens") or [],
                 "segments": cached_transcript.get("segments") or [],
@@ -450,7 +675,8 @@ def process_results(batch: dict, calls: list[dict], transcripts: dict, workdir: 
                 "criterion_idxs": [c["idx"] for c in entry["t_crits"]],
             }
         else:
-            log(f"call {cid}: батч-запрос {item['result']['type']} → синхронная оценка")
+            log(f"{subject_kind} {cid}: батч-запрос "
+                f"{item['result']['type']} → синхронная оценка")
             stats["errored"] += 1
             parsed = {"per_criterion": [], "overall_comment": ""}
             primary_meta = None
@@ -459,25 +685,30 @@ def process_results(batch: dict, calls: list[dict], transcripts: dict, workdir: 
         snapshot = entry["snapshot"]
         cache_model = components["model"]
         started_at = datetime.fromisoformat(entry["started_at"])
-        with runtime_store.distributed_call_lock(cid) as lock_acquired:
+        with runtime_store.distributed_call_lock(
+                cid, subject_kind=subject_kind) as lock_acquired:
             if not lock_acquired:
-                raise RuntimeError(
-                    f"advisory lock unavailable while publishing batch run for call {cid}")
+                raise RuntimeError("advisory lock unavailable while publishing batch run "
+                                   f"for {subject_kind} {cid}")
             already = runtime_store.get_cached_evaluation(
                 call_id=cid, evaluation_fingerprint=entry["evaluation_fingerprint"],
-                run_kinds=("standard", "force", "batch"),
+                run_kinds=("standard", "force", "batch"), subject_kind=subject_kind,
             )
             if already:
                 compatibility = dict(already.get("payload") or {})
                 compatibility.update({
                     "transcript": rec.get("segments") or _lines_from_tokens(rec.get("toks") or []),
-                    "_audio_path": call["audio_path"],
+                    "_audio_path": call.get("audio_path"),
+                    "subject_kind": subject_kind,
                     "_transcript_cache_id": entry["transcript_cache_id"],
                     "_transcript_hash": entry["transcript_hash"],
                 })
-                _retry(lambda: _cache_put(cid, cache_model, compatibility, strict=True),
-                       what=f"восстановление кэша call {cid}")
-                _meta_upsert(cid, cache_model, compatibility)
+                if rec.get("media"):
+                    compatibility["media"] = rec["media"]
+                _retry(lambda: _cache_put(cid, cache_model, compatibility, strict=True,
+                                          subject_kind=subject_kind),
+                       what=f"восстановление кэша {subject_kind} {cid}")
+                _meta_upsert(cid, cache_model, compatibility, subject_kind=subject_kind)
                 terminal.add(custom_id)
                 continue
             run_id = runtime_store.new_run_id()
@@ -497,10 +728,12 @@ def process_results(batch: dict, calls: list[dict], transcripts: dict, workdir: 
                 completed_at = datetime.now(timezone.utc)
                 # прогоны ключуются каноническим id направления (call["direction_id"]
                 # может указывать на архивную версию шкалы — по ней грузятся критерии)
-                failure_payload = {"id": cid, "direction_id": int(direction["id"]),
+                failure_payload = {"id": cid, "subject_kind": subject_kind,
+                                   "direction_id": int(direction["id"]),
                                    "_retrieval_trace": entry["prepared_rag"]["retrieval_trace"]}
                 runtime_store.save_evaluation_run(
                     run_id=run_id, call_id=cid, direction_id=int(direction["id"]),
+                    subject_kind=subject_kind,
                     transcript_cache_id=entry["transcript_cache_id"],
                     transcript_hash=entry["transcript_hash"],
                     evaluation_fingerprint=entry["evaluation_fingerprint"],
@@ -533,12 +766,13 @@ def process_results(batch: dict, calls: list[dict], transcripts: dict, workdir: 
             } for v in result["per_criterion"]]
             score = _ai_score(direction, result)
             payload = {
-                "id": cid, "direction_id": int(direction["id"]), "direction": call["direction"],
+                "id": cid, "subject_kind": subject_kind,
+                "direction_id": int(direction["id"]), "direction": call["direction"],
                 "operator": call["operator"], "datetime": call["datetime"],
-                "human_score": call["human_score"], "languages": rec["asm"]["languages"],
+                "human_score": call.get("human_score"), "languages": rec["asm"]["languages"],
                 "asr_mean_conf": rec["asm"]["mean_conf"] or 0,
                 "transcript": rec.get("segments") or _lines_from_tokens(rec.get("toks") or []),
-                "criteria": criteria, "ai_score": score, "_audio_path": call["audio_path"],
+                "criteria": criteria, "ai_score": score, "_audio_path": call.get("audio_path"),
                 "_transcript_cache_id": entry["transcript_cache_id"],
                 "_transcript_hash": entry["transcript_hash"],
                 "_evaluation_run_id": run_id,
@@ -556,11 +790,14 @@ def process_results(batch: dict, calls: list[dict], transcripts: dict, workdir: 
                 "retrieval_ms": int(payload["_retrieval_trace"].get("latency_ms") or 0),
                 "stale": False, "rollout_mode": "batch", "rag_enabled": True,
             }
+            if rec.get("media"):
+                payload["media"] = rec["media"]
             persisted_payload = dict(payload)
             persisted_payload.pop("transcript", None)
             persisted_payload.pop("_audio_path", None)
             runtime_store.save_evaluation_run(
                 run_id=run_id, call_id=cid, direction_id=int(direction["id"]),
+                subject_kind=subject_kind,
                 transcript_cache_id=entry["transcript_cache_id"],
                 transcript_hash=entry["transcript_hash"],
                 evaluation_fingerprint=entry["evaluation_fingerprint"],
@@ -579,14 +816,15 @@ def process_results(batch: dict, calls: list[dict], transcripts: dict, workdir: 
                 started_at=started_at, completed_at=completed_at,
                 llm_meta=result.get("_llm_meta"), estimated_cost=None,
             )
-            _retry(lambda: _cache_put(cid, cache_model, payload, strict=True),
-                   what=f"запись кэша call {cid}")
-            _meta_upsert(cid, cache_model, payload)
+            _retry(lambda: _cache_put(cid, cache_model, payload, strict=True,
+                                      subject_kind=subject_kind),
+                   what=f"запись кэша {subject_kind} {cid}")
+            _meta_upsert(cid, cache_model, payload, subject_kind=subject_kind)
             terminal.add(custom_id)
             stats["ok"] += 1
             if score is None:
                 stats["no_score"] += 1
-            elif call["human_score"] is not None:
+            elif call.get("human_score") is not None:
                 stats["pairs"].append((float(call["human_score"]), float(score)))
             if stats["ok"] % 50 == 0:
                 log(f"обработано {stats['ok']} результатов…")
@@ -601,8 +839,11 @@ def process_results(batch: dict, calls: list[dict], transcripts: dict, workdir: 
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Пакетная ИИ-оценка оценённых людьми звонков (Batch API)")
-    ap.add_argument("--month", required=True, help="месяц звонков, напр. 2026-06")
+    ap = argparse.ArgumentParser(description="Пакетная ИИ-оценка через Batch API")
+    ap.add_argument("--subject", choices=list(config.SUBJECT_KINDS),
+                    default=config.SUBJECT_CALL,
+                    help="что оцениваем: звонки (call) или эпизоды чатов Верификаторов (wz_episode)")
+    ap.add_argument("--month", required=True, help="месяц субъектов, напр. 2026-06")
     ap.add_argument("--fallback-month", help="добрать из этого месяца, если мало")
     ap.add_argument("--min-calls", type=int, default=50)
     ap.add_argument("--limit", type=int)
@@ -611,20 +852,32 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="только выборка, без ASR/LLM")
     args = ap.parse_args()
 
-    workdir = args.workdir or os.path.join(tempfile.gettempdir(), f"call_qa_batch_{args.month}")
+    subject_kind = args.subject
+    suffix = "" if subject_kind == config.SUBJECT_CALL else f"_{subject_kind}"
+    workdir = args.workdir or os.path.join(
+        tempfile.gettempdir(), f"call_qa_batch_{args.month}{suffix}")
     os.makedirs(workdir, exist_ok=True)
-    log(f"workdir: {workdir} | модель: {config.CLAUDE_MODEL_BULK} | тег кэша: {config.CLAUDE_MODEL}")
+    log(f"субъект: {subject_kind} | workdir: {workdir} | модель: {config.CLAUDE_MODEL_BULK} "
+        f"| тег кэша: {config.CLAUDE_MODEL}")
 
     # fail-fast: без RW-БД результаты некуда класть
     conn = config.connect_rw(); conn.close()
 
-    calls = select_calls(args.month, args.fallback_month, args.min_calls, args.limit)
+    if subject_kind == config.SUBJECT_WZ_EPISODE:
+        calls = select_episodes(args.month, args.fallback_month, args.min_calls, args.limit)
+    else:
+        calls = select_calls(args.month, args.fallback_month, args.min_calls, args.limit)
     if not calls:
         log("нечего оценивать — всё уже в кэше"); return
     if args.dry_run:
-        log(f"dry-run: к оценке {len(calls)} звонков"); return
+        log(f"dry-run: к оценке {len(calls)} субъектов ({subject_kind})"); return
 
-    transcripts = asr_stage(calls, workdir, args.asr_workers)
+    if subject_kind == config.SUBJECT_WZ_EPISODE:
+        # Сначала ОДИН батч описаний картинок (−50%), потом транскрипты с их содержанием.
+        media_batch_stage(calls, workdir)
+        transcripts = episode_transcript_stage(calls, workdir, args.asr_workers)
+    else:
+        transcripts = asr_stage(calls, workdir, args.asr_workers)
     bid = submit_batch(calls, transcripts, workdir, get_dir := _dir_cache())
     if not bid:
         return

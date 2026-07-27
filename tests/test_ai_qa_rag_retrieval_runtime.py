@@ -112,8 +112,10 @@ class RuntimeTraceTests(unittest.TestCase):
             completed_at=now, evaluation_succeeded=False,
         )
         params = cur.executed[0][1]
-        self.assertEqual(params[9], "skipped")
-        self.assertIsNone(params[10])
+        # subject_kind — 3-й параметр, поэтому status/error_code сдвинуты на один
+        self.assertEqual(params[2], "call")
+        self.assertEqual(params[10], "skipped")
+        self.assertIsNone(params[11])
 
     def test_distributed_lock_uses_primary_and_reports_acquisition(self):
         conn = _Connection()
@@ -133,7 +135,7 @@ class RuntimeTraceTests(unittest.TestCase):
             run_id, 10, 72, 3, "a" * 64, "b" * 64, 7,
             "succeeded", "force", "qa-model", {"criteria": []}, [], now,
             3, "a" * 64, "immutable transcript", [],
-            7, 72, "c" * 64, True, None,
+            7, 72, "c" * 64, True, None, "call",
         )
         scale_row = (
             "d72-greeting", 4, "Приветствие", "description", 1, True,
@@ -146,6 +148,7 @@ class RuntimeTraceTests(unittest.TestCase):
         self.assertEqual(source["transcript"]["text"], "immutable transcript")
         self.assertEqual(source["scale"]["criteria"][0]["criterion_id"], "d72-greeting")
         self.assertTrue(source["is_latest"])
+        self.assertEqual(source["subject_kind"], "call")
         sql = " ".join(statement for statement, _ in conn.cur.executed)
         self.assertIn("FROM ai_evaluation_runs e", sql)
         self.assertIn("NOT EXISTS", sql)

@@ -168,7 +168,8 @@ class ReviewFlowContractTests(unittest.TestCase):
         # последний прогон с пометкой _stale, пересчёт — только кнопкой «Переоценить»
         # (refresh=True). Фронтенд показывает бейдж по этому флагу.
         self.assertIn("def get_latest_evaluation", self.runtime_src)
-        self.assertIn("runtime_store.get_latest_evaluation(call_id=call_id)", self.api_src)
+        self.assertIn("runtime_store.get_latest_evaluation(", self.api_src)
+        self.assertIn("call_id=call_id, subject_kind=subject_kind)", self.api_src)
         self.assertIn('cached["_stale"] = serving_stale', self.api_src)
         self.assertIn("callData._stale", self.view_src)
 

@@ -48,15 +48,32 @@ OP_DIRECTION_IDS = [72, 73, 74]  # Яндекс Регистрация / Осн�
 
 
 def op_direction_id_family(cur) -> list[int]:
-    """Канонические id направлений ОП + id их архивных версий шкалы.
+    """Все направления отдела продаж: живые строки + архивные версии шкалы.
 
     Исторические оценки (calls) при смене критериев перевешиваются на архивные
-    строки directions (canonical_id -> живая строка), поэтому выборки звонков
-    должны фильтровать по всей семье id, а не только по каноническим."""
+    строки directions (canonical_id -> живая строка), поэтому выборки должны
+    фильтровать по всей семье id, а не только по каноническим.
+
+    Семья выводится из ОТДЕЛА, а не из литерального списка id: раньше здесь были
+    захардкожены 72/73/74, и «Верификатор» (71) молча выпадал из allowlist
+    разборов, rollout и случайной выборки. Список OP_DIRECTION_IDS остался
+    аварийным значением, если запрос не удался."""
+    try:
+        cur.execute(
+            """SELECT d.id FROM directions d
+                WHERE d.department_id = %s
+                   OR d.canonical_id IN (SELECT id FROM directions
+                                          WHERE department_id = %s)""",
+            (OP_DEPARTMENT_ID, OP_DEPARTMENT_ID))
+        ids = [int(r[0]) for r in cur.fetchall()]
+    except Exception:
+        ids = []
+    if ids:
+        return ids
     cur.execute(
         "SELECT id FROM directions WHERE id = ANY(%s) OR canonical_id = ANY(%s)",
         (OP_DIRECTION_IDS, OP_DIRECTION_IDS))
-    ids = [r[0] for r in cur.fetchall()]
+    ids = [int(r[0]) for r in cur.fetchall()]
     return ids or list(OP_DIRECTION_IDS)
 
 # --- ASR (Soniox) ---
@@ -97,6 +114,54 @@ CLAUDE_EFFORT = env("CLAUDE_EFFORT", "high")
 def anthropic_key():
     """Принимаем оба имени: ANTHROPIC_API_KEY или CLAUDE_API_KEY."""
     return env("ANTHROPIC_API_KEY") or env("CLAUDE_API_KEY")
+
+# --- Субъекты оценки ---
+# Раздел начинался со звонков; у Верификаторов ОП единица оценки — эпизод
+# переписки Wazzup. Значения совпадают с колонкой subject_kind в schema.sql.
+SUBJECT_CALL = "call"
+SUBJECT_WZ_EPISODE = "wz_episode"
+SUBJECT_KINDS = (SUBJECT_CALL, SUBJECT_WZ_EPISODE)
+
+# --- Эпизоды чатов Wazzup (Верификаторы) ---
+# Направления Верификаторов не хардкодятся: как и кнопка «Случайный чат», они
+# определяются кодом отдела + маркером в названии направления, поэтому новое или
+# переименованное направление подхватывается без правки кода.
+WZ_DEPARTMENT_CODE = str(env("WZ_RANDOM_CHAT_DEPARTMENT_CODE", "op")).strip().lower()
+WZ_DIRECTION_MARKER = str(env("WZ_RANDOM_CHAT_DIRECTION_MARKER", "верификатор")).strip().lower()
+# Порог атрибуции: в одном эпизоде могут отвечать несколько операторов, и оценка
+# «в одни руки» тогда несправедлива. Оцениваем только если доля ответов
+# доминирующего оператора не ниже порога (см. wazzup_episodes.operator_share).
+WZ_MIN_OPERATOR_SHARE = float(env("WZ_MIN_OPERATOR_SHARE", "0.9"))
+# Минимум сообщений оператора: два «ок» невозможно оценить по 15 критериям.
+WZ_MIN_OPERATOR_MESSAGES = int(env("WZ_MIN_OPERATOR_MESSAGES", "2"))
+
+# --- Вложения чатов: изображения (Claude vision) и голосовые (Soniox) ---
+# Транскрипт эпизода содержит только заглушки ([фото], [голосовое]); без их
+# содержания оценка слепа. Описание считается один раз и хранится в
+# wz_media_annotations (переживает 45-дневный ретеншн сырых сообщений).
+CLAUDE_MODEL_VISION = env("CLAUDE_MODEL_VISION", "claude-sonnet-5")
+CLAUDE_VISION_EFFORT = env("CLAUDE_VISION_EFFORT", "low")
+# Плотный документ (паспорт, договор) не должен обрезаться на середине: обрезанный
+# ответ считается неудачей и повторяется, поэтому лимит взят с запасом.
+VISION_MAX_TOKENS = int(env("CLAUDE_VISION_MAX_TOKENS", "2500"))
+# Anthropic принимает изображения до 5 МБ на картинку; крупнее не тянем вовсе,
+# чтобы не ловить 413 после платной загрузки.
+MEDIA_MAX_BYTES = int(env("WZ_MEDIA_MAX_BYTES", str(5 * 1024 * 1024)))
+MEDIA_HTTP_TIMEOUT = float(env("WZ_MEDIA_HTTP_TIMEOUT", "30"))
+MEDIA_IMAGE_TYPES = ("image",)
+MEDIA_AUDIO_TYPES = ("audio",)
+# Сколько вложений максимум расшифровываем на один эпизод (страховка от чата,
+# где клиент прислал 200 фото: и по деньгам, и по времени открытия карточки).
+MEDIA_MAX_PER_EPISODE = int(env("WZ_MEDIA_MAX_PER_EPISODE", "24"))
+# Бюджет ОТКРЫТИЯ КАРТОЧКИ: расшифровать 24 вложения по очереди — это минуты
+# ожидания в одном HTTP-запросе. Остальное доберёт ночной пакетный прогон.
+MEDIA_MAX_INTERACTIVE = int(env("WZ_MEDIA_MAX_INTERACTIVE", "8"))
+# Batch API ограничивает размер запроса; картинка в base64 весит мегабайты,
+# поэтому «весь месяц одним POST» упёрся бы в предел и в память процесса.
+MEDIA_BATCH_MAX_BYTES = int(env("WZ_MEDIA_BATCH_MAX_BYTES", str(64 * 1024 * 1024)))
+MEDIA_BATCH_MAX_ITEMS = int(env("WZ_MEDIA_BATCH_MAX_ITEMS", "200"))
+# Предел ожидания батча: без него подвисший батч молча вешал бы ночной прогон.
+MEDIA_BATCH_DEADLINE_S = int(env("WZ_MEDIA_BATCH_DEADLINE_S", str(6 * 3600)))
 
 # --- Хранилища ---
 GCS_BUCKET = env("GCS_BUCKET", "my-app-audio-uploads")
