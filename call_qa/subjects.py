@@ -300,10 +300,11 @@ def build_wz_transcript(subject: dict, messages: list[dict],
         parts = []
         if msg.get("is_deleted"):
             parts.append("[удалено]")
-        media_kind = media_mod._kind_of(msg.get("type"))
+        media_kind = media_mod._kind_of(msg.get("type"), msg.get("content_uri"))
         media_label = _MEDIA_RU.get(str(msg.get("type") or ""))
         if media_label:
-            if msg.get("content_uri") and media_mod.annotatable(msg.get("type")):
+            if msg.get("content_uri") and media_mod.annotatable(msg.get("type"),
+                                                               msg.get("content_uri")):
                 parts.append(media_mod.annotation_text(
                     media_kind, annotations.get(str(msg.get("message_id")))))
             else:

@@ -76,6 +76,24 @@ _IMAGE_SYSTEM = """Ты помощник, который описывает вл
    честно скажи об этом в description. Не додумывай содержание.
 """
 
+_DOCUMENT_SYSTEM = """Ты помощник, который описывает документы из рабочей переписки службы поддержки.
+
+Опиши PDF ФАКТИЧЕСКИ и коротко, по-русски. Твоя задача — заменить файл текстом
+так, чтобы проверяющий понял, что именно прислали, не открывая документ.
+
+Правила:
+1. description — 1-3 предложения: что это за документ, кем и когда выдан, чему
+   посвящён. Если страниц несколько — скажи сколько и что на них.
+2. visible_text — ключевые данные дословно (номера, ИИН/БИН, суммы, даты, ФИО,
+   статусы, реквизиты). Выпиши самое значимое и оборви на ~2000 символах: ответ
+   обязан помещаться целиком, обрезанный ответ считается неудачей.
+3. kind — тип вложения.
+4. Не оценивай работу оператора, не давай советов, не делай выводов о качестве
+   обслуживания. Только содержание документа.
+5. Если документ нечитаем (пустой скан, битый файл, только подпись) —
+   kind='unreadable' и честно скажи об этом. Не додумывай содержание.
+"""
+
 _MEDIA_UNAVAILABLE = "не удалось получить вложение"
 
 
@@ -95,6 +113,13 @@ def image_config() -> dict:
             "system": _IMAGE_SYSTEM, "thinking": "disabled"}
 
 
+def document_config() -> dict:
+    return {"annotator": ANNOTATOR_VERSION, "provider": "anthropic",
+            "model": config.CLAUDE_MODEL_VISION, "effort": config.CLAUDE_VISION_EFFORT,
+            "max_tokens": config.DOCUMENT_MAX_TOKENS, "schema": _IMAGE_SCHEMA,
+            "system": _DOCUMENT_SYSTEM, "thinking": "disabled"}
+
+
 def audio_config() -> dict:
     cfg = dict(soniox_asr_config())
     cfg["annotator"] = ANNOTATOR_VERSION
@@ -107,20 +132,44 @@ def soniox_asr_config() -> dict:
             "language_identification": True, "speaker_diarization": False}
 
 
-def _kind_of(media_type: str) -> str:
+def _uri_extension(content_uri: str) -> str:
+    """Расширение из ссылки Wazzup: она несёт ?filename=...pdf."""
+    uri = str(content_uri or "")
+    name = uri
+    if "filename=" in uri:
+        name = uri.split("filename=", 1)[1].split("&", 1)[0]
+    else:
+        name = uri.split("?", 1)[0]
+    dot = name.rfind(".")
+    return name[dot:].lower() if dot >= 0 and len(name) - dot <= 6 else ""
+
+
+def _kind_of(media_type: str, content_uri: str | None = None) -> str:
+    """Чем читать вложение.
+
+    Тип из Wazzup — не последняя инстанция: 'document' у них означает «файл», и
+    там встречаются и PDF (99%), и обычные картинки, отправленные как документ, и
+    сертификаты. Поэтому для 'document' решает расширение файла."""
     mt = str(media_type or "").strip().lower()
     if mt in config.MEDIA_IMAGE_TYPES:
         return "image"
     if mt in config.MEDIA_AUDIO_TYPES:
         return "audio"
-    if mt in ("video", "document"):
-        return mt
+    if mt in config.MEDIA_DOCUMENT_TYPES:
+        ext = _uri_extension(content_uri)
+        if ext == ".pdf":
+            return "document"
+        if ext in _EXT_MEDIA_TYPES:      # .jpg/.png, присланные как «документ»
+            return "image"
+        return "file"                    # docx, сертификаты и прочее — читать нечем
+    if mt == "video":
+        return "video"
     return "unknown"
 
 
-def annotatable(media_type: str) -> bool:
+def annotatable(media_type: str, content_uri: str | None = None) -> bool:
     """Расшифровываем только то, что реально можем прочитать."""
-    return _kind_of(media_type) in ("image", "audio")
+    return _kind_of(media_type, content_uri) in ("image", "audio", "document")
 
 
 # ── хранилище ────────────────────────────────────────────────────────────────
@@ -231,10 +280,10 @@ def _store(item: dict, result: dict) -> None:
 
 # ── загрузка вложения ────────────────────────────────────────────────────────
 
-def _download(url: str) -> tuple[bytes, str]:
+def _download(url: str, *, limit: int | None = None) -> tuple[bytes, str]:
     """Скачивает вложение с ограничением размера. Ссылки Wazzup публичные
     (store.wazzup24.com, без авторизации) — как их читает и браузер."""
-    limit = config.MEDIA_MAX_BYTES
+    limit = config.MEDIA_MAX_BYTES if limit is None else limit
     with httpx.stream("GET", url, timeout=config.MEDIA_HTTP_TIMEOUT,
                       follow_redirects=True) as r:
         r.raise_for_status()
@@ -312,6 +361,23 @@ def image_request_body(image_b64: str, media_type: str) -> dict:
         thinking=_vision_thinking())
 
 
+def document_request_body(pdf_b64: str) -> dict:
+    """Тело запроса описания PDF.
+
+    document-блок Anthropic принимает только application/pdf (и простой текст):
+    каждая страница обрабатывается и как текст, и как изображение, поэтому
+    сканы и фотографии документов читаются наравне с «текстовыми» PDF."""
+    return llm.build_body(
+        model=config.CLAUDE_MODEL_VISION, system=_DOCUMENT_SYSTEM,
+        user=[{"type": "document",
+               "source": {"type": "base64", "media_type": "application/pdf",
+                          "data": pdf_b64}},
+              {"type": "text", "text": "Опиши этот документ из рабочей переписки."}],
+        schema=_IMAGE_SCHEMA, max_tokens=config.DOCUMENT_MAX_TOKENS,
+        cache_system=False, effort=config.CLAUDE_VISION_EFFORT,
+        thinking=_vision_thinking())
+
+
 def render_image_annotation(parsed: dict) -> str:
     """Структурный ответ модели → одна строка для транскрипта."""
     desc = str((parsed or {}).get("description") or "").strip()
@@ -346,6 +412,29 @@ def _annotate_image(item: dict) -> dict:
             "latency_ms": round((time.perf_counter() - started) * 1000)}
 
 
+def _annotate_document(item: dict) -> dict:
+    """PDF → описание. Не-PDF сюда не попадает (см. _kind_of), но файл всё равно
+    проверяется по сигнатуре: расширение в ссылке может врать."""
+    import base64
+    started = time.perf_counter()
+    raw, content_type = _download(item["content_uri"], limit=config.MEDIA_PDF_MAX_BYTES)
+    if not raw.startswith(b"%PDF") and "pdf" not in (content_type or "").lower():
+        return {"status": "failed", "error": f"файл не PDF ({content_type or '?'})",
+                "source_bytes": len(raw),
+                "latency_ms": round((time.perf_counter() - started) * 1000)}
+    body = document_request_body(base64.standard_b64encode(raw).decode("ascii"))
+    parsed = llm.post_body(body, timeout=180.0, include_meta=True)
+    meta = parsed.pop("_llm_meta", None) or {}
+    if str(meta.get("stop_reason") or "") == "max_tokens":
+        return {"status": "failed",
+                "error": f"ответ модели обрезан (max_tokens={config.DOCUMENT_MAX_TOKENS})",
+                "source_bytes": len(raw), "usage": meta.get("usage") or {},
+                "latency_ms": round((time.perf_counter() - started) * 1000)}
+    return {"status": "ready", "annotation": render_image_annotation(parsed),
+            "source_bytes": len(raw), "usage": meta.get("usage") or {},
+            "latency_ms": round((time.perf_counter() - started) * 1000)}
+
+
 def _annotate_audio(item: dict) -> dict:
     started = time.perf_counter()
     raw, content_type = _download(item["content_uri"])
@@ -371,6 +460,8 @@ def _annotate_one(item: dict) -> dict:
     try:
         if item["media_kind"] == "image":
             return _annotate_image(item)
+        if item["media_kind"] == "document":
+            return _annotate_document(item)
         return _annotate_audio(item)
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code if exc.response is not None else 0
@@ -390,17 +481,18 @@ def plan(messages: list[dict]) -> list[dict]:
     for m in messages:
         uri = m.get("content_uri")
         media_type = m.get("type")
-        if not uri or not annotatable(media_type):
+        if not uri or not annotatable(media_type, uri):
             continue
-        kind = _kind_of(media_type)
-        cfg = image_config() if kind == "image" else audio_config()
+        kind = _kind_of(media_type, uri)
+        cfg = {"image": image_config, "document": document_config,
+               "audio": audio_config}[kind]()
         items.append({
             "message_id": str(m.get("message_id")),
             "channel_id": m.get("channel_id"), "chat_id": m.get("chat_id"),
             "media_kind": kind, "content_uri": uri,
             "source_hash": source_identity(content_uri=uri, media_type=media_type),
-            "provider": "anthropic" if kind == "image" else "soniox",
-            "model": config.CLAUDE_MODEL_VISION if kind == "image" else config.SONIOX_MODEL,
+            "provider": "soniox" if kind == "audio" else "anthropic",
+            "model": config.SONIOX_MODEL if kind == "audio" else config.CLAUDE_MODEL_VISION,
             "config_hash": content_hash(cfg),
         })
         if len(items) >= config.MEDIA_MAX_PER_EPISODE:
@@ -478,7 +570,8 @@ def annotation_text(media_kind: str, ann: dict | None) -> str:
 
     Неудача видна модели явно и отличается от «ещё не расшифровано»: иначе
     оценщик не понял бы, почему содержания нет, и мог бы штрафовать за пустоту."""
-    label = {"image": "фото", "audio": "голосовое"}.get(media_kind, "вложение")
+    label = {"image": "фото", "audio": "голосовое",
+             "document": "документ"}.get(media_kind, "вложение")
     if not ann:
         return f"[{label}: не расшифровано — не оценивать содержание]"
     if ann.get("status") != "ready" or not ann.get("annotation"):
@@ -487,26 +580,36 @@ def annotation_text(media_kind: str, ann: dict | None) -> str:
         return f"[{label}: {_MEDIA_UNAVAILABLE}{detail} — не оценивать содержание]"
     if media_kind == "audio":
         return f"[{label}, расшифровка: {ann['annotation']}]"
+    if media_kind == "document":
+        return f"[{label} (PDF): {ann['annotation']}]"
     return f"[{label}: {ann['annotation']}]"
 
 
 # ── Batch: описание картинок со скидкой 50% ──────────────────────────────────
 
-def batch_image_requests(items: list[dict]) -> tuple[list[dict], dict]:
-    """Готовит Batch-запросы описания картинок.
+def batch_media_requests(items: list[dict]) -> tuple[list[dict], dict]:
+    """Готовит Batch-запросы описания картинок и PDF-документов.
 
-    Batch API даёт −50% на ВСЕ токены, включая токены изображений, поэтому
-    ночной массовый прогон описывает вложения вдвое дешевле интерактивного.
-    Возвращает (requests, {custom_id: item}); недокачанные вложения сразу
-    отдаются как ошибки во втором элементе (item['_error']).
+    Batch API даёт −50% на ВСЕ токены, включая токены изображений и страниц
+    документов, поэтому ночной массовый прогон читает вложения вдвое дешевле
+    интерактивного. Возвращает (requests, {custom_id: item}); недокачанные
+    вложения сразу отдаются как ошибки во втором элементе (item['_error']).
     """
     import base64
     requests_out, by_id = [], {}
     for idx, item in enumerate(items):
-        custom_id = f"img-{idx}-{item['source_hash'][:16]}"
+        kind = item["media_kind"]
+        custom_id = f"{'doc' if kind == 'document' else 'img'}-{idx}-{item['source_hash'][:16]}"
         try:
-            raw, content_type = _download(item["content_uri"])
-            media_type = _image_media_type(content_type, item["content_uri"])
+            if kind == "document":
+                raw, content_type = _download(item["content_uri"],
+                                              limit=config.MEDIA_PDF_MAX_BYTES)
+                if not raw.startswith(b"%PDF") and "pdf" not in (content_type or "").lower():
+                    raise ValueError(f"файл не PDF ({content_type or '?'})")
+                media_type = "application/pdf"
+            else:
+                raw, content_type = _download(item["content_uri"])
+                media_type = _image_media_type(content_type, item["content_uri"])
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code if exc.response is not None else 0
             item = dict(item, _error={"status": "unavailable" if status in (403, 404, 410)
@@ -518,7 +621,9 @@ def batch_image_requests(items: list[dict]) -> tuple[list[dict], dict]:
                                       "error": f"{type(exc).__name__}: {exc}"[:500]})
             by_id[custom_id] = item
             continue
-        body = image_request_body(base64.standard_b64encode(raw).decode("ascii"), media_type)
+        encoded = base64.standard_b64encode(raw).decode("ascii")
+        body = (document_request_body(encoded) if kind == "document"
+                else image_request_body(encoded, media_type))
         item = dict(item, _source_bytes=len(raw))
         by_id[custom_id] = item
         requests_out.append({"custom_id": custom_id, "params": body})
@@ -599,24 +704,25 @@ def _read_batch_results(info: dict, batch_id: str, headers: dict,
                                        "error": stored.get("error")}
 
 
-def annotate_images_batch(items: list[dict], *, poll_interval: int = 30,
-                          log=logging.info, resume=None, remember=None) -> dict[str, dict]:
-    """Описывает картинки через Batch API и сохраняет результаты.
+def annotate_media_batch(items: list[dict], *, poll_interval: int = 30,
+                         log=logging.info, resume=None, remember=None) -> dict[str, dict]:
+    """Описывает картинки и PDF через Batch API и сохраняет результаты.
 
     Возвращает {message_id: {status, annotation, error}}. Ошибки скачивания и
     неуспешные ответы сохраняются так же, как в синхронном пути, чтобы прогон не
     зависал на одном битом вложении.
 
-    Батч режется на части: одна картинка в base64 весит мегабайты, а у Batch API
-    есть предел на размер запроса — «весь месяц одним POST» упёрся бы в него и в
-    память процесса. Каждая часть отправляется и вычитывается отдельно.
+    Батч режется на части: одна картинка (а тем более PDF) в base64 весит
+    мегабайты, а у Batch API есть предел на размер запроса — «весь месяц одним
+    POST» упёрся бы в него и в память процесса. Каждая часть отправляется и
+    вычитывается отдельно.
 
     ``resume``/``remember`` — колбэки хранения id уже отправленных частей (см.
     batch_eval.media_batch_stage). Без них повтор после обрыва сети отправил бы
     те же картинки вторым батчем и заплатил дважды.
     """
     out: dict[str, dict] = {}
-    requests_out, by_id = batch_image_requests(items)
+    requests_out, by_id = batch_media_requests(items)
     with _store_session() as store:
         for custom_id, item in by_id.items():
             if item.get("_error"):

@@ -150,6 +150,14 @@ MEDIA_MAX_BYTES = int(env("WZ_MEDIA_MAX_BYTES", str(5 * 1024 * 1024)))
 MEDIA_HTTP_TIMEOUT = float(env("WZ_MEDIA_HTTP_TIMEOUT", "30"))
 MEDIA_IMAGE_TYPES = ("image",)
 MEDIA_AUDIO_TYPES = ("audio",)
+MEDIA_DOCUMENT_TYPES = ("document",)
+# PDF уходит в запрос целиком. Предел запроса Anthropic — 32 МБ, поэтому сырой
+# файл ограничиваем с запасом на base64 (+33%). Ограничение по страницам (600)
+# проверяет сама модель — считать их локально нечем (PDF-библиотек в проекте нет),
+# и отказ придёт понятной ошибкой, а не молчанием.
+MEDIA_PDF_MAX_BYTES = int(env("WZ_MEDIA_PDF_MAX_BYTES", str(16 * 1024 * 1024)))
+# Документ длиннее картинки: ответ должен помещаться целиком (обрезанный = неудача).
+DOCUMENT_MAX_TOKENS = int(env("CLAUDE_DOCUMENT_MAX_TOKENS", "3000"))
 # Сколько вложений максимум расшифровываем на один эпизод (страховка от чата,
 # где клиент прислал 200 фото: и по деньгам, и по времени открытия карточки).
 MEDIA_MAX_PER_EPISODE = int(env("WZ_MEDIA_MAX_PER_EPISODE", "24"))

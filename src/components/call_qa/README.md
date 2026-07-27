@@ -83,7 +83,7 @@
                human?, human_comment? }],
   transcript: [{ speaker: 'operator'|'other_operator'|'bot'|'client',
                  seg: [{ t, c? }], start_ms?, ts?, author?, message_id?,
-                 media?: { kind: 'image'|'audio'|'file', label, url } }],
+                 media?: { kind: 'image'|'audio'|'document'|'file', label, url } }],
   evaluation: { run_id, fingerprint_short, knowledge_revision, retrieval_status,
                 retrieval_ms, stale, rollout_mode, rag_enabled },
   _cached, _stale, _previous_evaluation_stale,

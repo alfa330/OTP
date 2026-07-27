@@ -328,7 +328,7 @@ def asr_stage(calls: list[dict], workdir: str, workers: int) -> dict:
 
 
 def media_batch_stage(episodes: list[dict], workdir: str) -> int:
-    """Описывает ВСЕ картинки выбранных эпизодов одним Batch-запросом (−50%).
+    """Описывает картинки и PDF выбранных эпизодов пакетно (−50%).
 
     Отдельная стадия и отдельный маркер: смешивать описания вложений с оценками в
     одном манифесте нельзя — process_results требует терминального результата для
@@ -341,7 +341,7 @@ def media_batch_stage(episodes: list[dict], workdir: str) -> int:
     if os.path.exists(marker):
         log("описания вложений уже выполнены в этом workdir — пропуск")
         return 0
-    pending, seen = [], set()
+    pending, seen = [], set()  # картинки и PDF: их читает Claude, значит есть Batch
     for episode in episodes:
         try:
             subject = subjects_mod.load(config.SUBJECT_WZ_EPISODE, episode["id"])
@@ -350,7 +350,9 @@ def media_batch_stage(episodes: list[dict], workdir: str) -> int:
             log(f"эпизод {episode['id']}: не удалось прочитать сообщения ({exc})")
             continue
         for item in media_mod.plan(messages):
-            if item["media_kind"] != "image":
+            # Голосовые расшифровывает Soniox — у него нет пакетной скидки,
+            # поэтому в батч идут только те вложения, что читает Claude.
+            if item["media_kind"] not in ("image", "document"):
                 continue
             key = (item["message_id"], item["source_hash"])
             if key in seen:
@@ -358,13 +360,15 @@ def media_batch_stage(episodes: list[dict], workdir: str) -> int:
             seen.add(key)
             pending.append(item)
     if not pending:
-        log("картинок к описанию нет")
+        log("картинок и документов к описанию нет")
         open(marker, "w", encoding="utf-8").close()
         return 0
     cached = media_mod._lookup(pending)
     todo = [item for item in pending
             if (cached.get((item["message_id"], item["source_hash"])) or {}).get("status") != "ready"]
-    log(f"вложения: всего картинок {len(pending)}, к описанию {len(todo)} "
+    images = sum(1 for i in pending if i["media_kind"] == "image")
+    docs = len(pending) - images
+    log(f"вложения: картинок {images}, документов {docs}; к описанию {len(todo)} "
         f"(остальные уже расшифрованы)")
     if todo:
         # id уже отправленных частей батча переживают обрыв: без этого повтор
@@ -388,7 +392,7 @@ def media_batch_stage(episodes: list[dict], workdir: str) -> int:
                 fh.flush()
                 os.fsync(fh.fileno())
 
-        results = media_mod.annotate_images_batch(
+        results = media_mod.annotate_media_batch(
             todo, log=log, resume=_resume, remember=_remember)
         ready = sum(1 for r in (results or {}).values() if r.get("status") == "ready")
         log(f"вложения: описано {ready} из {len(todo)}")
