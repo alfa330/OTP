@@ -13,6 +13,12 @@ export default defineConfig({
     }
   },
   plugins: [react()],
+  // keepNames: без него minify стирает имена функций-компонентов, и стек
+  // компонентов в окне «Ошибка приложения» состоит из `oe`, `Xt` и т.п. —
+  // по фото экрана от оператора такую ошибку не найти.
+  esbuild: {
+    keepNames: true
+  },
   build: {
     chunkSizeWarningLimit: 1500,
     rollupOptions: {

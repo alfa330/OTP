@@ -1803,7 +1803,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         // Error Boundary Component
         class ErrorBoundary extends React.Component {
-            state = { hasError: false, error: null };
+            state = { hasError: false, error: null, componentStack: '', environment: '' };
 
             static getDerivedStateFromError(error) {
                 return { hasError: true, error };
@@ -1811,6 +1811,29 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             componentDidCatch(error, errorInfo) {
                 console.error('ErrorBoundary caught:', error, errorInfo);
+                // Технические детали храним в состоянии: пользователи присылают
+                // фото экрана, и без места падения такую ошибку не найти.
+                // Отдельно фиксируем окружение: встроенный переводчик Chromium
+                // помечает <html> классом translated-ltr/translated-rtl и меняет
+                // lang — по этой строке сразу видно, переводилась ли страница
+                // (именно перевод ломает React ошибкой removeChild).
+                let environment = '';
+                try {
+                    const root = document.documentElement;
+                    environment = [
+                        `lang=${root?.lang || '-'}`,
+                        `html.class=${(root?.className || '-').slice(0, 80)}`,
+                        `nav.lang=${navigator?.language || '-'}`,
+                        `nav.langs=${(navigator?.languages || []).join(',') || '-'}`,
+                        `url=${window.location?.search || '-'}`
+                    ].join(' · ');
+                } catch (environmentError) {
+                    environment = '';
+                }
+                this.setState({
+                    componentStack: String(errorInfo?.componentStack || ''),
+                    environment
+                });
             }
 
             handleHardReload = async () => {
@@ -1841,6 +1864,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <h1 className="text-2xl font-bold mb-4 text-center text-red-500">Ошибка приложения</h1>
                                 <p className="text-center">Произошла ошибка: {this.state.error?.message || 'Неизвестная ошибка'}</p>
                                 <p className="text-center">Пожалуйста, напишите Руслану или попробуйте обновить страницу.</p>
+                                {(this.state.error?.stack || this.state.componentStack || this.state.environment) && (
+                                    <details className="mt-4 text-left">
+                                        <summary className="cursor-pointer text-xs text-gray-500">Технические детали (для Руслана)</summary>
+                                        <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-gray-50 p-2 text-[10px] leading-4 text-gray-600">
+{[this.state.environment, this.state.error?.name, this.state.error?.stack, this.state.componentStack].filter(Boolean).join('\n').slice(0, 1500)}
+                                        </pre>
+                                    </details>
+                                )}
                                 <div className="mt-6 flex justify-center">
                                     <button
                                         type="button"
