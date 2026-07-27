@@ -182,7 +182,7 @@ class MediaAnnotationTests(unittest.TestCase):
         messages = [
             _msg("m1", mtype="image", uri="https://s/a.jpg"),
             _msg("m2", mtype="audio", uri="https://s/a.ogg"),
-            _msg("m3", mtype="document", uri="https://s/a.pdf"),
+            _msg("m3", mtype="document", uri="https://s/?filename=a.docx"),
             _msg("m4", mtype="image", uri=None),
             _msg("m5", text="просто текст"),
         ]
@@ -290,15 +290,24 @@ class MediaAnnotationTests(unittest.TestCase):
                 media._poll_batch("batch-1", {}, poll_interval=0, deadline_s=-1,
                                   log=lambda *_: None)
 
-    def test_batch_custom_ids_are_namespaced(self):
-        item = {"message_id": "m1", "media_kind": "image", "content_uri": "https://s/a.jpg",
-                "source_hash": "c" * 64, "provider": "anthropic",
-                "model": "claude-sonnet-5", "config_hash": "d" * 64}
-        with mock.patch.object(media, "_download", return_value=(b"fake", "image/jpeg")):
-            requests_out, by_id = media.batch_image_requests([item])
-        self.assertEqual(len(requests_out), 1)
-        self.assertTrue(requests_out[0]["custom_id"].startswith("img-"))
-        self.assertIn(requests_out[0]["custom_id"], by_id)
+    def test_batch_custom_ids_are_namespaced_per_kind(self):
+        image = {"message_id": "m1", "media_kind": "image", "content_uri": "https://s/a.jpg",
+                 "source_hash": "c" * 64, "provider": "anthropic",
+                 "model": "claude-sonnet-5", "config_hash": "d" * 64}
+        doc = dict(image, message_id="m2", media_kind="document",
+                   content_uri="https://s/x/?filename=a.pdf", source_hash="e" * 64)
+
+        def _dl(url, *, limit=None):
+            return (b"%PDF-1.4 fake", "application/pdf") if "pdf" in url else (b"fake", "image/jpeg")
+
+        with mock.patch.object(media, "_download", side_effect=_dl):
+            requests_out, by_id = media.batch_media_requests([image, doc])
+        ids = [r["custom_id"] for r in requests_out]
+        self.assertEqual(len(ids), 2)
+        self.assertTrue(any(i.startswith("img-") for i in ids))
+        self.assertTrue(any(i.startswith("doc-") for i in ids))
+        for custom_id in ids:
+            self.assertIn(custom_id, by_id)
 
     def test_missing_media_is_marked_unavailable_not_failed(self):
         import httpx
@@ -328,6 +337,108 @@ class MediaAnnotationTests(unittest.TestCase):
         with mock.patch.object(media.httpx, "stream", return_value=_Stream()):
             with self.assertRaises(ValueError):
                 media._download("https://s/big.jpg")
+
+
+class PdfDocumentTests(unittest.TestCase):
+    """PDF-вложения: 99% «документов» у Верификаторов — это PDF."""
+
+    def test_pdf_is_routed_to_the_model_and_other_files_are_not(self):
+        cases = {
+            "https://store/x/?filename=spravka.pdf": "document",
+            "https://store/x/?filename=SPRAVKA.PDF": "document",
+            "https://store/x/?filename=photo.jpg": "image",
+            "https://store/x/?filename=photo.png": "image",
+            "https://store/x/?filename=cert.p12": "file",
+            "https://store/x/?filename=report.docx": "file",
+            "https://store/x/": "file",
+        }
+        for uri, expected in cases.items():
+            with self.subTest(uri=uri):
+                self.assertEqual(media._kind_of("document", uri), expected)
+        # сертификат и docx читать нечем — в расшифровку они не идут
+        self.assertFalse(media.annotatable("document", "https://store/x/?filename=cert.p12"))
+        self.assertTrue(media.annotatable("document", "https://store/x/?filename=a.pdf"))
+
+    def test_plan_picks_the_right_reader_per_attachment(self):
+        messages = [
+            _msg("m1", mtype="document", uri="https://s/?filename=a.pdf"),
+            _msg("m2", mtype="document", uri="https://s/?filename=b.jpg"),
+            _msg("m3", mtype="document", uri="https://s/?filename=c.p12"),
+            _msg("m4", mtype="audio", uri="https://s/?filename=v.ogg"),
+        ]
+        plan = {item["message_id"]: item for item in media.plan(messages)}
+        self.assertEqual(set(plan), {"m1", "m2", "m4"})
+        self.assertEqual(plan["m1"]["media_kind"], "document")
+        self.assertEqual(plan["m1"]["provider"], "anthropic")
+        self.assertEqual(plan["m2"]["media_kind"], "image")
+        self.assertEqual(plan["m4"]["provider"], "soniox")
+        # у документа своя конфигурация → своя идентичность расшифровки
+        self.assertNotEqual(plan["m1"]["config_hash"], plan["m2"]["config_hash"])
+
+    def test_document_request_uses_the_pdf_document_block(self):
+        body = media.document_request_body("JVBERi0=")
+        self.assertEqual(body["model"], config.CLAUDE_MODEL_VISION)
+        self.assertEqual(body["max_tokens"], config.DOCUMENT_MAX_TOKENS)
+        block = body["messages"][0]["content"][0]
+        self.assertEqual(block["type"], "document")
+        self.assertEqual(block["source"]["type"], "base64")
+        self.assertEqual(block["source"]["media_type"], "application/pdf")
+        self.assertEqual(body["output_config"]["format"]["type"], "json_schema")
+
+    def test_non_pdf_masquerading_as_pdf_is_rejected_before_paying(self):
+        """Расширение в ссылке может врать — проверяем сигнатуру файла."""
+        with mock.patch.object(media, "_download", return_value=(b"PK\x03\x04zip", "application/zip")), \
+             mock.patch.object(media.llm, "post_body",
+                               side_effect=AssertionError("модель не должна вызываться")):
+            result = media._annotate_document({"content_uri": "https://s/?filename=a.pdf"})
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("не PDF", result["error"])
+
+    def test_pdf_has_its_own_size_limit(self):
+        captured = {}
+
+        def _dl(url, *, limit=None):
+            captured["limit"] = limit
+            return (b"%PDF-1.4", "application/pdf")
+
+        with mock.patch.object(media, "_download", side_effect=_dl), \
+             mock.patch.object(media.llm, "post_body",
+                               return_value={"description": "справка", "visible_text": "",
+                                             "kind": "document", "_llm_meta": {}}):
+            media._annotate_document({"content_uri": "https://s/?filename=a.pdf"})
+        self.assertEqual(captured["limit"], config.MEDIA_PDF_MAX_BYTES)
+        self.assertGreater(config.MEDIA_PDF_MAX_BYTES, config.MEDIA_MAX_BYTES)
+
+    def test_truncated_document_answer_is_a_failure(self):
+        reply = {"description": "договор", "visible_text": "х" * 100, "kind": "document",
+                 "_llm_meta": {"stop_reason": "max_tokens", "usage": {}}}
+        with mock.patch.object(media, "_download", return_value=(b"%PDF-1.4", "application/pdf")), \
+             mock.patch.object(media.llm, "post_body", return_value=reply):
+            result = media._annotate_document({"content_uri": "https://s/?filename=a.pdf"})
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("обрезан", result["error"])
+
+    def test_document_content_lands_in_the_transcript(self):
+        messages = [
+            _msg("m1", text="Вот справка", minute=1),
+            _msg("m2", mtype="document", uri="https://s/?filename=a.pdf", minute=2),
+            _msg("m3", echo=True, text="Принял", user_id=7, minute=3),
+        ]
+        built = subjects.build_wz_transcript(
+            _episode(), messages,
+            {"m2": {"status": "ready", "annotation": "справка о доходах, ИИН 900101300000"}})
+        self.assertIn("[документ (PDF): справка о доходах, ИИН 900101300000]", built["text"])
+        line = next(l for l in built["lines"] if l.get("media"))
+        self.assertEqual(line["media"]["kind"], "document")
+
+    def test_unreadable_document_keeps_the_placeholder(self):
+        """Сертификат/docx читать нечем — заглушка, а не «не удалось получить»."""
+        messages = [_msg("m1", mtype="document", uri="https://s/?filename=cert.p12", minute=1)]
+        built = subjects.build_wz_transcript(_episode(), messages, {})
+        line = built["lines"][0]["seg"][0]["t"]
+        self.assertIn("[документ]", line)
+        self.assertNotIn("не удалось получить", line)
+        self.assertNotIn("не расшифровано", line)
 
 
 class SubjectIsolationTests(unittest.TestCase):
