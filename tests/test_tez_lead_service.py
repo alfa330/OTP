@@ -66,6 +66,35 @@ class ParseLeadsFileTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertIsNone(rows[0][3])
 
+    def test_file_over_row_limit_is_rejected_instead_of_silent_truncation(self):
+        original_limit = tez_lead_service.MAX_LEAD_ROWS
+        tez_lead_service.MAX_LEAD_ROWS = 2
+        try:
+            raw = (
+                "fio,phone\n"
+                "Первый,77010000001\n"
+                "Второй,77010000002\n"
+                "Третий,77010000003\n"
+            ).encode("utf-8")
+            with self.assertRaisesRegex(ValueError, "Разделите его на несколько файлов"):
+                tez_lead_service.parse_leads_file(raw, ".csv")
+        finally:
+            tez_lead_service.MAX_LEAD_ROWS = original_limit
+
+    def test_file_at_row_limit_is_accepted(self):
+        original_limit = tez_lead_service.MAX_LEAD_ROWS
+        tez_lead_service.MAX_LEAD_ROWS = 2
+        try:
+            raw = (
+                "fio,phone\n"
+                "Первый,77010000001\n"
+                "Второй,77010000002\n"
+            ).encode("utf-8")
+            rows = tez_lead_service.parse_leads_file(raw, ".csv")
+            self.assertEqual(len(rows), 2)
+        finally:
+            tez_lead_service.MAX_LEAD_ROWS = original_limit
+
     def test_empty_file(self):
         with self.assertRaises(ValueError):
             tez_lead_service.parse_leads_file(b"", ".csv")

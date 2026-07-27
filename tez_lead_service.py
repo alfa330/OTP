@@ -90,8 +90,6 @@ def parse_leads_file(raw_bytes, file_ext):
 
     rows = []
     for offset, raw in enumerate(raw_rows[start_at:], start=start_at + 1):
-        if len(rows) >= MAX_LEAD_ROWS:
-            break
         fio = str(raw[fio_idx] or '').strip() if fio_idx < len(raw) else ''
         phone_cell = raw[phone_idx] if phone_idx < len(raw) else ''
         if isinstance(phone_cell, float):
@@ -99,6 +97,11 @@ def parse_leads_file(raw_bytes, file_ext):
         phone_raw = str(phone_cell or '').strip()
         if not fio and not phone_raw:
             continue
+        if len(rows) >= MAX_LEAD_ROWS:
+            raise ValueError(
+                f'В файле больше {MAX_LEAD_ROWS} строк с данными. '
+                'Разделите его на несколько файлов.'
+            )
         rows.append((offset, fio, phone_raw, normalize_kz_phone(phone_raw)))
     if not rows:
         raise ValueError('В файле не нашлось ни одной строки с данными')

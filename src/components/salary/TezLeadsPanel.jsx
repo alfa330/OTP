@@ -46,6 +46,8 @@ const RULE_LABELS = {
   active_prev_month: 'Были заказы в прошлом месяце — уже работал',
 };
 
+const TEZ_LEADS_MAX_FILES_PER_UPLOAD = 10;
+
 const ALMATY_DATE_TIME_FORMATTER = new Intl.DateTimeFormat('en-CA', {
   timeZone: 'Asia/Almaty',
   year: 'numeric',
@@ -278,9 +280,12 @@ const TezLeadsPanel = ({
   const [operatorFilter, setOperatorFilter] = useState('');
   const [search, setSearch] = useState('');
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(null);
+  const [uploadResults, setUploadResults] = useState([]);
   const [busy, setBusy] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [msg, setMsg] = useState('');
+  const [checkMsg, setCheckMsg] = useState('');
   const [invalidRows, setInvalidRows] = useState([]);
   const [page, setPage] = useState(1);
   const [leadsTotal, setLeadsTotal] = useState(0);
@@ -301,7 +306,10 @@ const TezLeadsPanel = ({
   });
   const fileRef = useRef(null);
   const pollRef = useRef(null);
+  const pollGenerationRef = useRef(0);
+  const pollBatchIdsRef = useRef(new Set());
   const statsRequestRef = useRef(0);
+  const leadsRequestRef = useRef(0);
   const historyRequestRef = useRef(0);
   const activeScopeRef = useRef('');
 
@@ -360,8 +368,10 @@ const TezLeadsPanel = ({
   }, [apiBaseUrl, headers, year, monthNum, groupId, statsScopeKey]);
 
   const loadLeads = useCallback((toPage = 1) => {
-    if (!validPeriod || !userId) return;
-    axios
+    const requestId = ++leadsRequestRef.current;
+    const requestScope = statsScopeKey;
+    if (!validPeriod || !userId || !requestScope) return Promise.resolve(null);
+    return axios
       .get(`${apiBaseUrl}/api/tez_leads/detail`, {
         params: {
           year, month: monthNum,
@@ -373,28 +383,62 @@ const TezLeadsPanel = ({
         headers,
       })
       .then((resp) => {
+        if (
+          requestId !== leadsRequestRef.current ||
+          requestScope !== activeScopeRef.current
+        ) return null;
         const d = resp?.data || {};
         setLeads(d.leads || []);
         setLeadsTotal(d.total || 0);
         setLeadsPages(d.pages || 1);
         setPage(d.page || toPage);
+        return d;
       })
-      .catch(() => { setLeads([]); setLeadsTotal(0); setLeadsPages(1); });
-  }, [apiBaseUrl, headers, userId, year, monthNum, validPeriod, statusFilter, operatorFilter, search]);
+      .catch(() => {
+        if (
+          requestId !== leadsRequestRef.current ||
+          requestScope !== activeScopeRef.current
+        ) return null;
+        setLeads([]);
+        setLeadsTotal(0);
+        setLeadsPages(1);
+        return null;
+      });
+  }, [
+    apiBaseUrl,
+    headers,
+    userId,
+    year,
+    monthNum,
+    validPeriod,
+    statusFilter,
+    operatorFilter,
+    search,
+    statsScopeKey,
+  ]);
 
   useEffect(() => {
     // Смена месяца/группы/пользователя мгновенно инвалидирует старые данные и
     // любые открытые действия. Поздние ответы прежнего scope игнорируются по id.
     statsRequestRef.current += 1;
+    leadsRequestRef.current += 1;
     historyRequestRef.current += 1;
+    pollGenerationRef.current += 1;
+    pollBatchIdsRef.current.clear();
+    clearTimeout(pollRef.current);
     setStats(null);
     setStatsLoadedScope('');
     setStatsError('');
+    setMsg('');
+    setCheckMsg('');
     setBatchAction(null);
     setBatchReason('');
     setBatchActionError('');
     setBatchBusy(false);
     setHistoryState({ batchId: null, status: 'idle', events: [], error: '' });
+    setUploadResults([]);
+    setUploadProgress(null);
+    setInvalidRows([]);
     setLeads([]);
     setLeadsTotal(0);
     setLeadsPages(1);
@@ -402,7 +446,11 @@ const TezLeadsPanel = ({
     loadStats();
     return () => {
       statsRequestRef.current += 1;
+      leadsRequestRef.current += 1;
       historyRequestRef.current += 1;
+      pollGenerationRef.current += 1;
+      pollBatchIdsRef.current.clear();
+      clearTimeout(pollRef.current);
     };
   }, [loadStats, statsScopeKey]);
 
@@ -419,54 +467,192 @@ const TezLeadsPanel = ({
     if (tab === 'leads') loadLeads(1);
   }, [tab, loadLeads]);
 
-  // Проверка базы на «уже работающих» идёт в фоне — дожидаемся её, опрашивая статус.
-  const pollBatch = useCallback((batchId, attempt = 0) => {
-    if (attempt > 60) return;
+  // Проверки загруженных баз идут в фоне. Один таймер следит сразу за всеми
+  // созданными batch, чтобы несколько параллельных poll не перетирали друг друга.
+  const pollBatches = useCallback((
+    batchIds,
+    attempt = 0,
+    scopeKey = statsScopeKey,
+    generation = pollGenerationRef.current,
+  ) => {
+    const ids = [...new Set((batchIds || []).filter(Boolean))];
+    if (
+      !ids.length ||
+      scopeKey !== activeScopeRef.current ||
+      generation !== pollGenerationRef.current
+    ) return;
+    if (attempt > 60) {
+      pollBatchIdsRef.current.clear();
+      setCheckMsg('Проверка загруженных баз продолжается в фоне. Статусы видны в списке загрузок.');
+      return;
+    }
+    clearTimeout(pollRef.current);
     pollRef.current = setTimeout(() => {
+      if (
+        scopeKey !== activeScopeRef.current ||
+        generation !== pollGenerationRef.current
+      ) return;
       loadStats().then((data) => {
-        const batch = (data?.batches || []).find((b) => b.id === batchId);
-        if (!batch || batch.check_status === 'pending' || batch.check_status === 'running') {
-          pollBatch(batchId, attempt + 1);
-        } else if (batch.check_status === 'error') {
-          setMsg(`Проверка базы не удалась: ${batch.check_error || 'неизвестная ошибка'}`);
+        if (
+          scopeKey !== activeScopeRef.current ||
+          generation !== pollGenerationRef.current
+        ) return;
+        const batchesById = new Map(
+          (data?.batches || []).map((batch) => [batch.id, batch])
+        );
+        const pending = ids.filter((id) => {
+          const batch = batchesById.get(id);
+          return !batch || batch.check_status === 'pending' || batch.check_status === 'running';
+        });
+        if (pending.length) {
+          pollBatches(ids, attempt + 1, scopeKey, generation);
+          return;
+        }
+
+        const failed = ids
+          .map((id) => batchesById.get(id))
+          .filter((batch) => batch?.check_status === 'error');
+        pollBatchIdsRef.current.clear();
+        if (failed.length) {
+          setCheckMsg(`Проверка завершена с ошибками: ${failed.length} из ${ids.length}. Подробности — в списке загрузок.`);
+        } else if (ids.length === 1) {
+          const batch = batchesById.get(ids[0]);
+          setCheckMsg(`Проверка базы завершена: уже работающих — ${batch?.already_working ?? 0}`);
         } else {
-          setMsg(`Проверка завершена: уже работающих — ${batch.already_working}`);
-          setTimeout(() => setMsg(''), 6000);
+          setCheckMsg(`Проверка завершена для всех загруженных файлов: ${ids.length}.`);
         }
       });
     }, 3000);
-  }, [loadStats]);
+  }, [loadStats, statsScopeKey]);
 
-  useEffect(() => () => clearTimeout(pollRef.current), []);
+  useEffect(() => () => {
+    pollGenerationRef.current += 1;
+    pollBatchIdsRef.current.clear();
+    clearTimeout(pollRef.current);
+  }, []);
 
-  const upload = useCallback(() => {
-    const file = fileRef.current?.files?.[0];
-    if (!file || !validPeriod) return;
-    const form = new FormData();
-    form.append('file', file);
-    form.append('year', year);
-    form.append('month', monthNum);
-    if (departmentId) form.append('department_id', departmentId);
+  const upload = useCallback(async () => {
+    const files = Array.from(fileRef.current?.files || []);
+    if (!files.length || !validPeriod) return;
+    if (files.length > TEZ_LEADS_MAX_FILES_PER_UPLOAD) {
+      setUploadResults([]);
+      setInvalidRows([]);
+      setMsg(`За один раз можно загрузить не более ${TEZ_LEADS_MAX_FILES_PER_UPLOAD} файлов.`);
+      return;
+    }
 
+    const uploadScope = statsScopeKey;
     setUploading(true);
+    setUploadProgress({ current: 0, total: files.length, fileName: '' });
+    setUploadResults([]);
     setMsg('');
+    if (!pollBatchIdsRef.current.size) setCheckMsg('');
     setInvalidRows([]);
-    axios
-      .post(`${apiBaseUrl}/api/tez_leads/upload`, form, { headers })
-      .then((resp) => {
-        const d = resp?.data || {};
+    const results = [];
+    const invalid = [];
+    const batchIds = [];
+
+    try {
+      for (let index = 0; index < files.length; index += 1) {
+        if (uploadScope !== activeScopeRef.current) return;
+        const file = files[index];
+        setUploadProgress({
+          current: index + 1,
+          total: files.length,
+          fileName: file.name,
+        });
+
+        const form = new FormData();
+        form.append('file', file);
+        form.append('year', year);
+        form.append('month', monthNum);
+        if (departmentId) form.append('department_id', departmentId);
+
+        try {
+          const resp = await axios.post(
+            `${apiBaseUrl}/api/tez_leads/upload`,
+            form,
+            { headers }
+          );
+          const data = resp?.data || {};
+          const result = {
+            ok: true,
+            fileName: file.name,
+            batchId: data.batch_id || null,
+            rowsTotal: Number(data.rows_total || 0),
+            rowsNew: Number(data.rows_new || 0),
+            rowsDuplicate: Number(data.rows_duplicate || 0),
+            rowsInvalid: Number(data.rows_invalid || 0),
+          };
+          results.push(result);
+          invalid.push(
+            ...(data.invalid_rows || []).map((row) => ({
+              ...row,
+              source_file_name: file.name,
+            }))
+          );
+          if (result.batchId) batchIds.push(result.batchId);
+        } catch (err) {
+          results.push({
+            ok: false,
+            fileName: file.name,
+            error: err?.response?.data?.error || 'Не удалось загрузить файл',
+          });
+        }
+        if (uploadScope !== activeScopeRef.current) return;
+        setUploadResults([...results]);
+      }
+
+      const successful = results.filter((result) => result.ok);
+      const failed = results.filter((result) => !result.ok);
+      const totals = successful.reduce(
+        (acc, result) => ({
+          rowsTotal: acc.rowsTotal + result.rowsTotal,
+          rowsNew: acc.rowsNew + result.rowsNew,
+          rowsDuplicate: acc.rowsDuplicate + result.rowsDuplicate,
+          rowsInvalid: acc.rowsInvalid + result.rowsInvalid,
+        }),
+        { rowsTotal: 0, rowsNew: 0, rowsDuplicate: 0, rowsInvalid: 0 }
+      );
+
+      setInvalidRows(invalid);
+      if (successful.length) {
         setMsg(
-          `Загружено ${d.rows_total}: новых ${d.rows_new}, дублей ${d.rows_duplicate}, ` +
-          `невалидных ${d.rows_invalid}. Идёт проверка на уже работающих…`
+          `Загружено файлов: ${successful.length} из ${files.length}. ` +
+          `Строк: ${totals.rowsTotal}, новых: ${totals.rowsNew}, ` +
+          `дублей: ${totals.rowsDuplicate}, невалидных: ${totals.rowsInvalid}.` +
+          (failed.length ? ` Ошибок: ${failed.length}.` : '')
         );
-        setInvalidRows(d.invalid_rows || []);
-        if (fileRef.current) fileRef.current.value = '';
-        loadStats();
-        if (d.batch_id) pollBatch(d.batch_id);
-      })
-      .catch((err) => setMsg(err?.response?.data?.error || 'Не удалось загрузить базу'))
-      .finally(() => setUploading(false));
-  }, [apiBaseUrl, headers, departmentId, year, monthNum, validPeriod, loadStats, pollBatch]);
+        await loadStats();
+        if (uploadScope !== activeScopeRef.current) return;
+        if (tab === 'leads') loadLeads(1);
+        batchIds.forEach((batchId) => pollBatchIdsRef.current.add(batchId));
+        const activeBatchIds = [...pollBatchIdsRef.current];
+        const pollGeneration = ++pollGenerationRef.current;
+        clearTimeout(pollRef.current);
+        setCheckMsg('Проверка загруженных баз на уже работающих выполняется…');
+        pollBatches(activeBatchIds, 0, uploadScope, pollGeneration);
+      } else {
+        setMsg(`Не удалось загрузить ни одного файла из ${files.length}.`);
+      }
+    } finally {
+      if (fileRef.current) fileRef.current.value = '';
+      setUploadProgress(null);
+      setUploading(false);
+    }
+  }, [
+    apiBaseUrl,
+    headers,
+    departmentId,
+    year,
+    monthNum,
+    validPeriod,
+    loadStats,
+    loadLeads,
+    pollBatches,
+    statsScopeKey,
+    tab,
+  ]);
 
   const recompute = useCallback(() => {
     if (!validPeriod) return;
@@ -752,26 +938,39 @@ const TezLeadsPanel = ({
             <input
               ref={fileRef}
               type="file"
+              multiple
+              disabled={uploading}
               accept=".csv,.xlsx,.xlsm"
-              className="text-sm file:mr-3 file:px-3 file:py-2 file:rounded-full file:border-0 file:bg-indigo-100 file:text-indigo-700"
+              className="text-sm disabled:cursor-wait disabled:opacity-60 file:mr-3 file:px-3 file:py-2 file:rounded-full file:border-0 file:bg-indigo-100 file:text-indigo-700"
             />
             <button
               onClick={upload}
-              disabled={uploading}
+              disabled={uploading || !validPeriod}
+              aria-busy={uploading}
               className={`inline-flex items-center gap-2 px-4 py-2 rounded-full text-sm font-semibold text-white shadow-sm ${
                 uploading ? 'bg-indigo-300 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'
               }`}
             >
               <FaIcon className="fas fa-upload" />
-              {uploading ? 'Загрузка…' : 'Загрузить базу'}
+              {uploading
+                ? (
+                  uploadProgress
+                    ? `Загрузка ${uploadProgress.current}/${uploadProgress.total}…`
+                    : 'Загрузка…'
+                )
+                : 'Загрузить базы'}
             </button>
             <span className="inline-flex items-center gap-1 text-xs text-slate-500">
-              Колонки: fio, phone
+              {uploading && uploadProgress?.fileName
+                ? `Сейчас: ${uploadProgress.fileName}`
+                : 'Колонки: fio, phone'}
               <InfoHint title="Формат файла" side="left">
                 CSV или Excel с колонками <b>fio</b> и <b>phone</b>. Шапка необязательна — тогда
                 первая колонка считается именем, вторая телефоном. Телефон в любом формате
                 (8700…, +7 700…, 700…) приводится к 11 цифрам. База помесячная: тот же номер,
                 загруженный повторно за месяц, не создаёт дубль, а увеличивает счётчик загрузок.
+                За один раз можно выбрать до <b>{TEZ_LEADS_MAX_FILES_PER_UPLOAD}</b> файлов;
+                каждый файл обрабатывается отдельно и может содержать до 50 000 строк.
               </InfoHint>
             </span>
           </div>
@@ -808,6 +1007,60 @@ const TezLeadsPanel = ({
           className="text-sm font-medium text-indigo-800 bg-indigo-50 border border-indigo-100 rounded-xl px-3 py-2"
         >
           {msg}
+        </div>
+      )}
+
+      {checkMsg && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="text-sm text-sky-800 bg-sky-50 border border-sky-100 rounded-xl px-3 py-2"
+        >
+          {checkMsg}
+        </div>
+      )}
+
+      {uploadResults.length > 0 && (
+        <div className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 shadow-sm">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-sm font-semibold text-slate-800">
+              Результаты загрузки ({uploadResults.filter((result) => result.ok).length}/{uploadResults.length})
+            </div>
+            {!uploading && (
+              <button
+                type="button"
+                onClick={() => setUploadResults([])}
+                className="text-xs text-slate-500 hover:text-slate-700"
+              >
+                скрыть
+              </button>
+            )}
+          </div>
+          <div className="mt-2 space-y-1.5">
+            {uploadResults.map((result, index) => (
+              <div
+                key={`${result.fileName}-${index}`}
+                className={`flex items-start gap-2 rounded-lg px-2.5 py-2 text-xs ${
+                  result.ok
+                    ? 'bg-emerald-50 text-emerald-800'
+                    : 'bg-rose-50 text-rose-800'
+                }`}
+              >
+                <FaIcon
+                  className={`fas ${result.ok ? 'fa-circle-check' : 'fa-circle-exclamation'} mt-0.5`}
+                  aria-hidden="true"
+                />
+                <div className="min-w-0">
+                  <div className="break-all font-semibold">{result.fileName}</div>
+                  <div className="mt-0.5 opacity-90">
+                    {result.ok
+                      ? `Строк: ${result.rowsTotal}, новых: ${result.rowsNew}, дублей: ${result.rowsDuplicate}, невалидных: ${result.rowsInvalid}`
+                      : result.error}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -851,6 +1104,7 @@ const TezLeadsPanel = ({
             <table className="min-w-full text-xs">
               <thead className="text-rose-500">
                 <tr>
+                  <th className="text-left px-2 py-1 font-medium">Файл</th>
                   <th className="text-left px-2 py-1 font-medium">Строка</th>
                   <th className="text-left px-2 py-1 font-medium">ФИО</th>
                   <th className="text-left px-2 py-1 font-medium">Номер в файле</th>
@@ -858,7 +1112,8 @@ const TezLeadsPanel = ({
               </thead>
               <tbody>
                 {invalidRows.map((r, i) => (
-                  <tr key={i} className="border-t border-rose-50">
+                  <tr key={`${r.source_file_name || 'file'}-${r.row || 0}-${i}`} className="border-t border-rose-50">
+                    <td className="max-w-48 break-all px-2 py-1 text-slate-500">{r.source_file_name || '—'}</td>
                     <td className="px-2 py-1 text-slate-400 tabular-nums">{r.row}</td>
                     <td className="px-2 py-1">{r.full_name || '—'}</td>
                     <td className="px-2 py-1 font-mono text-rose-700">{r.phone || '(пусто)'}</td>
