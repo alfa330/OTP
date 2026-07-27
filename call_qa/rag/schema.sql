@@ -102,7 +102,11 @@ ALTER TABLE ai_evaluation_meta ADD COLUMN IF NOT EXISTS review_reasons jsonb;
 ALTER TABLE ai_evaluation_meta ADD COLUMN IF NOT EXISTS review_outcome text;
 ALTER TABLE ai_evaluation_meta ADD COLUMN IF NOT EXISTS reviewed_by integer;
 ALTER TABLE ai_evaluation_meta ADD COLUMN IF NOT EXISTS reviewed_at timestamptz;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_eval_call_model ON ai_evaluation_meta (call_id, model);
+-- Исторический ключ (call_id, model) заменён на (subject_kind, call_id, model) —
+-- см. раздел «Субъект оценки» ниже. Пересоздавать его здесь НЕЛЬЗЯ: как только
+-- существуют мета-строки звонка №N и эпизода №N, CREATE UNIQUE INDEX по паре
+-- (call_id, model) падает на дубле и обрывает всю миграцию (файл применяется
+-- одной транзакцией и перезапускается целиком при любой правке схемы).
 
 -- ---------------------------------------------------------------------------
 -- Stable criterion identities and content-addressed scale revisions
@@ -713,6 +717,135 @@ CREATE TABLE IF NOT EXISTS qa_rag_rollout_config (
     CHECK (rollout_mode IN ('off','shadow','canary','active')),
     CHECK (canary_percent BETWEEN 0 AND 100)
 );
+
+-- ---------------------------------------------------------------------------
+-- Субъект оценки: звонок или эпизод чата
+-- ---------------------------------------------------------------------------
+-- Раздел ИИ-оценки начинался со звонков, поэтому колонка субъекта во всех
+-- таблицах называется call_id.  У Верификаторов ОП единица оценки — эпизод
+-- переписки Wazzup (wazzup_episodes.id).  У эпизодов своя последовательность,
+-- то есть числовые id ПЕРЕСЕКАЮТСЯ с calls.id, и без дискриминатора эпизод №42
+-- и звонок №42 делили бы кэш, очередь ревью и разборы.  subject_kind делает
+-- идентичность субъекта однозначной; значение по умолчанию 'call' оставляет уже
+-- сохранённые прогоны валидными без переливки данных.
+--
+-- ВНИМАНИЕ (rolling deploy): уникальные ключи ai_evaluation_meta и
+-- ai_review_cache расширяются subject_kind, старые удаляются. Воркер предыдущей
+-- версии кода делает ON CONFLICT (call_id, model) и после миграции получит
+-- 42P10. Заметно это будет НЕ везде: запись карточки ревью (_cache_put без
+-- strict) и журнал (_meta_upsert) ошибку глушат — оценка сохранится в
+-- immutable-прогон, но пропадёт из очереди ревью до следующей переоценки;
+-- пакетная оценка (strict=True) упадёт громко. Поэтому деплой должен заменять
+-- процессы, а не долго держать две версии одновременно.
+
+ALTER TABLE ai_transcript_cache   ADD COLUMN IF NOT EXISTS subject_kind text NOT NULL DEFAULT 'call';
+ALTER TABLE ai_evaluation_runs    ADD COLUMN IF NOT EXISTS subject_kind text NOT NULL DEFAULT 'call';
+ALTER TABLE ai_evaluation_meta    ADD COLUMN IF NOT EXISTS subject_kind text NOT NULL DEFAULT 'call';
+ALTER TABLE ai_review_cache       ADD COLUMN IF NOT EXISTS subject_kind text NOT NULL DEFAULT 'call';
+ALTER TABLE qa_adjudications      ADD COLUMN IF NOT EXISTS subject_kind text NOT NULL DEFAULT 'call';
+ALTER TABLE qa_adjudication_cases ADD COLUMN IF NOT EXISTS subject_kind text NOT NULL DEFAULT 'call';
+ALTER TABLE qa_retrieval_runs     ADD COLUMN IF NOT EXISTS subject_kind text NOT NULL DEFAULT 'call';
+ALTER TABLE qa_gold_labels        ADD COLUMN IF NOT EXISTS subject_kind text NOT NULL DEFAULT 'call';
+
+-- Значение subject_kind ограничено на КАЖДОЙ таблице, где оно участвует в ключе
+-- или в фильтре: опечатка ('chat' вместо 'wz_episode') иначе создала бы третий,
+-- невидимый ни одной выборке класс субъектов.
+ALTER TABLE ai_transcript_cache DROP CONSTRAINT IF EXISTS ai_transcript_cache_subject_kind_check;
+ALTER TABLE ai_transcript_cache ADD CONSTRAINT ai_transcript_cache_subject_kind_check
+    CHECK (subject_kind IN ('call','wz_episode'));
+ALTER TABLE ai_evaluation_runs DROP CONSTRAINT IF EXISTS ai_evaluation_runs_subject_kind_check;
+ALTER TABLE ai_evaluation_runs ADD CONSTRAINT ai_evaluation_runs_subject_kind_check
+    CHECK (subject_kind IN ('call','wz_episode'));
+ALTER TABLE ai_evaluation_meta DROP CONSTRAINT IF EXISTS ai_evaluation_meta_subject_kind_check;
+ALTER TABLE ai_evaluation_meta ADD CONSTRAINT ai_evaluation_meta_subject_kind_check
+    CHECK (subject_kind IN ('call','wz_episode'));
+ALTER TABLE ai_review_cache DROP CONSTRAINT IF EXISTS ai_review_cache_subject_kind_check;
+ALTER TABLE ai_review_cache ADD CONSTRAINT ai_review_cache_subject_kind_check
+    CHECK (subject_kind IN ('call','wz_episode'));
+ALTER TABLE qa_adjudication_cases DROP CONSTRAINT IF EXISTS qa_adjudication_cases_subject_kind_check;
+ALTER TABLE qa_adjudication_cases ADD CONSTRAINT qa_adjudication_cases_subject_kind_check
+    CHECK (subject_kind IN ('call','wz_episode'));
+ALTER TABLE qa_adjudications DROP CONSTRAINT IF EXISTS qa_adjudications_subject_kind_check;
+ALTER TABLE qa_adjudications ADD CONSTRAINT qa_adjudications_subject_kind_check
+    CHECK (subject_kind IN ('call','wz_episode'));
+
+-- Уникальность «один субъект + модель», а не «один id + модель».
+CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_eval_subject_model
+    ON ai_evaluation_meta (subject_kind, call_id, model);
+DROP INDEX IF EXISTS uq_ai_eval_call_model;
+
+-- Смена первичного ключа — ОДНИМ statement: в диагностическом режиме
+-- (ensure_schema strict=False) каждый statement коммитится отдельно, и пара
+-- «DROP; ADD» оставила бы таблицу без ключа, если ADD упадёт.
+DO $ai_review_cache_pk$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint
+                WHERE conrelid = 'ai_review_cache'::regclass AND contype = 'p'
+                  AND (SELECT array_agg(a.attname::text ORDER BY a.attname::text)
+                         FROM unnest(conkey) AS k
+                         JOIN pg_attribute a ON a.attrelid = conrelid AND a.attnum = k)
+                      = ARRAY['call_id','model']::text[]) THEN
+        ALTER TABLE ai_review_cache DROP CONSTRAINT ai_review_cache_pkey;
+        ALTER TABLE ai_review_cache ADD CONSTRAINT ai_review_cache_pkey
+            PRIMARY KEY (subject_kind, call_id, model);
+    END IF;
+END
+$ai_review_cache_pk$;
+
+CREATE INDEX IF NOT EXISTS idx_transcript_cache_subject
+    ON ai_transcript_cache (subject_kind, call_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_evaluation_run_subject
+    ON ai_evaluation_runs (subject_kind, call_id, evaluation_fingerprint, status, created_at DESC);
+
+-- Дедупликация разборов по субъекту: у эпизода и звонка с одинаковым id
+-- разные доказательные кейсы.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_adjudication_case_subject_content
+    ON qa_adjudication_cases (subject_kind, call_id, direction_id, criterion_id, content_hash)
+    WHERE call_id IS NOT NULL;
+DROP INDEX IF EXISTS uq_adjudication_case_content;
+
+-- ---------------------------------------------------------------------------
+-- Расшифровки вложений Wazzup (изображения/голосовые)
+-- ---------------------------------------------------------------------------
+-- Эпизод чата оценивается по тексту, но в переписке Верификаторов есть
+-- изображения и голосовые: без их содержания оценка слепа. Описание картинки
+-- (Claude vision) и расшифровка голосового (Soniox) считаются один раз и
+-- живут ЗДЕСЬ, а не в wazzup_messages: сырые сообщения удаляет ретеншн 45 дней,
+-- а переоценка эпизода должна оставаться воспроизводимой и после этого.
+-- Таблица изменяемая (в отличие от immutable-прогонов): неуспешную попытку
+-- можно повторить, успешную — нет (см. ON CONFLICT в media.py).
+
+CREATE TABLE IF NOT EXISTS wz_media_annotations (
+    id                bigserial PRIMARY KEY,
+    message_id        text NOT NULL,
+    channel_id        text,
+    chat_id           text,
+    media_kind        text NOT NULL,
+    source_hash       character(64) NOT NULL,
+    provider          text NOT NULL,
+    model             text NOT NULL,
+    config_hash       character(64) NOT NULL,
+    status            text NOT NULL,
+    annotation        text,
+    error             text,
+    source_bytes      integer,
+    latency_ms        integer,
+    input_tokens      integer,
+    output_tokens     integer,
+    estimated_cost    numeric(18,8),
+    created_at        timestamptz NOT NULL DEFAULT now(),
+    updated_at        timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (message_id, provider, model, config_hash, source_hash),
+    CHECK (media_kind IN ('image','audio','video','document','unknown')),
+    CHECK (status IN ('ready','failed','unavailable')),
+    CHECK (source_hash ~ '^[0-9a-f]{64}$'),
+    CHECK (config_hash ~ '^[0-9a-f]{64}$'),
+    CHECK (status <> 'ready' OR annotation IS NOT NULL)
+);
+CREATE INDEX IF NOT EXISTS idx_wz_media_message
+    ON wz_media_annotations (message_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_wz_media_status
+    ON wz_media_annotations (status, created_at DESC);
 
 -- ---------------------------------------------------------------------------
 -- Read models for retrieval and admin UX.  The catalog includes every lifecycle

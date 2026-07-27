@@ -43,17 +43,25 @@ def asr_config() -> dict:
     }
 
 
+# Разные пространства advisory-локов на тип субъекта: id звонка и id эпизода
+# чата — независимые последовательности, и лок по «просто числу» заставлял бы
+# их бессмысленно ждать друг друга (а review_payload показывает это как
+# невнятную ошибку «не удалось заблокировать»).
+_LOCK_CLASSID = {config.SUBJECT_CALL: 71623, config.SUBJECT_WZ_EPISODE: 71626}
+
+
 @contextmanager
-def distributed_call_lock(call_id: int):
+def distributed_call_lock(call_id: int, *, subject_kind: str = config.SUBJECT_CALL):
     """Cross-worker primary-DB lock; yields False so writers can fail closed."""
     conn = cur = None
     acquired = False
+    classid = _LOCK_CLASSID.get(subject_kind, 71623)
     try:
         # Advisory locks must live on the same primary that stores runs/cases;
         # a read replica would provide a different lock namespace.
         conn = config.connect_rw()
         cur = conn.cursor()
-        cur.execute("SELECT pg_advisory_lock(%s,%s)", (71623, int(call_id)))
+        cur.execute("SELECT pg_advisory_lock(%s,%s)", (classid, int(call_id)))
         acquired = True
     except Exception as exc:
         logging.warning("ai-qa: distributed call lock unavailable for %s: %s", call_id, exc)
@@ -62,7 +70,7 @@ def distributed_call_lock(call_id: int):
     finally:
         if acquired and cur is not None:
             try:
-                cur.execute("SELECT pg_advisory_unlock(%s,%s)", (71623, int(call_id)))
+                cur.execute("SELECT pg_advisory_unlock(%s,%s)", (classid, int(call_id)))
             except Exception:
                 logging.exception("ai-qa: failed to release distributed lock for %s", call_id)
         if cur is not None:
@@ -77,29 +85,64 @@ def distributed_call_lock(call_id: int):
                 pass
 
 
+_TRANSCRIPT_COLUMNS = """id,transcript_hash,transcript_text,segments,tokens,payload,languages,
+                         asr_mean_conf,asr_low_spans,duration_ms,created_at"""
+
+
+def _transcript_row(row) -> dict:
+    return {
+        "id": int(row[0]), "transcript_hash": row[1], "text": row[2],
+        "segments": row[3] or [], "tokens": row[4] or [], "payload": row[5] or {},
+        "languages": row[6] or {}, "mean_conf": row[7],
+        "low_conf_spans": row[8] or [], "duration_ms": row[9], "created_at": row[10],
+    }
+
+
 def get_transcript(*, call_id: int, audio_fingerprint_value: str,
-                   asr_provider: str, asr_model: str, asr_config_hash: str) -> dict | None:
+                   asr_provider: str, asr_model: str, asr_config_hash: str,
+                   subject_kind: str = config.SUBJECT_CALL) -> dict | None:
     conn = config.connect_ro()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT id,transcript_hash,transcript_text,segments,tokens,payload,languages,
-                          asr_mean_conf,asr_low_spans,duration_ms,created_at
+                f"""SELECT {_TRANSCRIPT_COLUMNS}
                      FROM ai_transcript_cache
-                    WHERE call_id=%s AND audio_fingerprint=%s AND asr_provider=%s
-                      AND asr_model=%s AND asr_config_hash=%s
+                    WHERE subject_kind=%s AND call_id=%s AND audio_fingerprint=%s
+                      AND asr_provider=%s AND asr_model=%s AND asr_config_hash=%s
                     ORDER BY created_at DESC LIMIT 1""",
-                (int(call_id), audio_fingerprint_value, asr_provider, asr_model, asr_config_hash),
+                (subject_kind, int(call_id), audio_fingerprint_value, asr_provider,
+                 asr_model, asr_config_hash),
             )
             row = cur.fetchone()
-            if not row:
-                return None
-            return {
-                "id": int(row[0]), "transcript_hash": row[1], "text": row[2],
-                "segments": row[3] or [], "tokens": row[4] or [], "payload": row[5] or {},
-                "languages": row[6] or {}, "mean_conf": row[7],
-                "low_conf_spans": row[8] or [], "duration_ms": row[9], "created_at": row[10],
-            }
+            return _transcript_row(row) if row else None
+    except Exception as exc:
+        if is_schema_compat_error(exc):
+            raise RuntimeSchemaUnavailable("ai_transcript_cache schema is unavailable") from exc
+        raise
+    finally:
+        conn.close()
+
+
+def get_latest_transcript(*, call_id: int, subject_kind: str,
+                          asr_provider: str | None = None) -> dict | None:
+    """Последний сохранённый транскрипт субъекта независимо от идентичности источника.
+
+    Нужен эпизоду чата, у которого сырые сообщения уже удалил ретеншн: заново
+    собрать текст с расшифровками вложений невозможно, но однажды замороженный
+    транскрипт остаётся авторитетным — и он богаче, чем заглушки эпизода."""
+    conn = config.connect_ro()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT {_TRANSCRIPT_COLUMNS}
+                     FROM ai_transcript_cache
+                    WHERE subject_kind=%s AND call_id=%s
+                      AND (%s IS NULL OR asr_provider=%s)
+                    ORDER BY created_at DESC LIMIT 1""",
+                (subject_kind, int(call_id), asr_provider, asr_provider),
+            )
+            row = cur.fetchone()
+            return _transcript_row(row) if row else None
     except Exception as exc:
         if is_schema_compat_error(exc):
             raise RuntimeSchemaUnavailable("ai_transcript_cache schema is unavailable") from exc
@@ -112,7 +155,8 @@ def put_transcript(*, call_id: int, audio_fingerprint_value: str,
                    asr_provider: str, asr_model: str, asr_config_hash: str,
                    transcript_hash: str, text: str, segments: list,
                    tokens: list | None, payload: dict | None, languages: dict | None,
-                   mean_conf=None, low_conf_spans=None, duration_ms=None) -> int:
+                   mean_conf=None, low_conf_spans=None, duration_ms=None,
+                   subject_kind: str = config.SUBJECT_CALL) -> int:
     """Insert once; a racing worker reuses the winner without mutating history."""
     conn = config.connect_rw()
     try:
@@ -120,14 +164,14 @@ def put_transcript(*, call_id: int, audio_fingerprint_value: str,
             with conn.cursor() as cur:
                 cur.execute(
                     """INSERT INTO ai_transcript_cache
-                           (call_id,audio_fingerprint,asr_provider,asr_model,asr_config_hash,
-                            transcript_hash,transcript_text,segments,tokens,payload,languages,
-                            asr_mean_conf,asr_low_spans,duration_ms)
-                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                           (subject_kind,call_id,audio_fingerprint,asr_provider,asr_model,
+                            asr_config_hash,transcript_hash,transcript_text,segments,tokens,
+                            payload,languages,asr_mean_conf,asr_low_spans,duration_ms)
+                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                          ON CONFLICT (call_id,audio_fingerprint,asr_provider,asr_model,asr_config_hash)
                          DO NOTHING RETURNING id""",
-                    (int(call_id), audio_fingerprint_value, asr_provider, asr_model,
-                     asr_config_hash, transcript_hash, text, Json(segments or []),
+                    (subject_kind, int(call_id), audio_fingerprint_value, asr_provider,
+                     asr_model, asr_config_hash, transcript_hash, text, Json(segments or []),
                      Json(tokens) if tokens is not None else None, Json(payload or {}),
                      Json(languages or {}), mean_conf, Json(low_conf_spans or []), duration_ms),
                 )
@@ -196,17 +240,19 @@ def get_adjudication_source(evaluation_run_id: str) -> dict | None:
                           s.id,s.direction_id,s.content_hash::text,
                           NOT EXISTS (
                               SELECT 1 FROM ai_evaluation_runs newer
-                               WHERE newer.call_id=e.call_id
+                               WHERE newer.subject_kind=e.subject_kind
+                                 AND newer.call_id=e.call_id
                                  AND newer.status='succeeded'
                                  AND newer.run_kind = ANY(%s)
                                  AND (newer.created_at,newer.id::text) >
                                      (e.created_at,e.id::text)
-                          ) AS is_latest,m.review_outcome
+                          ) AS is_latest,m.review_outcome,e.subject_kind
                      FROM ai_evaluation_runs e
                      LEFT JOIN ai_transcript_cache t ON t.id=e.transcript_cache_id
                      LEFT JOIN qa_scale_revisions s ON s.id=e.scale_revision_id
                      LEFT JOIN ai_evaluation_meta m
-                       ON m.call_id=e.call_id AND m.model=e.model
+                       ON m.subject_kind=e.subject_kind AND m.call_id=e.call_id
+                          AND m.model=e.model
                     WHERE e.id=%s""",
                 (["standard", "force", "batch"], run_id),
             )
@@ -232,6 +278,7 @@ def get_adjudication_source(evaluation_run_id: str) -> dict | None:
                 } for item in cur.fetchall()]
             return {
                 "id": row[0], "call_id": int(row[1]), "direction_id": int(row[2]),
+                "subject_kind": (row[22] if len(row) > 22 else None) or config.SUBJECT_CALL,
                 "transcript_cache_id": row[3], "transcript_hash": row[4],
                 "evaluation_fingerprint": row[5], "scale_revision_id": row[6],
                 "status": row[7], "run_kind": row[8], "model": row[9],
@@ -257,7 +304,8 @@ def get_adjudication_source(evaluation_run_id: str) -> dict | None:
 
 
 def get_cached_evaluation(*, call_id: int, evaluation_fingerprint: str,
-                          run_kinds=("standard", "force", "batch")) -> dict | None:
+                          run_kinds=("standard", "force", "batch"),
+                          subject_kind: str = config.SUBJECT_CALL) -> dict | None:
     conn = config.connect_ro()
     try:
         with conn.cursor() as cur:
@@ -271,7 +319,8 @@ def get_cached_evaluation(*, call_id: int, evaluation_fingerprint: str,
                           e.pair_id::text,e.evaluation_fingerprint::text,s.criteria_manifest,
                           NOT EXISTS (
                               SELECT 1 FROM ai_evaluation_runs newer
-                               WHERE newer.call_id=e.call_id
+                               WHERE newer.subject_kind=e.subject_kind
+                                 AND newer.call_id=e.call_id
                                  AND newer.status='succeeded'
                                  AND newer.run_kind = ANY(%s)
                                  AND (newer.created_at,newer.id::text) >
@@ -279,7 +328,8 @@ def get_cached_evaluation(*, call_id: int, evaluation_fingerprint: str,
                           ) AS is_latest
                      FROM ai_evaluation_runs e
                      LEFT JOIN qa_scale_revisions s ON s.id=e.scale_revision_id
-                    WHERE e.call_id=%s AND e.evaluation_fingerprint=%s AND e.status='succeeded'
+                    WHERE e.subject_kind=%s AND e.call_id=%s
+                      AND e.evaluation_fingerprint=%s AND e.status='succeeded'
                       AND e.run_kind = ANY(%s)
                     ORDER BY (
                           coalesce(e.retrieval_config->>'enabled','false') = 'true'
@@ -287,7 +337,7 @@ def get_cached_evaluation(*, call_id: int, evaluation_fingerprint: str,
                                        e.payload->'retrieval_trace'->>'status','') = 'degraded'
                       ) ASC, e.created_at DESC
                     LIMIT 1""",
-                (["standard", "force", "batch"], int(call_id),
+                (["standard", "force", "batch"], subject_kind, int(call_id),
                  evaluation_fingerprint, list(run_kinds)),
             )
             row = cur.fetchone()
@@ -307,7 +357,8 @@ def get_cached_evaluation(*, call_id: int, evaluation_fingerprint: str,
 
 
 def get_latest_evaluation(*, call_id: int,
-                          run_kinds=("standard", "force", "batch")) -> dict | None:
+                          run_kinds=("standard", "force", "batch"),
+                          subject_kind: str = config.SUBJECT_CALL) -> dict | None:
     """Последний успешный прогон звонка независимо от evaluation_fingerprint.
 
     Нужен, чтобы открытие карточки показывало устаревшую оценку с пометкой,
@@ -322,11 +373,11 @@ def get_latest_evaluation(*, call_id: int,
                           e.pair_id::text,e.evaluation_fingerprint::text,s.criteria_manifest
                      FROM ai_evaluation_runs e
                      LEFT JOIN qa_scale_revisions s ON s.id=e.scale_revision_id
-                    WHERE e.call_id=%s AND e.status='succeeded'
+                    WHERE e.subject_kind=%s AND e.call_id=%s AND e.status='succeeded'
                       AND e.run_kind = ANY(%s)
                     ORDER BY e.created_at DESC, e.id::text DESC
                     LIMIT 1""",
-                (int(call_id), list(run_kinds)),
+                (subject_kind, int(call_id), list(run_kinds)),
             )
             row = cur.fetchone()
             if not row:
@@ -344,18 +395,19 @@ def get_latest_evaluation(*, call_id: int,
         conn.close()
 
 
-def latest_evaluation_fingerprint(call_id: int) -> str | None:
-    """Fingerprint последнего успешного прогона звонка (без учёта конфигурации) —
-    чтобы отличить переоценку устаревшей оценки от первой оценки звонка."""
+def latest_evaluation_fingerprint(call_id: int,
+                                  subject_kind: str = config.SUBJECT_CALL) -> str | None:
+    """Fingerprint последнего успешного прогона субъекта (без учёта конфигурации) —
+    чтобы отличить переоценку устаревшей оценки от первой оценки."""
     conn = config.connect_ro()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """SELECT evaluation_fingerprint::text FROM ai_evaluation_runs
-                    WHERE call_id=%s AND status='succeeded'
+                    WHERE subject_kind=%s AND call_id=%s AND status='succeeded'
                       AND run_kind IN ('standard','force','batch')
                     ORDER BY created_at DESC, id::text DESC LIMIT 1""",
-                (int(call_id),))
+                (subject_kind, int(call_id)))
             row = cur.fetchone()
             return row[0] if row else None
     except Exception as exc:
@@ -421,7 +473,8 @@ def save_evaluation_run(*, run_id: str, call_id: int, direction_id: int,
                         payload: dict, started_at: datetime, completed_at: datetime,
                         pair_id=None, primary_run_id=None, llm_meta: dict | None = None,
                         error_code=None, error_message=None,
-                        estimated_cost=_AUTO_COST) -> str:
+                        estimated_cost=_AUTO_COST,
+                        subject_kind: str = config.SUBJECT_CALL) -> str:
     """Atomically persist one final run and its normalized retrieval facts."""
     usage = _usage_totals(llm_meta)
     if estimated_cost is _AUTO_COST:
@@ -435,7 +488,7 @@ def save_evaluation_run(*, run_id: str, call_id: int, direction_id: int,
             with conn.cursor() as cur:
                 cur.execute(
                     """INSERT INTO ai_evaluation_runs
-                           (id,call_id,direction_id,transcript_cache_id,transcript_hash,
+                           (id,subject_kind,call_id,direction_id,transcript_cache_id,transcript_hash,
                             evaluation_fingerprint,fingerprint_version,fingerprint_components,
                             run_kind,pair_id,primary_run_id,llm_provider,model,model_config_hash,prompt_hash,
                             output_schema_hash,output_schema_version,criteria_hash,
@@ -444,9 +497,9 @@ def save_evaluation_run(*, run_id: str, call_id: int, direction_id: int,
                             per_criterion,payload,error_code,error_message,latency_ms,input_tokens,
                             output_tokens,cache_read_tokens,cache_write_tokens,estimated_cost,
                             started_at,completed_at)
-                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'anthropic',%s,%s,%s,%s,%s,%s,
-                                 %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                    (str(run_id), int(call_id), int(direction_id), transcript_cache_id,
+                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'anthropic',%s,%s,%s,%s,%s,%s,
+                                 %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (str(run_id), subject_kind, int(call_id), int(direction_id), transcript_cache_id,
                      transcript_hash, evaluation_fingerprint,
                      int(fingerprint_components.get("fingerprint_version") or 1),
                      Json(fingerprint_components), run_kind, pair_id, primary_run_id,
@@ -461,6 +514,7 @@ def save_evaluation_run(*, run_id: str, call_id: int, direction_id: int,
                 )
                 _insert_retrieval_trace(
                     cur, trace=trace, evaluation_run_id=str(run_id), call_id=int(call_id),
+                    subject_kind=subject_kind,
                     direction_id=int(direction_id), knowledge_snapshot_id=knowledge_snapshot_id,
                     transcript_hash=transcript_hash, fallback_config=retrieval_config or {},
                     completed_at=completed_at, evaluation_succeeded=status == "succeeded",
@@ -477,7 +531,8 @@ def save_evaluation_run(*, run_id: str, call_id: int, direction_id: int,
 def _insert_retrieval_trace(cur, *, trace: dict, evaluation_run_id: str, call_id: int,
                             direction_id: int, knowledge_snapshot_id,
                             transcript_hash: str, fallback_config: dict,
-                            completed_at: datetime, evaluation_succeeded: bool):
+                            completed_at: datetime, evaluation_succeeded: bool,
+                            subject_kind: str = config.SUBJECT_CALL):
     cfg = trace.get("config") or fallback_config or {}
     candidates = trace.get("candidates") or []
     latency_ms = max(0, int(trace.get("latency_ms") or 0))
@@ -495,12 +550,13 @@ def _insert_retrieval_trace(cur, *, trace: dict, evaluation_run_id: str, call_id
                                "chunks": query_manifest.get("chunks") or []})
     cur.execute(
         """INSERT INTO qa_retrieval_runs
-               (id,evaluation_run_id,call_id,direction_id,criterion_id,
+               (id,evaluation_run_id,subject_kind,call_id,direction_id,criterion_id,
                 knowledge_snapshot_id,retrieval_config,retrieval_config_hash,
                 query_hash,query_manifest,status,error_code,error_message,latency_ms,
                 candidate_count,included_count,started_at,completed_at)
-             VALUES (%s,%s,%s,%s,NULL,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-        (retrieval_id, evaluation_run_id, call_id, direction_id, knowledge_snapshot_id,
+             VALUES (%s,%s,%s,%s,%s,NULL,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+        (retrieval_id, evaluation_run_id, subject_kind, call_id, direction_id,
+         knowledge_snapshot_id,
          Json(cfg), content_hash(cfg), query_hash, Json(query_manifest), status,
          "retrieval_degraded" if trace_status == "degraded" else None,
          "; ".join(str(item) for item in errors)[:2000] if errors else None,

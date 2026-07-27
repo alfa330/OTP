@@ -4175,6 +4175,22 @@ def _ai_qa_direction_scope(requester_id):
         return []
 
 
+def _ai_qa_subject_kind(value, *, default=None):
+    """Тип субъекта оценки из запроса: 'call' (звонок) или 'wz_episode' (эпизод чата).
+
+    Пустое значение = звонок (обратная совместимость со старым фронтендом);
+    'all'/'any' — без фильтра (только для списков)."""
+    raw = str(value or '').strip().lower()
+    if not raw:
+        return default
+    if raw in ('all', 'any'):
+        return None
+    from call_qa import config as _qa_config
+    if raw not in _qa_config.SUBJECT_KINDS:
+        raise ValueError(f"неизвестный тип субъекта оценки: {raw}")
+    return raw
+
+
 @app.route('/api/ai-qa/review-queue', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_ai_qa_review_queue():
@@ -4188,9 +4204,11 @@ def api_ai_qa_review_queue():
         scope = _ai_qa_direction_scope(requester_id)
         limit = int(request.args.get('limit', 30))
         offset = int(request.args.get('offset', 0))
-        items = review_queue_list(limit=limit, offset=offset, allowed_direction_ids=scope)
-        total = review_queue_count(allowed_direction_ids=scope)
-        return jsonify({"status": "success", "items": items,
+        subject = _ai_qa_subject_kind(request.args.get('subject'))
+        items = review_queue_list(limit=limit, offset=offset, allowed_direction_ids=scope,
+                                  subject_kind=subject)
+        total = review_queue_count(allowed_direction_ids=scope, subject_kind=subject)
+        return jsonify({"status": "success", "items": items, "subject": subject,
                         "total": total, "limit": limit, "offset": offset}), 200
     except Exception as error:
         logging.exception("ai-qa review-queue failed")
@@ -4208,18 +4226,23 @@ def api_ai_qa_call(call_id):
     try:
         scope = _ai_qa_direction_scope(requester_id)
         refresh = str(request.args.get('refresh', '')).lower() in ('1', 'true', 'yes')
-        if str(request.args.get('source', '')).lower() == 'binotel':
-            if scope is not None:
-                # У Binotel-звонков нет направления — СВ работает только со своими направлениями.
-                return jsonify({"error": "forbidden"}), 403
-            from call_qa.api import binotel_review_payload
-            return jsonify({"status": "success", "call": binotel_review_payload(call_id, refresh=refresh)}), 200
+        from call_qa import config as _qa_config
+        from call_qa import subjects as _qa_subjects
+        subject = _ai_qa_subject_kind(request.args.get('subject'),
+                                      default=_qa_config.SUBJECT_CALL)
         from call_qa.api import call_in_scope, review_payload
-        if not call_in_scope(call_id, scope):
-            return jsonify({"error": "звонок вне ваших направлений"}), 403
-        return jsonify({"status": "success", "call": review_payload(call_id, refresh=refresh)}), 200
+        if not call_in_scope(call_id, scope, subject):
+            return jsonify({"error": "субъект вне ваших направлений"}), 403
+        return jsonify({"status": "success",
+                        "call": review_payload(call_id, refresh=refresh,
+                                               subject_kind=subject)}), 200
+    except _qa_subjects.SubjectNotEvaluable as error:
+        # Оценить нельзя по существу (в эпизоде отвечали несколько операторов и т.п.):
+        # это не ошибка сервера, а причина, которую надо показать проверяющему.
+        return jsonify({"error": str(error), "reason": error.reason,
+                        "detail": error.detail}), 409
     except ValueError as error:
-        # Ожидаемое («звонок не найден» / «нет записи») — с текстом; это не сбой сервера.
+        # Ожидаемое («не найден» / «нет записи») — с текстом; это не сбой сервера.
         return jsonify({"error": str(error)}), 404
     except Exception:
         logging.exception("ai-qa call %s failed", call_id)
@@ -4240,14 +4263,18 @@ def api_ai_qa_adjudicate():
         if not isinstance(body, dict):
             raise ValueError("тело запроса должно быть JSON-объектом")
         scope = _ai_qa_direction_scope(requester_id)
-        if scope is not None and not call_in_scope(body.get('call_id'), scope):
-            return jsonify({"error": "звонок вне ваших направлений"}), 403
+        from call_qa import config as _qa_config
+        subject = _ai_qa_subject_kind(body.get('subject_kind') or body.get('subject'),
+                                      default=_qa_config.SUBJECT_CALL)
+        if scope is not None and not call_in_scope(body.get('call_id'), scope, subject):
+            return jsonify({"error": "субъект вне ваших направлений"}), 403
         saved = save_adjudications(
             body.get('call_id'), body.get('direction_id'), body.get('items', []),
             reviewer_id=requester_id,
             evaluation_run_id=body.get('evaluation_run_id'),
             scale_revision_id=body.get('scale_revision_id'),
-            evaluation_fingerprint=body.get('evaluation_fingerprint'))
+            evaluation_fingerprint=body.get('evaluation_fingerprint'),
+            subject_kind=subject)
         return jsonify({"status": "success", "saved": saved}), 200
     except ValueError as error:
         return jsonify({"error": str(error)}), 400
@@ -4460,6 +4487,49 @@ def api_ai_qa_random_call():
         return jsonify({"error": "внутренняя ошибка ИИ-оценки (детали в логах сервера)"}), 500
 
 
+@app.route('/api/ai-qa/random-chat', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_random_chat():
+    """Случайный эпизод переписки Верификаторов, пригодный для оценки ИИ."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        from call_qa.api import random_chat_episode
+        scope = _ai_qa_direction_scope(requester_id)
+        return jsonify({"status": "success",
+                        "call": random_chat_episode(allowed_direction_ids=scope)}), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 404
+    except Exception:
+        logging.exception("ai-qa random-chat failed")
+        return jsonify({"error": "внутренняя ошибка ИИ-оценки (детали в логах сервера)"}), 500
+
+
+@app.route('/api/ai-qa/chat-overview', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_chat_overview():
+    """Сколько эпизодов чатов пригодно к оценке и сколько отсекает порог атрибуции.
+
+    Нужно, чтобы порог «≥90% ответов одного оператора» не выглядел как «оценок
+    почему-то нет»: видно, что чаты есть, но в них отвечали несколько человек."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        from call_qa.api import chat_eligibility_overview
+        scope = _ai_qa_direction_scope(requester_id)
+        return jsonify({"status": "success",
+                        **chat_eligibility_overview(allowed_direction_ids=scope)}), 200
+    except Exception:
+        logging.exception("ai-qa chat-overview failed")
+        return jsonify({"error": "не удалось получить сводку по чатам"}), 500
+
+
 @app.route('/api/ai-qa/random-binotel-call', methods=['POST', 'OPTIONS'])
 @require_api_key
 def api_ai_qa_random_binotel_call():
@@ -4499,9 +4569,11 @@ def api_ai_qa_evaluations():
         scope = _ai_qa_direction_scope(requester_id)
         limit = int(request.args.get('limit', 50))
         offset = int(request.args.get('offset', 0))
-        items = evaluations_list(limit=limit, offset=offset, allowed_direction_ids=scope)
-        total = evaluations_count(allowed_direction_ids=scope)
-        return jsonify({"status": "success", "items": items,
+        subject = _ai_qa_subject_kind(request.args.get('subject'))
+        items = evaluations_list(limit=limit, offset=offset, allowed_direction_ids=scope,
+                                 subject_kind=subject)
+        total = evaluations_count(allowed_direction_ids=scope, subject_kind=subject)
+        return jsonify({"status": "success", "items": items, "subject": subject,
                         "total": total, "limit": limit, "offset": offset}), 200
     except Exception as error:
         logging.exception("ai-qa evaluations failed")

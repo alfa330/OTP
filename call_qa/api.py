@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from psycopg2.extras import Json
 
 from . import config
+from . import subjects as subjects_mod
 from .asr import soniox
 from .evaluation import criteria as criteria_mod
 from .evaluation import criterion_config as cc
@@ -47,8 +48,12 @@ def _scoped_op_family(cur, allowed_direction_ids) -> list[int]:
     return [i for i in family if i in allowed]
 
 
-def call_in_scope(call_id, allowed_direction_ids) -> bool:
-    """Принадлежит ли звонок направлениям скоупа (по каноническому id направления)."""
+def call_in_scope(call_id, allowed_direction_ids,
+                  subject_kind: str = config.SUBJECT_CALL) -> bool:
+    """Принадлежит ли субъект направлениям скоупа (по каноническому id направления).
+
+    У эпизода чата своего направления нет — оно берётся у оператора, которому
+    эпизод атрибутирован (так же, как в человеческой оценке «Случайного чата»)."""
     if allowed_direction_ids is None:
         return True
     try:
@@ -58,14 +63,21 @@ def call_in_scope(call_id, allowed_direction_ids) -> bool:
     allowed = {int(x) for x in allowed_direction_ids}
     if not allowed:
         return False
+    if subject_kind == config.SUBJECT_WZ_EPISODE:
+        sql = """SELECT COALESCE(d.canonical_id, d.id)
+                   FROM wazzup_episodes e
+                   LEFT JOIN users u ON u.id = e.operator_user_id
+                   LEFT JOIN directions d ON d.id = u.direction_id
+                  WHERE e.id = %s"""
+    else:
+        sql = """SELECT COALESCE(d.canonical_id, d.id)
+                   FROM calls c
+                   LEFT JOIN directions d ON d.id = c.direction_id
+                  WHERE c.id = %s"""
     conn = config.connect_ro()
     try:
         cur = conn.cursor()
-        cur.execute(
-            """SELECT COALESCE(d.canonical_id, d.id)
-                 FROM calls c
-                 LEFT JOIN directions d ON d.id = c.direction_id
-                WHERE c.id = %s""", (int(call_id),))
+        cur.execute(sql, (int(call_id),))
         row = cur.fetchone(); cur.close()
     finally:
         conn.close()
@@ -97,8 +109,28 @@ def direction_in_scope(direction_id, allowed_direction_ids) -> bool:
 
 _QUEUE_FETCH_CAP = 3000  # верх глобальной сортировки по критичности до постраничной нарезки
 
+# Один субъект оценки на строку кэша: звонок ИЛИ эпизод чата. Соединения
+# намеренно LEFT + условие по subject_kind — INNER JOIN calls прятал бы эпизоды,
+# а при совпадении числовых id подставлял бы чужого оператора и направление.
+_SUBJECT_JOIN = """
+                 LEFT JOIN calls c
+                        ON rc.subject_kind = 'call' AND c.id = rc.call_id
+                 LEFT JOIN wazzup_episodes e
+                        ON rc.subject_kind = 'wz_episode' AND e.id = rc.call_id
+                 LEFT JOIN users uc ON uc.id = c.operator_id
+                 LEFT JOIN users ue ON ue.id = e.operator_user_id
+                 LEFT JOIN directions d
+                        ON d.id = COALESCE(c.direction_id, ue.direction_id)
+"""
+_SUBJECT_EXISTS = " AND (c.id IS NOT NULL OR e.id IS NOT NULL)"
+_SUBJECT_DIRECTION = "COALESCE(c.direction_id, ue.direction_id)"
+_SUBJECT_OPERATOR = "COALESCE(uc.name, ue.name)"
+_SUBJECT_DATETIME = ("COALESCE(TO_CHAR(c.created_at,'DD.MM HH24:MI'),"
+                     " TO_CHAR(e.ended_at AT TIME ZONE 'Asia/Almaty','DD.MM HH24:MI'))")
 
-def review_queue_list(limit: int = 30, offset: int = 0, allowed_direction_ids=None) -> list[dict]:
+
+def review_queue_list(limit: int = 30, offset: int = 0, allowed_direction_ids=None,
+                      subject_kind=None) -> list[dict]:
     """Очередь ревью: ИИ-оценённые звонки (текущий тег модели), которые человек ещё не
     проверял. Причины считаются из сохранённой карточки; сортировка — сначала критичное,
     внутри — свежее; постранично (limit/offset) поверх глобального порядка. stale=True —
@@ -118,35 +150,42 @@ def review_queue_list(limit: int = 30, offset: int = 0, allowed_direction_ids=No
             if not family:
                 cur.close(); conn.close()
                 return []
-            scope_sql, scope_params = " AND c.direction_id = ANY(%s)", (family,)
+            scope_sql = f" AND {_SUBJECT_DIRECTION} = ANY(%s)"
+            scope_params = (family,)
+        kind_sql, kind_params = "", ()
+        if subject_kind:
+            kind_sql, kind_params = " AND rc.subject_kind = %s", (subjects_mod.normalise_kind(subject_kind),)
         cur.execute(
-            """SELECT rc.call_id, d.name, u.name, TO_CHAR(c.created_at,'DD.MM HH24:MI'), c.score,
+            f"""SELECT rc.call_id, d.name, {_SUBJECT_OPERATOR}, {_SUBJECT_DATETIME}, c.score,
                       rc.payload->'criteria', rc.payload->'asr_mean_conf', rc.created_at,
-                      c.direction_id, run.evaluation_fingerprint::text, run.fingerprint_components
-                 FROM ai_review_cache rc
-                 JOIN calls c ON c.id = rc.call_id
-                 LEFT JOIN directions d ON c.direction_id = d.id
-                 LEFT JOIN users u ON c.operator_id = u.id
-                 LEFT JOIN ai_evaluation_meta m ON m.call_id = rc.call_id AND m.model = rc.model
+                      {_SUBJECT_DIRECTION}, run.evaluation_fingerprint::text,
+                      run.fingerprint_components, rc.subject_kind, rc.payload->'media'
+                 FROM ai_review_cache rc""" + _SUBJECT_JOIN + """
+                 LEFT JOIN ai_evaluation_meta m
+                        ON m.subject_kind = rc.subject_kind AND m.call_id = rc.call_id
+                           AND m.model = rc.model
                  LEFT JOIN LATERAL (
                      SELECT r.evaluation_fingerprint, r.fingerprint_components
                        FROM ai_evaluation_runs r
-                      WHERE r.call_id = rc.call_id AND r.status = 'succeeded'
+                      WHERE r.subject_kind = rc.subject_kind AND r.call_id = rc.call_id
+                        AND r.status = 'succeeded'
                         AND r.run_kind IN ('standard','force','batch')
                       ORDER BY r.created_at DESC, r.id::text DESC
                       LIMIT 1
                  ) run ON true
-                WHERE rc.model = %s AND m.review_outcome IS NULL""" + scope_sql + """
+                WHERE rc.model = %s AND m.review_outcome IS NULL"""
+            + _SUBJECT_EXISTS + scope_sql + kind_sql + """
                 ORDER BY rc.created_at DESC LIMIT %s""",
-            (config.CLAUDE_MODEL, *scope_params, _QUEUE_FETCH_CAP),
+            (config.CLAUDE_MODEL, *scope_params, *kind_params, _QUEUE_FETCH_CAP),
         )
         rows = cur.fetchall(); cur.close(); conn.close()
         prio = review_queue.REASON_PRIORITY
         items = []
         for r in rows:
-            reasons = review_queue.review_reasons(r[5] or [], r[6])
+            reasons = review_queue.review_reasons(r[5] or [], r[6], r[12] or {})
             items.append({"id": r[0], "direction": r[1], "operator": r[2] or "—",
                           "datetime": r[3], "human_score": r[4], "reasons": reasons or ["ok"],
+                          "subject": r[11] or config.SUBJECT_CALL,
                           "_sev": min((prio.index(x) for x in reasons), default=len(prio)),
                           "_ts": r[7], "_direction_id": r[8],
                           "_run_fp": r[9], "_run_components": r[10]})
@@ -171,8 +210,8 @@ def review_queue_list(limit: int = 30, offset: int = 0, allowed_direction_ids=No
                 pass
 
 
-def review_queue_count(allowed_direction_ids=None) -> int:
-    """Сколько всего звонков в очереди ревью (не проверены человеком) — для пагинации."""
+def review_queue_count(allowed_direction_ids=None, subject_kind=None) -> int:
+    """Сколько всего субъектов в очереди ревью (не проверены человеком) — для пагинации."""
     conn = None
     try:
         conn = config.connect_ro()
@@ -183,13 +222,19 @@ def review_queue_count(allowed_direction_ids=None) -> int:
             if not family:
                 cur.close(); conn.close()
                 return 0
-            scope_sql, scope_params = " AND c.direction_id = ANY(%s)", (family,)
+            scope_sql = f" AND {_SUBJECT_DIRECTION} = ANY(%s)"
+            scope_params = (family,)
+        kind_sql, kind_params = "", ()
+        if subject_kind:
+            kind_sql, kind_params = " AND rc.subject_kind = %s", (subjects_mod.normalise_kind(subject_kind),)
         cur.execute(
-            """SELECT COUNT(*) FROM ai_review_cache rc
-                 JOIN calls c ON c.id = rc.call_id
-                 LEFT JOIN ai_evaluation_meta m ON m.call_id = rc.call_id AND m.model = rc.model
-                WHERE rc.model = %s AND m.review_outcome IS NULL""" + scope_sql,
-            (config.CLAUDE_MODEL, *scope_params))
+            """SELECT COUNT(*) FROM ai_review_cache rc""" + _SUBJECT_JOIN + """
+                 LEFT JOIN ai_evaluation_meta m
+                        ON m.subject_kind = rc.subject_kind AND m.call_id = rc.call_id
+                           AND m.model = rc.model
+                WHERE rc.model = %s AND m.review_outcome IS NULL"""
+            + _SUBJECT_EXISTS + scope_sql + kind_sql,
+            (config.CLAUDE_MODEL, *scope_params, *kind_params))
         n = cur.fetchone()[0]; cur.close(); conn.close()
         return int(n or 0)
     except Exception as exc:
@@ -281,7 +326,8 @@ def _flag_stale_evaluations(items: list[dict]) -> None:
                 item["stale"] = None
                 continue
             # тот же канонический id, что использует _evaluate_and_cache при открытии
-            bucket = _canary_bucket(int(ctx["direction"]["id"]), item["id"])
+            bucket = _canary_bucket(int(ctx["direction"]["id"]), item["id"],
+                                    item.get("subject") or config.SUBJECT_CALL)
             use_rag = ctx["mode"] == "active" or (
                 ctx["mode"] == "canary"
                 and bucket < max(0, min(100, ctx["canary_percent"])))
@@ -419,12 +465,23 @@ def _bind_rollout_approval(gates: dict, approval: dict) -> dict:
     return approval
 
 
-def _canary_bucket(direction_id: int, call_id: int) -> int:
-    """Детерминированная канарейка звонка: одна формула для оценки и очереди ревью."""
-    return int(content_hash({"call_id": int(call_id), "direction_id": int(direction_id)})[:8], 16) % 100
+def _canary_bucket(direction_id: int, call_id: int,
+                   subject_kind: str = config.SUBJECT_CALL) -> int:
+    """Детерминированная канарейка субъекта: одна формула для оценки и очереди ревью.
+
+    Для звонков формула не меняется (иначе уже назначенные звонки перескочили бы
+    между RAG-on и RAG-off на живом канареечном направлении); у других типов
+    субъекта тип входит в хэш, потому что id пересекаются."""
+    if subject_kind == config.SUBJECT_CALL:
+        payload = {"call_id": int(call_id), "direction_id": int(direction_id)}
+    else:
+        payload = {"subject_kind": str(subject_kind), "subject_id": int(call_id),
+                   "direction_id": int(direction_id)}
+    return int(content_hash(payload)[:8], 16) % 100
 
 
-def _rag_rollout(direction_id: int, call_id: int) -> dict:
+def _rag_rollout(direction_id: int, call_id: int,
+                 subject_kind: str = config.SUBJECT_CALL) -> dict:
     """Resolve DB-controlled rollout with a deterministic canary assignment."""
     mode, percent, source = config.RAG_MODE, config.RAG_CANARY_PERCENT, "environment"
     try:
@@ -468,7 +525,7 @@ def _rag_rollout(direction_id: int, call_id: int) -> dict:
             logging.warning("ai-qa: rollout for direction %s forced to shadow: %s",
                             direction_id, approval["reason"])
             mode, percent, source = "shadow", 0, "database-safe-fallback"
-    bucket = _canary_bucket(direction_id, call_id)
+    bucket = _canary_bucket(direction_id, call_id, subject_kind)
     selected = mode == "active" or (mode == "canary" and bucket < max(0, min(100, percent)))
     return {"mode": mode, "canary_percent": percent, "canary_bucket": bucket,
             "rag_enabled": selected, "shadow_enabled": mode == "shadow",
@@ -613,18 +670,34 @@ def _attach_human_review(payload: dict) -> dict:
     """Дописывает в карточку пер-критерийную оценку супервайзера (calls.scores /
     calls.criterion_comments) и свежий итоговый балл. Всегда читается из БД на момент
     запроса и НЕ попадает в immutable-кэш: человеческая оценка живёт независимо от
-    прогонов ИИ (супервайзер мог оценить звонок позже). Ошибки не роняют карточку."""
+    прогонов ИИ (супервайзер мог оценить звонок позже). Ошибки не роняют карточку.
+
+    У эпизода чата id субъекта — это НЕ calls.id: человеческая оценка эпизода —
+    обычная строка calls, привязанная через снапшот переписки
+    (calls.c2d_snapshot_id -> c2d_chat_snapshots с source='wazzup'). Читать calls
+    по id эпизода нельзя: это чужой звонок."""
     criteria = payload.get("criteria") or []
     call_id = payload.get("id")
+    subject_kind = payload.get("subject_kind") or config.SUBJECT_CALL
     if not call_id or not criteria:
         return payload
     scores, comments, human_score = None, None, payload.get("human_score")
+    if subject_kind == config.SUBJECT_WZ_EPISODE:
+        sql = """SELECT c.scores, c.criterion_comments, c.score
+                   FROM wazzup_episodes e
+                   JOIN c2d_chat_snapshots s
+                     ON s.source = 'wazzup' AND s.wz_channel_id = e.channel_id
+                        AND s.wz_chat_id = e.chat_id AND s.episode_start = e.started_at
+                   JOIN calls c ON c.c2d_snapshot_id = s.id
+                  WHERE e.id = %s AND COALESCE(c.is_draft, FALSE) = FALSE
+                  ORDER BY c.created_at DESC LIMIT 1"""
+    else:
+        sql = "SELECT scores, criterion_comments, score FROM calls WHERE id = %s"
     try:
         conn = config.connect_ro()
         try:
             cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
-            cur.execute("SELECT scores, criterion_comments, score FROM calls WHERE id = %s",
-                        (int(call_id),))
+            cur.execute(sql, (int(call_id),))
             row = cur.fetchone(); cur.close()
         finally:
             conn.close()
@@ -633,7 +706,8 @@ def _attach_human_review(payload: dict) -> dict:
             comments = row[1] if isinstance(row[1], list) else None
             human_score = row[2]
     except Exception:
-        logging.exception("ai-qa: не удалось загрузить оценку супервайзера для звонка %s", call_id)
+        logging.exception("ai-qa: не удалось загрузить оценку супервайзера для %s %s",
+                          subject_kind, call_id)
         return payload
     for c in criteria:
         idx = c.get("idx")
@@ -722,26 +796,34 @@ def _lines_from_tokens(toks: list[dict]) -> list[dict]:
     return lines
 
 
-def _cache_get(call_id, model):
+def _payload_reasons(payload: dict) -> list[str]:
+    return review_queue.review_reasons(
+        payload.get("criteria"), payload.get("asr_mean_conf"), payload.get("media") or {})
+
+
+def _cache_get(call_id, model, subject_kind=config.SUBJECT_CALL):
     try:
         conn = config.connect_ro(); cur = conn.cursor()
-        cur.execute("SELECT payload FROM ai_review_cache WHERE call_id=%s AND model=%s", (call_id, model))
+        cur.execute("SELECT payload FROM ai_review_cache "
+                    "WHERE subject_kind=%s AND call_id=%s AND model=%s",
+                    (subject_kind, call_id, model))
         row = cur.fetchone(); cur.close(); conn.close()
         return row[0] if row else None
     except Exception:
         return None  # таблицы ещё нет
 
 
-def _cache_put(call_id, model, payload, strict=False):
+def _cache_put(call_id, model, payload, strict=False, subject_kind=config.SUBJECT_CALL):
     try:
         from psycopg2.extras import Json
         conn = config.connect_rw()
         with conn, conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO ai_review_cache (call_id, model, payload, created_at)
-                   VALUES (%s,%s,%s, now())
-                   ON CONFLICT (call_id, model) DO UPDATE SET payload=EXCLUDED.payload, created_at=now()""",
-                (call_id, model, Json(payload)))
+                """INSERT INTO ai_review_cache (subject_kind, call_id, model, payload, created_at)
+                   VALUES (%s,%s,%s,%s, now())
+                   ON CONFLICT (subject_kind, call_id, model)
+                   DO UPDATE SET payload=EXCLUDED.payload, created_at=now()""",
+                (subject_kind, call_id, model, Json(payload)))
         conn.close()
     except Exception:
         if strict:
@@ -749,68 +831,72 @@ def _cache_put(call_id, model, payload, strict=False):
         pass  # карточка ревью: best-effort (нет RW/таблицы) — просто не кэшируем
 
 
-def _meta_upsert(call_id, model, payload):
+def _meta_upsert(call_id, model, payload, subject_kind=config.SUBJECT_CALL):
     """Журнал оценки в ai_evaluation_meta: needs_review + причины из карточки.
     Новая оценка сбрасывает след ревью (переоценили → человек проверяет заново).
     Best-effort: без RW/миграции оценка важнее журнала."""
     try:
         from psycopg2.extras import Json
-        reasons = review_queue.review_reasons(payload.get("criteria"), payload.get("asr_mean_conf"))
+        reasons = _payload_reasons(payload)
         conn = config.connect_rw()
         with conn, conn.cursor() as cur:
             cur.execute(
                 """INSERT INTO ai_evaluation_meta
-                     (call_id, direction_id, model, per_criterion, asr_mean_conf, needs_review, review_reasons)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s)
-                   ON CONFLICT (call_id, model) DO UPDATE SET
+                     (subject_kind, call_id, direction_id, model, per_criterion,
+                      asr_mean_conf, needs_review, review_reasons)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                   ON CONFLICT (subject_kind, call_id, model) DO UPDATE SET
                      per_criterion=EXCLUDED.per_criterion, asr_mean_conf=EXCLUDED.asr_mean_conf,
                      needs_review=EXCLUDED.needs_review, review_reasons=EXCLUDED.review_reasons,
                      review_outcome=NULL, reviewed_by=NULL, reviewed_at=NULL, created_at=now()""",
-                (call_id, payload.get("direction_id") or 0, model,
+                (subject_kind, call_id, payload.get("direction_id") or 0, model,
                  Json(payload.get("criteria") or []), payload.get("asr_mean_conf"),
                  bool(reasons), Json(reasons)))
         conn.close()
     except Exception:
-        logging.exception("ai-qa: не удалось записать ai_evaluation_meta (call %s)", call_id)
+        logging.exception("ai-qa: не удалось записать ai_evaluation_meta (%s %s)",
+                          subject_kind, call_id)
 
 
-def _record_review_outcome(call_id, outcome, reviewer_id=None, *, payload=None, model=None):
+def _record_review_outcome(call_id, outcome, reviewer_id=None, *, payload=None, model=None,
+                           subject_kind=config.SUBJECT_CALL):
     """Фиксирует итог ревью («confirmed» — человек согласился, «adjudicated» — исправил):
-    звонок уходит из очереди. Если меты ещё нет — создаём её из immutable карточки run."""
+    субъект уходит из очереди. Если меты ещё нет — создаём её из immutable карточки run."""
     try:
         from psycopg2.extras import Json
         model = model or config.CLAUDE_MODEL
         payload = payload or {}
-        reasons = review_queue.review_reasons(payload.get("criteria"), payload.get("asr_mean_conf"))
+        reasons = _payload_reasons(payload)
         conn = config.connect_rw()
         with conn, conn.cursor() as cur:
             cur.execute(
                 """INSERT INTO ai_evaluation_meta
-                     (call_id, direction_id, model, per_criterion, asr_mean_conf,
+                     (subject_kind, call_id, direction_id, model, per_criterion, asr_mean_conf,
                       needs_review, review_reasons, review_outcome, reviewed_by, reviewed_at)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s, now())
-                   ON CONFLICT (call_id, model) DO UPDATE SET
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now())
+                   ON CONFLICT (subject_kind, call_id, model) DO UPDATE SET
                      review_outcome=EXCLUDED.review_outcome,
                      reviewed_by=EXCLUDED.reviewed_by, reviewed_at=now()""",
-                (call_id, payload.get("direction_id") or 0, model,
+                (subject_kind, call_id, payload.get("direction_id") or 0, model,
                  Json(payload.get("criteria") or []), payload.get("asr_mean_conf"),
                  bool(reasons), Json(reasons), outcome, reviewer_id))
         conn.close()
     except Exception:
-        logging.exception("ai-qa: не удалось записать итог ревью (call %s)", call_id)
+        logging.exception("ai-qa: не удалось записать итог ревью (%s %s)",
+                          subject_kind, call_id)
 
 
 def _claim_review_outcome(cur, *, call_id: int, outcome: str, reviewer_id,
-                          payload: dict, model: str) -> None:
-    """Atomically claim one human review for the latest run under the call lock."""
-    reasons = review_queue.review_reasons(
-        payload.get("criteria"), payload.get("asr_mean_conf"))
+                          payload: dict, model: str,
+                          subject_kind: str = config.SUBJECT_CALL) -> None:
+    """Atomically claim one human review for the latest run under the subject lock."""
+    reasons = _payload_reasons(payload)
     cur.execute(
         """INSERT INTO ai_evaluation_meta
-                 (call_id,direction_id,model,per_criterion,asr_mean_conf,
+                 (subject_kind,call_id,direction_id,model,per_criterion,asr_mean_conf,
                   needs_review,review_reasons,review_outcome,reviewed_by,reviewed_at)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,now())
-               ON CONFLICT (call_id,model) DO UPDATE SET
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now())
+               ON CONFLICT (subject_kind,call_id,model) DO UPDATE SET
                  direction_id=EXCLUDED.direction_id,
                  per_criterion=EXCLUDED.per_criterion,
                  asr_mean_conf=EXCLUDED.asr_mean_conf,
@@ -821,7 +907,7 @@ def _claim_review_outcome(cur, *, call_id: int, outcome: str, reviewer_id,
                  reviewed_at=now()
                WHERE ai_evaluation_meta.review_outcome IS NULL
                RETURNING id""",
-        (int(call_id), int(payload["direction_id"]), str(model),
+        (subject_kind, int(call_id), int(payload["direction_id"]), str(model),
          Json(payload.get("criteria") or []), payload.get("asr_mean_conf"),
          bool(reasons), Json(reasons), outcome, reviewer_id),
     )
@@ -830,15 +916,16 @@ def _claim_review_outcome(cur, *, call_id: int, outcome: str, reviewer_id,
 
 
 # Параллельное открытие одной карточки (двойной клик, два админа) не должно оплачивать
-# ASR+LLM дважды: тяжёлый путь сериализуется на звонок, второй запрос дожидается кэша.
+# ASR+LLM дважды: тяжёлый путь сериализуется на субъект, второй запрос дожидается кэша.
+# Ключ — пара (тип, id): у звонка и эпизода чата свои последовательности id.
 # Защита в пределах процесса; при нескольких воркерах дубль остаётся возможен, но редок.
 _inflight_guard = threading.Lock()
-_inflight: dict[int, threading.Lock] = {}
+_inflight: dict[tuple[str, int], threading.Lock] = {}
 _shadow_executor = ThreadPoolExecutor(
     max_workers=max(1, int(config.env("RAG_SHADOW_WORKERS", "2"))),
     thread_name_prefix="rag-shadow")
 _shadow_guard = threading.Lock()
-_shadow_inflight: set[tuple[int, str]] = set()
+_shadow_inflight: set[tuple[str, int, str]] = set()
 _reindex_executor = ThreadPoolExecutor(
     max_workers=max(1, int(config.env("RAG_REINDEX_WORKERS", "2"))),
     thread_name_prefix="rag-reindex")
@@ -846,13 +933,14 @@ _reindex_guard = threading.Lock()
 _reindex_inflight: set[str] = set()
 
 
-def _call_lock(call_id: int) -> threading.Lock:
+def _call_lock(call_id: int, subject_kind: str = config.SUBJECT_CALL) -> threading.Lock:
     with _inflight_guard:
-        return _inflight.setdefault(call_id, threading.Lock())
+        return _inflight.setdefault((subject_kind, int(call_id)), threading.Lock())
 
 
 def _schedule_shadow_variant(**kwargs):
-    key = (int(kwargs["call_id"]), str(kwargs["snapshot"]["content_hash"]))
+    subject_kind = kwargs.get("subject_kind") or config.SUBJECT_CALL
+    key = (subject_kind, int(kwargs["call_id"]), str(kwargs["snapshot"]["content_hash"]))
     with _shadow_guard:
         if key in _shadow_inflight:
             return
@@ -862,7 +950,8 @@ def _schedule_shadow_variant(**kwargs):
         try:
             # Cross-worker serialization and the cache re-check inside the job
             # prevent duplicate shadow spend when several users open one card.
-            with runtime_store.distributed_call_lock(kwargs["call_id"]) as lock_acquired:
+            with runtime_store.distributed_call_lock(
+                    kwargs["call_id"], subject_kind=subject_kind) as lock_acquired:
                 if not lock_acquired:
                     logging.error("ai-qa: shadow run skipped because advisory lock is unavailable")
                     return
@@ -873,45 +962,39 @@ def _schedule_shadow_variant(**kwargs):
     _shadow_executor.submit(run)
 
 
-def review_payload(call_id: int, refresh: bool = False) -> dict:
-    """Return a reproducible evaluation, independently caching ASR and LLM/RAG.
+def review_payload(call_id: int, refresh: bool = False,
+                   subject_kind: str = config.SUBJECT_CALL) -> dict:
+    """Return a reproducible evaluation, independently caching the transcript and LLM/RAG.
 
     The immutable cache key includes prompt, scale, criterion configuration,
     retrieval settings and the knowledge snapshot.  ``refresh`` creates another
     immutable run with the same fingerprint; it never overwrites audit history.
 
-    Opening a card never re-evaluates a call that already has a succeeded run:
+    Opening a card never re-evaluates a subject that already has a succeeded run:
     a fingerprint mismatch serves the latest run flagged ``_stale`` instead, and
     a fresh run is started only via ``refresh=True`` (кнопка «Переоценить») or
-    when the call has no succeeded runs at all.
+    when the subject has no succeeded runs at all.
+
+    ``subject_kind`` — 'call' (аудиозвонок) или 'wz_episode' (эпизод переписки
+    Wazzup у Верификаторов). Отличается только источник текста; шкала, отпечатки,
+    очередь ревью и разборы — общие.
     """
     call_id = int(call_id)
-    with _call_lock(call_id):
-        with runtime_store.distributed_call_lock(call_id) as lock_acquired:
+    subject_kind = subjects_mod.normalise_kind(subject_kind)
+    with _call_lock(call_id, subject_kind):
+        with runtime_store.distributed_call_lock(
+                call_id, subject_kind=subject_kind) as lock_acquired:
             if not lock_acquired:
-                raise RuntimeError("не удалось заблокировать звонок для безопасной оценки")
-            payload = _evaluate_and_cache(call_id, config.CLAUDE_MODEL, refresh)
+                raise RuntimeError("не удалось заблокировать субъект для безопасной оценки")
+            payload = _evaluate_and_cache(call_id, config.CLAUDE_MODEL, refresh,
+                                         subject_kind=subject_kind)
     # Пер-критерийная оценка супервайзера — поверх результата, вне immutable-кэша.
     return _attach_human_review(payload)
 
 
-def _evaluate_and_cache(call_id: int, model: str, refresh: bool) -> dict:
-    conn = config.connect_ro()
-    cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
-    cur.execute(
-        """SELECT c.id, c.direction_id, d.name, u.name,
-                  TO_CHAR(c.created_at,'DD.MM.YYYY, HH24:MI'), c.score, c.audio_path
-             FROM calls c
-             LEFT JOIN directions d ON c.direction_id = d.id
-             LEFT JOIN users u ON c.operator_id = u.id
-            WHERE c.id = %s""", (call_id,))
-    row = cur.fetchone(); cur.close(); conn.close()
-    if not row:
-        raise ValueError("звонок не найден")
-    direction_id, audio_path = row[1], row[6]
-    if not audio_path:
-        raise ValueError("у звонка нет записи")
-
+def _resolve_call_source(subject: dict, model: str) -> dict:
+    """Транскрипт звонка: immutable-кэш ASR, иначе GCS → Soniox → кэш."""
+    call_id, audio_path = subject["id"], subject["audio_path"]
     audio_fp = _audio_object_fingerprint(call_id, audio_path)
     asr_cfg = runtime_store.asr_config()
     asr_cfg_hash = content_hash(asr_cfg)
@@ -919,7 +1002,8 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool) -> dict:
     try:
         transcript_record = runtime_store.get_transcript(
             call_id=call_id, audio_fingerprint_value=audio_fp, asr_provider="soniox",
-            asr_model=config.SONIOX_MODEL, asr_config_hash=asr_cfg_hash)
+            asr_model=config.SONIOX_MODEL, asr_config_hash=asr_cfg_hash,
+            subject_kind=config.SUBJECT_CALL)
     except runtime_store.RuntimeSchemaUnavailable:
         if config.RAG_TRACE_REQUIRED:
             raise RuntimeError("схема immutable ASR/evaluation cache не применена")
@@ -935,7 +1019,7 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool) -> dict:
     else:
         # Rolling-deploy migration path: reuse the old embedded ASR artifact once,
         # then write it into the dedicated immutable transcript cache.
-        legacy = _cache_get(call_id, model)
+        legacy = _cache_get(call_id, model, config.SUBJECT_CALL)
         legacy_asm = (legacy or {}).get("_asm") if (legacy or {}).get("_audio_path") == audio_path else None
         if legacy_asm and legacy_asm.get("text"):
             asm = legacy_asm
@@ -960,11 +1044,109 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool) -> dict:
                 transcript_hash=transcript_hash, text=asm["text"], segments=lines,
                 tokens=tokens, payload={"asr_config": asr_cfg},
                 languages=asm.get("languages"), mean_conf=asm.get("mean_conf"),
-                low_conf_spans=asm.get("low_conf_spans"), duration_ms=duration_ms)
+                low_conf_spans=asm.get("low_conf_spans"), duration_ms=duration_ms,
+                subject_kind=config.SUBJECT_CALL)
         except runtime_store.RuntimeSchemaUnavailable:
             if config.RAG_TRACE_REQUIRED:
                 raise RuntimeError("не удалось сохранить immutable ASR artifact")
             transcript_cache_id = None
+    return {"asm": asm, "lines": lines, "transcript_cache_id": transcript_cache_id,
+            "transcript_hash": transcript_hash, "source_identity": audio_fp,
+            "source_model": config.SONIOX_MODEL, "source_config": asr_cfg,
+            "extra": {}}
+
+
+def _resolve_wz_episode_source(subject: dict, model: str) -> dict:
+    """Транскрипт эпизода чата: заглушки вложений заменяются их содержанием.
+
+    Расшифровки картинок/голосовых входят в идентичность транскрипта, поэтому
+    появление описания даёт НОВЫЙ прогон, а не тихо переиспользованный кэш.
+    Когда сырые сообщения уже удалил 45-дневный ретеншн, переиспользуется ранее
+    заморожённый транскрипт (он богаче заглушек эпизода)."""
+    episode_id = subject["id"]
+    prepared = subjects_mod.prepare_wz_transcript(subject)
+    source_identity = prepared["source_identity"]
+    cfg, cfg_hash = prepared["source_config"], prepared["source_config_hash"]
+    transcript_record = None
+    try:
+        transcript_record = runtime_store.get_transcript(
+            call_id=episode_id, audio_fingerprint_value=source_identity,
+            asr_provider=prepared["provider"], asr_model=prepared["model"],
+            asr_config_hash=cfg_hash, subject_kind=config.SUBJECT_WZ_EPISODE)
+        if transcript_record is None and prepared["media_source"] == "expired":
+            transcript_record = runtime_store.get_latest_transcript(
+                call_id=episode_id, subject_kind=config.SUBJECT_WZ_EPISODE,
+                asr_provider=prepared["provider"])
+    except runtime_store.RuntimeSchemaUnavailable:
+        if config.RAG_TRACE_REQUIRED:
+            raise RuntimeError("схема immutable ASR/evaluation cache не применена")
+
+    if transcript_record:
+        text = transcript_record["text"]
+        lines = transcript_record.get("segments") or []
+        transcript_cache_id = transcript_record["id"]
+        transcript_hash = transcript_record["transcript_hash"]
+        stored = transcript_record.get("payload") or {}
+        media_source = stored.get("media_source") or prepared["media_source"]
+        media_stats = stored.get("media_stats") or prepared["media_stats"]
+        source_identity = stored.get("source_identity") or source_identity
+        cfg = stored.get("source_config") or cfg
+    else:
+        text, lines = prepared["text"], prepared["lines"]
+        media_source, media_stats = prepared["media_source"], prepared["media_stats"]
+        transcript_hash = content_hash(text)
+        try:
+            transcript_cache_id = runtime_store.put_transcript(
+                call_id=episode_id, audio_fingerprint_value=source_identity,
+                asr_provider=prepared["provider"], asr_model=prepared["model"],
+                asr_config_hash=cfg_hash, transcript_hash=transcript_hash, text=text,
+                segments=lines, tokens=None,
+                payload={"source_config": cfg, "media_source": media_source,
+                         "media_stats": media_stats, "source_identity": source_identity},
+                languages=None, mean_conf=None, low_conf_spans=None, duration_ms=None,
+                subject_kind=config.SUBJECT_WZ_EPISODE)
+        except runtime_store.RuntimeSchemaUnavailable:
+            if config.RAG_TRACE_REQUIRED:
+                raise RuntimeError("не удалось сохранить immutable транскрипт эпизода")
+            transcript_cache_id = None
+
+    asm = {"text": text, "languages": {}, "mean_conf": None, "low_conf_spans": []}
+    return {"asm": asm, "lines": lines, "transcript_cache_id": transcript_cache_id,
+            "transcript_hash": transcript_hash, "source_identity": source_identity,
+            "source_model": prepared["model"], "source_config": cfg,
+            "extra": {"media": dict(media_stats, source=media_source),
+                      "chat": {"channel_id": subject["channel_id"],
+                               "chat_id": subject["chat_id"],
+                               "chat_type": subject.get("chat_type"),
+                               "contact_name": subject.get("contact_name"),
+                               "contact_phone": subject.get("contact_phone"),
+                               "started_at": subject["started_at"].isoformat(),
+                               "ended_at": subject["ended_at"].isoformat(),
+                               "messages_count": subject.get("messages_count"),
+                               "inbound_count": subject.get("inbound_count"),
+                               "operator_share": subject.get("operator_share"),
+                               "human_outbound_count": subject.get("human_outbound_count"),
+                               "force_closed": subject.get("force_closed"),
+                               "authors": subject.get("authors") or []}}}
+
+
+_SOURCE_RESOLVERS = {config.SUBJECT_CALL: _resolve_call_source,
+                     config.SUBJECT_WZ_EPISODE: _resolve_wz_episode_source}
+
+
+def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
+                        subject_kind: str = config.SUBJECT_CALL) -> dict:
+    """Общий хвост оценки для любого субъекта: шкала → знания → отпечаток →
+    кэш/переоценка → прогон модели → immutable-запись → карточка."""
+    subject = subjects_mod.load(subject_kind, call_id)
+    subjects_mod.require_evaluable(subject)
+    direction_id = subject["direction_id"]
+    if direction_id is None:
+        raise ValueError("у субъекта нет направления — нет мониторинговой шкалы")
+    source = _SOURCE_RESOLVERS[subject_kind](subject, model)
+    asm, lines = source["asm"], source["lines"]
+    transcript_cache_id = source["transcript_cache_id"]
+    transcript_hash = source["transcript_hash"]
 
     direction = criteria_mod.load_direction(direction_id)
     cc.apply_to_direction(direction)
@@ -981,19 +1163,21 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool) -> dict:
         knowledge_conn.close()
     scale_revision_id = knowledge_ctx["scale_revision_id"]
     snapshot = knowledge_ctx["snapshot"]
-    rollout = _rag_rollout(direction_id, call_id)
+    rollout = _rag_rollout(direction_id, call_id, subject_kind)
     primary_use_rag = bool(rollout["rag_enabled"])
     transcript_identity = transcript_fingerprint(
-        audio_fingerprint=audio_fp, asr_model=config.SONIOX_MODEL,
-        asr_config=asr_cfg, transcript=asm["text"])
+        audio_fingerprint=source["source_identity"], asr_model=source["source_model"],
+        asr_config=source["source_config"], transcript=asm["text"])
     fingerprint, fingerprint_components, retrieval_cfg = _evaluation_identity(
         transcript_hash=transcript_identity, direction=direction,
         knowledge_snapshot=snapshot, use_rag=primary_use_rag)
+    audio_path = subject.get("audio_path")
 
     if not refresh:
         try:
             cached_run = runtime_store.get_cached_evaluation(
-                call_id=call_id, evaluation_fingerprint=fingerprint)
+                call_id=call_id, evaluation_fingerprint=fingerprint,
+                subject_kind=subject_kind)
         except runtime_store.RuntimeSchemaUnavailable:
             cached_run = None
             if config.RAG_TRACE_REQUIRED:
@@ -1007,12 +1191,13 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool) -> dict:
                 cached_run = None
         if not cached_run:
             # Сохранённая оценка не совпала с актуальной конфигурацией (или прогона
-            # под текущий fingerprint нет). Открытие карточки НЕ переоценивает звонок:
+            # под текущий fingerprint нет). Открытие карточки НЕ переоценивает субъект:
             # отдаём последний прогон с пометкой «оценка устарела», пересчёт — только
             # явной кнопкой «Переоценить» (refresh=True). Свежая оценка при открытии
-            # запускается лишь когда успешных прогонов у звонка нет вовсе.
+            # запускается лишь когда успешных прогонов у субъекта нет вовсе.
             try:
-                latest_run = runtime_store.get_latest_evaluation(call_id=call_id)
+                latest_run = runtime_store.get_latest_evaluation(
+                    call_id=call_id, subject_kind=subject_kind)
             except runtime_store.RuntimeSchemaUnavailable:
                 latest_run = None
             if latest_run:
@@ -1042,12 +1227,19 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool) -> dict:
             cached["_audio_path"] = audio_path
             cached["_cached"] = True
             cached["_stale"] = serving_stale
+            cached["subject_kind"] = subject_kind
             if serving_stale and isinstance(cached.get("evaluation"), dict):
                 cached["evaluation"]["stale"] = True
             cached["audio_url"] = _signed_url(audio_path)
+            # Свежие данные субъекта (вложения, доля ответов, ссылки на медиа)
+            # живут вне immutable-кэша: карточка должна показывать их «на сейчас».
+            for key, value in (source.get("extra") or {}).items():
+                cached[key] = value
+            cached["eligibility"] = subjects_mod.eligibility(subject)["detail"]
             if rollout["shadow_enabled"] and not serving_stale:
                 _schedule_shadow_variant(
-                    call_id=call_id, direction_id=direction_id, direction=direction, asm=asm,
+                    call_id=call_id, subject_kind=subject_kind,
+                    direction_id=direction_id, direction=direction, asm=asm,
                     transcript_cache_id=transcript_cache_id, transcript_hash=transcript_hash,
                     transcript_identity=transcript_identity,
                     scale_revision_id=scale_revision_id, snapshot=snapshot,
@@ -1055,8 +1247,8 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool) -> dict:
                     refresh=False)
             # Keep the legacy queue projection available, but adjudication itself
             # is bound only to the immutable run metadata hydrated above.
-            if not _cache_get(call_id, model):
-                _cache_put(call_id, model, cached)
+            if not _cache_get(call_id, model, subject_kind):
+                _cache_put(call_id, model, cached, subject_kind=subject_kind)
             return cached
 
     # Пометка для ревьюера: звонок уже оценивался, но пригодного immutable-прогона
@@ -1067,10 +1259,11 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool) -> dict:
     previous_evaluation_stale = False
     if not refresh:
         try:
-            prior_fp = runtime_store.latest_evaluation_fingerprint(call_id)
+            prior_fp = runtime_store.latest_evaluation_fingerprint(call_id, subject_kind)
         except runtime_store.RuntimeSchemaUnavailable:
             prior_fp = None
-        previous_evaluation_stale = bool(prior_fp) or bool(_cache_get(call_id, model))
+        previous_evaluation_stale = (bool(prior_fp)
+                                     or bool(_cache_get(call_id, model, subject_kind)))
 
     crit_meta = {c["idx"]: c for c in direction["criteria"]}
     run_id = runtime_store.new_run_id()
@@ -1085,10 +1278,12 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool) -> dict:
         completed_at = runtime_store.now_utc()
         # The evaluator may fail after retrieval (for example at the LLM call).
         # Without a completed trace we must not classify that as a retrieval outage.
-        failure_payload = {"id": row[0], "direction_id": direction_id}
+        failure_payload = {"id": subject["id"], "direction_id": direction_id,
+                           "subject_kind": subject_kind}
         try:
             runtime_store.save_evaluation_run(
                 run_id=run_id, call_id=call_id, direction_id=direction_id,
+                subject_kind=subject_kind,
                 transcript_cache_id=transcript_cache_id, transcript_hash=transcript_hash,
                 evaluation_fingerprint=fingerprint,
                 fingerprint_components=fingerprint_components,
@@ -1121,9 +1316,11 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool) -> dict:
         })
 
     payload = {
-        "id": row[0], "direction_id": direction_id, "direction": row[2],
-        "operator": row[3] or "—", "datetime": row[4],
-        "human_score": row[5], "languages": asm["languages"], "asr_mean_conf": asm["mean_conf"] or 0,
+        "id": subject["id"], "subject_kind": subject_kind,
+        "direction_id": direction_id, "direction": subject.get("direction"),
+        "operator": subject.get("operator") or "—", "datetime": subject.get("datetime"),
+        "human_score": subject.get("human_score"),
+        "languages": asm["languages"], "asr_mean_conf": asm["mean_conf"] or 0,
         "transcript": lines, "criteria": criteria,
         "ai_score": _ai_score(direction, result),
         "_audio_path": audio_path,
@@ -1141,6 +1338,8 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool) -> dict:
     payload["evaluation"] = _evaluation_summary(
         run_id=run_id, fingerprint=fingerprint, knowledge_snapshot=snapshot,
         trace=payload["_retrieval_trace"], rollout=rollout)
+    for key, value in (source.get("extra") or {}).items():
+        payload[key] = value
 
     # Keep ASR in ai_transcript_cache.  The immutable evaluation row stores only
     # references and evaluation output; the compatibility pointer remains a
@@ -1150,6 +1349,7 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool) -> dict:
     persisted_payload.pop("_audio_path", None)
     runtime_store.save_evaluation_run(
         run_id=run_id, call_id=call_id, direction_id=direction_id,
+        subject_kind=subject_kind,
         transcript_cache_id=transcript_cache_id, transcript_hash=transcript_hash,
         evaluation_fingerprint=fingerprint, fingerprint_components=fingerprint_components,
         run_kind="force" if refresh else "standard", model=model,
@@ -1166,16 +1366,18 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool) -> dict:
 
     if rollout["shadow_enabled"]:
         _schedule_shadow_variant(
-            call_id=call_id, direction_id=direction_id, direction=direction, asm=asm,
+            call_id=call_id, subject_kind=subject_kind,
+            direction_id=direction_id, direction=direction, asm=asm,
             transcript_cache_id=transcript_cache_id, transcript_hash=transcript_hash,
             transcript_identity=transcript_identity,
             scale_revision_id=scale_revision_id, snapshot=snapshot,
             primary_run_id=run_id, pair_id=pair_id, refresh=refresh)
 
-    _cache_put(call_id, model, payload)
-    _meta_upsert(call_id, model, payload)
+    _cache_put(call_id, model, payload, subject_kind=subject_kind)
+    _meta_upsert(call_id, model, payload, subject_kind=subject_kind)
     payload["_cached"] = False
     payload["audio_url"] = _signed_url(audio_path)
+    payload["eligibility"] = subjects_mod.eligibility(subject)["detail"]
     return payload
 
 
@@ -1183,7 +1385,7 @@ def _run_shadow_variant(*, call_id: int, direction_id: int, direction: dict, asm
                         transcript_cache_id, transcript_hash: str, transcript_identity: str,
                         scale_revision_id: int,
                         snapshot: dict, primary_run_id: str, pair_id: str | None,
-                        refresh: bool):
+                        refresh: bool, subject_kind: str = config.SUBJECT_CALL):
     """Best-effort paired RAG-on run; it never changes the user-facing verdict."""
     fingerprint, components, retrieval_cfg = _evaluation_identity(
         transcript_hash=transcript_identity, direction=direction,
@@ -1192,7 +1394,7 @@ def _run_shadow_variant(*, call_id: int, direction_id: int, direction: dict, asm
         try:
             if runtime_store.get_cached_evaluation(
                     call_id=call_id, evaluation_fingerprint=fingerprint,
-                    run_kinds=("shadow",)):
+                    run_kinds=("shadow",), subject_kind=subject_kind):
                 return
         except Exception:
             pass
@@ -1204,7 +1406,7 @@ def _run_shadow_variant(*, call_id: int, direction_id: int, direction: dict, asm
             use_rag=True, knowledge_snapshot_id=snapshot["id"])
         completed = runtime_store.now_utc()
         shadow_payload = {
-            "id": call_id, "direction_id": direction_id,
+            "id": call_id, "subject_kind": subject_kind, "direction_id": direction_id,
             "criteria": result.get("per_criterion") or [],
             "overall_comment": result.get("overall_comment"),
             "_primary_run_id": primary_run_id,
@@ -1214,6 +1416,7 @@ def _run_shadow_variant(*, call_id: int, direction_id: int, direction: dict, asm
         }
         runtime_store.save_evaluation_run(
             run_id=run_id, call_id=call_id, direction_id=direction_id,
+            subject_kind=subject_kind,
             transcript_cache_id=transcript_cache_id, transcript_hash=transcript_hash,
             evaluation_fingerprint=fingerprint, fingerprint_components=components,
             run_kind="shadow", model=config.CLAUDE_MODEL,
@@ -1229,11 +1432,12 @@ def _run_shadow_variant(*, call_id: int, direction_id: int, direction: dict, asm
             pair_id=pair_id, primary_run_id=primary_run_id,
             llm_meta=result.get("_llm_meta"))
     except Exception as exc:
-        logging.exception("ai-qa: shadow RAG run failed for call %s", call_id)
+        logging.exception("ai-qa: shadow RAG run failed for %s %s", subject_kind, call_id)
         completed = runtime_store.now_utc()
         try:
             runtime_store.save_evaluation_run(
                 run_id=run_id, call_id=call_id, direction_id=direction_id,
+                subject_kind=subject_kind,
                 transcript_cache_id=transcript_cache_id, transcript_hash=transcript_hash,
                 evaluation_fingerprint=fingerprint, fingerprint_components=components,
                 run_kind="shadow", model=config.CLAUDE_MODEL,
@@ -1245,7 +1449,8 @@ def _run_shadow_variant(*, call_id: int, direction_id: int, direction: dict, asm
                 scale_revision_id=scale_revision_id, knowledge_snapshot_id=snapshot["id"],
                 knowledge_revision=snapshot["knowledge_revision"], retrieval_config=retrieval_cfg,
                 status="failed", per_criterion=[],
-                payload={"id": call_id, "_primary_run_id": primary_run_id,
+                payload={"id": call_id, "subject_kind": subject_kind,
+                         "_primary_run_id": primary_run_id,
                          "_retrieval_trace": {"status": "degraded", "errors": [str(exc)]}},
                 started_at=started, completed_at=completed,
                 pair_id=pair_id, primary_run_id=primary_run_id,
@@ -1548,6 +1753,42 @@ def _legacy_adjudications_page(*, direction=None, q=None, page=1, page_size=20) 
         conn.close()
 
 
+def _ai_qa_allowed_direction_ids() -> list[int]:
+    """Направления, доступные разделу ИИ-оценки: вся семья направлений ОП.
+
+    Раньше здесь был литеральный список [72,73,74], из-за которого «Верификатор»
+    (71) получал 400 на сохранении разбора и не появлялся в настройке RAG-rollout.
+    Теперь список выводится из отдела, поэтому новое направление ОП работает сразу."""
+    conn = config.connect_ro()
+    try:
+        with conn.cursor() as cur:
+            return config.op_direction_id_family(cur)
+    except Exception:
+        logging.exception("ai-qa: не удалось получить allowlist направлений")
+        return list(config.OP_DIRECTION_IDS)
+    finally:
+        conn.close()
+
+
+def _ai_qa_live_direction_ids() -> list[int]:
+    """Только живые (канонические) направления ОП — для админских списков."""
+    conn = config.connect_ro()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET client_encoding TO 'UTF8'")
+            cur.execute("""SELECT id FROM directions
+                            WHERE department_id=%s AND canonical_id IS NULL
+                              AND COALESCE(is_active, TRUE)""",
+                        (config.OP_DEPARTMENT_ID,))
+            ids = [int(r[0]) for r in cur.fetchall()]
+        return ids or list(config.OP_DIRECTION_IDS)
+    except Exception:
+        logging.exception("ai-qa: не удалось получить список живых направлений")
+        return list(config.OP_DIRECTION_IDS)
+    finally:
+        conn.close()
+
+
 def rag_rollout_get() -> dict:
     conn = config.connect_ro()
     try:
@@ -1559,7 +1800,7 @@ def rag_rollout_get() -> dict:
                      FROM directions d
                      LEFT JOIN qa_rag_rollout_config r ON r.direction_id=d.id
                     WHERE d.id=ANY(%s) ORDER BY d.name""",
-                (config.RAG_MODE, config.RAG_CANARY_PERCENT, config.OP_DIRECTION_IDS))
+                (config.RAG_MODE, config.RAG_CANARY_PERCENT, _ai_qa_live_direction_ids()))
             rows = cur.fetchall()
             items = []
             for row in rows:
@@ -1592,7 +1833,7 @@ def rag_rollout_set(*, direction_id: int, mode: str, canary_percent=0,
     if mode not in ("off", "shadow", "canary", "active"):
         raise ValueError("недопустимый режим RAG rollout")
     direction_id = int(direction_id)
-    if direction_id not in set(config.OP_DIRECTION_IDS):
+    if direction_id not in set(_ai_qa_allowed_direction_ids()):
         raise ValueError("направление не входит в AI QA")
     percent = max(0, min(100, int(canary_percent or 0)))
     if mode == "canary" and not (1 <= percent <= 99):
@@ -1657,17 +1898,19 @@ def rag_rollout_set(*, direction_id: int, mode: str, canary_percent=0,
         conn.close()
 
 
-def _adjudication_exists(call_id, direction_id, criterion_idx, correct_verdict) -> bool:
-    """Повторное сохранение того же разбора (звонок открыли дважды) не должно плодить
+def _adjudication_exists(call_id, direction_id, criterion_idx, correct_verdict,
+                         subject_kind=config.SUBJECT_CALL) -> bool:
+    """Повторное сохранение того же разбора (карточку открыли дважды) не должно плодить
     дубли в RAG: одинаковые прецеденты вытесняют из top-K разнообразные."""
     try:
         conn = config.connect_ro(); cur = conn.cursor()
         cur.execute(
             """SELECT 1 FROM qa_adjudications
-                WHERE call_id=%s AND direction_id=%s AND criterion_idx=%s AND correct_verdict=%s
+                WHERE subject_kind=%s AND call_id=%s AND direction_id=%s
+                  AND criterion_idx=%s AND correct_verdict=%s
                   AND is_active
                 LIMIT 1""",
-            (call_id, direction_id, criterion_idx, correct_verdict))
+            (subject_kind, call_id, direction_id, criterion_idx, correct_verdict))
         row = cur.fetchone(); cur.close(); conn.close()
         return row is not None
     except Exception:
@@ -1700,14 +1943,16 @@ def _payload_transcript_text(payload: dict) -> str:
 
 def _validated_adjudication_items(call_id, direction_id, items, *,
                                   evaluation_run_id=None, scale_revision_id=None,
-                                  evaluation_fingerprint=None) -> tuple[dict, list[dict]]:
+                                  evaluation_fingerprint=None,
+                                  subject_kind=config.SUBJECT_CALL) -> tuple[dict, list[dict]]:
     """Validate corrections against the exact immutable card shown in the UI."""
     try:
         call_id = int(call_id)
         requested_direction = int(direction_id)
         requested_scale = int(scale_revision_id)
     except (TypeError, ValueError):
-        raise ValueError("неверные call_id, direction_id или scale_revision_id")
+        raise ValueError("неверные id субъекта, direction_id или scale_revision_id")
+    subject_kind = subjects_mod.normalise_kind(subject_kind)
     if not evaluation_run_id:
         raise ValueError("evaluation_run_id обязателен; переоткройте карточку")
     if not evaluation_fingerprint:
@@ -1724,15 +1969,18 @@ def _validated_adjudication_items(call_id, direction_id, items, *,
     if source.get("review_outcome"):
         raise ValueError("эта evaluation_run уже проверена")
     if call_id != int(source["call_id"]):
-        raise ValueError("call_id не совпадает с evaluation_run")
+        raise ValueError("id субъекта не совпадает с evaluation_run")
+    run_subject_kind = source.get("subject_kind") or config.SUBJECT_CALL
+    if subject_kind != run_subject_kind:
+        raise ValueError("тип субъекта не совпадает с evaluation_run")
     if requested_direction != int(source["direction_id"]):
         raise ValueError("направление не совпадает с evaluation_run")
     if source.get("scale_revision_id") is None or requested_scale != int(source["scale_revision_id"]):
         raise ValueError("scale_revision_id не совпадает с evaluation_run")
     if str(evaluation_fingerprint) != str(source["evaluation_fingerprint"]):
         raise ValueError("evaluation_fingerprint не совпадает с evaluation_run")
-    if requested_direction not in set(config.OP_DIRECTION_IDS):
-        raise ValueError("направление звонка не разрешено для AI QA")
+    if requested_direction not in set(_ai_qa_allowed_direction_ids()):
+        raise ValueError("направление не разрешено для AI QA")
 
     transcript_record = source.get("transcript")
     if (not transcript_record or not transcript_record.get("text") or
@@ -1935,31 +2183,37 @@ def _record_rule_review_feedback(evaluation_run_id, *, corrected_criterion_ids: 
 
 def save_adjudications(call_id, direction_id, items, reviewer_id=None, *,
                        evaluation_run_id=None, scale_revision_id=None,
-                       evaluation_fingerprint=None) -> int:
+                       evaluation_fingerprint=None,
+                       subject_kind=config.SUBJECT_CALL) -> int:
     """Create verified evidence cases and indexed policy-rule drafts atomically."""
     try:
         locked_call_id = int(call_id)
     except (TypeError, ValueError):
-        raise ValueError("неверный call_id")
+        raise ValueError("неверный id субъекта")
+    subject_kind = subjects_mod.normalise_kind(subject_kind)
     # The same cross-worker lock is used by refresh/batch publication.  A run
     # therefore cannot become stale between validation and the case commit.
-    with runtime_store.distributed_call_lock(locked_call_id) as lock_acquired:
+    with runtime_store.distributed_call_lock(
+            locked_call_id, subject_kind=subject_kind) as lock_acquired:
         if not lock_acquired:
             raise RuntimeError("не удалось заблокировать evaluation_run для безопасного разбора")
         return _save_adjudications_locked(
             locked_call_id, direction_id, items, reviewer_id=reviewer_id,
             evaluation_run_id=evaluation_run_id,
             scale_revision_id=scale_revision_id,
-            evaluation_fingerprint=evaluation_fingerprint)
+            evaluation_fingerprint=evaluation_fingerprint,
+            subject_kind=subject_kind)
 
 
 def _save_adjudications_locked(call_id, direction_id, items, reviewer_id=None, *,
                                evaluation_run_id=None, scale_revision_id=None,
-                               evaluation_fingerprint=None) -> int:
+                               evaluation_fingerprint=None,
+                               subject_kind=config.SUBJECT_CALL) -> int:
     payload, validated = _validated_adjudication_items(
         call_id, direction_id, items or [], evaluation_run_id=evaluation_run_id,
         scale_revision_id=scale_revision_id,
-        evaluation_fingerprint=evaluation_fingerprint)
+        evaluation_fingerprint=evaluation_fingerprint,
+        subject_kind=subject_kind)
     authoritative_direction = int(payload["direction_id"])
     authoritative_scale_revision = int(payload["_scale_revision_id"])
     transcript = _payload_transcript_text(payload)
@@ -1999,7 +2253,8 @@ def _save_adjudications_locked(call_id, direction_id, items, reviewer_id=None, *
                 _claim_review_outcome(
                     cur, call_id=int(call_id), outcome=outcome,
                     reviewer_id=reviewer_id, payload=payload,
-                    model=payload.get("_evaluation_model") or config.CLAUDE_MODEL)
+                    model=payload.get("_evaluation_model") or config.CLAUDE_MODEL,
+                    subject_kind=subject_kind)
             for index, item in enumerate(validated):
                 start_ms, end_ms = _evidence_time_range(payload, item["excerpt"])
                 case_id = knowledge.create_adjudication_case(
@@ -2007,7 +2262,8 @@ def _save_adjudications_locked(call_id, direction_id, items, reviewer_id=None, *
                     criterion_id=item["criterion_id"], criterion_idx=item["criterion_idx"],
                     criterion_name=item["criterion_name"],
                     scale_revision_id=authoritative_scale_revision,
-                    call_id=int(call_id), evaluation_run_id=payload.get("_evaluation_run_id"),
+                    call_id=int(call_id), subject_kind=subject_kind,
+                    evaluation_run_id=payload.get("_evaluation_run_id"),
                     ai_verdict=item["ai_verdict"], correct_verdict=item["correct_verdict"],
                     evidence_excerpt=item["excerpt"], evidence_status=item["evidence_status"],
                     evidence_start_offset=item["excerpt_start"],
@@ -2116,7 +2372,7 @@ def _migrate_legacy_adjudication(legacy_id: int, actor_id=None) -> dict:
             cur.execute(
                 """SELECT direction_id,criterion_idx,criterion_name,call_id,excerpt,
                           ai_verdict,correct_verdict,reason,not_covered,situation,created_by,
-                          canonical_rule_id::text
+                          canonical_rule_id::text,subject_kind
                      FROM qa_adjudications WHERE id=%s""", (int(legacy_id),))
             row = cur.fetchone()
     finally:
@@ -2157,6 +2413,7 @@ def _migrate_legacy_adjudication(legacy_id: int, actor_id=None) -> dict:
                 conn, direction_id=direction["id"], criterion_id=criterion["criterion_id"],
                 criterion_idx=criterion["idx"], criterion_name=criterion.get("name"),
                 scale_revision_id=knowledge_ctx["scale_revision_id"], call_id=row[3],
+                subject_kind=row[12] or config.SUBJECT_CALL,
                 ai_verdict=row[5], correct_verdict=row[6], evidence_excerpt="",
                 evidence_status="no_evidence", reason=row[7], situation=situation,
                 not_covered=row[8], case_status="verified", created_by=actor_id or row[10],
@@ -2645,7 +2902,8 @@ def random_call(allowed_direction_ids=None) -> dict:
         cur.close(); conn.close()
         raise ValueError("нет оценённых звонков ОП с записью по вашим направлениям")
     cur.execute(base + """ AND NOT EXISTS (SELECT 1 FROM ai_review_cache rc
-                                            WHERE rc.call_id = c.id AND rc.model = %s)
+                                            WHERE rc.subject_kind = 'call'
+                                              AND rc.call_id = c.id AND rc.model = %s)
                            ORDER BY random() LIMIT 1""",
                 (id_family, config.CLAUDE_MODEL))
     row = cur.fetchone()
@@ -2656,10 +2914,111 @@ def random_call(allowed_direction_ids=None) -> dict:
     if not row:
         raise ValueError("нет оценённых звонков ОП с записью")
     return {"id": row[0], "direction": row[1], "operator": row[2] or "—",
-            "datetime": row[3], "human_score": row[4]}
+            "datetime": row[3], "human_score": row[4], "subject": config.SUBJECT_CALL}
 
 
-def evaluations_count(allowed_direction_ids=None) -> int:
+def random_chat_episode(allowed_direction_ids=None) -> dict:
+    """Случайный эпизод чата Верификаторов, пригодный для оценки.
+
+    Пригодный = диалог, атрибутированный одному оператору с долей ответов не
+    ниже порога (config.WZ_MIN_OPERATOR_SHARE) и достаточным числом ответов, из
+    направления Верификаторов. Сначала берём ещё не оценённые ИИ эпизоды —
+    каждый вызов даёт новый сигнал за те же деньги."""
+    conn = config.connect_ro()
+    cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+    try:
+        wz_family = subjects_mod.wz_direction_family(cur)
+        if not wz_family:
+            raise ValueError("не найдено направление Верификаторов "
+                             f"(отдел «{config.WZ_DEPARTMENT_CODE}», маркер "
+                             f"«{config.WZ_DIRECTION_MARKER}» в названии)")
+        if allowed_direction_ids is not None:
+            allowed = set(_scope_family(cur, allowed_direction_ids))
+            wz_family = [i for i in wz_family if i in allowed]
+            if not wz_family:
+                raise ValueError("чаты Верификаторов вне ваших направлений")
+        base = """SELECT e.id, d.name, u.name,
+                         TO_CHAR(e.ended_at AT TIME ZONE 'Asia/Almaty','DD.MM HH24:MI'),
+                         e.operator_share, e.human_outbound_count
+                    FROM wazzup_episodes e
+                    JOIN users u ON u.id = e.operator_user_id
+                    LEFT JOIN directions d ON d.id = u.direction_id
+                   WHERE e.kind = 'dialog' AND u.direction_id = ANY(%s)
+                     AND e.operator_share >= %s AND e.human_outbound_count >= %s"""
+        params = (wz_family, config.WZ_MIN_OPERATOR_SHARE, config.WZ_MIN_OPERATOR_MESSAGES)
+        cur.execute(base + """ AND NOT EXISTS (SELECT 1 FROM ai_review_cache rc
+                                                WHERE rc.subject_kind = 'wz_episode'
+                                                  AND rc.call_id = e.id AND rc.model = %s)
+                               ORDER BY random() LIMIT 1""",
+                    (*params, config.CLAUDE_MODEL))
+        row = cur.fetchone()
+        if not row:
+            cur.execute(base + " ORDER BY random() LIMIT 1", params)
+            row = cur.fetchone()
+    finally:
+        cur.close(); conn.close()
+    if not row:
+        raise ValueError("нет эпизодов чатов, пригодных для оценки "
+                         f"(нужна доля ответов одного оператора ≥ "
+                         f"{round(config.WZ_MIN_OPERATOR_SHARE * 100)}%)")
+    return {"id": row[0], "direction": row[1], "operator": row[2] or "—",
+            "datetime": row[3], "human_score": None,
+            "subject": config.SUBJECT_WZ_EPISODE,
+            "operator_share": row[4], "human_outbound_count": row[5]}
+
+
+def chat_eligibility_overview(allowed_direction_ids=None) -> dict:
+    """Сколько эпизодов чатов можно оценить, а сколько отсеивает порог атрибуции.
+
+    Нужно, чтобы порог 90% не выглядел «оценок почему-то нет»: видно, что чаты
+    есть, но в них отвечали несколько операторов."""
+    conn = config.connect_ro()
+    cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+    try:
+        wz_family = subjects_mod.wz_direction_family(cur)
+        if allowed_direction_ids is not None:
+            allowed = set(_scope_family(cur, allowed_direction_ids))
+            wz_family = [i for i in wz_family if i in allowed]
+        if not wz_family:
+            return {"available": False, "directions": []}
+        cur.execute(
+            """SELECT COUNT(*) AS dialogs,
+                      COUNT(*) FILTER (WHERE e.operator_user_id IS NULL) AS unattributed,
+                      COUNT(*) FILTER (WHERE e.operator_user_id IS NOT NULL
+                                         AND e.operator_share < %s) AS multi_operator,
+                      COUNT(*) FILTER (WHERE e.operator_share >= %s
+                                         AND e.human_outbound_count >= %s) AS evaluable,
+                      COUNT(*) FILTER (WHERE e.operator_share >= %s
+                                         AND e.human_outbound_count >= %s
+                                         AND EXISTS (SELECT 1 FROM ai_review_cache rc
+                                                      WHERE rc.subject_kind='wz_episode'
+                                                        AND rc.call_id=e.id
+                                                        AND rc.model=%s)) AS evaluated
+                 FROM wazzup_episodes e
+                 LEFT JOIN users u ON u.id = e.operator_user_id
+                WHERE e.kind = 'dialog'
+                  AND (u.direction_id = ANY(%s) OR e.operator_user_id IS NULL)""",
+            (config.WZ_MIN_OPERATOR_SHARE, config.WZ_MIN_OPERATOR_SHARE,
+             config.WZ_MIN_OPERATOR_MESSAGES, config.WZ_MIN_OPERATOR_SHARE,
+             config.WZ_MIN_OPERATOR_MESSAGES, config.CLAUDE_MODEL, wz_family))
+        row = cur.fetchone() or (0, 0, 0, 0, 0)
+        cur.execute("SELECT id, name FROM directions WHERE id = ANY(%s) ORDER BY name",
+                    (wz_family,))
+        directions = [{"id": r[0], "name": r[1]} for r in cur.fetchall()]
+    except Exception:
+        logging.exception("ai-qa: не удалось посчитать пригодность чатов")
+        return {"available": False, "directions": []}
+    finally:
+        cur.close(); conn.close()
+    return {"available": True, "directions": directions,
+            "min_operator_share_pct": round(config.WZ_MIN_OPERATOR_SHARE * 100),
+            "min_operator_messages": config.WZ_MIN_OPERATOR_MESSAGES,
+            "dialogs": int(row[0] or 0), "unattributed": int(row[1] or 0),
+            "multi_operator": int(row[2] or 0), "evaluable": int(row[3] or 0),
+            "evaluated": int(row[4] or 0)}
+
+
+def evaluations_count(allowed_direction_ids=None, subject_kind=None) -> int:
     """Сколько всего звонков оценено ИИ (в рамках доступных направлений) — для пагинации."""
     conn = None
     try:
@@ -2671,10 +3030,18 @@ def evaluations_count(allowed_direction_ids=None) -> int:
             if not family:
                 cur.close(); conn.close()
                 return 0
-            scope_sql, scope_params = " WHERE c.direction_id = ANY(%s)", (family,)
+            scope_sql = f" AND {_SUBJECT_DIRECTION} = ANY(%s)"
+            scope_params = (family,)
+        kind_sql, kind_params = "", ()
+        if subject_kind:
+            kind_sql = " AND rc.subject_kind = %s"
+            kind_params = (subjects_mod.normalise_kind(subject_kind),)
         cur.execute(
-            """SELECT COUNT(*) FROM (SELECT DISTINCT rc.call_id FROM ai_review_cache rc
-                 JOIN calls c ON c.id = rc.call_id""" + scope_sql + ") t", scope_params)
+            """SELECT COUNT(*) FROM (
+                   SELECT DISTINCT rc.subject_kind, rc.call_id
+                     FROM ai_review_cache rc""" + _SUBJECT_JOIN
+            + " WHERE TRUE" + _SUBJECT_EXISTS + scope_sql + kind_sql + ") t",
+            (*scope_params, *kind_params))
         n = cur.fetchone()[0]; cur.close(); conn.close()
         return int(n or 0)
     except Exception:
@@ -2688,7 +3055,8 @@ def evaluations_count(allowed_direction_ids=None) -> int:
                 pass
 
 
-def evaluations_list(limit=100, offset=0, allowed_direction_ids=None) -> list[dict]:
+def evaluations_list(limit=100, offset=0, allowed_direction_ids=None,
+                     subject_kind=None) -> list[dict]:
     """Уже оценённые ИИ звонки (из кэша) — реальные данные, пусто пока ничего не оценено.
     Один звонок = одна строка (последняя оценка), иначе звонки, оценённые несколькими
     версиями модели, дублировались в списке. Сортировка — сначала новые; поддержана
@@ -2705,21 +3073,28 @@ def evaluations_list(limit=100, offset=0, allowed_direction_ids=None) -> list[di
             if not family:
                 cur.close(); conn.close()
                 return []
-            scope_sql, scope_params = " WHERE c.direction_id = ANY(%s)", (family,)
+            scope_sql = f" AND {_SUBJECT_DIRECTION} = ANY(%s)"
+            scope_params = (family,)
+        kind_sql, kind_params = "", ()
+        if subject_kind:
+            kind_sql = " AND rc.subject_kind = %s"
+            kind_params = (subjects_mod.normalise_kind(subject_kind),)
         cur.execute(
-            """SELECT t.call_id, d.name, u.name, TO_CHAR(t.created_at,'DD.MM HH24:MI'), c.score, t.ai
-                 FROM (SELECT DISTINCT ON (rc.call_id) rc.call_id, rc.created_at,
-                              rc.payload->>'ai_score' AS ai
+            f"""SELECT rc.call_id, d.name, {_SUBJECT_OPERATOR},
+                      TO_CHAR(rc.created_at,'DD.MM HH24:MI'), c.score,
+                      rc.payload->>'ai_score' AS ai, rc.subject_kind
+                 FROM (SELECT DISTINCT ON (rc.subject_kind, rc.call_id)
+                              rc.subject_kind, rc.call_id, rc.created_at, rc.payload
                          FROM ai_review_cache rc
-                        ORDER BY rc.call_id, rc.created_at DESC) t
-                 JOIN calls c ON c.id = t.call_id
-                 LEFT JOIN directions d ON c.direction_id = d.id
-                 LEFT JOIN users u ON c.operator_id = u.id""" + scope_sql + """
-                ORDER BY t.created_at DESC LIMIT %s OFFSET %s""", (*scope_params, limit, offset))
+                        ORDER BY rc.subject_kind, rc.call_id, rc.created_at DESC) rc"""
+            + _SUBJECT_JOIN + " WHERE TRUE" + _SUBJECT_EXISTS + scope_sql + kind_sql + """
+                ORDER BY rc.created_at DESC LIMIT %s OFFSET %s""",
+            (*scope_params, *kind_params, limit, offset))
         rows = cur.fetchall(); cur.close(); conn.close()
         return [{"id": r[0], "direction": r[1], "operator": r[2] or "—",
                  "datetime": r[3], "human": r[4],
-                 "ai": round(float(r[5])) if r[5] is not None else None} for r in rows]
+                 "ai": round(float(r[5])) if r[5] is not None else None,
+                 "subject": r[6] or config.SUBJECT_CALL} for r in rows]
     except Exception:
         logging.exception("ai-qa evaluations failed")
         raise
@@ -2802,11 +3177,13 @@ def _reviewed_metrics(cur):
     confirmed — все вердикты ИИ одобрены; adjudicated — исправленные критерии берём из
     qa_adjudications, неисправленные считаются одобренными. None — миграции меты ещё нет."""
     try:
-        cur.execute("""SELECT call_id, review_outcome, per_criterion
+        cur.execute("""SELECT call_id, review_outcome, per_criterion, subject_kind
                          FROM ai_evaluation_meta
                         WHERE review_outcome IS NOT NULL AND model = %s""",
                     (config.CLAUDE_MODEL,))
-        rows = cur.fetchall()
+        # Совместимость с БД до миграции subject_kind: строка без типа = звонок.
+        rows = [tuple(r) + (config.SUBJECT_CALL,) if len(r) == 3 else tuple(r)
+                for r in cur.fetchall()]
     except Exception:
         return None  # колонок ещё нет — появятся после деплоя (миграция на старте)
     out = {"confirmed": 0, "adjudicated": 0, "endorsed": 0, "corrected": 0, "alarm_precision": None}
@@ -2818,32 +3195,40 @@ def _reviewed_metrics(cur):
         # для точности тревог это безопасно (исправление = человек не согласен).
         # Деактивированные RAG-правила остаются следом ревью. Если по тому же критерию
         # разбор создавали повторно, человеческим эталоном считаем самый свежий.
-        cur.execute("""SELECT DISTINCT ON (call_id, criterion_idx)
-                              call_id, criterion_idx, correct_verdict
+        cur.execute("""SELECT DISTINCT ON (subject_kind, call_id, criterion_idx)
+                              subject_kind, call_id, criterion_idx, correct_verdict
                          FROM (
-                              SELECT call_id,criterion_idx,correct_verdict,created_at,id::text AS id
+                              SELECT subject_kind,call_id,criterion_idx,correct_verdict,
+                                     created_at,id::text AS id
                                 FROM qa_adjudication_cases
                                WHERE case_status='verified' AND call_id=ANY(%s)
                               UNION ALL
-                              SELECT call_id,criterion_idx,correct_verdict,created_at,id::text
+                              SELECT subject_kind,call_id,criterion_idx,correct_verdict,
+                                     created_at,id::text
                                 FROM qa_adjudications
                                WHERE call_id=ANY(%s)
                          ) corrections
-                        ORDER BY call_id, criterion_idx, created_at DESC, id DESC""",
+                        ORDER BY subject_kind, call_id, criterion_idx, created_at DESC, id DESC""",
                     ([r[0] for r in rows], [r[0] for r in rows]))
-        corr = {(r[0], r[1]): r[2] for r in cur.fetchall()}
+        corr = {}
+        for row in cur.fetchall():
+            if len(row) == 3:  # БД до миграции subject_kind
+                corr[(config.SUBJECT_CALL, row[0], row[1])] = row[2]
+            else:
+                corr[(row[0] or config.SUBJECT_CALL, row[1], row[2])] = row[3]
     except Exception:
         pass
     alarms = alarm_hits = 0
-    for call_id, outcome, crits in rows:
+    for call_id, outcome, crits, subject_kind in rows:
+        subject_kind = subject_kind or config.SUBJECT_CALL
         out["confirmed" if outcome == "confirmed" else "adjudicated"] += 1
         for c in crits or []:
             if c.get("source") != "transcript" or c.get("ai") not in _VERDICTS:
                 continue
             # confirmed означает, что в ТЕКУЩЕМ ревью человек одобрил все verdict'ы ИИ;
-            # старые разборы того же звонка не должны превращать это ревью в исправленное.
+            # старые разборы того же субъекта не должны превращать это ревью в исправленное.
             hv = (c.get("ai") if outcome == "confirmed"
-                  else corr.get((call_id, c.get("idx")), c.get("ai")))
+                  else corr.get((subject_kind, call_id, c.get("idx")), c.get("ai")))
             out["endorsed" if hv == c.get("ai") else "corrected"] += 1
             if c.get("ai") == "Incorrect":
                 alarms += 1
@@ -2934,25 +3319,26 @@ def stats(allowed_direction_ids=None) -> dict:
         if allowed_direction_ids is not None:
             scope_family = _scope_family(cur, allowed_direction_ids)
         if scope_family is not None:
-            cur.execute("""SELECT COUNT(*) FROM ai_review_cache rc
-                             JOIN calls c ON c.id = rc.call_id
-                            WHERE c.direction_id = ANY(%s)""",
+            cur.execute("SELECT COUNT(*) FROM ai_review_cache rc" + _SUBJECT_JOIN
+                        + f" WHERE TRUE{_SUBJECT_EXISTS} AND {_SUBJECT_DIRECTION} = ANY(%s)",
                         (scope_family or [-1],))
         else:
             cur.execute("SELECT COUNT(*) FROM ai_review_cache")
         out["evaluated"] = cur.fetchone()[0]
         try:  # реальный размер очереди ревью; до миграции — свежие звонки, как раньше
+            meta_join = """
+                 LEFT JOIN ai_evaluation_meta m
+                        ON m.subject_kind = rc.subject_kind AND m.call_id = rc.call_id
+                           AND m.model = rc.model"""
             if scope_family is not None:
-                cur.execute("""SELECT COUNT(*) FROM ai_review_cache rc
-                                 JOIN calls c ON c.id = rc.call_id
-                                 LEFT JOIN ai_evaluation_meta m ON m.call_id = rc.call_id AND m.model = rc.model
-                                WHERE rc.model = %s AND m.review_outcome IS NULL
-                                  AND c.direction_id = ANY(%s)""",
+                cur.execute("SELECT COUNT(*) FROM ai_review_cache rc" + _SUBJECT_JOIN + meta_join
+                            + " WHERE rc.model = %s AND m.review_outcome IS NULL"
+                            + _SUBJECT_EXISTS + f" AND {_SUBJECT_DIRECTION} = ANY(%s)",
                             (config.CLAUDE_MODEL, scope_family or [-1]))
             else:
-                cur.execute("""SELECT COUNT(*) FROM ai_review_cache rc
-                                 LEFT JOIN ai_evaluation_meta m ON m.call_id = rc.call_id AND m.model = rc.model
-                                WHERE rc.model = %s AND m.review_outcome IS NULL""", (config.CLAUDE_MODEL,))
+                cur.execute("SELECT COUNT(*) FROM ai_review_cache rc" + meta_join
+                            + " WHERE rc.model = %s AND m.review_outcome IS NULL",
+                            (config.CLAUDE_MODEL,))
             out["queue"] = cur.fetchone()[0]
         except Exception:
             family = _scoped_op_family(cur, allowed_direction_ids)
@@ -2965,15 +3351,31 @@ def stats(allowed_direction_ids=None) -> dict:
 
         # Сырой эталон: последняя оценка каждого звонка (без дублей по тегам моделей).
         cur.execute(
-            """SELECT t.criteria, c.scores, t.direction
-                 FROM (SELECT DISTINCT ON (rc.call_id) rc.call_id,
+            """SELECT t.criteria, COALESCE(c.scores, hc.scores), t.direction
+                 FROM (SELECT DISTINCT ON (rc.subject_kind, rc.call_id)
+                              rc.subject_kind, rc.call_id,
                               rc.payload->'criteria' AS criteria,
                               rc.payload->>'direction' AS direction
                          FROM ai_review_cache rc
-                        ORDER BY rc.call_id, rc.created_at DESC) t
-                 JOIN calls c ON c.id = t.call_id
-                WHERE c.scores IS NOT NULL"""
-            + (" AND c.direction_id = ANY(%s)" if scope_family is not None else ""),
+                        ORDER BY rc.subject_kind, rc.call_id, rc.created_at DESC) t
+                 LEFT JOIN calls c
+                        ON t.subject_kind = 'call' AND c.id = t.call_id
+                 LEFT JOIN wazzup_episodes e
+                        ON t.subject_kind = 'wz_episode' AND e.id = t.call_id
+                 LEFT JOIN users ue ON ue.id = e.operator_user_id
+                 LEFT JOIN LATERAL (
+                     SELECT hcalls.scores
+                       FROM c2d_chat_snapshots s
+                       JOIN calls hcalls ON hcalls.c2d_snapshot_id = s.id
+                      WHERE e.id IS NOT NULL AND s.source = 'wazzup'
+                        AND s.wz_channel_id = e.channel_id AND s.wz_chat_id = e.chat_id
+                        AND s.episode_start = e.started_at
+                        AND COALESCE(hcalls.is_draft, FALSE) = FALSE
+                      ORDER BY hcalls.created_at DESC LIMIT 1
+                 ) hc ON true
+                WHERE COALESCE(c.scores, hc.scores) IS NOT NULL"""
+            + (" AND COALESCE(c.direction_id, ue.direction_id) = ANY(%s)"
+               if scope_family is not None else ""),
             ((scope_family or [-1],) if scope_family is not None else ()))
         m = _verdict_metrics(cur.fetchall())
         for k in ("agreement", "alarm_precision", "recall", "correct_reliability", "matrix", "deficiency"):

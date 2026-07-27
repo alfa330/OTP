@@ -95,7 +95,8 @@ class _ReviewedCursor:
 class ReviewedMetricsTests(unittest.TestCase):
     def test_confirmed_review_ignores_old_correction(self):
         crit = [_crit(0, "Incorrect")]
-        cur = _ReviewedCursor([(10, "confirmed", crit)], [(10, 0, "Correct")])
+        cur = _ReviewedCursor([(10, "confirmed", crit, "call")],
+                              [("call", 10, 0, "Correct")])
         reviewed = _reviewed_metrics(cur)
         self.assertEqual(reviewed["endorsed"], 1)
         self.assertEqual(reviewed["corrected"], 0)
@@ -103,7 +104,8 @@ class ReviewedMetricsTests(unittest.TestCase):
 
     def test_adjudicated_review_keeps_soft_deleted_correction_in_history(self):
         crit = [_crit(0, "Incorrect")]
-        cur = _ReviewedCursor([(10, "adjudicated", crit)], [(10, 0, "Correct")])
+        cur = _ReviewedCursor([(10, "adjudicated", crit, "call")],
+                              [("call", 10, 0, "Correct")])
         reviewed = _reviewed_metrics(cur)
         self.assertEqual(reviewed["endorsed"], 0)
         self.assertEqual(reviewed["corrected"], 1)

@@ -11,6 +11,11 @@ const SOURCES = [
     { key: 'manual',     label: 'Ручная', Icon: User2,    tone: 'slate' },
 ];
 
+// Список направлений берётся из живых данных (?department_id отдела продаж), а не
+// из литералов: раньше здесь были только 72/73/74, и «Верификатор» нельзя было
+// выбрать, хотя сервер его классификацию отдаёт. Литералы остались аварийным
+// значением, если проп directions пуст.
+const OP_DEPARTMENT_CODE = 'op';
 const FALLBACK_DIRECTIONS = [{ id: 73, name: 'Основа' }, { id: 72, name: 'Яндекс Регистрация' }, { id: 74, name: 'Поток' }];
 
 function SourcePicker({ value, onChange, disabled = false }) {
@@ -35,13 +40,22 @@ export default function CriteriaClassification(props) {
     const { apiBaseUrl, withAccessTokenHeader, showToast, directions, onInteractionChange } = props;
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
     const availableDirections = useMemo(() => {
+        const live = (directions || []).filter((item) => (
+            String(item?.department_code || '').toLowerCase() === OP_DEPARTMENT_CODE
+            && item?.is_active !== false && !item?.canonical_id
+        ));
+        if (live.length) {
+            return live
+                .map((item) => ({ id: item.id, name: item.name }))
+                .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'ru'));
+        }
         const liveNames = new Map((directions || []).map((item) => [String(item.id), item.name]));
         return FALLBACK_DIRECTIONS.map((item) => ({
             ...item, name: liveNames.get(String(item.id)) || item.name,
         }));
     }, [directions]);
 
-    const [dir, setDir] = useState(FALLBACK_DIRECTIONS[0].id);
+    const [dir, setDir] = useState(null);
     const [rows, setRows] = useState(null);   // null = загрузка
     const [err, setErr] = useState(null);
     const [dirty, setDirty] = useState(false);
@@ -79,10 +93,15 @@ export default function CriteriaClassification(props) {
     };
 
     useEffect(() => {
-        loadDir(FALLBACK_DIRECTIONS[0].id, { force: true });
-        return () => requestRef.current.controller?.abort();
+        // Первое направление известно только после того, как пришёл список
+        // направлений отдела: грузим критерии, когда выбирать уже из чего.
+        const first = availableDirections[0]?.id;
+        if (first == null || dir != null) return;
+        loadDir(first, { force: true });
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [apiBaseUrl]);
+    }, [apiBaseUrl, availableDirections]);
+
+    useEffect(() => () => requestRef.current.controller?.abort(), []);
 
     useEffect(() => {
         onInteractionChange?.({ editing: dirty, busy: saving });

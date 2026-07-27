@@ -7,16 +7,21 @@ from ..rag import store
 
 
 # Порядок = серьёзность (важнее — раньше): ключи совпадают с бейджами фронтенда (CallQaView.REASON).
-REASON_PRIORITY = ("critical", "lowconf", "pending", "asr")
+REASON_PRIORITY = ("critical", "lowconf", "pending", "asr", "media")
 
 
-def review_reasons(criteria, asr_mean_conf=None) -> list[str]:
-    """Почему звонок требует человека — по критериям В ФОРМЕ КАРТОЧКИ (payload['criteria']:
+def review_reasons(criteria, asr_mean_conf=None, media_stats=None) -> list[str]:
+    """Почему субъект требует человека — по критериям В ФОРМЕ КАРТОЧКИ (payload['criteria']:
     {idx, is_critical, source, ai, conf}). Пустой список = флагов нет, ревью не обязательно.
-    Те же правила, что needs_review(), но на сохранённой карточке — для очереди ревью."""
+    Те же правила, что needs_review(), но на сохранённой карточке — для очереди ревью.
+
+    media_stats — сводка вложений эпизода чата: у чата нет ASR-уверенности, зато
+    есть свой аналог «плохо слышно» — нерасшифрованное фото или голосовое."""
     reasons = set()
     if asr_mean_conf is not None and asr_mean_conf < config.ASR_CONF_HARD:
         reasons.add("asr")
+    if int((media_stats or {}).get("failed") or 0) > 0:
+        reasons.add("media")
     for cr in criteria or []:
         v = cr.get("ai")
         if v == "Pending":
@@ -48,10 +53,11 @@ def needs_review(result, direction: dict, asr_mean_conf: float | None) -> bool:
 
 def on_adjudication(*, direction_id, criterion_idx, criterion_name, call_id,
                     excerpt, ai_verdict, correct_verdict, reason,
-                    not_covered=None, situation=None, situation_tag=None, reviewer_id=None) -> int:
+                    not_covered=None, situation=None, situation_tag=None, reviewer_id=None,
+                    subject_kind=None) -> int:
     """Человек разобрал спорный критерий → кладём в RAG (с embedding). Возвращает id записи."""
     return store.save_adjudication(
         direction_id=direction_id, criterion_idx=criterion_idx, criterion_name=criterion_name,
         call_id=call_id, excerpt=excerpt, ai_verdict=ai_verdict, correct_verdict=correct_verdict,
         reason=reason, not_covered=not_covered, situation=situation, situation_tag=situation_tag,
-        created_by=reviewer_id)
+        created_by=reviewer_id, subject_kind=subject_kind)

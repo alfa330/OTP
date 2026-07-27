@@ -67,7 +67,8 @@ def _valid_item(**overrides):
 
 class AdjudicationValidationTests(unittest.TestCase):
     def _validate(self, item=None, *, source=None, call_id=10, direction_id=72,
-                  scale_revision_id=7, fingerprint=FINGERPRINT):
+                  scale_revision_id=7, fingerprint=FINGERPRINT,
+                  subject_kind="call"):
         # A regression guard: neither the mutable projection nor the current
         # direction/criterion order may participate in adjudication.
         with patch.object(api.runtime_store, "get_adjudication_source",
@@ -78,7 +79,7 @@ class AdjudicationValidationTests(unittest.TestCase):
             return api._validated_adjudication_items(
                 call_id, direction_id, [] if item is None else [item],
                 evaluation_run_id=RUN_ID, scale_revision_id=scale_revision_id,
-                evaluation_fingerprint=fingerprint)
+                evaluation_fingerprint=fingerprint, subject_kind=subject_kind)
 
     def test_uses_authoritative_immutable_criterion_and_ai_verdict(self):
         payload, rows = self._validate(_valid_item())
@@ -103,7 +104,8 @@ class AdjudicationValidationTests(unittest.TestCase):
 
     def test_call_direction_scale_and_fingerprint_must_match_run(self):
         cases = (
-            ({"call_id": 11}, "call_id"),
+            ({"call_id": 11}, "id субъекта"),
+            ({"subject_kind": "wz_episode"}, "тип субъекта"),
             ({"direction_id": 73}, "направление"),
             ({"scale_revision_id": 8}, "scale_revision_id"),
             ({"fingerprint": "0" * 64}, "evaluation_fingerprint"),
@@ -231,7 +233,7 @@ class AdjudicationValidationTests(unittest.TestCase):
                 cursor, call_id=10, outcome="confirmed", reviewer_id=5,
                 payload={"direction_id": 72, "criteria": []}, model="qa-model")
         sql = " ".join(cursor.execute.call_args.args[0].split())
-        self.assertIn("ON CONFLICT (call_id,model) DO UPDATE", sql)
+        self.assertIn("ON CONFLICT (subject_kind,call_id,model) DO UPDATE", sql)
         self.assertIn("WHERE ai_evaluation_meta.review_outcome IS NULL", sql)
         self.assertIn("RETURNING id", sql)
 
