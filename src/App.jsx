@@ -2577,6 +2577,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         // редактировать решение даже после того, как строка ушла из текущего фильтра.
         const [lowRatingDetail, setLowRatingDetail] = useState(null);
         const lowRatingDetailIdRef = useRef('');
+        // Что открыто ПРЯМО СЕЙЧАС: ответ на сохранение прилетает через секунду-две,
+        // и к этому моменту проверяющий уже мог открыть следующий чат.
+        const lowRatingSelectionRef = useRef('');
         const [lowRatingExporting, setLowRatingExporting] = useState(false);
         // Переписка выбранной оценки: снапшот тянем по клику на строку и держим
         // в памяти вкладки (на сервере он тоже кэшируется — c2d_chat_snapshots).
@@ -2843,6 +2846,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return text.replace('T', ' ').slice(0, 19);
         };
 
+        // Подпись карточки (дата · таксопарк · номер · отдел) собирается ОДНОЙ
+        // строкой, а не набором соседних текстовых узлов. Соседние узлы — та же
+        // ловушка, что и в аукционе (см. фикс «removeChild»): встроенный
+        // переводчик браузера и расширения склеивают их в <font>, React после
+        // этого пишет в открепившийся узел, и шапка навсегда застывает на первом
+        // открытом чате, пока имя/оценка рядом обновляются.
+        const lowRatingMetaLine = (row, { withDepartment = false } = {}) => {
+            const parts = [
+                formatLowRatingDateTime(row?.rated_at || row?.day),
+                row?.taxi_park || row?.direction_name || '—',
+                row?.phone_number || row?.phone_normalized || '—',
+            ];
+            if (withDepartment && row?.department_name) parts.push(row.department_name);
+            return parts.join(' · ');
+        };
+
         const addChatMetricsSurgeWindow = () => {
             setChatMetricsSurgeWindows(prev => [...cloneChatMetricsSurgeWindows(prev), { start: '', end: '', description: '' }]);
         };
@@ -3095,12 +3114,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
                 if (payload?.review) {
                     patchLowRatingReviewInList(payload.review);
-                    setLowRatingDetail(payload.review);
-                    setSelectedLowRatingReviewId(String(payload.review.id));
-                    setLowRatingReviewDraft({
-                        status: payload.review.my_review_status || '',
-                        comment: payload.review.my_review_comment || '',
-                    });
+                    // Строку открыли другую, пока шёл запрос — не тащим выделение обратно.
+                    if (String(lowRatingSelectionRef.current) === String(payload.review.id)) {
+                        setLowRatingDetail(payload.review);
+                        setSelectedLowRatingReviewId(String(payload.review.id));
+                        setLowRatingReviewDraft({
+                            status: payload.review.my_review_status || '',
+                            comment: payload.review.my_review_comment || '',
+                        });
+                    }
                 }
                 await fetchLowRatingReviews();
                 await fetchDailyHoursAndTrainings();
@@ -3145,12 +3167,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
                 if (payload?.review) {
                     patchLowRatingReviewInList(payload.review);
-                    setLowRatingDetail(payload.review);
-                    setSelectedLowRatingReviewId(String(payload.review.id));
-                    setLowRatingFinalDraft({
-                        status: payload.review.final_status || '',
-                        comment: payload.review.final_comment || '',
-                    });
+                    // Строку открыли другую, пока шёл запрос — не тащим выделение обратно.
+                    if (String(lowRatingSelectionRef.current) === String(payload.review.id)) {
+                        setLowRatingDetail(payload.review);
+                        setSelectedLowRatingReviewId(String(payload.review.id));
+                        setLowRatingFinalDraft({
+                            status: payload.review.final_status || '',
+                            comment: payload.review.final_comment || '',
+                        });
+                    }
                 }
                 await fetchLowRatingReviews();
                 await fetchDailyHoursAndTrainings();
@@ -4718,6 +4743,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         useEffect(() => {
             lowRatingDetailIdRef.current = lowRatingDetail?.id ? String(lowRatingDetail.id) : '';
         }, [lowRatingDetail]);
+
+        useEffect(() => {
+            lowRatingSelectionRef.current = String(selectedLowRatingReviewId || '');
+        }, [selectedLowRatingReviewId]);
 
         // Выбрали строку — сразу показываем сам чат (первое открытие тянет
         // переписку из Chat2Desk, дальше отдаётся снапшот из БД).
@@ -6837,7 +6866,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         <div className="min-w-0">
                                             <div className="text-sm font-semibold text-slate-900">Журнал</div>
                                             <div className="truncate text-[11px] text-slate-500">
-                                                {rangePickerFormatRu(lowRatingRange.start)} — {rangePickerFormatRu(lowRatingRange.end)} · {Number(lowRatingPagination.total || 0)} строк
+                                                <span>{`${rangePickerFormatRu(lowRatingRange.start)} — ${rangePickerFormatRu(lowRatingRange.end)} · ${Number(lowRatingPagination.total || 0)} строк`}</span>
                                             </div>
                                         </div>
                                         {lowRatingLoading && <FaIcon className="fas fa-spinner fa-spin text-slate-400" aria-hidden="true" />}
@@ -6860,7 +6889,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         <button
                                                             key={row.id}
                                                             type="button"
-                                                            onClick={() => setSelectedLowRatingReviewId(String(row.id))}
+                                                            onClick={() => {
+                                                                // Ref обновляем сразу: ответ на сохранение прошлой строки
+                                                                // может прилететь раньше, чем React прогонит эффекты.
+                                                                lowRatingSelectionRef.current = String(row.id);
+                                                                setSelectedLowRatingReviewId(String(row.id));
+                                                                setLowRatingDetail(row);
+                                                            }}
                                                             title="Открыть переписку этого чата"
                                                             className={`w-full rounded-2xl border p-3 text-left transition ${
                                                                 selected
@@ -6874,7 +6909,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         {row.operator_name || '—'}
                                                                     </div>
                                                                     <div className="mt-0.5 truncate text-[11px] text-slate-500">
-                                                                        {row.phone_number || row.phone_normalized || '—'} · {row.taxi_park || row.direction_name || '—'}
+                                                                        <span>{`${row.phone_number || row.phone_normalized || '—'} · ${row.taxi_park || row.direction_name || '—'}`}</span>
                                                                     </div>
                                                                 </div>
                                                                 <span className="inline-flex h-8 min-w-8 items-center justify-center rounded-full bg-rose-50 px-2 text-sm font-bold text-rose-700 ring-1 ring-rose-200">
@@ -6886,11 +6921,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     {lowRatingFinalLabel(row)}
                                                                 </span>
                                                                 <span className="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-[10.5px] font-semibold text-slate-600">
-                                                                    Проверок: {Number(row.review_count || 0)}
+                                                                    {`Проверок: ${Number(row.review_count || 0)}`}
                                                                 </span>
                                                                 {row.my_review_status && (
                                                                     <span className={`inline-flex rounded-full px-2 py-0.5 text-[10.5px] font-semibold ring-1 ${lowRatingStatusClass(row.my_review_status)}`}>
-                                                                        Моя: {lowRatingStatusLabel(row.my_review_status)}
+                                                                        {`Моя: ${lowRatingStatusLabel(row.my_review_status)}`}
                                                                     </span>
                                                                 )}
                                                             </div>
@@ -6915,7 +6950,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <FaIcon className="fas fa-chevron-left" aria-hidden="true" />
                                         </button>
                                         <div className="text-xs font-semibold text-slate-500">
-                                            {Number(lowRatingPagination.page || 1)} / {Number(lowRatingPagination.total_pages || 1)}
+                                            <span>{`${Number(lowRatingPagination.page || 1)} / ${Number(lowRatingPagination.total_pages || 1)}`}</span>
                                         </div>
                                         <button
                                             type="button"
@@ -6937,19 +6972,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </div>
                                     ) : (
                                         <>
-                                            <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 bg-white px-4 py-2.5">
+                                            {/* key по id оценки: переключение чата пересоздаёт шапку целиком,
+                                                поэтому подмена текстовых узлов извне (переводчик, расширения)
+                                                не может оставить в ней номер и дату прошлого чата. */}
+                                            <div key={`lr-head-${selectedLowRatingReview.id}`} className="flex flex-wrap items-center gap-2 border-b border-slate-200 bg-white px-4 py-2.5">
                                                 <span className="inline-flex h-9 min-w-9 items-center justify-center rounded-2xl bg-rose-50 px-2 text-base font-bold text-rose-700 ring-1 ring-rose-200">
                                                     {Number(selectedLowRatingReview.score || 0).toLocaleString('ru-RU', { maximumFractionDigits: 1 })}
                                                 </span>
                                                 <div className="min-w-0">
                                                     <div className="truncate text-sm font-semibold text-slate-900">
-                                                        {selectedLowRatingReview.operator_name || '—'}
+                                                        <span>{selectedLowRatingReview.operator_name || '—'}</span>
                                                     </div>
                                                     <div className="truncate text-[11px] text-slate-500">
-                                                        {formatLowRatingDateTime(selectedLowRatingReview.rated_at || selectedLowRatingReview.day)}
-                                                        {' · '}{selectedLowRatingReview.taxi_park || selectedLowRatingReview.direction_name || '—'}
-                                                        {' · '}{selectedLowRatingReview.phone_number || selectedLowRatingReview.phone_normalized || '—'}
-                                                        {selectedLowRatingReview.department_name ? ` · ${selectedLowRatingReview.department_name}` : ''}
+                                                        <span>{lowRatingMetaLine(selectedLowRatingReview, { withDepartment: true })}</span>
                                                     </div>
                                                 </div>
                                                 <span className={`ml-auto inline-flex rounded-full px-3 py-1 text-[11px] font-bold ring-1 ${lowRatingFinalClass(selectedLowRatingReview)}`}>
@@ -6981,11 +7016,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </div>
 
                                             {selectedLowRatingReview.client_comment && (
-                                                <div className="flex items-start gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-[12.5px] leading-5 text-amber-900">
+                                                <div key={`lr-comment-${selectedLowRatingReview.id}`} className="flex items-start gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-[12.5px] leading-5 text-amber-900">
                                                     <FaIcon className="fas fa-comment-dots mt-0.5 shrink-0" aria-hidden="true" />
                                                     <div className="min-w-0 break-words">
                                                         <span className="font-semibold">Комментарий клиента: </span>
-                                                        {selectedLowRatingReview.client_comment}
+                                                        <span>{selectedLowRatingReview.client_comment}</span>
                                                     </div>
                                                 </div>
                                             )}
@@ -7016,11 +7051,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         </span>
                                                         {selectedLowRatingReview.my_review_status && (
                                                             <span className={`inline-flex rounded-full px-2.5 py-0.5 text-[11px] font-semibold ring-1 ${lowRatingStatusClass(selectedLowRatingReview.my_review_status)}`}>
-                                                                Моя: {lowRatingStatusLabel(selectedLowRatingReview.my_review_status)}
+                                                                {`Моя: ${lowRatingStatusLabel(selectedLowRatingReview.my_review_status)}`}
                                                             </span>
                                                         )}
                                                         <span className="inline-flex rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-semibold text-slate-600">
-                                                            Проверок: {Number(selectedLowRatingReview.review_count || 0)}
+                                                            {`Проверок: ${Number(selectedLowRatingReview.review_count || 0)}`}
                                                         </span>
                                                     </div>
                                                     <button
@@ -7034,7 +7069,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </div>
 
                                                 {lowRatingPanelOpen && (
-                                                    <div className={`grid max-h-[42vh] gap-3 overflow-y-auto border-t border-slate-100 bg-slate-50/60 px-4 py-3 lg:grid-cols-2 ${
+                                                    <div key={`lr-verdict-${selectedLowRatingReview.id}`} className={`grid max-h-[42vh] gap-3 overflow-y-auto border-t border-slate-100 bg-slate-50/60 px-4 py-3 lg:grid-cols-2 ${
                                                         selectedLowRatingReview.can_finalize ? 'xl:grid-cols-3' : ''
                                                     }`}>
                                                         <div className="flex flex-col rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
@@ -7110,7 +7145,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                     <div className="flex flex-wrap items-center justify-between gap-2">
                                                                                         <div className="min-w-0">
                                                                                             <div className="truncate text-[13px] font-semibold text-slate-900">
-                                                                                                {entry.reviewer_name || 'Проверяющий'}{entry.is_mine ? ' · вы' : ''}
+                                                                                                <span>{`${entry.reviewer_name || 'Проверяющий'}${entry.is_mine ? ' · вы' : ''}`}</span>
                                                                                             </div>
                                                                                             <div className="text-[10.5px] text-slate-400">
                                                                                                 {formatLowRatingDateTime(entry.updated_at)}
@@ -7134,8 +7169,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     {!selectedLowRatingReview.can_finalize && (
                                                                         <div className="mt-2 rounded-xl bg-slate-50 px-3 py-2 text-[12px] leading-5 text-slate-600 ring-1 ring-slate-200">
                                                                             <span className="font-semibold">Итог: </span>
-                                                                            {lowRatingFinalLabel(selectedLowRatingReview)}
-                                                                            {selectedLowRatingReview.final_comment ? ` · ${selectedLowRatingReview.final_comment}` : ''}
+                                                                            <span>{`${lowRatingFinalLabel(selectedLowRatingReview)}${selectedLowRatingReview.final_comment ? ` · ${selectedLowRatingReview.final_comment}` : ''}`}</span>
                                                                         </div>
                                                                     )}
                                                                 </div>
