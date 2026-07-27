@@ -50,6 +50,19 @@ const getPostClaimKey = (claim) => {
   return `${lotId}|${planId}|${shiftId}`;
 };
 
+// Идентичность добора с точки зрения ОТМЕНЫ: сервер снимает добор по паре
+// (plan_id, source_schedule_shift_id), а для синтетических лотов — по lot_id
+// (см. handleCancelMyClaim и /api/shift_auction/cancel_post_claim). Один и тот
+// же добор не должен попасть в список дважды, даже если запрос когда-нибудь
+// вернёт его продублированным с разными lot_id.
+const getPostClaimIdentity = (claim) => {
+  if (!claim) return '';
+  if (claim.plan_id != null && claim.source_schedule_shift_id != null) {
+    return `plan:${claim.plan_id}|shift:${claim.source_schedule_shift_id}`;
+  }
+  return claim.lot_id != null ? `lot:${claim.lot_id}` : '';
+};
+
 const normalizeOperatorId = (value) => {
   const id = Number(value);
   return Number.isFinite(id) && id > 0 ? id : null;
@@ -1244,7 +1257,10 @@ const getAuctionRuntimeStatus = (settings, nowMs, effectiveStartsAt = undefined)
   return 'open';
 };
 
-const AuctionCountdownText = React.memo(({ target }) => {
+// Имя у внутренней функции, а не только displayName на обёртке memo: React
+// строит стек компонентов по type-функции, а displayName обёртки в него не
+// попадает — иначе в «Технических деталях» вместо имени будет минифицированный id.
+const AuctionCountdownText = React.memo(function AuctionCountdownText({ target }) {
   const [, setTick] = useState(0);
   useEffect(() => {
     if (!target) return undefined;
@@ -1252,7 +1268,10 @@ const AuctionCountdownText = React.memo(({ target }) => {
     return () => window.clearInterval(timer);
   }, [target]);
   if (!target) return null;
-  return <>{formatCountdown(target, Date.now())}</>;
+  // Именно <span>, а не <>…</>: фрагмент отдаёт голый текстовый узел, который
+  // встроенный переводчик браузера оборачивает в <font>. Дальше React пытается
+  // удалить «свой» текстовый узел у прежнего родителя и падает с removeChild.
+  return <span>{formatCountdown(target, Date.now())}</span>;
 });
 AuctionCountdownText.displayName = 'AuctionCountdownText';
 
@@ -2531,7 +2550,16 @@ const subtractBusyRanges = (sourceRange, busyRanges) => {
     .filter((range) => Number.isFinite(range[0]) && Number.isFinite(range[1]) && range[1] > range[0])
     .sort((a, b) => a[0] - b[0] || a[1] - b[1])
     .forEach((busy) => {
-      occupied.push({ start: busy[0], end: busy[1] });
+      // Занятые отрезки склеиваем: один и тот же добор приходит и в work_shifts
+      // оператора, и в claim_segments лота, поэтому диапазоны дублируются. Без
+      // склейки на таймлайне рисуются два одинаковых блока с одинаковым React-key
+      // — при обновлении по SSE лишний узел остаётся в DOM «призраком».
+      const last = occupied[occupied.length - 1];
+      if (last && busy[0] <= last.end) {
+        last.end = Math.max(last.end, busy[1]);
+      } else {
+        occupied.push({ start: busy[0], end: busy[1] });
+      }
       const nextAvailable = [];
       available.forEach((segment) => {
         if (busy[1] <= segment.start || busy[0] >= segment.end) {
@@ -2813,6 +2841,87 @@ const PostAuctionPartialClaimModal = ({
     </div>
   );
 };
+
+/**
+ * Карточка одной взятой доп. смены в панели «Мои доп. смены».
+ *
+ * Обратный отсчёт окна отмены тикает ВНУТРИ карточки. Раньше секунды лежали в
+ * состоянии всего раздела (claimsNowMs), поэтому при открытой панели раз в
+ * секунду перерисовывалось всё дерево аукциона — сетка лотов на весь период,
+ * таблицы мониторинга и т.д. Любая рассинхронизация DOM (например, DOM, который
+ * переписал встроенный переводчик браузера) сразу же всплывала именно здесь
+ * ошибкой «Failed to execute 'removeChild' on 'Node'».
+ *
+ * Дедлайн считается один раз от времени ответа сервера (fetchedAtMs +
+ * cancel_seconds_left): источник времени — часы БД, а не браузера.
+ */
+const MyPostClaimRow = React.memo(function MyPostClaimRow({ claim, fetchedAtMs, busy, onCancel }) {
+  const baseLeftMs = Math.max(0, (Number(claim?.cancel_seconds_left) || 0) * 1000);
+  // Запасное время берём один раз при монтировании: иначе Date.now() в теле
+  // рендера сделал бы deadlineMs новым на каждый рендер, а он же — зависимость
+  // эффекта ниже (интервал пересоздавался бы бесконечно).
+  const mountedAtMsRef = useRef(Date.now());
+  const fetchedAtSafeMs = Number(fetchedAtMs) > 0 ? Number(fetchedAtMs) : mountedAtMsRef.current;
+  const deadlineMs = fetchedAtSafeMs + baseLeftMs;
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    setNowMs(Date.now());
+    if (deadlineMs <= Date.now()) return undefined;
+    const interval = window.setInterval(() => {
+      const next = Date.now();
+      setNowMs(next);
+      if (next >= deadlineMs) window.clearInterval(interval);
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [deadlineMs]);
+
+  const remainingMs = deadlineMs - nowMs;
+  const canCancel = remainingMs > 0;
+  const totalSec = Math.max(0, Math.ceil(remainingMs / 1000));
+  const countdown = `${Math.floor(totalSec / 60)}:${String(totalSec % 60).padStart(2, '0')}`;
+
+  return (
+    <div className={`${iosCard} p-3.5`}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[14.5px] font-semibold capitalize text-slate-900">
+            {formatDateLabel(claim?.shift_date)}
+          </div>
+          <div className="mt-1 flex items-center gap-1.5 text-[13px] text-slate-500">
+            <Clock3 size={14} className="shrink-0 text-slate-400" />
+            <span className="tabular-nums">{`${claim?.start_time || ''}–${claim?.end_time || ''}`}</span>
+          </div>
+        </div>
+        {canCancel ? (
+          <IosBadge key="claim-countdown" tone="amber" className="tabular-nums">
+            <Clock3 size={12} />
+            <span>{countdown}</span>
+          </IosBadge>
+        ) : (
+          <IosBadge key="claim-locked" tone="green">
+            <CheckCircle2 size={12} />
+            <span>В графике</span>
+          </IosBadge>
+        )}
+      </div>
+      {canCancel ? (
+        <div className="mt-3">
+          <button
+            type="button"
+            onClick={() => onCancel?.(claim)}
+            disabled={busy}
+            className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-rose-50 px-4 py-2.5 text-[13.5px] font-semibold text-rose-600 ring-1 ring-rose-100 transition-all hover:bg-rose-100 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {busy ? <RefreshCw size={15} className="animate-spin" /> : <Undo2 size={15} />}
+            <span>{busy ? 'Отмена…' : `Отменить · ${countdown}`}</span>
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+});
+MyPostClaimRow.displayName = 'MyPostClaimRow';
 
 const ShiftAuctionShiftsTable = ({
   operators = [],
@@ -3595,7 +3704,6 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [myClaimsError, setMyClaimsError] = useState('');
   const [myClaimsFetchedAt, setMyClaimsFetchedAt] = useState(0);
   const [cancelingClaimKey, setCancelingClaimKey] = useState('');
-  const [claimsNowMs, setClaimsNowMs] = useState(() => Date.now());
   const [viewSchedulePlanId, setViewSchedulePlanId] = useState('');
   const [periodPreviewLots, setPeriodPreviewLots] = useState([]);
   const [periodPreviewBlockedDates, setPeriodPreviewBlockedDates] = useState([]);
@@ -4481,16 +4589,19 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       : runtimeStatus === 'closed'
         ? 'выбор завершен'
         : `${settings.selected_operator_ids.length} тест.`;
+  // key у каждой ветки: статус-бар висит на экране постоянно и тикает раз в
+  // секунду. Без key React переиспользует один и тот же узел и правит текст
+  // на месте — на переведённом браузером DOM это заканчивается removeChild.
   const auctionStatusDetail = hasStartCountdown
-    ? <AuctionCountdownText target={operatorEffectiveStartsAt} />
+    ? <AuctionCountdownText key="status-detail-start" target={operatorEffectiveStartsAt} />
     : hasCloseCountdown
-      ? <>до закрытия <AuctionCountdownText target={settings.ends_at} /></>
-      : auctionStatusDetailText;
+      ? <span key="status-detail-close">до закрытия <AuctionCountdownText target={settings.ends_at} /></span>
+      : <span key="status-detail-text">{auctionStatusDetailText}</span>;
   const auctionStatusShortDetail = hasCloseCountdown
-    ? <AuctionCountdownText target={settings.ends_at} />
+    ? <AuctionCountdownText key="status-short-close" target={settings.ends_at} />
     : hasStartCountdown
-      ? <AuctionCountdownText target={operatorEffectiveStartsAt} />
-      : auctionStatusDetailText;
+      ? <AuctionCountdownText key="status-short-start" target={operatorEffectiveStartsAt} />
+      : <span key="status-short-text">{auctionStatusDetailText}</span>;
   const auctionStatusTone = runtimeStatus === 'open'
     ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
     : runtimeStatus === 'scheduled'
@@ -5468,13 +5579,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     selectedViewSchedulePlanId
   ]);
 
-  // Посекундный тик для обратного отсчёта окна отмены, пока панель открыта.
-  useEffect(() => {
-    if (!myClaimsOpen) return undefined;
-    setClaimsNowMs(Date.now());
-    const interval = window.setInterval(() => setClaimsNowMs(Date.now()), 1000);
-    return () => window.clearInterval(interval);
-  }, [myClaimsOpen]);
+  // Обратный отсчёт окна отмены тикает внутри MyPostClaimRow — раздел целиком
+  // раз в секунду больше не перерисовывается.
 
   const openReleaseConfirm = useCallback((lotsToRelease) => {
     const options = (Array.isArray(lotsToRelease) ? lotsToRelease : [lotsToRelease])
@@ -5622,6 +5728,23 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       </div>
     );
   };
+
+  // Строки панели «Мои доп. смены»: одна карточка на один отменяемый добор.
+  // Ключ — идентичность добора при отмене, а не (lot|plan|shift): так один и
+  // тот же добор не покажется двумя карточками, если запрос вернёт его дважды
+  // с разными lot_id, и React-ключи гарантированно уникальны (дубликат ключа
+  // ломает согласование и оставляет в DOM «призрачные» узлы).
+  const myClaimRows = useMemo(() => {
+    const seen = new Set();
+    const rows = [];
+    (Array.isArray(myClaims) ? myClaims : []).forEach((claim, index) => {
+      const identity = getPostClaimIdentity(claim) || `claim-${index}`;
+      if (seen.has(identity)) return;
+      seen.add(identity);
+      rows.push({ claim, actionKey: getPostClaimKey(claim), reactKey: identity });
+    });
+    return rows;
+  }, [myClaims]);
 
   const releaseOptions = releaseConfirmOptions.length
     ? releaseConfirmOptions
@@ -7262,76 +7385,48 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
             <span>Отменить взятую смену можно в течение <b>10 минут</b> после того, как вы её взяли. Позже смена закрепляется в графике — обратитесь к руководителю.</span>
           </div>
 
+          {/*
+            У каждой ветки свой key: иначе React переиспользует один и тот же
+            <div> и удаляет его текстовые узлы по отдельности. Если текстовый
+            узел уже перенесён чем-то извне (встроенный переводчик Edge/Chrome
+            оборачивает текст в <font>, так же ведут себя Grammarly, «Читать
+            вслух» и подсветчики), removeChild падает с «The node to be removed
+            is not a child of this node» — и ErrorBoundary гасит всё приложение.
+            С key React удаляет контейнер целиком, а это безопасно.
+            Голый текст по той же причине завёрнут в <span>.
+          */}
           {myClaimsLoading && !myClaims.length ? (
-            <div className="flex items-center justify-center gap-2 py-12 text-[13px] text-slate-400">
+            <div key="claims-loading" className="flex items-center justify-center gap-2 py-12 text-[13px] text-slate-400">
               <RefreshCw size={15} className="animate-spin" />
-              Загрузка…
+              <span>Загрузка…</span>
             </div>
           ) : myClaimsError ? (
-            <div className="rounded-2xl bg-rose-50 px-3.5 py-3 text-[13px] text-rose-600 ring-1 ring-rose-100">
-              {myClaimsError}
+            <div key="claims-error" className="rounded-2xl bg-rose-50 px-3.5 py-3 text-[13px] text-rose-600 ring-1 ring-rose-100">
+              <span>{myClaimsError}</span>
             </div>
           ) : !myClaims.length ? (
-            <div className="flex flex-col items-center gap-2 py-12 text-center">
+            <div key="claims-empty" className="flex flex-col items-center gap-2 py-12 text-center">
               <div className="grid h-14 w-14 place-items-center rounded-full bg-slate-100 text-slate-400">
                 <CalendarDays size={24} />
               </div>
-              <div className="text-[14px] font-semibold text-slate-600">Нет недавно взятых смен</div>
+              <div className="text-[14px] font-semibold text-slate-600">
+                <span>Нет недавно взятых смен</span>
+              </div>
               <div className="max-w-[260px] text-[12px] leading-5 text-slate-400">
-                Здесь появятся дополнительные смены, которые вы возьмёте, — с возможностью отменить их в первые 10 минут.
+                <span>Здесь появятся дополнительные смены, которые вы возьмёте, — с возможностью отменить их в первые 10 минут.</span>
               </div>
             </div>
           ) : (
-            <div className="space-y-2">
-              {myClaims.map((claim) => {
-                const key = getPostClaimKey(claim);
-                const baseLeftMs = (Number(claim.cancel_seconds_left) || 0) * 1000;
-                const elapsedMs = Math.max(0, claimsNowMs - myClaimsFetchedAt);
-                const remainingMs = baseLeftMs - elapsedMs;
-                const canCancel = remainingMs > 0;
-                const busy = cancelingClaimKey === key;
-                const totalSec = Math.max(0, Math.ceil(remainingMs / 1000));
-                const countdown = `${Math.floor(totalSec / 60)}:${String(totalSec % 60).padStart(2, '0')}`;
-                return (
-                  <div key={key} className={`${iosCard} p-3.5`}>
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="text-[14.5px] font-semibold capitalize text-slate-900">
-                          {formatDateLabel(claim.shift_date)}
-                        </div>
-                        <div className="mt-1 flex items-center gap-1.5 text-[13px] text-slate-500">
-                          <Clock3 size={14} className="shrink-0 text-slate-400" />
-                          <span className="tabular-nums">{claim.start_time}–{claim.end_time}</span>
-                        </div>
-                      </div>
-                      {canCancel ? (
-                        <IosBadge tone="amber" className="tabular-nums">
-                          <Clock3 size={12} />
-                          {countdown}
-                        </IosBadge>
-                      ) : (
-                        <IosBadge tone="green">
-                          <CheckCircle2 size={12} />
-                          В графике
-                        </IosBadge>
-                      )}
-                    </div>
-                    {canCancel ? (
-                      <div className="mt-3">
-                        <button
-                          type="button"
-                          onClick={() => handleCancelMyClaim(claim)}
-                          disabled={busy}
-                          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-rose-50 px-4 py-2.5 text-[13.5px] font-semibold text-rose-600 ring-1 ring-rose-100 transition-all hover:bg-rose-100 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                          {busy ? <RefreshCw size={15} className="animate-spin" /> : <Undo2 size={15} />}
-                          {busy ? 'Отмена…' : `Отменить · ${countdown}`}
-                        </button>
-                      </div>
-                    ) : null}
-                  </div>
-                );
-              })}
+            <div key="claims-list" className="space-y-2">
+              {myClaimRows.map((row) => (
+                <MyPostClaimRow
+                  key={row.reactKey}
+                  claim={row.claim}
+                  fetchedAtMs={myClaimsFetchedAt}
+                  busy={Boolean(row.actionKey) && cancelingClaimKey === row.actionKey}
+                  onCancel={handleCancelMyClaim}
+                />
+              ))}
             </div>
           )}
         </div>

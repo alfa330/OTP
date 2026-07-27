@@ -1,8 +1,20 @@
 ﻿<!doctype html>
-<html lang="en">
+<html lang="ru" translate="no" class="notranslate">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      Защита от встроенного переводчика браузера. Он подменяет текстовые узлы
+      обёртками <font>, после чего React пытается удалить узел, которого у
+      родителя уже нет, и всё приложение падает с ошибкой
+      «Failed to execute 'removeChild' on 'Node'» (воспроизведено на React 18.3.1).
+      Защищает именно набор translate="no" + class="notranslate" + мета ниже;
+      lang="ru" — это отдельно про корректность: интерфейс полностью русский,
+      а страница объявляла lang="en", из-за чего браузер вообще предлагал перевод.
+      NB: так же ведут себя расширения (Grammarly, «Читать вслух», подсветчики) —
+      от них помогает не это, а элементы-обёртки и key у веток в самих компонентах.
+    -->
+    <meta name="google" content="notranslate" />
     <title>iCORE</title>
     <link rel="icon" type="image/x-icon" href="favicon.ico" />
     <!-- Google tag (gtag.js) -->
