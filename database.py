@@ -926,6 +926,7 @@ class Database:
     SCHEMA_INIT_RETRY_ATTEMPTS = 6
     SHIFT_AUCTION_OPERATOR_LOCK_NAMESPACE = 915904138
     SHIFT_AUCTION_SAVED_SHIFT_LOCK_NAMESPACE = 915904139
+    TEZ_LEAD_PERIOD_LOCK_NAMESPACE = 915904140
 
     def __init__(self):
         self._init_db_with_retry()
@@ -4198,6 +4199,12 @@ class Database:
                 -- свежие звонки и навсегда останется без успешки. Дата поездки уже
                 -- известна, звонки до неё в прошлом — одной докачки достаточно.
                 ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS calls_synced_at TIMESTAMP WITH TIME ZONE;
+                -- Происхождение состояния: NULL — ещё не вычисленный живой лид,
+                -- 0 — результат реального пересчёта, положительное значение —
+                -- event_seq архивного снимка. Это не даёт restore перезаписать
+                -- свежий вычисленный результат и делает порядок откатов A/B
+                -- детерминированным.
+                ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS archive_state_event_seq BIGINT;
 
                 CREATE INDEX IF NOT EXISTS idx_tez_leads_pending_order_check
                     ON tez_leads(year, month) WHERE month_first_order_at IS NULL;
@@ -4213,6 +4220,209 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_tez_successes_operator_period
                     ON tez_lead_successes(operator_id, year, month);
                 CREATE INDEX IF NOT EXISTS idx_tez_successes_date ON tez_lead_successes(success_date);
+
+                -- ── Удаление загруженной базы с историей и откатом ──
+                -- Сама загрузка удаляется МЯГКО (deleted_at), а вот её лиды —
+                -- жёстко. Иначе пришлось бы дописывать «AND deleted_at IS NULL» в
+                -- каждый читающий запрос (воронка, рейтинг, успешки по дням,
+                -- детализация, экспорт, план ОП, ночные выборки номеров), и любой
+                -- пропущенный фильтр молча утёк бы в расчёт зарплаты. Возврат
+                -- обеспечивают архивные таблицы ниже: там лежит полный снимок всего,
+                -- что удалили, включая исходные UUID.
+                ALTER TABLE tez_lead_batches ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP WITH TIME ZONE;
+                ALTER TABLE tez_lead_batches ADD COLUMN IF NOT EXISTS deleted_by INTEGER REFERENCES users(id) ON DELETE SET NULL;
+                ALTER TABLE tez_lead_batches ADD COLUMN IF NOT EXISTS delete_reason TEXT;
+                ALTER TABLE tez_lead_batches ADD COLUMN IF NOT EXISTS restored_at TIMESTAMP WITH TIME ZONE;
+                ALTER TABLE tez_lead_batches ADD COLUMN IF NOT EXISTS restored_by INTEGER REFERENCES users(id) ON DELETE SET NULL;
+
+                -- Отдельная sequence нужна и свежей схеме, и детерминированной
+                -- миграции ранней схемы. ADD BIGSERIAL IF NOT EXISTS здесь
+                -- намеренно не используется: на старых PostgreSQL он мог плодить
+                -- лишние sequence при каждом запуске init.
+                CREATE SEQUENCE IF NOT EXISTS tez_lead_batch_event_order_seq;
+
+                -- Журнал «кто удалил / кто вернул» — append-only, не чистится при
+                -- откате: история должна пережить и удаление, и восстановление.
+                CREATE TABLE IF NOT EXISTS tez_lead_batch_events (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    event_seq BIGINT NOT NULL
+                        DEFAULT nextval('tez_lead_batch_event_order_seq') UNIQUE,
+                    batch_id UUID NOT NULL REFERENCES tez_lead_batches(id) ON DELETE RESTRICT,
+                    action VARCHAR(16) NOT NULL CHECK (action IN ('delete', 'restore')),
+                    source_event_id UUID REFERENCES tez_lead_batch_events(id) ON DELETE RESTRICT,
+                    actor_id INTEGER,
+                    actor_name TEXT NOT NULL DEFAULT '',
+                    reason TEXT NOT NULL DEFAULT '',
+                    leads_removed INTEGER NOT NULL DEFAULT 0,
+                    leads_kept INTEGER NOT NULL DEFAULT 0,
+                    successes_removed INTEGER NOT NULL DEFAULT 0,
+                    leads_merged INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                ALTER TABLE tez_lead_batch_events ADD COLUMN IF NOT EXISTS event_seq BIGINT;
+                ALTER TABLE tez_lead_batch_events ADD COLUMN IF NOT EXISTS source_event_id UUID
+                    REFERENCES tez_lead_batch_events(id) ON DELETE RESTRICT;
+                ALTER TABLE tez_lead_batch_events ADD COLUMN IF NOT EXISTS actor_name TEXT NOT NULL DEFAULT '';
+                -- Для ранней схемы последовательность событий восстанавливаем в
+                -- устойчивом порядке. Уже назначенные номера не трогаем. Таблицу
+                -- на время синхронизации sequence закрываем от INSERT, чтобы
+                -- параллельное audit-событие не получило номер между MAX и setval.
+                LOCK TABLE tez_lead_batch_events IN SHARE ROW EXCLUSIVE MODE;
+                SELECT setval(
+                    'tez_lead_batch_event_order_seq',
+                    COALESCE(MAX(event_seq), 1),
+                    MAX(event_seq) IS NOT NULL
+                )
+                FROM tez_lead_batch_events;
+                WITH missing_events AS (
+                    SELECT ordered.id,
+                           nextval('tez_lead_batch_event_order_seq') AS assigned_seq
+                    FROM (
+                        SELECT id
+                        FROM tez_lead_batch_events
+                        WHERE event_seq IS NULL
+                        ORDER BY created_at NULLS FIRST, id
+                    ) ordered
+                )
+                UPDATE tez_lead_batch_events e
+                SET event_seq = m.assigned_seq
+                FROM missing_events m
+                WHERE e.id = m.id;
+                SELECT setval(
+                    'tez_lead_batch_event_order_seq',
+                    COALESCE(MAX(event_seq), 1),
+                    MAX(event_seq) IS NOT NULL
+                )
+                FROM tez_lead_batch_events;
+                ALTER TABLE tez_lead_batch_events
+                    ALTER COLUMN event_seq
+                    SET DEFAULT nextval('tez_lead_batch_event_order_seq');
+                ALTER TABLE tez_lead_batch_events ALTER COLUMN event_seq SET NOT NULL;
+                ALTER TABLE tez_lead_batch_events ALTER COLUMN created_at SET DEFAULT CURRENT_TIMESTAMP;
+                -- actor_id намеренно без FK: числовой id и снимок имени должны
+                -- пережить удаление аккаунта автора из users.
+                UPDATE tez_lead_batch_events e
+                SET actor_name = u.name
+                FROM users u
+                WHERE e.actor_id = u.id
+                  AND BTRIM(COALESCE(e.actor_name, '')) = '';
+                ALTER TABLE tez_lead_batch_events
+                    DROP CONSTRAINT IF EXISTS tez_lead_batch_events_actor_id_fkey;
+
+                -- Снимок удалённых лидов типизированными колонками (а не JSONB):
+                -- восстановление — обычный INSERT ... SELECT, а не разбор структуры.
+                -- first/last_batch_id БЕЗ внешнего ключа: архив должен пережить
+                -- любую дальнейшую судьбу самих загрузок.
+                CREATE TABLE IF NOT EXISTS tez_lead_archived_leads (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    event_id UUID NOT NULL REFERENCES tez_lead_batch_events(id) ON DELETE RESTRICT,
+                    lead_id UUID NOT NULL,
+                    year INTEGER NOT NULL,
+                    month INTEGER NOT NULL,
+                    phone_norm VARCHAR(16) NOT NULL,
+                    full_name TEXT NOT NULL DEFAULT '',
+                    first_batch_id UUID,
+                    last_batch_id UUID,
+                    upload_count INTEGER NOT NULL DEFAULT 1,
+                    status VARCHAR(20) NOT NULL DEFAULT 'new',
+                    status_rule VARCHAR(32),
+                    month_first_order_at TIMESTAMP WITH TIME ZONE,
+                    prev_month_first_order_at TIMESTAMP WITH TIME ZONE,
+                    first_order_checked_at TIMESTAMP WITH TIME ZONE,
+                    calls_synced_at TIMESTAMP WITH TIME ZONE,
+                    lead_created_at TIMESTAMP,
+                    lead_updated_at TIMESTAMP,
+                    restored_at TIMESTAMP WITH TIME ZONE,
+                    restored_lead_id UUID
+                );
+                ALTER TABLE tez_lead_archived_leads ADD COLUMN IF NOT EXISTS restored_lead_id UUID;
+
+                CREATE TABLE IF NOT EXISTS tez_lead_archived_successes (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    event_id UUID NOT NULL REFERENCES tez_lead_batch_events(id) ON DELETE RESTRICT,
+                    success_id UUID NOT NULL,
+                    lead_id UUID NOT NULL,
+                    phone_norm VARCHAR(16) NOT NULL,
+                    operator_id INTEGER,
+                    operator_name TEXT NOT NULL DEFAULT '',
+                    call_general_id VARCHAR(32),
+                    call_at TIMESTAMP WITH TIME ZONE,
+                    first_order_at TIMESTAMP WITH TIME ZONE,
+                    success_date DATE,
+                    year INTEGER NOT NULL,
+                    month INTEGER NOT NULL,
+                    rule_code VARCHAR(32) NOT NULL DEFAULT '',
+                    is_late BOOLEAN NOT NULL DEFAULT FALSE,
+                    success_created_at TIMESTAMP,
+                    success_updated_at TIMESTAMP,
+                    restored_at TIMESTAMP WITH TIME ZONE,
+                    restored_lead_id UUID,
+                    restored_success_id UUID
+                );
+                ALTER TABLE tez_lead_archived_successes ADD COLUMN IF NOT EXISTS success_id UUID;
+                ALTER TABLE tez_lead_archived_successes ADD COLUMN IF NOT EXISTS success_updated_at TIMESTAMP;
+                ALTER TABLE tez_lead_archived_successes ADD COLUMN IF NOT EXISTS restored_lead_id UUID;
+                ALTER TABLE tez_lead_archived_successes ADD COLUMN IF NOT EXISTS restored_success_id UUID;
+                -- Совместимость с ранней локальной версией миграции, где UUID
+                -- самой успешки ещё не сохранялся.
+                UPDATE tez_lead_archived_successes SET success_id = id WHERE success_id IS NULL;
+                ALTER TABLE tez_lead_archived_successes ALTER COLUMN success_id SET NOT NULL;
+
+                -- Ранняя локальная версия этих таблиц использовала CASCADE и могла
+                -- стереть аудит при физическом DELETE родителя. Переводим уже
+                -- созданные FK на RESTRICT один раз; свежая схема сразу создаётся
+                -- с правильным действием.
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'tez_lead_batch_events_batch_id_fkey'
+                          AND conrelid = 'tez_lead_batch_events'::regclass
+                          AND confdeltype = 'c'
+                    ) THEN
+                        EXECUTE 'ALTER TABLE tez_lead_batch_events '
+                                'DROP CONSTRAINT tez_lead_batch_events_batch_id_fkey';
+                        EXECUTE 'ALTER TABLE tez_lead_batch_events '
+                                'ADD CONSTRAINT tez_lead_batch_events_batch_id_fkey '
+                                'FOREIGN KEY (batch_id) REFERENCES tez_lead_batches(id) ON DELETE RESTRICT';
+                    END IF;
+                    IF EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'tez_lead_archived_leads_event_id_fkey'
+                          AND conrelid = 'tez_lead_archived_leads'::regclass
+                          AND confdeltype = 'c'
+                    ) THEN
+                        EXECUTE 'ALTER TABLE tez_lead_archived_leads '
+                                'DROP CONSTRAINT tez_lead_archived_leads_event_id_fkey';
+                        EXECUTE 'ALTER TABLE tez_lead_archived_leads '
+                                'ADD CONSTRAINT tez_lead_archived_leads_event_id_fkey '
+                                'FOREIGN KEY (event_id) REFERENCES tez_lead_batch_events(id) ON DELETE RESTRICT';
+                    END IF;
+                    IF EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'tez_lead_archived_successes_event_id_fkey'
+                          AND conrelid = 'tez_lead_archived_successes'::regclass
+                          AND confdeltype = 'c'
+                    ) THEN
+                        EXECUTE 'ALTER TABLE tez_lead_archived_successes '
+                                'DROP CONSTRAINT tez_lead_archived_successes_event_id_fkey';
+                        EXECUTE 'ALTER TABLE tez_lead_archived_successes '
+                                'ADD CONSTRAINT tez_lead_archived_successes_event_id_fkey '
+                                'FOREIGN KEY (event_id) REFERENCES tez_lead_batch_events(id) ON DELETE RESTRICT';
+                    END IF;
+                END
+                $$;
+
+                CREATE INDEX IF NOT EXISTS idx_tez_lead_batch_events_batch_seq
+                    ON tez_lead_batch_events(batch_id, event_seq DESC);
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_tez_lead_batch_events_seq
+                    ON tez_lead_batch_events(event_seq);
+                CREATE INDEX IF NOT EXISTS idx_tez_archived_leads_event ON tez_lead_archived_leads(event_id);
+                CREATE INDEX IF NOT EXISTS idx_tez_archived_successes_event ON tez_lead_archived_successes(event_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_tez_archived_leads_event_lead
+                    ON tez_lead_archived_leads(event_id, lead_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_tez_archived_successes_event_success
+                    ON tez_lead_archived_successes(event_id, success_id);
 
                 -- Бэкофилл привязки направлений к отделу: всё, что без отдела — в СЗоВ
                 -- (исторически направления создавались до разделения на отделы).
@@ -13672,6 +13882,20 @@ class Database:
 
     # ─────────────────────── Успешки TEZ ОП: база лидов ───────────────────────
 
+    @classmethod
+    def _lock_tez_lead_period_tx(cls, cursor, year, month):
+        """Сериализует изменения состава/состояния базы лидов внутри месяца.
+
+        Лиды дедуплицируются по (year, month, phone_norm), поэтому блокировки одной
+        строки загрузки недостаточно: две разные загрузки могут менять один и тот же
+        канонический лид. Advisory xact lock освобождается вместе с транзакцией.
+        """
+        period_key = int(year) * 100 + int(month)
+        cursor.execute(
+            "SELECT pg_advisory_xact_lock(%s, %s)",
+            (int(cls.TEZ_LEAD_PERIOD_LOCK_NAMESPACE), period_key),
+        )
+
     def create_tez_lead_batch(self, department_id, year, month, uploaded_by, file_name=''):
         """Заводит запись о загрузке базы лидов и возвращает её id."""
         with self._get_cursor() as cursor:
@@ -13703,6 +13927,29 @@ class Database:
         """
         counts = {'rows_total': 0, 'rows_new': 0, 'rows_duplicate': 0, 'rows_invalid': 0}
         with self._get_cursor() as cursor:
+            requested_year, requested_month = int(year), int(month)
+            # Единый порядок блокировок для import/delete/restore:
+            # period advisory lock -> batch FOR UPDATE. Иначе import может
+            # продолжиться уже после мягкого удаления родительской загрузки.
+            self._lock_tez_lead_period_tx(cursor, requested_year, requested_month)
+            cursor.execute(
+                """
+                SELECT year, month, deleted_at
+                FROM tez_lead_batches
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (batch_id,),
+            )
+            batch = cursor.fetchone()
+            if not batch:
+                raise ValueError('TEZ lead batch not found')
+            batch_year, batch_month = int(batch[0]), int(batch[1])
+            if (batch_year, batch_month) != (requested_year, requested_month):
+                raise ValueError('TEZ lead batch period mismatch')
+            if batch[2] is not None:
+                raise ValueError('Cannot import rows into a deleted TEZ lead batch')
+
             for row_number, raw_name, raw_phone, phone_norm in rows or []:
                 counts['rows_total'] += 1
                 clean_name = str(raw_name or '').strip()[:255]
@@ -13740,7 +13987,7 @@ class Database:
                         updated_at = CURRENT_TIMESTAMP
                     RETURNING id, (xmax = 0) AS inserted
                     """,
-                    (int(year), int(month), phone_norm, clean_name, batch_id, batch_id)
+                    (batch_year, batch_month, phone_norm, clean_name, batch_id, batch_id)
                 )
                 lead_id, inserted = cursor.fetchone()
                 if inserted:
@@ -13788,21 +14035,68 @@ class Database:
                  batch_id)
             )
 
-    def list_tez_lead_batches(self, year, month):
-        """Загрузки базы за месяц (свежие сверху)."""
+    def get_tez_lead_batch_metadata(self, batch_id):
+        """Минимальные метаданные загрузки для проверки HTTP-scope."""
         with self._get_cursor() as cursor:
             cursor.execute(
                 """
-                SELECT b.id, b.file_name, b.rows_total, b.rows_new, b.rows_duplicate,
-                       b.rows_invalid, b.already_working, b.check_status, b.check_error,
-                       b.created_at, u.name
-                FROM tez_lead_batches b
-                LEFT JOIN users u ON u.id = b.uploaded_by
-                WHERE b.year = %s AND b.month = %s
-                ORDER BY b.created_at DESC
+                SELECT id, department_id, year, month, deleted_at
+                FROM tez_lead_batches
+                WHERE id = %s
                 """,
-                (int(year), int(month))
+                (batch_id,),
             )
+            row = cursor.fetchone()
+        if not row:
+            return None
+        return {
+            'id': str(row[0]),
+            'department_id': int(row[1]) if row[1] is not None else None,
+            'year': int(row[2]),
+            'month': int(row[3]),
+            'is_deleted': row[4] is not None,
+        }
+
+    def list_tez_lead_batches(self, year, month, include_deleted=True):
+        """Загрузки базы за месяц (свежие сверху).
+
+        Удалённые загрузки по умолчанию остаются в списке (с deleted_at и автором
+        удаления) — это и есть требуемая история: видно, что база была и кто её убрал.
+        """
+        sql = """
+            SELECT b.id, b.file_name, b.rows_total, b.rows_new, b.rows_duplicate,
+                   b.rows_invalid, b.already_working, b.check_status, b.check_error,
+                   b.created_at, u.name,
+                   b.deleted_at,
+                   COALESCE(NULLIF(de.actor_name, ''), du.name, ''),
+                   COALESCE(NULLIF(de.reason, ''), b.delete_reason, ''),
+                   b.restored_at,
+                   COALESCE(NULLIF(re.actor_name, ''), ru.name, '')
+            FROM tez_lead_batches b
+            LEFT JOIN users u ON u.id = b.uploaded_by
+            LEFT JOIN users du ON du.id = b.deleted_by
+            LEFT JOIN users ru ON ru.id = b.restored_by
+            LEFT JOIN LATERAL (
+                SELECT e.actor_name, e.reason
+                FROM tez_lead_batch_events e
+                WHERE e.batch_id = b.id AND e.action = 'delete'
+                ORDER BY e.event_seq DESC
+                LIMIT 1
+            ) de ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT e.actor_name
+                FROM tez_lead_batch_events e
+                WHERE e.batch_id = b.id AND e.action = 'restore'
+                ORDER BY e.event_seq DESC
+                LIMIT 1
+            ) re ON TRUE
+            WHERE b.year = %s AND b.month = %s
+        """
+        if not include_deleted:
+            sql += " AND b.deleted_at IS NULL"
+        sql += " ORDER BY b.created_at DESC"
+        with self._get_cursor() as cursor:
+            cursor.execute(sql, (int(year), int(month)))
             return [{
                 'id': str(r[0]),
                 'file_name': r[1],
@@ -13815,7 +14109,871 @@ class Database:
                 'check_error': r[8],
                 'created_at': r[9].isoformat() if hasattr(r[9], 'isoformat') else str(r[9] or ''),
                 'uploaded_by_name': r[10] or '',
+                'is_deleted': r[11] is not None,
+                'deleted_at': r[11].isoformat() if hasattr(r[11], 'isoformat') else None,
+                'deleted_by_name': r[12] or '',
+                'delete_reason': r[13] or '',
+                'restored_at': r[14].isoformat() if hasattr(r[14], 'isoformat') else None,
+                'restored_by_name': r[15] or '',
             } for r in cursor.fetchall()]
+
+    def get_tez_lead_batch_events(self, batch_id):
+        """История удалений/восстановлений загрузки (старые снизу)."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT e.id, e.action, e.actor_id,
+                       COALESCE(NULLIF(e.actor_name, ''), u.name, ''),
+                       e.reason,
+                       e.leads_removed, e.leads_kept, e.successes_removed, e.leads_merged,
+                       e.created_at, e.source_event_id
+                FROM tez_lead_batch_events e
+                LEFT JOIN users u ON u.id = e.actor_id
+                WHERE e.batch_id = %s
+                ORDER BY e.event_seq DESC
+                """,
+                (batch_id,)
+            )
+            events = []
+            for r in cursor.fetchall():
+                action = r[1]
+                # Колонки счётчиков общие для обоих действий, поэтому наружу отдаём
+                # ещё и «говорящие» имена: у восстановления leads_kept — это сколько
+                # лидов вернулось, а не сколько уцелело.
+                affected, successes = int(r[6] or 0), int(r[7] or 0)
+                events.append({
+                    'id': str(r[0]),
+                    'action': action,
+                    'actor_id': int(r[2]) if r[2] is not None else None,
+                    'actor_name': r[3] or '',
+                    'reason': r[4] or '',
+                    'leads_removed': int(r[5] or 0),
+                    'leads_kept': affected if action == 'delete' else 0,
+                    'leads_restored': affected if action == 'restore' else 0,
+                    'successes_removed': successes if action == 'delete' else 0,
+                    'successes_restored': successes if action == 'restore' else 0,
+                    'leads_merged': int(r[8] or 0),
+                    'created_at': r[9].isoformat() if hasattr(r[9], 'isoformat') else str(r[9] or ''),
+                    'source_event_id': str(r[10]) if r[10] else None,
+                })
+            return events
+
+    @staticmethod
+    def _tez_resync_leads_from_rows_tx(cursor, lead_ids):
+        """Пересобирает upload_count и first/last_batch_id из живых строк загрузок.
+
+        Инвариант базы: upload_count лида = число строк в НЕудалённых загрузках,
+        которые на него ссылаются (импорт кладёт ровно одну строку на вхождение).
+        Поэтому и удаление, и откат не занимаются арифметикой «+1/−1», а просто
+        пересчитывают истину из строк — операция идемпотентна и самолечится, если
+        счётчик когда-то разъехался.
+        """
+        ids = [i for i in (lead_ids or []) if i]
+        if not ids:
+            return 0
+        # Строку засчитываем и по lead_id, и по номеру: прошлые удаления могли
+        # обнулить FK (ON DELETE SET NULL), и такая строка иначе выпала бы из счёта.
+        cursor.execute(
+            """
+            UPDATE tez_leads l
+            SET upload_count = GREATEST(agg.cnt, 1),
+                first_batch_id = agg.first_batch_id,
+                last_batch_id = agg.last_batch_id,
+                updated_at = CURRENT_TIMESTAMP
+            FROM (
+                SELECT l2.id AS lead_id,
+                       COUNT(*) AS cnt,
+                       (ARRAY_AGG(r.batch_id ORDER BY b.created_at, r.row_number))[1] AS first_batch_id,
+                       (ARRAY_AGG(r.batch_id ORDER BY b.created_at DESC, r.row_number DESC))[1] AS last_batch_id
+                FROM tez_leads l2
+                JOIN tez_lead_batch_rows r
+                  ON r.lead_id = l2.id
+                  OR (r.phone_norm IS NOT NULL AND r.phone_norm = l2.phone_norm)
+                JOIN tez_lead_batches b
+                  ON b.id = r.batch_id
+                 AND b.deleted_at IS NULL
+                 AND b.year = l2.year AND b.month = l2.month
+                WHERE l2.id = ANY(%s::uuid[])
+                GROUP BY l2.id
+            ) agg
+            WHERE l.id = agg.lead_id
+            """,
+            (ids,)
+        )
+        return cursor.rowcount
+
+    def _lock_tez_lead_batch_for_change_tx(self, cursor, batch_id):
+        """Находит batch и берёт блокировки в едином для всех операций порядке."""
+        cursor.execute(
+            "SELECT year, month FROM tez_lead_batches WHERE id = %s",
+            (batch_id,),
+        )
+        preview = cursor.fetchone()
+        if not preview:
+            return None
+        year, month = int(preview[0]), int(preview[1])
+        self._lock_tez_lead_period_tx(cursor, year, month)
+        cursor.execute(
+            """
+            SELECT id, department_id, year, month, deleted_at
+            FROM tez_lead_batches
+            WHERE id = %s
+            FOR UPDATE
+            """,
+            (batch_id,),
+        )
+        return cursor.fetchone()
+
+    @staticmethod
+    def _tez_actor_name_tx(cursor, actor_id):
+        if actor_id is None:
+            return ''
+        cursor.execute("SELECT name FROM users WHERE id = %s", (int(actor_id),))
+        row = cursor.fetchone()
+        return str(row[0] or '')[:255] if row else ''
+
+    def delete_tez_lead_batch(self, batch_id, actor_id, reason=''):
+        """Транзакционно исключает загрузку из базы и сохраняет полный снимок.
+
+        Снимок делается для *всех* затронутых лидов, включая общие с другими
+        загрузками. Это важно для порядка A(delete) -> B(delete) -> A(restore):
+        восстановление A не зависит от того, какая загрузка последней удалила
+        каноническую строку лида.
+        """
+        clean_reason = str(reason or '').strip()[:2000]
+        with self._get_cursor() as cursor:
+            batch = self._lock_tez_lead_batch_for_change_tx(cursor, batch_id)
+            if not batch:
+                return None
+            if batch[4] is not None:
+                return {'already_deleted': True}
+            year, month = int(batch[2]), int(batch[3])
+
+            cursor.execute(
+                """
+                SELECT DISTINCT l.id
+                FROM tez_lead_batch_rows r
+                JOIN tez_leads l
+                  ON l.year = %s
+                 AND l.month = %s
+                 AND (
+                        l.id = r.lead_id
+                        OR (r.phone_norm IS NOT NULL AND l.phone_norm = r.phone_norm)
+                     )
+                WHERE r.batch_id = %s
+                ORDER BY l.id
+                """,
+                (year, month, batch_id),
+            )
+            touched = [row[0] for row in cursor.fetchall()]
+
+            # Защищаем снимок от параллельного пересчёта статусов/успешек.
+            if touched:
+                cursor.execute(
+                    "SELECT id FROM tez_leads WHERE id = ANY(%s::uuid[]) ORDER BY id FOR UPDATE",
+                    (touched,),
+                )
+                touched = [row[0] for row in cursor.fetchall()]
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM tez_lead_successes
+                    WHERE lead_id = ANY(%s::uuid[])
+                    ORDER BY id
+                    FOR UPDATE
+                    """,
+                    (touched,),
+                )
+                cursor.fetchall()
+
+            actor_name = self._tez_actor_name_tx(cursor, actor_id)
+            cursor.execute(
+                """
+                INSERT INTO tez_lead_batch_events
+                    (batch_id, action, actor_id, actor_name, reason)
+                VALUES (%s, 'delete', %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    batch_id,
+                    int(actor_id) if actor_id is not None else None,
+                    actor_name,
+                    clean_reason,
+                ),
+            )
+            event_id = cursor.fetchone()[0]
+
+            cursor.execute(
+                """
+                UPDATE tez_lead_batches
+                SET deleted_at = CURRENT_TIMESTAMP,
+                    deleted_by = %s,
+                    delete_reason = %s,
+                    restored_at = NULL,
+                    restored_by = NULL
+                WHERE id = %s
+                """,
+                (
+                    int(actor_id) if actor_id is not None else None,
+                    clean_reason,
+                    batch_id,
+                ),
+            )
+
+            doomed = []
+            if touched:
+                cursor.execute(
+                    """
+                    SELECT l.id
+                    FROM tez_leads l
+                    WHERE l.id = ANY(%s::uuid[])
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM tez_lead_batch_rows r
+                          JOIN tez_lead_batches b ON b.id = r.batch_id
+                          WHERE b.deleted_at IS NULL
+                            AND b.year = l.year
+                            AND b.month = l.month
+                            AND (
+                                   r.lead_id = l.id
+                                   OR (r.phone_norm IS NOT NULL AND r.phone_norm = l.phone_norm)
+                                )
+                      )
+                    ORDER BY l.id
+                    """,
+                    (touched,),
+                )
+                doomed = [row[0] for row in cursor.fetchall()]
+
+                cursor.execute(
+                    """
+                    INSERT INTO tez_lead_archived_leads
+                        (event_id, lead_id, year, month, phone_norm, full_name,
+                         first_batch_id, last_batch_id, upload_count, status, status_rule,
+                         month_first_order_at, prev_month_first_order_at,
+                         first_order_checked_at, calls_synced_at,
+                         lead_created_at, lead_updated_at)
+                    SELECT %s, l.id, l.year, l.month, l.phone_norm, l.full_name,
+                           l.first_batch_id, l.last_batch_id, l.upload_count,
+                           l.status, l.status_rule, l.month_first_order_at,
+                           l.prev_month_first_order_at, l.first_order_checked_at,
+                           l.calls_synced_at, l.created_at, l.updated_at
+                    FROM tez_leads l
+                    WHERE l.id = ANY(%s::uuid[])
+                    ON CONFLICT DO NOTHING
+                    """,
+                    (event_id, touched),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO tez_lead_archived_successes
+                        (event_id, success_id, lead_id, phone_norm, operator_id,
+                         operator_name, call_general_id, call_at, first_order_at,
+                         success_date, year, month, rule_code, is_late,
+                         success_created_at, success_updated_at)
+                    SELECT %s, s.id, s.lead_id, s.phone_norm, s.operator_id,
+                           s.operator_name, s.call_general_id, s.call_at,
+                           s.first_order_at, s.success_date, s.year, s.month,
+                           s.rule_code, s.is_late, s.created_at, s.updated_at
+                    FROM tez_lead_successes s
+                    WHERE s.lead_id = ANY(%s::uuid[])
+                    ON CONFLICT DO NOTHING
+                    """,
+                    (event_id, touched),
+                )
+
+            successes_removed = 0
+            if doomed:
+                cursor.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM tez_lead_archived_successes
+                    WHERE event_id = %s AND lead_id = ANY(%s::uuid[])
+                    """,
+                    (event_id, doomed),
+                )
+                successes_removed = int(cursor.fetchone()[0] or 0)
+                cursor.execute("DELETE FROM tez_leads WHERE id = ANY(%s::uuid[])", (doomed,))
+
+            doomed_set = set(doomed)
+            kept = [lead_id for lead_id in touched if lead_id not in doomed_set]
+            self._tez_resync_leads_from_rows_tx(cursor, kept)
+
+            counts = {
+                'batch_id': str(batch_id),
+                'event_id': str(event_id),
+                'leads_removed': len(doomed),
+                'leads_kept': len(kept),
+                'successes_removed': successes_removed,
+            }
+            cursor.execute(
+                """
+                UPDATE tez_lead_batch_events
+                SET leads_removed = %s,
+                    leads_kept = %s,
+                    successes_removed = %s
+                WHERE id = %s
+                """,
+                (
+                    counts['leads_removed'],
+                    counts['leads_kept'],
+                    counts['successes_removed'],
+                    event_id,
+                ),
+            )
+        return counts
+
+    def restore_tez_lead_batch(self, batch_id, actor_id, reason=''):
+        """Безопасно возвращает загрузку, объединяя архив с текущим лидом по номеру."""
+        clean_reason = str(reason or '').strip()[:2000]
+        with self._get_cursor() as cursor:
+            batch = self._lock_tez_lead_batch_for_change_tx(cursor, batch_id)
+            if not batch:
+                return None
+            if batch[4] is None:
+                return {'not_deleted': True}
+            year, month = int(batch[2]), int(batch[3])
+
+            cursor.execute(
+                """
+                SELECT id
+                FROM tez_lead_batch_events
+                WHERE batch_id = %s AND action = 'delete'
+                ORDER BY event_seq DESC
+                LIMIT 1
+                """,
+                (batch_id,),
+            )
+            source = cursor.fetchone()
+            if not source:
+                raise RuntimeError('Deleted TEZ lead batch has no delete audit event')
+            delete_event_id = source[0]
+
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM tez_lead_archived_leads
+                WHERE event_id = %s AND restored_at IS NULL
+                """,
+                (delete_event_id,),
+            )
+            archived_total = int(cursor.fetchone()[0] or 0)
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM tez_lead_archived_successes
+                WHERE event_id = %s AND restored_at IS NULL
+                """,
+                (delete_event_id,),
+            )
+            archived_success_total = int(cursor.fetchone()[0] or 0)
+
+            # Водитель нужен FK лида. Берём и архив, и исходные строки batch:
+            # вторая ветка чинит данные ранней версии механизма отката.
+            cursor.execute(
+                """
+                INSERT INTO tez_drivers (phone_norm)
+                SELECT phone_norm
+                FROM (
+                    SELECT a.phone_norm
+                    FROM tez_lead_archived_leads a
+                    WHERE a.event_id = %s AND a.restored_at IS NULL
+                    UNION
+                    SELECT r.phone_norm
+                    FROM tez_lead_batch_rows r
+                    WHERE r.batch_id = %s AND r.phone_norm IS NOT NULL
+                ) phones
+                ON CONFLICT (phone_norm) DO NOTHING
+                """,
+                (delete_event_id, batch_id),
+            )
+
+            # Один телефон мог попасть в несколько загрузок, которые затем были
+            # удалены в разном порядке. Восстанавливаем не снимок именно этого
+            # batch, а последнее известное состояние логического лида во всём
+            # периоде. restored_at намеренно не фильтруем: архив остаётся журналом
+            # истины и после предыдущего отката.
+            cursor.execute(
+                """
+                WITH target_phones AS (
+                    SELECT DISTINCT phone_norm
+                    FROM tez_lead_batch_rows
+                    WHERE batch_id = %s AND phone_norm IS NOT NULL
+                ),
+                latest AS (
+                    SELECT DISTINCT ON (a.year, a.month, a.phone_norm)
+                           a.*, e.event_seq AS snapshot_event_seq
+                    FROM tez_lead_archived_leads a
+                    JOIN tez_lead_batch_events e
+                      ON e.id = a.event_id
+                     AND e.action = 'delete'
+                    JOIN target_phones t ON t.phone_norm = a.phone_norm
+                    WHERE a.year = %s AND a.month = %s
+                    ORDER BY a.year, a.month, a.phone_norm,
+                             e.event_seq DESC, a.id DESC
+                )
+                INSERT INTO tez_leads
+                    (id, year, month, phone_norm, full_name,
+                     first_batch_id, last_batch_id, upload_count,
+                     status, status_rule, month_first_order_at,
+                     prev_month_first_order_at, first_order_checked_at,
+                     calls_synced_at, archive_state_event_seq,
+                     created_at, updated_at)
+                SELECT x.lead_id, x.year, x.month, x.phone_norm, x.full_name,
+                       CASE WHEN fb.id IS NOT NULL THEN x.first_batch_id END,
+                       CASE WHEN lb.id IS NOT NULL THEN x.last_batch_id END,
+                       x.upload_count, x.status, x.status_rule,
+                       x.month_first_order_at, x.prev_month_first_order_at,
+                       x.first_order_checked_at, x.calls_synced_at,
+                       x.snapshot_event_seq,
+                       COALESCE(x.lead_created_at, CURRENT_TIMESTAMP),
+                       CURRENT_TIMESTAMP
+                FROM latest x
+                LEFT JOIN tez_lead_batches fb ON fb.id = x.first_batch_id
+                LEFT JOIN tez_lead_batches lb ON lb.id = x.last_batch_id
+                ON CONFLICT (year, month, phone_norm) DO NOTHING
+                RETURNING id
+                """,
+                (batch_id, year, month),
+            )
+            archive_recreated_ids = [row[0] for row in cursor.fetchall()]
+
+            # Fallback гарантирует: каждая валидная строка восстановленного batch
+            # снова имеет канонический лид, даже если архив был создан ранней
+            # дефектной версией и не содержал общий лид.
+            cursor.execute(
+                """
+                INSERT INTO tez_leads
+                    (year, month, phone_norm, full_name,
+                     first_batch_id, last_batch_id, upload_count)
+                SELECT %s, %s, r.phone_norm,
+                       COALESCE(MAX(NULLIF(BTRIM(r.raw_full_name), '')), ''),
+                       %s, %s, 1
+                FROM tez_lead_batch_rows r
+                WHERE r.batch_id = %s AND r.phone_norm IS NOT NULL
+                GROUP BY r.phone_norm
+                ON CONFLICT (year, month, phone_norm) DO NOTHING
+                RETURNING id
+                """,
+                (year, month, batch_id, batch_id, batch_id),
+            )
+            fallback_recreated_ids = [row[0] for row in cursor.fetchall()]
+
+            # Текущие непустые поля считаем свежее архивных, но архив может
+            # заполнить пробелы. Это обновление также инвалидирует outcome,
+            # рассчитанный параллельно до начала restore.
+            cursor.execute(
+                """
+                WITH target_phones AS (
+                    SELECT DISTINCT phone_norm
+                    FROM tez_lead_batch_rows
+                    WHERE batch_id = %s AND phone_norm IS NOT NULL
+                ),
+                latest AS (
+                    SELECT DISTINCT ON (a.year, a.month, a.phone_norm)
+                           a.*, e.event_seq AS snapshot_event_seq
+                    FROM tez_lead_archived_leads a
+                    JOIN tez_lead_batch_events e
+                      ON e.id = a.event_id
+                     AND e.action = 'delete'
+                    JOIN target_phones t ON t.phone_norm = a.phone_norm
+                    WHERE a.year = %s AND a.month = %s
+                    ORDER BY a.year, a.month, a.phone_norm,
+                             e.event_seq DESC, a.id DESC
+                )
+                UPDATE tez_leads l
+                SET full_name = CASE
+                        WHEN BTRIM(COALESCE(l.full_name, '')) = '' THEN x.full_name
+                        ELSE l.full_name
+                    END,
+                    month_first_order_at =
+                        COALESCE(l.month_first_order_at, x.month_first_order_at),
+                    prev_month_first_order_at =
+                        COALESCE(l.prev_month_first_order_at, x.prev_month_first_order_at),
+                    first_order_checked_at =
+                        GREATEST(l.first_order_checked_at, x.first_order_checked_at),
+                    calls_synced_at = GREATEST(l.calls_synced_at, x.calls_synced_at),
+                    updated_at = CURRENT_TIMESTAMP
+                FROM latest x
+                WHERE l.year = x.year
+                  AND l.month = x.month
+                  AND l.phone_norm = x.phone_norm
+                """,
+                (batch_id, year, month),
+            )
+
+            # NULL + new — ещё не вычисленное состояние новой живой загрузки.
+            # 0 — результат реального recompute: архив его не перезаписывает.
+            # Положительное значение — применённый архив; более новый event_seq
+            # может заменить более старый независимо от порядка restore A/B.
+            cursor.execute(
+                """
+                WITH target_phones AS (
+                    SELECT DISTINCT phone_norm
+                    FROM tez_lead_batch_rows
+                    WHERE batch_id = %s AND phone_norm IS NOT NULL
+                ),
+                latest AS (
+                    SELECT DISTINCT ON (a.year, a.month, a.phone_norm)
+                           a.*, e.event_seq AS snapshot_event_seq
+                    FROM tez_lead_archived_leads a
+                    JOIN tez_lead_batch_events e
+                      ON e.id = a.event_id
+                     AND e.action = 'delete'
+                    JOIN target_phones t ON t.phone_norm = a.phone_norm
+                    WHERE a.year = %s AND a.month = %s
+                    ORDER BY a.year, a.month, a.phone_norm,
+                             e.event_seq DESC, a.id DESC
+                )
+                UPDATE tez_leads l
+                SET status = x.status,
+                    status_rule = x.status_rule,
+                    archive_state_event_seq = x.snapshot_event_seq,
+                    updated_at = CURRENT_TIMESTAMP
+                FROM latest x
+                WHERE l.year = x.year
+                  AND l.month = x.month
+                  AND l.phone_norm = x.phone_norm
+                  AND (
+                        (l.archive_state_event_seq IS NULL AND l.status = 'new')
+                        OR (
+                            l.archive_state_event_seq > 0
+                            AND l.archive_state_event_seq < x.snapshot_event_seq
+                        )
+                      )
+                RETURNING l.id
+                """,
+                (batch_id, year, month),
+            )
+            archive_upgraded_ids = [row[0] for row in cursor.fetchall()]
+            snapshot_applied_ids = list(dict.fromkeys(
+                archive_recreated_ids + archive_upgraded_ids
+            ))
+
+            cursor.execute(
+                """
+                SELECT COUNT(*),
+                       COUNT(*) FILTER (WHERE l.id <> a.lead_id)
+                FROM tez_lead_archived_leads a
+                JOIN tez_leads l
+                  ON l.year = a.year
+                 AND l.month = a.month
+                 AND l.phone_norm = a.phone_norm
+                WHERE a.event_id = %s AND a.restored_at IS NULL
+                """,
+                (delete_event_id,),
+            )
+            mapped_total, merged = cursor.fetchone()
+            mapped_total, merged = int(mapped_total or 0), int(merged or 0)
+            if mapped_total != archived_total:
+                raise RuntimeError('TEZ lead archive could not be mapped completely')
+
+            successes_restored = 0
+            if snapshot_applied_ids:
+                # Архивный success допустим только из того же события, что и
+                # latest lead snapshot. Иначе старый success мог бы воскреснуть
+                # поверх более нового not_counted/in_progress.
+                cursor.execute(
+                    """
+                    WITH target_phones AS (
+                        SELECT DISTINCT phone_norm
+                        FROM tez_lead_batch_rows
+                        WHERE batch_id = %s AND phone_norm IS NOT NULL
+                    ),
+                    latest AS (
+                        SELECT DISTINCT ON (a.year, a.month, a.phone_norm)
+                               a.*, e.event_seq AS snapshot_event_seq
+                        FROM tez_lead_archived_leads a
+                        JOIN tez_lead_batch_events e
+                          ON e.id = a.event_id
+                         AND e.action = 'delete'
+                        JOIN target_phones t ON t.phone_norm = a.phone_norm
+                        WHERE a.year = %s AND a.month = %s
+                        ORDER BY a.year, a.month, a.phone_norm,
+                                 e.event_seq DESC, a.id DESC
+                    )
+                    SELECT COUNT(*)
+                    FROM latest x
+                    JOIN tez_leads l
+                      ON l.year = x.year
+                     AND l.month = x.month
+                     AND l.phone_norm = x.phone_norm
+                    WHERE l.id = ANY(%s::uuid[])
+                      AND x.status = 'success'
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM tez_lead_archived_successes a
+                          WHERE a.event_id = x.event_id
+                            AND a.lead_id = x.lead_id
+                      )
+                    """,
+                    (batch_id, year, month, snapshot_applied_ids),
+                )
+                if int(cursor.fetchone()[0] or 0):
+                    raise RuntimeError('Latest TEZ success snapshot has no archived success')
+
+                # Сначала убираем успех от предыдущего архивного состояния:
+                # latest может оказаться как success, так и non-success.
+                cursor.execute(
+                    "DELETE FROM tez_lead_successes WHERE lead_id = ANY(%s::uuid[])",
+                    (snapshot_applied_ids,),
+                )
+                cursor.execute(
+                    """
+                    WITH target_phones AS (
+                        SELECT DISTINCT phone_norm
+                        FROM tez_lead_batch_rows
+                        WHERE batch_id = %s AND phone_norm IS NOT NULL
+                    ),
+                    latest AS (
+                        SELECT DISTINCT ON (a.year, a.month, a.phone_norm)
+                               a.*, e.event_seq AS snapshot_event_seq
+                        FROM tez_lead_archived_leads a
+                        JOIN tez_lead_batch_events e
+                          ON e.id = a.event_id
+                         AND e.action = 'delete'
+                        JOIN target_phones t ON t.phone_norm = a.phone_norm
+                        WHERE a.year = %s AND a.month = %s
+                        ORDER BY a.year, a.month, a.phone_norm,
+                                 e.event_seq DESC, a.id DESC
+                    )
+                    INSERT INTO tez_lead_successes
+                        (id, lead_id, phone_norm, operator_id, operator_name,
+                         call_general_id, call_at, first_order_at, success_date,
+                         year, month, rule_code, is_late, created_at, updated_at)
+                    SELECT a.success_id, l.id, a.phone_norm,
+                           CASE WHEN u.id IS NULL THEN NULL ELSE a.operator_id END,
+                           a.operator_name, a.call_general_id, a.call_at,
+                           a.first_order_at, a.success_date, a.year, a.month,
+                           a.rule_code, a.is_late,
+                           COALESCE(a.success_created_at, CURRENT_TIMESTAMP),
+                           COALESCE(
+                               a.success_updated_at,
+                               a.success_created_at,
+                               CURRENT_TIMESTAMP
+                           )
+                    FROM latest x
+                    JOIN tez_lead_archived_successes a
+                      ON a.event_id = x.event_id
+                     AND a.lead_id = x.lead_id
+                    JOIN tez_leads l
+                      ON l.year = x.year
+                     AND l.month = x.month
+                     AND l.phone_norm = x.phone_norm
+                    LEFT JOIN users u ON u.id = a.operator_id
+                    WHERE l.id = ANY(%s::uuid[])
+                      AND x.status = 'success'
+                      AND l.archive_state_event_seq = x.snapshot_event_seq
+                    ON CONFLICT (lead_id) DO UPDATE SET
+                        id = EXCLUDED.id,
+                        phone_norm = EXCLUDED.phone_norm,
+                        operator_id = EXCLUDED.operator_id,
+                        operator_name = EXCLUDED.operator_name,
+                        call_general_id = EXCLUDED.call_general_id,
+                        call_at = EXCLUDED.call_at,
+                        first_order_at = EXCLUDED.first_order_at,
+                        success_date = EXCLUDED.success_date,
+                        year = EXCLUDED.year,
+                        month = EXCLUDED.month,
+                        rule_code = EXCLUDED.rule_code,
+                        is_late = EXCLUDED.is_late,
+                        created_at = EXCLUDED.created_at,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    (batch_id, year, month, snapshot_applied_ids),
+                )
+                successes_restored = int(cursor.rowcount or 0)
+
+                cursor.execute(
+                    """
+                    WITH target_phones AS (
+                        SELECT DISTINCT phone_norm
+                        FROM tez_lead_batch_rows
+                        WHERE batch_id = %s AND phone_norm IS NOT NULL
+                    ),
+                    latest AS (
+                        SELECT DISTINCT ON (a.year, a.month, a.phone_norm)
+                               a.*, e.event_seq AS snapshot_event_seq
+                        FROM tez_lead_archived_leads a
+                        JOIN tez_lead_batch_events e
+                          ON e.id = a.event_id
+                         AND e.action = 'delete'
+                        JOIN target_phones t ON t.phone_norm = a.phone_norm
+                        WHERE a.year = %s AND a.month = %s
+                        ORDER BY a.year, a.month, a.phone_norm,
+                                 e.event_seq DESC, a.id DESC
+                    )
+                    SELECT COUNT(*)
+                    FROM latest x
+                    JOIN tez_leads l
+                      ON l.year = x.year
+                     AND l.month = x.month
+                     AND l.phone_norm = x.phone_norm
+                    WHERE l.id = ANY(%s::uuid[])
+                      AND (
+                            (
+                                x.status = 'success'
+                                AND NOT EXISTS (
+                                    SELECT 1 FROM tez_lead_successes s
+                                    WHERE s.lead_id = l.id
+                                )
+                            )
+                            OR (
+                                x.status <> 'success'
+                                AND EXISTS (
+                                    SELECT 1 FROM tez_lead_successes s
+                                    WHERE s.lead_id = l.id
+                                )
+                            )
+                          )
+                    """,
+                    (batch_id, year, month, snapshot_applied_ids),
+                )
+                if int(cursor.fetchone()[0] or 0):
+                    raise RuntimeError('Restored TEZ lead and success states disagree')
+
+            cursor.execute(
+                """
+                UPDATE tez_lead_archived_leads a
+                SET restored_at = CURRENT_TIMESTAMP,
+                    restored_lead_id = l.id
+                FROM tez_leads l
+                WHERE a.event_id = %s
+                  AND a.restored_at IS NULL
+                  AND l.year = a.year
+                  AND l.month = a.month
+                  AND l.phone_norm = a.phone_norm
+                """,
+                (delete_event_id,),
+            )
+            if int(cursor.rowcount or 0) != archived_total:
+                raise RuntimeError('TEZ lead archive restore marker is incomplete')
+
+            cursor.execute(
+                """
+                WITH target_phones AS (
+                    SELECT DISTINCT phone_norm
+                    FROM tez_lead_batch_rows
+                    WHERE batch_id = %s AND phone_norm IS NOT NULL
+                ),
+                latest AS (
+                    SELECT DISTINCT ON (a.year, a.month, a.phone_norm)
+                           a.*, e.event_seq AS snapshot_event_seq
+                    FROM tez_lead_archived_leads a
+                    JOIN tez_lead_batch_events e
+                      ON e.id = a.event_id
+                     AND e.action = 'delete'
+                    JOIN target_phones t ON t.phone_norm = a.phone_norm
+                    WHERE a.year = %s AND a.month = %s
+                    ORDER BY a.year, a.month, a.phone_norm,
+                             e.event_seq DESC, a.id DESC
+                )
+                UPDATE tez_lead_archived_successes a
+                SET restored_at = CURRENT_TIMESTAMP,
+                    restored_lead_id = l.id,
+                    restored_success_id = CASE
+                        WHEN x.event_id = a.event_id
+                         AND l.archive_state_event_seq = x.snapshot_event_seq
+                        THEN s.id
+                        ELSE NULL
+                    END
+                FROM tez_leads l
+                LEFT JOIN tez_lead_successes s ON s.lead_id = l.id
+                LEFT JOIN latest x
+                  ON x.year = l.year
+                 AND x.month = l.month
+                 AND x.phone_norm = l.phone_norm
+                WHERE a.event_id = %s
+                  AND a.restored_at IS NULL
+                  AND l.year = a.year
+                  AND l.month = a.month
+                  AND l.phone_norm = a.phone_norm
+                """,
+                (batch_id, year, month, delete_event_id),
+            )
+            if int(cursor.rowcount or 0) != archived_success_total:
+                raise RuntimeError('TEZ success archive could not be restored completely')
+
+            cursor.execute(
+                """
+                UPDATE tez_lead_batches
+                SET deleted_at = NULL,
+                    deleted_by = NULL,
+                    delete_reason = NULL,
+                    restored_at = CURRENT_TIMESTAMP,
+                    restored_by = %s
+                WHERE id = %s
+                """,
+                (int(actor_id) if actor_id is not None else None, batch_id),
+            )
+            cursor.execute(
+                """
+                UPDATE tez_lead_batch_rows r
+                SET lead_id = l.id
+                FROM tez_leads l
+                WHERE r.batch_id = %s
+                  AND r.phone_norm IS NOT NULL
+                  AND l.year = %s
+                  AND l.month = %s
+                  AND l.phone_norm = r.phone_norm
+                  AND (r.lead_id IS NULL OR r.lead_id <> l.id)
+                """,
+                (batch_id, year, month),
+            )
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM tez_lead_batch_rows
+                WHERE batch_id = %s
+                  AND phone_norm IS NOT NULL
+                  AND lead_id IS NULL
+                """,
+                (batch_id,),
+            )
+            if int(cursor.fetchone()[0] or 0):
+                raise RuntimeError('Restored TEZ batch still has rows without a lead')
+
+            cursor.execute(
+                """
+                SELECT DISTINCT lead_id
+                FROM tez_lead_batch_rows
+                WHERE batch_id = %s AND lead_id IS NOT NULL
+                """,
+                (batch_id,),
+            )
+            touched = [row[0] for row in cursor.fetchall()]
+            self._tez_resync_leads_from_rows_tx(cursor, touched)
+
+            leads_recreated = len(archive_recreated_ids) + len(fallback_recreated_ids)
+            actor_name = self._tez_actor_name_tx(cursor, actor_id)
+            cursor.execute(
+                """
+                INSERT INTO tez_lead_batch_events
+                    (batch_id, action, source_event_id, actor_id, actor_name,
+                     reason, leads_kept, successes_removed, leads_merged)
+                VALUES (%s, 'restore', %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    batch_id,
+                    delete_event_id,
+                    int(actor_id) if actor_id is not None else None,
+                    actor_name,
+                    clean_reason,
+                    leads_recreated,
+                    successes_restored,
+                    merged,
+                ),
+            )
+            event_id = cursor.fetchone()[0]
+
+        return {
+            'batch_id': str(batch_id),
+            'event_id': str(event_id),
+            'leads_restored': leads_recreated,
+            'successes_restored': successes_restored,
+            'leads_merged': merged,
+        }
 
     def get_tez_phones_pending_first_order(self, year, month, batch_id=None, limit=None):
         """Номера месяца, у которых заказ в отчётном месяце ещё не найден.
@@ -13849,6 +15007,7 @@ class Database:
         """
         found = 0
         with self._get_cursor() as cursor:
+            self._lock_tez_lead_period_tx(cursor, year, month)
             for phone_norm, dates in (first_orders or {}).items():
                 month_at = (dates or {}).get('month')
                 prev_at = (dates or {}).get('prev')
@@ -13900,6 +15059,7 @@ class Database:
         if not nums:
             return 0
         with self._get_cursor() as cursor:
+            self._lock_tez_lead_period_tx(cursor, year, month)
             cursor.execute(
                 """
                 UPDATE tez_leads
@@ -13955,7 +15115,8 @@ class Database:
             cursor.execute(
                 """
                 SELECT l.id, l.phone_norm, l.full_name,
-                       l.month_first_order_at, l.prev_month_first_order_at
+                       l.month_first_order_at, l.prev_month_first_order_at,
+                       l.xmin::text
                 FROM tez_leads l
                 WHERE l.year = %s AND l.month = %s
                 """,
@@ -13967,6 +15128,7 @@ class Database:
                 'full_name': r[2] or '',
                 'month_first_order_at': r[3],
                 'prev_month_first_order_at': r[4],
+                'version': r[5],
                 'calls': [],
             } for r in cursor.fetchall()]
             if not leads:
@@ -14009,17 +15171,54 @@ class Database:
         """
         stats = {'success': 0, 'already_working': 0, 'not_counted': 0, 'in_progress': 0, 'new': 0}
         with self._get_cursor() as cursor:
+            self._lock_tez_lead_period_tx(cursor, year, month)
             for item in outcomes or []:
                 status = item.get('status') or 'new'
+                lead_version = item.get('lead_version')
+                if lead_version is None:
+                    # Совместимость с внутренними/тестовыми вызовами старого
+                    # контракта. Основной recompute всегда передаёт version.
+                    cursor.execute(
+                        """
+                        UPDATE tez_leads
+                        SET status = %s,
+                            status_rule = %s,
+                            archive_state_event_seq = 0,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s AND year = %s AND month = %s
+                        """,
+                        (status, item.get('rule'), item['lead_id'], int(year), int(month)),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        UPDATE tez_leads
+                        SET status = %s,
+                            status_rule = %s,
+                            archive_state_event_seq = 0,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                          AND year = %s
+                          AND month = %s
+                          -- xmin меняется при любом UPDATE и при delete+insert,
+                          -- даже если восстановлен тот же UUID. В отличие от
+                          -- timestamp он не может совпасть из-за точности часов.
+                          AND xmin::text = %s
+                        """,
+                        (
+                            status,
+                            item.get('rule'),
+                            item['lead_id'],
+                            int(year),
+                            int(month),
+                            lead_version,
+                        ),
+                    )
+                # Лид мог исчезнуть между read-фазой пересчёта и этой
+                # транзакцией. В таком случае нельзя вставлять успешку с битым FK.
+                if cursor.rowcount <= 0:
+                    continue
                 stats[status] = stats.get(status, 0) + 1
-                cursor.execute(
-                    """
-                    UPDATE tez_leads
-                    SET status = %s, status_rule = %s, updated_at = CURRENT_TIMESTAMP
-                    WHERE id = %s
-                    """,
-                    (status, item.get('rule'), item['lead_id'])
-                )
 
                 if status != 'success':
                     cursor.execute("DELETE FROM tez_lead_successes WHERE lead_id = %s", (item['lead_id'],))
@@ -14261,12 +15460,25 @@ class Database:
                    COALESCE(u.name, s.operator_name, lu.name),
                    COALESCE(s.call_at, lc.started_at) AT TIME ZONE 'Asia/Almaty',
                    s.success_date, s.rule_code,
-                   l.prev_month_first_order_at AT TIME ZONE 'Asia/Almaty'
+                   l.prev_month_first_order_at AT TIME ZONE 'Asia/Almaty',
+                   source_batch.file_name,
+                   CASE
+                       -- Для успешек длительность должна относиться ровно к тому
+                       -- звонку Binotel, который сохранён как звонок привлечения.
+                       WHEN s.id IS NOT NULL THEN success_call.billsec
+                       -- Для остальных статусов это тот же последний
+                       -- квалифицирующий звонок, который показываем в колонке
+                       -- «Звонок» детализации.
+                       ELSE lc.billsec
+                   END
             FROM tez_leads l
             LEFT JOIN tez_lead_successes s ON s.lead_id = l.id
             LEFT JOIN users u ON u.id = s.operator_id
+            LEFT JOIN tez_lead_batches source_batch ON source_batch.id = l.first_batch_id
+            LEFT JOIN tez_lead_calls success_call
+              ON success_call.general_call_id = s.call_general_id
             LEFT JOIN LATERAL (
-                SELECT c.operator_id, c.started_at
+                SELECT c.operator_id, c.started_at, c.billsec
                 FROM tez_lead_calls c
                 WHERE c.phone_norm = l.phone_norm
                   AND c.is_qualifying
@@ -14298,6 +15510,8 @@ class Database:
                 'success_date': r[10].isoformat() if r[10] else None,
                 'rule_code': r[11],
                 'prev_month_first_order_at': r[12].isoformat() if r[12] else None,
+                'source_file_name': r[13] or '',
+                'talk_duration_seconds': int(r[14]) if r[14] is not None else None,
             } for r in cursor.fetchall()]
 
     def get_tez_success_counts_for_operators(self, operator_ids, year, month):
@@ -14782,17 +15996,20 @@ class Database:
     # чтобы обе цифры считались по одному и тому же определению.
     _WAZZUP_ANALYTICS_CTE = """
         WITH msgs AS (
-            SELECT m.channel_id, m.chat_id, m.dt, m.is_echo,
+            SELECT m.channel_id, m.chat_id, m.dt,
+                   (m.dt AT TIME ZONE 'Asia/Almaty')::date AS local_date,
+                   m.is_echo,
                    m.author_id, m.author_name,
                    map.user_id, COALESCE(map.is_bot, FALSE) AS is_bot
               FROM wazzup_messages m
               LEFT JOIN wazzup_operator_map map ON map.author_id = m.author_id
-             WHERE {window}
+             WHERE NOT m.is_deleted AND {window}
         ),
         agent_msgs AS (
             -- исходящие живого менеджера; grp = оператор (если привязан), иначе автор,
             -- NULL — сообщение, которое некому засчитать (но «первым ответом» быть может)
-            SELECT channel_id, chat_id, dt, author_id, author_name, user_id,
+            SELECT channel_id, chat_id, dt, local_date,
+                   author_id, author_name, user_id,
                    COALESCE('u:' || user_id::text, 'a:' || author_id) AS grp
               FROM msgs
              WHERE is_echo AND NOT is_bot
@@ -14817,7 +16034,8 @@ class Database:
     def wazzup_operator_analytics(self, date_from=None, date_to=None):
         """Аналитика по менеджерам Wazzup за период (границы — даты Алматы).
 
-        • Диалоги — чаты (не эпизоды), где у менеджера есть хотя бы одно сообщение.
+        • Диалоги — сумма активных чатов по дням: один чат в два разных дня
+          считается дважды. Именно так недельные итоги строит Wazzup.
         • Сообщения — его исходящие.
         • Время ответа — на каждый чат одно значение: первое сообщение менеджера
           после первого сообщения клиента минус время того сообщения клиента.
@@ -14830,10 +16048,16 @@ class Database:
         """
         window, params = ["TRUE"], []
         if date_from:
-            window.append("m.dt >= (%s::date) AT TIME ZONE 'Asia/Almaty'")
+            # Явный timestamp обязателен. Для date PostgreSQL выбирает другую
+            # перегрузку AT TIME ZONE и при UTC-сессии сдвигает границу на +10 ч.
+            window.append(
+                "m.dt >= (%s::date::timestamp AT TIME ZONE 'Asia/Almaty')"
+            )
             params.append(date_from)
         if date_to:
-            window.append("m.dt < (%s::date + 1) AT TIME ZONE 'Asia/Almaty'")
+            window.append(
+                "m.dt < ((%s::date + 1)::timestamp AT TIME ZONE 'Asia/Almaty')"
+            )
             params.append(date_to)
         cte = self._WAZZUP_ANALYTICS_CTE.format(window=' AND '.join(window))
         with self._get_cursor() as cursor:
@@ -14844,7 +16068,8 @@ class Database:
                            (array_agg(author_name ORDER BY dt DESC))[1] AS author_name,
                            (array_agg(author_id ORDER BY dt DESC))[1] AS author_id,
                            COUNT(*) AS messages_count,
-                           COUNT(DISTINCT (channel_id, chat_id)) AS dialogs_count,
+                           COUNT(DISTINCT (local_date, channel_id, chat_id))
+                               AS dialogs_count,
                            MAX(dt) AS last_message_at
                       FROM agent_msgs WHERE grp IS NOT NULL GROUP BY grp
                 ),
@@ -14873,7 +16098,8 @@ class Database:
                      for r in cursor.fetchall()]
             # Итог считается по сырым значениям, а не усреднением средних
             cursor.execute(cte + """
-                SELECT (SELECT COUNT(DISTINCT (channel_id, chat_id))
+                SELECT (SELECT COUNT(DISTINCT
+                                     (grp, local_date, channel_id, chat_id))
                           FROM agent_msgs WHERE grp IS NOT NULL),
                        (SELECT COUNT(*) FROM agent_msgs WHERE grp IS NOT NULL),
                        (SELECT AVG(secs) FROM first_reply WHERE grp IS NOT NULL),

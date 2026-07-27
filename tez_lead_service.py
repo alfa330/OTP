@@ -230,6 +230,10 @@ def recompute_outcomes(db, year, month, min_billsec=DEFAULT_MIN_BILLSEC, month_c
         )
         item = {
             'lead_id': lead['id'],
+            # Optimistic version: delete/restore может вернуть тот же UUID, но
+            # уже другое состояние. Database применит результат только к той
+            # версии лида, на которой он был рассчитан.
+            'lead_version': lead.get('version'),
             'phone_norm': lead['phone_norm'],
             'status': outcome['status'],
             'rule': outcome['rule'],

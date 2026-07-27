@@ -173,6 +173,17 @@ class RecomputeOutcomesTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(first_applied, db.applied)
 
+    def test_recompute_forwards_lead_version(self):
+        """Optimistic locking uses the lead version read before computation."""
+        version = datetime(2026, 6, 15, 12, 30, tzinfo=ALMATY_TZ)
+        lead = self._lead('L6', None, [])
+        lead['version'] = version
+        db = FakeDb([lead])
+
+        tez_lead_service.recompute_outcomes(db, 2026, 6)
+
+        self.assertEqual(db.applied[0]['lead_version'], version)
+
     def test_empty_month(self):
         db = FakeDb([])
         stats = tez_lead_service.recompute_outcomes(db, 2026, 6)
