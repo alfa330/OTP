@@ -462,6 +462,273 @@ class EffortChipTests(unittest.TestCase):
         self.assertIn("if (estimate > 0 && spent > 0) estimateRatios.push(spent / estimate);", self.src)
 
 
+class TaskComposerTests(unittest.TestCase):
+    """Форма задачи: на виду только суть, остальное добавляется чипами."""
+
+    def setUp(self):
+        self.src = _read(TASKS_VIEW_PATH)
+
+    def test_sections_are_declarative(self):
+        start = self.src.index("const COMPOSER_SECTIONS = [")
+        block = self.src[start:self.src.index("\n];", start)]
+        ids = re.findall(r"id: '([a-z]+)'", block)
+        self.assertEqual(
+            ids,
+            ['priority', 'tag', 'deadline', 'estimate', 'origin', 'checklist', 'recurrence', 'files'],
+        )
+        # У каждой секции есть признак заполненности — от него зависит авто-раскрытие при правке.
+        self.assertEqual(len(re.findall(r"hasValue:", block)), len(ids))
+
+    def test_closing_a_chip_clears_its_value(self):
+        start = self.src.index("const toggleSection = (section) => {")
+        block = self.src[start:start + 700]
+        self.assertIn("if (section.clear) onChange(section.clear());", block)
+        self.assertIn("if (section.requiresFiles) onFilesChange?.([]);", block)
+
+    def test_filled_sections_open_on_edit(self):
+        start = self.src.index("const [openIds, setOpenIds] = useState(() => new Set(")
+        block = self.src[start:start + 260]
+        self.assertIn("section.hasValue(values, files)", block)
+
+    def test_only_essentials_are_always_visible(self):
+        start = self.src.index("const TaskComposerForm = ({")
+        block = self.src[start:self.src.index("const TaskRow = React.memo", start)]
+        # Тема, описание и исполнитель — вне раскрываемых секций.
+        self.assertIn('className="tv-composer-title"', block)
+        self.assertIn('className="tv-composer-description"', block)
+        self.assertIn('className="tv-composer-assignee"', block)
+        for gated in ("isOpen('priority')", "isOpen('tag')", "isOpen('deadline')",
+                      "isOpen('estimate')", "isOpen('origin')", "isOpen('checklist')",
+                      "isOpen('recurrence')"):
+            self.assertIn(gated, block)
+
+    def test_both_modals_share_the_composer(self):
+        self.assertEqual(self.src.count("<TaskComposerForm"), 2)
+        # Флаг бэклога уместен только при создании — правка его не отправляет.
+        self.assertEqual(self.src.count("showBacklogToggle\n"), 1)
+
+    def test_files_chip_only_when_uploads_supported(self):
+        start = self.src.index("const supportsFiles = typeof onFilesChange === 'function';")
+        block = self.src[start:start + 320]
+        self.assertIn("!section.requiresFiles || supportsFiles", block)
+
+
+class TaskOriginTests(unittest.TestCase):
+    """Задачи себе + «кто поручил» (пусто = своя инициатива)."""
+
+    def test_columns_added(self):
+        src = _read(DATABASE_PATH)
+        self.assertIn("ADD COLUMN IF NOT EXISTS requested_by_id INTEGER REFERENCES users(id) ON DELETE SET NULL;", src)
+        self.assertIn("ADD COLUMN IF NOT EXISTS requested_by_name VARCHAR(160);", src)
+
+    def test_origin_normalizer_prefers_id(self):
+        src = _read(DATABASE_PATH)
+        start = src.index("    def _normalize_task_origin(self, requested_by_id, requested_by_name):")
+        block = src[start:src.index("    def _parse_task_datetime", start)]
+        # Свободный текст читаем только когда сотрудник не выбран.
+        self.assertIn("if origin_id is None and requested_by_name not in (None, _UNSET):", block)
+        self.assertIn('raise ValueError("INVALID_REQUESTED_BY")', block)
+
+    def test_self_is_always_a_valid_recipient(self):
+        src = _read(DATABASE_PATH)
+        start = src.index("    def get_task_recipients(self, requester_id, requester_role")
+        block = src[start:src.index("    def _task_now", start)]
+        self.assertIn("OR u.id = %s", block)
+        self.assertIn("params.append(requester_id)", block)
+
+    def test_payload_exposes_resolved_origin(self):
+        src = _read(DATABASE_PATH)
+        self.assertIn("LEFT JOIN users origin_user ON origin_user.id = t.requested_by_id", src)
+        self.assertIn("COALESCE(origin_user.name, t.requested_by_name)", src)
+        self.assertIn("\"source\": 'user' if row[36] else 'external'", src)
+
+    def test_api_accepts_origin_on_create_and_patch(self):
+        src = _read(APP_PATH)
+        self.assertIn("requested_by_id_raw = (request.form.get('requested_by_id')", src)
+        self.assertIn("requested_by_id=requested_by_id_raw", src)
+        self.assertIn("has_origin = 'requested_by_id' in data or 'requested_by_name' in data", src)
+        self.assertIn('edit_kwargs["requested_by_id"] = data.get(\'requested_by_id\')', src)
+
+    def test_form_carries_origin(self):
+        src = _read(TASKS_VIEW_PATH)
+        self.assertIn("requestedById: '',", src)
+        self.assertIn("requestedByName: '',", src)
+        self.assertIn("requested_by_id: values.requestedById ? String(values.requestedById) : ''", src)
+        # Кнопка «Себе» рядом с исполнителем.
+        self.assertIn('className={`tv-composer-self', src)
+        self.assertIn("onChange({ assignedTo: String(currentUserId) })", src)
+
+    def test_self_task_without_origin_reads_as_initiative(self):
+        src = _read(TASKS_VIEW_PATH)
+        start = src.index("const originLabel     = (assigneeId && assigneeId === creatorId && !task?.requested_by)")
+        block = src[start:start + 200]
+        self.assertIn("'Своя инициатива'", block)
+        self.assertIn("'Постановщик'", block)
+
+    def test_cli_supports_self_and_origin(self):
+        module = _load_cli_module()
+        parser = module.build_parser()
+        args = parser.parse_args(['create', 'Тема', '--self', '--from', '169'])
+        self.assertTrue(args.self_assign)
+        self.assertEqual(args.from_id, 169)
+        self.assertEqual(module._origin_label(args), 'поручил id 169')
+
+        external = parser.parse_args(['create', 'Тема', '--self', '--from-name', 'директор'])
+        self.assertEqual(module._origin_label(external), 'поручил: директор')
+
+        own = parser.parse_args(['create', 'Тема', '--self'])
+        self.assertEqual(module._origin_label(own), 'своя инициатива')
+
+    def test_cli_requires_an_assignee(self):
+        module = _load_cli_module()
+        args = module.build_parser().parse_args(['create', 'Тема'])
+
+        class FakeClient:
+            user_id = 2
+        with self.assertRaises(SystemExit):
+            module._resolve_assignee(FakeClient(), args)
+        args.self_assign = True
+        self.assertEqual(module._resolve_assignee(FakeClient(), args), 2)
+
+    def test_log_command_walks_the_whole_flow(self):
+        cli = _read(CLI_PATH)
+        start = cli.index("def cmd_log(client, args):")
+        block = cli[start:cli.index("def cmd_deadline", start)]
+        # Создать → в работу → (промежуточные отчёты) → сдать отчётом → принять.
+        self.assertIn("steps = [('in_progress', {})]", block)
+        self.assertIn("for text in (args.progress or []):", block)
+        self.assertIn("steps.append(('completed', {", block)
+        self.assertIn("if not args.keep_open:", block)
+        self.assertIn("steps.append(('accepted', {}))", block)
+        # Без явной оценки берём её равной факту, иначе «факт к оценке» соврёт.
+        self.assertIn("if args.spent and 'estimate_minutes' not in fields:", block)
+
+
+class SkillExpectationsTests(unittest.TestCase):
+    """В скилле зафиксированы постоянные требования владельца."""
+
+    def setUp(self):
+        self.src = _read(SKILL_PATH)
+
+    def test_noise_rule_is_explicit(self):
+        self.assertIn("Визуальный и информационный шум", self.src)
+        self.assertIn("Цвет только там, где он несёт смысл", self.src)
+        self.assertIn("Не дублировать одну и ту же информацию", self.src)
+
+    def test_style_points_at_shared_primitives(self):
+        self.assertIn("src/components/ui/ios.jsx", self.src)
+        self.assertIn("FullscreenSheet.jsx", self.src)
+
+    def test_optimization_is_required(self):
+        self.assertIn("Оптимизация — обязательна", self.src)
+        self.assertIn("Батч вместо N запросов", self.src)
+        self.assertIn("миграции идемпотентные", self.src)
+
+    def test_best_practice_research_expected(self):
+        self.assertIn("Best practice", self.src)
+        self.assertIn("медианы вместо средних", self.src)
+
+    def test_workflow_rules_captured(self):
+        self.assertIn("без трейлера `Co-Authored-By`", self.src)
+        self.assertIn("Весь UI-текст по-русски", self.src)
+        self.assertIn("npm run build", self.src)
+
+
+class DoneArchiveTests(unittest.TestCase):
+    """«Готово» — скользящее окно: принятое давно не должно забивать доску."""
+
+    def setUp(self):
+        self.src = _read(WORKSPACE_PATH)
+
+    def test_window_is_one_week(self):
+        self.assertIn("export const DONE_ARCHIVE_DAYS = 7;", self.src)
+
+    def test_archive_counts_from_acceptance_not_completion(self):
+        start = self.src.index("export const acceptedAtOf = (task) => {")
+        block = self.src[start:self.src.index("export const isDoneArchived", start)]
+        # Идём по истории с конца — берём последнюю приёмку.
+        self.assertIn("history[index]?.status_code === 'accepted'", block)
+        self.assertIn("for (let index = history.length - 1; index >= 0; index -= 1)", block)
+        # completed_at только как запасной вариант.
+        self.assertIn("return parseDate(task?.completed_at) || parseDate(task?.updated_at);", block)
+
+    def test_only_accepted_tasks_are_archived(self):
+        start = self.src.index("export const isDoneArchived = (task, now = Date.now()) => {")
+        block = self.src[start:self.src.index("const actualEndOf", start)]
+        self.assertIn("if (task?.status !== 'accepted') return false;", block)
+        self.assertIn("DONE_ARCHIVE_DAYS * DAY", block)
+
+    def test_buckets_split_archive_out(self):
+        start = self.src.index("const { tasksByColumn, archivedDone } = useMemo(() => {")
+        block = self.src[start:self.src.index("}, [scopedTasks, dropContext]);", start)]
+        self.assertIn("if (columnId === 'done' && isDoneArchived(task, now)) archived.push(entry);", block)
+        # Свежее принятое — сверху.
+        self.assertIn("buckets.done.sort((a, b) => acceptedTime(b) - acceptedTime(a));", block)
+
+    def test_archive_is_reachable_not_lost(self):
+        self.assertIn("archiveOpen", self.src)
+        self.assertIn("Скрыть архив", self.src)
+        self.assertIn("`Архив · ${archivedDone.length}", self.src)
+
+    def test_cli_mirrors_the_same_rule(self):
+        cli = _read(CLI_PATH)
+        self.assertIn("DONE_ARCHIVE_DAYS = 7", cli)
+        self.assertIn("def is_done_archived(task, now=None):", cli)
+        self.assertIn("if task.get('status') != 'accepted':", cli)
+        self.assertIn("--archive", cli)
+
+    def test_cli_archive_helpers_behave(self):
+        module = _load_cli_module()
+        from datetime import datetime as dt, timedelta as td
+        now = dt(2026, 7, 28, 12, 0, 0)
+        fresh = {"status": "accepted", "history": [
+            {"status_code": "accepted", "changed_at": (now - td(days=2)).isoformat()}]}
+        stale = {"status": "accepted", "history": [
+            {"status_code": "accepted", "changed_at": (now - td(days=10)).isoformat()}]}
+        in_review = {"status": "completed", "completed_at": (now - td(days=30)).isoformat()}
+        self.assertFalse(module.is_done_archived(fresh, now))
+        self.assertTrue(module.is_done_archived(stale, now))
+        # Не принятую задачу архив не забирает, даже если она давно «выполнена».
+        self.assertFalse(module.is_done_archived(in_review, now))
+
+    def test_cli_prefers_last_acceptance(self):
+        module = _load_cli_module()
+        from datetime import datetime as dt
+        task = {"status": "accepted", "completed_at": "2026-07-01T10:00:00", "history": [
+            {"status_code": "accepted", "changed_at": "2026-07-02T10:00:00"},
+            {"status_code": "returned", "changed_at": "2026-07-03T10:00:00"},
+            {"status_code": "accepted", "changed_at": "2026-07-27T10:00:00"},
+        ]}
+        self.assertEqual(module.accepted_at(task), dt(2026, 7, 27, 10, 0, 0))
+
+
+class TimelineFullscreenTests(unittest.TestCase):
+    def setUp(self):
+        self.src = _read(WORKSPACE_PATH)
+
+    def test_fullscreen_uses_shared_sheet_via_portal(self):
+        self.assertIn("import FullscreenSheet from '../common/FullscreenSheet';", self.src)
+        start = self.src.index("  if (expanded) {")
+        block = self.src[start:start + 700]
+        self.assertIn("createPortal(", block)
+        self.assertIn("document.body", block)
+        self.assertIn("wide", block)
+        self.assertIn('title="Таймлайн задач"', block)
+
+    def test_same_markup_in_both_modes(self):
+        # Контент собирается один раз и лишь оборачивается — двойного DOM таблицы нет.
+        self.assertIn("const content = (", self.src)
+        self.assertEqual(self.src.count("Медианный цикл"), 1)
+
+    def test_row_area_grows_in_fullscreen(self):
+        self.assertIn("expanded ? 'max-h-[calc(100vh-280px)]' : 'max-h-[520px]'", self.src)
+
+    def test_sheet_supports_wide_content(self):
+        sheet = _read(ROOT / "src" / "components" / "common" / "FullscreenSheet.jsx")
+        self.assertIn("wide = false", sheet)
+        self.assertIn("${wide ? '' : 'max-w-5xl'}", sheet)
+
+
 class ReportCliTests(unittest.TestCase):
     def setUp(self):
         self.module = _load_cli_module()

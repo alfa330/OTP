@@ -3172,6 +3172,11 @@ class Database:
             """)
             cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS planned_start_at TIMESTAMP;")
             cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS started_at TIMESTAMP;")
+            # Источник задачи: кто её поручил, если это не тот, кто создал карточку
+            # (устная просьба руководителя, запрос клиента и т.п.).
+            # Оба поля пустые = своя инициатива.
+            cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS requested_by_id INTEGER REFERENCES users(id) ON DELETE SET NULL;")
+            cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS requested_by_name VARCHAR(160);")
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_tasks_backlog_rank
                 ON tasks(is_backlog, backlog_rank NULLS LAST, created_at DESC);
@@ -38248,12 +38253,17 @@ class Database:
                 if scope_department_id is not None and not role_has_min(role, 'admin'):
                     scope_filter = "AND (u.role IN ('super_admin', 'admin') OR u.department_id = %s)"
                     params.append(int(scope_department_id))
+                # Себя включаем всегда: задачу можно поставить самому себе (своя инициатива),
+                # иначе роли вне списка получателей (например trainer) не могут ничего себе записать.
+                params.append(requester_id)
                 cursor.execute(f"""
                     SELECT u.id, u.name, u.role, u.supervisor_id, COALESCE(u.status, 'working')
                     FROM users u
-                    WHERE u.role IN ('super_admin', 'admin', 'sv')
-                      AND COALESCE(u.status, 'working') <> 'fired'
-                      {scope_filter}
+                    WHERE COALESCE(u.status, 'working') <> 'fired'
+                      AND (
+                          (u.role IN ('super_admin', 'admin', 'sv') {scope_filter})
+                          OR u.id = %s
+                      )
                     ORDER BY CASE WHEN u.role IN ('super_admin', 'admin') THEN 0 ELSE 1 END, u.name
                 """, tuple(params))
             else:
@@ -38328,6 +38338,27 @@ class Database:
         if minutes < 0 or minutes > 10 * 365 * 24 * 60:
             raise ValueError("INVALID_ESTIMATE")
         return minutes or None
+
+    def _normalize_task_origin(self, requested_by_id, requested_by_name):
+        """
+        Источник задачи: сотрудник из системы либо свободный текст.
+        Оба пустые = своя инициатива. Id имеет приоритет над текстом,
+        чтобы не хранить два противоречащих ответа на один вопрос.
+        """
+        origin_id = None
+        if requested_by_id not in (None, '', _UNSET):
+            try:
+                origin_id = int(requested_by_id)
+            except Exception:
+                raise ValueError("INVALID_REQUESTED_BY")
+            if origin_id <= 0:
+                origin_id = None
+
+        origin_name = None
+        if origin_id is None and requested_by_name not in (None, _UNSET):
+            origin_name = str(requested_by_name or '').strip()[:160] or None
+
+        return origin_id, origin_name
 
     def _parse_task_datetime(self, value, error_code="INVALID_DATETIME"):
         """ISO-строка / datetime → naive datetime в таймзоне проекта (Asia/Almaty)."""
@@ -38440,7 +38471,9 @@ class Database:
             is_backlog=False,
             estimate_minutes=None,
             planned_start_at=None,
-            due_at=None
+            due_at=None,
+            requested_by_id=None,
+            requested_by_name=None
     ):
         subject_norm = (subject or '').strip()
         description_norm = (description or '').strip() or None
@@ -38453,6 +38486,7 @@ class Database:
         is_backlog_norm = bool(is_backlog)
         estimate_minutes_norm = self._normalize_task_estimate_minutes(estimate_minutes)
         planned_start_at_norm = self._parse_task_datetime(planned_start_at, "INVALID_PLANNED_START")
+        requested_by_id_norm, requested_by_name_norm = self._normalize_task_origin(requested_by_id, requested_by_name)
         now = self._task_now()
         # Абсолютный дедлайн (нужен агентам/планировщику) выигрывает у относительного «через N».
         due_at_absolute = self._parse_task_datetime(due_at, "INVALID_DEADLINE")
@@ -38486,9 +38520,10 @@ class Database:
                     deadline_duration_minutes, due_at, is_regulation, recurrence_type,
                     recurrence_interval, recurrence_next_at, regulation_iteration,
                     is_backlog, backlog_rank, estimate_minutes, planned_start_at,
+                    requested_by_id, requested_by_name,
                     created_at, updated_at
                 )
-                VALUES (%s, %s, %s, %s, 'assigned', %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, 'assigned', %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id, created_at, updated_at
             """, (
                 subject_norm,
@@ -38507,6 +38542,8 @@ class Database:
                 backlog_rank,
                 estimate_minutes_norm,
                 planned_start_at_norm,
+                requested_by_id_norm,
+                requested_by_name_norm,
                 now,
                 now
             ))
@@ -38547,7 +38584,9 @@ class Database:
             "is_regulation": is_regulation_norm,
             "is_backlog": is_backlog_norm,
             "estimate_minutes": estimate_minutes_norm,
-            "planned_start_at": self._task_dt_to_iso(planned_start_at_norm)
+            "planned_start_at": self._task_dt_to_iso(planned_start_at_norm),
+            "requested_by_id": requested_by_id_norm,
+            "requested_by_name": requested_by_name_norm
         }
 
     def edit_task(
@@ -38567,7 +38606,9 @@ class Database:
             checklist_items=_UNSET,
             due_at=_UNSET,
             estimate_minutes=_UNSET,
-            planned_start_at=_UNSET
+            planned_start_at=_UNSET,
+            requested_by_id=_UNSET,
+            requested_by_name=_UNSET
     ):
         task_id = int(task_id)
         requester_id = int(requester_id)
@@ -38586,12 +38627,13 @@ class Database:
         has_checklist = checklist_items is not _UNSET
         has_estimate = estimate_minutes is not _UNSET
         has_planned_start = planned_start_at is not _UNSET
+        has_origin = requested_by_id is not _UNSET or requested_by_name is not _UNSET
 
         if not any([
             has_subject, has_description, has_tag, has_assigned_to,
             has_priority, has_deadline, has_due_at, has_is_regulation,
             has_recurrence_type, has_recurrence_interval, has_checklist,
-            has_estimate, has_planned_start
+            has_estimate, has_planned_start, has_origin
         ]):
             raise ValueError("NOTHING_TO_UPDATE")
 
@@ -38603,7 +38645,8 @@ class Database:
                     assignee.role, assignee.supervisor_id,
                     t.deadline_duration_minutes, t.due_at,
                     t.is_regulation, t.recurrence_type, t.recurrence_interval,
-                    t.recurrence_next_at, t.created_at, t.estimate_minutes, t.planned_start_at
+                    t.recurrence_next_at, t.created_at, t.estimate_minutes, t.planned_start_at,
+                    t.requested_by_id, t.requested_by_name
                 FROM tasks t
                 LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 WHERE t.id = %s
@@ -38629,6 +38672,8 @@ class Database:
             current_created_at = row[15]
             current_estimate_minutes = row[16]
             current_planned_start_at = row[17]
+            current_requested_by_id = row[18]
+            current_requested_by_name = row[19]
 
             if not self._task_visible_for_requester(role, requester_id, created_by, current_assigned_to, assignee_role, assignee_supervisor_id):
                 raise PermissionError("TASK_FORBIDDEN")
@@ -38687,6 +38732,15 @@ class Database:
                 if has_planned_start else current_planned_start_at
             )
 
+            if has_origin:
+                requested_by_id_new, requested_by_name_new = self._normalize_task_origin(
+                    requested_by_id if requested_by_id is not _UNSET else None,
+                    requested_by_name if requested_by_name is not _UNSET else None
+                )
+            else:
+                requested_by_id_new = current_requested_by_id
+                requested_by_name_new = current_requested_by_name
+
             if has_is_regulation and not bool(is_regulation):
                 recurrence_type_input = None
                 recurrence_interval_input = None
@@ -38732,6 +38786,9 @@ class Database:
                 changed_fields.append("estimate")
             if planned_start_at_new != current_planned_start_at:
                 changed_fields.append("planned_start")
+            if (requested_by_id_new != current_requested_by_id
+                    or requested_by_name_new != current_requested_by_name):
+                changed_fields.append("requested_by")
 
             if not changed_fields:
                 return {
@@ -38771,6 +38828,8 @@ class Database:
                     recurrence_next_at = %s,
                     estimate_minutes = %s,
                     planned_start_at = %s,
+                    requested_by_id = %s,
+                    requested_by_name = %s,
                     updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 WHERE id = %s
                 RETURNING updated_at
@@ -38788,6 +38847,8 @@ class Database:
                 recurrence_next_at_new,
                 estimate_minutes_new,
                 planned_start_at_new,
+                requested_by_id_new,
+                requested_by_name_new,
                 task_id
             ))
             updated_row = cursor.fetchone()
@@ -39741,11 +39802,13 @@ class Database:
                     creator.id, creator.name, creator.role,
                     creator.avatar_bucket, creator.avatar_blob_path,
                     t.is_backlog, t.backlog_rank, t.estimate_minutes,
-                    t.planned_start_at, t.started_at
+                    t.planned_start_at, t.started_at,
+                    t.requested_by_id, COALESCE(origin_user.name, t.requested_by_name)
                 FROM tasks t
                 LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 LEFT JOIN users creator ON creator.id = t.created_by
                 LEFT JOIN users completed_user ON completed_user.id = t.completed_by
+                LEFT JOIN users origin_user ON origin_user.id = t.requested_by_id
                 {filtered_where_sql}
                 ORDER BY {order_by_sql}
             """
@@ -39902,6 +39965,12 @@ class Database:
                 "estimate_minutes": row[33],
                 "planned_start_at": self._task_dt_to_iso(row[34]),
                 "started_at": self._task_dt_to_iso(row[35]),
+                # Источник задачи: сотрудник, внешний текст либо своя инициатива.
+                "requested_by": ({
+                    "id": row[36],
+                    "name": row[37],
+                    "source": 'user' if row[36] else 'external'
+                } if (row[36] or row[37]) else None),
                 "history": history_map.get(task_id, []),
                 "attachments": initial_attachments,
                 "completion_attachments": result_attachments,

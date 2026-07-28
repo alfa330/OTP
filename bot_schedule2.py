@@ -3057,7 +3057,8 @@ def _build_task_event_notification_html(event, task_ctx, actor_name, changed_fie
             'estimate': 'оценка',
             'planned_start': 'плановый старт',
             'is_backlog': 'бэклог',
-            'backlog_rank': 'приоритет в бэклоге'
+            'backlog_rank': 'приоритет в бэклоге',
+            'requested_by': 'кто поручил'
         }
         changed_items = []
         for item in (changed_fields or []):
@@ -17357,6 +17358,8 @@ def handle_tasks():
             return jsonify({"error": str(parse_error)}), 400
         due_at_raw = (request.form.get('due_at') or '').strip() or None
         planned_start_raw = (request.form.get('planned_start_at') or '').strip() or None
+        requested_by_id_raw = (request.form.get('requested_by_id') or '').strip() or None
+        requested_by_name_raw = (request.form.get('requested_by_name') or '').strip() or None
         assigned_to_raw = request.form.get('assigned_to')
 
         if not subject:
@@ -17412,7 +17415,9 @@ def handle_tasks():
                 is_backlog=is_backlog,
                 estimate_minutes=estimate_minutes,
                 planned_start_at=planned_start_raw,
-                due_at=due_at_raw
+                due_at=due_at_raw,
+                requested_by_id=requested_by_id_raw,
+                requested_by_name=requested_by_name_raw
             )
         except ValueError as create_error:
             _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths)
@@ -17426,7 +17431,8 @@ def handle_tasks():
                 "INVALID_RECURRENCE_INTERVAL": "Invalid recurrence_interval",
                 "INVALID_CHECKLIST": "Invalid checklist",
                 "INVALID_ESTIMATE": "Invalid estimate_minutes",
-                "INVALID_PLANNED_START": "Invalid planned_start_at"
+                "INVALID_PLANNED_START": "Invalid planned_start_at",
+                "INVALID_REQUESTED_BY": "Invalid requested_by_id"
             }
             return jsonify({"error": error_map.get(code, code)}), 400
         except Exception:
@@ -17523,12 +17529,13 @@ def handle_single_task(task_id):
             has_checklist = 'checklist_items' in data
             has_estimate = any(key in data for key in ('estimate_minutes', 'estimate_hours', 'estimate_extra_minutes'))
             has_planned_start = 'planned_start_at' in data
+            has_origin = 'requested_by_id' in data or 'requested_by_name' in data
 
             if not any([
                 has_subject, has_description, has_tag, has_assigned_to,
                 has_priority, has_deadline, has_due_at, has_is_regulation,
                 has_recurrence_type, has_recurrence_interval, has_checklist,
-                has_estimate, has_planned_start
+                has_estimate, has_planned_start, has_origin
             ]):
                 return jsonify({"error": "No fields to update"}), 400
 
@@ -17601,6 +17608,9 @@ def handle_single_task(task_id):
                     edit_kwargs["estimate_minutes"] = estimate_minutes
                 if has_planned_start:
                     edit_kwargs["planned_start_at"] = data.get('planned_start_at')
+                if has_origin:
+                    edit_kwargs["requested_by_id"] = data.get('requested_by_id')
+                    edit_kwargs["requested_by_name"] = data.get('requested_by_name')
 
                 result = db.edit_task(**edit_kwargs)
             except ValueError as value_error:
@@ -17629,6 +17639,8 @@ def handle_single_task(task_id):
                     return jsonify({"error": "Invalid estimate_minutes"}), 400
                 if code == 'INVALID_PLANNED_START':
                     return jsonify({"error": "Invalid planned_start_at"}), 400
+                if code == 'INVALID_REQUESTED_BY':
+                    return jsonify({"error": "Invalid requested_by_id"}), 400
                 return jsonify({"error": code}), 400
             except PermissionError as permission_error:
                 code = str(permission_error)

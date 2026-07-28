@@ -181,6 +181,124 @@ styleTag.textContent = `
   .tv-report-composer { margin-top: 10px; }
   .tv-reports-add { margin-top: 10px; }
   .tv-field-hint { margin: 5px 0 0; font-size: 11.5px; color: var(--ink-3); }
+
+  /* ── Форма задачи с постепенным раскрытием ── */
+  .tv-composer { display: flex; flex-direction: column; gap: 2px; }
+  .tv-composer-context {
+    margin: 0 0 14px; padding: 9px 12px;
+    background: #f8f7f4; border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-size: 12.5px; color: var(--ink-2); word-break: break-word;
+  }
+  .tv-composer-title {
+    width: 100%; border: 0; background: none; outline: none;
+    padding: 0 2px; font-size: 19px; font-weight: 600;
+    color: var(--ink); font-family: 'Syne', sans-serif;
+  }
+  .tv-composer-title::placeholder { color: var(--ink-3); font-weight: 500; }
+  .tv-composer-description {
+    width: 100%; border: 0; background: none; outline: none; resize: vertical;
+    padding: 6px 2px 0; min-height: 62px;
+    font-size: 13.5px; line-height: 1.55; color: var(--ink-2);
+  }
+  .tv-composer-description::placeholder { color: var(--ink-3); }
+  .tv-composer-assignee {
+    display: flex; align-items: center; gap: 10px;
+    margin-top: 12px; padding-top: 12px;
+    border-top: 1px solid var(--border);
+  }
+  .tv-composer-assignee label {
+    font-size: 12px; font-weight: 500; color: var(--ink-2);
+    white-space: nowrap;
+  }
+  .tv-composer-assignee .tv-select { flex: 1; }
+  .tv-composer-self {
+    flex: 0 0 auto;
+    padding: 6px 11px; border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    font-size: 12px; font-weight: 500; color: var(--ink-2);
+    cursor: pointer; transition: all .15s; white-space: nowrap;
+  }
+  .tv-composer-self:hover:not(:disabled) { border-color: var(--border-strong); color: var(--ink); }
+  .tv-composer-self.is-active { background: var(--ink); border-color: var(--ink); color: #fff; }
+  .tv-composer-self:disabled { opacity: .5; cursor: not-allowed; }
+
+  .tv-composer-chips {
+    display: flex; flex-wrap: wrap; gap: 5px;
+    margin-top: 12px;
+  }
+  .tv-composer-chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 5px 10px; border-radius: 99px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    font-size: 12px; font-weight: 500; color: var(--ink-2);
+    cursor: pointer; transition: all .15s; white-space: nowrap;
+  }
+  .tv-composer-chip:hover:not(:disabled) { border-color: var(--border-strong); color: var(--ink); }
+  .tv-composer-chip:disabled { opacity: .5; cursor: not-allowed; }
+  .tv-composer-chip.is-active {
+    background: #f0efeb; border-color: var(--border-strong); color: var(--ink);
+  }
+  .tv-composer-chip-sign {
+    font-size: 13px; line-height: 1; color: var(--ink-3);
+    font-weight: 400;
+  }
+  .tv-composer-chip.is-active .tv-composer-chip-sign { color: var(--ink-2); }
+  .tv-composer-chip-value {
+    padding-left: 5px; margin-left: 1px;
+    border-left: 1px solid var(--border-strong);
+    font-weight: 400; color: var(--ink-3);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .tv-composer-details {
+    display: flex; flex-direction: column; gap: 12px;
+    margin-top: 14px; padding: 13px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+  }
+  .tv-composer-row { display: flex; align-items: center; gap: 12px; }
+  .tv-composer-row.is-stacked { flex-direction: column; align-items: stretch; gap: 7px; }
+  .tv-composer-row-label {
+    flex: 0 0 96px; font-size: 12px; color: var(--ink-2); font-weight: 500;
+  }
+  .tv-composer-row.is-stacked .tv-composer-row-label { flex: none; }
+  .tv-composer-row-body { flex: 1; display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+  .tv-composer-row-inline { flex-direction: row; align-items: center; }
+  .tv-composer-row-inline .tv-select { flex: 1; }
+  .tv-composer-row-inline .tv-input { width: 78px; }
+
+  .tv-composer-segmented {
+    display: inline-flex; gap: 2px; padding: 2px;
+    border-radius: 9px; background: #ecebe7;
+  }
+  .tv-composer-segmented button {
+    border: 0; background: transparent; cursor: pointer;
+    padding: 5px 11px; border-radius: 7px;
+    font-size: 12px; font-weight: 500; color: var(--ink-2);
+    transition: background .15s, color .15s, box-shadow .15s;
+    white-space: nowrap;
+  }
+  .tv-composer-segmented button:hover:not(:disabled) { color: var(--ink); }
+  .tv-composer-segmented button.is-active {
+    background: var(--surface); color: var(--ink);
+    box-shadow: 0 1px 3px rgba(0,0,0,.10);
+  }
+  .tv-composer-presets { display: flex; flex-wrap: wrap; gap: 5px; }
+  .tv-composer-presets button {
+    border: 1px solid var(--border); background: var(--surface);
+    border-radius: 7px; cursor: pointer;
+    padding: 4px 9px; font-size: 12px; color: var(--ink-2);
+    transition: all .15s; white-space: nowrap;
+  }
+  .tv-composer-presets button:hover:not(:disabled) { border-color: var(--border-strong); color: var(--ink); }
+  .tv-composer-presets button.is-active {
+    background: var(--ink); border-color: var(--ink); color: #fff;
+  }
+  .tv-composer-presets button:disabled { opacity: .5; cursor: not-allowed; }
   .tv-stat-card {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -2719,6 +2837,8 @@ const EMPTY_TASK_FORM = {
   checklistItems: [],
   isBacklog: false,
   estimateMinutes: '',
+  requestedById: '',
+  requestedByName: '',
 };
 
 const buildEmptyTaskForm = (overrides = {}) => ({
@@ -2744,6 +2864,8 @@ const taskToTaskForm = (task, fallbackAssignedTo = '') => {
     checklistItems: checklistToFormItems(task?.checklist),
     isBacklog: Boolean(task?.is_backlog),
     estimateMinutes: task?.estimate_minutes ? String(task.estimate_minutes) : '',
+    requestedById: task?.requested_by?.id ? String(task.requested_by.id) : '',
+    requestedByName: task?.requested_by?.id ? '' : (task?.requested_by?.name || ''),
   });
 };
 
@@ -2768,6 +2890,9 @@ const buildTaskJsonPayload = (values) => ({
   recurrence_interval: values.isRegulation ? numberFieldValue(values.recurrenceInterval || '1') : '1',
   checklist_items: formChecklistItems(values.checklistItems),
   estimate_minutes: numberFieldValue(values.estimateMinutes),
+  // Пустые оба поля = своя инициатива; id имеет приоритет над свободным текстом.
+  requested_by_id: values.requestedById ? String(values.requestedById) : '',
+  requested_by_name: values.requestedById ? '' : String(values.requestedByName || '').trim(),
 });
 
 const appendTaskFormData = (body, values) => {
@@ -2786,6 +2911,8 @@ const appendTaskFormData = (body, values) => {
   body.append('checklist_items', JSON.stringify(payload.checklist_items));
   body.append('estimate_minutes', payload.estimate_minutes);
   body.append('is_backlog', values.isBacklog ? '1' : '0');
+  body.append('requested_by_id', payload.requested_by_id);
+  body.append('requested_by_name', payload.requested_by_name);
 };
 
 const filesFromList = (files) => Array.from(files || []).filter(Boolean);
@@ -3602,6 +3729,429 @@ const ChecklistDraftEditor = React.memo(({ items, disabled = false, onChange, co
   );
 });
 
+/*
+ * Форма задачи с постепенным раскрытием: на виду только тема, описание и исполнитель,
+ * остальное добавляется кнопками-чипами. Одна и та же форма обслуживает создание и правку —
+ * при правке секции с уже заполненными значениями раскрыты сразу.
+ */
+const deadlineMinutesOfForm = (values) => (
+  (Number(values?.deadlineDays) || 0) * 24 * 60
+  + (Number(values?.deadlineHours) || 0) * 60
+  + (Number(values?.deadlineMinutes) || 0)
+);
+
+const DEADLINE_PRESETS = [
+  { label: 'Сегодня', days: 0, hours: 8 },
+  { label: 'Завтра', days: 1 },
+  { label: '3 дня', days: 3 },
+  { label: 'Неделя', days: 7 },
+];
+
+const COMPOSER_SECTIONS = [
+  {
+    id: 'priority',
+    label: 'Срочность',
+    hasValue: (v) => (v.priority || 'normal') !== 'normal',
+    summary: (v) => PRIORITY_META[v.priority]?.label,
+    clear: () => ({ priority: 'normal' }),
+  },
+  {
+    id: 'tag',
+    label: 'Тип',
+    hasValue: (v) => (v.tag || 'task') !== 'task',
+    summary: (v) => TAG_META[v.tag]?.label,
+    clear: () => ({ tag: 'task' }),
+  },
+  {
+    id: 'deadline',
+    label: 'Дедлайн',
+    hasValue: (v) => deadlineMinutesOfForm(v) > 0,
+    summary: (v) => formatSpentMinutes(deadlineMinutesOfForm(v)),
+    clear: () => ({ deadlineDays: '', deadlineHours: '', deadlineMinutes: '' }),
+  },
+  {
+    id: 'estimate',
+    label: 'Оценка',
+    hasValue: (v) => Number(v.estimateMinutes) > 0,
+    summary: (v) => formatSpentMinutes(Number(v.estimateMinutes)),
+    clear: () => ({ estimateMinutes: '' }),
+  },
+  {
+    id: 'origin',
+    label: 'Кто поручил',
+    hasValue: (v) => Boolean(v.requestedById || String(v.requestedByName || '').trim()),
+    summary: (v, files, ctx) => (
+      v.requestedById
+        ? (ctx?.recipients || []).find((person) => String(person.id) === String(v.requestedById))?.name
+        : String(v.requestedByName || '').trim()
+    ),
+    clear: () => ({ requestedById: '', requestedByName: '' }),
+  },
+  {
+    id: 'checklist',
+    label: 'Чек-лист',
+    hasValue: (v) => formChecklistItems(v.checklistItems).length > 0,
+    summary: (v) => {
+      const count = formChecklistItems(v.checklistItems).length;
+      return count ? `${count} ${pluralRu(count, 'пункт', 'пункта', 'пунктов')}` : '';
+    },
+    clear: () => ({ checklistItems: [createEmptyChecklistDraftItem()] }),
+  },
+  {
+    id: 'recurrence',
+    label: 'Повтор',
+    hasValue: (v) => Boolean(v.isRegulation),
+    summary: (v) => RECURRENCE_OPTIONS.find((item) => item.value === (v.recurrenceType || 'daily'))?.label,
+    clear: () => ({ isRegulation: false, recurrenceType: '' }),
+    open: () => ({ isRegulation: true, recurrenceType: 'daily' }),
+  },
+  {
+    id: 'files',
+    label: 'Файлы',
+    requiresFiles: true,
+    hasValue: (v, files) => filesFromList(files).length > 0,
+    summary: (v, files) => {
+      const count = filesFromList(files).length;
+      return count ? `${count} ${pluralRu(count, 'файл', 'файла', 'файлов')}` : '';
+    },
+  },
+];
+
+const TaskComposerForm = ({
+  values,
+  onChange,
+  recipients = [],
+  isRecipientsLoading = false,
+  disabled = false,
+  files = null,
+  onFilesChange = null,
+  showBacklogToggle = false,
+  currentUserId = 0,
+}) => {
+  const supportsFiles = typeof onFilesChange === 'function';
+  const sections = useMemo(
+    () => COMPOSER_SECTIONS.filter((section) => !section.requiresFiles || supportsFiles),
+    [supportsFiles]
+  );
+  const sectionCtx = useMemo(() => ({ recipients }), [recipients]);
+  const canAssignSelf = Number(currentUserId) > 0
+    && recipients.some((person) => Number(person.id) === Number(currentUserId));
+  const isSelfAssigned = String(values.assignedTo || '') === String(currentUserId || '');
+
+  // Раскрываем то, что уже заполнено: при правке задачи форма сразу показывает суть.
+  const [openIds, setOpenIds] = useState(() => new Set(
+    sections.filter((section) => section.hasValue(values, files)).map((section) => section.id)
+  ));
+
+  const toggleSection = (section) => {
+    setOpenIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(section.id)) {
+        next.delete(section.id);
+        if (section.clear) onChange(section.clear());
+        if (section.requiresFiles) onFilesChange?.([]);
+      } else {
+        next.add(section.id);
+        if (section.open) onChange(section.open());
+      }
+      return next;
+    });
+  };
+
+  const applyDeadlinePreset = (preset) => onChange({
+    deadlineDays: preset.days ? String(preset.days) : '',
+    deadlineHours: preset.hours ? String(preset.hours) : '',
+    deadlineMinutes: '',
+  });
+
+  const isOpen = (id) => openIds.has(id);
+
+  return (
+    <div className="tv-composer">
+      <input
+        className="tv-composer-title"
+        value={values.subject}
+        maxLength={255}
+        disabled={disabled}
+        placeholder="Что нужно сделать?"
+        autoFocus
+        onChange={(event) => onChange({ subject: event.target.value })}
+      />
+      <textarea
+        className="tv-composer-description"
+        value={values.description}
+        disabled={disabled}
+        placeholder="Описание, контекст, ссылки — необязательно"
+        onChange={(event) => onChange({ description: event.target.value })}
+      />
+
+      <div className="tv-composer-assignee">
+        <label htmlFor="tv-composer-assignee-select">Исполнитель</label>
+        <select
+          id="tv-composer-assignee-select"
+          className="tv-select"
+          value={values.assignedTo}
+          disabled={disabled || isRecipientsLoading}
+          onChange={(event) => onChange({ assignedTo: event.target.value })}
+        >
+          <option value="">{isRecipientsLoading ? 'Загрузка...' : 'Выберите сотрудника'}</option>
+          {recipients.map((person) => (
+            <option key={person.id} value={person.id}>
+              {person.name} ({ROLE_LABELS[person.role] || person.role})
+            </option>
+          ))}
+        </select>
+        {canAssignSelf && (
+          <button
+            type="button"
+            className={`tv-composer-self ${isSelfAssigned ? 'is-active' : ''}`}
+            disabled={disabled}
+            title="Поставить задачу себе"
+            onClick={() => onChange({ assignedTo: String(currentUserId) })}
+          >
+            Себе
+          </button>
+        )}
+      </div>
+
+      <div className="tv-composer-chips">
+        {sections.map((section) => {
+          const active = isOpen(section.id);
+          const summary = active || section.hasValue(values, files)
+            ? section.summary?.(values, files, sectionCtx)
+            : '';
+          return (
+            <button
+              key={section.id}
+              type="button"
+              className={`tv-composer-chip ${active ? 'is-active' : ''}`}
+              disabled={disabled}
+              onClick={() => toggleSection(section)}
+            >
+              <span className="tv-composer-chip-sign">{active ? '×' : '+'}</span>
+              {section.label}
+              {summary && <span className="tv-composer-chip-value">{summary}</span>}
+            </button>
+          );
+        })}
+        {showBacklogToggle && (
+          <button
+            type="button"
+            className={`tv-composer-chip ${values.isBacklog ? 'is-active' : ''}`}
+            disabled={disabled}
+            title="Задача попадёт в бэклог, исполнитель не получит уведомление"
+            onClick={() => onChange({ isBacklog: !values.isBacklog })}
+          >
+            <span className="tv-composer-chip-sign">{values.isBacklog ? '×' : '+'}</span>
+            В бэклог
+          </button>
+        )}
+      </div>
+
+      {openIds.size > 0 && (
+        <div className="tv-composer-details">
+          {isOpen('priority') && (
+            <div className="tv-composer-row">
+              <span className="tv-composer-row-label">Срочность</span>
+              <div className="tv-composer-segmented">
+                {PRIORITY_OPTIONS.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    className={values.priority === option.value ? 'is-active' : ''}
+                    disabled={disabled}
+                    onClick={() => onChange({ priority: option.value })}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {isOpen('tag') && (
+            <div className="tv-composer-row">
+              <span className="tv-composer-row-label">Тип</span>
+              <div className="tv-composer-segmented">
+                {TAG_OPTIONS.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    className={values.tag === option.value ? 'is-active' : ''}
+                    disabled={disabled}
+                    onClick={() => onChange({ tag: option.value })}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {isOpen('deadline') && (
+            <div className="tv-composer-row">
+              <span className="tv-composer-row-label">Дедлайн через</span>
+              <div className="tv-composer-row-body">
+                <div className="tv-composer-presets">
+                  {DEADLINE_PRESETS.map((preset) => (
+                    <button
+                      key={preset.label}
+                      type="button"
+                      disabled={disabled}
+                      onClick={() => applyDeadlinePreset(preset)}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="tv-form-inline-grid">
+                  <input className="tv-input" type="number" min="0" placeholder="Дней"
+                    value={values.deadlineDays} disabled={disabled}
+                    onChange={(event) => onChange({ deadlineDays: event.target.value })} />
+                  <input className="tv-input" type="number" min="0" max="23" placeholder="Часов"
+                    value={values.deadlineHours} disabled={disabled}
+                    onChange={(event) => onChange({ deadlineHours: event.target.value })} />
+                  <input className="tv-input" type="number" min="0" max="59" placeholder="Минут"
+                    value={values.deadlineMinutes} disabled={disabled}
+                    onChange={(event) => onChange({ deadlineMinutes: event.target.value })} />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {isOpen('estimate') && (
+            <div className="tv-composer-row">
+              <span className="tv-composer-row-label">Оценка</span>
+              <div className="tv-composer-row-body">
+                <div className="tv-composer-presets">
+                  {[30, 60, 120, 240, 480].map((minutes) => (
+                    <button
+                      key={minutes}
+                      type="button"
+                      className={Number(values.estimateMinutes) === minutes ? 'is-active' : ''}
+                      disabled={disabled}
+                      onClick={() => onChange({ estimateMinutes: String(minutes) })}
+                    >
+                      {formatSpentMinutes(minutes)}
+                    </button>
+                  ))}
+                </div>
+                <input className="tv-input" type="number" min="0" step="15" placeholder="минут"
+                  value={values.estimateMinutes} disabled={disabled}
+                  onChange={(event) => onChange({ estimateMinutes: event.target.value })} />
+              </div>
+            </div>
+          )}
+
+          {isOpen('origin') && (
+            <div className="tv-composer-row">
+              <span className="tv-composer-row-label">Кто поручил</span>
+              <div className="tv-composer-row-body">
+                <div className="tv-composer-segmented">
+                  <button
+                    type="button"
+                    className={values.requestedById ? 'is-active' : ''}
+                    disabled={disabled}
+                    onClick={() => onChange({ requestedByName: '' })}
+                  >
+                    Сотрудник
+                  </button>
+                  <button
+                    type="button"
+                    className={!values.requestedById ? 'is-active' : ''}
+                    disabled={disabled}
+                    onClick={() => onChange({ requestedById: '' })}
+                  >
+                    Другой источник
+                  </button>
+                </div>
+                {values.requestedById ? (
+                  <select
+                    className="tv-select"
+                    value={values.requestedById}
+                    disabled={disabled || isRecipientsLoading}
+                    onChange={(event) => onChange({ requestedById: event.target.value, requestedByName: '' })}
+                  >
+                    {recipients.map((person) => (
+                      <option key={person.id} value={person.id}>{person.name}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <>
+                    <select
+                      className="tv-select"
+                      value=""
+                      disabled={disabled || isRecipientsLoading}
+                      onChange={(event) => onChange({ requestedById: event.target.value, requestedByName: '' })}
+                    >
+                      <option value="">Выбрать сотрудника…</option>
+                      {recipients.map((person) => (
+                        <option key={person.id} value={person.id}>{person.name}</option>
+                      ))}
+                    </select>
+                    <input
+                      className="tv-input"
+                      placeholder="Например: директор на планёрке, клиент Wolt"
+                      maxLength={160}
+                      value={values.requestedByName}
+                      disabled={disabled}
+                      onChange={(event) => onChange({ requestedByName: event.target.value, requestedById: '' })}
+                    />
+                  </>
+                )}
+                <p className="tv-field-hint">Не заполнено — задача считается своей инициативой.</p>
+              </div>
+            </div>
+          )}
+
+          {isOpen('recurrence') && (
+            <div className="tv-composer-row">
+              <span className="tv-composer-row-label">Повтор</span>
+              <div className="tv-composer-row-body tv-composer-row-inline">
+                <select
+                  className="tv-select"
+                  value={values.recurrenceType || 'daily'}
+                  disabled={disabled}
+                  onChange={(event) => onChange({ isRegulation: true, recurrenceType: event.target.value })}
+                >
+                  {RECURRENCE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+                <input className="tv-input" type="number" min="1" max="365" title="Каждые N периодов"
+                  value={values.recurrenceInterval} disabled={disabled}
+                  onChange={(event) => onChange({ recurrenceInterval: event.target.value })} />
+              </div>
+            </div>
+          )}
+
+          {isOpen('checklist') && (
+            <div className="tv-composer-row is-stacked">
+              <span className="tv-composer-row-label">Чек-лист</span>
+              <ChecklistDraftEditor
+                items={values.checklistItems}
+                disabled={disabled}
+                onChange={(next) => onChange({ checklistItems: next })}
+              />
+            </div>
+          )}
+
+          {supportsFiles && isOpen('files') && (
+            <div className="tv-composer-row is-stacked">
+              <TaskFileDropzone
+                files={files}
+                disabled={disabled}
+                onChange={onFilesChange}
+                title="Вложения"
+              />
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const TaskRow = React.memo(({ task, onClick, onPin, isPinned }) => {
   const sm = STATUS_META[task.status] || { label: task.status, badge: 'tv-badge-gray', dot: '#ccc' };
   const tm = TAG_META[task.tag]       || { label: task.tag || '—', badge: 'tv-badge-gray' };
@@ -3845,6 +4395,10 @@ const TaskDrawer = React.memo(({
   const assigneeId      = Number(task?.assignee?.id || 0);
   const creatorId       = Number(task?.creator?.id || 0);
   const reports         = Array.isArray(task.reports) ? task.reports : [];
+  // Задача, поставленная самому себе без указания источника, — своя инициатива.
+  const originLabel     = (assigneeId && assigneeId === creatorId && !task?.requested_by)
+    ? 'Своя инициатива'
+    : 'Постановщик';
   // Отчёт пишут участники задачи — та же проверка, что и на API.
   const canWriteReport  = typeof onSubmitReport === 'function' && (
     assigneeId === currentUserId || creatorId === currentUserId || isAdminLikeRole(currentUserRole)
@@ -3963,7 +4517,7 @@ const TaskDrawer = React.memo(({
                 avatarUrl={task?.creator?.avatar_url || ''}
               />
               <div className="tv-participant-info">
-                <div className="tv-participant-role">Постановщик</div>
+                <div className="tv-participant-role">{originLabel}</div>
                 <div className="tv-participant-name">{task?.creator?.name || '—'}</div>
               </div>
             </div>
@@ -3971,6 +4525,9 @@ const TaskDrawer = React.memo(({
 
           <div className="tv-info-grid">
             <div className="tv-info-item"><label>Создано</label><span>{fmt(task.created_at)}</span></div>
+            {task?.requested_by?.name && (
+              <div className="tv-info-item"><label>Поручил</label><span>{task.requested_by.name}</span></div>
+            )}
             <div className="tv-info-item"><label>Статус</label><span>{sm.label}</span></div>
             {deadlineLabel && (
               <div className="tv-info-item"><label>Дедлайн</label><span className={isTaskOverdue(task) ? 'tv-deadline-chip is-overdue' : ''}>{deadlineLabel}</span></div>
@@ -6421,121 +6978,17 @@ const TasksView = ({
             </div>
             <form onSubmit={handleCreate}>
               <div className="tv-modal-body">
-                <div className="tv-form-grid">
-                  <div className="tv-form-field">
-                    <label>Тема *</label>
-                    <input className="tv-input" value={form.subject} maxLength={255} disabled={isCreateLoading}
-                      placeholder="Введите тему задачи"
-                      autoFocus
-                      onChange={e => setForm(p => ({ ...p, subject: e.target.value }))} />
-                  </div>
-                  <div className="tv-form-field">
-                    <label>Описание</label>
-                    <textarea className="tv-textarea" value={form.description} disabled={isCreateLoading}
-                      placeholder="Опишите задачу (необязательно)"
-                      onChange={e => setForm(p => ({ ...p, description: e.target.value }))} />
-                  </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                    <div className="tv-form-field">
-                      <label>Тег</label>
-                      <select className="tv-select" value={form.tag} disabled={isCreateLoading}
-                        onChange={e => setForm(p => ({ ...p, tag: e.target.value }))}>
-                        {TAG_OPTIONS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
-                      </select>
-                    </div>
-                    <div className="tv-form-field">
-                      <label>Исполнитель *</label>
-                      <select className="tv-select" value={form.assignedTo}
-                        disabled={isCreateLoading || isRecipientsLoading}
-                        onChange={e => setForm(p => ({ ...p, assignedTo: e.target.value }))}>
-                        <option value="">{isRecipientsLoading ? 'Загрузка...' : 'Выберите сотрудника'}</option>
-                        {recipients.map(r => (
-                          <option key={r.id} value={r.id}>
-                            {r.name} ({ROLE_LABELS[r.role] || r.role})
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr', gap: 12 }}>
-                    <div className="tv-form-field">
-                      <label>Срочность</label>
-                      <select className="tv-select" value={form.priority} disabled={isCreateLoading}
-                        onChange={e => setForm(p => ({ ...p, priority: e.target.value }))}>
-                        {PRIORITY_OPTIONS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
-                      </select>
-                    </div>
-                    <div className="tv-form-field">
-                      <label>Дедлайн через</label>
-                      <div className="tv-form-inline-grid">
-                        <input className="tv-input" type="number" min="0" placeholder="Дней" value={form.deadlineDays} disabled={isCreateLoading}
-                          onChange={e => setForm(p => ({ ...p, deadlineDays: e.target.value }))} />
-                        <input className="tv-input" type="number" min="0" max="23" placeholder="Часов" value={form.deadlineHours} disabled={isCreateLoading}
-                          onChange={e => setForm(p => ({ ...p, deadlineHours: e.target.value }))} />
-                        <input className="tv-input" type="number" min="0" max="59" placeholder="Минут" value={form.deadlineMinutes} disabled={isCreateLoading}
-                          onChange={e => setForm(p => ({ ...p, deadlineMinutes: e.target.value }))} />
-                      </div>
-                    </div>
-                  </div>
-                  <div className="tv-soft-block">
-                    <label className="tv-form-switch">
-                      <input type="checkbox" checked={form.isBacklog} disabled={isCreateLoading}
-                        onChange={e => setForm(p => ({ ...p, isBacklog: e.target.checked }))} />
-                      Отложить в бэклог (исполнитель не получит уведомление)
-                    </label>
-                    <div className="tv-form-field" style={{ margin: '10px 0 0' }}>
-                      <label>Оценка, минут</label>
-                      <input className="tv-input" type="number" min="0" step="15" placeholder="например 120"
-                        value={form.estimateMinutes} disabled={isCreateLoading}
-                        onChange={e => setForm(p => ({ ...p, estimateMinutes: e.target.value }))} />
-                    </div>
-                  </div>
-                  <div className="tv-soft-block">
-                    <label className="tv-form-switch">
-                      <input type="checkbox" checked={form.isRegulation} disabled={isCreateLoading}
-                        onChange={e => setForm(p => ({
-                          ...p,
-                          isRegulation: e.target.checked,
-                          recurrenceType: e.target.checked ? (p.recurrenceType || 'daily') : ''
-                        }))} />
-                      Повторяемая регламентная задача
-                    </label>
-                    {form.isRegulation && (
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 120px', gap: 10, marginTop: 10 }}>
-                        <div className="tv-form-field" style={{ margin: 0 }}>
-                          <label>Период</label>
-                          <select className="tv-select" value={form.recurrenceType || 'daily'} disabled={isCreateLoading}
-                            onChange={e => setForm(p => ({ ...p, recurrenceType: e.target.value }))}>
-                            {RECURRENCE_OPTIONS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
-                          </select>
-                        </div>
-                        <div className="tv-form-field" style={{ margin: 0 }}>
-                          <label>Интервал</label>
-                          <input className="tv-input" type="number" min="1" max="365" value={form.recurrenceInterval} disabled={isCreateLoading}
-                            onChange={e => setForm(p => ({ ...p, recurrenceInterval: e.target.value }))} />
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                  <div className="tv-form-field">
-                    <label>Чек-лист</label>
-                    <ChecklistDraftEditor
-                      items={form.checklistItems}
-                      disabled={isCreateLoading}
-                      onChange={(next) => setForm((p) => ({ ...p, checklistItems: next }))}
-                    />
-                  </div>
-                  <div className="tv-form-field">
-                    <label>Прикрепить файлы</label>
-                    <input ref={fileInputRef} type="file" multiple className="tv-input" disabled={isCreateLoading}
-                      onChange={e => setSelectedFiles(Array.from(e.target.files || []))} />
-                    {selectedFiles.length > 0 && (
-                      <p style={{ fontSize: 11, color: 'var(--ink-3)', marginTop: 4 }}>
-                        Прикреплено файлов: {selectedFiles.length}
-                      </p>
-                    )}
-                  </div>
-                </div>
+                <TaskComposerForm
+                  values={form}
+                  onChange={(patch) => setForm((prev) => ({ ...prev, ...patch }))}
+                  recipients={recipients}
+                  isRecipientsLoading={isRecipientsLoading}
+                  disabled={isCreateLoading}
+                  files={selectedFiles}
+                  onFilesChange={setSelectedFiles}
+                  showBacklogToggle
+                  currentUserId={currentUserId}
+                />
               </div>
               <div className="tv-modal-footer">
                 <button type="button" className="tv-btn tv-btn-ghost" disabled={isCreateLoading}
@@ -6561,154 +7014,16 @@ const TasksView = ({
             <form onSubmit={submitEditTask}>
               <div className="tv-modal-body">
                 {editModal.taskSubject && (
-                  <div style={{
-                    background: '#f8f7f4', border: '1px solid var(--border)',
-                    borderRadius: 'var(--radius-sm)', padding: '10px 14px',
-                    fontSize: 13, color: 'var(--ink-2)', marginBottom: 16,
-                    display: 'flex', gap: 8, alignItems: 'flex-start',
-                  }}>
-                    <span style={{ color: 'var(--ink-3)', marginTop: 1 }}>📌</span>
-                    <span><strong style={{ color: 'var(--ink)' }}>{editModal.taskSubject}</strong></span>
-                  </div>
+                  <p className="tv-composer-context">{editModal.taskSubject}</p>
                 )}
-                <div className="tv-form-grid">
-                  <div className="tv-form-field">
-                    <label>Тема *</label>
-                    <input
-                      className="tv-input"
-                      value={editForm.subject}
-                      maxLength={255}
-                      disabled={!!actionLoadingKey}
-                      autoFocus
-                      onChange={e => setEditForm(p => ({ ...p, subject: e.target.value }))}
-                    />
-                  </div>
-                  <div className="tv-form-field">
-                    <label>Описание</label>
-                    <textarea
-                      className="tv-textarea"
-                      value={editForm.description}
-                      disabled={!!actionLoadingKey}
-                      onChange={e => setEditForm(p => ({ ...p, description: e.target.value }))}
-                    />
-                  </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                    <div className="tv-form-field">
-                      <label>Тег</label>
-                      <select
-                        className="tv-select"
-                        value={editForm.tag}
-                        disabled={!!actionLoadingKey}
-                        onChange={e => setEditForm(p => ({ ...p, tag: e.target.value }))}
-                      >
-                        {TAG_OPTIONS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
-                      </select>
-                    </div>
-                    <div className="tv-form-field">
-                      <label>Исполнитель *</label>
-                      <select
-                        className="tv-select"
-                        value={editForm.assignedTo}
-                        disabled={!!actionLoadingKey || isRecipientsLoading}
-                        onChange={e => setEditForm(p => ({ ...p, assignedTo: e.target.value }))}
-                      >
-                        <option value="">{isRecipientsLoading ? 'Загрузка...' : 'Выберите сотрудника'}</option>
-                        {recipients.map(r => (
-                          <option key={r.id} value={r.id}>
-                            {r.name} ({ROLE_LABELS[r.role] || r.role})
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr', gap: 12 }}>
-                    <div className="tv-form-field">
-                      <label>Срочность</label>
-                      <select
-                        className="tv-select"
-                        value={editForm.priority}
-                        disabled={!!actionLoadingKey}
-                        onChange={e => setEditForm(p => ({ ...p, priority: e.target.value }))}
-                      >
-                        {PRIORITY_OPTIONS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
-                      </select>
-                    </div>
-                    <div className="tv-form-field">
-                      <label>Дедлайн через</label>
-                      <div className="tv-form-inline-grid">
-                        <input className="tv-input" type="number" min="0" placeholder="Дней" value={editForm.deadlineDays} disabled={!!actionLoadingKey}
-                          onChange={e => setEditForm(p => ({ ...p, deadlineDays: e.target.value }))} />
-                        <input className="tv-input" type="number" min="0" max="23" placeholder="Часов" value={editForm.deadlineHours} disabled={!!actionLoadingKey}
-                          onChange={e => setEditForm(p => ({ ...p, deadlineHours: e.target.value }))} />
-                        <input className="tv-input" type="number" min="0" max="59" placeholder="Минут" value={editForm.deadlineMinutes} disabled={!!actionLoadingKey}
-                          onChange={e => setEditForm(p => ({ ...p, deadlineMinutes: e.target.value }))} />
-                      </div>
-                    </div>
-                  </div>
-                  <div className="tv-form-field">
-                    <label>Оценка, минут</label>
-                    <input
-                      className="tv-input"
-                      type="number"
-                      min="0"
-                      step="15"
-                      placeholder="например 120"
-                      value={editForm.estimateMinutes}
-                      disabled={!!actionLoadingKey}
-                      onChange={e => setEditForm(p => ({ ...p, estimateMinutes: e.target.value }))}
-                    />
-                  </div>
-                  <div className="tv-soft-block">
-                    <label className="tv-form-switch">
-                      <input
-                        type="checkbox"
-                        checked={!!editForm.isRegulation}
-                        disabled={!!actionLoadingKey}
-                        onChange={e => setEditForm(p => ({
-                          ...p,
-                          isRegulation: e.target.checked,
-                          recurrenceType: e.target.checked ? (p.recurrenceType || 'daily') : ''
-                        }))}
-                      />
-                      Повторяемая регламентная задача
-                    </label>
-                    {editForm.isRegulation && (
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 120px', gap: 10, marginTop: 10 }}>
-                        <div className="tv-form-field" style={{ margin: 0 }}>
-                          <label>Период</label>
-                          <select
-                            className="tv-select"
-                            value={editForm.recurrenceType || 'daily'}
-                            disabled={!!actionLoadingKey}
-                            onChange={e => setEditForm(p => ({ ...p, recurrenceType: e.target.value }))}
-                          >
-                            {RECURRENCE_OPTIONS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
-                          </select>
-                        </div>
-                        <div className="tv-form-field" style={{ margin: 0 }}>
-                          <label>Интервал</label>
-                          <input
-                            className="tv-input"
-                            type="number"
-                            min="1"
-                            max="365"
-                            value={editForm.recurrenceInterval}
-                            disabled={!!actionLoadingKey}
-                            onChange={e => setEditForm(p => ({ ...p, recurrenceInterval: e.target.value }))}
-                          />
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                  <div className="tv-form-field">
-                    <label>Чек-лист</label>
-                    <ChecklistDraftEditor
-                      items={editForm.checklistItems}
-                      disabled={!!actionLoadingKey}
-                      onChange={(next) => setEditForm((p) => ({ ...p, checklistItems: next }))}
-                    />
-                  </div>
-                </div>
+                <TaskComposerForm
+                  values={editForm}
+                  onChange={(patch) => setEditForm((prev) => ({ ...prev, ...patch }))}
+                  recipients={recipients}
+                  isRecipientsLoading={isRecipientsLoading}
+                  disabled={!!actionLoadingKey}
+                  currentUserId={currentUserId}
+                />
               </div>
               <div className="tv-modal-footer">
                 <button
