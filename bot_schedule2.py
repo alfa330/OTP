@@ -2889,10 +2889,13 @@ def _fetch_task_notification_context(task_id):
             SELECT
                 t.id, t.subject, t.tag, t.priority, t.due_at, t.created_by,
                 creator.telegram_id, creator.name,
-                t.assigned_to, assignee.telegram_id, assignee.name
+                t.assigned_to, assignee.telegram_id, assignee.name,
+                t.requested_by_id, requester.telegram_id,
+                COALESCE(requester.name, t.requested_by_name)
             FROM tasks t
             LEFT JOIN users creator ON creator.id = t.created_by
             LEFT JOIN users assignee ON assignee.id = t.assigned_to
+            LEFT JOIN users requester ON requester.id = t.requested_by_id
             WHERE t.id = %s
             LIMIT 1
         """, (int(task_id),))
@@ -2910,7 +2913,11 @@ def _fetch_task_notification_context(task_id):
         "creator_name": row[7],
         "assigned_to": row[8],
         "assignee_telegram_id": row[9],
-        "assignee_name": row[10]
+        "assignee_name": row[10],
+        # Поручитель принимает итог — он должен получать уведомления по задаче.
+        "requested_by": row[11],
+        "requester_telegram_id": row[12],
+        "requester_name": row[13]
     }
 
 
@@ -2940,6 +2947,19 @@ def _collect_task_notification_recipients(task_ctx, actor_user_id):
                 "kind": "assignee",
                 "chat_id": assignee_chat_id,
                 "name": task_ctx.get('assignee_name') or 'Исполнитель'
+            })
+
+    # Поручитель принимает итог, поэтому обновления по задаче должны доходить и до него.
+    requester_chat_id = task_ctx.get('requester_telegram_id')
+    requester_id = task_ctx.get('requested_by')
+    if requester_chat_id and (requester_id is None or int(requester_id) != int(actor_user_id)):
+        chat_key = str(requester_chat_id)
+        if chat_key not in seen_chat_ids:
+            seen_chat_ids.add(chat_key)
+            recipients.append({
+                "kind": "requester",
+                "chat_id": requester_chat_id,
+                "name": task_ctx.get('requester_name') or 'Поручитель'
             })
 
     return recipients
@@ -3009,6 +3029,12 @@ def _build_task_status_notification_html(
             "<b>Отчёт о проделанной работе:</b>",
             _escape_telegram_html(completion_summary or "Отчёт не заполнен.", 2500)
         ])
+        # Итог принимает поручитель — говорим ему об этом прямо, а не «просто уведомляем».
+        if (recipient_kind or '').strip() == 'requester':
+            lines.extend([
+                "",
+                "<b>Задача ждёт вашей приёмки:</b> проверьте итог и примите его или верните на доработку."
+            ])
 
     message = "\n".join(lines)
     if len(message) > TELEGRAM_MAX_MESSAGE_CHARS:

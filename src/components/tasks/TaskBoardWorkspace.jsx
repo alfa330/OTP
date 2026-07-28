@@ -228,10 +228,15 @@ export const resolveBoardDrop = (task, toColumn, ctx) => {
 
   const assigneeId = Number(task?.assignee?.id || 0);
   const creatorId = Number(task?.creator?.id || 0);
+  const requesterId = Number(task?.requested_by?.id || 0);
   const isAssignee = assigneeId === ctx.currentUserId;
   const isCreator = creatorId === ctx.currentUserId;
   const canPlan = isCreator || ctx.isAdmin;
-  const canReview = !isAssignee && (ctx.isAdmin || isCreator || ctx.isSupervisor);
+  // Приёмка за поручителем (или постановщиком). Свою работу себе не принимают —
+  // кроме своей инициативы, где принимать больше некому.
+  const authorityId = requesterId || creatorId;
+  const canReview = (authorityId && authorityId === ctx.currentUserId)
+    || (!isAssignee && (ctx.isAdmin || isCreator || ctx.isSupervisor));
 
   if (toColumn === 'backlog') {
     if (task?.status !== 'assigned') return { type: 'blocked', reason: 'В бэклог можно вернуть только не начатую задачу' };
@@ -247,11 +252,11 @@ export const resolveBoardDrop = (task, toColumn, ctx) => {
 
   if (toColumn === 'progress') {
     if (from === 'review') {
-      if (!canReview) return { type: 'blocked', reason: 'Вернуть на доработку может постановщик или проверяющий' };
+      if (!canReview) return { type: 'blocked', reason: 'Вернуть на доработку может тот, кто поручил задачу' };
       return { type: 'status', action: 'returned' };
     }
     if (from === 'done') {
-      if (!canReview) return { type: 'blocked', reason: 'Возобновить задачу может постановщик или проверяющий' };
+      if (!canReview) return { type: 'blocked', reason: 'Возобновить задачу может тот, кто поручил её' };
       return { type: 'status', action: 'reopened' };
     }
     if (!isAssignee) return { type: 'blocked', reason: 'Взять задачу в работу может только исполнитель' };
@@ -266,7 +271,7 @@ export const resolveBoardDrop = (task, toColumn, ctx) => {
 
   if (toColumn === 'done') {
     if (from !== 'review') return { type: 'blocked', reason: 'Принять можно только задачу на проверке' };
-    if (!canReview) return { type: 'blocked', reason: 'Принять задачу может постановщик или проверяющий' };
+    if (!canReview) return { type: 'blocked', reason: 'Итог принимает тот, кто поручил задачу — свою работу себе не принимают' };
     return { type: 'status', action: 'accepted' };
   }
 

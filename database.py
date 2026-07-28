@@ -38256,7 +38256,8 @@ class Database:
                 'completed_at': self._survey_dt_to_iso(completed_at)
             }
 
-    def _task_visible_for_requester(self, requester_role, requester_id, created_by, assigned_to, assignee_role, assignee_supervisor_id):
+    def _task_visible_for_requester(self, requester_role, requester_id, created_by, assigned_to, assignee_role,
+                                    assignee_supervisor_id, requested_by=None):
         role = normalize_role_value(requester_role)
         requester_id = int(requester_id)
         if role_has_min(role, 'admin'):
@@ -38265,9 +38266,41 @@ class Database:
             return True
         if assigned_to is not None and int(assigned_to) == requester_id:
             return True
+        # Поручитель принимает итог, значит должен видеть задачу — даже если карточку создал не он.
+        if requested_by is not None and int(requested_by) == requester_id:
+            return True
         if role == 'sv' and assignee_role == 'operator' and assignee_supervisor_id is not None and int(assignee_supervisor_id) == requester_id:
             return True
         return False
+
+    def _task_review_authority(self, created_by, assigned_to, requested_by):
+        """
+        Кто принимает итог: поручитель, если он указан, иначе постановщик.
+        Возвращает id или None (никого — своя инициатива без поручителя).
+        """
+        if requested_by is not None:
+            return int(requested_by)
+        if created_by is not None:
+            return int(created_by)
+        return None
+
+    def _task_can_review(self, role, requester_id, created_by, assigned_to, requested_by):
+        """
+        Приёмка и возврат: право у поручителя (или постановщика, если поручителя нет).
+        Исполнитель не принимает свою же работу — кроме случая, когда принимать больше некому
+        (своя инициатива), иначе такая задача навсегда застрянет на проверке.
+        Админ и СВ могут принять за поручителя, но не свою собственную работу.
+        """
+        requester_id = int(requester_id)
+        authority = self._task_review_authority(created_by, assigned_to, requested_by)
+        is_assignee = assigned_to is not None and int(assigned_to) == requester_id
+
+        if authority is not None and authority == requester_id:
+            # Сам себе поручил и сам исполняет — закрыть может, это своя инициатива.
+            return True
+        if is_assignee:
+            return False
+        return role_has_min(role, 'admin') or role == 'sv' or (created_by is not None and int(created_by) == requester_id)
 
     def get_task_recipients(self, requester_id, requester_role, scope_department_id=None):
         requester_id = int(requester_id)
@@ -38799,7 +38832,8 @@ class Database:
             current_requested_by_name = row[19]
             current_reminder = row[20]
 
-            if not self._task_visible_for_requester(role, requester_id, created_by, current_assigned_to, assignee_role, assignee_supervisor_id):
+            if not self._task_visible_for_requester(role, requester_id, created_by, current_assigned_to, assignee_role,
+                                                    assignee_supervisor_id, current_requested_by_id):
                 raise PermissionError("TASK_FORBIDDEN")
 
             if created_by is None or int(created_by) != requester_id:
@@ -39065,7 +39099,7 @@ class Database:
     def _task_report_access_tx(self, cursor, task_id, requester_id, role):
         """Возвращает (created_by, assigned_to) или бросает, если задача недоступна."""
         cursor.execute("""
-            SELECT t.id, t.created_by, t.assigned_to, assignee.role, assignee.supervisor_id
+            SELECT t.id, t.created_by, t.assigned_to, assignee.role, assignee.supervisor_id, t.requested_by_id
             FROM tasks t
             LEFT JOIN users assignee ON assignee.id = t.assigned_to
             WHERE t.id = %s
@@ -39074,7 +39108,9 @@ class Database:
         if not row:
             raise ValueError("TASK_NOT_FOUND")
         created_by, assigned_to, assignee_role, assignee_supervisor_id = row[1], row[2], row[3], row[4]
-        if not self._task_visible_for_requester(role, requester_id, created_by, assigned_to, assignee_role, assignee_supervisor_id):
+        requested_by = row[5]
+        if not self._task_visible_for_requester(role, requester_id, created_by, assigned_to, assignee_role,
+                                                assignee_supervisor_id, requested_by):
             raise PermissionError("TASK_FORBIDDEN")
         return created_by, assigned_to
 
@@ -39266,7 +39302,7 @@ class Database:
                     t.is_backlog, t.backlog_rank, t.estimate_minutes, t.planned_start_at,
                     t.due_at, t.deadline_duration_minutes, t.subject,
                     assignee.role, assignee.supervisor_id,
-                    t.reminder_minutes_before
+                    t.reminder_minutes_before, t.requested_by_id
                 FROM tasks t
                 LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 WHERE t.id = %s
@@ -39289,8 +39325,10 @@ class Database:
             assignee_role = row[12]
             assignee_supervisor_id = row[13]
             current_reminder = row[14]
+            requested_by = row[15]
 
-            if not self._task_visible_for_requester(role, requester_id, created_by, assigned_to, assignee_role, assignee_supervisor_id):
+            if not self._task_visible_for_requester(role, requester_id, created_by, assigned_to, assignee_role,
+                                                    assignee_supervisor_id, requested_by):
                 raise PermissionError("TASK_FORBIDDEN")
 
             is_creator = created_by is not None and int(created_by) == requester_id
@@ -39873,8 +39911,9 @@ class Database:
         if role_has_min(role, 'admin'):
             pass
         elif role in ('sv', 'trainer'):
-            base_conditions.append("(t.created_by = %s OR t.assigned_to = %s)")
-            base_params.extend([requester_id, requester_id])
+            # Поручитель видит задачи, которые поручил, — иначе он не сможет принять итог.
+            base_conditions.append("(t.created_by = %s OR t.assigned_to = %s OR t.requested_by_id = %s)")
+            base_params.extend([requester_id, requester_id, requester_id])
         else:
             return {
                 "tasks": [],
@@ -39884,8 +39923,8 @@ class Database:
             }
 
         if only_my_flag:
-            base_conditions.append("(t.created_by = %s OR t.assigned_to = %s)")
-            base_params.extend([requester_id, requester_id])
+            base_conditions.append("(t.created_by = %s OR t.assigned_to = %s OR t.requested_by_id = %s)")
+            base_params.extend([requester_id, requester_id, requester_id])
 
         filtered_conditions = list(base_conditions)
         filtered_params = list(base_params)
@@ -40189,7 +40228,7 @@ class Database:
             cursor.execute("""
                 SELECT
                     t.id, t.created_by, t.assigned_to, t.status,
-                    assignee.role, assignee.supervisor_id
+                    assignee.role, assignee.supervisor_id, t.requested_by_id
                 FROM tasks t
                 LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 WHERE t.id = %s
@@ -40203,16 +40242,16 @@ class Database:
             current_status = row[3]
             assignee_role = row[4]
             assignee_supervisor_id = row[5]
+            requested_by = row[6]
 
-            if not self._task_visible_for_requester(role, requester_id, created_by, assigned_to, assignee_role, assignee_supervisor_id):
+            if not self._task_visible_for_requester(role, requester_id, created_by, assigned_to, assignee_role,
+                                                    assignee_supervisor_id, requested_by):
                 raise PermissionError("TASK_FORBIDDEN")
 
             is_assignee = assigned_to is not None and int(assigned_to) == requester_id
-            is_reviewer = (
-                role_has_min(role, 'admin')
-                or (created_by is not None and int(created_by) == requester_id)
-                or (role == 'sv' and not is_assignee)
-            )
+            # Приёмку итога делает поручитель (или постановщик, если поручителя нет),
+            # а не исполнитель — свою работу себе не принимают.
+            is_reviewer = self._task_can_review(role, requester_id, created_by, assigned_to, requested_by)
 
             target_status = None
             history_status = None
@@ -40371,7 +40410,7 @@ class Database:
                 SELECT
                     ci.id, ci.task_id, ci.title, ci.position, ci.is_required,
                     t.created_by, t.assigned_to, assignee.role, assignee.supervisor_id,
-                    ci.is_done, ci.result_note
+                    ci.is_done, ci.result_note, t.requested_by_id
                 FROM task_checklist_items ci
                 JOIN tasks t ON t.id = ci.task_id
                 LEFT JOIN users assignee ON assignee.id = t.assigned_to
@@ -40385,7 +40424,8 @@ class Database:
             assigned_to = row[6]
             assignee_role = row[7]
             assignee_supervisor_id = row[8]
-            if not self._task_visible_for_requester(role, requester_id, created_by, assigned_to, assignee_role, assignee_supervisor_id):
+            if not self._task_visible_for_requester(role, requester_id, created_by, assigned_to, assignee_role,
+                                                    assignee_supervisor_id, row[11]):
                 raise PermissionError("TASK_FORBIDDEN")
 
             was_done = bool(row[9])
@@ -40472,7 +40512,7 @@ class Database:
                     a.id, a.file_name, a.content_type, a.file_size, a.file_data, a.created_at,
                     COALESCE(a.storage_type, 'db'), a.gcs_bucket, a.gcs_blob_path,
                     t.id, t.created_by, t.assigned_to,
-                    assignee.role, assignee.supervisor_id
+                    assignee.role, assignee.supervisor_id, t.requested_by_id
                 FROM task_attachments a
                 JOIN tasks t ON t.id = a.task_id
                 LEFT JOIN users assignee ON assignee.id = t.assigned_to
@@ -40487,7 +40527,8 @@ class Database:
             assignee_role = row[12]
             assignee_supervisor_id = row[13]
 
-            if not self._task_visible_for_requester(role, requester_id, created_by, assigned_to, assignee_role, assignee_supervisor_id):
+            if not self._task_visible_for_requester(role, requester_id, created_by, assigned_to, assignee_role,
+                                                    assignee_supervisor_id, row[14]):
                 raise PermissionError("TASK_FORBIDDEN")
 
             storage_type = row[6] or 'db'

@@ -714,6 +714,89 @@ class DeadlineReminderTests(unittest.TestCase):
             module.parse_reminder_argument('2d')
 
 
+class ReviewAuthorityTests(unittest.TestCase):
+    """Итог принимает поручитель, а не исполнитель."""
+
+    def setUp(self):
+        self.db = _read(DATABASE_PATH)
+        self.app = _read(APP_PATH)
+
+    def test_authority_prefers_requester_over_creator(self):
+        start = self.db.index("    def _task_review_authority(self, created_by, assigned_to, requested_by):")
+        block = self.db[start:self.db.index("    def _task_can_review", start)]
+        self.assertIn("if requested_by is not None:\n            return int(requested_by)", block)
+        self.assertIn("if created_by is not None:\n            return int(created_by)", block)
+
+    def test_assignee_cannot_accept_own_work(self):
+        start = self.db.index("    def _task_can_review(self, role, requester_id, created_by, assigned_to, requested_by):")
+        block = self.db[start:self.db.index("\n    def ", start + 10)]
+        # Своя инициатива — можно, иначе исполнителю отказ.
+        self.assertIn("if authority is not None and authority == requester_id:", block)
+        self.assertIn("if is_assignee:\n            return False", block)
+        # Порядок важен: проверка «я и есть приёмщик» идёт до отказа исполнителю.
+        self.assertLess(block.index("authority == requester_id"), block.index("if is_assignee:\n            return False"))
+
+    def test_status_route_uses_the_new_rule(self):
+        self.assertIn(
+            "is_reviewer = self._task_can_review(role, requester_id, created_by, assigned_to, requested_by)",
+            self.db,
+        )
+        # Прежняя формула, где админ мог принять свою же работу, убрана.
+        self.assertNotIn("or (role == 'sv' and not is_assignee)\n            )", self.db)
+
+    def test_requester_can_see_the_task(self):
+        start = self.db.index("    def _task_visible_for_requester(")
+        block = self.db[start:self.db.index("    def _task_review_authority", start)]
+        self.assertIn("if requested_by is not None and int(requested_by) == requester_id:", block)
+        # И в списке задач для СВ/тренера.
+        self.assertIn("(t.created_by = %s OR t.assigned_to = %s OR t.requested_by_id = %s)", self.db)
+
+    def test_requester_gets_notifications_and_a_call_to_action(self):
+        self.assertIn('"kind": "requester"', self.app)
+        self.assertIn("requester.telegram_id", self.app)
+        self.assertIn("Задача ждёт вашей приёмки", self.app)
+
+    def test_frontend_mirrors_the_rule(self):
+        view = _read(TASKS_VIEW_PATH)
+        start = view.index("export const canReviewTask = (task, currentUserId, currentUserRole) => {")
+        block = view[start:view.index("const buildTaskActionButtons", start)]
+        self.assertIn("const authorityId = requesterId || creatorId;", block)
+        self.assertIn("if (authorityId && authorityId === currentUserId) return true;", block)
+        self.assertIn("if (isAssignee) return false;", block)
+        self.assertIn("const canReview  = canReviewTask(task, currentUserId, currentUserRole);", view)
+
+        board = _read(WORKSPACE_PATH)
+        self.assertIn("const authorityId = requesterId || creatorId;", board)
+        self.assertIn("Итог принимает тот, кто поручил задачу", board)
+
+
+class ReportReadabilityTests(unittest.TestCase):
+    """Отчёт пишется для коллеги, а не для разработчика."""
+
+    def setUp(self):
+        self.src = _read(SKILL_PATH)
+
+    def test_skill_demands_plain_language(self):
+        self.assertIn("Отчёт читает коллега, а не разработчик", self.src)
+        self.assertIn("понятен\nчеловеку не из разработки", self.src.replace('\r\n', '\n'))
+
+    def test_skill_shows_bad_and_good_examples(self):
+        # Таблица «нельзя / надо» — самая проверяемая часть требования.
+        self.assertIn("| Нельзя | Надо |", self.src)
+        self.assertIn("reminder_minutes_before", self.src)
+        self.assertIn("за сколько предупредить", self.src)
+
+    def test_skill_forbids_internal_names_in_reports(self):
+        self.assertIn(
+            "Никаких имён полей, таблиц, функций, файлов, коммитов, названий тестов и команд сборки.",
+            self.src,
+        )
+
+    def test_skill_tells_me_not_to_accept_my_own_work(self):
+        self.assertIn("Приёмку итога делает поручитель", self.src)
+        self.assertIn("сдав работу (`status <id> completed`), я **останавливаюсь**", self.src)
+
+
 class SkillExpectationsTests(unittest.TestCase):
     """В скилле зафиксированы постоянные требования владельца."""
 
