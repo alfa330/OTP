@@ -35304,15 +35304,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 navigateToView('tasks');
             }, [navigateToView]);
 
-            const runPinnedTaskAction = useCallback(async (task, action) => {
+            const runPinnedTaskAction = useCallback(async (task, action, options = {}) => {
                 const taskId = Number(task?.id || 0);
-                if (!taskId || !action || !user?.id) return;
+                if (!taskId || !action || !user?.id) return false;
                 const key = `${taskId}:${action}`;
                 setPinnedTaskActionLoadingKey(key);
                 try {
+                    const payload = { action };
+                    // Сдача работы несёт отчёт и трудозатраты (см. журнал отчётов задачи).
+                    if (options?.report) payload.report = String(options.report).trim();
+                    if (options?.spentMinutes) payload.spent_minutes = Number(options.spentMinutes);
                     const response = await axios.post(
                         `${API_BASE_URL}/api/tasks/${taskId}/status`,
-                        { action },
+                        payload,
                         {
                             headers: withAccessTokenHeader({
                                 'X-User-Id': String(user.id),
@@ -35335,8 +35339,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         });
                     }
                     setTaskRefreshToken((prev) => prev + 1);
+                    return true;
                 } catch (error) {
                     showToast(error?.response?.data?.error || 'Не удалось обновить статус задачи', 'error');
+                    return false;
                 } finally {
                     setPinnedTaskActionLoadingKey('');
                 }

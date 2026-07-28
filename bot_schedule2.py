@@ -2405,6 +2405,30 @@ def _parse_task_deadline_minutes(source):
     return total if total > 0 else None
 
 
+def _parse_task_estimate_minutes(source):
+    """Плановая длительность задачи: либо estimate_minutes, либо часы+минуты из формы."""
+    direct = source.get('estimate_minutes')
+    if direct is not None and str(direct).strip() != '':
+        total = _parse_task_int(direct, 'estimate_minutes', default=0, minimum=0, maximum=3650 * 24 * 60)
+        return total or None
+    hours = _parse_task_int(source.get('estimate_hours'), 'estimate_hours', default=0, minimum=0, maximum=3650 * 24)
+    minutes = _parse_task_int(source.get('estimate_extra_minutes'), 'estimate_extra_minutes', default=0, minimum=0, maximum=59)
+    total = hours * 60 + minutes
+    return total or None
+
+
+def _parse_task_spent_minutes(source):
+    """Фактические трудозатраты: либо spent_minutes, либо часы+минуты из формы."""
+    direct = source.get('spent_minutes')
+    if direct is not None and str(direct).strip() != '':
+        total = _parse_task_int(direct, 'spent_minutes', default=0, minimum=0, maximum=3650 * 24 * 60)
+        return total or None
+    hours = _parse_task_int(source.get('spent_hours'), 'spent_hours', default=0, minimum=0, maximum=3650 * 24)
+    minutes = _parse_task_int(source.get('spent_extra_minutes'), 'spent_extra_minutes', default=0, minimum=0, maximum=59)
+    total = hours * 60 + minutes
+    return total or None
+
+
 def _parse_task_checklist_items(raw_value):
     if raw_value is None:
         return []
@@ -2929,7 +2953,8 @@ def _build_task_status_notification_html(
     comment=None,
     completion_summary=None,
     completion_files_count=0,
-    task_link=None
+    task_link=None,
+    spent_minutes=None
 ):
     action_norm = (action or '').strip().lower()
     tag_label = TASK_TAG_LABELS.get((task_ctx.get('tag') or 'task').strip().lower(), 'Задача')
@@ -2976,10 +3001,13 @@ def _build_task_status_notification_html(
 
     if action_norm == 'completed':
         lines.append(f"<b>Файлов:</b> {int(completion_files_count or 0)}")
+        spent_label = _format_task_spent_for_notification(spent_minutes)
+        if spent_label:
+            lines.append(f"<b>Затрачено:</b> {_escape_telegram_html(spent_label, 40)}")
         lines.extend([
             "",
-            "<b>Итоги выполнения:</b>",
-            _escape_telegram_html(completion_summary or "Итоги выполнения не указаны.", 2500)
+            "<b>Отчёт о проделанной работе:</b>",
+            _escape_telegram_html(completion_summary or "Отчёт не заполнен.", 2500)
         ])
 
     message = "\n".join(lines)
@@ -3000,7 +3028,9 @@ def _build_task_event_notification_html(event, task_ctx, actor_name, changed_fie
 
     header_map = {
         'edited': '✏️ Задача обновлена',
-        'deleted': '🗑️ Задача удалена'
+        'deleted': '🗑️ Задача удалена',
+        'promoted': '🆕 Задача из бэклога в работу',
+        'planned': '🗓️ Сроки задачи обновлены'
     }
 
     lines = [
@@ -3014,7 +3044,7 @@ def _build_task_event_notification_html(event, task_ctx, actor_name, changed_fie
     if due_label:
         lines.insert(4, f"<b>Дедлайн:</b> {_escape_telegram_html(due_label, 80)}")
 
-    if event_norm == 'edited':
+    if event_norm in ('edited', 'planned'):
         labels = {
             'subject': 'тема',
             'description': 'описание',
@@ -3023,7 +3053,11 @@ def _build_task_event_notification_html(event, task_ctx, actor_name, changed_fie
             'deadline': 'дедлайн',
             'recurrence': 'регламент',
             'checklist': 'чек-лист',
-            'assigned_to': 'исполнитель'
+            'assigned_to': 'исполнитель',
+            'estimate': 'оценка',
+            'planned_start': 'плановый старт',
+            'is_backlog': 'бэклог',
+            'backlog_rank': 'приоритет в бэклоге'
         }
         changed_items = []
         for item in (changed_fields or []):
@@ -3034,6 +3068,45 @@ def _build_task_event_notification_html(event, task_ctx, actor_name, changed_fie
         if changed_items:
             lines.append(f"<b>Изменено:</b> {_escape_telegram_html(', '.join(changed_items), 120)}")
 
+    if event_norm == 'promoted':
+        lines.append("")
+        lines.append("<b>Откройте раздел «Задачи», чтобы посмотреть детали.</b>")
+
+    message = "\n".join(lines)
+    if len(message) > TELEGRAM_MAX_MESSAGE_CHARS:
+        message = message[:TELEGRAM_MAX_MESSAGE_CHARS]
+    return message
+
+
+def _format_task_spent_for_notification(minutes):
+    total = int(minutes or 0)
+    if total <= 0:
+        return None
+    if total < 60:
+        return f"{total} мин"
+    hours, rest = divmod(total, 60)
+    if hours < 24:
+        return f"{hours} ч {rest} мин" if rest else f"{hours} ч"
+    days, rest_hours = divmod(hours, 24)
+    return f"{days} д {rest_hours} ч" if rest_hours else f"{days} д"
+
+
+def _build_task_report_notification_html(task_ctx, actor_name, report, task_link=None):
+    is_final = (report or {}).get('kind') == 'completion'
+    header = '📄 Итоговый отчёт по задаче' if is_final else '📝 Отчёт о проделанной работе'
+    lines = [
+        f"<b>{header}</b>",
+        "",
+        f"<b>Тема:</b> {_build_task_subject_notification_html(task_ctx, task_link)}",
+        f"<b>Автор:</b> {_escape_telegram_html(actor_name or 'Сотрудник', 80)}"
+    ]
+    spent_label = _format_task_spent_for_notification((report or {}).get('spent_minutes'))
+    if spent_label:
+        lines.append(f"<b>Затрачено:</b> {_escape_telegram_html(spent_label, 40)}")
+    body = str((report or {}).get('body') or '').strip()
+    if body:
+        lines.append("")
+        lines.append(_escape_telegram_html(body, 1500))
     message = "\n".join(lines)
     if len(message) > TELEGRAM_MAX_MESSAGE_CHARS:
         message = message[:TELEGRAM_MAX_MESSAGE_CHARS]
@@ -17152,6 +17225,7 @@ def handle_tasks():
             only_my_raw = (request.args.get('only_my') or '').strip().lower()
             only_my = only_my_raw in {'1', 'true', 'yes', 'y', 'on'}
             person_scope = (request.args.get('person_scope') or '').strip().lower() or None
+            backlog_filter = (request.args.get('backlog') or '').strip().lower() or None
             person_id_raw = request.args.get('person_id')
             person_id = None
             if person_id_raw is not None and str(person_id_raw).strip() != '':
@@ -17193,7 +17267,8 @@ def handle_tasks():
                     offset=offset,
                     only_my=only_my,
                     person_id=person_id,
-                    person_scope=person_scope
+                    person_scope=person_scope,
+                    backlog=backlog_filter
                 )
             except ValueError as e:
                 error_code = str(e)
@@ -17211,6 +17286,8 @@ def handle_tasks():
                     return jsonify({"error": "Invalid person_id filter"}), 400
                 if error_code == 'INVALID_TASK_PERSON_SCOPE_FILTER':
                     return jsonify({"error": "Invalid person_scope filter"}), 400
+                if error_code == 'INVALID_TASK_BACKLOG_FILTER':
+                    return jsonify({"error": "Invalid backlog filter (use only|exclude)"}), 400
                 raise
 
             tasks = payload.get("tasks") or []
@@ -17259,7 +17336,8 @@ def handle_tasks():
                     "priority": priority_filter,
                     "only_my": only_my,
                     "person_id": person_id,
-                    "person_scope": person_scope
+                    "person_scope": person_scope,
+                    "backlog": backlog_filter
                 }
             }), 200
 
@@ -17273,8 +17351,12 @@ def handle_tasks():
             is_regulation = _parse_task_bool(request.form.get('is_regulation')) or bool(recurrence_type)
             deadline_minutes = _parse_task_deadline_minutes(request.form)
             checklist_items = _parse_task_checklist_items(request.form.get('checklist_items'))
+            is_backlog = _parse_task_bool(request.form.get('is_backlog'))
+            estimate_minutes = _parse_task_estimate_minutes(request.form)
         except ValueError as parse_error:
             return jsonify({"error": str(parse_error)}), 400
+        due_at_raw = (request.form.get('due_at') or '').strip() or None
+        planned_start_raw = (request.form.get('planned_start_at') or '').strip() or None
         assigned_to_raw = request.form.get('assigned_to')
 
         if not subject:
@@ -17326,7 +17408,11 @@ def handle_tasks():
                 is_regulation=is_regulation,
                 recurrence_type=recurrence_type,
                 recurrence_interval=recurrence_interval,
-                checklist_items=checklist_items
+                checklist_items=checklist_items,
+                is_backlog=is_backlog,
+                estimate_minutes=estimate_minutes,
+                planned_start_at=planned_start_raw,
+                due_at=due_at_raw
             )
         except ValueError as create_error:
             _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths)
@@ -17338,7 +17424,9 @@ def handle_tasks():
                 "INVALID_DEADLINE": "Invalid deadline",
                 "INVALID_RECURRENCE_TYPE": "Invalid recurrence_type",
                 "INVALID_RECURRENCE_INTERVAL": "Invalid recurrence_interval",
-                "INVALID_CHECKLIST": "Invalid checklist"
+                "INVALID_CHECKLIST": "Invalid checklist",
+                "INVALID_ESTIMATE": "Invalid estimate_minutes",
+                "INVALID_PLANNED_START": "Invalid planned_start_at"
             }
             return jsonify({"error": error_map.get(code, code)}), 400
         except Exception:
@@ -17350,7 +17438,8 @@ def handle_tasks():
         try:
             assignee = db.get_user(id=assigned_to)
             assignee_chat_id = assignee[1] if assignee else None
-            if assignee_chat_id:
+            # Карточка в бэклоге ещё не обязательство исполнителя — уведомляем только при выносе на доску.
+            if assignee_chat_id and not is_backlog:
                 task_link = _build_current_task_deep_link(created.get("id"))
                 tag_label = TASK_TAG_LABELS.get(tag, 'Задача')
                 priority_label = TASK_PRIORITY_LABELS.get(priority, 'Обычная')
@@ -17393,8 +17482,10 @@ def handle_tasks():
 
         response_payload = {
             "status": "success",
-            "message": "Task created successfully",
-            "task_id": created.get("id")
+            "message": "Задача добавлена в бэклог" if is_backlog else "Task created successfully",
+            "task_id": created.get("id"),
+            "is_backlog": bool(is_backlog),
+            "due_at": created.get("due_at")
         }
         if telegram_warning:
             response_payload["warning"] = telegram_warning
@@ -17425,15 +17516,19 @@ def handle_single_task(task_id):
             has_assigned_to = 'assigned_to' in data
             has_priority = 'priority' in data
             has_deadline = any(key in data for key in ('deadline_days', 'deadline_hours', 'deadline_minutes'))
+            has_due_at = 'due_at' in data
             has_is_regulation = 'is_regulation' in data
             has_recurrence_type = 'recurrence_type' in data
             has_recurrence_interval = 'recurrence_interval' in data
             has_checklist = 'checklist_items' in data
+            has_estimate = any(key in data for key in ('estimate_minutes', 'estimate_hours', 'estimate_extra_minutes'))
+            has_planned_start = 'planned_start_at' in data
 
             if not any([
                 has_subject, has_description, has_tag, has_assigned_to,
-                has_priority, has_deadline, has_is_regulation,
-                has_recurrence_type, has_recurrence_interval, has_checklist
+                has_priority, has_deadline, has_due_at, has_is_regulation,
+                has_recurrence_type, has_recurrence_interval, has_checklist,
+                has_estimate, has_planned_start
             ]):
                 return jsonify({"error": "No fields to update"}), 400
 
@@ -17455,6 +17550,7 @@ def handle_single_task(task_id):
                 )
                 is_regulation = _parse_task_bool(data.get('is_regulation')) if has_is_regulation else None
                 checklist_items = _parse_task_checklist_items(data.get('checklist_items')) if has_checklist else None
+                estimate_minutes = _parse_task_estimate_minutes(data) if has_estimate else None
             except ValueError as parse_error:
                 return jsonify({"error": str(parse_error)}), 400
 
@@ -17499,6 +17595,12 @@ def handle_single_task(task_id):
                     edit_kwargs["recurrence_interval"] = recurrence_interval
                 if has_checklist:
                     edit_kwargs["checklist_items"] = checklist_items
+                if has_due_at:
+                    edit_kwargs["due_at"] = data.get('due_at')
+                if has_estimate:
+                    edit_kwargs["estimate_minutes"] = estimate_minutes
+                if has_planned_start:
+                    edit_kwargs["planned_start_at"] = data.get('planned_start_at')
 
                 result = db.edit_task(**edit_kwargs)
             except ValueError as value_error:
@@ -17523,6 +17625,10 @@ def handle_single_task(task_id):
                     return jsonify({"error": "Invalid checklist"}), 400
                 if code == 'INVALID_ASSIGNED_TO':
                     return jsonify({"error": "Invalid assigned_to value"}), 400
+                if code == 'INVALID_ESTIMATE':
+                    return jsonify({"error": "Invalid estimate_minutes"}), 400
+                if code == 'INVALID_PLANNED_START':
+                    return jsonify({"error": "Invalid planned_start_at"}), 400
                 return jsonify({"error": code}), 400
             except PermissionError as permission_error:
                 code = str(permission_error)
@@ -17638,6 +17744,265 @@ def handle_single_task(task_id):
         return jsonify({"error": "Internal server error"}), 500
 
 
+@app.route('/api/tasks/board', methods=['POST', 'OPTIONS'])
+@require_api_key
+def handle_tasks_board():
+    """
+    Планирующие правки с доски: перенос бэклог ↔ доска, порядок приоритезации,
+    оценка длительности и сроки. Батч — чтобы drag&drop переставлял соседей одним запросом.
+
+    Тело: {"items": [{"task_id": 12, "is_backlog": false, "backlog_rank": 2.5,
+                      "estimate_minutes": 120, "planned_start_at": "...", "due_at": "..."}]}
+    Допускается и одиночный объект без обёртки items.
+    """
+    try:
+        requester_id, requester, guard_response, guard_status = _task_route_guard()
+        if guard_response is not None:
+            return guard_response, guard_status
+
+        requester_role = getattr(g, 'effective_task_role', requester[3])
+        data = request.get_json(silent=True) or {}
+        raw_items = data.get('items')
+        if raw_items is None:
+            raw_items = [data] if data.get('task_id') is not None else []
+        if not isinstance(raw_items, list) or not raw_items:
+            return jsonify({"error": "items is required"}), 400
+        if len(raw_items) > 200:
+            return jsonify({"error": "Too many items (max 200)"}), 400
+
+        error_map = {
+            'TASK_NOT_FOUND': ("Task not found", 404),
+            'NOTHING_TO_UPDATE': ("No fields to update", 400),
+            'INVALID_ESTIMATE': ("Invalid estimate_minutes", 400),
+            'INVALID_PLANNED_START': ("Invalid planned_start_at", 400),
+            'INVALID_DEADLINE': ("Invalid due_at", 400),
+            'INVALID_BACKLOG_RANK': ("Invalid backlog_rank", 400),
+            'BACKLOG_ONLY_FOR_ASSIGNED': ("Только не начатую задачу можно вернуть в бэклог", 409),
+            'TASK_FORBIDDEN': ("You do not have access to this task", 403),
+            'ONLY_CREATOR_CAN_PLAN': ("Сроки задачи меняет постановщик или админ", 403)
+        }
+
+        results = []
+        promoted = []
+        for raw_item in raw_items:
+            if not isinstance(raw_item, dict):
+                return jsonify({"error": "Each item must be an object"}), 400
+            try:
+                item_task_id = int(raw_item.get('task_id'))
+            except Exception:
+                return jsonify({"error": "task_id must be an integer"}), 400
+
+            kwargs = {
+                "task_id": item_task_id,
+                "requester_id": requester_id,
+                "requester_role": requester_role
+            }
+            if 'is_backlog' in raw_item:
+                kwargs["is_backlog"] = _parse_task_bool(raw_item.get('is_backlog'))
+            if 'backlog_rank' in raw_item:
+                kwargs["backlog_rank"] = raw_item.get('backlog_rank')
+            if any(key in raw_item for key in ('estimate_minutes', 'estimate_hours', 'estimate_extra_minutes')):
+                try:
+                    kwargs["estimate_minutes"] = _parse_task_estimate_minutes(raw_item)
+                except ValueError as parse_error:
+                    return jsonify({"error": str(parse_error)}), 400
+            if 'planned_start_at' in raw_item:
+                kwargs["planned_start_at"] = raw_item.get('planned_start_at')
+            if 'due_at' in raw_item:
+                kwargs["due_at"] = raw_item.get('due_at')
+
+            try:
+                result = db.update_task_board_state(**kwargs)
+            except ValueError as value_error:
+                message, code = error_map.get(str(value_error), (str(value_error), 400))
+                return jsonify({"error": message, "task_id": item_task_id}), code
+            except PermissionError as permission_error:
+                message, code = error_map.get(str(permission_error), (str(permission_error), 403))
+                return jsonify({"error": message, "task_id": item_task_id}), code
+
+            results.append(result)
+            if result.get('updated') and result.get('was_backlog') and not result.get('is_backlog'):
+                promoted.append(result)
+
+        warnings = []
+        actor_name = requester[2] if requester and len(requester) > 2 else 'Сотрудник'
+        for result in promoted:
+            try:
+                task_ctx = _fetch_task_notification_context(result.get('task_id'))
+                if not task_ctx:
+                    continue
+                task_link = _build_current_task_deep_link(task_ctx.get('id'))
+                reply_markup = _build_task_notification_reply_markup(task_link)
+                for recipient in _collect_task_assignee_recipients(task_ctx, requester_id):
+                    response = _send_telegram_text_message(
+                        recipient.get('chat_id'),
+                        _build_task_event_notification_html(
+                            event='promoted',
+                            task_ctx=task_ctx,
+                            actor_name=actor_name,
+                            task_link=task_link
+                        ),
+                        parse_mode='HTML',
+                        reply_markup=reply_markup
+                    )
+                    if response.status_code != 200:
+                        recipient_name = recipient.get('name') or 'исполнитель'
+                        warnings.append(
+                            f"Не удалось отправить уведомление ({recipient_name}): {_get_telegram_error_text(response)}"
+                        )
+            except Exception as notify_error:
+                warnings.append(f"Ошибка отправки Telegram-уведомления: {notify_error}")
+
+        response_payload = {
+            "status": "success",
+            "message": "Доска обновлена" if any(item.get('updated') for item in results) else "Изменений нет",
+            "items": results,
+            "updated": sum(1 for item in results if item.get('updated'))
+        }
+        if warnings:
+            response_payload["warning"] = _truncate_for_telegram(" | ".join(warnings), 1000)
+        return jsonify(response_payload), 200
+
+    except Exception as e:
+        logging.error(f"Error in handle_tasks_board: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+TASK_REPORT_ERRORS = {
+    'TASK_NOT_FOUND': ("Task not found", 404),
+    'REPORT_NOT_FOUND': ("Отчёт не найден", 404),
+    'REPORT_BODY_REQUIRED': ("Опишите проделанную работу", 400),
+    'INVALID_REPORT_KIND': ("Invalid report kind", 400),
+    'INVALID_SPENT_MINUTES': ("Invalid spent_minutes", 400),
+    'NOTHING_TO_UPDATE': ("No fields to update", 400),
+    'TASK_FORBIDDEN': ("You do not have access to this task", 403),
+    'ONLY_TASK_PARTICIPANT': ("Отчёт пишут исполнитель, постановщик или админ", 403),
+    'ONLY_REPORT_AUTHOR': ("Редактировать отчёт может только его автор", 403),
+}
+
+
+def _task_report_error_response(error):
+    message, code = TASK_REPORT_ERRORS.get(str(error), (str(error), 400 if isinstance(error, ValueError) else 403))
+    return jsonify({"error": message}), code
+
+
+@app.route('/api/tasks/<int:task_id>/reports', methods=['GET', 'POST', 'OPTIONS'])
+@require_api_key
+def handle_task_reports(task_id):
+    """Журнал отчётов о проделанной работе по задаче."""
+    try:
+        requester_id, requester, guard_response, guard_status = _task_route_guard()
+        if guard_response is not None:
+            return guard_response, guard_status
+
+        requester_role = getattr(g, 'effective_task_role', requester[3])
+
+        if request.method == 'GET':
+            try:
+                reports = db.get_task_reports(task_id, requester_id, requester_role)
+            except (ValueError, PermissionError) as error:
+                return _task_report_error_response(error)
+            return jsonify({
+                "status": "success",
+                "reports": reports,
+                "spent_minutes": sum(int(item.get('spent_minutes') or 0) for item in reports) or None
+            }), 200
+
+        data = request.get_json(silent=True) or request.form or {}
+        try:
+            spent_minutes = _parse_task_spent_minutes(data)
+        except ValueError as parse_error:
+            return jsonify({"error": str(parse_error)}), 400
+
+        try:
+            report = db.create_task_report(
+                task_id=task_id,
+                requester_id=requester_id,
+                requester_role=requester_role,
+                body=data.get('body') or data.get('report') or '',
+                spent_minutes=spent_minutes,
+                kind=data.get('kind') or 'progress'
+            )
+        except (ValueError, PermissionError) as error:
+            return _task_report_error_response(error)
+
+        warnings = []
+        try:
+            task_ctx = _fetch_task_notification_context(task_id)
+            if task_ctx:
+                actor_name = requester[2] if requester and len(requester) > 2 else 'Сотрудник'
+                task_link = _build_current_task_deep_link(task_ctx.get('id'))
+                for recipient in _collect_task_notification_recipients(task_ctx, requester_id):
+                    response = _send_telegram_text_message(
+                        recipient.get('chat_id'),
+                        _build_task_report_notification_html(
+                            task_ctx=task_ctx,
+                            actor_name=actor_name,
+                            report=report,
+                            task_link=task_link
+                        ),
+                        parse_mode='HTML',
+                        reply_markup=_build_task_notification_reply_markup(task_link)
+                    )
+                    if response.status_code != 200:
+                        warnings.append(
+                            f"Не удалось отправить уведомление ({recipient.get('name') or 'получатель'}): "
+                            f"{_get_telegram_error_text(response)}"
+                        )
+        except Exception as notify_error:
+            warnings.append(f"Ошибка отправки Telegram-уведомления: {notify_error}")
+
+        payload = {"status": "success", "message": "Отчёт добавлен", "report": report}
+        if warnings:
+            payload["warning"] = _truncate_for_telegram(" | ".join(warnings), 1000)
+        return jsonify(payload), 201
+
+    except Exception as e:
+        logging.error(f"Error in handle_task_reports: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/tasks/reports/<int:report_id>', methods=['PATCH', 'DELETE', 'OPTIONS'])
+@require_api_key
+def handle_task_report_item(report_id):
+    try:
+        requester_id, requester, guard_response, guard_status = _task_route_guard()
+        if guard_response is not None:
+            return guard_response, guard_status
+
+        requester_role = getattr(g, 'effective_task_role', requester[3])
+
+        if request.method == 'PATCH':
+            data = request.get_json(silent=True) or {}
+            kwargs = {
+                "report_id": report_id,
+                "requester_id": requester_id,
+                "requester_role": requester_role
+            }
+            if 'body' in data:
+                kwargs["body"] = data.get('body')
+            if any(key in data for key in ('spent_minutes', 'spent_hours', 'spent_extra_minutes')):
+                try:
+                    kwargs["spent_minutes"] = _parse_task_spent_minutes(data)
+                except ValueError as parse_error:
+                    return jsonify({"error": str(parse_error)}), 400
+            try:
+                report = db.update_task_report(**kwargs)
+            except (ValueError, PermissionError) as error:
+                return _task_report_error_response(error)
+            return jsonify({"status": "success", "message": "Отчёт обновлён", "report": report}), 200
+
+        try:
+            result = db.delete_task_report(report_id, requester_id, requester_role)
+        except (ValueError, PermissionError) as error:
+            return _task_report_error_response(error)
+        return jsonify({"status": "success", "message": "Отчёт удалён", **result}), 200
+
+    except Exception as e:
+        logging.error(f"Error in handle_task_report_item: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/tasks/<int:task_id>/status', methods=['POST', 'OPTIONS'])
 @require_api_key
 def update_task_status(task_id):
@@ -17650,19 +18015,24 @@ def update_task_status(task_id):
         is_multipart = 'multipart/form-data' in content_type
 
         if is_multipart:
-            action = (request.form.get('action') or '').strip().lower()
-            comment = (request.form.get('comment') or '').strip()
-            completion_summary = (request.form.get('completion_summary') or '').strip()
+            source = request.form
             uploaded_files = request.files.getlist('files')
         else:
-            data = request.get_json() or {}
-            action = (data.get('action') or '').strip().lower()
-            comment = (data.get('comment') or '').strip()
-            completion_summary = (data.get('completion_summary') or '').strip()
+            source = request.get_json() or {}
             uploaded_files = []
+
+        action = str(source.get('action') or '').strip().lower()
+        comment = str(source.get('comment') or '').strip()
+        # `report` — понятный алиас: при сдаче задачи это отчёт о проделанной работе.
+        completion_summary = str(source.get('completion_summary') or source.get('report') or '').strip()
 
         if action not in TASK_ALLOWED_ACTIONS:
             return jsonify({"error": "Invalid action"}), 400
+
+        try:
+            spent_minutes = _parse_task_spent_minutes(source)
+        except ValueError as parse_error:
+            return jsonify({"error": str(parse_error)}), 400
 
         action_attachments = []
         uploaded_blob_paths = []
@@ -17694,7 +18064,8 @@ def update_task_status(task_id):
                 action=action,
                 comment=comment,
                 completion_summary=completion_summary if action == 'completed' else None,
-                completion_attachments=action_attachments
+                completion_attachments=action_attachments,
+                spent_minutes=spent_minutes if action == 'completed' else None
             )
         except ValueError as value_error:
             _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths)
@@ -17705,6 +18076,8 @@ def update_task_status(task_id):
                 return jsonify({"error": "Invalid task status transition"}), 400
             if code == 'CHECKLIST_INCOMPLETE':
                 return jsonify({"error": "Сначала завершите обязательные пункты чек-листа"}), 400
+            if code == 'INVALID_SPENT_MINUTES':
+                return jsonify({"error": "Invalid spent_minutes"}), 400
             return jsonify({"error": code}), 400
         except PermissionError as permission_error:
             _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths)
@@ -17737,7 +18110,8 @@ def update_task_status(task_id):
                             comment=comment,
                             completion_summary=completion_summary,
                             completion_files_count=len(action_attachments),
-                            task_link=task_link
+                            task_link=task_link,
+                            spent_minutes=spent_minutes
                         )
                         response = _send_telegram_text_message(
                             recipient.get('chat_id'),

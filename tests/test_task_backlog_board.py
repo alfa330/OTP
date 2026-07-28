@@ -1,0 +1,508 @@
+"""Бэклог + канбан + таймлайн раздела «Задачи».
+
+Проверяем контракт без БД: миграции/поля в database.py, роуты в bot_schedule2.py,
+разрешение drag&drop и раскладку колонок во фронте, а также разбор длительностей в CLI.
+"""
+import importlib.util
+import re
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DATABASE_PATH = ROOT / "database.py"
+APP_PATH = ROOT / "bot_schedule2.py"
+WORKSPACE_PATH = ROOT / "src" / "components" / "tasks" / "TaskBoardWorkspace.jsx"
+TASKS_VIEW_PATH = ROOT / "src" / "components" / "tasks" / "TasksView.jsx"
+APP_JSX_PATH = ROOT / "src" / "App.jsx"
+CLI_PATH = ROOT / "scripts" / "task_board.py"
+SKILL_PATH = ROOT / ".claude" / "skills" / "task-board" / "SKILL.md"
+
+
+def _read(path):
+    return path.read_text(encoding="utf-8-sig")
+
+
+def _load_cli_module():
+    spec = importlib.util.spec_from_file_location("task_board_cli", CLI_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class TaskSchemaTests(unittest.TestCase):
+    """Колонки бэклога/таймлайна добавляются идемпотентными ALTER'ами."""
+
+    def setUp(self):
+        self.src = _read(DATABASE_PATH)
+
+    def test_board_columns_added(self):
+        self.assertIn("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS is_backlog BOOLEAN NOT NULL DEFAULT FALSE;", self.src)
+        self.assertIn("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS backlog_rank DOUBLE PRECISION;", self.src)
+        self.assertIn("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS planned_start_at TIMESTAMP;", self.src)
+        self.assertIn("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS started_at TIMESTAMP;", self.src)
+        self.assertIn("ADD COLUMN IF NOT EXISTS estimate_minutes INTEGER", self.src)
+
+    def test_backlog_index_and_started_at_backfill(self):
+        self.assertIn("idx_tasks_backlog_rank", self.src)
+        # Фактический старт восстанавливается из истории статусов и только для пустых значений.
+        backfill_start = self.src.index("SET started_at = h.first_started")
+        backfill = self.src[backfill_start:backfill_start + 400]
+        self.assertIn("WHERE status_code = 'in_progress'", backfill)
+        self.assertIn("t.started_at IS NULL", backfill)
+
+    def test_no_new_task_status_values(self):
+        # Бэклог — флаг поверх 'assigned', а не новый статус: CHECK не расширяем.
+        self.assertIn(
+            "status VARCHAR(32) NOT NULL DEFAULT 'assigned' CHECK (status IN "
+            "('assigned', 'in_progress', 'completed', 'accepted', 'returned'))",
+            self.src,
+        )
+        self.assertNotIn("'backlog',", self.src.split("CREATE TABLE IF NOT EXISTS tasks (")[1][:900])
+
+
+class TaskDbLayerTests(unittest.TestCase):
+    def setUp(self):
+        self.src = _read(DATABASE_PATH)
+
+    def test_create_task_accepts_board_fields(self):
+        signature_start = self.src.index("    def create_task(")
+        signature = self.src[signature_start:self.src.index("):", signature_start)]
+        for field in ("is_backlog=False", "estimate_minutes=None", "planned_start_at=None", "due_at=None"):
+            self.assertIn(field, signature)
+
+    def test_new_backlog_item_goes_to_queue_tail(self):
+        self.assertIn("SELECT COALESCE(MAX(backlog_rank), 0) + 1 FROM tasks WHERE is_backlog = TRUE", self.src)
+
+    def test_edit_task_supports_absolute_due_at(self):
+        signature_start = self.src.index("    def edit_task(")
+        signature = self.src[signature_start:self.src.index("):", signature_start)]
+        for field in ("due_at=_UNSET", "estimate_minutes=_UNSET", "planned_start_at=_UNSET"):
+            self.assertIn(field, signature)
+
+    def test_board_state_method_permissions(self):
+        start = self.src.index("    def update_task_board_state(")
+        block = self.src[start:self.src.index("    def delete_task(", start)]
+        # Двигать карточку и оценивать может исполнитель, сроки — только постановщик/админ.
+        self.assertIn("if not (is_creator or is_assignee or is_admin):", block)
+        self.assertIn("raise PermissionError(\"ONLY_CREATOR_CAN_PLAN\")", block)
+        self.assertIn("raise ValueError(\"BACKLOG_ONLY_FOR_ASSIGNED\")", block)
+        self.assertIn("\"was_backlog\": current_is_backlog", block)
+
+    def test_in_progress_records_start_and_clears_backlog(self):
+        start = self.src.index("elif target_status == 'in_progress':")
+        block = self.src[start:start + 700]
+        self.assertIn("is_backlog = FALSE", block)
+        self.assertIn("started_at = COALESCE(started_at,", block)
+
+    def test_get_tasks_exposes_board_fields_and_filter(self):
+        self.assertIn("if backlog_norm and backlog_norm not in {'only', 'exclude'}:", self.src)
+        self.assertIn("INVALID_TASK_BACKLOG_FILTER", self.src)
+        self.assertIn("t.is_backlog = TRUE", self.src)
+        self.assertIn("t.is_backlog = FALSE", self.src)
+        self.assertIn('"is_backlog": bool(row[31]),', self.src)
+        self.assertIn('"backlog_rank": float(row[32]) if row[32] is not None else None,', self.src)
+        self.assertIn('"estimate_minutes": row[33],', self.src)
+        self.assertIn('"started_at": self._task_dt_to_iso(row[35]),', self.src)
+
+    def test_backlog_sorted_by_rank(self):
+        self.assertIn('"t.backlog_rank ASC NULLS LAST, t.created_at DESC, t.id DESC"', self.src)
+
+    def test_regulation_templates_skip_backlog(self):
+        start = self.src.index("    def materialize_due_regulation_tasks(")
+        block = self.src[start:start + 1500]
+        self.assertIn("AND t.is_backlog = FALSE", block)
+
+
+class TaskApiTests(unittest.TestCase):
+    def setUp(self):
+        self.src = _read(APP_PATH)
+
+    def test_board_endpoint_registered(self):
+        self.assertIn("@app.route('/api/tasks/board', methods=['POST', 'OPTIONS'])", self.src)
+        self.assertIn("def handle_tasks_board():", self.src)
+
+    def test_board_endpoint_is_batch_and_capped(self):
+        start = self.src.index("def handle_tasks_board():")
+        block = self.src[start:self.src.index("@app.route('/api/tasks/<int:task_id>/status'", start)]
+        self.assertIn("raw_items = data.get('items')", block)
+        self.assertIn("Too many items (max 200)", block)
+        self.assertIn("db.update_task_board_state(**kwargs)", block)
+        # Вынос из бэклога = момент, когда исполнителя наконец уведомляют.
+        self.assertIn("result.get('was_backlog') and not result.get('is_backlog')", block)
+        self.assertIn("event='promoted'", block)
+
+    def test_backlog_creation_does_not_notify_assignee(self):
+        self.assertIn("if assignee_chat_id and not is_backlog:", self.src)
+
+    def test_get_accepts_backlog_filter(self):
+        self.assertIn("backlog_filter = (request.args.get('backlog') or '').strip().lower() or None", self.src)
+        self.assertIn("backlog=backlog_filter", self.src)
+
+    def test_patch_accepts_absolute_deadline_and_estimate(self):
+        self.assertIn("has_due_at = 'due_at' in data", self.src)
+        self.assertIn('edit_kwargs["due_at"] = data.get(\'due_at\')', self.src)
+        self.assertIn('edit_kwargs["estimate_minutes"] = estimate_minutes', self.src)
+        self.assertIn('edit_kwargs["planned_start_at"] = data.get(\'planned_start_at\')', self.src)
+
+    def test_estimate_parser_supports_both_shapes(self):
+        start = self.src.index("def _parse_task_estimate_minutes(source):")
+        block = self.src[start:start + 900]
+        self.assertIn("direct = source.get('estimate_minutes')", block)
+        self.assertIn("source.get('estimate_hours')", block)
+
+
+class WorkspaceFrontendTests(unittest.TestCase):
+    def setUp(self):
+        self.src = _read(WORKSPACE_PATH)
+
+    def test_five_board_columns(self):
+        start = self.src.index("export const BOARD_COLUMNS = [")
+        block = self.src[start:self.src.index("];", start)]
+        ids = re.findall(r"id: '([a-z]+)'", block)
+        self.assertEqual(ids, ["backlog", "todo", "progress", "review", "done"])
+
+    def test_column_mapping_matches_status_model(self):
+        start = self.src.index("export const columnOfTask = (task) => {")
+        block = self.src[start:self.src.index("};", start)]
+        self.assertIn("if (task?.is_backlog) return 'backlog';", block)
+        self.assertIn("case 'returned':", block)
+        self.assertIn("return 'progress';", block)
+        self.assertIn("case 'completed':", block)
+        self.assertIn("return 'review';", block)
+        self.assertIn("case 'accepted':", block)
+        self.assertIn("return 'done';", block)
+
+    def test_drop_resolution_respects_permissions(self):
+        start = self.src.index("export const resolveBoardDrop =")
+        block = self.src[start:self.src.index("export const rankForPosition", start)]
+        # Взять в работу — только исполнитель; принять/вернуть — проверяющий.
+        self.assertIn("Взять задачу в работу может только исполнитель", block)
+        self.assertIn("Отметить выполненной может только исполнитель", block)
+        self.assertIn("action: 'accepted'", block)
+        self.assertIn("action: 'returned'", block)
+        self.assertIn("action: 'reopened'", block)
+        self.assertIn("В бэклог можно вернуть только не начатую задачу", block)
+
+    def test_wip_limit_present(self):
+        self.assertIn("wipExceeded", self.src)
+        self.assertIn("Превышен лимит одновременной работы", self.src)
+
+    def test_timeline_reports_plan_and_fact(self):
+        start = self.src.index("export const timelineSpanOf =")
+        block = self.src[start:self.src.index("const TimelineView", start)]
+        self.assertIn("plannedStart", block)
+        self.assertIn("actualStart", block)
+        self.assertIn("actualMs", block)
+        self.assertIn("leadMs", block)
+        # Медианы, а не средние: одна забытая задача не должна ломать метрику.
+        self.assertIn("const median = (values)", self.src)
+        self.assertIn("Медианный цикл", self.src)
+
+    def test_normal_priority_has_no_dot(self):
+        start = self.src.index("const PRIORITY_DOT = {")
+        block = self.src[start:self.src.index("};", start)]
+        self.assertIn("critical:", block)
+        self.assertIn("urgent:", block)
+        self.assertNotIn("normal:", block)
+
+
+class TasksViewIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        self.src = _read(TASKS_VIEW_PATH)
+
+    def test_workspace_tabs_registered(self):
+        start = self.src.index("const WORKSPACE_TABS = [")
+        block = self.src[start:self.src.index("];", start)]
+        ids = re.findall(r"id: '([a-z]+)'", block)
+        self.assertEqual(ids, ["overview", "backlog", "board", "timeline"])
+
+    def test_workspace_is_mounted_with_handlers(self):
+        self.assertIn("import TaskBoardWorkspace from './TaskBoardWorkspace';", self.src)
+        self.assertIn("<TaskBoardWorkspace", self.src)
+        for prop in (
+            "onBoardUpdate={updateBoardItems}",
+            "onStatusAction={handleBoardStatusAction}",
+            "onCreateBacklogItem={openBacklogCreate}",
+        ):
+            self.assertIn(prop, self.src)
+
+    def test_board_updates_go_to_board_endpoint(self):
+        self.assertIn("`${apiBaseUrl}/api/tasks/board`", self.src)
+
+    def test_status_actions_with_comment_open_modals(self):
+        start = self.src.index("const handleBoardStatusAction = useCallback(")
+        block = self.src[start:start + 600]
+        self.assertIn("openCompleteModal(task)", block)
+        self.assertIn("openStatusModal(task, action)", block)
+
+    def test_create_form_carries_backlog_and_estimate(self):
+        self.assertIn("isBacklog: false,", self.src)
+        self.assertIn("estimateMinutes: '',", self.src)
+        self.assertIn("body.append('is_backlog', values.isBacklog ? '1' : '0');", self.src)
+        self.assertIn("estimate_minutes: numberFieldValue(values.estimateMinutes),", self.src)
+
+    def test_workspace_uses_site_font_not_section_font(self):
+        self.assertIn(".tv-root .tb-scope, .tv-root .tb-scope *", self.src)
+
+
+class CliTests(unittest.TestCase):
+    def setUp(self):
+        self.module = _load_cli_module()
+
+    def test_duration_parsing(self):
+        parse = self.module.parse_duration_to_minutes
+        self.assertEqual(parse("90"), 90)
+        self.assertEqual(parse("90m"), 90)
+        self.assertEqual(parse("4h"), 240)
+        self.assertEqual(parse("3d4h"), 3 * 1440 + 240)
+        self.assertEqual(parse("2ч30м"), 150)
+        self.assertIsNone(parse(""))
+        with self.assertRaises(SystemExit):
+            parse("скоро")
+
+    def test_deadline_form_split_respects_api_bounds(self):
+        payload = self.module.split_minutes_for_form(3 * 1440 + 4 * 60 + 30)
+        self.assertEqual(payload["deadline_days"], "3")
+        self.assertEqual(payload["deadline_hours"], "4")
+        self.assertEqual(payload["deadline_minutes"], "30")
+        self.assertLessEqual(int(payload["deadline_hours"]), 23)
+        self.assertLessEqual(int(payload["deadline_minutes"]), 59)
+
+    def test_date_only_deadline_lands_at_end_of_day(self):
+        self.assertTrue(self.module.parse_due_argument("2026-08-05").endswith("T18:00:00"))
+        self.assertEqual(self.module.parse_due_argument("2026-08-05 14:30"), "2026-08-05T14:30:00")
+        with self.assertRaises(SystemExit):
+            self.module.parse_due_argument("послезавтра")
+
+    def test_column_mapping_matches_frontend(self):
+        column_of = self.module.column_of
+        self.assertEqual(column_of({"is_backlog": True, "status": "assigned"}), "backlog")
+        self.assertEqual(column_of({"status": "assigned"}), "todo")
+        self.assertEqual(column_of({"status": "returned"}), "progress")
+        self.assertEqual(column_of({"status": "in_progress"}), "progress")
+        self.assertEqual(column_of({"status": "completed"}), "review")
+        self.assertEqual(column_of({"status": "accepted"}), "done")
+
+    def test_bearer_only_auth_documented_in_code(self):
+        # Cookies после логина обязательно сбрасываем — иначе прод даёт 403 Invalid request origin.
+        self.assertIn("self.session.cookies.clear()", _read(CLI_PATH))
+
+
+class TaskReportSchemaTests(unittest.TestCase):
+    """Журнал отчётов о проделанной работе."""
+
+    def setUp(self):
+        self.src = _read(DATABASE_PATH)
+
+    def test_reports_table(self):
+        self.assertIn("CREATE TABLE IF NOT EXISTS task_reports (", self.src)
+        start = self.src.index("CREATE TABLE IF NOT EXISTS task_reports (")
+        block = self.src[start:self.src.index('"""', start)]
+        self.assertIn("task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE", block)
+        self.assertIn("CHECK (kind IN ('progress', 'completion'))", block)
+        self.assertIn("body TEXT NOT NULL", block)
+        self.assertIn("spent_minutes INTEGER CHECK (spent_minutes IS NULL OR spent_minutes >= 0)", block)
+        self.assertIn("idx_task_reports_task", self.src)
+
+    def test_legacy_summaries_are_backfilled_once(self):
+        start = self.src.index("INSERT INTO task_reports (task_id, author_id, kind, body, created_at, updated_at)")
+        block = self.src[start:start + 900]
+        self.assertIn("'completion'", block)
+        # Идемпотентность: второй прогон не должен плодить дубли.
+        self.assertIn("NOT EXISTS", block)
+        self.assertIn("r.task_id = t.id AND r.kind = 'completion'", block)
+
+
+class TaskReportDbTests(unittest.TestCase):
+    def setUp(self):
+        self.src = _read(DATABASE_PATH)
+
+    def test_create_report_permissions(self):
+        start = self.src.index("    def create_task_report(")
+        block = self.src[start:self.src.index("    def update_task_report(", start)]
+        self.assertIn('raise ValueError("REPORT_BODY_REQUIRED")', block)
+        self.assertIn('raise PermissionError("ONLY_TASK_PARTICIPANT")', block)
+        # Итоговый отчёт держит tasks.completion_summary в синхроне (Telegram/виджеты/выгрузки).
+        self.assertIn("if kind_norm == 'completion':", block)
+        self.assertIn("SET completion_summary = %s", block)
+
+    def test_only_author_can_edit_report(self):
+        start = self.src.index("    def update_task_report(")
+        block = self.src[start:self.src.index("    def delete_task_report(", start)]
+        self.assertIn('raise PermissionError("ONLY_REPORT_AUTHOR")', block)
+        self.assertNotIn("role_has_min(role, 'admin')", block)
+
+    def test_admin_may_delete_but_summary_falls_back(self):
+        start = self.src.index("    def delete_task_report(")
+        block = self.src[start:self.src.index("    def update_task_board_state(", start)]
+        self.assertIn("if not (is_author or role_has_min(role, 'admin')):", block)
+        self.assertIn("ORDER BY created_at DESC, id DESC", block)
+
+    def test_completion_creates_report_with_spent(self):
+        start = self.src.index("            completion_report_id = None")
+        block = self.src[start:start + 700]
+        self.assertIn("action_norm == 'completed' and (completion_summary_norm or spent_minutes_norm)", block)
+        self.assertIn("'completion'", block)
+        self.assertIn("spent_minutes_norm", block)
+
+    def test_tasks_payload_carries_reports_and_spent_total(self):
+        self.assertIn('"reports": task_reports,', self.src)
+        self.assertIn('"spent_minutes": spent_total or None', self.src)
+        self.assertIn("spent_total = sum(int(item.get('spent_minutes') or 0) for item in task_reports)", self.src)
+
+
+class TaskReportApiTests(unittest.TestCase):
+    def setUp(self):
+        self.src = _read(APP_PATH)
+
+    def test_report_routes_registered(self):
+        self.assertIn("@app.route('/api/tasks/<int:task_id>/reports', methods=['GET', 'POST', 'OPTIONS'])", self.src)
+        self.assertIn("@app.route('/api/tasks/reports/<int:report_id>', methods=['PATCH', 'DELETE', 'OPTIONS'])", self.src)
+
+    def test_report_errors_mapped_to_status_codes(self):
+        start = self.src.index("TASK_REPORT_ERRORS = {")
+        block = self.src[start:self.src.index("}", start)]
+        self.assertIn("'ONLY_REPORT_AUTHOR'", block)
+        self.assertIn("'ONLY_TASK_PARTICIPANT'", block)
+        self.assertIn("'REPORT_BODY_REQUIRED'", block)
+
+    def test_status_route_accepts_report_alias_and_spent(self):
+        start = self.src.index("def update_task_status(task_id):")
+        block = self.src[start:start + 4000]
+        self.assertIn("source.get('completion_summary') or source.get('report')", block)
+        self.assertIn("spent_minutes = _parse_task_spent_minutes(source)", block)
+        self.assertIn("spent_minutes=spent_minutes if action == 'completed' else None", block)
+
+    def test_report_notification_exists(self):
+        self.assertIn("def _build_task_report_notification_html(", self.src)
+        self.assertIn("📄 Итоговый отчёт по задаче", self.src)
+        self.assertIn("📝 Отчёт о проделанной работе", self.src)
+
+    def test_completion_notification_reports_spent(self):
+        start = self.src.index("    if action_norm == 'completed':\n        lines.append(f\"<b>Файлов:</b>")
+        block = self.src[start:start + 700]
+        self.assertIn("Затрачено", block)
+        self.assertIn("Отчёт о проделанной работе", block)
+
+
+class TaskReportFrontendTests(unittest.TestCase):
+    def setUp(self):
+        self.src = _read(TASKS_VIEW_PATH)
+
+    def test_reports_block_rendered_in_drawer(self):
+        self.assertIn("const TaskReportsBlock = ({", self.src)
+        self.assertIn("<TaskReportsBlock", self.src)
+        self.assertIn("Отчёты о работе", self.src)
+
+    def test_report_handlers_hit_report_endpoints(self):
+        self.assertIn("`${apiBaseUrl}/api/tasks/${taskId}/reports`", self.src)
+        self.assertIn("`${apiBaseUrl}/api/tasks/reports/${reportId}`", self.src)
+
+    def test_only_author_sees_edit_controls(self):
+        start = self.src.index("const isAuthor = Number(report?.author_id || 0) === currentUserId;")
+        block = self.src[start:start + 1200]
+        self.assertIn("{isAuthor && !isEditing && (", block)
+
+    def test_completion_requires_report_text(self):
+        start = self.src.index("const submitComplete = useCallback(")
+        block = self.src[start:start + 700]
+        self.assertIn("if (!completionSummary.trim())", block)
+        self.assertIn("body.append('spent_minutes'", block)
+
+    def test_completion_modal_asks_for_report_and_spent(self):
+        self.assertIn("Отчёт о проделанной работе *", self.src)
+        self.assertIn("Затрачено времени", self.src)
+
+    def test_no_duplicate_summary_block(self):
+        # Итоги показываем один раз — через журнал; отдельного текстового блока быть не должно.
+        self.assertNotIn('<p className="tv-block-label">Итоги выполнения</p>', self.src)
+        self.assertIn('<p className="tv-block-label">Файлы результата</p>', self.src)
+
+    def test_pinned_widget_also_asks_for_report(self):
+        # Иначе сдача из виджета молча обходила бы журнал отчётов.
+        start = self.src.index("if (btn.action === 'completed') {\n                        setCompleteDraft")
+        block = self.src[start:start + 3200]
+        self.assertIn("setCompleteDraft({ body: '', spent: '' })", block)
+        self.assertIn("Отчёт о проделанной работе", block)
+        self.assertIn("report: completeDraft.body.trim()", block)
+        self.assertIn("spentMinutes: parseSpentInput(completeDraft.spent)", block)
+
+    def test_spent_input_parser(self):
+        start = self.src.index("const parseSpentInput = (raw) => {")
+        block = self.src[start:self.src.index("const formatSpentMinutes", start)]
+        self.assertIn("d: 1440, д: 1440, h: 60, ч: 60, m: 1, м: 1", block)
+
+
+class PinnedWidgetReportWiringTests(unittest.TestCase):
+    def test_run_action_forwards_report_and_spent(self):
+        src = _read(APP_JSX_PATH)
+        start = src.index("const runPinnedTaskAction = useCallback(async (task, action, options = {}) => {")
+        block = src[start:src.index("}, [user?.id, withAccessTokenHeader, showToast]);", start)]
+        self.assertIn("if (options?.report) payload.report = String(options.report).trim();", block)
+        self.assertIn("if (options?.spentMinutes) payload.spent_minutes = Number(options.spentMinutes);", block)
+        # Виджет ждёт результат, чтобы не закрывать форму отчёта при ошибке.
+        self.assertIn("return true;", block)
+        self.assertIn("return false;", block)
+
+
+class EffortChipTests(unittest.TestCase):
+    def setUp(self):
+        self.src = _read(WORKSPACE_PATH)
+
+    def test_effort_chip_compares_fact_to_estimate(self):
+        start = self.src.index("export const effortChipOf = (task) => {")
+        block = self.src[start:self.src.index("const checklistProgress", start)]
+        self.assertIn("spent > estimate ? 'soon' : 'normal'", block)
+        self.assertIn("formatDurationMinutes(spent)} / ${formatDurationMinutes(estimate)}", block)
+
+    def test_timeline_tracks_estimate_accuracy(self):
+        self.assertIn("estimateAccuracy", self.src)
+        self.assertIn("Факт к оценке", self.src)
+        self.assertIn("if (estimate > 0 && spent > 0) estimateRatios.push(spent / estimate);", self.src)
+
+
+class ReportCliTests(unittest.TestCase):
+    def setUp(self):
+        self.module = _load_cli_module()
+
+    def test_report_commands_registered(self):
+        parser = self.module.build_parser()
+        subparsers = next(
+            action for action in parser._actions if isinstance(action, __import__('argparse')._SubParsersAction)
+        )
+        for command in ('report', 'reports', 'status', 'board', 'backlog'):
+            self.assertIn(command, subparsers.choices)
+
+    def test_completed_without_report_is_rejected(self):
+        args = self.module.build_parser().parse_args(['status', '412', 'completed'])
+        with self.assertRaises(SystemExit):
+            self.module.cmd_status(None, args)
+
+    def test_report_accepts_spent_and_final(self):
+        args = self.module.build_parser().parse_args(
+            ['report', '412', 'сделал', '--spent', '2h30m', '--final']
+        )
+        self.assertTrue(args.final)
+        self.assertEqual(self.module.parse_duration_to_minutes(args.spent), 150)
+
+
+class SkillTests(unittest.TestCase):
+    def test_skill_describes_connection(self):
+        src = _read(SKILL_PATH)
+        self.assertIn("name: task-board", src)
+        self.assertIn("scripts/task_board.py", src)
+        self.assertIn("POST /api/tasks/board", src)
+        self.assertIn("BACKLOG_ONLY_FOR_ASSIGNED", src)
+
+    def test_skill_documents_reports(self):
+        src = _read(SKILL_PATH)
+        self.assertIn("task_reports", src)
+        self.assertIn("/api/tasks/<id>/reports", src)
+        self.assertIn("только автор", src)
+        # Агенту прямо запрещено выдумывать трудозатраты.
+        self.assertIn("Выдумывать трудозатраты нельзя", src)
+
+
+if __name__ == "__main__":
+    unittest.main()
