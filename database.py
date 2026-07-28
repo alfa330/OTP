@@ -18301,7 +18301,7 @@ class Database:
                 SELECT d.operator_id, d.day, d.work_time, d.break_time, d.talk_time, d.calls, d.efficiency,
                     d.fine_amount, d.fine_reason, d.fine_comment,
                     COALESCE(d.no_phone_minutes, 0), COALESCE(d.no_phone_seconds, 0),
-                    COALESCE(d.extra_metrics, '{}'::jsonb)
+                    COALESCE(d.extra_metrics, '{{}}'::jsonb)
                 FROM daily_hours d
                 WHERE d.operator_id = ANY(%s)
                 AND d.day >= %s AND d.day <= %s
