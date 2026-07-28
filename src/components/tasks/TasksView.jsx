@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { normalizeRole, isAdminLikeRole, isSupervisorRole } from '../../utils/roles';
 import FaIcon from '../common/FaIcon';
+import TaskBoardWorkspace from './TaskBoardWorkspace';
 
 /* ─── Google Fonts ─── */
 const fontLink = document.createElement('link');
@@ -34,6 +35,11 @@ const styleTag = document.createElement('style');
 styleTag.textContent = `
   .tv-root * { font-family: 'DM Sans', sans-serif; box-sizing: border-box; }
   .tv-root h1, .tv-root h2, .tv-root h3, .tv-root .heading { font-family: 'Syne', sans-serif; }
+
+  /* Бэклог/доска/таймлайн живут в дизайн-системе сайта (SF Pro), а не в editorial-типографике раздела. */
+  .tv-root .tb-scope, .tv-root .tb-scope * {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", system-ui, sans-serif;
+  }
 
   .tv-root {
     --bg: #f4f3f0;
@@ -61,6 +67,9 @@ styleTag.textContent = `
     min-height: 100vh;
     padding: 28px 24px;
   }
+  /* На вкладках доски раздел переходит на нейтральную macOS-подложку. */
+  .tv-root.is-board-mode { background: #f5f5f7; }
+  .tv-root.is-board-mode .tv-workspace-tabs { background: #e8e8ed; }
 
   /* ── Top bar ── */
   .tv-topbar {
@@ -83,10 +92,95 @@ styleTag.textContent = `
   /* ── Stats strip ── */
   .tv-stats-strip {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
     gap: 10px;
     margin-bottom: 28px;
   }
+
+  /* ── Workspace tabs (Обзор / Бэклог / Доска / Таймлайн) ── */
+  .tv-workspace-tabs {
+    display: inline-flex;
+    gap: 2px;
+    padding: 3px;
+    margin-bottom: 22px;
+    border-radius: 11px;
+    background: #ecebe7;
+  }
+  .tv-workspace-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    border: 0;
+    border-radius: 9px;
+    background: transparent;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--ink-2);
+    cursor: pointer;
+    transition: background .15s, color .15s, box-shadow .15s;
+    white-space: nowrap;
+  }
+  .tv-workspace-tab:hover { color: var(--ink); }
+  .tv-workspace-tab.is-active {
+    background: var(--surface);
+    color: var(--ink);
+    box-shadow: 0 1px 3px rgba(0,0,0,.10);
+  }
+  .tv-workspace-tab-count {
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink-3);
+  }
+
+  /* ── Отчёты о проделанной работе ── */
+  .tv-reports-header {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 12px; margin-bottom: 10px; flex-wrap: wrap;
+  }
+  .tv-reports-meta {
+    display: flex; gap: 8px; flex-wrap: wrap;
+    font-size: 11.5px; color: var(--ink-3);
+    font-variant-numeric: tabular-nums;
+  }
+  .tv-reports-meta .is-over { color: #b45309; }
+  .tv-reports-empty { font-size: 12.5px; color: var(--ink-3); line-height: 1.5; margin: 0 0 10px; }
+  .tv-reports-list { display: flex; flex-direction: column; gap: 8px; }
+  .tv-report-card {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+  }
+  .tv-report-card.is-final { border-color: #c7d2fe; background: #f5f6ff; }
+  .tv-report-top {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    font-size: 11.5px; color: var(--ink-3); margin-bottom: 6px;
+  }
+  .tv-report-kind { font-weight: 600; color: var(--ink-2); }
+  .tv-report-card.is-final .tv-report-kind { color: var(--indigo); }
+  .tv-report-spent {
+    padding: 1px 7px; border-radius: 99px;
+    background: #ecebe7; color: var(--ink-2); font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+  .tv-report-actions { display: flex; gap: 8px; margin-left: auto; }
+  .tv-report-actions button {
+    border: 0; background: none; padding: 0; cursor: pointer;
+    font-size: 11.5px; color: var(--ink-3);
+  }
+  .tv-report-actions button:hover:not(:disabled) { color: var(--ink); text-decoration: underline; }
+  .tv-report-actions button:disabled { opacity: .5; cursor: not-allowed; }
+  .tv-report-body {
+    margin: 0; font-size: 13px; line-height: 1.55;
+    color: var(--ink); white-space: pre-wrap; word-break: break-word;
+  }
+  .tv-report-form { display: flex; flex-direction: column; gap: 8px; }
+  .tv-report-form-row { display: flex; gap: 8px; align-items: center; }
+  .tv-report-form-row .tv-input { flex: 1; }
+  .tv-report-composer { margin-top: 10px; }
+  .tv-reports-add { margin-top: 10px; }
+  .tv-field-hint { margin: 5px 0 0; font-size: 11.5px; color: var(--ink-3); }
   .tv-stat-card {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -2307,6 +2401,43 @@ const HISTORY_LABELS = {
 const ROLE_LABELS = { admin: 'Админ', sv: 'СВ' };
 const TASKS_PAGE_SIZE = 20;
 
+/** «3ч», «1д 2ч», «90», «2h30m» → минуты. Пусто/мусор → 0. */
+const parseSpentInput = (raw) => {
+  const text = String(raw ?? '').trim().toLowerCase().replace(',', '.');
+  if (!text) return 0;
+  if (/^\d+(\.\d+)?$/.test(text)) return Math.round(Number(text));
+  const units = { d: 1440, д: 1440, h: 60, ч: 60, m: 1, м: 1 };
+  let total = 0;
+  let matched = false;
+  for (const match of text.matchAll(/(\d+(?:\.\d+)?)\s*([dдhчmм])/g)) {
+    total += Number(match[1]) * units[match[2]];
+    matched = true;
+  }
+  return matched ? Math.round(total) : 0;
+};
+
+const formatSpentMinutes = (minutes) => {
+  const total = Math.max(0, Math.round(Number(minutes) || 0));
+  if (!total) return '';
+  if (total < 60) return `${total} мин`;
+  const hours = Math.floor(total / 60);
+  const rest = total % 60;
+  if (hours < 24) return rest ? `${hours} ч ${rest} мин` : `${hours} ч`;
+  const days = Math.floor(hours / 24);
+  const restHours = hours % 24;
+  return restHours ? `${days} д ${restHours} ч` : `${days} д`;
+};
+
+const REPORT_KIND_LABEL = { progress: 'Промежуточный', completion: 'Итоговый' };
+
+const WORKSPACE_TAB_STORAGE_KEY = 'otp.tasks.workspaceTab';
+const WORKSPACE_TABS = [
+  { id: 'overview', label: 'Обзор' },
+  { id: 'backlog',  label: 'Бэклог' },
+  { id: 'board',    label: 'Доска' },
+  { id: 'timeline', label: 'Таймлайн' },
+];
+
 const buildTaskActionButtons = (task, currentUserId, currentUserRole) => {
   const assigneeId = Number(task?.assignee?.id || 0);
   const creatorId  = Number(task?.creator?.id  || 0);
@@ -2586,6 +2717,8 @@ const EMPTY_TASK_FORM = {
   recurrenceType: '',
   recurrenceInterval: '1',
   checklistItems: [],
+  isBacklog: false,
+  estimateMinutes: '',
 };
 
 const buildEmptyTaskForm = (overrides = {}) => ({
@@ -2609,6 +2742,8 @@ const taskToTaskForm = (task, fallbackAssignedTo = '') => {
     recurrenceType: task?.recurrence_type || '',
     recurrenceInterval: String(task?.recurrence_interval || '1'),
     checklistItems: checklistToFormItems(task?.checklist),
+    isBacklog: Boolean(task?.is_backlog),
+    estimateMinutes: task?.estimate_minutes ? String(task.estimate_minutes) : '',
   });
 };
 
@@ -2632,6 +2767,7 @@ const buildTaskJsonPayload = (values) => ({
   recurrence_type: values.isRegulation ? (values.recurrenceType || 'daily') : '',
   recurrence_interval: values.isRegulation ? numberFieldValue(values.recurrenceInterval || '1') : '1',
   checklist_items: formChecklistItems(values.checklistItems),
+  estimate_minutes: numberFieldValue(values.estimateMinutes),
 });
 
 const appendTaskFormData = (body, values) => {
@@ -2648,6 +2784,8 @@ const appendTaskFormData = (body, values) => {
   body.append('recurrence_type', payload.recurrence_type);
   body.append('recurrence_interval', payload.recurrence_interval);
   body.append('checklist_items', JSON.stringify(payload.checklist_items));
+  body.append('estimate_minutes', payload.estimate_minutes);
+  body.append('is_backlog', values.isBacklog ? '1' : '0');
 };
 
 const filesFromList = (files) => Array.from(files || []).filter(Boolean);
@@ -3515,11 +3653,181 @@ const TaskRow = React.memo(({ task, onClick, onPin, isPinned }) => {
 });
 
 /* ─── TaskDrawer — defined outside to avoid remount ─── */
+/* Журнал отчётов о проделанной работе: промежуточные записи + итоговый отчёт при сдаче. */
+const TaskReportsBlock = ({
+  task,
+  reports,
+  canWrite,
+  currentUserId,
+  actionLoadingKey,
+  onSubmitReport,
+  onPatchReport,
+  onRemoveReport,
+}) => {
+  const [composerOpen, setComposerOpen] = useState(false);
+  const [draftBody, setDraftBody] = useState('');
+  const [draftSpent, setDraftSpent] = useState('');
+  const [editingId, setEditingId] = useState(null);
+  const [editBody, setEditBody] = useState('');
+  const [editSpent, setEditSpent] = useState('');
+
+  const spentTotal = useMemo(
+    () => reports.reduce((sum, item) => sum + (Number(item?.spent_minutes) || 0), 0),
+    [reports]
+  );
+  const estimate = Number(task?.estimate_minutes || 0);
+  const isBusy = !!actionLoadingKey;
+
+  const closeComposer = () => {
+    setComposerOpen(false);
+    setDraftBody('');
+    setDraftSpent('');
+  };
+
+  const submitDraft = async () => {
+    const ok = await onSubmitReport(task, {
+      body: draftBody,
+      spentMinutes: parseSpentInput(draftSpent),
+      kind: 'progress',
+    });
+    if (ok) closeComposer();
+  };
+
+  const startEdit = (report) => {
+    setEditingId(report.id);
+    setEditBody(report.body || '');
+    setEditSpent(report.spent_minutes ? String(report.spent_minutes) : '');
+  };
+
+  const submitEdit = async (report) => {
+    const ok = await onPatchReport(task, report, {
+      body: editBody,
+      spentMinutes: parseSpentInput(editSpent),
+    });
+    if (ok) setEditingId(null);
+  };
+
+  return (
+    <div>
+      <div className="tv-reports-header">
+        <p className="tv-block-label" style={{ marginBottom: 0 }}>Отчёты о работе</p>
+        <span className="tv-reports-meta">
+          {spentTotal > 0 && <span>Затрачено {formatSpentMinutes(spentTotal)}</span>}
+          {spentTotal > 0 && estimate > 0 && (
+            <span className={spentTotal > estimate ? 'is-over' : ''}>
+              из {formatSpentMinutes(estimate)} по оценке
+            </span>
+          )}
+          {spentTotal === 0 && estimate > 0 && <span>Оценка {formatSpentMinutes(estimate)}</span>}
+        </span>
+      </div>
+
+      {reports.length === 0 && (
+        <p className="tv-reports-empty">
+          Отчётов пока нет. Опишите, что сделано — это остаётся в истории задачи.
+        </p>
+      )}
+
+      {reports.length > 0 && (
+        <div className="tv-reports-list">
+          {reports.map((report) => {
+            const isAuthor = Number(report?.author_id || 0) === currentUserId;
+            const isEditing = editingId === report.id;
+            const rowBusy = actionLoadingKey === `${task.id}:report:${report.id}`;
+            return (
+              <div key={report.id} className={`tv-report-card ${report.kind === 'completion' ? 'is-final' : ''}`}>
+                <div className="tv-report-top">
+                  <span className="tv-report-kind">{REPORT_KIND_LABEL[report.kind] || 'Отчёт'}</span>
+                  <span className="tv-report-author">{report.author_name || '—'}</span>
+                  <span className="tv-report-time">{fmt(report.created_at)}</span>
+                  {Number(report.spent_minutes) > 0 && (
+                    <span className="tv-report-spent">{formatSpentMinutes(report.spent_minutes)}</span>
+                  )}
+                  {isAuthor && !isEditing && (
+                    <span className="tv-report-actions">
+                      <button type="button" disabled={isBusy} onClick={() => startEdit(report)}>Правка</button>
+                      <button type="button" disabled={isBusy} onClick={() => onRemoveReport(task, report)}>Удалить</button>
+                    </span>
+                  )}
+                </div>
+                {isEditing ? (
+                  <div className="tv-report-form">
+                    <textarea
+                      className="tv-textarea"
+                      value={editBody}
+                      disabled={rowBusy}
+                      onChange={(event) => setEditBody(event.target.value)}
+                    />
+                    <div className="tv-report-form-row">
+                      <input
+                        className="tv-input"
+                        placeholder="Затрачено: 3ч, 90, 1д 2ч"
+                        value={editSpent}
+                        disabled={rowBusy}
+                        onChange={(event) => setEditSpent(event.target.value)}
+                      />
+                      <button type="button" className="tv-btn tv-btn-ghost" disabled={rowBusy}
+                        onClick={() => setEditingId(null)}>Отмена</button>
+                      <button type="button" className="tv-btn tv-btn-primary" disabled={rowBusy}
+                        onClick={() => submitEdit(report)}>Сохранить</button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="tv-report-body">{report.body}</p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {canWrite && !composerOpen && (
+        <button
+          type="button"
+          className="tv-btn tv-btn-ghost tv-reports-add"
+          disabled={isBusy}
+          onClick={() => setComposerOpen(true)}
+        >
+          + Добавить отчёт
+        </button>
+      )}
+
+      {canWrite && composerOpen && (
+        <div className="tv-report-form tv-report-composer">
+          <textarea
+            className="tv-textarea"
+            placeholder="Что сделано по задаче"
+            autoFocus
+            value={draftBody}
+            disabled={isBusy}
+            onChange={(event) => setDraftBody(event.target.value)}
+          />
+          <div className="tv-report-form-row">
+            <input
+              className="tv-input"
+              placeholder="Затрачено: 3ч, 90, 1д 2ч"
+              value={draftSpent}
+              disabled={isBusy}
+              onChange={(event) => setDraftSpent(event.target.value)}
+            />
+            <button type="button" className="tv-btn tv-btn-ghost" disabled={isBusy} onClick={closeComposer}>
+              Отмена
+            </button>
+            <button type="button" className="tv-btn tv-btn-primary" disabled={isBusy} onClick={submitDraft}>
+              {actionLoadingKey === `${task.id}:report` ? 'Сохраняю...' : 'Сохранить отчёт'}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const TaskDrawer = React.memo(({
   task, onClose, actionLoadingKey,
   getActionButtons, openCompleteModal, openStatusModal, updateStatus, downloadAttachment,
   onEditTask, onDeleteTask, onTogglePinTask, onCopyTaskLink, onToggleChecklistItem, onSaveChecklistNote,
-  isPinned,
+  isPinned, currentUserId, currentUserRole, onSubmitReport, onPatchReport, onRemoveReport,
 }) => {
   const sm = STATUS_META[task.status] || { label: task.status, badge: 'tv-badge-gray' };
   const tm = TAG_META[task.tag]       || { label: task.tag || '—', badge: 'tv-badge-gray' };
@@ -3536,6 +3844,11 @@ const TaskDrawer = React.memo(({
   const footerBtns      = btns.filter((btn) => btn.action !== 'edit' && btn.action !== 'delete');
   const assigneeId      = Number(task?.assignee?.id || 0);
   const creatorId       = Number(task?.creator?.id || 0);
+  const reports         = Array.isArray(task.reports) ? task.reports : [];
+  // Отчёт пишут участники задачи — та же проверка, что и на API.
+  const canWriteReport  = typeof onSubmitReport === 'function' && (
+    assigneeId === currentUserId || creatorId === currentUserId || isAdminLikeRole(currentUserRole)
+  );
 
   // ESC key handler
   useEffect(() => {
@@ -3737,17 +4050,22 @@ const TaskDrawer = React.memo(({
             </>
           )}
 
-          {(task.completion_summary || compAttachments.length > 0) && (
+          {(reports.length > 0 || compAttachments.length > 0 || canWriteReport) && (
             <>
               <hr className="tv-divider" />
-              <div className="tv-completion-block">
-                <p className="tv-block-label">Итоги выполнения</p>
-                {task.completion_summary && (
-                  <p className="tv-description" style={{ marginBottom: compAttachments.length ? 10 : 0 }}>
-                    {task.completion_summary}
-                  </p>
-                )}
-                {compAttachments.length > 0 && (
+              <TaskReportsBlock
+                task={task}
+                reports={reports}
+                canWrite={canWriteReport}
+                currentUserId={currentUserId}
+                actionLoadingKey={actionLoadingKey}
+                onSubmitReport={onSubmitReport}
+                onPatchReport={onPatchReport}
+                onRemoveReport={onRemoveReport}
+              />
+              {compAttachments.length > 0 && (
+                <div className="tv-completion-block" style={{ marginTop: 12 }}>
+                  <p className="tv-block-label">Файлы результата</p>
                   <div className="tv-file-list">
                     {compAttachments.map(att => (
                       <button key={att.id} className="tv-file-btn"
@@ -3757,8 +4075,8 @@ const TaskDrawer = React.memo(({
                       </button>
                     ))}
                   </div>
-                )}
-              </div>
+                </div>
+              )}
             </>
           )}
 
@@ -3852,6 +4170,8 @@ export const PinnedTaskWidget = React.memo(({
   const [quickFormFiles, setQuickFormFiles] = useState([]);
   const [quickFormLoading, setQuickFormLoading] = useState(false);
   const [quickFormError, setQuickFormError] = useState('');
+  // Сдача задачи из виджета тоже требует отчёта — иначе журнал работ зависел бы от того, откуда нажали.
+  const [completeDraft, setCompleteDraft] = useState(null);
   const [taskMenuScope, setTaskMenuScope] = useState('incoming');
   const notifyNote = useCallback((message, type = 'success') => {
     if (typeof showToast === 'function') showToast(message, type);
@@ -4781,7 +5101,13 @@ export const PinnedTaskWidget = React.memo(({
                     type="button"
                     className={`tv-btn ${btn.cls}`}
                     disabled={!!actionLoadingKey}
-                    onClick={() => onRunAction?.(task, btn.action)}
+                    onClick={() => {
+                      if (btn.action === 'completed') {
+                        setCompleteDraft({ body: '', spent: '' });
+                        return;
+                      }
+                      onRunAction?.(task, btn.action);
+                    }}
                   >
                     {loading && <LoaderCircle size={14} strokeWidth={2} className="animate-spin" />}
                     {loading ? 'Сохраняю...' : btn.label}
@@ -4792,6 +5118,50 @@ export const PinnedTaskWidget = React.memo(({
                 <span className="tv-pin-empty-actions">Для текущего статуса быстрых действий нет.</span>
               )}
             </div>
+
+            {completeDraft && (
+              <div className="tv-report-form tv-report-composer">
+                <textarea
+                  className="tv-textarea"
+                  placeholder="Отчёт о проделанной работе"
+                  autoFocus
+                  value={completeDraft.body}
+                  disabled={!!actionLoadingKey}
+                  onChange={(event) => setCompleteDraft((prev) => ({ ...prev, body: event.target.value }))}
+                />
+                <div className="tv-report-form-row">
+                  <input
+                    className="tv-input"
+                    placeholder="Затрачено: 3ч, 90"
+                    value={completeDraft.spent}
+                    disabled={!!actionLoadingKey}
+                    onChange={(event) => setCompleteDraft((prev) => ({ ...prev, spent: event.target.value }))}
+                  />
+                  <button
+                    type="button"
+                    className="tv-btn tv-btn-ghost"
+                    disabled={!!actionLoadingKey}
+                    onClick={() => setCompleteDraft(null)}
+                  >
+                    Отмена
+                  </button>
+                  <button
+                    type="button"
+                    className="tv-btn tv-btn-indigo"
+                    disabled={!!actionLoadingKey || !completeDraft.body.trim()}
+                    onClick={async () => {
+                      const ok = await onRunAction?.(task, 'completed', {
+                        report: completeDraft.body.trim(),
+                        spentMinutes: parseSpentInput(completeDraft.spent),
+                      });
+                      if (ok !== false) setCompleteDraft(null);
+                    }}
+                  >
+                    Сдать работу
+                  </button>
+                </div>
+              </div>
+            )}
           </>
         )}
       </div>
@@ -4853,9 +5223,10 @@ const TasksView = ({
   const [deleteModal,       setDeleteModal]       = useState({ open: false, taskId: null, taskSubject: '' });
   const [editForm,          setEditForm]          = useState(() => buildEmptyTaskForm());
   const [drawerTask,        setDrawerTask]        = useState(null);
-  const [completeModal,     setCompleteModal]     = useState({ open: false, taskId: null, taskSubject: '' });
+  const [completeModal,     setCompleteModal]     = useState({ open: false, taskId: null, taskSubject: '', estimateMinutes: null });
   const [statusModal,       setStatusModal]       = useState({ open: false, taskId: null, action: '', taskSubject: '' });
   const [completionSummary, setCompletionSummary] = useState('');
+  const [completionSpent,   setCompletionSpent]   = useState('');
   const [completionFiles,   setCompletionFiles]   = useState([]);
   const [statusComment,     setStatusComment]     = useState('');
   const [statusFiles,       setStatusFiles]       = useState([]);
@@ -4873,6 +5244,16 @@ const TasksView = ({
   const hasSyncedDrawerUrlRef   = useRef(false);
   const [form, setForm] = useState(() => buildEmptyTaskForm());
   const [notesOpen, setNotesOpen] = useState(false);
+  const [workspaceTab, setWorkspaceTab] = useState(() => {
+    if (typeof window === 'undefined') return 'overview';
+    const stored = window.localStorage.getItem(WORKSPACE_TAB_STORAGE_KEY);
+    return WORKSPACE_TABS.some((tab) => tab.id === stored) ? stored : 'overview';
+  });
+
+  const selectWorkspaceTab = useCallback((tabId) => {
+    setWorkspaceTab(tabId);
+    try { window.localStorage.setItem(WORKSPACE_TAB_STORAGE_KEY, tabId); } catch (error) { /* private mode */ }
+  }, []);
 
   const showToastRef = useRef(showToast);
   useEffect(() => { showToastRef.current = showToast; }, [showToast]);
@@ -5230,7 +5611,10 @@ const TasksView = ({
     inProgress: tasks.filter(t => t.status === 'in_progress').length,
     completed:  tasks.filter(t => t.status === 'completed' || t.status === 'accepted').length,
     overdue:    tasks.filter(t => t.status === 'returned').length,
+    backlog:    tasks.filter(t => t.is_backlog).length,
   }), [tasks]);
+
+  const backlogCount = stats.backlog;
 
   // Count badges for tabs
   const incomingAlert = useMemo(
@@ -5387,18 +5771,118 @@ const TasksView = ({
     } finally { setActionLoadingKey(''); }
   }, [apiBaseUrl, buildHeaders, notify, refreshTasksData]);
 
+  /* ── Доска: планирующие правки (бэклог, порядок, оценка, срок) ── */
+  const updateBoardItems = useCallback(async (items) => {
+    if (!Array.isArray(items) || !items.length) return false;
+    const key = `board:${items.map((item) => item.task_id).join(',')}`;
+    setActionLoadingKey(key);
+    try {
+      const res = await axios.post(
+        `${apiBaseUrl}/api/tasks/board`,
+        { items },
+        { headers: buildHeaders() }
+      );
+      if (res?.data?.warning) notify(res.data.warning, 'error');
+      await refreshTasksData();
+      return true;
+    } catch (e) {
+      notify(e?.response?.data?.error || 'Не удалось обновить доску', 'error');
+      return false;
+    } finally {
+      setActionLoadingKey('');
+    }
+  }, [apiBaseUrl, buildHeaders, notify, refreshTasksData]);
+
+  /* ── Отчёты о проделанной работе ── */
+  const submitTaskReport = useCallback(async (task, { body, spentMinutes, kind = 'progress' }) => {
+    const taskId = Number(task?.id || 0);
+    const text = String(body || '').trim();
+    if (!taskId) return false;
+    if (!text) { notify('Опишите проделанную работу', 'error'); return false; }
+    const key = `${taskId}:report`;
+    setActionLoadingKey(key);
+    try {
+      const res = await axios.post(
+        `${apiBaseUrl}/api/tasks/${taskId}/reports`,
+        { body: text, spent_minutes: spentMinutes || 0, kind },
+        { headers: buildHeaders() }
+      );
+      notify(res?.data?.message || 'Отчёт добавлен');
+      if (res?.data?.warning) notify(res.data.warning, 'error');
+      await refreshTasksData();
+      return true;
+    } catch (e) {
+      notify(e?.response?.data?.error || 'Не удалось сохранить отчёт', 'error');
+      return false;
+    } finally {
+      setActionLoadingKey('');
+    }
+  }, [apiBaseUrl, buildHeaders, notify, refreshTasksData]);
+
+  const patchTaskReport = useCallback(async (task, report, { body, spentMinutes }) => {
+    const reportId = Number(report?.id || 0);
+    if (!reportId) return false;
+    const text = String(body || '').trim();
+    if (!text) { notify('Опишите проделанную работу', 'error'); return false; }
+    const key = `${task?.id}:report:${reportId}`;
+    setActionLoadingKey(key);
+    try {
+      const res = await axios.patch(
+        `${apiBaseUrl}/api/tasks/reports/${reportId}`,
+        { body: text, spent_minutes: spentMinutes || 0 },
+        { headers: buildHeaders() }
+      );
+      notify(res?.data?.message || 'Отчёт обновлён');
+      await refreshTasksData();
+      return true;
+    } catch (e) {
+      notify(e?.response?.data?.error || 'Не удалось обновить отчёт', 'error');
+      return false;
+    } finally {
+      setActionLoadingKey('');
+    }
+  }, [apiBaseUrl, buildHeaders, notify, refreshTasksData]);
+
+  const removeTaskReport = useCallback(async (task, report) => {
+    const reportId = Number(report?.id || 0);
+    if (!reportId) return false;
+    const key = `${task?.id}:report:${reportId}`;
+    setActionLoadingKey(key);
+    try {
+      const res = await axios.delete(
+        `${apiBaseUrl}/api/tasks/reports/${reportId}`,
+        { headers: buildHeaders() }
+      );
+      notify(res?.data?.message || 'Отчёт удалён');
+      await refreshTasksData();
+      return true;
+    } catch (e) {
+      notify(e?.response?.data?.error || 'Не удалось удалить отчёт', 'error');
+      return false;
+    } finally {
+      setActionLoadingKey('');
+    }
+  }, [apiBaseUrl, buildHeaders, notify, refreshTasksData]);
+
   /* ── Complete modal ── */
   const openCompleteModal = useCallback((task) => {
     if (!task?.id) return;
     setCompletionSummary(task?.completion_summary || '');
+    setCompletionSpent('');
     setCompletionFiles([]);
     if (completionFileInputRef.current) completionFileInputRef.current.value = '';
-    setCompleteModal({ open: true, taskId: task.id, taskSubject: task.subject || '' });
+    setCompleteModal({
+      open: true,
+      taskId: task.id,
+      taskSubject: task.subject || '',
+      estimateMinutes: Number(task?.estimate_minutes || 0) || null,
+    });
   }, []);
 
   const closeCompleteModal = useCallback(() => {
-    setCompleteModal({ open: false, taskId: null, taskSubject: '' });
+    setCompleteModal({ open: false, taskId: null, taskSubject: '', estimateMinutes: null });
     setCompletionSummary('');
+    setCompletionSpent('');
     setCompletionFiles([]);
     if (completionFileInputRef.current) completionFileInputRef.current.value = '';
   }, []);
@@ -5422,12 +5906,14 @@ const TasksView = ({
   const submitComplete = useCallback(async (e) => {
     e.preventDefault();
     if (!completeModal.taskId) return;
+    if (!completionSummary.trim()) { notify('Опишите проделанную работу', 'error'); return; }
     const key = `${completeModal.taskId}:completed`;
     setActionLoadingKey(key);
     try {
       const body = new FormData();
       body.append('action', 'completed');
       body.append('completion_summary', completionSummary.trim());
+      body.append('spent_minutes', String(parseSpentInput(completionSpent) || 0));
       completionFiles.forEach(f => body.append('files', f));
       const res = await axios.post(
         `${apiBaseUrl}/api/tasks/${completeModal.taskId}/status`,
@@ -5441,7 +5927,7 @@ const TasksView = ({
     } catch (e) {
       notify(e?.response?.data?.error || 'Не удалось завершить задачу', 'error');
     } finally { setActionLoadingKey(''); }
-  }, [completeModal, completionSummary, completionFiles, apiBaseUrl, buildHeaders, notify, closeCompleteModal, refreshTasksData]);
+  }, [completeModal, completionSummary, completionSpent, completionFiles, apiBaseUrl, buildHeaders, notify, closeCompleteModal, refreshTasksData]);
 
   const submitStatusModal = useCallback(async (e) => {
     e.preventDefault();
@@ -5475,6 +5961,25 @@ const TasksView = ({
   const getActionButtons = useCallback((task) => {
     return buildTaskActionButtons(task, currentUserId, currentUserRole);
   }, [currentUserId, currentUserRole]);
+
+  /* Смена статуса с доски: действия с обязательным комментарием уходят в свои модалки. */
+  const handleBoardStatusAction = useCallback((task, action) => {
+    if (action === 'completed') {
+      openCompleteModal(task);
+      return;
+    }
+    if (action === 'returned' || action === 'reopened') {
+      openStatusModal(task, action);
+      return;
+    }
+    updateStatus(task.id, action);
+  }, [openCompleteModal, openStatusModal, updateStatus]);
+
+  const openBacklogCreate = useCallback(() => {
+    setForm(buildEmptyTaskForm({ isBacklog: true }));
+    setSelectedFiles([]);
+    setCreateOpen(true);
+  }, []);
 
   const isReturnAction = statusModal.action === 'returned';
   const statusModalTitle = isReturnAction ? 'Возврат на доработку' : 'Возобновление задачи';
@@ -5618,7 +6123,7 @@ const TasksView = ({
   const isAnyTasksLoading = isTasksLoading || isPagedTasksLoading || isPersonTasksLoading;
 
   return (
-    <div className="tv-root">
+    <div className={`tv-root ${workspaceTab === 'overview' ? '' : 'is-board-mode'}`}>
       {/* Top bar */}
       <div className="tv-topbar">
         <h1 className="tv-topbar-title">Задачи</h1>
@@ -5650,6 +6155,43 @@ const TasksView = ({
         </div>
       )}
 
+      {/* Обзор / Бэклог / Доска / Таймлайн */}
+      <div className="tv-workspace-tabs">
+        {WORKSPACE_TABS.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            className={`tv-workspace-tab ${workspaceTab === tab.id ? 'is-active' : ''}`}
+            onClick={() => selectWorkspaceTab(tab.id)}
+          >
+            {tab.label}
+            {tab.id === 'backlog' && backlogCount > 0 && (
+              <span className="tv-workspace-tab-count">{backlogCount}</span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {workspaceTab !== 'overview' && (
+        <div className="tv-section">
+          <TaskBoardWorkspace
+            mode={workspaceTab}
+            tasks={tasks}
+            loading={isTasksLoading}
+            currentUserId={currentUserId}
+            isAdmin={isAdminLikeRole(currentUserRole)}
+            isSupervisor={isSupervisorRole(currentUserRole)}
+            onOpenTask={setDrawerTask}
+            onStatusAction={handleBoardStatusAction}
+            onBoardUpdate={updateBoardItems}
+            onCreateBacklogItem={openBacklogCreate}
+            notify={notify}
+          />
+        </div>
+      )}
+
+      {workspaceTab === 'overview' && (
+      <>
       {/* Stats strip */}
       <div className="tv-stats-strip">
         <div className="tv-stat-card">
@@ -5667,6 +6209,10 @@ const TasksView = ({
         <div className="tv-stat-card is-indigo">
           <span className="tv-stat-label">Возвращено</span>
           <span className="tv-stat-value">{stats.overdue}</span>
+        </div>
+        <div className="tv-stat-card">
+          <span className="tv-stat-label">В бэклоге</span>
+          <span className="tv-stat-value">{stats.backlog}</span>
         </div>
       </div>
 
@@ -5830,6 +6376,8 @@ const TasksView = ({
           )}
         </div>
       )}
+      </>
+      )}
 
       {/* Drawer */}
       {drawerTask && (
@@ -5847,6 +6395,11 @@ const TasksView = ({
           onCopyTaskLink={copyTaskLink}
           onToggleChecklistItem={toggleChecklistItem}
           onSaveChecklistNote={saveChecklistNote}
+          currentUserId={currentUserId}
+          currentUserRole={currentUserRole}
+          onSubmitReport={submitTaskReport}
+          onPatchReport={patchTaskReport}
+          onRemoveReport={removeTaskReport}
           onTogglePinTask={(task) => {
             if (Number(task?.id || 0) === Number(pinnedTaskId)) {
               onUnpinTask?.();
@@ -5863,7 +6416,7 @@ const TasksView = ({
         <div className="tv-modal-overlay" onClick={() => setCreateOpen(false)}>
           <div className="tv-modal" onClick={e => e.stopPropagation()}>
             <div className="tv-modal-header">
-              <h3 className="tv-modal-title">Новая задача</h3>
+              <h3 className="tv-modal-title">{form.isBacklog ? 'Новая задача в бэклог' : 'Новая задача'}</h3>
               <button className="tv-close-btn" onClick={() => setCreateOpen(false)}><CloseIcon /></button>
             </div>
             <form onSubmit={handleCreate}>
@@ -5926,6 +6479,19 @@ const TasksView = ({
                   </div>
                   <div className="tv-soft-block">
                     <label className="tv-form-switch">
+                      <input type="checkbox" checked={form.isBacklog} disabled={isCreateLoading}
+                        onChange={e => setForm(p => ({ ...p, isBacklog: e.target.checked }))} />
+                      Отложить в бэклог (исполнитель не получит уведомление)
+                    </label>
+                    <div className="tv-form-field" style={{ margin: '10px 0 0' }}>
+                      <label>Оценка, минут</label>
+                      <input className="tv-input" type="number" min="0" step="15" placeholder="например 120"
+                        value={form.estimateMinutes} disabled={isCreateLoading}
+                        onChange={e => setForm(p => ({ ...p, estimateMinutes: e.target.value }))} />
+                    </div>
+                  </div>
+                  <div className="tv-soft-block">
+                    <label className="tv-form-switch">
                       <input type="checkbox" checked={form.isRegulation} disabled={isCreateLoading}
                         onChange={e => setForm(p => ({
                           ...p,
@@ -5976,7 +6542,7 @@ const TasksView = ({
                   onClick={() => setCreateOpen(false)}>Отмена</button>
                 <button type="submit" className="tv-btn tv-btn-primary"
                   disabled={isCreateLoading || isRecipientsLoading}>
-                  {isCreateLoading ? 'Создаю...' : 'Поставить задачу'}
+                  {isCreateLoading ? 'Создаю...' : (form.isBacklog ? 'Добавить в бэклог' : 'Поставить задачу')}
                 </button>
               </div>
             </form>
@@ -6078,6 +6644,19 @@ const TasksView = ({
                           onChange={e => setEditForm(p => ({ ...p, deadlineMinutes: e.target.value }))} />
                       </div>
                     </div>
+                  </div>
+                  <div className="tv-form-field">
+                    <label>Оценка, минут</label>
+                    <input
+                      className="tv-input"
+                      type="number"
+                      min="0"
+                      step="15"
+                      placeholder="например 120"
+                      value={editForm.estimateMinutes}
+                      disabled={!!actionLoadingKey}
+                      onChange={e => setEditForm(p => ({ ...p, estimateMinutes: e.target.value }))}
+                    />
                   </div>
                   <div className="tv-soft-block">
                     <label className="tv-form-switch">
@@ -6233,13 +6812,34 @@ const TasksView = ({
                 )}
                 <div className="tv-form-grid">
                   <div className="tv-form-field">
-                    <label>Итоги выполнения</label>
+                    <label>Отчёт о проделанной работе *</label>
                     <textarea className="tv-textarea" value={completionSummary}
-                      placeholder="Опишите, что сделано по задаче"
+                      placeholder="Что сделано, к какому результату пришли, что осталось"
                       style={{ minHeight: 110 }}
                       autoFocus
                       disabled={!!actionLoadingKey}
                       onChange={e => setCompletionSummary(e.target.value)} />
+                  </div>
+                  <div className="tv-form-field">
+                    <label>Затрачено времени</label>
+                    <input className="tv-input" value={completionSpent}
+                      placeholder="например 3ч, 90, 1д 2ч"
+                      disabled={!!actionLoadingKey}
+                      onChange={e => setCompletionSpent(e.target.value)} />
+                    <p className="tv-field-hint">
+                      {(() => {
+                        const spent = parseSpentInput(completionSpent);
+                        const estimate = Number(completeModal.estimateMinutes || 0);
+                        if (!spent && estimate) return `Оценка по задаче: ${formatSpentMinutes(estimate)}`;
+                        if (!spent) return 'Необязательно, но так видно реальные трудозатраты в таймлайне.';
+                        if (!estimate) return formatSpentMinutes(spent);
+                        const delta = spent - estimate;
+                        if (delta === 0) return `${formatSpentMinutes(spent)} — ровно по оценке`;
+                        return delta > 0
+                          ? `${formatSpentMinutes(spent)} — на ${formatSpentMinutes(delta)} больше оценки`
+                          : `${formatSpentMinutes(spent)} — на ${formatSpentMinutes(-delta)} меньше оценки`;
+                      })()}
+                    </p>
                   </div>
                   <div className="tv-form-field">
                     <label>Итоговые файлы</label>

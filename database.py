@@ -3159,6 +3159,36 @@ class Database:
             cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS regulation_parent_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL;")
             cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS regulation_iteration INTEGER NOT NULL DEFAULT 0;")
 
+            # Бэклог + канбан + таймлайн раздела «Задачи».
+            # is_backlog — задача лежит в бэклоге (ещё не взята в работу, исполнителя не тревожим),
+            # backlog_rank — ручной порядок приоритезации (DOUBLE, чтобы вставлять между соседями),
+            # estimate_minutes / planned_start_at — плановая длительность и старт для таймлайна,
+            # started_at — фактическое начало работ (первый переход в in_progress).
+            cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS is_backlog BOOLEAN NOT NULL DEFAULT FALSE;")
+            cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS backlog_rank DOUBLE PRECISION;")
+            cursor.execute("""
+                ALTER TABLE tasks ADD COLUMN IF NOT EXISTS estimate_minutes INTEGER
+                    CHECK (estimate_minutes IS NULL OR estimate_minutes >= 0);
+            """)
+            cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS planned_start_at TIMESTAMP;")
+            cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS started_at TIMESTAMP;")
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_tasks_backlog_rank
+                ON tasks(is_backlog, backlog_rank NULLS LAST, created_at DESC);
+            """)
+            # Разовый бэкфилл фактического старта по истории статусов (идемпотентен).
+            cursor.execute("""
+                UPDATE tasks t
+                SET started_at = h.first_started
+                FROM (
+                    SELECT task_id, MIN(changed_at) AS first_started
+                    FROM task_status_history
+                    WHERE status_code = 'in_progress'
+                    GROUP BY task_id
+                ) h
+                WHERE h.task_id = t.id AND t.started_at IS NULL;
+            """)
+
             # Task checklist items
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS task_checklist_items (
@@ -3176,6 +3206,41 @@ class Database:
                 );
             """)
             cursor.execute("ALTER TABLE task_checklist_items ADD COLUMN IF NOT EXISTS result_note TEXT;")
+
+            # Отчёты о проделанной работе: журнал по задаче.
+            # 'progress' — промежуточный отчёт (можно писать по ходу), 'completion' — итоговый при сдаче.
+            # spent_minutes — фактические трудозатраты; сумма по отчётам даёт факт против estimate_minutes.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS task_reports (
+                    id SERIAL PRIMARY KEY,
+                    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    author_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    kind VARCHAR(16) NOT NULL DEFAULT 'progress'
+                        CHECK (kind IN ('progress', 'completion')),
+                    body TEXT NOT NULL,
+                    spent_minutes INTEGER CHECK (spent_minutes IS NULL OR spent_minutes >= 0),
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_task_reports_task ON task_reports(task_id, created_at ASC, id ASC);")
+            # Старые «Итоги выполнения» переносим в журнал, чтобы он не начинался с пустоты (идемпотентно).
+            cursor.execute("""
+                INSERT INTO task_reports (task_id, author_id, kind, body, created_at, updated_at)
+                SELECT
+                    t.id,
+                    COALESCE(t.completed_by, t.assigned_to),
+                    'completion',
+                    t.completion_summary,
+                    COALESCE(t.completed_at, t.updated_at),
+                    COALESCE(t.completed_at, t.updated_at)
+                FROM tasks t
+                WHERE COALESCE(NULLIF(TRIM(t.completion_summary), ''), NULL) IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM task_reports r
+                      WHERE r.task_id = t.id AND r.kind = 'completion'
+                  );
+            """)
 
             # Personal notes inside the Tasks section
             cursor.execute("""
@@ -38250,6 +38315,40 @@ class Database:
             "total_minutes": int(total)
         }
 
+    def _normalize_task_estimate_minutes(self, estimate_minutes):
+        """Плановая длительность задачи в минутах (для таймлайна). 0/пусто → None."""
+        if estimate_minutes is None or estimate_minutes is _UNSET:
+            return None
+        if isinstance(estimate_minutes, str) and not estimate_minutes.strip():
+            return None
+        try:
+            minutes = int(estimate_minutes)
+        except Exception:
+            raise ValueError("INVALID_ESTIMATE")
+        if minutes < 0 or minutes > 10 * 365 * 24 * 60:
+            raise ValueError("INVALID_ESTIMATE")
+        return minutes or None
+
+    def _parse_task_datetime(self, value, error_code="INVALID_DATETIME"):
+        """ISO-строка / datetime → naive datetime в таймзоне проекта (Asia/Almaty)."""
+        if value is None or value is _UNSET:
+            return None
+        if isinstance(value, datetime):
+            parsed = value
+        else:
+            raw = str(value).strip()
+            if not raw:
+                return None
+            if raw.endswith('Z'):
+                raw = raw[:-1] + '+00:00'
+            try:
+                parsed = datetime.fromisoformat(raw)
+            except Exception:
+                raise ValueError(error_code)
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(ZoneInfo('Asia/Almaty')).replace(tzinfo=None)
+        return parsed.replace(microsecond=0)
+
     def _normalize_task_recurrence(self, is_regulation=False, recurrence_type=None, recurrence_interval=None):
         recurrence_type_norm = (recurrence_type or '').strip().lower() or None
         is_regulation_norm = bool(is_regulation or recurrence_type_norm)
@@ -38337,7 +38436,11 @@ class Database:
             is_regulation=False,
             recurrence_type=None,
             recurrence_interval=None,
-            checklist_items=None
+            checklist_items=None,
+            is_backlog=False,
+            estimate_minutes=None,
+            planned_start_at=None,
+            due_at=None
     ):
         subject_norm = (subject or '').strip()
         description_norm = (description or '').strip() or None
@@ -38347,8 +38450,17 @@ class Database:
         attachments = attachments or []
         priority_norm = self._normalize_task_priority(priority)
         deadline_minutes_norm = self._normalize_task_deadline_minutes(deadline_minutes)
+        is_backlog_norm = bool(is_backlog)
+        estimate_minutes_norm = self._normalize_task_estimate_minutes(estimate_minutes)
+        planned_start_at_norm = self._parse_task_datetime(planned_start_at, "INVALID_PLANNED_START")
         now = self._task_now()
-        due_at = now + timedelta(minutes=deadline_minutes_norm) if deadline_minutes_norm else None
+        # Абсолютный дедлайн (нужен агентам/планировщику) выигрывает у относительного «через N».
+        due_at_absolute = self._parse_task_datetime(due_at, "INVALID_DEADLINE")
+        if due_at_absolute is not None:
+            due_at = due_at_absolute
+            deadline_minutes_norm = max(0, int((due_at_absolute - now).total_seconds() // 60)) or None
+        else:
+            due_at = now + timedelta(minutes=deadline_minutes_norm) if deadline_minutes_norm else None
         is_regulation_norm, recurrence_type_norm, recurrence_interval_norm = self._normalize_task_recurrence(
             is_regulation=is_regulation,
             recurrence_type=recurrence_type,
@@ -38362,14 +38474,21 @@ class Database:
             raise ValueError("INVALID_TAG")
 
         with self._get_cursor() as cursor:
+            # Новые элементы бэклога встают в конец очереди приоритезации.
+            backlog_rank = None
+            if is_backlog_norm:
+                cursor.execute("SELECT COALESCE(MAX(backlog_rank), 0) + 1 FROM tasks WHERE is_backlog = TRUE")
+                backlog_rank = float((cursor.fetchone() or [1])[0] or 1)
+
             cursor.execute("""
                 INSERT INTO tasks (
                     subject, description, tag, priority, status, assigned_to, created_by,
                     deadline_duration_minutes, due_at, is_regulation, recurrence_type,
                     recurrence_interval, recurrence_next_at, regulation_iteration,
+                    is_backlog, backlog_rank, estimate_minutes, planned_start_at,
                     created_at, updated_at
                 )
-                VALUES (%s, %s, %s, %s, 'assigned', %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s)
+                VALUES (%s, %s, %s, %s, 'assigned', %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s, %s, %s)
                 RETURNING id, created_at, updated_at
             """, (
                 subject_norm,
@@ -38384,6 +38503,10 @@ class Database:
                 recurrence_type_norm,
                 recurrence_interval_norm,
                 recurrence_next_at,
+                is_backlog_norm,
+                backlog_rank,
+                estimate_minutes_norm,
+                planned_start_at_norm,
                 now,
                 now
             ))
@@ -38421,7 +38544,10 @@ class Database:
             "updated_at": self._task_dt_to_iso(updated_at),
             "due_at": self._task_dt_to_iso(due_at),
             "priority": priority_norm,
-            "is_regulation": is_regulation_norm
+            "is_regulation": is_regulation_norm,
+            "is_backlog": is_backlog_norm,
+            "estimate_minutes": estimate_minutes_norm,
+            "planned_start_at": self._task_dt_to_iso(planned_start_at_norm)
         }
 
     def edit_task(
@@ -38438,7 +38564,10 @@ class Database:
             is_regulation=_UNSET,
             recurrence_type=_UNSET,
             recurrence_interval=_UNSET,
-            checklist_items=_UNSET
+            checklist_items=_UNSET,
+            due_at=_UNSET,
+            estimate_minutes=_UNSET,
+            planned_start_at=_UNSET
     ):
         task_id = int(task_id)
         requester_id = int(requester_id)
@@ -38450,15 +38579,19 @@ class Database:
         has_assigned_to = assigned_to is not None
         has_priority = priority is not _UNSET
         has_deadline = deadline_minutes is not _UNSET
+        has_due_at = due_at is not _UNSET
         has_is_regulation = is_regulation is not _UNSET
         has_recurrence_type = recurrence_type is not _UNSET
         has_recurrence_interval = recurrence_interval is not _UNSET
         has_checklist = checklist_items is not _UNSET
+        has_estimate = estimate_minutes is not _UNSET
+        has_planned_start = planned_start_at is not _UNSET
 
         if not any([
             has_subject, has_description, has_tag, has_assigned_to,
-            has_priority, has_deadline, has_is_regulation,
-            has_recurrence_type, has_recurrence_interval, has_checklist
+            has_priority, has_deadline, has_due_at, has_is_regulation,
+            has_recurrence_type, has_recurrence_interval, has_checklist,
+            has_estimate, has_planned_start
         ]):
             raise ValueError("NOTHING_TO_UPDATE")
 
@@ -38470,7 +38603,7 @@ class Database:
                     assignee.role, assignee.supervisor_id,
                     t.deadline_duration_minutes, t.due_at,
                     t.is_regulation, t.recurrence_type, t.recurrence_interval,
-                    t.recurrence_next_at
+                    t.recurrence_next_at, t.created_at, t.estimate_minutes, t.planned_start_at
                 FROM tasks t
                 LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 WHERE t.id = %s
@@ -38493,6 +38626,9 @@ class Database:
             current_recurrence_type = (row[12] or '').strip().lower() or None
             current_recurrence_interval = row[13]
             current_recurrence_next_at = row[14]
+            current_created_at = row[15]
+            current_estimate_minutes = row[16]
+            current_planned_start_at = row[17]
 
             if not self._task_visible_for_requester(role, requester_id, created_by, current_assigned_to, assignee_role, assignee_supervisor_id):
                 raise PermissionError("TASK_FORBIDDEN")
@@ -38528,12 +38664,28 @@ class Database:
 
             priority_new = current_priority if not has_priority else self._normalize_task_priority(priority)
 
-            if has_deadline:
+            if has_due_at:
+                # Абсолютный дедлайн: считаем «через N» от постановки, чтобы форма правки осталась осмысленной.
+                due_at_new = self._parse_task_datetime(due_at, "INVALID_DEADLINE")
+                if due_at_new is None:
+                    deadline_minutes_new = None
+                else:
+                    base_at = current_created_at or self._task_now()
+                    deadline_minutes_new = max(0, int((due_at_new - base_at).total_seconds() // 60)) or None
+            elif has_deadline:
                 deadline_minutes_new = self._normalize_task_deadline_minutes(deadline_minutes)
                 due_at_new = self._task_now() + timedelta(minutes=deadline_minutes_new) if deadline_minutes_new else None
             else:
                 deadline_minutes_new = current_deadline_minutes
                 due_at_new = current_due_at
+
+            estimate_minutes_new = (
+                self._normalize_task_estimate_minutes(estimate_minutes) if has_estimate else current_estimate_minutes
+            )
+            planned_start_at_new = (
+                self._parse_task_datetime(planned_start_at, "INVALID_PLANNED_START")
+                if has_planned_start else current_planned_start_at
+            )
 
             if has_is_regulation and not bool(is_regulation):
                 recurrence_type_input = None
@@ -38576,6 +38728,10 @@ class Database:
                 changed_fields.append("recurrence")
             if has_checklist:
                 changed_fields.append("checklist")
+            if estimate_minutes_new != current_estimate_minutes:
+                changed_fields.append("estimate")
+            if planned_start_at_new != current_planned_start_at:
+                changed_fields.append("planned_start")
 
             if not changed_fields:
                 return {
@@ -38594,7 +38750,9 @@ class Database:
                     "is_regulation": current_is_regulation,
                     "recurrence_type": current_recurrence_type,
                     "recurrence_interval": current_recurrence_interval,
-                    "recurrence_next_at": self._task_dt_to_iso(current_recurrence_next_at)
+                    "recurrence_next_at": self._task_dt_to_iso(current_recurrence_next_at),
+                    "estimate_minutes": current_estimate_minutes,
+                    "planned_start_at": self._task_dt_to_iso(current_planned_start_at)
                 }
 
             cursor.execute("""
@@ -38611,6 +38769,8 @@ class Database:
                     recurrence_type = %s,
                     recurrence_interval = %s,
                     recurrence_next_at = %s,
+                    estimate_minutes = %s,
+                    planned_start_at = %s,
                     updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 WHERE id = %s
                 RETURNING updated_at
@@ -38626,6 +38786,8 @@ class Database:
                 recurrence_type_new,
                 recurrence_interval_new,
                 recurrence_next_at_new,
+                estimate_minutes_new,
+                planned_start_at_new,
                 task_id
             ))
             updated_row = cursor.fetchone()
@@ -38651,7 +38813,375 @@ class Database:
                 "is_regulation": is_regulation_new,
                 "recurrence_type": recurrence_type_new,
                 "recurrence_interval": recurrence_interval_new,
-                "recurrence_next_at": self._task_dt_to_iso(recurrence_next_at_new)
+                "recurrence_next_at": self._task_dt_to_iso(recurrence_next_at_new),
+                "estimate_minutes": estimate_minutes_new,
+                "planned_start_at": self._task_dt_to_iso(planned_start_at_new)
+            }
+
+    def _normalize_task_report_kind(self, kind):
+        kind_norm = (kind or 'progress').strip().lower() or 'progress'
+        if kind_norm not in ('progress', 'completion'):
+            raise ValueError("INVALID_REPORT_KIND")
+        return kind_norm
+
+    def _normalize_task_spent_minutes(self, spent_minutes):
+        if spent_minutes is None or spent_minutes is _UNSET:
+            return None
+        if isinstance(spent_minutes, str) and not spent_minutes.strip():
+            return None
+        try:
+            minutes = int(spent_minutes)
+        except Exception:
+            raise ValueError("INVALID_SPENT_MINUTES")
+        if minutes < 0 or minutes > 10 * 365 * 24 * 60:
+            raise ValueError("INVALID_SPENT_MINUTES")
+        return minutes or None
+
+    def _serialize_task_report(self, row):
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "task_id": row[1],
+            "author_id": row[2],
+            "author_name": row[3],
+            "kind": row[4],
+            "body": row[5],
+            "spent_minutes": row[6],
+            "created_at": self._task_dt_to_iso(row[7]),
+            "updated_at": self._task_dt_to_iso(row[8])
+        }
+
+    _TASK_REPORT_SELECT = """
+        SELECT
+            r.id, r.task_id, r.author_id, author.name, r.kind, r.body,
+            r.spent_minutes, r.created_at, r.updated_at
+        FROM task_reports r
+        LEFT JOIN users author ON author.id = r.author_id
+    """
+
+    def _task_report_access_tx(self, cursor, task_id, requester_id, role):
+        """Возвращает (created_by, assigned_to) или бросает, если задача недоступна."""
+        cursor.execute("""
+            SELECT t.id, t.created_by, t.assigned_to, assignee.role, assignee.supervisor_id
+            FROM tasks t
+            LEFT JOIN users assignee ON assignee.id = t.assigned_to
+            WHERE t.id = %s
+        """, (int(task_id),))
+        row = cursor.fetchone()
+        if not row:
+            raise ValueError("TASK_NOT_FOUND")
+        created_by, assigned_to, assignee_role, assignee_supervisor_id = row[1], row[2], row[3], row[4]
+        if not self._task_visible_for_requester(role, requester_id, created_by, assigned_to, assignee_role, assignee_supervisor_id):
+            raise PermissionError("TASK_FORBIDDEN")
+        return created_by, assigned_to
+
+    def get_task_reports(self, task_id, requester_id, requester_role):
+        requester_id = int(requester_id)
+        role = normalize_role_value(requester_role)
+        with self._get_cursor() as cursor:
+            self._task_report_access_tx(cursor, task_id, requester_id, role)
+            cursor.execute(
+                self._TASK_REPORT_SELECT + " WHERE r.task_id = %s ORDER BY r.created_at ASC, r.id ASC",
+                (int(task_id),)
+            )
+            rows = cursor.fetchall()
+        return [self._serialize_task_report(row) for row in rows]
+
+    def create_task_report(self, task_id, requester_id, requester_role, body, spent_minutes=None, kind='progress'):
+        """Отчёт о проделанной работе. Пишут исполнитель, постановщик и админ."""
+        task_id = int(task_id)
+        requester_id = int(requester_id)
+        role = normalize_role_value(requester_role)
+        body_norm = str(body or '').strip()
+        if not body_norm:
+            raise ValueError("REPORT_BODY_REQUIRED")
+        kind_norm = self._normalize_task_report_kind(kind)
+        spent_norm = self._normalize_task_spent_minutes(spent_minutes)
+
+        with self._get_cursor() as cursor:
+            created_by, assigned_to = self._task_report_access_tx(cursor, task_id, requester_id, role)
+            is_participant = (
+                (assigned_to is not None and int(assigned_to) == requester_id)
+                or (created_by is not None and int(created_by) == requester_id)
+                or role_has_min(role, 'admin')
+            )
+            if not is_participant:
+                raise PermissionError("ONLY_TASK_PARTICIPANT")
+
+            cursor.execute("""
+                INSERT INTO task_reports (task_id, author_id, kind, body, spent_minutes)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING id
+            """, (task_id, requester_id, kind_norm, body_norm, spent_norm))
+            report_id = cursor.fetchone()[0]
+
+            # Итоговый отчёт — источник «Итогов выполнения» задачи (Telegram, виджеты, выгрузки).
+            if kind_norm == 'completion':
+                cursor.execute("""
+                    UPDATE tasks
+                    SET completion_summary = %s,
+                        updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                    WHERE id = %s
+                """, (body_norm, task_id))
+
+            cursor.execute(self._TASK_REPORT_SELECT + " WHERE r.id = %s", (report_id,))
+            return self._serialize_task_report(cursor.fetchone())
+
+    def update_task_report(self, report_id, requester_id, requester_role, body=_UNSET, spent_minutes=_UNSET):
+        report_id = int(report_id)
+        requester_id = int(requester_id)
+        role = normalize_role_value(requester_role)
+        has_body = body is not _UNSET
+        has_spent = spent_minutes is not _UNSET
+        if not (has_body or has_spent):
+            raise ValueError("NOTHING_TO_UPDATE")
+
+        with self._get_cursor() as cursor:
+            cursor.execute("SELECT id, task_id, author_id, kind, body, spent_minutes FROM task_reports WHERE id = %s", (report_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("REPORT_NOT_FOUND")
+            task_id, author_id, kind, current_body, current_spent = row[1], row[2], row[3], row[4], row[5]
+            self._task_report_access_tx(cursor, task_id, requester_id, role)
+
+            # Править чужой отчёт нельзя даже админу: это чужие слова о своей работе.
+            if author_id is None or int(author_id) != requester_id:
+                raise PermissionError("ONLY_REPORT_AUTHOR")
+
+            body_new = current_body
+            if has_body:
+                body_new = str(body or '').strip()
+                if not body_new:
+                    raise ValueError("REPORT_BODY_REQUIRED")
+            spent_new = self._normalize_task_spent_minutes(spent_minutes) if has_spent else current_spent
+
+            if body_new == current_body and spent_new == current_spent:
+                cursor.execute(self._TASK_REPORT_SELECT + " WHERE r.id = %s", (report_id,))
+                return self._serialize_task_report(cursor.fetchone())
+
+            cursor.execute("""
+                UPDATE task_reports
+                SET body = %s,
+                    spent_minutes = %s,
+                    updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                WHERE id = %s
+            """, (body_new, spent_new, report_id))
+
+            # «Итоги выполнения» задачи отражают последний итоговый отчёт — правим только его.
+            if kind == 'completion' and body_new != current_body:
+                cursor.execute("""
+                    SELECT id FROM task_reports
+                    WHERE task_id = %s AND kind = 'completion'
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                """, (task_id,))
+                latest = cursor.fetchone()
+                if latest and int(latest[0]) == report_id:
+                    cursor.execute("""
+                        UPDATE tasks
+                        SET completion_summary = %s,
+                            updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                        WHERE id = %s
+                    """, (body_new, task_id))
+
+            cursor.execute(self._TASK_REPORT_SELECT + " WHERE r.id = %s", (report_id,))
+            return self._serialize_task_report(cursor.fetchone())
+
+    def delete_task_report(self, report_id, requester_id, requester_role):
+        report_id = int(report_id)
+        requester_id = int(requester_id)
+        role = normalize_role_value(requester_role)
+
+        with self._get_cursor() as cursor:
+            cursor.execute("SELECT id, task_id, author_id, kind FROM task_reports WHERE id = %s", (report_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("REPORT_NOT_FOUND")
+            task_id, author_id, kind = row[1], row[2], row[3]
+            self._task_report_access_tx(cursor, task_id, requester_id, role)
+
+            is_author = author_id is not None and int(author_id) == requester_id
+            if not (is_author or role_has_min(role, 'admin')):
+                raise PermissionError("ONLY_REPORT_AUTHOR")
+
+            cursor.execute("DELETE FROM task_reports WHERE id = %s", (report_id,))
+
+            # Удалили итоговый — «Итоги выполнения» подтягиваем из предыдущего итогового отчёта.
+            if kind == 'completion':
+                cursor.execute("""
+                    SELECT body FROM task_reports
+                    WHERE task_id = %s AND kind = 'completion'
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                """, (task_id,))
+                fallback = cursor.fetchone()
+                cursor.execute("""
+                    UPDATE tasks
+                    SET completion_summary = %s,
+                        updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                    WHERE id = %s
+                """, (fallback[0] if fallback else None, task_id))
+
+        return {"report_id": report_id, "task_id": task_id, "deleted": True}
+
+    def update_task_board_state(
+            self,
+            task_id,
+            requester_id,
+            requester_role,
+            is_backlog=_UNSET,
+            backlog_rank=_UNSET,
+            estimate_minutes=_UNSET,
+            planned_start_at=_UNSET,
+            due_at=_UNSET
+    ):
+        """
+        Планирующие правки с доски: бэклог ↔ доска, порядок приоритезации, оценка, сроки.
+
+        Отличается от edit_task правами: двигать карточку и ставить оценку может
+        и исполнитель (это его работа), а сроки — только постановщик или админ.
+        """
+        task_id = int(task_id)
+        requester_id = int(requester_id)
+        role = normalize_role_value(requester_role)
+
+        has_is_backlog = is_backlog is not _UNSET
+        has_backlog_rank = backlog_rank is not _UNSET
+        has_estimate = estimate_minutes is not _UNSET
+        has_planned_start = planned_start_at is not _UNSET
+        has_due_at = due_at is not _UNSET
+
+        if not any([has_is_backlog, has_backlog_rank, has_estimate, has_planned_start, has_due_at]):
+            raise ValueError("NOTHING_TO_UPDATE")
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    t.id, t.created_by, t.assigned_to, t.status, t.created_at,
+                    t.is_backlog, t.backlog_rank, t.estimate_minutes, t.planned_start_at,
+                    t.due_at, t.deadline_duration_minutes, t.subject,
+                    assignee.role, assignee.supervisor_id
+                FROM tasks t
+                LEFT JOIN users assignee ON assignee.id = t.assigned_to
+                WHERE t.id = %s
+            """, (task_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("TASK_NOT_FOUND")
+
+            created_by = row[1]
+            assigned_to = row[2]
+            current_status = row[3]
+            current_created_at = row[4]
+            current_is_backlog = bool(row[5])
+            current_backlog_rank = row[6]
+            current_estimate = row[7]
+            current_planned_start = row[8]
+            current_due_at = row[9]
+            current_deadline_minutes = row[10]
+            subject = row[11]
+            assignee_role = row[12]
+            assignee_supervisor_id = row[13]
+
+            if not self._task_visible_for_requester(role, requester_id, created_by, assigned_to, assignee_role, assignee_supervisor_id):
+                raise PermissionError("TASK_FORBIDDEN")
+
+            is_creator = created_by is not None and int(created_by) == requester_id
+            is_assignee = assigned_to is not None and int(assigned_to) == requester_id
+            is_admin = role_has_min(role, 'admin')
+            if not (is_creator or is_assignee or is_admin):
+                raise PermissionError("TASK_FORBIDDEN")
+            if (has_due_at or has_planned_start) and not (is_creator or is_admin):
+                raise PermissionError("ONLY_CREATOR_CAN_PLAN")
+
+            is_backlog_new = bool(is_backlog) if has_is_backlog else current_is_backlog
+            # В бэклог возвращаем только ещё не начатую задачу — иначе доска врала бы про прогресс.
+            # Проверяем именно переход: правки сроков уже лежащей в бэклоге задачи блокировать не за что.
+            if is_backlog_new and not current_is_backlog and current_status != 'assigned':
+                raise ValueError("BACKLOG_ONLY_FOR_ASSIGNED")
+
+            if has_backlog_rank:
+                if backlog_rank is None:
+                    backlog_rank_new = None
+                else:
+                    try:
+                        backlog_rank_new = float(backlog_rank)
+                    except Exception:
+                        raise ValueError("INVALID_BACKLOG_RANK")
+            elif is_backlog_new and current_backlog_rank is None:
+                cursor.execute("SELECT COALESCE(MAX(backlog_rank), 0) + 1 FROM tasks WHERE is_backlog = TRUE")
+                backlog_rank_new = float((cursor.fetchone() or [1])[0] or 1)
+            else:
+                backlog_rank_new = current_backlog_rank
+
+            estimate_new = (
+                self._normalize_task_estimate_minutes(estimate_minutes) if has_estimate else current_estimate
+            )
+            planned_start_new = (
+                self._parse_task_datetime(planned_start_at, "INVALID_PLANNED_START")
+                if has_planned_start else current_planned_start
+            )
+
+            if has_due_at:
+                due_at_new = self._parse_task_datetime(due_at, "INVALID_DEADLINE")
+                if due_at_new is None:
+                    deadline_minutes_new = None
+                else:
+                    base_at = current_created_at or self._task_now()
+                    deadline_minutes_new = max(0, int((due_at_new - base_at).total_seconds() // 60)) or None
+            else:
+                due_at_new = current_due_at
+                deadline_minutes_new = current_deadline_minutes
+
+            changed_fields = []
+            if is_backlog_new != current_is_backlog:
+                changed_fields.append("is_backlog")
+            if backlog_rank_new != current_backlog_rank:
+                changed_fields.append("backlog_rank")
+            if estimate_new != current_estimate:
+                changed_fields.append("estimate")
+            if planned_start_new != current_planned_start:
+                changed_fields.append("planned_start")
+            if due_at_new != current_due_at:
+                changed_fields.append("deadline")
+
+            if changed_fields:
+                cursor.execute("""
+                    UPDATE tasks
+                    SET
+                        is_backlog = %s,
+                        backlog_rank = %s,
+                        estimate_minutes = %s,
+                        planned_start_at = %s,
+                        due_at = %s,
+                        deadline_duration_minutes = %s,
+                        updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                    WHERE id = %s
+                """, (
+                    is_backlog_new,
+                    backlog_rank_new,
+                    estimate_new,
+                    planned_start_new,
+                    due_at_new,
+                    deadline_minutes_new,
+                    task_id
+                ))
+
+            return {
+                "task_id": task_id,
+                "subject": subject,
+                "updated": bool(changed_fields),
+                "changed_fields": changed_fields,
+                "assigned_to": assigned_to,
+                "status": current_status,
+                "is_backlog": is_backlog_new,
+                "was_backlog": current_is_backlog,
+                "backlog_rank": backlog_rank_new,
+                "estimate_minutes": estimate_new,
+                "planned_start_at": self._task_dt_to_iso(planned_start_new),
+                "due_at": self._task_dt_to_iso(due_at_new),
+                "deadline_duration_minutes": deadline_minutes_new
             }
 
     def delete_task(self, task_id, requester_id, requester_role):
@@ -38927,10 +39457,11 @@ class Database:
                 SELECT
                     t.id, t.subject, t.description, t.tag, t.priority, t.assigned_to, t.created_by,
                     t.deadline_duration_minutes, t.recurrence_type, t.recurrence_interval,
-                    t.recurrence_next_at
+                    t.recurrence_next_at, t.estimate_minutes
                 FROM tasks t
                 WHERE t.is_regulation = TRUE
                   AND t.regulation_parent_id IS NULL
+                  AND t.is_backlog = FALSE
                   AND t.recurrence_type IS NOT NULL
                   AND t.recurrence_next_at IS NOT NULL
                   AND t.recurrence_next_at <= %s
@@ -38943,7 +39474,8 @@ class Database:
             for template in templates:
                 (
                     root_id, subject, description, tag, priority, assigned_to, created_by,
-                    deadline_minutes, recurrence_type, recurrence_interval, next_at
+                    deadline_minutes, recurrence_type, recurrence_interval, next_at,
+                    template_estimate_minutes
                 ) = template
 
                 cursor.execute("""
@@ -38975,14 +39507,14 @@ class Database:
                             subject, description, tag, priority, status, assigned_to, created_by,
                             deadline_duration_minutes, due_at, is_regulation,
                             recurrence_type, recurrence_interval, recurrence_next_at,
-                            regulation_parent_id, regulation_iteration,
+                            regulation_parent_id, regulation_iteration, estimate_minutes,
                             created_at, updated_at
                         )
                         VALUES (
                             %s, %s, %s, %s, 'assigned', %s, %s,
                             %s, %s, TRUE,
                             NULL, NULL, NULL,
-                            %s, %s,
+                            %s, %s, %s,
                             (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
                             (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                         )
@@ -38997,7 +39529,8 @@ class Database:
                         deadline_minutes,
                         due_at,
                         root_id,
-                        next_iteration
+                        next_iteration,
+                        template_estimate_minutes
                     ))
                     created_id = cursor.fetchone()[0]
                     created_task_ids.append(created_id)
@@ -39040,7 +39573,8 @@ class Database:
             offset=0,
             only_my=False,
             person_id=None,
-            person_scope=None
+            person_scope=None,
+            backlog=None
     ):
         requester_id = int(requester_id)
         role = normalize_role_value(requester_role)
@@ -39050,6 +39584,7 @@ class Database:
         priority_norm = (priority or '').strip().lower() or None
         only_my_flag = bool(only_my)
         person_scope_norm = (person_scope or '').strip().lower() or None
+        backlog_norm = (backlog or '').strip().lower() or None
 
         if person_id is None or str(person_id).strip() == '':
             person_id_norm = None
@@ -39066,6 +39601,8 @@ class Database:
             raise ValueError("INVALID_TASK_PRIORITY_FILTER")
         if person_scope_norm and person_scope_norm not in {'incoming', 'outgoing', 'any'}:
             raise ValueError("INVALID_TASK_PERSON_SCOPE_FILTER")
+        if backlog_norm and backlog_norm not in {'only', 'exclude'}:
+            raise ValueError("INVALID_TASK_BACKLOG_FILTER")
 
         if limit is None or str(limit).strip() == '':
             limit_norm = None
@@ -39131,6 +39668,11 @@ class Database:
             filtered_conditions.append("t.priority = %s")
             filtered_params.append(priority_norm)
 
+        if backlog_norm == 'only':
+            filtered_conditions.append("t.is_backlog = TRUE")
+        elif backlog_norm == 'exclude':
+            filtered_conditions.append("t.is_backlog = FALSE")
+
         if person_id_norm is not None:
             if person_scope_norm == 'incoming':
                 filtered_conditions.append("t.assigned_to = %s")
@@ -39155,18 +39697,20 @@ class Database:
                     COUNT(*)::INT AS total_count,
                     COUNT(*) FILTER (WHERE t.status = 'in_progress')::INT AS in_progress_count,
                     COUNT(*) FILTER (WHERE t.status IN ('completed', 'accepted'))::INT AS completed_count,
-                    COUNT(*) FILTER (WHERE t.status = 'returned')::INT AS returned_count
+                    COUNT(*) FILTER (WHERE t.status = 'returned')::INT AS returned_count,
+                    COUNT(*) FILTER (WHERE t.is_backlog)::INT AS backlog_count
                 FROM tasks t
                 LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 LEFT JOIN users creator ON creator.id = t.created_by
                 {base_where_sql}
             """, tuple(base_params))
-            summary_row = cursor.fetchone() or (0, 0, 0, 0)
+            summary_row = cursor.fetchone() or (0, 0, 0, 0, 0)
             summary = {
                 "total": int(summary_row[0] or 0),
                 "in_progress": int(summary_row[1] or 0),
                 "completed": int(summary_row[2] or 0),
-                "returned": int(summary_row[3] or 0)
+                "returned": int(summary_row[3] or 0),
+                "backlog": int(summary_row[4] or 0)
             }
 
             cursor.execute(f"""
@@ -39179,6 +39723,12 @@ class Database:
             total_filtered_row = cursor.fetchone()
             total_filtered = int(total_filtered_row[0] or 0) if total_filtered_row else 0
 
+            # Бэклог — упорядоченная очередь приоритезации, остальные списки — свежие сверху.
+            order_by_sql = (
+                "t.backlog_rank ASC NULLS LAST, t.created_at DESC, t.id DESC"
+                if backlog_norm == 'only'
+                else "t.created_at DESC, t.id DESC"
+            )
             task_query = f"""
                 SELECT
                     t.id, t.subject, t.description, t.tag, t.status, t.created_at, t.updated_at,
@@ -39189,13 +39739,15 @@ class Database:
                     assignee.id, assignee.name, assignee.role, assignee.supervisor_id,
                     assignee.avatar_bucket, assignee.avatar_blob_path,
                     creator.id, creator.name, creator.role,
-                    creator.avatar_bucket, creator.avatar_blob_path
+                    creator.avatar_bucket, creator.avatar_blob_path,
+                    t.is_backlog, t.backlog_rank, t.estimate_minutes,
+                    t.planned_start_at, t.started_at
                 FROM tasks t
                 LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 LEFT JOIN users creator ON creator.id = t.created_by
                 LEFT JOIN users completed_user ON completed_user.id = t.completed_by
                 {filtered_where_sql}
-                ORDER BY t.created_at DESC, t.id DESC
+                ORDER BY {order_by_sql}
             """
             task_query_params = list(filtered_params)
             if limit_norm is not None:
@@ -39211,6 +39763,7 @@ class Database:
             history_rows = []
             attachment_rows = []
             checklist_rows = []
+            report_rows = []
             if task_rows:
                 task_ids = [row[0] for row in task_rows]
 
@@ -39247,6 +39800,12 @@ class Database:
                     ORDER BY ci.task_id ASC, ci.position ASC, ci.id ASC
                 """, (task_ids,))
                 checklist_rows = cursor.fetchall()
+
+                cursor.execute(
+                    self._TASK_REPORT_SELECT + " WHERE r.task_id = ANY(%s) ORDER BY r.created_at ASC, r.id ASC",
+                    (task_ids,)
+                )
+                report_rows = cursor.fetchall()
 
         history_map = defaultdict(list)
         for row in history_rows:
@@ -39289,9 +39848,15 @@ class Database:
                 "result_note": row[10]
             })
 
+        report_map = defaultdict(list)
+        for row in report_rows:
+            report_map[row[1]].append(self._serialize_task_report(row))
+
         result = []
         for row in task_rows:
             task_id = row[0]
+            task_reports = report_map.get(task_id, [])
+            spent_total = sum(int(item.get('spent_minutes') or 0) for item in task_reports)
             all_attachments = attachment_map.get(task_id, [])
             initial_attachments = [a for a in all_attachments if a.get("attachment_kind") != "result"]
             result_attachments = [a for a in all_attachments if a.get("attachment_kind") == "result"]
@@ -39332,10 +39897,17 @@ class Database:
                     "avatar_bucket": row[29],
                     "avatar_blob_path": row[30]
                 } if row[26] else None,
+                "is_backlog": bool(row[31]),
+                "backlog_rank": float(row[32]) if row[32] is not None else None,
+                "estimate_minutes": row[33],
+                "planned_start_at": self._task_dt_to_iso(row[34]),
+                "started_at": self._task_dt_to_iso(row[35]),
                 "history": history_map.get(task_id, []),
                 "attachments": initial_attachments,
                 "completion_attachments": result_attachments,
-                "checklist": checklist_map.get(task_id, [])
+                "checklist": checklist_map.get(task_id, []),
+                "reports": task_reports,
+                "spent_minutes": spent_total or None
             })
 
         return {
@@ -39345,7 +39917,8 @@ class Database:
             "summary": summary
         }
 
-    def update_task_status(self, task_id, requester_id, requester_role, action, comment=None, completion_summary=None, completion_attachments=None):
+    def update_task_status(self, task_id, requester_id, requester_role, action, comment=None, completion_summary=None,
+                           completion_attachments=None, spent_minutes=None):
         task_id = int(task_id)
         requester_id = int(requester_id)
         role = normalize_role_value(requester_role)
@@ -39353,6 +39926,7 @@ class Database:
         comment_norm = (comment or '').strip() or None
         completion_summary_norm = (completion_summary or '').strip() or None
         completion_attachments = completion_attachments or []
+        spent_minutes_norm = self._normalize_task_spent_minutes(spent_minutes)
 
         with self._get_cursor() as cursor:
             cursor.execute("""
@@ -39451,6 +40025,18 @@ class Database:
                     WHERE id = %s
                     RETURNING updated_at
                 """, (target_status, completion_summary_norm, requester_id, task_id))
+            elif target_status == 'in_progress':
+                # Работа началась: фиксируем фактический старт (для таймлайна) и убираем из бэклога.
+                cursor.execute("""
+                    UPDATE tasks
+                    SET
+                        status = %s,
+                        is_backlog = FALSE,
+                        started_at = COALESCE(started_at, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')),
+                        updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                    WHERE id = %s
+                    RETURNING updated_at
+                """, (target_status, task_id))
             else:
                 cursor.execute("""
                     UPDATE tasks
@@ -39468,6 +40054,21 @@ class Database:
                 RETURNING id, changed_at
             """, (task_id, history_status, requester_id, history_comment))
             history_row = cursor.fetchone()
+
+            # Сдача задачи = итоговый отчёт о проделанной работе в журнале.
+            completion_report_id = None
+            if action_norm == 'completed' and (completion_summary_norm or spent_minutes_norm):
+                cursor.execute("""
+                    INSERT INTO task_reports (task_id, author_id, kind, body, spent_minutes)
+                    VALUES (%s, %s, 'completion', %s, %s)
+                    RETURNING id
+                """, (
+                    task_id,
+                    requester_id,
+                    completion_summary_norm or 'Работа выполнена',
+                    spent_minutes_norm
+                ))
+                completion_report_id = cursor.fetchone()[0]
 
             if action_norm in ('completed', 'returned', 'reopened'):
                 attachment_kind = 'result' if action_norm == 'completed' else 'initial'
@@ -39494,6 +40095,8 @@ class Database:
                 "task_id": task_id,
                 "status": target_status,
                 "updated_at": updated_at.isoformat() if hasattr(updated_at, 'isoformat') else updated_at,
+                "report_id": completion_report_id,
+                "spent_minutes": spent_minutes_norm,
                 "history_id": history_row[0] if history_row else None,
                 "history_changed_at": (history_row[1].isoformat() if history_row and hasattr(history_row[1], 'isoformat') else (history_row[1] if history_row else None))
             }
