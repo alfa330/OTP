@@ -128,6 +128,23 @@ class ChatTranscriptTests(unittest.TestCase):
             self.assertIn(fragment, card_text)
             self.assertIn(fragment, built["text"])
 
+    def test_card_line_plus_stamp_reconstructs_the_model_line(self):
+        """Модель цитирует строку вместе с «[дд.мм чч:мм]», а карточка держит время
+        отдельным полем. Проверка цитаты в карточке обязана собирать их обратно —
+        иначе цитату ИИ нельзя подтвердить в один клик (её принимает только сервер)."""
+        built = self._build({"m3": {"status": "ready", "annotation": "скриншот"}})
+        model_lines = built["text"].split("\n\n", 1)[1].splitlines()
+        rebuilt = [f"[{line['ts']}] " + "".join(seg["t"] for seg in line["seg"])
+                   for line in built["lines"]]
+        self.assertEqual(rebuilt, model_lines)
+
+    def test_card_prefixes_the_stamp_before_matching_a_quote(self):
+        card = (ROOT / "src" / "components" / "call_qa" / "CallReviewCard.jsx").read_text(
+            encoding="utf-8")
+        transcript_text = card.split("const transcriptText = useMemo(", 1)[1][:400]
+        self.assertIn("line.ts", transcript_text)
+        self.assertIn("`[${line.ts}] ${body}`", transcript_text)
+
     def test_ready_image_annotation_replaces_placeholder(self):
         built = self._build({"m3": {"status": "ready", "annotation": "скриншот оплаты на 5000 тенге"}})
         self.assertIn("[фото: скриншот оплаты на 5000 тенге]", built["text"])
