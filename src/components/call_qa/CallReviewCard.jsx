@@ -542,9 +542,16 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
         [decisions, call],
     );
     // Текст транскрипта для клиентской сверки цитаты (тот же источник, что видит проверяющий).
+    // Текст для предпроверки цитаты обязан совпадать с авторитетным транскриптом,
+    // по которому сервер валидирует разбор. У строк чата время входит в строку
+    // («[26.07 21:17] Оператор (…): …»), и модель цитирует её вместе с ним —
+    // без префикса «Подтверждаю» отвергало бы цитату, которую сервер принимает.
     const transcriptText = useMemo(
         () => (call?.transcript || [])
-            .map((line) => (line.seg || []).map((seg) => seg.t || '').join(''))
+            .map((line) => {
+                const body = (line.seg || []).map((seg) => seg.t || '').join('');
+                return line.ts ? `[${line.ts}] ${body}` : body;
+            })
             .join('\n'),
         [call],
     );
