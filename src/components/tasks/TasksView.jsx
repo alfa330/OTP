@@ -2561,13 +2561,30 @@ const WORKSPACE_TABS = [
   { id: 'timeline', label: 'Таймлайн' },
 ];
 
+/**
+ * Итог принимает поручитель (или постановщик, если поручителя нет) — исполнитель
+ * свою работу себе не принимает. Исключение — своя инициатива: принимать больше некому,
+ * иначе задача навсегда осталась бы на проверке. Те же правила проверяет API.
+ */
+export const canReviewTask = (task, currentUserId, currentUserRole) => {
+  const assigneeId = Number(task?.assignee?.id || 0);
+  const creatorId = Number(task?.creator?.id || 0);
+  const requesterId = Number(task?.requested_by?.id || 0);
+  const authorityId = requesterId || creatorId;
+  const isAssignee = assigneeId === currentUserId;
+
+  if (authorityId && authorityId === currentUserId) return true;
+  if (isAssignee) return false;
+  return isAdminLikeRole(currentUserRole) || isSupervisorRole(currentUserRole) || creatorId === currentUserId;
+};
+
 const buildTaskActionButtons = (task, currentUserId, currentUserRole) => {
   const assigneeId = Number(task?.assignee?.id || 0);
   const creatorId  = Number(task?.creator?.id  || 0);
   const isAssignee = assigneeId === currentUserId;
   const isCreator  = creatorId === currentUserId;
   const isSuperAdmin = normalizeRole(currentUserRole) === 'super_admin';
-  const canReview  = !isAssignee && (isAdminLikeRole(currentUserRole) || creatorId === currentUserId || isSupervisorRole(currentUserRole));
+  const canReview  = canReviewTask(task, currentUserId, currentUserRole);
   const s = task?.status;
   const btns = [];
   if (isAssignee && (s === 'assigned' || s === 'returned'))
