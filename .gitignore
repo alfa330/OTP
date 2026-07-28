@@ -11,6 +11,7 @@ tools_find_tdz.js
 tools_find_tdz.cjs
 .claude/settings.local.json
 .claude/worktrees/
+.claude/skills/task-daily-report/
 
 # Python cache
 __pycache__/

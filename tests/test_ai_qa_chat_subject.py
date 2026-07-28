@@ -441,6 +441,109 @@ class PdfDocumentTests(unittest.TestCase):
         self.assertNotIn("не расшифровано", line)
 
 
+class SubjectPromptTests(unittest.TestCase):
+    """Промпт зависит от субъекта, но у звонка обязан остаться неизменным."""
+
+    # Отпечаток промпта звонка до появления второго субъекта. prompt_hash входит в
+    # evaluation_fingerprint: изменится — все сохранённые оценки звонков станут
+    # «устаревшими» и потребуют переоценки за деньги.
+    CALL_PROMPT_HASH = "36eeb3fd743d6d67a2888e7344c1c232a25a24c5312a9e02e70c9f22e4921f46"
+
+    def setUp(self):
+        self.crits = [{"idx": 0, "name": "X", "description": "Y",
+                       "is_critical": False, "deficiency": None}]
+
+    def test_call_prompt_is_byte_identical(self):
+        from call_qa.evaluation import evaluator
+        from call_qa.evaluation.fingerprint import content_hash
+        self.assertEqual(content_hash(evaluator.build_system(self.crits)),
+                         self.CALL_PROMPT_HASH)
+        self.assertEqual(
+            content_hash(evaluator.build_system(self.crits, config.SUBJECT_CALL)),
+            self.CALL_PROMPT_HASH)
+
+    def test_chat_prompt_differs_and_drops_call_only_wording(self):
+        from call_qa.evaluation import evaluator
+        chat = evaluator.build_system(self.crits, config.SUBJECT_WZ_EPISODE)
+        call = evaluator.build_system(self.crits, config.SUBJECT_CALL)
+        self.assertNotEqual(chat, call)
+        # у переписки нет диаризации и «звонка»
+        self.assertNotIn("[S1]/[S2]", chat)
+        self.assertIn("[S1]/[S2]", call)
+        self.assertIn("чате WhatsApp", chat)
+        self.assertIn("Роли определять не нужно", chat)
+
+    def test_chat_prompt_keeps_asr_leniency_only_for_voice_transcripts(self):
+        """Голосовые в чате расшифровывает Soniox — там ошибки распознавания реальны,
+        а в набранном тексте орфография на операторе (критерий «Грамотность»)."""
+        from call_qa.evaluation import evaluator
+        chat = evaluator.build_system(self.crits, config.SUBJECT_WZ_EPISODE)
+        self.assertIn("орфография и пунктуация в них полностью на ответственности оператора",
+                      chat)
+        self.assertIn("[голосовое, расшифровка:", chat)
+        self.assertIn("получен автоматическим распознаванием речи", chat)
+
+    def test_transcript_label_matches_the_subject(self):
+        from call_qa.evaluation import evaluator
+        direction = {"id": 71, "name": "Верификатор", "criteria": self.crits,
+                     "scale_hash": "h"}
+        call_body = evaluator.build_eval_body(
+            "т", direction, self.crits, use_rag=False, model="m")
+        chat_body = evaluator.build_eval_body(
+            "т", direction, self.crits, use_rag=False, model="m",
+            subject_kind=config.SUBJECT_WZ_EPISODE)
+        self.assertIn("ТРАНСКРИПТ ЗВОНКА:", call_body["messages"][0]["content"])
+        self.assertIn("ПЕРЕПИСКА В ЧАТЕ:", chat_body["messages"][0]["content"])
+        self.assertNotIn("ТРАНСКРИПТ ЗВОНКА:", chat_body["messages"][0]["content"])
+
+
+class ScoreBreakdownTests(unittest.TestCase):
+    """Балл зачитывает непроверяемые критерии — это должно быть видно."""
+
+    def _direction(self):
+        return {"id": 71, "name": "Верификатор", "criteria": [
+            {"idx": 0, "name": "Приветствие", "weight": 10, "is_critical": False,
+             "deficiency": None},
+            {"idx": 1, "name": "Регистрация", "weight": 30, "is_critical": False,
+             "deficiency": None},
+            {"idx": 2, "name": "КО", "weight": 0, "is_critical": True, "deficiency": None},
+        ]}
+
+    def test_unchecked_weight_is_reported_separately(self):
+        from call_qa.api import _ai_score, _score_breakdown
+        result = {"per_criterion": [
+            {"idx": 0, "verdict": "Correct", "source": "transcript"},
+            {"idx": 1, "verdict": "Pending", "source": "system_api"},
+            {"idx": 2, "verdict": "Correct", "source": "transcript"},
+        ]}
+        direction = self._direction()
+        breakdown = _score_breakdown(direction, result)
+        # балл не меняется — «Регистрация» по-прежнему зачтена
+        self.assertEqual(_ai_score(direction, result), 40)
+        # но видно, что 30 из них ИИ не проверял
+        self.assertEqual(breakdown["unchecked_weight"], 30)
+        self.assertEqual(breakdown["verified_weight"], 10)
+        self.assertEqual([c["name"] for c in breakdown["unchecked"]], ["Регистрация"])
+
+    def test_nothing_unchecked_when_everything_is_evaluated(self):
+        from call_qa.api import _score_breakdown
+        result = {"per_criterion": [
+            {"idx": 0, "verdict": "Correct", "source": "transcript"},
+            {"idx": 1, "verdict": "Incorrect", "source": "transcript"},
+            {"idx": 2, "verdict": "Correct", "source": "transcript"},
+        ]}
+        breakdown = _score_breakdown(self._direction(), result)
+        self.assertEqual(breakdown["unchecked_weight"], 0)
+        self.assertEqual(breakdown["unchecked"], [])
+        self.assertEqual(breakdown["verified_weight"], 40)
+
+    def test_card_shows_the_unchecked_badge(self):
+        card = (ROOT / "src" / "components" / "call_qa" / "CallReviewCard.jsx").read_text(
+            encoding="utf-8")
+        self.assertIn("score_breakdown?.unchecked_weight", card)
+        self.assertIn("не проверено", card)
+
+
 class SubjectIsolationTests(unittest.TestCase):
     """Числовые id звонков и эпизодов пересекаются — ключи не должны их путать."""
 
