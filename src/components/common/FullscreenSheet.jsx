@@ -14,6 +14,7 @@ import FaIcon from './FaIcon';
  *  - actions: узлы-кнопки справа (перед крестиком)
  *  - children: содержимое
  *  - z: z-index (по умолчанию 140)
+ *  - wide: снять ограничение ширины контента (для таблиц/таймлайнов на весь экран)
  */
 const FullscreenSheet = ({
   open,
@@ -24,6 +25,7 @@ const FullscreenSheet = ({
   actions = null,
   children,
   z = 140,
+  wide = false,
 }) => {
   useEffect(() => {
     if (!open) return undefined;
@@ -67,7 +69,7 @@ const FullscreenSheet = ({
           </div>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-6">
-          <div className="mx-auto w-full max-w-5xl">{children}</div>
+          <div className={`mx-auto w-full ${wide ? '' : 'max-w-5xl'}`}>{children}</div>
         </div>
       </div>
     </div>

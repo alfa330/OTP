@@ -12,6 +12,8 @@ CLI к бэклогу/канбану раздела «Задачи» — точ�
     python scripts/task_board.py backlog
     python scripts/task_board.py show 412
     python scripts/task_board.py create "Проверить выгрузку Oktell" --assignee 169 --backlog --estimate 120
+    python scripts/task_board.py create "Разобраться с дублями" --self --from 169
+    python scripts/task_board.py log "Починил выгрузку" --report "что сделано" --spent 2h30m
     python scripts/task_board.py deadline 412 --due "2026-08-05 18:00"
     python scripts/task_board.py deadline 412 --in 3d4h --estimate 90
     python scripts/task_board.py promote 412
@@ -45,6 +47,8 @@ COLUMN_TITLES = [
     ('done', 'Готово'),
 ]
 STATUS_ACTIONS = ('in_progress', 'completed', 'accepted', 'returned', 'reopened')
+# То же окно, что на доске: принятое раньше уходит в архив колонки «Готово».
+DONE_ARCHIVE_DAYS = 7
 
 
 def _load_env(path):
@@ -165,6 +169,25 @@ def parse_iso(value):
         return None
 
 
+def accepted_at(task):
+    """Момент приёмки — точка отсчёта архива «Готово» (как во фронте)."""
+    for item in reversed(task.get('history') or []):
+        if item.get('status_code') == 'accepted':
+            parsed = parse_iso(item.get('changed_at'))
+            if parsed:
+                return parsed
+    return parse_iso(task.get('completed_at')) or parse_iso(task.get('updated_at'))
+
+
+def is_done_archived(task, now=None):
+    if task.get('status') != 'accepted':
+        return False
+    moment = accepted_at(task)
+    if not moment:
+        return False
+    return (now or datetime.now()) - moment > timedelta(days=DONE_ARCHIVE_DAYS)
+
+
 DURATION_RE = re.compile(r'(?P<value>\d+)\s*(?P<unit>[dhmдчм]+)', re.IGNORECASE)
 UNIT_MINUTES = {'d': 1440, 'д': 1440, 'h': 60, 'ч': 60, 'm': 1, 'м': 1}
 
@@ -275,19 +298,29 @@ def cmd_board(client, args):
 
     now = datetime.now()
     buckets = {key: [] for key, _ in COLUMN_TITLES}
+    archived = []
     for task in tasks:
-        buckets[column_of(task)].append(task)
+        column = column_of(task)
+        if column == 'done' and is_done_archived(task, now) and not args.archive:
+            archived.append(task)
+        else:
+            buckets[column].append(task)
 
     print(f'Доска задач · {client.user_name} (id {client.user_id}) · всего {len(tasks)}')
     for key, title in COLUMN_TITLES:
         items = buckets[key]
         if key == 'backlog':
             items.sort(key=lambda t: (t.get('backlog_rank') is None, t.get('backlog_rank') or 0))
+        if key == 'done':
+            items.sort(key=lambda t: accepted_at(t) or datetime.min, reverse=True)
         print(f'\n── {title} ({len(items)}) ' + '─' * max(0, 60 - len(title)))
         if not items:
             print('   —')
         for task in items:
             print('   ' + task_line(task, now))
+        if key == 'done' and archived:
+            print(f'   … + {len(archived)} в архиве (принято больше {DONE_ARCHIVE_DAYS} дней назад, '
+                  f'показать: --archive)')
 
 
 def cmd_backlog(client, args):
@@ -320,6 +353,13 @@ def cmd_show(client, args):
     print(f'  исполнитель   {(task.get("assignee") or {}).get("name", "—")}')
     print(f'  постановщик   {(task.get("creator") or {}).get("name", "—")}')
     print(f'  срочность     {task.get("priority")}')
+    origin = task.get('requested_by') or {}
+    origin_label = origin.get('name') or (
+        'своя инициатива'
+        if (task.get('creator') or {}).get('id') == (task.get('assignee') or {}).get('id')
+        else '—'
+    )
+    print(f'  поручил       {origin_label}')
     print(f'  оценка        {format_minutes(task.get("estimate_minutes"))}')
     print(f'  затрачено     {format_minutes(task.get("spent_minutes"))} (по отчётам)')
     print(f'  план старта   {task.get("planned_start_at") or "—"}')
@@ -351,32 +391,111 @@ def cmd_show(client, args):
             print(f'    {item.get("changed_at")}  {item.get("status_code"):<12} {item.get("changed_by_name") or "—"}')
 
 
-def cmd_create(client, args):
+def _build_create_fields(client, args, assignee_id):
     fields = {
         'subject': args.subject,
-        'description': args.description or '',
-        'tag': args.tag,
-        'priority': args.priority,
-        'assigned_to': str(args.assignee),
-        'is_backlog': '1' if args.backlog else '0',
+        'description': getattr(args, 'description', '') or '',
+        'tag': getattr(args, 'tag', 'task'),
+        'priority': getattr(args, 'priority', 'normal'),
+        'assigned_to': str(assignee_id),
+        'is_backlog': '1' if getattr(args, 'backlog', False) else '0',
     }
-    if args.estimate:
+    if getattr(args, 'estimate', None):
         fields['estimate_minutes'] = str(parse_duration_to_minutes(args.estimate))
-    if args.due:
+    if getattr(args, 'due', None):
         fields['due_at'] = parse_due_argument(args.due)
-    elif args.in_:
+    elif getattr(args, 'in_', None):
         fields.update(split_minutes_for_form(parse_duration_to_minutes(args.in_)))
-    if args.checklist:
+    if getattr(args, 'checklist', None):
         fields['checklist_items'] = json.dumps([{'title': item} for item in args.checklist], ensure_ascii=False)
+    # Источник задачи: сотрудник, свободный текст либо (по умолчанию) своя инициатива.
+    if getattr(args, 'from_id', None):
+        fields['requested_by_id'] = str(args.from_id)
+    elif getattr(args, 'from_name', None):
+        fields['requested_by_name'] = args.from_name
+    return fields
 
-    result = client.create_task(fields)
+
+def _resolve_assignee(client, args):
+    """--self ставит задачу на текущего пользователя, иначе нужен --assignee."""
+    if getattr(args, 'self_assign', False):
+        return client.user_id
+    if getattr(args, 'assignee', None):
+        return args.assignee
+    raise SystemExit('Укажите исполнителя: --assignee <id> или --self (себе)')
+
+
+def _origin_label(args):
+    if getattr(args, 'from_id', None):
+        return f'поручил id {args.from_id}'
+    if getattr(args, 'from_name', None):
+        return f'поручил: {args.from_name}'
+    return 'своя инициатива'
+
+
+def cmd_create(client, args):
+    assignee_id = _resolve_assignee(client, args)
+    result = client.create_task(_build_create_fields(client, args, assignee_id))
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
     where = 'бэклог' if args.backlog else 'доска'
-    print(f'Создана задача #{result.get("task_id")} → {where}; дедлайн {result.get("due_at") or "—"}')
+    print(f'Создана задача #{result.get("task_id")} → {where}; {_origin_label(args)}; '
+          f'дедлайн {result.get("due_at") or "—"}')
     if result.get('warning'):
         print(f'warning: {result["warning"]}')
+
+
+def cmd_log(client, args):
+    """
+    Записать уже сделанную работу одной командой: создать задачу на себя,
+    провести её через работу и закрыть итоговым отчётом с трудозатратами.
+    """
+    assignee_id = client.user_id
+    fields = _build_create_fields(client, args, assignee_id)
+    fields['assigned_to'] = str(assignee_id)
+    fields['is_backlog'] = '0'
+    if args.spent and 'estimate_minutes' not in fields:
+        # Оценки не было — считаем, что она равна факту, чтобы метрика «факт к оценке» не врала.
+        fields['estimate_minutes'] = str(parse_duration_to_minutes(args.spent))
+
+    created = client.create_task(fields)
+    task_id = created.get('task_id')
+    if not task_id:
+        raise SystemExit(f'Не удалось создать задачу: {json.dumps(created, ensure_ascii=False)[:300]}')
+
+    steps = [('in_progress', {})]
+    for text in (args.progress or []):
+        steps.append(('__report__', {'body': text}))
+    steps.append(('completed', {
+        'report': args.report,
+        'spent': parse_duration_to_minutes(args.spent) if args.spent else None,
+    }))
+    if not args.keep_open:
+        steps.append(('accepted', {}))
+
+    done = []
+    for action, payload in steps:
+        if action == '__report__':
+            client.add_report(task_id, payload['body'])
+            done.append('промежуточный отчёт')
+            continue
+        if action == 'completed':
+            client.set_status(task_id, 'completed',
+                              completion_summary=payload['report'],
+                              spent_minutes=payload['spent'])
+            done.append('сдана с отчётом')
+            continue
+        client.set_status(task_id, action)
+        done.append({'in_progress': 'взята в работу', 'accepted': 'принята'}[action])
+
+    if args.json:
+        print(json.dumps({'task_id': task_id, 'steps': done}, ensure_ascii=False, indent=2))
+        return
+    spent_label = format_minutes(parse_duration_to_minutes(args.spent)) if args.spent else '—'
+    print(f'Задача #{task_id} «{args.subject}»: {", ".join(done)}')
+    print(f'  затрачено {spent_label}; {_origin_label(args)}; '
+          f'{"осталась на проверке" if args.keep_open else "закрыта"}')
 
 
 def cmd_deadline(client, args):
@@ -542,6 +661,8 @@ def build_parser():
     board = sub.add_parser('board', help='канбан по колонкам')
     board.add_argument('--mine', action='store_true', help='только мои задачи')
     board.add_argument('--assignee', type=int, help='фильтр по id исполнителя')
+    board.add_argument('--archive', action='store_true',
+                       help=f'показать и «Готово» старше {DONE_ARCHIVE_DAYS} дней (по умолчанию в архиве)')
     board.set_defaults(func=cmd_board)
 
     backlog = sub.add_parser('backlog', help='бэклог в порядке приоритета')
@@ -553,7 +674,8 @@ def build_parser():
 
     create = sub.add_parser('create', help='создать задачу (по умолчанию сразу на доску)')
     create.add_argument('subject')
-    create.add_argument('--assignee', type=int, required=True, help='id исполнителя (см. recipients)')
+    create.add_argument('--assignee', type=int, help='id исполнителя (см. recipients)')
+    create.add_argument('--self', dest='self_assign', action='store_true', help='поставить задачу себе')
     create.add_argument('--description', default='')
     create.add_argument('--tag', default='task', choices=('task', 'problem', 'suggestion'))
     create.add_argument('--priority', default='normal', choices=('normal', 'urgent', 'critical'))
@@ -562,7 +684,23 @@ def build_parser():
     create.add_argument('--due', help='абсолютный дедлайн: "2026-08-05 18:00"')
     create.add_argument('--in', dest='in_', help='дедлайн через: 3d4h')
     create.add_argument('--checklist', nargs='*', help='пункты чек-листа')
+    create.add_argument('--from', dest='from_id', type=int, help='id того, кто поручил задачу')
+    create.add_argument('--from-name', dest='from_name', help='кто поручил, если его нет в системе')
     create.set_defaults(func=cmd_create)
+
+    log = sub.add_parser('log', help='записать уже сделанную работу: создать себе задачу и сразу закрыть отчётом')
+    log.add_argument('subject')
+    log.add_argument('--report', required=True, help='отчёт о проделанной работе')
+    log.add_argument('--spent', help='затрачено времени: 3h, 90m, 1d2h')
+    log.add_argument('--description', default='')
+    log.add_argument('--tag', default='task', choices=('task', 'problem', 'suggestion'))
+    log.add_argument('--priority', default='normal', choices=('normal', 'urgent', 'critical'))
+    log.add_argument('--estimate', help='оценка, если она была (иначе берётся равной факту)')
+    log.add_argument('--progress', nargs='*', help='промежуточные отчёты по ходу работы')
+    log.add_argument('--from', dest='from_id', type=int, help='id того, кто поручил')
+    log.add_argument('--from-name', dest='from_name', help='кто поручил, если его нет в системе')
+    log.add_argument('--keep-open', action='store_true', help='оставить на проверке, не принимать')
+    log.set_defaults(func=cmd_log)
 
     deadline = sub.add_parser('deadline', help='дедлайн / оценка / плановый старт')
     deadline.add_argument('task_id', type=int)

@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { Maximize2, Minimize2 } from 'lucide-react';
 import { APPLE_FONT } from '../ui/ios';
+import FullscreenSheet from '../common/FullscreenSheet';
 
 /*
  * Бэклог + канбан + таймлайн раздела «Задачи».
@@ -42,6 +44,9 @@ const ESTIMATE_PRESETS = [
 const MINUTE = 60 * 1000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
+
+/** Через сколько принятая задача уходит из «Готово» в архив, чтобы доска не забивалась. */
+export const DONE_ARCHIVE_DAYS = 7;
 
 /* ─────────────── Утилиты ─────────────── */
 
@@ -130,6 +135,14 @@ const DUE_TONE_CLASS = {
   none:    'bg-slate-100 text-slate-400 ring-transparent',
 };
 
+const pluralTasks = (count) => {
+  const mod10 = Math.abs(count) % 10;
+  const mod100 = Math.abs(count) % 100;
+  if (mod10 === 1 && mod100 !== 11) return 'задача';
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'задачи';
+  return 'задач';
+};
+
 const initials = (name) => String(name || '?')
   .trim()
   .split(/\s+/)
@@ -172,6 +185,30 @@ const actualStartOf = (task) => {
   const history = Array.isArray(task?.history) ? task.history : [];
   const started = history.find((item) => item?.status_code === 'in_progress');
   return parseDate(started?.changed_at);
+};
+
+/**
+ * Момент приёмки задачи — точка отсчёта архива «Готово».
+ * Берём из истории статусов; completed_at годится только как запасной вариант,
+ * иначе задача, принятая сегодня, но выполненная 10 дней назад, сразу бы исчезла.
+ */
+export const acceptedAtOf = (task) => {
+  const history = Array.isArray(task?.history) ? task.history : [];
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    if (history[index]?.status_code === 'accepted') {
+      const parsed = parseDate(history[index].changed_at);
+      if (parsed) return parsed;
+    }
+  }
+  return parseDate(task?.completed_at) || parseDate(task?.updated_at);
+};
+
+/** Принятая задача старше окна — на доске её не показываем. */
+export const isDoneArchived = (task, now = Date.now()) => {
+  if (task?.status !== 'accepted') return false;
+  const acceptedAt = acceptedAtOf(task);
+  if (!acceptedAt) return false;
+  return now - acceptedAt.getTime() > DONE_ARCHIVE_DAYS * DAY;
 };
 
 const actualEndOf = (task) => {
@@ -766,9 +803,19 @@ const BoardCard = ({ task, canPlan, isDragging, onOpen, onApplyPlan, onDragStart
   );
 };
 
-const BoardView = ({ tasksByColumn, canPlan, wipLimit, onWipLimitChange, onOpen, onApplyPlan, onDrop }) => {
+const BoardView = ({
+  tasksByColumn,
+  archivedDone = [],
+  canPlan,
+  wipLimit,
+  onWipLimitChange,
+  onOpen,
+  onApplyPlan,
+  onDrop,
+}) => {
   const [dragged, setDragged] = useState(null);
   const [hoverColumn, setHoverColumn] = useState(null);
+  const [archiveOpen, setArchiveOpen] = useState(false);
 
   const allowedColumns = useMemo(() => {
     if (!dragged) return null;
@@ -803,6 +850,7 @@ const BoardView = ({ tasksByColumn, canPlan, wipLimit, onWipLimitChange, onOpen,
           const isAllowed = !allowedColumns || allowedColumns.has(column.id);
           const isHover = hoverColumn === column.id && isAllowed;
           const isProgress = column.id === 'progress';
+          const isDone = column.id === 'done';
 
           return (
             <section
@@ -861,7 +909,7 @@ const BoardView = ({ tasksByColumn, canPlan, wipLimit, onWipLimitChange, onOpen,
               )}
 
               <div className="flex min-h-[72px] flex-col gap-1.5">
-                {items.length === 0 ? (
+                {items.length === 0 && !(isDone && archivedDone.length > 0) ? (
                   <p className="px-1.5 py-3 text-[11.5px] text-slate-400">{column.caption}</p>
                 ) : (
                   items.map((entry) => (
@@ -876,6 +924,31 @@ const BoardView = ({ tasksByColumn, canPlan, wipLimit, onWipLimitChange, onOpen,
                       onDragEnd={handleDragEnd}
                     />
                   ))
+                )}
+
+                {isDone && archiveOpen && archivedDone.map((entry) => (
+                  <BoardCard
+                    key={entry.task.id}
+                    task={entry.task}
+                    canPlan={canPlan}
+                    isDragging={dragged?.task?.id === entry.task.id}
+                    onOpen={onOpen}
+                    onApplyPlan={onApplyPlan}
+                    onDragStart={(event, task) => handleDragStart(event, task, entry.resolve)}
+                    onDragEnd={handleDragEnd}
+                  />
+                ))}
+
+                {isDone && archivedDone.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setArchiveOpen((prev) => !prev)}
+                    className="rounded-lg px-1.5 py-2 text-left text-[11.5px] text-slate-400 transition hover:bg-slate-200/60 hover:text-slate-600"
+                  >
+                    {archiveOpen
+                      ? 'Скрыть архив'
+                      : `Архив · ${archivedDone.length} ${pluralTasks(archivedDone.length)}`}
+                  </button>
                 )}
               </div>
             </section>
@@ -921,6 +994,7 @@ export const timelineSpanOf = (task, now = Date.now()) => {
 
 const TimelineView = ({ tasks, onOpen }) => {
   const [range, setRange] = useState('month');
+  const [expanded, setExpanded] = useState(false);
   const now = Date.now();
 
   const rangeDays = TIMELINE_RANGES.find((item) => item.value === range)?.days || 30;
@@ -995,8 +1069,8 @@ const TimelineView = ({ tasks, onOpen }) => {
     return { left: `${left}%`, width: `${width}%` };
   };
 
-  return (
-    <div className="space-y-3">
+  const content = (
+    <div className="space-y-3" style={{ fontFamily: APPLE_FONT }}>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-4">
           <span className="text-[12px] text-slate-500">
@@ -1037,11 +1111,23 @@ const TimelineView = ({ tasks, onOpen }) => {
             </span>
           )}
         </div>
-        <SegmentedControl
-          value={range}
-          onChange={setRange}
-          options={TIMELINE_RANGES.map(({ value, label }) => ({ value, label }))}
-        />
+        <div className="flex items-center gap-2">
+          <SegmentedControl
+            value={range}
+            onChange={setRange}
+            options={TIMELINE_RANGES.map(({ value, label }) => ({ value, label }))}
+          />
+          <button
+            type="button"
+            onClick={() => setExpanded((prev) => !prev)}
+            title={expanded ? 'Свернуть' : 'Развернуть на весь экран'}
+            className="grid h-[32px] w-[32px] place-items-center rounded-[10px] bg-slate-100 text-slate-500 transition hover:bg-slate-200 hover:text-slate-700 active:scale-95"
+          >
+            {expanded
+              ? <Minimize2 size={14} strokeWidth={2} />
+              : <Maximize2 size={14} strokeWidth={2} />}
+          </button>
+        </div>
       </div>
 
       {rows.length === 0 ? (
@@ -1068,7 +1154,7 @@ const TimelineView = ({ tasks, onOpen }) => {
             </div>
           </div>
 
-          <div className="max-h-[520px] overflow-y-auto">
+          <div className={`overflow-y-auto ${expanded ? 'max-h-[calc(100vh-280px)]' : 'max-h-[520px]'}`}>
             {rows.map(({ task, span }) => {
               const planned = barGeometry(span.plannedStart, span.plannedEnd);
               const actual = barGeometry(span.actualStart, span.actualFinish);
@@ -1148,6 +1234,25 @@ const TimelineView = ({ tasks, onOpen }) => {
       </div>
     </div>
   );
+
+  // Полный экран — портал мимо .tv-root, иначе раздел навязал бы свою типографику.
+  if (expanded) {
+    return createPortal(
+      <FullscreenSheet
+        open
+        wide
+        icon="fa-chart-gantt"
+        title="Таймлайн задач"
+        subtitle={`${rows.length} ${rows.length === 1 ? 'задача' : 'задач'} в окне · Esc чтобы выйти`}
+        onClose={() => setExpanded(false)}
+      >
+        {content}
+      </FullscreenSheet>,
+      document.body
+    );
+  }
+
+  return content;
 };
 
 /* ─────────────── Оболочка ─────────────── */
@@ -1233,18 +1338,24 @@ const TaskBoardWorkspace = ({
     [scopedTasks]
   );
 
-  const tasksByColumn = useMemo(() => {
+  // «Готово» — скользящее окно: принятое больше недели назад уезжает в архив колонки,
+  // иначе доска со временем превращается в свалку выполненного.
+  const { tasksByColumn, archivedDone } = useMemo(() => {
+    const now = Date.now();
     const buckets = Object.fromEntries(BOARD_COLUMNS.map((column) => [column.id, []]));
+    const archived = [];
     scopedTasks.forEach((task) => {
       const columnId = columnOfTask(task);
       if (!buckets[columnId]) return;
-      buckets[columnId].push({
-        task,
-        resolve: (toColumn) => resolveBoardDrop(task, toColumn, dropContext),
-      });
+      const entry = { task, resolve: (toColumn) => resolveBoardDrop(task, toColumn, dropContext) };
+      if (columnId === 'done' && isDoneArchived(task, now)) archived.push(entry);
+      else buckets[columnId].push(entry);
     });
     buckets.backlog.sort((a, b) => (a.task.backlog_rank ?? 1e9) - (b.task.backlog_rank ?? 1e9));
-    return buckets;
+    const acceptedTime = (entry) => acceptedAtOf(entry.task)?.getTime() || 0;
+    buckets.done.sort((a, b) => acceptedTime(b) - acceptedTime(a));
+    archived.sort((a, b) => acceptedTime(b) - acceptedTime(a));
+    return { tasksByColumn: buckets, archivedDone: archived };
   }, [scopedTasks, dropContext]);
 
   const applyBoardPatch = useCallback(async (task, patch, optimistic = null) => {
@@ -1311,7 +1422,9 @@ const TaskBoardWorkspace = ({
         <SegmentedControl value={scope} options={scopeOptions} onChange={setScope} />
         {mode === 'board' && (
           <span className="text-[11.5px] text-slate-400">
-            Перетащите карточку между колонками, чтобы сменить статус
+            {archivedDone.length > 0
+              ? `Перетащите карточку между колонками · принятое больше ${DONE_ARCHIVE_DAYS} дней назад — в архиве колонки «Готово»`
+              : 'Перетащите карточку между колонками, чтобы сменить статус'}
           </span>
         )}
       </div>
@@ -1331,6 +1444,7 @@ const TaskBoardWorkspace = ({
       {mode === 'board' && (
         <BoardView
           tasksByColumn={tasksByColumn}
+          archivedDone={archivedDone}
           canPlan={canPlan}
           wipLimit={wipLimit}
           onWipLimitChange={handleWipLimitChange}
