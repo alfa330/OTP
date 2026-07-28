@@ -151,7 +151,11 @@ class TezCalculationModelRegistryTests(unittest.TestCase):
         self.assertIn("dict(CALCULATION_MODEL_DESCRIPTIONS[CALCULATION_MODEL_TEZ_LINE])", self.src)
         self.assertIn("dict(CALCULATION_MODEL_DESCRIPTIONS[CALCULATION_MODEL_TEZ_OP])", self.src)
         self.assertIn("CALCULATION_MODEL_TEZ_LINE: _CALC_METRICS_HEAD + _CALC_METRICS_TAIL", self.src)
-        self.assertIn("CALCULATION_MODEL_TEZ_OP: _CALC_METRICS_HEAD + _CALC_METRICS_TAIL", self.src)
+        self.assertIn("CALCULATION_MODEL_TEZ_OP: _CALC_METRICS_HEAD + [", self.src)
+        self.assertIn("_calc_metric('dial_time', 'Время набора'", self.src)
+        self.assertIn("_calc_metric('talk_time', 'В разговоре'", self.src)
+        self.assertIn("_calc_metric('chats', 'Чаты'", self.src)
+        self.assertIn("_calc_metric('tez_successes', 'Успешки'", self.src)
 
     def test_status_profile_branch_for_tez(self):
         self.assertIn("if code in CALCULATION_MODEL_TEZ_CODES:", self.src)

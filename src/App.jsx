@@ -4451,6 +4451,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return Number.isFinite(num) && Math.abs(num) > 0;
         };
 
+        const getHoursMetricTotal = (op, aggregateKey, dailyKey) => {
+            const aggregates = (op?.aggregates && typeof op.aggregates === 'object') ? op.aggregates : {};
+            const aggregateValue = aggregates[aggregateKey];
+            if (aggregateValue !== null && aggregateValue !== undefined && aggregateValue !== '') {
+                const aggregateNumber = Number(aggregateValue);
+                if (Number.isFinite(aggregateNumber)) return aggregateNumber;
+            }
+
+            const daily = (op?.daily && typeof op.daily === 'object' && !Array.isArray(op.daily)) ? op.daily : {};
+            return Object.values(daily).reduce((sum, dayData) => {
+                if (!dayData || typeof dayData !== 'object') return sum;
+                const value = Number(dayData[dailyKey]);
+                return sum + (Number.isFinite(value) ? value : 0);
+            }, 0);
+        };
+
         const hasAnyHoursIndicators = (op) => {
             if (!op || typeof op !== 'object') return false;
 
@@ -4458,8 +4474,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const aggregateKeys = [
             'regular_hours',
             'total_break_time',
+            'total_dial_time',
             'total_talk_time',
             'total_calls',
+            'total_chats',
             'total_efficiency_hours',
             'calls_per_hour',
             'fines'
@@ -4486,8 +4504,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             if (
                 hasNonZeroMetric(dayData.work_time) ||
                 hasNonZeroMetric(dayData.break_time) ||
+                hasNonZeroMetric(dayData.dial_time) ||
                 hasNonZeroMetric(dayData.talk_time) ||
                 hasNonZeroMetric(dayData.calls) ||
+                hasNonZeroMetric(dayData.chats) ||
                 hasNonZeroMetric(dayData.efficiency) ||
                 hasNonZeroMetric(dayData.fine_amount) ||
                 hasNonZeroMetric(computeNoPhoneHoursFromDaily(dayData))
@@ -4821,11 +4841,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return out;
             }
             if (isTezOpContext) {
-                // ОП TEZ: добавляем «Успешки» (кол-во успешек по дням) сразу за звонками.
+                // ОП TEZ: показатели звонков/чатов и «Успешки» идут рядом.
                 const out = [];
                 for (const t of TABS) {
                     out.push(t);
-                    if (t.key === 'calls') out.push({ key: 'tez_successes', label: 'Успешки', unit: 'шт' });
+                    if (t.key === 'calls') {
+                        out.push({ key: 'dial_time', label: 'Время набора', unit: 'ч' });
+                        out.push({ key: 'talk_time', label: 'В разговоре', unit: 'ч' });
+                        out.push({ key: 'chats', label: 'Чаты', unit: 'шт' });
+                        out.push({ key: 'tez_successes', label: 'Успешки', unit: 'шт' });
+                    }
                 }
                 return out;
             }
@@ -4849,7 +4874,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 tabs: keys.map(key => byKey.get(key)).filter(Boolean)
             });
             return [
-                buildGroup('Работа', 'fa-clock', 'blue', ['work_time', 'break_time', 'calls', 'efficiency', 'tez_successes']),
+                buildGroup('Работа', 'fa-clock', 'blue', ['work_time', 'break_time', 'calls', 'dial_time', 'talk_time', 'chats', 'efficiency', 'tez_successes']),
                 buildGroup('Метрики', 'fa-chart-line', 'cyan', ['avg_score', 'response_time']),
                 buildGroup('Активности', 'fa-layer-group', 'emerald', ['trainings', 'technical_issues', 'offline_activity', 'no_phone']),
                 buildGroup('Деньги', 'fa-coins', 'slate', ['bonuses', 'fines'])
@@ -5005,6 +5030,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             let noPhoneTotal = 0;
             let sumFines = 0;
             let sumBonuses = 0;
+            let sumCalls = 0;
+            let sumDialTime = 0;
+            let sumTalkTime = 0;
+            let sumChats = 0;
             let sumTezPlan = 0; // сумма индивидуальных планов успешек (только tez_op)
             let hasTezPlanRows = false;
 
@@ -5070,6 +5099,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             technicalIssuesTotal += technicalHoursTotal;
             offlineActivitiesTotal += offlineHoursTotal;
             noPhoneTotal += noPhoneHoursTotal;
+            sumCalls += getHoursMetricTotal(op, 'total_calls', 'calls');
+            sumDialTime += getHoursMetricTotal(op, 'total_dial_time', 'dial_time');
+            sumTalkTime += getHoursMetricTotal(op, 'total_talk_time', 'talk_time');
+            sumChats += getHoursMetricTotal(op, 'total_chats', 'chats');
 
             // compute fines per operator (support both array of fines and legacy fine_amount)
             if (op.daily) {
@@ -5103,6 +5136,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             sumEff,
             sumFines,
             sumBonuses,
+            sumCalls,
+            sumDialTime,
+            sumTalkTime,
+            sumChats,
             avgOcc,
             trainingsTotal,
             trainingsCounted,
@@ -5472,7 +5509,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             if (!d) return <div className="text-sm text-gray-400">—</div>;
             const val = d[metricKey];
-            if (metricKey === 'calls') return <div className="text-sm font-medium">{Number(val || 0)}</div>;
+            if (metricKey === 'calls' || metricKey === 'chats') {
+                return <div className="text-sm font-medium">{Math.round(Number(val || 0))}</div>;
+            }
             const num = Number(val || 0);
             return <div className="text-sm font-medium">{num ? num.toFixed(2) : '0.00'}</div>;
         }
@@ -7278,7 +7317,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </>
                     )}
                     {selectedTab === 'calls' && (
-                    <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>{isChatModel ? 'Кол-во чатов' : 'КВЗ'}</div>
+                    <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>
+                        {isTezOpContext ? 'Всего звонков' : (isChatModel ? 'Кол-во чатов' : 'КВЗ')}
+                    </div>
+                    )}
+                    {(selectedTab === 'dial_time' || selectedTab === 'talk_time') && (
+                    <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Итого (ч)</div>
+                    )}
+                    {selectedTab === 'chats' && (
+                    <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Всего чатов</div>
                     )}
                     {selectedTab === 'tez_successes' && (
                     <>
@@ -7384,7 +7431,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             const displayedTotal = regular + totalHoursCounted + totalTechnicalIssuesHours + totalOfflineActivityHours;
                             const prodDiff = displayedTotal - norm;
 
-                            const callsTotal = Number(aggr.total_calls || 0);
+                            const callsTotal = getHoursMetricTotal(op, 'total_calls', 'calls');
+                            const dialTimeTotal = getHoursMetricTotal(op, 'total_dial_time', 'dial_time');
+                            const talkTimeTotal = getHoursMetricTotal(op, 'total_talk_time', 'talk_time');
+                            const chatsTotal = getHoursMetricTotal(op, 'total_chats', 'chats');
                             const effTotal = Number(aggr.total_efficiency_hours || 0);
                             // КВЗ (звонки/чаты в час): делим на базовые часы ТОЛЬКО тех дней,
                             // что относятся к модели текущего вида. Для переведённых посреди месяца
@@ -7530,7 +7580,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                 {selectedTab === 'calls' && (
                                 <div className={`${hoursSummaryColClass} w-36 text-sm`}>
-                                    {effectiveCallHours > 0 ? formatNumber(callsTotal / effectiveCallHours, 1) : '—'}
+                                    {isTezOpContext
+                                        ? Math.round(callsTotal).toLocaleString('ru-RU')
+                                        : (effectiveCallHours > 0 ? formatNumber(callsTotal / effectiveCallHours, 1) : '—')}
+                                </div>
+                                )}
+
+                                {(selectedTab === 'dial_time' || selectedTab === 'talk_time') && (
+                                <div className={`${hoursSummaryColClass} w-36 text-sm`}>
+                                    {(selectedTab === 'dial_time' ? dialTimeTotal : talkTimeTotal).toFixed(2)}
+                                </div>
+                                )}
+
+                                {selectedTab === 'chats' && (
+                                <div className={`${hoursSummaryColClass} w-36 text-sm`}>
+                                    {Math.round(chatsTotal).toLocaleString('ru-RU')}
                                 </div>
                                 )}
 
@@ -7672,7 +7736,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         )}
 
                         {selectedTab === 'calls' && (
-                        <div className={`${hoursSummaryColClass} w-36 text-sm`}>—</div>
+                        <div className={`${hoursSummaryColClass} w-36 text-sm`}>
+                            {isTezOpContext ? Math.round(footerTotals.sumCalls).toLocaleString('ru-RU') : '—'}
+                        </div>
+                        )}
+
+                        {(selectedTab === 'dial_time' || selectedTab === 'talk_time') && (
+                        <div className={`${hoursSummaryColClass} w-36 text-sm`}>
+                            {(selectedTab === 'dial_time' ? footerTotals.sumDialTime : footerTotals.sumTalkTime).toFixed(2)}
+                        </div>
+                        )}
+
+                        {selectedTab === 'chats' && (
+                        <div className={`${hoursSummaryColClass} w-36 text-sm`}>
+                            {Math.round(footerTotals.sumChats).toLocaleString('ru-RU')}
+                        </div>
                         )}
 
                         {selectedTab === 'tez_successes' && (
