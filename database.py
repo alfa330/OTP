@@ -1,4 +1,4 @@
-﻿import os
+import os
 import logging
 import psycopg2
 from contextlib import contextmanager
@@ -3177,6 +3177,20 @@ class Database:
             # Оба поля пустые = своя инициатива.
             cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS requested_by_id INTEGER REFERENCES users(id) ON DELETE SET NULL;")
             cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS requested_by_name VARCHAR(160);")
+            # Напоминание в Telegram перед дедлайном: за сколько минут предупредить.
+            # NULL = напоминание выключено; максимум сутки (по требованию — «максимум за день до»).
+            # reminder_sent_at сбрасывается при смене срока или интервала, чтобы напомнить заново.
+            cursor.execute("""
+                ALTER TABLE tasks ADD COLUMN IF NOT EXISTS reminder_minutes_before INTEGER
+                    CHECK (reminder_minutes_before IS NULL
+                           OR (reminder_minutes_before >= 0 AND reminder_minutes_before <= 1440));
+            """)
+            cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS reminder_sent_at TIMESTAMP;")
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_tasks_due_reminder
+                ON tasks(due_at, reminder_minutes_before)
+                WHERE due_at IS NOT NULL AND reminder_minutes_before IS NOT NULL;
+            """)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_tasks_backlog_rank
                 ON tasks(is_backlog, backlog_rank NULLS LAST, created_at DESC);
@@ -3266,6 +3280,18 @@ class Database:
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_task_notes_owner_updated ON task_notes(owner_id, updated_at DESC);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_task_notes_owner_due ON task_notes(owner_id, due_at);")
+            # Напоминание в Telegram по дедлайну заметки — та же механика, что у задач.
+            cursor.execute("""
+                ALTER TABLE task_notes ADD COLUMN IF NOT EXISTS reminder_minutes_before INTEGER
+                    CHECK (reminder_minutes_before IS NULL
+                           OR (reminder_minutes_before >= 0 AND reminder_minutes_before <= 1440));
+            """)
+            cursor.execute("ALTER TABLE task_notes ADD COLUMN IF NOT EXISTS reminder_sent_at TIMESTAMP;")
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_task_notes_due_reminder
+                ON task_notes(due_at, reminder_minutes_before)
+                WHERE due_at IS NOT NULL AND reminder_minutes_before IS NOT NULL;
+            """)
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS raw_resource_uploads (
@@ -38339,6 +38365,97 @@ class Database:
             raise ValueError("INVALID_ESTIMATE")
         return minutes or None
 
+    # «Максимум за день до» — жёсткий предел, дальше напоминание теряет смысл.
+    TASK_REMINDER_MAX_MINUTES = 24 * 60
+    TASK_REMINDER_DEFAULT_MINUTES = 24 * 60
+
+    def _normalize_task_reminder_minutes(self, reminder_minutes_before):
+        """За сколько минут до дедлайна напомнить. Пусто/0 = напоминание выключено."""
+        if reminder_minutes_before is None or reminder_minutes_before is _UNSET:
+            return None
+        if isinstance(reminder_minutes_before, str) and not reminder_minutes_before.strip():
+            return None
+        try:
+            minutes = int(reminder_minutes_before)
+        except Exception:
+            raise ValueError("INVALID_REMINDER")
+        if minutes < 0 or minutes > self.TASK_REMINDER_MAX_MINUTES:
+            raise ValueError("INVALID_REMINDER")
+        return minutes or None
+
+    def collect_due_task_reminders(self, limit=100):
+        """
+        Напоминания, которые пора отправить: наступило (due_at - reminder), но дедлайн ещё не прошёл.
+        Просроченные и закрытые не берём — напоминать о них поздно и бессмысленно.
+        Возвращает записи заметок и задач с telegram-адресатом.
+        """
+        now = self._task_now()
+        result = []
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT n.id, n.title, n.body, n.due_at, n.priority, u.telegram_id, u.name
+                FROM task_notes n
+                JOIN users u ON u.id = n.owner_id
+                WHERE n.due_at IS NOT NULL
+                  AND n.reminder_minutes_before IS NOT NULL
+                  AND n.reminder_sent_at IS NULL
+                  AND n.is_done = FALSE
+                  AND u.telegram_id IS NOT NULL
+                  AND n.due_at > %s
+                  AND n.due_at - (n.reminder_minutes_before * INTERVAL '1 minute') <= %s
+                ORDER BY n.due_at ASC
+                LIMIT %s
+            """, (now, now, int(limit)))
+            for row in cursor.fetchall():
+                result.append({
+                    "kind": "note",
+                    "id": row[0],
+                    "title": (row[1] or '').strip() or 'Заметка',
+                    "body": row[2] or '',
+                    "due_at": row[3],
+                    "priority": row[4] or 'normal',
+                    "chat_id": row[5],
+                    "recipient_name": row[6]
+                })
+
+            cursor.execute("""
+                SELECT t.id, t.subject, t.description, t.due_at, t.priority, u.telegram_id, u.name
+                FROM tasks t
+                JOIN users u ON u.id = t.assigned_to
+                WHERE t.due_at IS NOT NULL
+                  AND t.reminder_minutes_before IS NOT NULL
+                  AND t.reminder_sent_at IS NULL
+                  AND t.is_backlog = FALSE
+                  AND t.status NOT IN ('completed', 'accepted')
+                  AND u.telegram_id IS NOT NULL
+                  AND t.due_at > %s
+                  AND t.due_at - (t.reminder_minutes_before * INTERVAL '1 minute') <= %s
+                ORDER BY t.due_at ASC
+                LIMIT %s
+            """, (now, now, int(limit)))
+            for row in cursor.fetchall():
+                result.append({
+                    "kind": "task",
+                    "id": row[0],
+                    "title": (row[1] or '').strip() or f'Задача #{row[0]}',
+                    "body": row[2] or '',
+                    "due_at": row[3],
+                    "priority": row[4] or 'normal',
+                    "chat_id": row[5],
+                    "recipient_name": row[6]
+                })
+        return result
+
+    def mark_task_reminder_sent(self, kind, record_id):
+        """Отметить напоминание отправленным, чтобы не дублировать его каждые пять минут."""
+        table = 'task_notes' if str(kind) == 'note' else 'tasks'
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                f"UPDATE {table} SET reminder_sent_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty') WHERE id = %s",
+                (int(record_id),)
+            )
+        return True
+
     def _normalize_task_origin(self, requested_by_id, requested_by_name):
         """
         Источник задачи: сотрудник из системы либо свободный текст.
@@ -38473,7 +38590,8 @@ class Database:
             planned_start_at=None,
             due_at=None,
             requested_by_id=None,
-            requested_by_name=None
+            requested_by_name=None,
+            reminder_minutes_before=None
     ):
         subject_norm = (subject or '').strip()
         description_norm = (description or '').strip() or None
@@ -38487,6 +38605,7 @@ class Database:
         estimate_minutes_norm = self._normalize_task_estimate_minutes(estimate_minutes)
         planned_start_at_norm = self._parse_task_datetime(planned_start_at, "INVALID_PLANNED_START")
         requested_by_id_norm, requested_by_name_norm = self._normalize_task_origin(requested_by_id, requested_by_name)
+        reminder_minutes_norm = self._normalize_task_reminder_minutes(reminder_minutes_before)
         now = self._task_now()
         # Абсолютный дедлайн (нужен агентам/планировщику) выигрывает у относительного «через N».
         due_at_absolute = self._parse_task_datetime(due_at, "INVALID_DEADLINE")
@@ -38520,10 +38639,10 @@ class Database:
                     deadline_duration_minutes, due_at, is_regulation, recurrence_type,
                     recurrence_interval, recurrence_next_at, regulation_iteration,
                     is_backlog, backlog_rank, estimate_minutes, planned_start_at,
-                    requested_by_id, requested_by_name,
+                    requested_by_id, requested_by_name, reminder_minutes_before,
                     created_at, updated_at
                 )
-                VALUES (%s, %s, %s, %s, 'assigned', %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, 'assigned', %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id, created_at, updated_at
             """, (
                 subject_norm,
@@ -38544,6 +38663,7 @@ class Database:
                 planned_start_at_norm,
                 requested_by_id_norm,
                 requested_by_name_norm,
+                reminder_minutes_norm if due_at else None,
                 now,
                 now
             ))
@@ -38586,7 +38706,8 @@ class Database:
             "estimate_minutes": estimate_minutes_norm,
             "planned_start_at": self._task_dt_to_iso(planned_start_at_norm),
             "requested_by_id": requested_by_id_norm,
-            "requested_by_name": requested_by_name_norm
+            "requested_by_name": requested_by_name_norm,
+            "reminder_minutes_before": reminder_minutes_norm if due_at else None
         }
 
     def edit_task(
@@ -38608,7 +38729,8 @@ class Database:
             estimate_minutes=_UNSET,
             planned_start_at=_UNSET,
             requested_by_id=_UNSET,
-            requested_by_name=_UNSET
+            requested_by_name=_UNSET,
+            reminder_minutes_before=_UNSET
     ):
         task_id = int(task_id)
         requester_id = int(requester_id)
@@ -38628,12 +38750,13 @@ class Database:
         has_estimate = estimate_minutes is not _UNSET
         has_planned_start = planned_start_at is not _UNSET
         has_origin = requested_by_id is not _UNSET or requested_by_name is not _UNSET
+        has_reminder = reminder_minutes_before is not _UNSET
 
         if not any([
             has_subject, has_description, has_tag, has_assigned_to,
             has_priority, has_deadline, has_due_at, has_is_regulation,
             has_recurrence_type, has_recurrence_interval, has_checklist,
-            has_estimate, has_planned_start, has_origin
+            has_estimate, has_planned_start, has_origin, has_reminder
         ]):
             raise ValueError("NOTHING_TO_UPDATE")
 
@@ -38646,7 +38769,7 @@ class Database:
                     t.deadline_duration_minutes, t.due_at,
                     t.is_regulation, t.recurrence_type, t.recurrence_interval,
                     t.recurrence_next_at, t.created_at, t.estimate_minutes, t.planned_start_at,
-                    t.requested_by_id, t.requested_by_name
+                    t.requested_by_id, t.requested_by_name, t.reminder_minutes_before
                 FROM tasks t
                 LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 WHERE t.id = %s
@@ -38674,6 +38797,7 @@ class Database:
             current_planned_start_at = row[17]
             current_requested_by_id = row[18]
             current_requested_by_name = row[19]
+            current_reminder = row[20]
 
             if not self._task_visible_for_requester(role, requester_id, created_by, current_assigned_to, assignee_role, assignee_supervisor_id):
                 raise PermissionError("TASK_FORBIDDEN")
@@ -38741,6 +38865,12 @@ class Database:
                 requested_by_id_new = current_requested_by_id
                 requested_by_name_new = current_requested_by_name
 
+            reminder_new = (
+                self._normalize_task_reminder_minutes(reminder_minutes_before) if has_reminder else current_reminder
+            )
+            if due_at_new is None:
+                reminder_new = None
+
             if has_is_regulation and not bool(is_regulation):
                 recurrence_type_input = None
                 recurrence_interval_input = None
@@ -38789,6 +38919,8 @@ class Database:
             if (requested_by_id_new != current_requested_by_id
                     or requested_by_name_new != current_requested_by_name):
                 changed_fields.append("requested_by")
+            if reminder_new != current_reminder:
+                changed_fields.append("reminder")
 
             if not changed_fields:
                 return {
@@ -38830,10 +38962,17 @@ class Database:
                     planned_start_at = %s,
                     requested_by_id = %s,
                     requested_by_name = %s,
+                    reminder_minutes_before = %s,
+                    {reset_reminder_sql}
                     updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 WHERE id = %s
                 RETURNING updated_at
-            """, (
+            """.format(
+                reset_reminder_sql=(
+                    'reminder_sent_at = NULL,'
+                    if ('deadline' in changed_fields or 'reminder' in changed_fields) else ''
+                )
+            ), (
                 subject_new,
                 description_new,
                 tag_new,
@@ -38849,6 +38988,7 @@ class Database:
                 planned_start_at_new,
                 requested_by_id_new,
                 requested_by_name_new,
+                reminder_new,
                 task_id
             ))
             updated_row = cursor.fetchone()
@@ -38876,7 +39016,8 @@ class Database:
                 "recurrence_interval": recurrence_interval_new,
                 "recurrence_next_at": self._task_dt_to_iso(recurrence_next_at_new),
                 "estimate_minutes": estimate_minutes_new,
-                "planned_start_at": self._task_dt_to_iso(planned_start_at_new)
+                "planned_start_at": self._task_dt_to_iso(planned_start_at_new),
+                "reminder_minutes_before": reminder_new
             }
 
     def _normalize_task_report_kind(self, kind):
@@ -39095,7 +39236,8 @@ class Database:
             backlog_rank=_UNSET,
             estimate_minutes=_UNSET,
             planned_start_at=_UNSET,
-            due_at=_UNSET
+            due_at=_UNSET,
+            reminder_minutes_before=_UNSET
     ):
         """
         Планирующие правки с доски: бэклог ↔ доска, порядок приоритезации, оценка, сроки.
@@ -39112,8 +39254,9 @@ class Database:
         has_estimate = estimate_minutes is not _UNSET
         has_planned_start = planned_start_at is not _UNSET
         has_due_at = due_at is not _UNSET
+        has_reminder = reminder_minutes_before is not _UNSET
 
-        if not any([has_is_backlog, has_backlog_rank, has_estimate, has_planned_start, has_due_at]):
+        if not any([has_is_backlog, has_backlog_rank, has_estimate, has_planned_start, has_due_at, has_reminder]):
             raise ValueError("NOTHING_TO_UPDATE")
 
         with self._get_cursor() as cursor:
@@ -39122,7 +39265,8 @@ class Database:
                     t.id, t.created_by, t.assigned_to, t.status, t.created_at,
                     t.is_backlog, t.backlog_rank, t.estimate_minutes, t.planned_start_at,
                     t.due_at, t.deadline_duration_minutes, t.subject,
-                    assignee.role, assignee.supervisor_id
+                    assignee.role, assignee.supervisor_id,
+                    t.reminder_minutes_before
                 FROM tasks t
                 LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 WHERE t.id = %s
@@ -39144,6 +39288,7 @@ class Database:
             subject = row[11]
             assignee_role = row[12]
             assignee_supervisor_id = row[13]
+            current_reminder = row[14]
 
             if not self._task_visible_for_requester(role, requester_id, created_by, assigned_to, assignee_role, assignee_supervisor_id):
                 raise PermissionError("TASK_FORBIDDEN")
@@ -39195,6 +39340,13 @@ class Database:
                 due_at_new = current_due_at
                 deadline_minutes_new = current_deadline_minutes
 
+            reminder_new = (
+                self._normalize_task_reminder_minutes(reminder_minutes_before) if has_reminder else current_reminder
+            )
+            # Без дедлайна напоминать не от чего.
+            if due_at_new is None:
+                reminder_new = None
+
             changed_fields = []
             if is_backlog_new != current_is_backlog:
                 changed_fields.append("is_backlog")
@@ -39206,9 +39358,13 @@ class Database:
                 changed_fields.append("planned_start")
             if due_at_new != current_due_at:
                 changed_fields.append("deadline")
+            if reminder_new != current_reminder:
+                changed_fields.append("reminder")
 
             if changed_fields:
-                cursor.execute("""
+                # Съехал срок или интервал — напоминание должно сработать заново.
+                reset_sent = ('deadline' in changed_fields) or ('reminder' in changed_fields)
+                cursor.execute(f"""
                     UPDATE tasks
                     SET
                         is_backlog = %s,
@@ -39217,6 +39373,8 @@ class Database:
                         planned_start_at = %s,
                         due_at = %s,
                         deadline_duration_minutes = %s,
+                        reminder_minutes_before = %s,
+                        {'reminder_sent_at = NULL,' if reset_sent else ''}
                         updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                     WHERE id = %s
                 """, (
@@ -39226,6 +39384,7 @@ class Database:
                     planned_start_new,
                     due_at_new,
                     deadline_minutes_new,
+                    reminder_new,
                     task_id
                 ))
 
@@ -39242,7 +39401,8 @@ class Database:
                 "estimate_minutes": estimate_new,
                 "planned_start_at": self._task_dt_to_iso(planned_start_new),
                 "due_at": self._task_dt_to_iso(due_at_new),
-                "deadline_duration_minutes": deadline_minutes_new
+                "deadline_duration_minutes": deadline_minutes_new,
+                "reminder_minutes_before": reminder_new
             }
 
     def delete_task(self, task_id, requester_id, requester_role):
@@ -39354,7 +39514,9 @@ class Database:
             "completed_at": self._task_dt_to_iso(row[8]),
             "created_at": self._task_dt_to_iso(row[9]),
             "updated_at": self._task_dt_to_iso(row[10]),
-            "saved_at": self._task_dt_to_iso(row[10])
+            "saved_at": self._task_dt_to_iso(row[10]),
+            "reminder_minutes_before": row[11] if len(row) > 11 else None,
+            "reminder_sent_at": self._task_dt_to_iso(row[12]) if len(row) > 12 else None
         }
 
     def get_task_notes(self, owner_id):
@@ -39363,7 +39525,8 @@ class Database:
             cursor.execute("""
                 SELECT
                     id, owner_id, title, body, priority, due_at,
-                    is_task, is_done, completed_at, created_at, updated_at
+                    is_task, is_done, completed_at, created_at, updated_at,
+                    reminder_minutes_before, reminder_sent_at
                 FROM task_notes
                 WHERE owner_id = %s
                 ORDER BY
@@ -39385,7 +39548,8 @@ class Database:
             priority='normal',
             due_at=None,
             is_task=False,
-            is_done=False
+            is_done=False,
+            reminder_minutes_before=None
     ):
         owner_id = int(owner_id)
         title_norm = str(title or '').strip()[:160] or 'Без темы'
@@ -39395,17 +39559,20 @@ class Database:
         is_task_norm = bool(is_task)
         is_done_norm = bool(is_done) if is_task_norm else False
         completed_at = self._task_now() if is_done_norm else None
+        # Напоминание живёт только при дедлайне.
+        reminder_norm = self._normalize_task_reminder_minutes(reminder_minutes_before) if due_at_norm else None
 
         with self._get_cursor() as cursor:
             cursor.execute("""
                 INSERT INTO task_notes (
                     owner_id, title, body, priority, due_at,
-                    is_task, is_done, completed_at
+                    is_task, is_done, completed_at, reminder_minutes_before
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING
                     id, owner_id, title, body, priority, due_at,
-                    is_task, is_done, completed_at, created_at, updated_at
+                    is_task, is_done, completed_at, created_at, updated_at,
+                    reminder_minutes_before, reminder_sent_at
             """, (
                 owner_id,
                 title_norm,
@@ -39414,7 +39581,8 @@ class Database:
                 due_at_norm,
                 is_task_norm,
                 is_done_norm,
-                completed_at
+                completed_at,
+                reminder_norm
             ))
             row = cursor.fetchone()
         return self._serialize_task_note(row)
@@ -39428,19 +39596,22 @@ class Database:
             priority=_UNSET,
             due_at=_UNSET,
             is_task=_UNSET,
-            is_done=_UNSET
+            is_done=_UNSET,
+            reminder_minutes_before=_UNSET
     ):
         note_id = int(note_id)
         owner_id = int(owner_id)
 
-        if not any(value is not _UNSET for value in (title, body, priority, due_at, is_task, is_done)):
+        if not any(value is not _UNSET for value in
+                   (title, body, priority, due_at, is_task, is_done, reminder_minutes_before)):
             raise ValueError("NOTHING_TO_UPDATE")
 
         with self._get_cursor() as cursor:
             cursor.execute("""
                 SELECT
                     id, owner_id, title, body, priority, due_at,
-                    is_task, is_done, completed_at, created_at, updated_at
+                    is_task, is_done, completed_at, created_at, updated_at,
+                    reminder_minutes_before, reminder_sent_at
                 FROM task_notes
                 WHERE id = %s
             """, (note_id,))
@@ -39465,6 +39636,16 @@ class Database:
             elif not is_done_new:
                 completed_at_new = None
 
+            current_reminder = current[11]
+            reminder_new = (
+                current_reminder if reminder_minutes_before is _UNSET
+                else self._normalize_task_reminder_minutes(reminder_minutes_before)
+            )
+            if due_at_new is None:
+                reminder_new = None
+            # Съехал срок или интервал — напоминание отправляем заново.
+            reset_sent = (due_at_new != current[5]) or (reminder_new != current_reminder)
+
             cursor.execute("""
                 UPDATE task_notes
                 SET
@@ -39475,12 +39656,15 @@ class Database:
                     is_task = %s,
                     is_done = %s,
                     completed_at = %s,
+                    reminder_minutes_before = %s,
+                    {reset_reminder_sql}
                     updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 WHERE id = %s AND owner_id = %s
                 RETURNING
                     id, owner_id, title, body, priority, due_at,
-                    is_task, is_done, completed_at, created_at, updated_at
-            """, (
+                    is_task, is_done, completed_at, created_at, updated_at,
+                    reminder_minutes_before, reminder_sent_at
+            """.format(reset_reminder_sql='reminder_sent_at = NULL,' if reset_sent else ''), (
                 title_new,
                 body_new,
                 priority_new,
@@ -39488,6 +39672,7 @@ class Database:
                 is_task_new,
                 is_done_new,
                 completed_at_new,
+                reminder_new,
                 note_id,
                 owner_id
             ))
@@ -39803,7 +39988,8 @@ class Database:
                     creator.avatar_bucket, creator.avatar_blob_path,
                     t.is_backlog, t.backlog_rank, t.estimate_minutes,
                     t.planned_start_at, t.started_at,
-                    t.requested_by_id, COALESCE(origin_user.name, t.requested_by_name)
+                    t.requested_by_id, COALESCE(origin_user.name, t.requested_by_name),
+                    t.reminder_minutes_before, t.reminder_sent_at
                 FROM tasks t
                 LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 LEFT JOIN users creator ON creator.id = t.created_by
@@ -39971,6 +40157,8 @@ class Database:
                     "name": row[37],
                     "source": 'user' if row[36] else 'external'
                 } if (row[36] or row[37]) else None),
+                "reminder_minutes_before": row[38],
+                "reminder_sent_at": self._task_dt_to_iso(row[39]),
                 "history": history_map.get(task_id, []),
                 "attachments": initial_attachments,
                 "completion_attachments": result_attachments,

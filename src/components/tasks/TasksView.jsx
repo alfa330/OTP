@@ -1148,6 +1148,11 @@ styleTag.textContent = `
     color: var(--ink-3);
     font-size: 10.5px;
   }
+  .tv-note-reminder-mark {
+    display: inline-flex; align-items: center;
+    margin-left: 5px; color: var(--ink-3);
+    vertical-align: -1px;
+  }
   .tv-note-card-meta {
     flex-wrap: wrap;
     gap: 5px;
@@ -2664,6 +2669,32 @@ const checklistProgress = (items) => {
 
 const LOCAL_NOTES_EVENT = 'otp:task-notes-changed';
 const localNotesKey = (userId) => `otp:task-notes:${Number(userId || 0)}`;
+/* ── Напоминания в Telegram перед дедлайном ──
+   Предел жёсткий: максимум за сутки, дальше напоминание бесполезно. */
+const REMINDER_MAX_MINUTES = 1440;
+const REMINDER_OPTIONS = [
+  { value: 0,    label: 'Без напоминания' },
+  { value: 30,   label: 'За 30 минут' },
+  { value: 60,   label: 'За час' },
+  { value: 180,  label: 'За 3 часа' },
+  { value: 360,  label: 'За 6 часов' },
+  { value: 1440, label: 'За день' },
+];
+const REMINDER_DEFAULT_MINUTES = 1440;
+
+const normalizeReminderMinutes = (value) => {
+  const minutes = Number(value);
+  if (!Number.isFinite(minutes) || minutes <= 0) return null;
+  return Math.min(REMINDER_MAX_MINUTES, Math.round(minutes));
+};
+
+const reminderLabel = (minutes) => {
+  const normalized = normalizeReminderMinutes(minutes);
+  if (!normalized) return '';
+  return REMINDER_OPTIONS.find((option) => option.value === normalized)?.label
+    || `За ${formatSpentMinutes(normalized)}`;
+};
+
 const EMPTY_TASK_NOTE = {
   id: '',
   title: '',
@@ -2675,6 +2706,7 @@ const EMPTY_TASK_NOTE = {
   saved_at: null,
   created_at: null,
   completed_at: null,
+  reminder_minutes_before: null,
   is_local: false,
 };
 
@@ -2705,6 +2737,10 @@ const normalizeTaskNote = (value) => {
     saved_at: source.saved_at || source.updated_at || null,
     created_at: source.created_at || source.saved_at || source.updated_at || new Date().toISOString(),
     completed_at: source.completed_at || null,
+    // Напоминание имеет смысл только при дедлайне.
+    reminder_minutes_before: (source.due_at || source.deadline)
+      ? normalizeReminderMinutes(source.reminder_minutes_before)
+      : null,
     is_local: Boolean(source.is_local || !isPersistedNoteId(id)),
   };
 };
@@ -2819,6 +2855,7 @@ const buildNotePayload = (note) => {
     due_at: normalized.due_at || null,
     is_task: isTask,
     is_done: isTask && Boolean(normalized.is_done),
+    reminder_minutes_before: normalized.due_at ? normalized.reminder_minutes_before : null,
   };
 };
 
@@ -2839,6 +2876,7 @@ const EMPTY_TASK_FORM = {
   estimateMinutes: '',
   requestedById: '',
   requestedByName: '',
+  reminderMinutes: '',
 };
 
 const buildEmptyTaskForm = (overrides = {}) => ({
@@ -2866,6 +2904,7 @@ const taskToTaskForm = (task, fallbackAssignedTo = '') => {
     estimateMinutes: task?.estimate_minutes ? String(task.estimate_minutes) : '',
     requestedById: task?.requested_by?.id ? String(task.requested_by.id) : '',
     requestedByName: task?.requested_by?.id ? '' : (task?.requested_by?.name || ''),
+    reminderMinutes: task?.reminder_minutes_before ? String(task.reminder_minutes_before) : '',
   });
 };
 
@@ -2893,6 +2932,10 @@ const buildTaskJsonPayload = (values) => ({
   // Пустые оба поля = своя инициатива; id имеет приоритет над свободным текстом.
   requested_by_id: values.requestedById ? String(values.requestedById) : '',
   requested_by_name: values.requestedById ? '' : String(values.requestedByName || '').trim(),
+  // Без дедлайна напоминание не отправляем — незачем.
+  reminder_minutes_before: deadlineMinutesOfForm(values) > 0
+    ? (normalizeReminderMinutes(values.reminderMinutes) || 0)
+    : 0,
 });
 
 const appendTaskFormData = (body, values) => {
@@ -2913,6 +2956,7 @@ const appendTaskFormData = (body, values) => {
   body.append('is_backlog', values.isBacklog ? '1' : '0');
   body.append('requested_by_id', payload.requested_by_id);
   body.append('requested_by_name', payload.requested_by_name);
+  body.append('reminder_minutes_before', String(payload.reminder_minutes_before));
 };
 
 const filesFromList = (files) => Array.from(files || []).filter(Boolean);
@@ -3434,7 +3478,18 @@ const TaskNoteCard = React.memo(({ note, active = false, onSelect, onToggleDone 
         )}
         <span className="tv-note-topic-title">{note?.title || 'Без темы'}</span>
       </span>
-      <span className="tv-note-topic-date">{dueLabel || (note?.saved_at ? fmtShortDateTime(note.saved_at) : 'Черновик')}</span>
+      <span className="tv-note-topic-date">
+        {dueLabel || (note?.saved_at ? fmtShortDateTime(note.saved_at) : 'Черновик')}
+        {/* Напоминание — маленькие часы у срока: видно, что оно стоит, без лишнего текста. */}
+        {Boolean(note?.reminder_minutes_before) && !note?.is_done && (
+          <span
+            className="tv-note-reminder-mark"
+            title={`Напоминание в Telegram ${reminderLabel(note.reminder_minutes_before).toLowerCase()} до дедлайна`}
+          >
+            <CalendarClock size={11} strokeWidth={2} />
+          </span>
+        )}
+      </span>
       <span className="tv-note-card-meta">
         <span className={`tv-badge ${priorityMeta.badge}`}>{priorityMeta.label}</span>
         {note?.is_task && <span className="tv-note-task-mark">Задача</span>}
@@ -3499,6 +3554,7 @@ const TaskNotesPanel = React.memo(({ notesState, compact = false, fullScreen = f
   const draftPriorityMeta = PRIORITY_META[draftPriority] || PRIORITY_META.normal;
   const hasDraftDetails = Boolean(
     normalizedDraft.due_at ||
+    normalizedDraft.reminder_minutes_before ||
     normalizedDraft.is_task ||
     normalizedDraft.is_done ||
     draftPriority !== 'normal'
@@ -3512,10 +3568,14 @@ const TaskNotesPanel = React.memo(({ notesState, compact = false, fullScreen = f
   const noteDetailsSummary = useMemo(() => {
     const parts = [];
     if (normalizedDraft.due_at) parts.push('дедлайн');
+    if (normalizedDraft.reminder_minutes_before) {
+      parts.push(reminderLabel(normalizedDraft.reminder_minutes_before).toLowerCase());
+    }
     if (draftPriority !== 'normal') parts.push(draftPriorityMeta.label.toLowerCase());
     if (normalizedDraft.is_task) parts.push(normalizedDraft.is_done ? 'выполнено' : 'как задача');
     return parts.length ? parts.join(' · ') : 'не заданы';
-  }, [draftPriority, draftPriorityMeta.label, normalizedDraft.due_at, normalizedDraft.is_done, normalizedDraft.is_task]);
+  }, [draftPriority, draftPriorityMeta.label, normalizedDraft.due_at, normalizedDraft.is_done,
+      normalizedDraft.is_task, normalizedDraft.reminder_minutes_before]);
 
   const updateDraft = useCallback((patch) => {
     setDraft((prev) => normalizeTaskNote({ ...normalizeTaskNote(prev), ...patch }));
@@ -3605,8 +3665,33 @@ const TaskNotesPanel = React.memo(({ notesState, compact = false, fullScreen = f
                 type="datetime-local"
                 value={draftDueValue}
                 disabled={isSaving}
-                onChange={(event) => updateDraft({ due_at: event.target.value || null })}
+                onChange={(event) => {
+                  const nextDue = event.target.value || null;
+                  updateDraft({
+                    due_at: nextDue,
+                    // Поставили срок — сразу предлагаем напомнить за день; сняли — напоминание не нужно.
+                    reminder_minutes_before: nextDue
+                      ? (normalizedDraft.reminder_minutes_before || REMINDER_DEFAULT_MINUTES)
+                      : null,
+                  });
+                }}
               />
+            </label>
+            <label className="tv-form-field">
+              <span>Напомнить в Telegram</span>
+              <select
+                className="tv-select"
+                value={String(normalizedDraft.reminder_minutes_before || 0)}
+                disabled={isSaving || !normalizedDraft.due_at}
+                title={normalizedDraft.due_at ? '' : 'Сначала поставьте дедлайн'}
+                onChange={(event) => updateDraft({
+                  reminder_minutes_before: normalizeReminderMinutes(event.target.value),
+                })}
+              >
+                {REMINDER_OPTIONS.map((item) => (
+                  <option key={item.value} value={item.value}>{item.label}</option>
+                ))}
+              </select>
             </label>
             <label className="tv-form-field">
               <span>Приоритет</span>
@@ -3767,7 +3852,9 @@ const COMPOSER_SECTIONS = [
     label: 'Дедлайн',
     hasValue: (v) => deadlineMinutesOfForm(v) > 0,
     summary: (v) => formatSpentMinutes(deadlineMinutesOfForm(v)),
-    clear: () => ({ deadlineDays: '', deadlineHours: '', deadlineMinutes: '' }),
+    clear: () => ({ deadlineDays: '', deadlineHours: '', deadlineMinutes: '', reminderMinutes: '' }),
+    // Появился срок — сразу предлагаем напомнить за день, как просили по умолчанию.
+    open: (v) => ({ reminderMinutes: v.reminderMinutes || String(REMINDER_DEFAULT_MINUTES) }),
   },
   {
     id: 'estimate',
@@ -3852,7 +3939,7 @@ const TaskComposerForm = ({
         if (section.requiresFiles) onFilesChange?.([]);
       } else {
         next.add(section.id);
-        if (section.open) onChange(section.open());
+        if (section.open) onChange(section.open(values));
       }
       return next;
     });
@@ -4015,6 +4102,19 @@ const TaskComposerForm = ({
                     value={values.deadlineMinutes} disabled={disabled}
                     onChange={(event) => onChange({ deadlineMinutes: event.target.value })} />
                 </div>
+                <select
+                  className="tv-select"
+                  value={String(normalizeReminderMinutes(values.reminderMinutes) || 0)}
+                  disabled={disabled || deadlineMinutesOfForm(values) <= 0}
+                  title={deadlineMinutesOfForm(values) > 0 ? '' : 'Сначала задайте дедлайн'}
+                  onChange={(event) => onChange({ reminderMinutes: event.target.value })}
+                >
+                  {REMINDER_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.value ? `Напомнить в Telegram: ${option.label.toLowerCase()}` : 'Без напоминания'}
+                    </option>
+                  ))}
+                </select>
               </div>
             </div>
           )}

@@ -3058,7 +3058,8 @@ def _build_task_event_notification_html(event, task_ctx, actor_name, changed_fie
             'planned_start': 'плановый старт',
             'is_backlog': 'бэклог',
             'backlog_rank': 'приоритет в бэклоге',
-            'requested_by': 'кто поручил'
+            'requested_by': 'кто поручил',
+            'reminder': 'напоминание'
         }
         changed_items = []
         for item in (changed_fields or []):
@@ -17071,7 +17072,8 @@ def handle_task_notes():
                 priority=priority,
                 due_at=due_at,
                 is_task=is_task,
-                is_done=is_done
+                is_done=is_done,
+                reminder_minutes_before=data.get('reminder_minutes_before')
             )
         except ValueError as create_error:
             code = str(create_error)
@@ -17079,6 +17081,8 @@ def handle_task_notes():
                 return jsonify({"error": "Invalid priority"}), 400
             if code == 'INVALID_DUE_AT':
                 return jsonify({"error": "Invalid due_at"}), 400
+            if code == 'INVALID_REMINDER':
+                return jsonify({"error": "Напоминание можно поставить максимум за сутки до дедлайна"}), 400
             return jsonify({"error": code}), 400
 
         return jsonify({
@@ -17108,8 +17112,9 @@ def handle_single_task_note(note_id):
             has_due_at = 'due_at' in data
             has_is_task = 'is_task' in data
             has_is_done = 'is_done' in data
+            has_reminder = 'reminder_minutes_before' in data
 
-            if not any([has_title, has_body, has_priority, has_due_at, has_is_task, has_is_done]):
+            if not any([has_title, has_body, has_priority, has_due_at, has_is_task, has_is_done, has_reminder]):
                 return jsonify({"error": "No fields to update"}), 400
 
             priority = (str(data.get('priority') or '').strip().lower() or 'normal') if has_priority else None
@@ -17132,6 +17137,8 @@ def handle_single_task_note(note_id):
                 edit_kwargs["is_task"] = _parse_task_bool(data.get('is_task'))
             if has_is_done:
                 edit_kwargs["is_done"] = _parse_task_bool(data.get('is_done'))
+            if has_reminder:
+                edit_kwargs["reminder_minutes_before"] = data.get('reminder_minutes_before')
 
             try:
                 note = db.update_task_note(**edit_kwargs)
@@ -17145,6 +17152,8 @@ def handle_single_task_note(note_id):
                     return jsonify({"error": "Invalid priority"}), 400
                 if code == 'INVALID_DUE_AT':
                     return jsonify({"error": "Invalid due_at"}), 400
+                if code == 'INVALID_REMINDER':
+                    return jsonify({"error": "Напоминание можно поставить максимум за сутки до дедлайна"}), 400
                 return jsonify({"error": code}), 400
             except PermissionError:
                 return jsonify({"error": "You do not have access to this note"}), 403
@@ -17360,6 +17369,7 @@ def handle_tasks():
         planned_start_raw = (request.form.get('planned_start_at') or '').strip() or None
         requested_by_id_raw = (request.form.get('requested_by_id') or '').strip() or None
         requested_by_name_raw = (request.form.get('requested_by_name') or '').strip() or None
+        reminder_raw = (request.form.get('reminder_minutes_before') or '').strip() or None
         assigned_to_raw = request.form.get('assigned_to')
 
         if not subject:
@@ -17417,7 +17427,8 @@ def handle_tasks():
                 planned_start_at=planned_start_raw,
                 due_at=due_at_raw,
                 requested_by_id=requested_by_id_raw,
-                requested_by_name=requested_by_name_raw
+                requested_by_name=requested_by_name_raw,
+                reminder_minutes_before=reminder_raw
             )
         except ValueError as create_error:
             _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths)
@@ -17432,7 +17443,8 @@ def handle_tasks():
                 "INVALID_CHECKLIST": "Invalid checklist",
                 "INVALID_ESTIMATE": "Invalid estimate_minutes",
                 "INVALID_PLANNED_START": "Invalid planned_start_at",
-                "INVALID_REQUESTED_BY": "Invalid requested_by_id"
+                "INVALID_REQUESTED_BY": "Invalid requested_by_id",
+                "INVALID_REMINDER": "Напоминание можно поставить максимум за сутки до дедлайна"
             }
             return jsonify({"error": error_map.get(code, code)}), 400
         except Exception:
@@ -17530,12 +17542,13 @@ def handle_single_task(task_id):
             has_estimate = any(key in data for key in ('estimate_minutes', 'estimate_hours', 'estimate_extra_minutes'))
             has_planned_start = 'planned_start_at' in data
             has_origin = 'requested_by_id' in data or 'requested_by_name' in data
+            has_reminder = 'reminder_minutes_before' in data
 
             if not any([
                 has_subject, has_description, has_tag, has_assigned_to,
                 has_priority, has_deadline, has_due_at, has_is_regulation,
                 has_recurrence_type, has_recurrence_interval, has_checklist,
-                has_estimate, has_planned_start, has_origin
+                has_estimate, has_planned_start, has_origin, has_reminder
             ]):
                 return jsonify({"error": "No fields to update"}), 400
 
@@ -17611,6 +17624,8 @@ def handle_single_task(task_id):
                 if has_origin:
                     edit_kwargs["requested_by_id"] = data.get('requested_by_id')
                     edit_kwargs["requested_by_name"] = data.get('requested_by_name')
+                if has_reminder:
+                    edit_kwargs["reminder_minutes_before"] = data.get('reminder_minutes_before')
 
                 result = db.edit_task(**edit_kwargs)
             except ValueError as value_error:
@@ -17641,6 +17656,8 @@ def handle_single_task(task_id):
                     return jsonify({"error": "Invalid planned_start_at"}), 400
                 if code == 'INVALID_REQUESTED_BY':
                     return jsonify({"error": "Invalid requested_by_id"}), 400
+                if code == 'INVALID_REMINDER':
+                    return jsonify({"error": "Напоминание можно поставить максимум за сутки до дедлайна"}), 400
                 return jsonify({"error": code}), 400
             except PermissionError as permission_error:
                 code = str(permission_error)
@@ -17789,6 +17806,7 @@ def handle_tasks_board():
             'INVALID_PLANNED_START': ("Invalid planned_start_at", 400),
             'INVALID_DEADLINE': ("Invalid due_at", 400),
             'INVALID_BACKLOG_RANK': ("Invalid backlog_rank", 400),
+            'INVALID_REMINDER': ("Напоминание можно поставить максимум за сутки до дедлайна", 400),
             'BACKLOG_ONLY_FOR_ASSIGNED': ("Только не начатую задачу можно вернуть в бэклог", 409),
             'TASK_FORBIDDEN': ("You do not have access to this task", 403),
             'ONLY_CREATOR_CAN_PLAN': ("Сроки задачи меняет постановщик или админ", 403)
@@ -17822,6 +17840,8 @@ def handle_tasks_board():
                 kwargs["planned_start_at"] = raw_item.get('planned_start_at')
             if 'due_at' in raw_item:
                 kwargs["due_at"] = raw_item.get('due_at')
+            if 'reminder_minutes_before' in raw_item:
+                kwargs["reminder_minutes_before"] = raw_item.get('reminder_minutes_before')
 
             try:
                 result = db.update_task_board_state(**kwargs)
@@ -43554,6 +43574,98 @@ async def run_chatapp_retention_async():
     except Exception:
         logging.exception("chatapp retention failed")
 
+
+def _build_task_reminder_html(reminder):
+    """Напоминание о приближающемся дедлайне заметки или задачи."""
+    is_note = reminder.get('kind') == 'note'
+    due_at = reminder.get('due_at')
+    due_label = _format_task_due_for_notification(
+        due_at.isoformat() if hasattr(due_at, 'isoformat') else due_at
+    )
+    left_label = None
+    if hasattr(due_at, 'timestamp'):
+        minutes_left = int((due_at - datetime.now()).total_seconds() // 60)
+        left_label = _format_task_spent_for_notification(minutes_left)
+
+    priority_label = TASK_PRIORITY_LABELS.get(
+        (reminder.get('priority') or 'normal').strip().lower(), 'Обычная'
+    )
+    title_safe = _escape_telegram_html(reminder.get('title') or '', 220)
+    if not is_note:
+        task_link = _build_current_task_deep_link(reminder.get('id'))
+        if task_link:
+            title_safe = f'<a href="{_escape_telegram_html(task_link, 500)}">{title_safe}</a>'
+
+    lines = [
+        f"<b>⏰ Скоро дедлайн: {'заметка' if is_note else 'задача'}</b>",
+        "",
+        f"<b>{'Заметка' if is_note else 'Тема'}:</b> {title_safe}",
+        f"<b>Дедлайн:</b> {_escape_telegram_html(due_label or '—', 80)}"
+    ]
+    if left_label:
+        lines.append(f"<b>Осталось:</b> {_escape_telegram_html(left_label, 40)}")
+    if (reminder.get('priority') or 'normal') != 'normal':
+        lines.append(f"<b>Срочность:</b> {_escape_telegram_html(priority_label, 60)}")
+
+    body = str(reminder.get('body') or '').strip()
+    if body:
+        lines.append("")
+        lines.append(_escape_telegram_html(body, 700))
+
+    message = "\n".join(lines)
+    if len(message) > TELEGRAM_MAX_MESSAGE_CHARS:
+        message = message[:TELEGRAM_MAX_MESSAGE_CHARS]
+    return message
+
+
+def send_due_task_reminders():
+    """
+    Рассылает напоминания о приближающихся дедлайнах заметок и задач.
+    Отметку об отправке ставим только после успеха, иначе напоминание потеряется молча.
+    """
+    try:
+        pending = db.collect_due_task_reminders()
+    except Exception:
+        logging.exception("task reminders: failed to collect pending items")
+        return 0
+
+    sent = 0
+    for reminder in pending:
+        chat_id = reminder.get('chat_id')
+        if not chat_id:
+            continue
+        try:
+            task_link = None if reminder.get('kind') == 'note' else _build_current_task_deep_link(reminder.get('id'))
+            response = _send_telegram_text_message(
+                chat_id,
+                _build_task_reminder_html(reminder),
+                parse_mode='HTML',
+                reply_markup=_build_task_notification_reply_markup(task_link) if task_link else None
+            )
+            if response.status_code != 200:
+                logging.error(
+                    "task reminder failed (%s #%s): %s",
+                    reminder.get('kind'), reminder.get('id'), _get_telegram_error_text(response)
+                )
+                continue
+            db.mark_task_reminder_sent(reminder.get('kind'), reminder.get('id'))
+            sent += 1
+        except Exception:
+            logging.exception(
+                "task reminder crashed (%s #%s)", reminder.get('kind'), reminder.get('id')
+            )
+    if sent:
+        logging.info("task reminders sent: %s", sent)
+    return sent
+
+
+async def run_task_reminders_async():
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(executor_pool, send_due_task_reminders)
+    except Exception:
+        logging.exception("task reminders job failed")
+
 # === Главный запуск =============================================================================================
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('reject_reval:'))
 async def handle_reject_reval(callback_query: types.CallbackQuery, state: FSMContext):
@@ -43863,6 +43975,17 @@ if __name__ == '__main__':
         CronTrigger(hour=3, minute=45, timezone=ZoneInfo('Asia/Almaty')),
         id='chatapp_retention_daily',
         misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # Напоминания о дедлайнах заметок и задач: каждые 5 минут — достаточная точность
+    # при интервале «максимум за сутки», и дешевле, чем гонять раз в минуту.
+    scheduler.add_job(
+        run_task_reminders_async,
+        CronTrigger(minute='*/5', timezone=ZoneInfo('Asia/Almaty')),
+        id='task_deadline_reminders',
+        misfire_grace_time=600,
         max_instances=1,
         coalesce=True
     )
