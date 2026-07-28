@@ -340,7 +340,13 @@ CALCULATION_MODEL_METRICS = {
     # TEZ-модели: часы/перерыв считаются авто из выгрузки статусов TEZ
     # (active+work in crm = работа, break in work = перерыв), остальное — общий хвост.
     CALCULATION_MODEL_TEZ_LINE: _CALC_METRICS_HEAD + _CALC_METRICS_TAIL,
-    CALCULATION_MODEL_TEZ_OP: _CALC_METRICS_HEAD + _CALC_METRICS_TAIL,
+    CALCULATION_MODEL_TEZ_OP: _CALC_METRICS_HEAD + [
+        _calc_metric('calls', 'Звонки', '', 'import', 'daily_hours.calls'),
+        _calc_metric('dial_time', 'Время набора', 'ч', 'import', 'daily_hours.extra_metrics.dial_time'),
+        _calc_metric('talk_time', 'В разговоре', 'ч', 'import', 'daily_hours.extra_metrics.talk_time'),
+        _calc_metric('chats', 'Чаты', '', 'import', 'daily_hours.extra_metrics.chats'),
+        _calc_metric('tez_successes', 'Успешки', 'шт', 'computed', 'tez_lead_successes'),
+    ] + _CALC_METRICS_TAIL,
     # Модели направлений ОП: пока только отработанные часы (ручной ввод) и
     # штрафы (учёт опозданий). Состав вкладок учёта часов фронт берёт из этого
     # реестра, поэтому новая метрика = новая строка здесь.
@@ -927,6 +933,7 @@ class Database:
     SHIFT_AUCTION_OPERATOR_LOCK_NAMESPACE = 915904138
     SHIFT_AUCTION_SAVED_SHIFT_LOCK_NAMESPACE = 915904139
     TEZ_LEAD_PERIOD_LOCK_NAMESPACE = 915904140
+    STATUS_SEGMENT_OPERATOR_LOCK_NAMESPACE = 915904142
 
     def __init__(self):
         self._init_db_with_retry()
@@ -1467,7 +1474,9 @@ class Database:
                 ("training_hours", "DOUBLE PRECISION"),
                 ("total_break_time", "DOUBLE PRECISION"),
                 ("total_talk_time", "DOUBLE PRECISION"),
+                ("total_dial_time", "DOUBLE PRECISION"),
                 ("total_calls", "INTEGER"),
+                ("total_chats", "INTEGER"),
                 ("total_efficiency_hours", "DOUBLE PRECISION"),
                 ("calls_per_hour", "DOUBLE PRECISION"),
                 ("fines", "DOUBLE PRECISION"),
@@ -2871,8 +2880,13 @@ class Database:
                     status_key VARCHAR(128) NOT NULL,
                     state_note VARCHAR(255) NULL,
                     event_kind VARCHAR(16) NOT NULL DEFAULT 'status' CHECK (event_kind IN ('status', 'action')),
-                    imported_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL
+                    imported_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                    is_authoritative BOOLEAN NOT NULL DEFAULT FALSE
                 );
+            """)
+            cursor.execute("""
+                ALTER TABLE operator_status_events
+                ADD COLUMN IF NOT EXISTS is_authoritative BOOLEAN NOT NULL DEFAULT FALSE;
             """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operator_status_segments (
@@ -2885,9 +2899,17 @@ class Database:
                     status_key VARCHAR(128) NOT NULL,
                     state_note VARCHAR(255) NULL,
                     imported_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                    is_authoritative BOOLEAN NOT NULL DEFAULT FALSE,
                     CHECK (end_at > start_at),
                     CHECK (duration_sec > 0)
                 );
+            """)
+            # Некоторые источники (сейчас TEZ/Binotel) отдают готовые интервалы
+            # start/stop. Их нельзя впоследствии растягивать пересборкой только
+            # из start-событий, поэтому provenance хранится на durable-сегменте.
+            cursor.execute("""
+                ALTER TABLE operator_status_segments
+                ADD COLUMN IF NOT EXISTS is_authoritative BOOLEAN NOT NULL DEFAULT FALSE;
             """)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_operator_status_events_operator_time
@@ -11875,6 +11897,348 @@ class Database:
             res = cursor.fetchone()
             return res[0] if res else None
 
+    @staticmethod
+    def _coerce_daily_extra_metrics(value):
+        """JSONB daily_hours.extra_metrics -> обычный dict без исключений."""
+        if isinstance(value, dict):
+            return dict(value)
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                return parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                return {}
+        return {}
+
+    def get_tez_op_binotel_internal_numbers(self, start_date, end_date):
+        """Внутренние номера Binotel, относящиеся к модели TEZ ОП в периоде.
+
+        Один SIP может последовательно принадлежать нескольким людям, поэтому
+        возвращаем только DISTINCT номера. Конкретного оператора для каждого
+        звонка определяет имя из employeeData и модель на дату звонка.
+        """
+        start_obj = self._normalize_schedule_date(start_date)
+        end_obj = self._normalize_schedule_date(end_date)
+        if end_obj < start_obj:
+            start_obj, end_obj = end_obj, start_obj
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT DISTINCT TRIM(u.sip_number)
+                FROM users u
+                LEFT JOIN directions d ON d.id = u.direction_id
+                WHERE NULLIF(TRIM(u.sip_number), '') IS NOT NULL
+                  AND (
+                    LOWER(COALESCE(d.calculation_model_code, '')) = %s
+                    OR EXISTS (
+                        SELECT 1
+                        FROM group_operator_memberships gom
+                        JOIN groups gr ON gr.id = gom.group_id
+                        WHERE gom.operator_id = u.id
+                          AND LOWER(COALESCE(gr.calculation_model_code, '')) = %s
+                          AND gom.start_date <= %s
+                          AND (gom.end_date IS NULL OR gom.end_date >= %s)
+                    )
+                  )
+                ORDER BY 1
+                """,
+                (CALCULATION_MODEL_TEZ_OP, CALCULATION_MODEL_TEZ_OP, end_obj, start_obj),
+            )
+            return [str(row[0]).strip() for row in (cursor.fetchall() or []) if row and row[0]]
+
+    def replace_tez_op_call_metrics(self, start_date, end_date, rows):
+        """Идемпотентно заменяет телефонную продуктивность TEZ ОП за период.
+
+        `calls` хранится в штатной колонке, а времена набора/разговора — в
+        extra_metrics. Последнее принципиально: автопересчёт часов по статусам
+        владеет legacy-полем talk_time и не должен стирать данные Binotel.
+        """
+        start_obj = self._normalize_schedule_date(start_date)
+        end_obj = self._normalize_schedule_date(end_date)
+        if end_obj < start_obj:
+            start_obj, end_obj = end_obj, start_obj
+
+        normalized = []
+        for item in rows or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                operator_id = int(item.get("operator_id"))
+                day_obj = self._normalize_schedule_date(item.get("day"))
+            except Exception:
+                continue
+            if day_obj < start_obj or day_obj > end_obj:
+                continue
+            try:
+                calls = max(0, int(item.get("calls") or 0))
+                dial_time = max(
+                    0.0,
+                    float(
+                        item.get("dial_time")
+                        if item.get("dial_time") is not None
+                        else float(item.get("dial_seconds") or 0) / 3600.0
+                    ),
+                )
+                talk_time = max(
+                    0.0,
+                    float(
+                        item.get("talk_time")
+                        if item.get("talk_time") is not None
+                        else float(item.get("talk_seconds") or 0) / 3600.0
+                    ),
+                )
+            except (TypeError, ValueError):
+                continue
+            normalized.append(
+                {
+                    "operator_id": operator_id,
+                    "day": day_obj,
+                    "calls": calls,
+                    "dial_time": round(dial_time, 8),
+                    "talk_time": round(talk_time, 8),
+                }
+            )
+
+        with self._get_cursor() as cursor:
+            # Replace-семантика: исчезнувший после повторного импорта звонок не
+            # должен оставлять вчерашнее значение. Часы/штрафы не затрагиваем.
+            cursor.execute(
+                """
+                UPDATE daily_hours dh
+                SET calls = 0,
+                    extra_metrics = jsonb_set(
+                        jsonb_set(
+                            COALESCE(dh.extra_metrics, '{}'::jsonb),
+                            '{dial_time}', '0'::jsonb, TRUE
+                        ),
+                        '{talk_time}', '0'::jsonb, TRUE
+                    )
+                WHERE dh.day >= %s
+                  AND dh.day <= %s
+                  AND LOWER(COALESCE(
+                        (
+                            SELECT gr.calculation_model_code
+                            FROM group_operator_memberships gom
+                            JOIN groups gr ON gr.id = gom.group_id
+                            WHERE gom.operator_id = dh.operator_id
+                              AND gom.start_date <= dh.day
+                              AND (gom.end_date IS NULL OR gom.end_date >= dh.day)
+                            ORDER BY gom.start_date DESC
+                            LIMIT 1
+                        ),
+                        (
+                            SELECT d.calculation_model_code
+                            FROM users u
+                            LEFT JOIN directions d ON d.id = u.direction_id
+                            WHERE u.id = dh.operator_id
+                            LIMIT 1
+                        ),
+                        ''
+                  )) = %s
+                RETURNING dh.operator_id, dh.day
+                """,
+                (
+                    start_obj,
+                    end_obj,
+                    CALCULATION_MODEL_TEZ_OP,
+                ),
+            )
+            cleared = max(0, int(cursor.rowcount or 0))
+            cleared_rows = cursor.fetchall() or []
+
+            values = []
+            for item in normalized:
+                group_id = self._get_operator_group_id_tx(
+                    cursor, item["operator_id"], item["day"]
+                )
+                values.append(
+                    (
+                        item["operator_id"],
+                        item["day"],
+                        item["calls"],
+                        group_id,
+                        Json(
+                            {
+                                "dial_time": item["dial_time"],
+                                "talk_time": item["talk_time"],
+                            }
+                        ),
+                    )
+                )
+            if values:
+                execute_values(
+                    cursor,
+                    """
+                    INSERT INTO daily_hours (
+                        operator_id, day, calls, group_id, extra_metrics
+                    )
+                    VALUES %s
+                    ON CONFLICT (operator_id, day) DO UPDATE SET
+                        calls = EXCLUDED.calls,
+                        group_id = COALESCE(EXCLUDED.group_id, daily_hours.group_id),
+                        extra_metrics = COALESCE(daily_hours.extra_metrics, '{}'::jsonb)
+                                        || EXCLUDED.extra_metrics
+                    """,
+                    values,
+                    page_size=500,
+                )
+
+            # work_hours читают не только экран учёта часов, но и общие сводки.
+            # Обновляем их в той же транзакции, включая операторов, у которых
+            # после повторной выгрузки звонки исчезли.
+            affected_operator_months = {
+                (int(operator_id), day_obj.strftime("%Y-%m"))
+                for operator_id, day_obj in cleared_rows
+                if operator_id is not None and day_obj is not None
+            }
+            affected_operator_months.update(
+                (
+                    int(item["operator_id"]),
+                    item["day"].strftime("%Y-%m"),
+                )
+                for item in normalized
+            )
+            for operator_id, month_key in sorted(affected_operator_months):
+                self._aggregate_month_from_daily_tx(cursor, operator_id, month_key)
+
+        return {
+            "date_from": start_obj.strftime("%Y-%m-%d"),
+            "date_to": end_obj.strftime("%Y-%m-%d"),
+            "cleared_days": cleared,
+            "saved_days": len(values),
+            "calls": sum(item["calls"] for item in normalized),
+        }
+
+    def refresh_tez_op_chat_metrics(self, start_date, end_date):
+        """Пересчитывает дневные чаты TEZ ОП из сообщений ChatApp.
+
+        Чат засчитывается каждому оператору, который написал в нём хотя бы одно
+        ручное сообщение в этот локальный день. Доминирующий автор эпизода здесь
+        намеренно не используется.
+        """
+        start_obj = self._normalize_schedule_date(start_date)
+        end_obj = self._normalize_schedule_date(end_date)
+        if end_obj < start_obj:
+            start_obj, end_obj = end_obj, start_obj
+
+        human_out = self._CHATAPP_HUMAN_OUT
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE daily_hours dh
+                SET extra_metrics = jsonb_set(
+                    COALESCE(dh.extra_metrics, '{}'::jsonb),
+                    '{chats}', '0'::jsonb, TRUE
+                )
+                WHERE dh.day >= %s
+                  AND dh.day <= %s
+                  AND COALESCE(dh.extra_metrics, '{}'::jsonb) ? 'chats'
+                  AND LOWER(COALESCE(
+                        (
+                            SELECT gr.calculation_model_code
+                            FROM group_operator_memberships gom
+                            JOIN groups gr ON gr.id = gom.group_id
+                            WHERE gom.operator_id = dh.operator_id
+                              AND gom.start_date <= dh.day
+                              AND (gom.end_date IS NULL OR gom.end_date >= dh.day)
+                            ORDER BY gom.start_date DESC
+                            LIMIT 1
+                        ),
+                        (
+                            SELECT d.calculation_model_code
+                            FROM users u
+                            LEFT JOIN directions d ON d.id = u.direction_id
+                            WHERE u.id = dh.operator_id
+                            LIMIT 1
+                        ),
+                        ''
+                  )) = %s
+                """,
+                (start_obj, end_obj, CALCULATION_MODEL_TEZ_OP),
+            )
+            cleared = max(0, int(cursor.rowcount or 0))
+
+            cursor.execute(
+                f"""
+                SELECT
+                    map.user_id,
+                    (m.dt AT TIME ZONE 'Asia/Almaty')::date AS local_day,
+                    COUNT(DISTINCT (m.license_id, m.messenger_type, m.chat_id)) AS chats
+                FROM chatapp_messages m
+                JOIN chatapp_operator_map map ON map.employee_id = m.employee_id
+                LEFT JOIN users u ON u.id = map.user_id
+                LEFT JOIN directions d ON d.id = u.direction_id
+                LEFT JOIN LATERAL (
+                    SELECT gr.calculation_model_code
+                    FROM group_operator_memberships gom
+                    JOIN groups gr ON gr.id = gom.group_id
+                    WHERE gom.operator_id = map.user_id
+                      AND gom.start_date <= (m.dt AT TIME ZONE 'Asia/Almaty')::date
+                      AND (
+                        gom.end_date IS NULL
+                        OR gom.end_date >= (m.dt AT TIME ZONE 'Asia/Almaty')::date
+                      )
+                    ORDER BY gom.start_date DESC
+                    LIMIT 1
+                ) active_group ON TRUE
+                WHERE map.user_id IS NOT NULL
+                  AND COALESCE(map.is_bot, FALSE) = FALSE
+                  AND COALESCE(m.is_deleted, FALSE) = FALSE
+                  AND ({human_out})
+                  AND (m.dt AT TIME ZONE 'Asia/Almaty')::date >= %s
+                  AND (m.dt AT TIME ZONE 'Asia/Almaty')::date <= %s
+                  AND LOWER(COALESCE(
+                        active_group.calculation_model_code,
+                        d.calculation_model_code,
+                        ''
+                  )) = %s
+                GROUP BY map.user_id, local_day
+                ORDER BY map.user_id, local_day
+                """,
+                (
+                    start_obj,
+                    end_obj,
+                    CALCULATION_MODEL_TEZ_OP,
+                ),
+            )
+            aggregate_rows = cursor.fetchall() or []
+
+            values = []
+            for operator_id, day_obj, chats in aggregate_rows:
+                group_id = self._get_operator_group_id_tx(cursor, operator_id, day_obj)
+                values.append(
+                    (
+                        int(operator_id),
+                        day_obj,
+                        group_id,
+                        Json({"chats": max(0, int(chats or 0))}),
+                    )
+                )
+            if values:
+                execute_values(
+                    cursor,
+                    """
+                    INSERT INTO daily_hours (
+                        operator_id, day, group_id, extra_metrics
+                    )
+                    VALUES %s
+                    ON CONFLICT (operator_id, day) DO UPDATE SET
+                        group_id = COALESCE(EXCLUDED.group_id, daily_hours.group_id),
+                        extra_metrics = COALESCE(daily_hours.extra_metrics, '{}'::jsonb)
+                                        || EXCLUDED.extra_metrics
+                    """,
+                    values,
+                    page_size=500,
+                )
+
+        return {
+            "date_from": start_obj.strftime("%Y-%m-%d"),
+            "date_to": end_obj.strftime("%Y-%m-%d"),
+            "cleared_days": cleared,
+            "saved_days": len(values),
+            "chats": sum(int(row[2] or 0) for row in aggregate_rows),
+        }
+
     def insert_or_update_daily_hours(self, operator_id, day, work_time=0.0, break_time=0.0,
                                     talk_time=0.0, calls=0, efficiency=0.0,
                                     fine_amount=0.0, fine_reason=None, fine_comment=None,
@@ -17464,7 +17828,8 @@ class Database:
                 """
                 SELECT day, work_time, break_time, talk_time, calls, efficiency,
                     fine_amount, fine_reason, fine_comment,
-                    COALESCE(no_phone_minutes, 0), COALESCE(no_phone_seconds, 0)
+                    COALESCE(no_phone_minutes, 0), COALESCE(no_phone_seconds, 0),
+                    COALESCE(extra_metrics, '{}'::jsonb)
                 FROM daily_hours
                 WHERE operator_id = %s AND day >= %s AND day <= %s
                 ORDER BY day
@@ -17483,12 +17848,22 @@ class Database:
                 no_phone_minutes = int(row[9] or 0)
                 no_phone_seconds = int(row[10] or 0)
                 no_phone_day_hours = float(no_phone_seconds or 0) / 3600.0
+                extra_metrics = self._coerce_daily_extra_metrics(row[11])
+                imported_talk_time = extra_metrics.get("talk_time")
+                talk_time_value = (
+                    float(imported_talk_time)
+                    if imported_talk_time is not None
+                    else (float(row[3]) if row[3] is not None else 0.0)
+                )
                 no_phone_hours += no_phone_day_hours
                 daily_map[day_key] = {
                     "work_time": float(row[1]) if row[1] is not None else 0.0,
                     "break_time": float(row[2]) if row[2] is not None else 0.0,
-                    "talk_time": float(row[3]) if row[3] is not None else 0.0,
+                    "talk_time": talk_time_value,
                     "calls": int(row[4]) if row[4] is not None else 0,
+                    "dial_time": float(extra_metrics.get("dial_time") or 0.0),
+                    "chats": int(extra_metrics.get("chats") or 0),
+                    "extra_metrics": extra_metrics,
                     "efficiency": float(row[5]) if row[5] is not None else 0.0,
                     "fine_amount": float(row[6]) if row[6] is not None else 0.0,
                     "fine_reason": row[7],
@@ -17700,6 +18075,34 @@ class Database:
                 entry["chat_metrics"] = metrics
                 entry["calls"] = int(metrics.get("chats_count") or 0)
 
+        total_dial_time = sum(
+            float(day_data.get("dial_time") or 0.0)
+            for day_data in daily_map.values()
+            if isinstance(day_data, dict)
+        )
+        total_tez_chats = sum(
+            int(day_data.get("chats") or 0)
+            for day_data in daily_map.values()
+            if isinstance(day_data, dict)
+        )
+        if effective_calculation_model_code == CALCULATION_MODEL_TEZ_OP:
+            total_calls = sum(
+                int(day_data.get("calls") or 0)
+                for day_data in daily_map.values()
+                if isinstance(day_data, dict)
+            )
+            total_talk_time = sum(
+                float(day_data.get("talk_time") or 0.0)
+                for day_data in daily_map.values()
+                if isinstance(day_data, dict)
+            )
+            regular_hours_for_rate = max(0.0, float(regular_hours or 0.0))
+            calls_per_hour = (
+                float(total_calls) / regular_hours_for_rate
+                if regular_hours_for_rate > 0
+                else 0.0
+            )
+
         accounted_hours = (
             float(regular_hours or 0.0)
             + float(training_hours or 0.0)
@@ -17734,6 +18137,8 @@ class Database:
                 "total_break_time": float(total_break_time),
                 "total_talk_time": float(total_talk_time),
                 "total_calls": int(total_calls),
+                "total_dial_time": float(total_dial_time),
+                "total_chats": int(total_tez_chats),
                 "total_efficiency_hours": float(total_efficiency_hours),
                 "calls_per_hour": float(calls_per_hour),
                 "chat_avg_score": chat_metric_totals.get("avg_score"),
@@ -17895,7 +18300,8 @@ class Database:
             _daily_sql = """
                 SELECT d.operator_id, d.day, d.work_time, d.break_time, d.talk_time, d.calls, d.efficiency,
                     d.fine_amount, d.fine_reason, d.fine_comment,
-                    COALESCE(d.no_phone_minutes, 0), COALESCE(d.no_phone_seconds, 0)
+                    COALESCE(d.no_phone_minutes, 0), COALESCE(d.no_phone_seconds, 0),
+                    COALESCE(d.extra_metrics, '{}'::jsonb)
                 FROM daily_hours d
                 WHERE d.operator_id = ANY(%s)
                 AND d.day >= %s AND d.day <= %s
@@ -17918,17 +18324,28 @@ class Database:
             daily_map = {}
             no_phone_totals_by_operator = {}
             for (op_id, day, work_time, break_time, talk_time, calls, eff,
-                fine_amount, fine_reason, fine_comment, no_phone_minutes, no_phone_seconds) in daily_rows:
+                fine_amount, fine_reason, fine_comment, no_phone_minutes, no_phone_seconds,
+                extra_metrics_raw) in daily_rows:
                 day_num = str(int(day.day))
                 no_phone_minutes = int(no_phone_minutes or 0)
                 no_phone_seconds = int(no_phone_seconds or 0)
                 no_phone_day_hours = float(no_phone_seconds or 0) / 3600.0
+                extra_metrics = self._coerce_daily_extra_metrics(extra_metrics_raw)
+                imported_talk_time = extra_metrics.get("talk_time")
+                talk_time_value = (
+                    float(imported_talk_time)
+                    if imported_talk_time is not None
+                    else (float(talk_time) if talk_time is not None else 0.0)
+                )
                 no_phone_totals_by_operator[op_id] = no_phone_totals_by_operator.get(op_id, 0.0) + no_phone_day_hours
                 d = {
                     "work_time": float(work_time) if work_time is not None else 0.0,
                     "break_time": float(break_time) if break_time is not None else 0.0,
-                    "talk_time": float(talk_time) if talk_time is not None else 0.0,
+                    "talk_time": talk_time_value,
                     "calls": int(calls) if calls is not None else 0,
+                    "dial_time": float(extra_metrics.get("dial_time") or 0.0),
+                    "chats": int(extra_metrics.get("chats") or 0),
+                    "extra_metrics": extra_metrics,
                     "efficiency": float(eff) if eff is not None else 0.0,
                     "fine_amount": float(fine_amount) if fine_amount is not None else 0.0,
                     "fine_reason": fine_reason,
@@ -18025,17 +18442,39 @@ class Database:
                 # group-filtered daily_map (work_hours хранит ОБЩИЙ итог оператора без
                 # разбивки по группам). Формулы — как в _aggregate_month_from_daily_tx;
                 # fines — из daily_fines (список fines[]).
-                grp_regular = grp_break = grp_talk = grp_eff = grp_fines = 0.0
-                grp_calls = 0
+                grp_regular = grp_break = grp_talk = grp_eff = grp_fines = grp_dial = 0.0
+                grp_calls = grp_chats = 0
                 if group_id is not None:
                     for _dnum, _dd in op_daily.items():
                         grp_regular += float(_dd.get("work_time") or 0.0)
                         grp_break += float(_dd.get("break_time") or 0.0)
                         grp_talk += float(_dd.get("talk_time") or 0.0)
+                        grp_dial += float(_dd.get("dial_time") or 0.0)
                         grp_eff += float(_dd.get("efficiency") or 0.0)
                         grp_calls += int(_dd.get("calls") or 0)
+                        grp_chats += int(_dd.get("chats") or 0)
                         for _f in (_dd.get("fines") or []):
                             grp_fines += float(_f.get("amount") or 0.0)
+                daily_dial_total = sum(
+                    float(_dd.get("dial_time") or 0.0)
+                    for _dd in op_daily.values()
+                    if isinstance(_dd, dict)
+                )
+                daily_talk_total = sum(
+                    float(_dd.get("talk_time") or 0.0)
+                    for _dd in op_daily.values()
+                    if isinstance(_dd, dict)
+                )
+                daily_calls_total = sum(
+                    int(_dd.get("calls") or 0)
+                    for _dd in op_daily.values()
+                    if isinstance(_dd, dict)
+                )
+                daily_chats_total = sum(
+                    int(_dd.get("chats") or 0)
+                    for _dd in op_daily.values()
+                    if isinstance(_dd, dict)
+                )
                 training_hours = float(training_totals_by_operator.get(op_id, 0.0)) if isinstance(training_totals_by_operator, dict) else 0.0
                 technical_issue_hours = float(technical_totals_by_operator.get(op_id, 0.0)) if isinstance(technical_totals_by_operator, dict) else 0.0
                 offline_activity_hours = float(offline_totals_by_operator.get(op_id, 0.0)) if isinstance(offline_totals_by_operator, dict) else 0.0
@@ -18064,6 +18503,15 @@ class Database:
                         })
                         entry["chat_metrics"] = metrics
                         entry["calls"] = int(metrics.get("chats_count") or 0)
+                elif calculation_model_code == CALCULATION_MODEL_TEZ_OP and group_id is None:
+                    total_calls = int(daily_calls_total)
+                    total_talk_time = float(daily_talk_total)
+                    regular_hours_for_rate = max(0.0, accounted_regular_hours)
+                    calls_per_hour = (
+                        float(total_calls) / regular_hours_for_rate
+                        if regular_hours_for_rate > 0
+                        else 0.0
+                    )
 
                 operators.append({
                     "operator_id": op_id,
@@ -18094,6 +18542,8 @@ class Database:
                         "total_break_time": float(grp_break),
                         "total_talk_time": float(grp_talk),
                         "total_calls": int(total_calls if calculation_model_code == CALCULATION_MODEL_CHAT_MANAGER else grp_calls),
+                        "total_dial_time": float(grp_dial),
+                        "total_chats": int(grp_chats),
                         "total_efficiency_hours": float(grp_eff),
                         "calls_per_hour": (
                             (float(total_calls if calculation_model_code == CALCULATION_MODEL_CHAT_MANAGER else grp_calls) / grp_regular)
@@ -18109,6 +18559,8 @@ class Database:
                         "total_break_time": float(total_break_time),
                         "total_talk_time": float(total_talk_time),
                         "total_calls": int(total_calls),
+                        "total_dial_time": float(daily_dial_total),
+                        "total_chats": int(daily_chats_total),
                         "total_efficiency_hours": float(total_efficiency_hours),
                         "calls_per_hour": float(calls_per_hour),
                         "fines": float(fines),
@@ -18126,7 +18578,8 @@ class Database:
                 with self._get_cursor() as _sc:
                     _sc.execute("""
                         SELECT operator_id, status, rate, norm_hours, regular_hours, total_break_time,
-                               total_talk_time, total_calls, total_efficiency_hours, calls_per_hour, fines,
+                               total_talk_time, total_dial_time, total_calls, total_chats,
+                               total_efficiency_hours, calls_per_hour, fines,
                                chat_avg_score, chat_avg_response_time_seconds, chat_transfer_count
                         FROM group_operator_month_snapshots
                         WHERE group_id = %s AND month = %s AND frozen_at IS NOT NULL
@@ -18136,6 +18589,7 @@ class Database:
                     r = snap.get(int(_op.get("operator_id")))
                     if not r:
                         continue
+                    _live_aggregates = _op.get("aggregates") or {}
                     if r[1] is not None:
                         _op["status"] = r[1]
                     if r[2] is not None:
@@ -18146,13 +18600,23 @@ class Database:
                         "regular_hours": float(r[4] or 0.0),
                         "total_break_time": float(r[5] or 0.0),
                         "total_talk_time": float(r[6] or 0.0),
-                        "total_calls": int(r[7] or 0),
-                        "total_efficiency_hours": float(r[8] or 0.0),
-                        "calls_per_hour": float(r[9] or 0.0),
-                        "fines": float(r[10] or 0.0),
-                        "chat_avg_score": r[11],
-                        "chat_avg_response_time_seconds": r[12],
-                        "chat_transfer_count": int(r[13] or 0),
+                        "total_dial_time": (
+                            float(r[7])
+                            if r[7] is not None
+                            else float(_live_aggregates.get("total_dial_time") or 0.0)
+                        ),
+                        "total_calls": int(r[8] or 0),
+                        "total_chats": (
+                            int(r[9])
+                            if r[9] is not None
+                            else int(_live_aggregates.get("total_chats") or 0)
+                        ),
+                        "total_efficiency_hours": float(r[10] or 0.0),
+                        "calls_per_hour": float(r[11] or 0.0),
+                        "fines": float(r[12] or 0.0),
+                        "chat_avg_score": r[13],
+                        "chat_avg_response_time_seconds": r[14],
+                        "chat_transfer_count": int(r[15] or 0),
                     }
                     _op["frozen"] = True
             except Exception as _ov_err:
@@ -18224,7 +18688,8 @@ class Database:
             cursor.execute("""
                 SELECT d.operator_id, d.day, d.work_time, d.break_time, d.talk_time, d.calls, d.efficiency,
                     d.fine_amount, d.fine_reason, d.fine_comment,
-                    COALESCE(d.no_phone_minutes, 0), COALESCE(d.no_phone_seconds, 0)
+                    COALESCE(d.no_phone_minutes, 0), COALESCE(d.no_phone_seconds, 0),
+                    COALESCE(d.extra_metrics, '{}'::jsonb)
                 FROM daily_hours d
                 WHERE d.operator_id = ANY(%s)
                 AND d.day >= %s AND d.day <= %s
@@ -18235,17 +18700,28 @@ class Database:
             daily_map = {}
             no_phone_totals_by_operator = {}
             for (op_id, day, work_time, break_time, talk_time, calls, eff,
-                fine_amount, fine_reason, fine_comment, no_phone_minutes, no_phone_seconds) in daily_rows:
+                fine_amount, fine_reason, fine_comment, no_phone_minutes, no_phone_seconds,
+                extra_metrics_raw) in daily_rows:
                 day_num = str(int(day.day))
                 no_phone_minutes = int(no_phone_minutes or 0)
                 no_phone_seconds = int(no_phone_seconds or 0)
                 no_phone_day_hours = float(no_phone_seconds or 0) / 3600.0
+                extra_metrics = self._coerce_daily_extra_metrics(extra_metrics_raw)
+                imported_talk_time = extra_metrics.get("talk_time")
+                talk_time_value = (
+                    float(imported_talk_time)
+                    if imported_talk_time is not None
+                    else (float(talk_time) if talk_time is not None else 0.0)
+                )
                 no_phone_totals_by_operator[op_id] = no_phone_totals_by_operator.get(op_id, 0.0) + no_phone_day_hours
                 d = {
                     "work_time": float(work_time) if work_time is not None else 0.0,
                     "break_time": float(break_time) if break_time is not None else 0.0,
-                    "talk_time": float(talk_time) if talk_time is not None else 0.0,
+                    "talk_time": talk_time_value,
                     "calls": int(calls) if calls is not None else 0,
+                    "dial_time": float(extra_metrics.get("dial_time") or 0.0),
+                    "chats": int(extra_metrics.get("chats") or 0),
+                    "extra_metrics": extra_metrics,
                     "efficiency": float(eff) if eff is not None else 0.0,
                     "fine_amount": float(fine_amount) if fine_amount is not None else 0.0,
                     "fine_reason": fine_reason,
@@ -18332,6 +18808,26 @@ class Database:
                 total_calls, total_efficiency_hours, calls_per_hour, fines, operator_department_id) = row
                 calculation_model_code = self._normalize_calculation_model_code(calculation_model_raw, direction_name)
                 op_daily = daily_map.get(op_id, {})
+                daily_dial_total = sum(
+                    float(_dd.get("dial_time") or 0.0)
+                    for _dd in op_daily.values()
+                    if isinstance(_dd, dict)
+                )
+                daily_talk_total = sum(
+                    float(_dd.get("talk_time") or 0.0)
+                    for _dd in op_daily.values()
+                    if isinstance(_dd, dict)
+                )
+                daily_calls_total = sum(
+                    int(_dd.get("calls") or 0)
+                    for _dd in op_daily.values()
+                    if isinstance(_dd, dict)
+                )
+                daily_chats_total = sum(
+                    int(_dd.get("chats") or 0)
+                    for _dd in op_daily.values()
+                    if isinstance(_dd, dict)
+                )
                 training_hours = float(training_totals_by_operator.get(op_id, 0.0)) if isinstance(training_totals_by_operator, dict) else 0.0
                 technical_issue_hours = float(technical_totals_by_operator.get(op_id, 0.0)) if isinstance(technical_totals_by_operator, dict) else 0.0
                 offline_activity_hours = float(offline_totals_by_operator.get(op_id, 0.0)) if isinstance(offline_totals_by_operator, dict) else 0.0
@@ -18359,6 +18855,15 @@ class Database:
                         })
                         entry["chat_metrics"] = metrics
                         entry["calls"] = int(metrics.get("chats_count") or 0)
+                elif calculation_model_code == CALCULATION_MODEL_TEZ_OP:
+                    total_calls = int(daily_calls_total)
+                    total_talk_time = float(daily_talk_total)
+                    regular_hours_for_rate = max(0.0, float(regular_hours or 0.0))
+                    calls_per_hour = (
+                        float(total_calls) / regular_hours_for_rate
+                        if regular_hours_for_rate > 0
+                        else 0.0
+                    )
 
                 operators.append({
                     "operator_id": op_id,
@@ -18388,6 +18893,8 @@ class Database:
                         "total_break_time": float(total_break_time),
                         "total_talk_time": float(total_talk_time),
                         "total_calls": int(total_calls),
+                        "total_dial_time": float(daily_dial_total),
+                        "total_chats": int(daily_chats_total),
                         "total_efficiency_hours": float(total_efficiency_hours),
                         "calls_per_hour": float(calls_per_hour),
                         "fines": float(fines),
@@ -29085,10 +29592,20 @@ class Database:
             cursor = seg_end
         return parts
 
+    def _lock_operator_status_segments_tx(self, cursor, operator_ids):
+        """Сериализует замену/rebuild сегментов по оператору в рамках транзакции."""
+        for operator_id in sorted({int(v) for v in (operator_ids or []) if v is not None}):
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(%s, %s)",
+                (self.STATUS_SEGMENT_OPERATOR_LOCK_NAMESPACE, operator_id),
+            )
+
     def _rebuild_operator_status_segments_tx(self, cursor, operator_ids, start_date, end_date, imported_by=None):
         op_ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
         if not op_ids:
             return {'segments_saved': 0, 'deleted_segments': 0}
+
+        self._lock_operator_status_segments_tx(cursor, op_ids)
 
         start_date_obj = self._normalize_schedule_date(start_date)
         end_date_obj = self._normalize_schedule_date(end_date)
@@ -29132,6 +29649,7 @@ class Database:
                 FROM operator_status_events
                 WHERE operator_id = ANY(%s)
                   AND COALESCE(event_kind, 'status') <> 'action'
+                  AND COALESCE(is_authoritative, FALSE) = FALSE
                   AND NOT (LOWER(TRIM(status_key)) = ANY(%s))
             ),
             previous_events AS (
@@ -29167,6 +29685,28 @@ class Database:
             (op_ids, action_status_keys, window_start, window_start, window_end, window_end)
         )
         rows = cursor.fetchall() or []
+
+        # Готовые start/stop-интервалы некоторых источников являются первичным
+        # сырьём. Обычная пересборка из точек переключения не должна ни удалять
+        # их, ни создавать поверх них дубли. Защита хранится в самой строке,
+        # поэтому переживает отдельные HTTP-запросы и рестарты приложения.
+        cursor.execute(
+            """
+            SELECT operator_id, status_date
+            FROM operator_status_segments
+            WHERE operator_id = ANY(%s)
+              AND status_date >= %s
+              AND status_date <= %s
+              AND COALESCE(is_authoritative, FALSE) = TRUE
+            GROUP BY operator_id, status_date
+            """,
+            (op_ids, start_date_obj, end_date_obj),
+        )
+        authoritative_days = {
+            (int(operator_id), status_date)
+            for operator_id, status_date in (cursor.fetchall() or [])
+            if status_date is not None
+        }
 
         events_by_operator = {}
         for event_id, operator_id, event_at_value, status_key, state_note, event_kind in rows:
@@ -29205,6 +29745,8 @@ class Database:
                     status_date_obj = part.get('status_date')
                     if status_date_obj < start_date_obj or status_date_obj > end_date_obj:
                         continue
+                    if (int(op_id), status_date_obj) in authoritative_days:
+                        continue
                     segment_values.append((
                         int(op_id),
                         status_date_obj,
@@ -29227,6 +29769,8 @@ class Database:
                     status_date_obj = part.get('status_date')
                     if status_date_obj < start_date_obj or status_date_obj > end_date_obj:
                         continue
+                    if (int(op_id), status_date_obj) in authoritative_days:
+                        continue
                     segment_values.append((
                         int(op_id),
                         status_date_obj,
@@ -29244,6 +29788,7 @@ class Database:
             WHERE operator_id = ANY(%s)
               AND status_date >= %s
               AND status_date <= %s
+              AND COALESCE(is_authoritative, FALSE) = FALSE
             """,
             (op_ids, start_date_obj, end_date_obj)
         )
@@ -29322,6 +29867,7 @@ class Database:
                             FROM operator_status_events
                             WHERE event_date < %(floor)s
                               AND COALESCE(event_kind, 'status') <> 'action'
+                              AND COALESCE(is_authoritative, FALSE) = FALSE
                               AND NOT (LOWER(TRIM(status_key)) = ANY(%(keys)s))
                             GROUP BY operator_id
                         ),
@@ -29709,12 +30255,47 @@ class Database:
                 COALESCE(SUM(talk_time),0),
                 COALESCE(SUM(calls),0),
                 COALESCE(SUM(efficiency),0),
-                COALESCE(SUM(no_phone_seconds),0)
+                COALESCE(SUM(no_phone_seconds),0),
+                COALESCE(SUM(
+                    CASE
+                        WHEN jsonb_typeof(COALESCE(extra_metrics, '{}'::jsonb)->'talk_time') = 'number'
+                            THEN (extra_metrics->>'talk_time')::double precision
+                        ELSE 0
+                    END
+                ), 0),
+                COALESCE(SUM(
+                    CASE
+                        WHEN jsonb_typeof(COALESCE(extra_metrics, '{}'::jsonb)->'dial_time') = 'number'
+                            THEN (extra_metrics->>'dial_time')::double precision
+                        ELSE 0
+                    END
+                ), 0),
+                COALESCE(SUM(
+                    CASE
+                        WHEN jsonb_typeof(COALESCE(extra_metrics, '{}'::jsonb)->'chats') = 'number'
+                            THEN (extra_metrics->>'chats')::integer
+                        ELSE 0
+                    END
+                ), 0)
             FROM daily_hours
             WHERE operator_id = %s AND day >= %s AND day <= %s
         """, (operator_id, start, end))
         row = cursor.fetchone()
-        total_work_time, total_training_time, total_break_time, total_talk_time, total_calls, total_efficiency_hours, total_no_phone_seconds = row
+        (
+            total_work_time,
+            total_training_time,
+            total_break_time,
+            total_talk_time,
+            total_calls,
+            total_efficiency_hours,
+            total_no_phone_seconds,
+            tez_talk_time,
+            tez_dial_time,
+            tez_chats,
+        ) = row
+
+        if calculation_model_code == CALCULATION_MODEL_TEZ_OP:
+            total_talk_time = float(tez_talk_time or 0.0)
 
         chat_avg_score = None
         chat_avg_response_time_seconds = None
@@ -29857,6 +30438,8 @@ class Database:
             "total_break_time": float(total_break_time or 0.0),
             "total_talk_time": float(total_talk_time or 0.0),
             "total_calls": int(total_calls or 0),
+            "total_dial_time": float(tez_dial_time or 0.0),
+            "total_chats": int(tez_chats or 0),
             "total_efficiency_hours": float(total_efficiency_hours or 0.0),
             "calls_per_hour": float(calls_per_hour or 0.0),
             "fines": float(total_fines or 0.0),
@@ -29897,13 +30480,48 @@ class Database:
                 COALESCE(SUM(talk_time),0),
                 COALESCE(SUM(calls),0),
                 COALESCE(SUM(efficiency),0),
-                COALESCE(SUM(no_phone_seconds),0)
+                COALESCE(SUM(no_phone_seconds),0),
+                COALESCE(SUM(
+                    CASE
+                        WHEN jsonb_typeof(COALESCE(extra_metrics, '{}'::jsonb)->'talk_time') = 'number'
+                            THEN (extra_metrics->>'talk_time')::double precision
+                        ELSE 0
+                    END
+                ), 0),
+                COALESCE(SUM(
+                    CASE
+                        WHEN jsonb_typeof(COALESCE(extra_metrics, '{}'::jsonb)->'dial_time') = 'number'
+                            THEN (extra_metrics->>'dial_time')::double precision
+                        ELSE 0
+                    END
+                ), 0),
+                COALESCE(SUM(
+                    CASE
+                        WHEN jsonb_typeof(COALESCE(extra_metrics, '{}'::jsonb)->'chats') = 'number'
+                            THEN (extra_metrics->>'chats')::integer
+                        ELSE 0
+                    END
+                ), 0)
             FROM daily_hours
             WHERE operator_id = %s AND day >= %s AND day <= %s
               AND (%s IS NULL OR group_id = %s)
         """, (operator_id, seg_start, seg_end, gid, gid))
         row = cursor.fetchone()
-        total_work_time, total_training_time, total_break_time, total_talk_time, total_calls, total_efficiency_hours, total_no_phone_seconds = row
+        (
+            total_work_time,
+            total_training_time,
+            total_break_time,
+            total_talk_time,
+            total_calls,
+            total_efficiency_hours,
+            total_no_phone_seconds,
+            tez_talk_time,
+            tez_dial_time,
+            tez_chats,
+        ) = row
+
+        if calculation_model_code == CALCULATION_MODEL_TEZ_OP:
+            total_talk_time = float(tez_talk_time or 0.0)
 
         chat_avg_score = None
         chat_avg_response_time_seconds = None
@@ -30008,6 +30626,8 @@ class Database:
             "total_break_time": float(total_break_time or 0.0),
             "total_talk_time": float(total_talk_time or 0.0),
             "total_calls": int(total_calls or 0),
+            "total_dial_time": float(tez_dial_time or 0.0),
+            "total_chats": int(tez_chats or 0),
             "total_efficiency_hours": float(total_efficiency_hours or 0.0),
             "calls_per_hour": float(calls_per_hour or 0.0),
             "fines": float(total_fines or 0.0),
@@ -30226,9 +30846,10 @@ class Database:
                             group_id, month, operator_id, name, role, status, direction_id, direction_name,
                             calculation_model_code, rate, supervisor_ids, supervisor_names, first_day, last_day,
                             norm_hours, regular_hours, training_hours, total_break_time, total_talk_time,
-                            total_calls, total_efficiency_hours, calls_per_hour, fines, offline_activity_hours,
+                            total_dial_time, total_calls, total_chats,
+                            total_efficiency_hours, calls_per_hour, fines, offline_activity_hours,
                             no_phone_hours, chat_avg_score, chat_avg_response_time_seconds, chat_transfer_count, frozen_at
-                        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                         ON CONFLICT (group_id, month, operator_id) DO UPDATE SET
                             name=EXCLUDED.name, role=EXCLUDED.role, status=EXCLUDED.status,
                             direction_id=EXCLUDED.direction_id, direction_name=EXCLUDED.direction_name,
@@ -30237,7 +30858,8 @@ class Database:
                             first_day=EXCLUDED.first_day, last_day=EXCLUDED.last_day,
                             norm_hours=EXCLUDED.norm_hours, regular_hours=EXCLUDED.regular_hours,
                             training_hours=EXCLUDED.training_hours, total_break_time=EXCLUDED.total_break_time,
-                            total_talk_time=EXCLUDED.total_talk_time, total_calls=EXCLUDED.total_calls,
+                            total_talk_time=EXCLUDED.total_talk_time, total_dial_time=EXCLUDED.total_dial_time,
+                            total_calls=EXCLUDED.total_calls, total_chats=EXCLUDED.total_chats,
                             total_efficiency_hours=EXCLUDED.total_efficiency_hours, calls_per_hour=EXCLUDED.calls_per_hour,
                             fines=EXCLUDED.fines, offline_activity_hours=EXCLUDED.offline_activity_hours,
                             no_phone_hours=EXCLUDED.no_phone_hours, chat_avg_score=EXCLUDED.chat_avg_score,
@@ -30251,7 +30873,8 @@ class Database:
                         date(year, mon, seg["start_day"]), date(year, mon, seg["end_day"]),
                         m.get("norm_hours"),
                         a["regular_hours"], a["training_hours"], a["total_break_time"], a["total_talk_time"],
-                        a["total_calls"], a["total_efficiency_hours"], a["calls_per_hour"], a["fines"],
+                        a["total_dial_time"], a["total_calls"], a["total_chats"],
+                        a["total_efficiency_hours"], a["calls_per_hour"], a["fines"],
                         a["offline_activity_hours"], a["no_phone_hours"],
                         a["chat_avg_score"], a["chat_avg_response_time_seconds"], a["chat_transfer_count"],
                         frozen_at,
@@ -30311,7 +30934,8 @@ class Database:
                 SELECT s.group_id, s.operator_id, s.name, s.role, s.status, s.direction_id, s.direction_name,
                        s.calculation_model_code, s.rate, s.supervisor_ids, s.supervisor_names,
                        s.first_day, s.last_day, s.norm_hours, s.regular_hours, s.training_hours,
-                       s.total_break_time, s.total_talk_time, s.total_calls, s.total_efficiency_hours,
+                       s.total_break_time, s.total_talk_time, s.total_dial_time,
+                       s.total_calls, s.total_chats, s.total_efficiency_hours,
                        s.calls_per_hour, s.fines, s.offline_activity_hours, s.no_phone_hours,
                        s.chat_avg_score, s.chat_avg_response_time_seconds, s.chat_transfer_count, s.frozen_at,
                        gms.name AS group_name
@@ -30324,7 +30948,7 @@ class Database:
             frozen = False
             for r in cursor.fetchall() or []:
                 (g_id, op_id, name, role, status, dir_id, dir_name, model, rate, sv_ids, sv_names,
-                 first_day, last_day, norm, regular, training, brk, talk, calls, eff, cph, fines,
+                 first_day, last_day, norm, regular, training, brk, talk, dial, calls, chats, eff, cph, fines,
                  offline, no_phone, c_score, c_resp, c_transfer, frozen_at, group_name) = r
                 if frozen_at is not None:
                     frozen = True
@@ -30344,7 +30968,8 @@ class Database:
                     "last_day": last_day.isoformat() if last_day else None,
                     "aggregates": {
                         "norm_hours": norm, "regular_hours": regular, "training_hours": training,
-                        "total_break_time": brk, "total_talk_time": talk, "total_calls": calls,
+                        "total_break_time": brk, "total_talk_time": talk,
+                        "total_dial_time": dial, "total_calls": calls, "total_chats": chats,
                         "total_efficiency_hours": eff, "calls_per_hour": cph, "fines": fines,
                         "offline_activity_hours": offline, "no_phone_hours": no_phone,
                         "chat_avg_score": c_score, "chat_avg_response_time_seconds": c_resp,
@@ -34885,6 +35510,10 @@ class Database:
             raise ValueError("segments must be a list")
 
         summary_payload = summary if isinstance(summary, dict) else {}
+        summary_meta = summary_payload.get("meta")
+        if not isinstance(summary_meta, dict):
+            summary_meta = {}
+        authoritative_segments = bool(summary_meta.get("segments_authoritative"))
 
         def _safe_int(value, default=0):
             try:
@@ -35103,6 +35732,8 @@ class Database:
         }
 
         with self._get_cursor() as cursor:
+            self._lock_operator_status_segments_tx(cursor, affected_operator_ids)
+
             for operator_id, start_date_obj, end_date_obj in event_ranges:
                 cursor.execute(
                     """
@@ -35179,13 +35810,17 @@ class Database:
                     'status_key',
                     'state_note',
                     'event_kind',
-                    'imported_by'
+                    'imported_by',
+                    'is_authoritative'
                 ]
                 event_values = []
                 for item in normalized_events:
                     row_values = []
                     for col in event_insert_columns:
-                        row_values.append(item.get(col))
+                        if col == 'is_authoritative':
+                            row_values.append(bool(authoritative_segments))
+                        else:
+                            row_values.append(item.get(col))
                     event_values.append(tuple(row_values))
                 event_columns_sql = ', '.join(event_insert_columns)
                 execute_values(
@@ -35200,7 +35835,7 @@ class Database:
                     page_size=STATUS_IMPORT_INSERT_PAGE_SIZE
                 )
 
-            if normalized_events and segment_rebuild_ranges:
+            if normalized_events and segment_rebuild_ranges and not authoritative_segments:
                 rebuild_start_obj = min(r[1] for r in segment_rebuild_ranges)
                 rebuild_end_obj = max(r[2] for r in segment_rebuild_ranges)
                 rebuilt = self._rebuild_operator_status_segments_tx(
@@ -35222,7 +35857,7 @@ class Database:
                     'operator_ids': [int(r[0]) for r in segment_rebuild_ranges]
                 }
 
-            if normalized_segments and not normalized_events:
+            if normalized_segments and (not normalized_events or authoritative_segments):
                 segment_insert_columns = [
                     'operator_id',
                     'status_date',
@@ -35231,13 +35866,17 @@ class Database:
                     'duration_sec',
                     'status_key',
                     'state_note',
-                    'imported_by'
+                    'imported_by',
+                    'is_authoritative'
                 ]
                 segment_values = []
                 for item in normalized_segments:
                     row_values = []
                     for col in segment_insert_columns:
-                        row_values.append(item.get(col))
+                        if col == 'is_authoritative':
+                            row_values.append(bool(authoritative_segments))
+                        else:
+                            row_values.append(item.get(col))
                     segment_values.append(tuple(row_values))
                 segment_columns_sql = ', '.join(segment_insert_columns)
                 execute_values(
@@ -35263,7 +35902,7 @@ class Database:
             )
 
             if affected_operator_ids and date_from_obj and date_to_obj:
-                if normalized_events and segment_rebuild_ranges:
+                if normalized_events and segment_rebuild_ranges and not authoritative_segments:
                     recalc_start_obj = min(r[1] for r in segment_rebuild_ranges)
                     recalc_end_obj = max(r[2] for r in segment_rebuild_ranges)
                 else:

@@ -5853,7 +5853,7 @@ def sync_chatapp_data(days=None, date_from=None, date_to=None, rebuild_episodes=
                  for c in client.iter_chats(company_id, license_ids, since_ts=since_ts)]
     db.store_chatapp_chats(chat_rows)
 
-    stored_messages, touched_chats = 0, 0
+    stored_messages, touched_chats, failed_chats = 0, 0, 0
     explicit_range = bool(date_from)
     for chat in db.chatapp_chats_needing_messages(since_dt, force=explicit_range):
         # Отступаем на паузу эпизода назад от начала окна: иначе на его границе
@@ -5868,6 +5868,7 @@ def sync_chatapp_data(days=None, date_from=None, date_to=None, rebuild_episodes=
                                         until_ts=until_ts)
         except chatapp_client.ChatAppError as error:
             logging.warning("chatapp sync: чат %s пропущен (%s)", chat['chat_id'], error)
+            failed_chats += 1
             continue
         rows = [chatapp_client.message_row(m, chat['license_id'],
                                            chat['messenger_type'], chat['chat_id'])
@@ -5883,9 +5884,24 @@ def sync_chatapp_data(days=None, date_from=None, date_to=None, rebuild_episodes=
             db.mark_chatapp_chat_synced(chat['license_id'], chat['messenger_type'],
                                         chat['chat_id'], newest)
 
+    # Дневной показатель — replace по всему окну. Если хотя бы один чат не
+    # загрузился, пересчёт из неполного сырья занизил бы результат и выглядел
+    # как успешная синхронизация. Уже сохранённые сообщения безопасно останутся
+    # в БД, а незагруженные чаты будут повторены следующим запуском.
+    if failed_chats:
+        raise RuntimeError(
+            f"ChatApp: не удалось загрузить {failed_chats} чат(ов); "
+            "дневные показатели не пересчитаны"
+        )
+
     result = {'chats': len(chat_rows), 'chats_with_messages': touched_chats,
               'messages': stored_messages, 'employees': len(employees),
-              'authors_matched': matched}
+              'authors_matched': matched, 'failed_chats': 0}
+    metric_from = since_dt.astimezone(almaty).date()
+    metric_to = (until_dt or datetime.now(timezone.utc)).astimezone(almaty).date()
+    result['tez_op_chat_metrics'] = db.refresh_tez_op_chat_metrics(
+        metric_from, metric_to
+    )
     if rebuild_episodes:
         result['episodes'] = db.build_chatapp_episodes(gap_hours=CHATAPP_EPISODE_GAP_HOURS)
     logging.info("chatapp sync: %s", result)
@@ -6208,7 +6224,26 @@ def api_chatapp_authors_map():
             user_id=int(user_id) if user_id not in (None, '') else None,
             is_bot=data.get('is_bot'),
             updated_by=requester_id)
-        return jsonify({"status": "success"}), 200
+        today = datetime.now(ZoneInfo('Asia/Almaty')).date()
+        try:
+            chat_metrics = db.refresh_tez_op_chat_metrics(
+                today - timedelta(days=45), today
+            )
+            return jsonify({"status": "success", "chat_metrics": chat_metrics}), 200
+        except Exception as refresh_error:
+            # Привязка уже успешно сохранена отдельной транзакцией. Не отвечаем
+            # ложным 500: ночной синк повторит rollup, а UI получает явное
+            # предупреждение о временно устаревших показателях.
+            logging.exception("chatapp author map saved, metrics refresh failed")
+            return jsonify({
+                "status": "success",
+                "chat_metrics": {
+                    "status": "failed",
+                    "error": "refresh_failed",
+                    "error_type": type(refresh_error).__name__,
+                },
+                "warning": "Привязка сохранена, показатели чатов обновятся следующим запуском",
+            }), 200
     except Exception as error:
         logging.exception("chatapp author map failed")
         return jsonify({"error": str(error)}), 500
@@ -25027,7 +25062,15 @@ def _tez_status_sync_importer(csv_text):
             'source_rows': int(parsed.get('source_rows') or 0),
             'valid_events': int(parsed.get('valid_events') or 0),
             'invalid_rows_count': int(parsed.get('invalid_rows_count') or 0),
-            'meta': {'api': 'tez_status_sync', 'source': 'binotel'},
+            'meta': {
+                'api': 'tez_status_sync',
+                'source': 'binotel',
+                # В ответе панели каждый интервал уже имеет точные start/stop.
+                # Пересборка только по start-событиям растягивала разрывы и
+                # теряла последний закрытый интервал, поэтому сохраняем
+                # переданные сегменты как авторитетные.
+                'segments_authoritative': True,
+            },
         },
     )
 
@@ -30832,6 +30875,26 @@ def _tez_op_operator_resolver():
     return resolve
 
 
+def sync_tez_op_productivity_metrics(
+    date_from=None,
+    date_to=None,
+    triggered_by='manual',
+):
+    """Собрать дневные звонки/набор/разговор ОП через официальный Binotel API."""
+    import tez_op_productivity
+
+    summary = tez_op_productivity.run_sync(
+        db,
+        _tez_op_operator_resolver(),
+        start=date_from,
+        end=date_to,
+        logger=logging.getLogger('tez_op_productivity'),
+    )
+    if isinstance(summary, dict):
+        summary.setdefault('triggered_by', triggered_by)
+    return summary
+
+
 def _tez_leads_first_orders_client():
     import tez_first_orders
     if not tez_first_orders.api_ready():
@@ -31419,11 +31482,13 @@ def import_work_schedules_statuses_csv():
         # Manual upload is the telephony status source. Chat managers have their
         # own Chat2Desk sync and must never be matched (or replaced) by this import.
         operator_lookup = _status_import_build_operator_lookup(exclude_chat_managers=True)
+        is_tez_format = False
         if file_ext in ('.xlsx', '.xlsm'):
             xlsx_rows = _status_import_xlsx_rows(raw_bytes)
             header_row = next((r for r in xlsx_rows if any(str(c or '').strip() for c in r)), [])
             normalized_header = [_status_import_normalize_header(h) for h in header_row]
-            if _status_import_header_is_tez(normalized_header):
+            is_tez_format = _status_import_header_is_tez(normalized_header)
+            if is_tez_format:
                 parsed = _status_import_parse_tez_rows(
                     xlsx_rows,
                     operator_lookup,
@@ -31447,7 +31512,8 @@ def import_work_schedules_statuses_csv():
                     continue
             if csv_text is None:
                 return jsonify({"error": "Не удалось декодировать CSV (поддерживаются UTF-8 и CP1251)"}), 400
-            if _status_import_csv_text_is_tez(csv_text):
+            is_tez_format = _status_import_csv_text_is_tez(csv_text)
+            if is_tez_format:
                 parsed = _status_import_parse_tez_csv(
                     csv_text,
                     operator_lookup,
@@ -31503,7 +31569,11 @@ def import_work_schedules_statuses_csv():
                     'source': source_system,
                     'file_name': file_name,
                     'file_ext': file_ext,
-                    'file_size_bytes': len(raw_bytes or b'')
+                    'file_size_bytes': len(raw_bytes or b''),
+                    # TEZ содержит точные startedAt/stoppedAt, а не только
+                    # точки переключений. Метка сохраняет эти интервалы и при
+                    # последующих пересчётах часов.
+                    'segments_authoritative': bool(is_tez_format),
                 }
             }
         )
@@ -32023,10 +32093,32 @@ def sync_work_schedules_statuses_binotel():
             d_from.strftime('%d.%m.%Y'), d_to.strftime('%d.%m.%Y'), cfg
         )
         summary = _tez_status_sync_importer(csv_text)
+        # Статусный импорт закончен: официальный API телефонной аналитики
+        # использует собственный lock и не должен удерживать STATUS_IMPORT_LOCK.
+        STATUS_IMPORT_LOCK.release()
+        lock_acquired = False
+        try:
+            phone_metrics = sync_tez_op_productivity_metrics(
+                d_from.strftime('%Y-%m-%d'),
+                d_to.strftime('%Y-%m-%d'),
+                triggered_by='manual-status-sync',
+            )
+        except Exception as phone_error:
+            logging.exception(
+                "Binotel statuses were imported, but TEZ OP phone metrics failed"
+            )
+            phone_metrics = {
+                "status": "failed",
+                "error": "internal_error",
+                "error_type": type(phone_error).__name__,
+                "saved": False,
+                "triggered_by": "manual-status-sync",
+            }
         return jsonify({
             "status": "success",
             "message": "Статусы операторов синхронизированы из Binotel",
             "import": summary,
+            "phone_metrics": phone_metrics,
             "range": {
                 "date_from": d_from.strftime('%Y-%m-%d'),
                 "date_to": d_to.strftime('%Y-%m-%d'),
@@ -43836,6 +43928,21 @@ if __name__ == '__main__':
         except Exception as e:
             logging.exception(f"Error running tez_status_sync_job: {e}")
 
+    async def tez_op_productivity_sync_job():
+        # Отдельный от panel-status job сбор дневной аналитики звонков ОП через
+        # официальный Binotel API. По умолчанию модуль пересчитывает вчера+сегодня.
+        try:
+            loop = asyncio.get_event_loop()
+            summary = await loop.run_in_executor(
+                executor_pool,
+                lambda: sync_tez_op_productivity_metrics(
+                    triggered_by='scheduler',
+                ),
+            )
+            logging.info(f"tez_op_productivity result: {summary}")
+        except Exception as e:
+            logging.exception(f"Error running tez_op_productivity_sync_job: {e}")
+
     async def clockster_attendance_sync_job():
         # Ежедневная выгрузка отметок прихода/ухода Clockster (отдел продаж) →
         # события статусов → авто-пересчёт часов/опозданий по графикам.
@@ -43937,6 +44044,18 @@ if __name__ == '__main__':
         clockster_attendance_sync_job,
         CronTrigger(hour=1, minute=10, timezone=ZoneInfo('Asia/Almaty')),
         id='clockster_attendance_sync_daily',
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # Дневные звонки, время набора и разговора ОП — в 01:15 через официальный
+    # Binotel API, отдельным job между импортом статусов и сверкой успешек.
+    # Без TEZ_BINOTEL_API_KEY/SECRET модуль возвращает skipped/no_credentials.
+    scheduler.add_job(
+        tez_op_productivity_sync_job,
+        CronTrigger(hour=1, minute=15, timezone=ZoneInfo('Asia/Almaty')),
+        id='tez_op_productivity_daily',
         misfire_grace_time=3600,
         max_instances=1,
         coalesce=True
