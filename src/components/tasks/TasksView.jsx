@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { normalizeRole, isAdminLikeRole, isSupervisorRole } from '../../utils/roles';
 import FaIcon from '../common/FaIcon';
+import FullscreenSheet from '../common/FullscreenSheet';
 import TaskBoardWorkspace from './TaskBoardWorkspace';
 
 /* ─── Google Fonts ─── */
@@ -1007,6 +1008,38 @@ styleTag.textContent = `
     height: 100%;
     overflow: hidden;
     box-shadow: none;
+  }
+  /* Широкое окно: рамку и тень даёт само окно, панель их не дублирует. */
+  .tv-notes-panel.is-wide {
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    padding: 0;
+    gap: 14px;
+  }
+  .tv-notes-panel.is-wide .tv-notes-toolbar { justify-content: flex-end; }
+  /* Список слева тянется, редактор справа фиксированной удобной ширины. */
+  .tv-notes-panel.is-wide .tv-notes-content {
+    grid-template-columns: minmax(0, 1fr) minmax(340px, 420px);
+    gap: 16px;
+    align-items: start;
+    overflow: visible;
+  }
+  .tv-notes-panel.is-wide .tv-note-column-list { max-height: none; }
+  .tv-notes-panel.is-wide .tv-notes-editor {
+    position: sticky;
+    top: 0;
+  }
+  .tv-notes-panel.is-wide .tv-note-textarea { min-height: 260px; }
+  /* На широких экранах помещается третья колонка — доска и редактор дышат. */
+  @media (min-width: 1500px) {
+    .tv-notes-panel.is-wide .tv-notes-content {
+      grid-template-columns: minmax(0, 1fr) minmax(380px, 460px);
+    }
+  }
+  @media (max-width: 900px) {
+    .tv-notes-panel.is-wide .tv-notes-content { grid-template-columns: minmax(0, 1fr); }
+    .tv-notes-panel.is-wide .tv-notes-editor { position: static; }
   }
   .tv-notes-toolbar,
   .tv-notes-toolbar-actions,
@@ -3540,7 +3573,7 @@ const TaskNoteColumn = React.memo(({ title, subtitle, notes, activeNoteId, empty
   </section>
 ));
 
-const TaskNotesPanel = React.memo(({ notesState, compact = false, fullScreen = false }) => {
+const TaskNotesPanel = React.memo(({ notesState, compact = false, fullScreen = false, wide = false }) => {
   const {
     notes,
     activeNoteId,
@@ -3599,12 +3632,15 @@ const TaskNotesPanel = React.memo(({ notesState, compact = false, fullScreen = f
   }, [setDraft]);
 
   return (
-    <div className={`tv-notes-panel ${compact ? 'is-compact' : ''} ${fullScreen ? 'is-fullscreen' : ''}`}>
+    <div className={`tv-notes-panel ${compact ? 'is-compact' : ''} ${fullScreen ? 'is-fullscreen' : ''} ${wide ? 'is-wide' : ''}`}>
       <div className="tv-notes-toolbar">
-        <div>
-          <span className="tv-block-label" style={{ margin: 0 }}>Заметки</span>
-          <p>{backendReady ? 'Сохраняются в базе данных' : 'Сервер недоступен, включён локальный режим'}</p>
-        </div>
+        {/* В широком окне заголовок и статус уже в шапке окна — второй раз не повторяем. */}
+        {!wide && (
+          <div>
+            <span className="tv-block-label" style={{ margin: 0 }}>Заметки</span>
+            <p>{backendReady ? 'Сохраняются в базе данных' : 'Сервер недоступен, включён локальный режим'}</p>
+          </div>
+        )}
         <div className="tv-notes-toolbar-actions">
           <button type="button" className="tv-btn tv-btn-ghost" onClick={refreshNotes} disabled={isLoading || isSaving}>
             <RefreshCw size={13} strokeWidth={2} />
@@ -6820,14 +6856,19 @@ const TasksView = ({
         </div>
       </div>
 
-      {notesOpen && (
-        <div className="tv-section">
-          <div className="tv-section-header">
-            <span className="tv-section-title heading">Заметки</span>
-          </div>
-          <TaskNotesPanel notesState={notesState} />
-        </div>
-      )}
+      {/* Заметки — отдельное широкое окно, а не блок, вклеенный в страницу. */}
+      <FullscreenSheet
+        open={notesOpen}
+        wide
+        icon="fa-file-lines"
+        title="Заметки"
+        subtitle={notesState?.backendReady
+          ? 'Личные заметки — сохраняются в базе данных'
+          : 'Сервер недоступен, включён локальный режим'}
+        onClose={() => setNotesOpen(false)}
+      >
+        <TaskNotesPanel notesState={notesState} wide />
+      </FullscreenSheet>
 
       {/* Обзор / Бэклог / Доска / Таймлайн */}
       <div className="tv-workspace-tabs">
