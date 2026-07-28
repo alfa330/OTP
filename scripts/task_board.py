@@ -14,8 +14,9 @@ CLI к бэклогу/канбану раздела «Задачи» — точ�
     python scripts/task_board.py create "Проверить выгрузку Oktell" --assignee 169 --backlog --estimate 120
     python scripts/task_board.py create "Разобраться с дублями" --self --from 169
     python scripts/task_board.py log "Починил выгрузку" --report "что сделано" --spent 2h30m
-    python scripts/task_board.py deadline 412 --due "2026-08-05 18:00"
+    python scripts/task_board.py deadline 412 --due "2026-08-05 18:00" --remind 1d
     python scripts/task_board.py deadline 412 --in 3d4h --estimate 90
+    python scripts/task_board.py deadline 412 --remind off
     python scripts/task_board.py promote 412
     python scripts/task_board.py park 412
     python scripts/task_board.py rank 412 --after 408
@@ -238,6 +239,31 @@ def parse_due_argument(raw):
     raise SystemExit(f'Не понял дату «{raw}». Примеры: "2026-08-05 18:00", 2026-08-05, 05.08.2026 14:30')
 
 
+REMINDER_MAX_MINUTES = 24 * 60
+
+
+REMINDER_WORD_ALIASES = {
+    'день': 24 * 60, 'сутки': 24 * 60, 'day': 24 * 60,
+    'час': 60, 'hour': 60,
+}
+
+
+def parse_reminder_argument(raw):
+    """«1d», «3h», «за день», «off» → минуты до дедлайна. Максимум сутки."""
+    text = str(raw or '').strip().lower()
+    if not text or text in ('off', 'no', 'none', 'выкл', '0'):
+        return 0
+    for word, minutes_alias in REMINDER_WORD_ALIASES.items():
+        if word in text and not any(ch.isdigit() for ch in text):
+            return minutes_alias
+    minutes = parse_duration_to_minutes(text)
+    if minutes is None:
+        return 0
+    if minutes > REMINDER_MAX_MINUTES:
+        raise SystemExit(f'Напоминание можно поставить максимум за сутки до дедлайна (получено {minutes} мин)')
+    return minutes
+
+
 def split_minutes_for_form(total_minutes):
     """API принимает дедлайн как days/hours/minutes с ограничениями 23/59."""
     total = max(0, int(total_minutes or 0))
@@ -365,6 +391,10 @@ def cmd_show(client, args):
     print(f'  план старта   {task.get("planned_start_at") or "—"}')
     print(f'  начато        {task.get("started_at") or "—"}')
     print(f'  дедлайн       {format_due(task)}')
+    remind = task.get('reminder_minutes_before')
+    sent = task.get('reminder_sent_at')
+    print(f'  напоминание   ' + (f'за {format_minutes(remind)} до дедлайна'
+                                 + (f' (отправлено {sent[:16]})' if sent else '') if remind else '—'))
     print(f'  rank          {task.get("backlog_rank")}')
     if task.get('description'):
         print(f'  описание      {task["description"][:400]}')
@@ -408,6 +438,8 @@ def _build_create_fields(client, args, assignee_id):
         fields.update(split_minutes_for_form(parse_duration_to_minutes(args.in_)))
     if getattr(args, 'checklist', None):
         fields['checklist_items'] = json.dumps([{'title': item} for item in args.checklist], ensure_ascii=False)
+    if getattr(args, 'remind', None) is not None:
+        fields['reminder_minutes_before'] = str(parse_reminder_argument(args.remind))
     # Источник задачи: сотрудник, свободный текст либо (по умолчанию) своя инициатива.
     if getattr(args, 'from_id', None):
         fields['requested_by_id'] = str(args.from_id)
@@ -511,8 +543,10 @@ def cmd_deadline(client, args):
         payload['estimate_minutes'] = parse_duration_to_minutes(args.estimate) if args.estimate else None
     if args.planned_start:
         payload['planned_start_at'] = parse_due_argument(args.planned_start)
+    if args.remind is not None:
+        payload['reminder_minutes_before'] = parse_reminder_argument(args.remind)
     if not payload:
-        raise SystemExit('Нечего менять: укажите --due / --in / --clear / --estimate / --planned-start')
+        raise SystemExit('Нечего менять: укажите --due / --in / --clear / --estimate / --planned-start / --remind')
 
     result = client.board_update([{'task_id': args.task_id, **payload}])
     if args.json:
@@ -686,6 +720,7 @@ def build_parser():
     create.add_argument('--checklist', nargs='*', help='пункты чек-листа')
     create.add_argument('--from', dest='from_id', type=int, help='id того, кто поручил задачу')
     create.add_argument('--from-name', dest='from_name', help='кто поручил, если его нет в системе')
+    create.add_argument('--remind', help='напомнить в Telegram до дедлайна: 1d, 3h, off (максимум сутки)')
     create.set_defaults(func=cmd_create)
 
     log = sub.add_parser('log', help='записать уже сделанную работу: создать себе задачу и сразу закрыть отчётом')
@@ -709,6 +744,7 @@ def build_parser():
     deadline.add_argument('--clear', action='store_true', help='снять дедлайн')
     deadline.add_argument('--estimate', nargs='?', const='', help='оценка (пусто — сбросить)')
     deadline.add_argument('--planned-start', help='плановый старт для таймлайна')
+    deadline.add_argument('--remind', help='напоминание в Telegram: 1d, 3h, off (максимум сутки)')
     deadline.set_defaults(func=cmd_deadline)
 
     promote = sub.add_parser('promote', help='из бэклога на доску (уведомит исполнителя)')

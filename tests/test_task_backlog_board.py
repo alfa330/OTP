@@ -604,6 +604,116 @@ class TaskOriginTests(unittest.TestCase):
         self.assertIn("if args.spent and 'estimate_minutes' not in fields:", block)
 
 
+class DeadlineReminderTests(unittest.TestCase):
+    """Напоминания в Telegram перед дедлайном — заметки и задачи, максимум за сутки."""
+
+    def setUp(self):
+        self.db = _read(DATABASE_PATH)
+        self.app = _read(APP_PATH)
+        self.view = _read(TASKS_VIEW_PATH)
+
+    def test_columns_on_both_tables_capped_at_one_day(self):
+        for table in ('tasks', 'task_notes'):
+            marker = f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS reminder_minutes_before INTEGER"
+            self.assertIn(marker, self.db)
+            block = self.db[self.db.index(marker):self.db.index(marker) + 320]
+            self.assertIn("reminder_minutes_before <= 1440", block)
+            self.assertIn(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS reminder_sent_at TIMESTAMP;", self.db)
+
+    def test_max_is_a_single_day(self):
+        self.assertIn("TASK_REMINDER_MAX_MINUTES = 24 * 60", self.db)
+        start = self.db.index("    def _normalize_task_reminder_minutes(self, reminder_minutes_before):")
+        block = self.db[start:start + 700]
+        self.assertIn("if minutes < 0 or minutes > self.TASK_REMINDER_MAX_MINUTES:", block)
+        self.assertIn('raise ValueError("INVALID_REMINDER")', block)
+        self.assertIn("return minutes or None", block)
+
+    def test_pending_query_skips_done_and_overdue(self):
+        start = self.db.index("    def collect_due_task_reminders(self, limit=100):")
+        block = self.db[start:self.db.index("    def mark_task_reminder_sent", start)]
+        # Заметки: только незавершённые, с чатом, дедлайн ещё впереди.
+        self.assertIn("AND n.is_done = FALSE", block)
+        self.assertIn("AND n.due_at > %s", block)
+        self.assertIn("n.due_at - (n.reminder_minutes_before * INTERVAL '1 minute') <= %s", block)
+        # Задачи: не закрытые и не в бэклоге.
+        self.assertIn("AND t.status NOT IN ('completed', 'accepted')", block)
+        self.assertIn("AND t.is_backlog = FALSE", block)
+        self.assertIn("AND t.due_at > %s", block)
+        # Только тем, у кого есть Telegram.
+        self.assertEqual(block.count("u.telegram_id IS NOT NULL"), 2)
+
+    def test_reminder_resets_when_schedule_moves(self):
+        # Задачи (доска) и заметки: съехал срок или интервал — напоминаем заново.
+        board = self.db[self.db.index("    def update_task_board_state("):]
+        board = board[:board.index("    def delete_task(")]
+        self.assertIn("reset_sent = ('deadline' in changed_fields) or ('reminder' in changed_fields)", board)
+        self.assertIn("reminder_sent_at = NULL,", board)
+
+        notes = self.db[self.db.index("    def update_task_note("):]
+        notes = notes[:notes.index("    def delete_task_note(")]
+        self.assertIn("reset_sent = (due_at_new != current[5]) or (reminder_new != current_reminder)", notes)
+
+    def test_no_deadline_means_no_reminder(self):
+        self.assertGreaterEqual(self.db.count("if due_at_new is None:\n                reminder_new = None"), 1)
+        start = self.db.index("    def create_task_note(")
+        block = self.db[start:start + 1400]
+        self.assertIn("if due_at_norm else None", block)
+
+    def test_sender_marks_only_after_success(self):
+        start = self.app.index("def send_due_task_reminders():")
+        block = self.app[start:self.app.index("async def run_task_reminders_async", start)]
+        self.assertIn("if response.status_code != 200:", block)
+        # Отметка ставится строго после успешной отправки, иначе напоминание потеряется.
+        marked = block.index("db.mark_task_reminder_sent")
+        failed = block.index("continue")
+        self.assertLess(failed, marked)
+
+    def test_scheduler_job_registered(self):
+        self.assertIn("id='task_deadline_reminders'", self.app)
+        start = self.app.index("id='task_deadline_reminders'")
+        block = self.app[start - 300:start + 200]
+        self.assertIn("CronTrigger(minute='*/5'", block)
+        self.assertIn("max_instances=1", block)
+        self.assertIn("coalesce=True", block)
+
+    def test_api_accepts_reminder_everywhere(self):
+        self.assertIn("reminder_raw = (request.form.get('reminder_minutes_before')", self.app)
+        self.assertIn('edit_kwargs["reminder_minutes_before"] = data.get(\'reminder_minutes_before\')', self.app)
+        self.assertIn('kwargs["reminder_minutes_before"] = raw_item.get(\'reminder_minutes_before\')', self.app)
+        self.assertIn("reminder_minutes_before=data.get('reminder_minutes_before')", self.app)
+        self.assertIn("Напоминание можно поставить максимум за сутки до дедлайна", self.app)
+
+    def test_frontend_options_stop_at_a_day(self):
+        start = self.view.index("const REMINDER_OPTIONS = [")
+        block = self.view[start:self.view.index("];", start)]
+        values = [int(v) for v in re.findall(r"value: (\d+)", block)]
+        self.assertEqual(max(values), 1440)
+        self.assertIn("const REMINDER_MAX_MINUTES = 1440;", self.view)
+        self.assertIn("const REMINDER_DEFAULT_MINUTES = 1440;", self.view)
+
+    def test_setting_a_deadline_defaults_to_day_before(self):
+        # Заметка: поставили срок — предлагаем напомнить за день.
+        self.assertIn("reminder_minutes_before: nextDue", self.view)
+        self.assertIn("|| REMINDER_DEFAULT_MINUTES", self.view)
+        # Задача: чип «Дедлайн» открывается с тем же значением по умолчанию.
+        self.assertIn("open: (v) => ({ reminderMinutes: v.reminderMinutes || String(REMINDER_DEFAULT_MINUTES) })", self.view)
+
+    def test_reminder_select_disabled_without_deadline(self):
+        self.assertIn("disabled={isSaving || !normalizedDraft.due_at}", self.view)
+        self.assertIn("disabled={disabled || deadlineMinutesOfForm(values) <= 0}", self.view)
+
+    def test_cli_reminder_parsing(self):
+        module = _load_cli_module()
+        self.assertEqual(module.parse_reminder_argument('1d'), 1440)
+        self.assertEqual(module.parse_reminder_argument('3h'), 180)
+        self.assertEqual(module.parse_reminder_argument('за день'), 1440)
+        self.assertEqual(module.parse_reminder_argument('off'), 0)
+        self.assertEqual(module.parse_reminder_argument(''), 0)
+        # Больше суток — отказ, а не молчаливое усечение.
+        with self.assertRaises(SystemExit):
+            module.parse_reminder_argument('2d')
+
+
 class SkillExpectationsTests(unittest.TestCase):
     """В скилле зафиксированы постоянные требования владельца."""
 
