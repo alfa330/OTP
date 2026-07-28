@@ -147,6 +147,30 @@ class TezOpChatRollupTests(unittest.TestCase):
 
 
 class TezOpCallStorageTests(unittest.TestCase):
+    def test_group_hours_query_formats_json_default_without_positional_placeholder(self):
+        source = DATABASE_PATH.read_text(encoding="utf-8-sig")
+        start = source.index("def get_daily_hours_by_supervisor_month(")
+        end = source.index(
+            "\n    def get_daily_hours_for_all_month(",
+            start,
+        )
+        method_module = ast.parse(textwrap.dedent(source[start:end]))
+        daily_sql = next(
+            node.value.value
+            for node in ast.walk(method_module)
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "_daily_sql"
+                for target in node.targets
+            )
+            and isinstance(node.value, ast.Constant)
+        )
+
+        formatted = daily_sql.format(group_filter="AND d.group_id = %s")
+
+        self.assertIn("COALESCE(d.extra_metrics, '{}'::jsonb)", formatted)
+        self.assertIn("AND d.group_id = %s", formatted)
+
     def test_call_metrics_do_not_write_status_owned_talk_column(self):
         source = DATABASE_PATH.read_text(encoding="utf-8-sig")
         start = source.index("def replace_tez_op_call_metrics(")
