@@ -748,6 +748,33 @@ def _ai_score(direction: dict, result: dict):
     return round(total)
 
 
+def _score_breakdown(direction: dict, result: dict) -> dict:
+    """Из чего сложился балл ИИ: сколько веса он реально проверил, а сколько
+    зачёл не проверяя.
+
+    Балл намеренно даёт «benefit of the doubt» непроверяемым критериям
+    (system_api/manual), но в карточке это не видно, а вес бывает решающим: у
+    Верификаторов «Регистрация» — 30 из 100, и эти 30 начисляются всегда. Балл
+    здесь НЕ меняется — только становится понятно, чего он стоит."""
+    verdict = {r["idx"]: r for r in result.get("per_criterion", [])}
+    verified = unchecked = 0.0
+    unchecked_criteria = []
+    for c in direction.get("criteria", []):
+        if c.get("is_critical"):
+            continue
+        weight = float(c.get("weight") or 0)
+        row = verdict.get(c["idx"]) or {}
+        if row.get("verdict") == "Pending":
+            unchecked += weight
+            unchecked_criteria.append({"idx": c["idx"], "name": c.get("name"),
+                                       "weight": c.get("weight"),
+                                       "source": row.get("source")})
+        else:
+            verified += weight
+    return {"verified_weight": round(verified), "unchecked_weight": round(unchecked),
+            "unchecked": unchecked_criteria}
+
+
 def _lines_from_tokens(toks: list[dict]) -> list[dict]:
     """Soniox tokens -> review lines with confidence and source time ranges.
 
@@ -1272,7 +1299,8 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
     try:
         result = evaluator.evaluate(
             asm["text"], direction, asr_low_spans=asm["low_conf_spans"],
-            use_rag=primary_use_rag, knowledge_snapshot_id=snapshot["id"])
+            use_rag=primary_use_rag, knowledge_snapshot_id=snapshot["id"],
+            subject_kind=subject_kind)
         completed_at = runtime_store.now_utc()
     except Exception as exc:
         completed_at = runtime_store.now_utc()
@@ -1323,6 +1351,7 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
         "languages": asm["languages"], "asr_mean_conf": asm["mean_conf"] or 0,
         "transcript": lines, "criteria": criteria,
         "ai_score": _ai_score(direction, result),
+        "score_breakdown": _score_breakdown(direction, result),
         "_audio_path": audio_path,
         "_transcript_cache_id": transcript_cache_id,
         "_transcript_hash": transcript_hash,
@@ -1403,7 +1432,8 @@ def _run_shadow_variant(*, call_id: int, direction_id: int, direction: dict, asm
     try:
         result = evaluator.evaluate(
             asm["text"], direction, asr_low_spans=asm.get("low_conf_spans") or [],
-            use_rag=True, knowledge_snapshot_id=snapshot["id"])
+            use_rag=True, knowledge_snapshot_id=snapshot["id"],
+            subject_kind=subject_kind)
         completed = runtime_store.now_utc()
         shadow_payload = {
             "id": call_id, "subject_kind": subject_kind, "direction_id": direction_id,

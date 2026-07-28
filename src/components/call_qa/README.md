@@ -77,6 +77,10 @@
 ```
 { id, subject_kind: 'call'|'wz_episode', direction, direction_id, operator, datetime,
   ai_score, human_score, has_human_review,
+  score_breakdown: { verified_weight, unchecked_weight,
+                     unchecked: [{ idx, name, weight, source }] },
+  score_breakdown: { verified_weight, unchecked_weight,
+                     unchecked: [{ idx, name, weight, source }] },
   criteria: [{ idx, criterion_id, name, is_critical, deficiency?:{weight,description},
                source: 'transcript'|'system_api'|'manual',
                ai: 'Correct'|'Incorrect'|'N/A'|'Deficiency'|'Pending', conf, evidence, comment,
@@ -106,6 +110,16 @@
 Вердикты ИИ: `Correct | Incorrect | N/A | Deficiency | Pending` («Недочёт» — только у критериев
 с `deficiency`). `human`/`human_comment` — пер-критерийная оценка супервайзера
 (`Correct | Incorrect | N/A | Deficiency | Error`), прикрепляется свежей при каждом открытии.
+
+`score_breakdown` — из чего сложился балл: `unchecked_weight` это вес критериев,
+которые ИИ проверить не может (`system_api`/`manual`) и которые формула зачитывает
+по умолчанию. Карточка показывает их отдельной пометкой рядом с баллом: «ИИ: 85 /
+из них 30 не проверено».
+
+`score_breakdown` — из чего сложился балл: `unchecked_weight` это вес критериев,
+которые ИИ проверить не может (`system_api`/`manual`) и которые формула зачитывает
+по умолчанию. Карточка показывает их отдельной пометкой рядом с баллом: «ИИ: 85 /
+из них 30 не проверено».
 
 ## Инварианты, которые легко сломать
 

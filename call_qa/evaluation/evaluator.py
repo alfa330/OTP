@@ -57,8 +57,50 @@ def _criteria_block(criteria: list[dict]) -> str:
     return "\n".join(out)
 
 
-def build_system(criteria: list[dict]) -> str:
-    return open(_PROMPT, encoding="utf-8").read().replace("{{CRITERIA}}", _criteria_block(criteria))
+# Вступление промпта зависит от субъекта. Вариант для ЗВОНКА обязан остаться
+# байт-в-байт прежним: prompt_hash входит в evaluation_fingerprint, и любая правка
+# пометила бы все сохранённые оценки звонков как устаревшие.
+_INTRO_CALL = """Ты — опытный контролёр качества звонков отдела продаж. Оцениваешь звонок оператора с клиентом строго по мониторинговой шкале направления.
+
+ВХОД:
+- Транскрипт звонка с разделением на спикеров: [S1]/[S2]. Определи сам, кто оператор (ведёт по скрипту, представляется, предлагает), кто клиент.
+- Речь смешанная (казахский + русский) — это норма, оценивай смысл, а не язык.
+- Транскрипт получен автоматическим распознаванием и может содержать ошибки. Помеченные как неуверенные фрагменты НЕ используй против оператора.
+"""
+
+# Правило про ошибки распознавания в переписке нельзя ни отменить, ни оставить
+# как у звонка. Сами сообщения — подлинный набранный текст, и списывать опечатки
+# на ASR нельзя: в шкале Верификаторов есть критерий «Грамотность» про орфографию
+# и пунктуацию. Но голосовые внутри чата расшифровывает тот же Soniox, поэтому
+# ВНУТРИ «[голосовое, расшифровка: …]» ошибки распознавания реальны, и там правило
+# звонка остаётся в силе.
+_INTRO_WZ_EPISODE = """Ты — опытный контролёр качества переписок отдела продаж. Оцениваешь работу оператора в чате WhatsApp с клиентом строго по мониторинговой шкале направления.
+
+ВХОД:
+- Переписка одного эпизода: каждая строка помечена временем и автором — «Оператор (имя)», «Другой сотрудник (имя)», «Рассылка (имя)» или «Клиент». Роли определять не нужно, они уже указаны.
+- Оценивай ТОЛЬКО строки оцениваемого оператора (он назван в начале переписки). Реплики других сотрудников, рассылок и клиента — контекст, за них оператор не отвечает.
+- Переписка смешанная (казахский + русский) — это норма, оценивай смысл, а не язык. Но если шкала требует отвечать на языке клиента, это требование проверяй.
+- Набранные сообщения — подлинный текст, а не распознанная речь: орфография и пунктуация в них полностью на ответственности оператора, списывать их на ошибки распознавания нельзя.
+- Содержимое вложений приведено текстом в квадратных скобках: «[фото: …]», «[документ (PDF): …]», «[голосовое, расшифровка: …]».
+- ИСКЛЮЧЕНИЕ про распознавание: текст внутри «[голосовое, расшифровка: …]» получен автоматическим распознаванием речи и может содержать ошибки. Оценивай его по смыслу, не придирайся к орфографии и формулировкам в нём и не штрафуй за них — ни оператора, ни понимание запроса клиента.
+- Если вложение получить или расшифровать не удалось, это указано явно — не оценивай его содержание и не штрафуй за него.
+"""
+
+_INTRO = {config.SUBJECT_CALL: _INTRO_CALL,
+          config.SUBJECT_WZ_EPISODE: _INTRO_WZ_EPISODE}
+
+# Заголовок блока в пользовательском сообщении — тоже часть промпта.
+_TRANSCRIPT_LABEL = {config.SUBJECT_CALL: "ТРАНСКРИПТ ЗВОНКА",
+                     config.SUBJECT_WZ_EPISODE: "ПЕРЕПИСКА В ЧАТЕ"}
+
+
+def build_system(criteria: list[dict], subject_kind: str = config.SUBJECT_CALL) -> str:
+    template = open(_PROMPT, encoding="utf-8").read()
+    return (template
+            # rstrip: шаблон уже содержит пустую строку перед «ПРАВИЛА:», и
+            # лишний перевод строки изменил бы prompt_hash звонка.
+            .replace("{{INTRO}}", _INTRO.get(subject_kind, _INTRO_CALL).rstrip("\n"))
+            .replace("{{CRITERIA}}", _criteria_block(criteria)))
 
 
 def _render_rag_context(criteria: list[dict], hits_by_idx: dict, status: str) -> tuple[str, dict]:
@@ -156,7 +198,8 @@ def _subset_rag_text(prepared_rag: dict | None, criteria: list[dict], fallback: 
 
 
 def build_eval_body(transcript, direction, criteria, *, asr_low_spans=None, use_rag=True, model,
-                    rag_text=None, knowledge_snapshot_id=None, retrieval_trace_out=None) -> dict:
+                    rag_text=None, knowledge_snapshot_id=None, retrieval_trace_out=None,
+                    subject_kind=config.SUBJECT_CALL) -> dict:
     """Тело запроса оценки (для синхронного вызова и для Batch API)."""
     if use_rag and rag_text is None:
         rag, trace, _ = _prepare_rag(direction["id"], criteria, transcript,
@@ -168,16 +211,17 @@ def build_eval_body(transcript, direction, criteria, *, asr_low_spans=None, use_
     low = ("\nНЕУВЕРЕННЫЕ ФРАГМЕНТЫ РАСПОЗНАВАНИЯ (не штрафовать):\n"
            + json.dumps(asr_low_spans, ensure_ascii=False)) if asr_low_spans else ""
     user = (f"РАЗБОРЫ (согласованные прецеденты):\n{rag}\n\n"
-            f"ТРАНСКРИПТ ЗВОНКА:\n{transcript}{low}\n\nОцени по всем перечисленным критериям.")
-    return llm.build_body(model=model, system=build_system(criteria), user=user,
+            f"{_TRANSCRIPT_LABEL.get(subject_kind, 'ТРАНСКРИПТ ЗВОНКА')}:\n{transcript}{low}\n\nОцени по всем перечисленным критериям.")
+    return llm.build_body(model=model, system=build_system(criteria, subject_kind), user=user,
                           schema=_OUTPUT_SCHEMA, max_tokens=8000, cache_system=True)
 
 
 def _claude_eval(transcript, direction, criteria, *, asr_low_spans, use_rag, model,
-                 rag_text=None, stage="primary") -> dict:
+                 rag_text=None, stage="primary", subject_kind=config.SUBJECT_CALL) -> dict:
     """Оценка подмножества (transcript) критериев моделью `model`."""
     body = build_eval_body(transcript, direction, criteria, asr_low_spans=asr_low_spans,
-                           use_rag=use_rag, model=model, rag_text=rag_text)
+                           use_rag=use_rag, model=model, rag_text=rag_text,
+                           subject_kind=subject_kind)
     result = llm.post_body(body, timeout=120.0, include_meta=True)
     if result.get("_llm_meta") is not None:
         result["_llm_meta"]["stage"] = stage
@@ -220,7 +264,8 @@ def _collect_verdicts(items) -> dict:
 
 def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=True,
              call_context=None, knowledge_snapshot_id=None, prepared_rag=None,
-             primary_result=None, primary_llm_meta=None) -> dict:
+             primary_result=None, primary_llm_meta=None,
+             subject_kind=config.SUBJECT_CALL) -> dict:
     """Полная оценка. Двухуровнево: массовая модель (BULK) первым проходом, затем спорные/
     критические критерии переоцениваются HARD-моделью. Плюс маршрутизация по источнику."""
     cc.apply_to_direction(direction)
@@ -256,7 +301,7 @@ def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=Tr
     ai = (primary_result if primary_result is not None else
           (_claude_eval(transcript, direction, t_crits, asr_low_spans=asr_low_spans,
                         use_rag=use_rag, model=config.CLAUDE_MODEL_BULK,
-                        rag_text=rag_text, stage="bulk")
+                        rag_text=rag_text, stage="bulk", subject_kind=subject_kind)
            if t_crits else {"per_criterion": [], "overall_comment": ""}))
     if primary_llm_meta and not ai.get("_llm_meta"):
         llm_calls.append(primary_llm_meta)
@@ -272,7 +317,7 @@ def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=Tr
         retry_rag_text = _subset_rag_text(prepared_rag, missing, rag_text)
         retry = _claude_eval(transcript, direction, missing, asr_low_spans=asr_low_spans,
                              use_rag=use_rag, model=config.CLAUDE_MODEL_BULK,
-                             rag_text=retry_rag_text, stage="bulk_retry")
+                             rag_text=retry_rag_text, stage="bulk_retry", subject_kind=subject_kind)
         if retry.get("_llm_meta"):
             llm_calls.append(retry["_llm_meta"])
         for idx, v in _collect_verdicts(retry.get("per_criterion")).items():
@@ -294,7 +339,7 @@ def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=Tr
             hard_rag_text = _subset_rag_text(prepared_rag, escalate, rag_text)
             ai2 = _claude_eval(transcript, direction, escalate, asr_low_spans=asr_low_spans,
                                use_rag=use_rag, model=config.CLAUDE_MODEL_HARD,
-                               rag_text=hard_rag_text, stage="hard")
+                               rag_text=hard_rag_text, stage="hard", subject_kind=subject_kind)
             if ai2.get("_llm_meta"):
                 llm_calls.append(ai2["_llm_meta"])
             for idx, v in _collect_verdicts(ai2.get("per_criterion")).items():

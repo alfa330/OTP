@@ -45,7 +45,7 @@ from .evaluation import runtime_store
 from .evaluation.fingerprint import content_hash, transcript_fingerprint
 from .rag import knowledge
 from .api import (_download, _lines_from_tokens, _ai_score, _cache_put, _meta_upsert,
-                  _audio_object_fingerprint, _evaluation_identity)
+                  _audio_object_fingerprint, _evaluation_identity, _score_breakdown)
 
 _SUBJECT_PREFIX = {config.SUBJECT_CALL: "call", config.SUBJECT_WZ_EPISODE: "wz"}
 
@@ -546,6 +546,7 @@ def submit_batch(calls: list[dict], transcripts: dict, workdir: str, get_dir) ->
                 rec["asm"]["text"], info["direction"], info["t_crits"],
                 asr_low_spans=rec["asm"]["low_conf_spans"], use_rag=True,
                 model=config.CLAUDE_MODEL_BULK, rag_text=prepared["rag_text"],
+                subject_kind=subject_kind,
             )
             custom_id = f"{_SUBJECT_PREFIX.get(subject_kind, subject_kind)}-{call['id']}"
             entries[custom_id] = {
@@ -723,7 +724,7 @@ def process_results(batch: dict, calls: list[dict], transcripts: dict, workdir: 
                         asr_low_spans=rec["asm"].get("low_conf_spans") or [],
                         use_rag=True, knowledge_snapshot_id=snapshot["id"],
                         prepared_rag=entry["prepared_rag"], primary_result=parsed,
-                        primary_llm_meta=primary_meta,
+                        primary_llm_meta=primary_meta, subject_kind=subject_kind,
                     ),
                     tries=3, delay=20, what=f"завершение оценки call {cid}",
                 )
@@ -776,7 +777,9 @@ def process_results(batch: dict, calls: list[dict], transcripts: dict, workdir: 
                 "human_score": call.get("human_score"), "languages": rec["asm"]["languages"],
                 "asr_mean_conf": rec["asm"]["mean_conf"] or 0,
                 "transcript": rec.get("segments") or _lines_from_tokens(rec.get("toks") or []),
-                "criteria": criteria, "ai_score": score, "_audio_path": call.get("audio_path"),
+                "criteria": criteria, "ai_score": score,
+                "score_breakdown": _score_breakdown(direction, result),
+                "_audio_path": call.get("audio_path"),
                 "_transcript_cache_id": entry["transcript_cache_id"],
                 "_transcript_hash": entry["transcript_hash"],
                 "_evaluation_run_id": run_id,

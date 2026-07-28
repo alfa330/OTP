@@ -603,6 +603,18 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
                             {call.ai_score != null && (
                                 <IosBadge tone={scoreTone(call.ai_score)}><Sparkles size={11} />ИИ: {Math.round(call.ai_score)}</IosBadge>
                             )}
+                            {/* Балл намеренно зачитывает непроверяемые критерии; без этой
+                                пометки «ИИ: 85» выглядит как полноценная оценка, хотя часть
+                                веса ИИ не проверял (у Верификаторов это «Регистрация», 30). */}
+                            {call.score_breakdown?.unchecked_weight > 0 && (
+                                <IosBadge tone="slate"
+                                    title={'ИИ не проверял: '
+                                        + (call.score_breakdown.unchecked || [])
+                                            .map((c) => `${c.name} (${c.weight})`).join(', ')
+                                        + '. Эти баллы зачтены по умолчанию — проверьте их вручную.'}>
+                                    из них {call.score_breakdown.unchecked_weight} не проверено
+                                </IosBadge>
+                            )}
                             {call.human_score != null && (
                                 <IosBadge tone={scoreTone(call.human_score)}><User2 size={11} />Человек: {Math.round(call.human_score)}</IosBadge>
                             )}
