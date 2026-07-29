@@ -9,6 +9,7 @@ import {
 import {
     APPLE_FONT, iosCard, iosInput, iosBtnPrimary, iosBtnGhost, IosBadge, scoreTone,
 } from '../ui/ios';
+import ChatThread from '../c2d_eval/ChatThread';
 
 /* Карточка ревью одного субъекта оценки — центральный экран взаимодействия с ИИ.
  * Субъект — звонок (аудио + диаризация) либо эпизод переписки Wazzup у
@@ -17,6 +18,43 @@ import {
  * (props.call). Мок-данных нет. */
 
 const SUBJECT_CHAT = 'wz_episode';
+
+// Переписку чата рисуем тем же компонентом, что «Чаты Верификаторов» (ChatThread):
+// строки транскрипта эпизода → сообщения снапшота. Тело строки уже без префикса
+// «кто:» (новый бэкенд), но для старых закэшированных эпизодов префикс срезаем тут.
+const CHAT_SPEAKER_LABEL = {
+    operator: 'Оператор', other_operator: 'Другой сотрудник', bot: 'Рассылка', client: 'Клиент',
+};
+const CHAT_PREFIX_RE = /^(Оператор|Клиент|Другой сотрудник|Рассылка)\b[^:]*:\s+/;
+
+function chatLinesToSnapshot(lines, operatorName) {
+    const messages = (lines || []).map((line, i) => {
+        const isClient = line.speaker === 'client';
+        const label = CHAT_SPEAKER_LABEL[line.speaker] || 'Клиент';
+        const name = line.author ? String(line.author) : '';
+        const media = line.media || {};
+        // Новый бэкенд отдаёт чистое тело в line.body; для старых закэшированных
+        // эпизодов срезаем префикс «кто:» из seg.
+        const body = (line.body != null
+            ? line.body
+            : (line.seg || []).map((s) => s.t).join(' ').replace(CHAT_PREFIX_RE, '')).trim();
+        return {
+            id: line.message_id || `m${i}`,
+            type: (line.outgoing ?? (line.speaker !== 'client')) ? 'to_client' : 'from_client',
+            created: line.created || null,
+            text: body,
+            author: isClient ? undefined : (name ? `${label} · ${name}` : label),
+            photo: media.kind === 'image' ? media.url : undefined,
+            audio: media.kind === 'audio' ? media.url : undefined,
+            video: media.kind === 'video' ? media.url : undefined,
+            pdf: media.kind === 'document' ? media.url : undefined,
+            attachments: (media.url && !['image', 'audio', 'video', 'document'].includes(media.kind))
+                ? [{ link: media.url, name: media.label || 'файл' }] : undefined,
+            annotation: line.annotation || null,
+        };
+    });
+    return { messages, operator_name: operatorName };
+}
 
 const formatTimestamp = (ms) => {
     const total = Math.max(0, Math.floor(Number(ms || 0) / 1000));
@@ -564,6 +602,11 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
     const hasCriteria = Boolean(call?.criteria?.length);
     const hasTranscript = Boolean(call?.transcript?.length);
     const canSubmit = hasCriteria && hasTranscript;
+    const chatSnapshot = useMemo(
+        () => (((call?.subject_kind || 'call') === SUBJECT_CHAT) && call?.transcript?.length
+            ? chatLinesToSnapshot(call.transcript, call.operator) : null),
+        [call],
+    );
     // Есть ли у звонка оценка супервайзера (calls.scores) — иначе панель «Супервайзер» пуста.
     const hasHumanReview = useMemo(
         () => call?.has_human_review === true || (call?.criteria || []).some((c) => c.human != null),
@@ -653,19 +696,23 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
                     <div className="border-b border-slate-100 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
                         {isChat ? 'Переписка · эпизод' : 'Транскрипт · диаризация'}
                     </div>
-                    <div className="flex-1 space-y-2 overflow-y-auto px-4 py-3" tabIndex={0}
-                         aria-label={isChat ? 'Переписка эпизода' : 'Транскрипт звонка'}>
-                        {(call.transcript || []).length > 0
-                            ? call.transcript.map((l, i) => <TranscriptLine key={i} line={l} onSeek={call.audio_url ? seekAudio : undefined} />)
-                            : <div className="flex min-h-32 items-center justify-center text-center text-[13px] text-slate-500">
-                                {isChat
-                                    ? 'Переписка недоступна. Не подтверждайте оценку, пока данные не будут загружены.'
-                                    : 'Транскрипт отсутствует. Не подтверждайте оценку, пока данные не будут загружены.'}
-                              </div>}
-                    </div>
+                    {chatSnapshot ? (
+                        <ChatThread snapshot={chatSnapshot} quotes={[]} className="rounded-b-2xl" />
+                    ) : (
+                        <div className="flex-1 space-y-2 overflow-y-auto px-4 py-3" tabIndex={0}
+                             aria-label={isChat ? 'Переписка эпизода' : 'Транскрипт звонка'}>
+                            {(call.transcript || []).length > 0
+                                ? call.transcript.map((l, i) => <TranscriptLine key={i} line={l} onSeek={call.audio_url ? seekAudio : undefined} />)
+                                : <div className="flex min-h-32 items-center justify-center text-center text-[13px] text-slate-500">
+                                    {isChat
+                                        ? 'Переписка недоступна. Не подтверждайте оценку, пока данные не будут загружены.'
+                                        : 'Транскрипт отсутствует. Не подтверждайте оценку, пока данные не будут загружены.'}
+                                  </div>}
+                        </div>
+                    )}
                     <div className="border-t border-slate-100 px-4 py-2 text-[11px] text-slate-500">
                         {isChat
-                            ? 'Содержимое фото и голосовых приведено текстом в квадратных скобках — именно его видела модель.'
+                            ? 'Фото открываются в лайтбоксе, голосовые — плеером; под ними серым — транскрипт/описание, которые видела модель.'
                             : (<><mark className="rounded bg-amber-100 px-1 text-amber-800">жёлтым</mark> — где ИИ не уверен в распознавании (не учитывается против оператора)</>)}
                     </div>
                 </div>

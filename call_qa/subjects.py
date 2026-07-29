@@ -297,30 +297,56 @@ def build_wz_transcript(subject: dict, messages: list[dict],
     for msg in messages:
         stamp = msg["dt"].astimezone(ALMATY).strftime("%d.%m %H:%M")
         speaker, who = _speaker_of(msg, target)
-        parts = []
-        if msg.get("is_deleted"):
-            parts.append("[удалено]")
+        deleted = bool(msg.get("is_deleted"))
         media_kind = media_mod._kind_of(msg.get("type"), msg.get("content_uri"))
         media_label = _MEDIA_RU.get(str(msg.get("type") or ""))
+        annotatable = bool(media_label and msg.get("content_uri")
+                           and media_mod.annotatable(msg.get("type"), msg.get("content_uri")))
+        ann = annotations.get(str(msg.get("message_id"))) if annotatable else None
+        text = msg.get("text") or ""
+
+        # Инвариант: seg карточки == строке модели (без времени) — цитата разбора
+        # проверяется по тексту карточки, оценка идёт по тексту модели. Поэтому seg
+        # НЕ трогаем (аннотация вшита), а для нового вида чата добавляем ОТДЕЛЬНЫЕ поля.
+        parts = []
+        if deleted:
+            parts.append("[удалено]")
         if media_label:
-            if msg.get("content_uri") and media_mod.annotatable(msg.get("type"),
-                                                               msg.get("content_uri")):
-                parts.append(media_mod.annotation_text(
-                    media_kind, annotations.get(str(msg.get("message_id")))))
-            else:
-                parts.append(f"[{media_label}]")
-        if msg.get("text"):
-            parts.append(msg["text"])
+            parts.append(media_mod.annotation_text(media_kind, ann) if annotatable
+                         else f"[{media_label}]")
+        if text:
+            parts.append(text)
         if not parts:
             parts.append(f"[{msg.get('type') or 'сообщение'}]")
         body = " ".join(parts)
         text_lines.append(f"[{stamp}] {who}: {body}")
+
+        # Тело для вида-чата (без префикса «кто:» и без вшитой аннотации — она
+        # показывается отдельным блоком под фото/аудио).
+        clean_parts = []
+        if deleted:
+            clean_parts.append("[удалено]")
+        if media_label and not annotatable:
+            clean_parts.append(f"[{media_label}]")
+        if text:
+            clean_parts.append(text)
         line = {"speaker": speaker, "seg": [{"t": f"{who}: {body}"}], "ts": stamp,
+                "body": " ".join(clean_parts),
+                "created": msg["dt"].astimezone(ALMATY).isoformat(),
+                "outgoing": speaker != "client",
                 "author": msg.get("matched_name") or msg.get("author_name"),
                 "message_id": str(msg.get("message_id"))}
         if msg.get("content_uri") and media_label:
             line["media"] = {"kind": media_kind if media_kind != "unknown" else "file",
                              "label": media_label, "url": msg["content_uri"]}
+        if annotatable:
+            if ann and ann.get("status") == "ready" and ann.get("annotation"):
+                line["annotation"] = {"kind": media_kind, "status": "ready",
+                                      "text": ann["annotation"]}
+            else:
+                line["annotation"] = {"kind": media_kind,
+                                      "status": (ann or {}).get("status") or "missing",
+                                      "error": (ann or {}).get("error")}
         lines.append(line)
 
     header = _transcript_header(subject)
