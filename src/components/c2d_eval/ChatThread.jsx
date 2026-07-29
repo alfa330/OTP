@@ -130,7 +130,7 @@ function MediaAnnotation({ ann, light }) {
         <div className={`mt-1.5 overflow-hidden rounded-xl ring-1 ${shell}`}>
             <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open}
                     aria-label={open ? `Скрыть: ${label}` : `Показать: ${label}`}
-                    className={`flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left transition ${
+                    className={`flex w-full min-w-0 items-center gap-1.5 px-2.5 py-1.5 text-left transition ${
                         light ? 'hover:bg-white/10' : 'hover:bg-slate-100'} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50`}>
                 <Sparkles size={11} className={`shrink-0 ${accent}`} />
                 <Icon size={12} className={`shrink-0 ${accent}`} />
