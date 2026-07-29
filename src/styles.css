@@ -676,6 +676,18 @@
             transform: scale(1) translateY(0);
             pointer-events: auto;
         }
+        /* Мост через зазор между шапкой и списком: без него курсор, пересекая
+           6px пустоты, «выходит» из меню и оно успевает моргнуть.
+           pointer-events наследуется, поэтому у закрытого меню мост неактивен
+           и ничего под собой не блокирует. */
+        .tab-dropdown::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            right: 0;
+            top: -8px;
+            height: 8px;
+        }
 
 
 /* ── Док переписки справа ──

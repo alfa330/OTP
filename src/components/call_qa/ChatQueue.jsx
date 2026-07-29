@@ -1,9 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
 import {
-    MessageSquare, Loader2, AlertCircle, CheckCircle2, Users, Sparkles, ImageOff,
+    MessageSquare, Loader2, AlertCircle, CheckCircle2, Users, Sparkles,
 } from 'lucide-react';
 import { iosCard, iosBtnPrimary, iosBtnSecondary, IosBadge } from '../ui/ios';
+import QueueList from './QueueList';
+import EvaluationsList from './EvaluationsList';
 
 /* Вкладка «Чаты» раздела ИИ-оценки: эпизоды переписки Верификаторов (Wazzup).
  *
@@ -147,27 +149,9 @@ export default function ChatQueue({ apiBaseUrl, withAccessTokenHeader, showToast
                 </div>
             ) : (
                 <div className="space-y-2.5">
-                    {items.map((c) => (
-                        <button key={c.id} type="button" onClick={() => onOpen?.(c)}
-                            className={`${iosCard} flex w-full flex-col items-stretch justify-between gap-2.5 p-3.5 text-left transition hover:ring-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 active:scale-[0.995] sm:flex-row sm:items-center`}>
-                            <div className="min-w-0">
-                                <div className="flex items-center gap-2">
-                                    <MessageSquare size={14} className="shrink-0 text-blue-500" />
-                                    <span className="text-[14px] font-semibold text-slate-900">Чат #{c.id}</span>
-                                    <IosBadge tone="slate">{c.direction}</IosBadge>
-                                </div>
-                                <p className="mt-0.5 text-[12px] text-slate-400">{c.operator} · {c.datetime}</p>
-                            </div>
-                            <div className="flex flex-wrap items-center gap-1.5 sm:shrink-0 sm:justify-end">
-                                {(c.reasons || []).includes('media') && (
-                                    <IosBadge tone="amber" title="Часть вложений (фото/голосовых) не удалось прочитать — проверьте их вручную.">
-                                        <ImageOff size={11} />Вложение не прочитано
-                                    </IosBadge>
-                                )}
-                                {c.stale && <IosBadge tone="amber">оценка устарела</IosBadge>}
-                            </div>
-                        </button>
-                    ))}
+                    {/* Строка та же, что во вкладке «Очередь ревью»: список один и тот
+                        же, отличается только фильтр по субъекту. */}
+                    <QueueList items={items} onOpen={onOpen} />
                     {items.length < total && (
                         <div className="flex justify-center pt-1">
                             <button type="button" onClick={() => load(items.length, true)}
@@ -178,6 +162,14 @@ export default function ChatQueue({ apiBaseUrl, withAccessTokenHeader, showToast
                     )}
                 </div>
             )}
+
+            {/* Проверенные чаты уходят из очереди, но остаются здесь: вкладка
+                «Звонки» их не показывает — там только звонки. */}
+            <div className="space-y-2 pt-1">
+                <p className="px-1 text-[12px] font-semibold text-slate-500">Оценённые чаты</p>
+                <EvaluationsList apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
+                                 onOpen={onOpen} showToast={showToast} subject="wz_episode" />
+            </div>
         </div>
     );
 }

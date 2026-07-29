@@ -71,6 +71,10 @@ const BADGE_TONES = {
     amber: 'bg-amber-50 text-amber-700 ring-1 ring-amber-100',
 };
 
+/** Балл 0..100 → тон бейджа: один и тот же порог в очереди и в карточке ревью. */
+export const scoreTone = (value) => (
+    value == null ? 'slate' : value >= 70 ? 'green' : value >= 50 ? 'amber' : 'red');
+
 export const IosBadge = ({ tone = 'slate', children, className = '', ...props }) => (
     <span {...props} className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11.5px] font-medium ${BADGE_TONES[tone] || BADGE_TONES.slate} ${className}`}>
         {children}

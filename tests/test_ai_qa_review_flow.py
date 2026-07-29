@@ -110,6 +110,8 @@ class ReviewFlowContractTests(unittest.TestCase):
         cls.batch_src = (ROOT / "call_qa" / "batch_eval.py").read_text(encoding="utf-8-sig")
         cls.runtime_src = (ROOT / "call_qa" / "evaluation" / "runtime_store.py").read_text(encoding="utf-8-sig")
         cls.view_src = (ROOT / "src" / "components" / "call_qa" / "CallQaView.jsx").read_text(encoding="utf-8-sig")
+        # Строка очереди общая для вкладок «Очередь ревью» и «Чаты».
+        cls.queue_src = (ROOT / "src" / "components" / "call_qa" / "QueueList.jsx").read_text(encoding="utf-8-sig")
         cls.schema_src = (ROOT / "call_qa" / "rag" / "schema.sql").read_text(encoding="utf-8-sig")
 
     def test_confirm_leaves_trace(self):
@@ -154,7 +156,8 @@ class ReviewFlowContractTests(unittest.TestCase):
         self.assertIn("def _flag_stale_evaluations", self.api_src)
         self.assertIn("peek_knowledge_snapshot_hash", self.api_src)
         self.assertIn("run.fingerprint_components", self.api_src)
-        self.assertIn("c.stale &&", self.view_src)
+        self.assertIn("c.stale &&", self.queue_src)
+        self.assertIn("устарела", self.queue_src)
         self.assertIn("Оценка устарела", self.view_src)
 
     def test_reevaluation_of_stale_card_is_labeled_on_open(self):

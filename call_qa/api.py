@@ -159,7 +159,8 @@ def review_queue_list(limit: int = 30, offset: int = 0, allowed_direction_ids=No
             f"""SELECT rc.call_id, d.name, {_SUBJECT_OPERATOR}, {_SUBJECT_DATETIME}, c.score,
                       rc.payload->'criteria', rc.payload->'asr_mean_conf', rc.created_at,
                       {_SUBJECT_DIRECTION}, run.evaluation_fingerprint::text,
-                      run.fingerprint_components, rc.subject_kind, rc.payload->'media'
+                      run.fingerprint_components, rc.subject_kind, rc.payload->'media',
+                      rc.payload->'ai_score', rc.payload->'score_breakdown'
                  FROM ai_review_cache rc""" + _SUBJECT_JOIN + """
                  LEFT JOIN ai_evaluation_meta m
                         ON m.subject_kind = rc.subject_kind AND m.call_id = rc.call_id
@@ -183,9 +184,15 @@ def review_queue_list(limit: int = 30, offset: int = 0, allowed_direction_ids=No
         items = []
         for r in rows:
             reasons = review_queue.review_reasons(r[5] or [], r[6], r[12] or {})
+            breakdown = r[14] if isinstance(r[14], dict) else {}
             items.append({"id": r[0], "direction": r[1], "operator": r[2] or "—",
                           "datetime": r[3], "human_score": r[4], "reasons": reasons or ["ok"],
                           "subject": r[11] or config.SUBJECT_CALL,
+                          # Балл ИИ и та его часть, которую ИИ не проверял: в очереди
+                          # решают, что смотреть первым, и 90 из зачтённых баллов —
+                          # совсем не то же самое, что 90 проверенных.
+                          "ai_score": r[13],
+                          "unchecked_weight": breakdown.get("unchecked_weight") or 0,
                           "_sev": min((prio.index(x) for x in reasons), default=len(prio)),
                           "_ts": r[7], "_direction_id": r[8],
                           "_run_fp": r[9], "_run_components": r[10]})

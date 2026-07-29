@@ -3,14 +3,17 @@ import axios from 'axios';
 import { ChevronRight, Bot, User2, Shuffle, Loader2, ClipboardList, AlertCircle, RefreshCw, ChevronDown } from 'lucide-react';
 import { APPLE_FONT, iosCard, iosBtnPrimary, iosBtnSecondary, IosBadge } from '../ui/ios';
 
-/* Оценки: список уже оценённых ИИ звонков (реальные данные из кэша), новые сверху,
- * постраничная подгрузка «Показать ещё» — можно посмотреть все. Плюс кнопка
- * «Случайный звонок» — берёт случайный оценённый человеком звонок ОП и прогоняет ИИ. */
+/* Список уже оценённых ИИ субъектов (реальные данные из кэша), новые сверху,
+ * постраничная подгрузка «Показать ещё» — можно посмотреть все. Субъект задаёт
+ * вкладка: «Звонки» отдаёт звонки, «Чаты» — эпизоды переписки. Кнопка
+ * «Случайный звонок» есть только у звонков: у чатов свой подбор в ChatQueue. */
 
 const PAGE = 50;
+const SUBJECT_CHAT = 'wz_episode';
 
 export default function EvaluationsList(props) {
-    const { apiBaseUrl, withAccessTokenHeader, onOpen, showToast } = props;
+    const { apiBaseUrl, withAccessTokenHeader, onOpen, showToast, subject = 'call' } = props;
+    const chats = subject === SUBJECT_CHAT;
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
     const [items, setItems] = useState(null);   // null = первичная загрузка
     const [total, setTotal] = useState(0);
@@ -27,8 +30,8 @@ export default function EvaluationsList(props) {
         loadRequest.current = { id: requestId, controller };
         if (append) setMoreBusy(true); else { setItems(null); setError(null); }
         if (!apiBaseUrl) { setItems([]); setError('Сервис оценок не настроен'); return; }
-        axios.get(`${apiBaseUrl}/api/ai-qa/evaluations?limit=${PAGE}&offset=${offset}`,
-            { headers: headers(), signal: controller.signal })
+        axios.get(`${apiBaseUrl}/api/ai-qa/evaluations`,
+            { params: { limit: PAGE, offset, subject }, headers: headers(), signal: controller.signal })
             .then((r) => {
                 if (requestId !== loadRequest.current.id) return;
                 const page = r.data.items || [];
@@ -50,7 +53,7 @@ export default function EvaluationsList(props) {
             randomRequest.current.controller?.abort();
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [apiBaseUrl]);
+    }, [apiBaseUrl, subject]);
 
     const randomCall = () => {
         if (!apiBaseUrl) { showToast?.('Бэкенд недоступен', 'error'); return; }
@@ -80,17 +83,21 @@ export default function EvaluationsList(props) {
         <div style={{ fontFamily: APPLE_FONT }} className="space-y-3">
             <div className="flex flex-col items-stretch justify-between gap-3 sm:flex-row sm:items-center">
                 <p className="text-[13px] text-slate-500">
-                    Звонки и чаты, уже оценённые ИИ{total ? ` · всего ${total}` : ''}. Можно взять случайный звонок из оценённых человеком и проверить ИИ.
+                    {chats
+                        ? `Чаты, уже оценённые ИИ${total ? ` · всего ${total}` : ''}.`
+                        : `Звонки, уже оценённые ИИ${total ? ` · всего ${total}` : ''}. Можно взять случайный звонок из оценённых человеком и проверить ИИ.`}
                 </p>
                 <div className="flex shrink-0 items-center gap-2">
                     <button type="button" onClick={() => fetchPage(0, false)} disabled={items === null}
                         className={iosBtnSecondary} title="Обновить список">
                         <RefreshCw size={14} className={items === null ? 'animate-spin' : ''} />
                     </button>
-                    <button type="button" onClick={randomCall} disabled={busy} className={iosBtnPrimary}>
-                        {busy ? <Loader2 size={15} className="animate-spin" /> : <Shuffle size={15} />}
-                        {busy ? 'Подбираю звонок…' : 'Оценить случайный звонок'}
-                    </button>
+                    {!chats && (
+                        <button type="button" onClick={randomCall} disabled={busy} className={iosBtnPrimary}>
+                            {busy ? <Loader2 size={15} className="animate-spin" /> : <Shuffle size={15} />}
+                            {busy ? 'Подбираю звонок…' : 'Оценить случайный звонок'}
+                        </button>
+                    )}
                 </div>
             </div>
 
@@ -107,8 +114,14 @@ export default function EvaluationsList(props) {
             ) : items.length === 0 ? (
                 <div className={`${iosCard} flex flex-col items-center gap-2 px-6 py-14 text-center`}>
                     <ClipboardList size={26} className="text-slate-300" />
-                    <p className="text-[13px] text-slate-500">Пока ничего не оценено ИИ.</p>
-                    <p className="text-[12px] text-slate-400">Нажмите «Случайный звонок», чтобы протестировать оценку.</p>
+                    <p className="text-[13px] text-slate-500">
+                        {chats ? 'Пока ни один чат не оценён ИИ.' : 'Пока ни один звонок не оценён ИИ.'}
+                    </p>
+                    <p className="text-[12px] text-slate-400">
+                        {chats
+                            ? 'Нажмите «Оценить случайный чат» выше, чтобы получить первую оценку.'
+                            : 'Нажмите «Оценить случайный звонок», чтобы протестировать оценку.'}
+                    </p>
                 </div>
             ) : (
                 <div className="space-y-2">
@@ -118,7 +131,7 @@ export default function EvaluationsList(props) {
                             <div className="min-w-0 flex-1">
                                 <div className="flex items-center gap-2">
                                     <span className="text-[14px] font-semibold text-slate-900">
-                                        {m.subject === 'wz_episode' ? `Чат #${m.id}` : `#${m.id}`}
+                                        {m.subject === SUBJECT_CHAT ? `Чат #${m.id}` : `Звонок #${m.id}`}
                                     </span>
                                     <IosBadge tone="slate">{m.direction}</IosBadge>
                                     <IosBadge tone="green"><Bot size={11} />оценено ИИ</IosBadge>

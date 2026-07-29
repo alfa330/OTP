@@ -2,9 +2,8 @@ import React, { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import { motion } from 'framer-motion';
 import {
-    Sparkles, ListChecks, ClipboardList, SlidersHorizontal, Database, ChevronLeft,
-    ShieldAlert, Gauge, Server, Clock, Loader2, AlertCircle, RotateCcw, Volume1, CheckCircle2,
-    MessageSquare, ImageOff, Users,
+    Sparkles, ListChecks, SlidersHorizontal, Database, ChevronLeft, Gauge,
+    Loader2, AlertCircle, RotateCcw, CheckCircle2, MessageSquare, PhoneCall,
 } from 'lucide-react';
 import { APPLE_FONT, iosCard, iosBtnGhost, iosBtnSecondary, IosBadge } from '../ui/ios';
 import { isDepartmentHead, normalizeRole } from '../../utils/roles';
@@ -14,6 +13,7 @@ import EvaluationsList from './EvaluationsList';
 import CriteriaClassification from './CriteriaClassification';
 import AdjudicationsRag from './AdjudicationsRag';
 import ChatQueue from './ChatQueue';
+import QueueList, { isChat } from './QueueList';
 
 /* Контейнер раздела «ИИ-оценка» (App.jsx: view === "ai_qa"; доступ: super_admin,
  * главы ОП/СЗоВ, СВ ОП — последним бэкенд отдаёт только их направления, а вкладки
@@ -24,25 +24,12 @@ const TABS = [
     { key: 'overview',  label: 'Обзор',          Icon: Gauge },
     { key: 'queue',     label: 'Очередь ревью',  Icon: ListChecks },
     { key: 'chats',     label: 'Чаты',           Icon: MessageSquare },
-    { key: 'evals',     label: 'Оценки',         Icon: ClipboardList },
+    // Два блока оценённого — по субъекту: переписки Верификаторов и звонки
+    // остальных направлений ОП. Раньше здесь были «Оценки» вперемешку.
+    { key: 'evals',     label: 'Звонки',         Icon: PhoneCall },
     { key: 'criteria',  label: 'Критерии',       Icon: SlidersHorizontal },
     { key: 'rag',       label: 'База разборов',  Icon: Database },
 ];
-
-// Тип субъекта оценки: звонок или эпизод переписки (см. call_qa/config.SUBJECT_*).
-const SUBJECT_CHAT = 'wz_episode';
-const isChat = (subject) => subject === SUBJECT_CHAT;
-const subjectTitle = (subject, id) => (isChat(subject) ? `Чат #${id}` : `Звонок #${id}`);
-
-const REASON = {
-    critical: { tone: 'red',   label: 'Критический', Icon: ShieldAlert },
-    lowconf:  { tone: 'amber', label: 'Низкая увер.', Icon: Clock },
-    pending:  { tone: 'blue',  label: 'Ждёт API',    Icon: Server },
-    asr:      { tone: 'amber', label: 'Слабый звук', Icon: Volume1 },
-    media:    { tone: 'amber', label: 'Вложение не прочитано', Icon: ImageOff },
-    ok:       { tone: 'green', label: 'Без флагов',  Icon: CheckCircle2 },
-    new:      { tone: 'slate', label: 'Новый',       Icon: Sparkles },
-};
 
 function Segmented({ tabs = TABS, tab, setTab }) {
     const refs = useRef([]);
@@ -77,40 +64,6 @@ function Segmented({ tabs = TABS, tab, setTab }) {
                     </button>
                 );
             })}
-        </div>
-    );
-}
-
-function QueueList({ items, onOpen }) {
-    return (
-        <div className="space-y-2.5">
-            {items.map((c) => (
-                <button key={c.id} type="button" onClick={() => onOpen(c)}
-                    className={`${iosCard} flex w-full flex-col items-stretch justify-between gap-2.5 p-3.5 text-left transition hover:ring-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 active:scale-[0.995] sm:flex-row sm:items-center`}>
-                    <div className="min-w-0">
-                        <div className="flex items-center gap-2">
-                            {isChat(c.subject) && <MessageSquare size={14} className="shrink-0 text-blue-500" />}
-                            <span className="text-[14px] font-semibold text-slate-900">
-                                {subjectTitle(c.subject, c.id)}
-                            </span>
-                            <IosBadge tone="slate">{c.direction}</IosBadge>
-                        </div>
-                        <p className="mt-0.5 text-[12px] text-slate-400">{c.operator} · {c.datetime}</p>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-1.5 sm:shrink-0 sm:justify-end">
-                        {c.human_score != null && <IosBadge tone="green">Человек: {c.human_score}</IosBadge>}
-                        {(c.reasons || []).map((r) => {
-                            const m = REASON[r] || REASON.new;
-                            return <IosBadge key={r} tone={m.tone}><m.Icon size={11} />{m.label}</IosBadge>;
-                        })}
-                        {c.stale && (
-                            <IosBadge tone="amber" title="Конфигурация ИИ (промпт, критерии или база знаний) изменилась после этой оценки. При открытии показывается прежняя оценка; пересчёт — только кнопкой «Переоценить» в карточке.">
-                                <RotateCcw size={11} />Оценка устарела
-                            </IosBadge>
-                        )}
-                    </div>
-                </button>
-            ))}
         </div>
     );
 }
@@ -428,7 +381,7 @@ export default function CallQaView(props) {
                 <QaDashboard apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader} />
             ) : tab === 'evals' ? (
                 <EvaluationsList apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
-                                 onOpen={openCall} showToast={showToast} />
+                                 onOpen={openCall} showToast={showToast} subject="call" />
             ) : tab === 'criteria' ? (
                 <CriteriaClassification showToast={showToast} apiBaseUrl={apiBaseUrl}
                                         withAccessTokenHeader={withAccessTokenHeader} directions={props.directions}
