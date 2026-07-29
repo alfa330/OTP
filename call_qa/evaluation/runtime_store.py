@@ -498,7 +498,7 @@ def save_evaluation_run(*, run_id: str, call_id: int, direction_id: int,
                             output_tokens,cache_read_tokens,cache_write_tokens,estimated_cost,
                             started_at,completed_at)
                          VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'anthropic',%s,%s,%s,%s,%s,%s,
-                                 %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                                 %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                     (str(run_id), subject_kind, int(call_id), int(direction_id), transcript_cache_id,
                      transcript_hash, evaluation_fingerprint,
                      int(fingerprint_components.get("fingerprint_version") or 1),

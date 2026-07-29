@@ -1,19 +1,20 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
-import {
-    MessageSquare, Loader2, AlertCircle, CheckCircle2, Users, Sparkles,
-} from 'lucide-react';
-import { iosCard, iosBtnPrimary, iosBtnSecondary, IosBadge } from '../ui/ios';
-import QueueList from './QueueList';
+import { MessageSquare, Loader2, AlertCircle, Users, Sparkles } from 'lucide-react';
+import { iosCard, iosBtnPrimary, IosBadge } from '../ui/ios';
 import EvaluationsList from './EvaluationsList';
 
-/* Вкладка «Чаты» раздела ИИ-оценки: эпизоды переписки Верификаторов (Wazzup).
+/* Вкладка «Чаты» раздела ИИ-оценки: эпизоды переписки Верификаторов (Wazzup) —
+ * сводка пригодности, подбор нового чата и уже оценённые чаты.
  *
- * Зачем отдельная вкладка, а не просто фильтр очереди: у чатов есть своё
- * ограничение, которого нет у звонков, — в одном эпизоде могут отвечать
- * несколько операторов, и тогда оценить работу одного человека нельзя. Порог
- * («не меньше N% ответов у одного оператора») отсекает такие эпизоды, поэтому
- * сводка сверху объясняет, почему пригодных чатов меньше, чем всех диалогов. */
+ * Непроверенные карточки живут в общей «Очереди ревью» вместе со звонками:
+ * очередь одна, дублировать её здесь незачем.
+ *
+ * Зачем чатам отдельная вкладка: у них есть ограничение, которого нет у звонков, —
+ * в одном эпизоде могут отвечать несколько операторов, и тогда оценить работу
+ * одного человека нельзя. Порог («не меньше N% ответов у одного оператора»)
+ * отсекает такие эпизоды, поэтому сводка объясняет, почему пригодных чатов
+ * меньше, чем всех диалогов. */
 
 const OverviewTile = ({ label, value, tone = 'slate', hint }) => (
     <div className="rounded-2xl bg-slate-50 px-3.5 py-3">
@@ -29,36 +30,13 @@ const OverviewTile = ({ label, value, tone = 'slate', hint }) => (
 export default function ChatQueue({ apiBaseUrl, withAccessTokenHeader, showToast, onOpen }) {
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
     const [overview, setOverview] = useState(null);
-    const [items, setItems] = useState(null);
-    const [total, setTotal] = useState(0);
-    const [err, setErr] = useState(false);
-    const [moreBusy, setMoreBusy] = useState(false);
     const [randomBusy, setRandomBusy] = useState(false);
-
-    const PAGE = 30;
-    const load = (offset = 0, append = false) => {
-        if (append) setMoreBusy(true); else { setItems(null); setErr(false); }
-        if (!apiBaseUrl) { setErr(true); setItems([]); setMoreBusy(false); return; }
-        axios.get(`${apiBaseUrl}/api/ai-qa/review-queue`,
-            { params: { limit: PAGE, offset, subject: 'wz_episode' }, headers: headers() })
-            .then((r) => {
-                const page = r.data.items || [];
-                setTotal(typeof r.data.total === 'number' ? r.data.total : page.length);
-                setItems((prev) => (append && Array.isArray(prev) ? [...prev, ...page] : page));
-            })
-            .catch(() => {
-                if (append) showToast?.('Не удалось подгрузить ещё', 'error');
-                else { setItems([]); setErr(true); }
-            })
-            .finally(() => setMoreBusy(false));
-    };
 
     useEffect(() => {
         if (!apiBaseUrl) return;
         axios.get(`${apiBaseUrl}/api/ai-qa/chat-overview`, { headers: headers() })
             .then((r) => setOverview(r.data || null))
             .catch(() => setOverview(null));
-        load();
         // eslint-disable-next-line
     }, [apiBaseUrl]);
 
@@ -114,10 +92,7 @@ export default function ChatQueue({ apiBaseUrl, withAccessTokenHeader, showToast
                 </div>
             ) : null}
 
-            <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="text-[12.5px] text-slate-500">
-                    Очередь ревью по чатам{items ? `: ${items.length} из ${total}` : ''}
-                </p>
+            <div className="flex justify-end">
                 <button type="button" onClick={openRandom} disabled={randomBusy || !apiBaseUrl}
                         className={`${iosBtnPrimary} disabled:cursor-not-allowed disabled:opacity-50`}>
                     {randomBusy ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
@@ -125,51 +100,10 @@ export default function ChatQueue({ apiBaseUrl, withAccessTokenHeader, showToast
                 </button>
             </div>
 
-            {items === null ? (
-                <div className={`${iosCard} flex flex-col items-center justify-center gap-3 px-6 py-16 text-center`} role="status">
-                    <Loader2 size={26} className="animate-spin text-blue-500" />
-                    <p className="text-[13px] text-slate-500">Загружаю очередь чатов…</p>
-                </div>
-            ) : err ? (
-                <div className={`${iosCard} flex flex-col items-center gap-3 px-6 py-14 text-center`} role="alert">
-                    <AlertCircle size={26} className="text-rose-500" />
-                    <p className="text-[13.5px] font-medium text-slate-700">Не удалось загрузить очередь чатов</p>
-                    <button type="button" onClick={() => load()} className={iosBtnSecondary}>Повторить</button>
-                </div>
-            ) : items.length === 0 ? (
-                <div className={`${iosCard} flex flex-col items-center gap-3 px-6 py-14 text-center`}>
-                    <CheckCircle2 size={26} className="text-emerald-500" />
-                    <div>
-                        <p className="text-[14px] font-semibold text-slate-700">Непроверенных чатов нет</p>
-                        <p className="mt-1 text-[12.5px] text-slate-500">
-                            Нажмите «Оценить случайный чат», чтобы получить новый эпизод на проверку.
-                        </p>
-                    </div>
-                    <button type="button" onClick={() => load()} className={iosBtnSecondary}>Обновить</button>
-                </div>
-            ) : (
-                <div className="space-y-2.5">
-                    {/* Строка та же, что во вкладке «Очередь ревью»: список один и тот
-                        же, отличается только фильтр по субъекту. */}
-                    <QueueList items={items} onOpen={onOpen} />
-                    {items.length < total && (
-                        <div className="flex justify-center pt-1">
-                            <button type="button" onClick={() => load(items.length, true)}
-                                    disabled={moreBusy} className={iosBtnSecondary}>
-                                {moreBusy ? 'Загрузка…' : `Показать ещё (осталось ${total - items.length})`}
-                            </button>
-                        </div>
-                    )}
-                </div>
-            )}
-
-            {/* Проверенные чаты уходят из очереди, но остаются здесь: вкладка
-                «Звонки» их не показывает — там только звонки. */}
-            <div className="space-y-2 pt-1">
-                <p className="px-1 text-[12px] font-semibold text-slate-500">Оценённые чаты</p>
-                <EvaluationsList apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
-                                 onOpen={onOpen} showToast={showToast} subject="wz_episode" />
-            </div>
+            {/* Только чаты: оценённые эпизоды. Непроверенные лежат в общей
+                «Очереди ревью» вместе со звонками — второй очереди здесь не нужно. */}
+            <EvaluationsList apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
+                             onOpen={onOpen} showToast={showToast} subject="wz_episode" />
         </div>
     );
 }
