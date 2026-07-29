@@ -164,6 +164,61 @@ const OperatorAvatar = ({ operator, size = 32 }) => {
     );
 };
 
+const CALL_END_PARTY_META = Object.freeze({
+    operator: {
+        label: 'Оператор завершил',
+        description: 'Звонок завершил оператор'
+    },
+    client: {
+        label: 'Клиент завершил',
+        description: 'Звонок завершил клиент'
+    },
+    system: {
+        label: 'Система завершила',
+        description: 'Звонок завершила система'
+    },
+    transfer: {
+        label: 'Перевод звонка',
+        description: 'Звонок завершён переводом'
+    },
+    unknown: {
+        label: 'Не определено',
+        description: 'Кто завершил звонок, не определено'
+    }
+});
+
+const normalizeCallEndParty = (value) => {
+    if (value === null || value === undefined || String(value).trim() === '') return null;
+    const normalized = String(value).trim().toLowerCase();
+    return Object.prototype.hasOwnProperty.call(CALL_END_PARTY_META, normalized)
+        ? normalized
+        : 'unknown';
+};
+
+const resolveCallEndParty = (call) => (
+    call?.callEndParty
+    ?? call?.call_end_party
+    ?? call?._rawEvaluation?.call_end_party
+    ?? null
+);
+
+const CallEndedBadge = ({ party, className = '' }) => {
+    const normalizedParty = normalizeCallEndParty(party);
+    if (!normalizedParty) return null;
+    const meta = CALL_END_PARTY_META[normalizedParty];
+
+    return (
+        <span
+            className={`badge badge-muted call-ended-badge ${className}`.trim()}
+            title={meta.description}
+            aria-label={meta.description}
+        >
+            <FaIcon className="fas fa-phone" aria-hidden="true" />
+            {meta.label}
+        </span>
+    );
+};
+
 const normalizeClientAuthTransport = (value) => {
     const normalized = String(value || '').trim().toLowerCase();
     if (normalized === 'bearer' || normalized === 'cookie') return normalized;
@@ -999,7 +1054,11 @@ const SvRequestButton = ({ call, userId, userRole, isAdminRole = false, fetchEva
                 <div className="modal-backdrop" onClick={e => { e.stopPropagation(); setShowModal(false); }}>
                     <div className="modal request-modal" onClick={e => e.stopPropagation()}>
                         <div className="modal-header">
-                            <div><h2>Запрос на переоценку</h2><div className="modal-header-sub">Call ID: {call.id}</div></div>
+                            <div>
+                                <h2>Запрос на переоценку</h2>
+                                <div className="modal-header-sub">Call ID: {call.id}</div>
+                                <CallEndedBadge party={resolveCallEndParty(call)} className="call-ended-header-badge" />
+                            </div>
                             <button className="close-btn" onClick={() => setShowModal(false)}><FaIcon className="fas fa-times" /></button>
                         </div>
                         <div className="modal-body">
@@ -1050,7 +1109,11 @@ const SvRequestButton = ({ call, userId, userRole, isAdminRole = false, fetchEva
                         <div className="modal-backdrop" onClick={e => { e.stopPropagation(); setShowApproveModal(false); }}>
                             <div className="modal request-modal" onClick={e => e.stopPropagation()}>
                                 <div className="modal-header">
-                                    <div><h2>Одобрить запрос</h2><div className="modal-header-sub">Call ID: {call.id}</div></div>
+                                    <div>
+                                        <h2>Одобрить запрос</h2>
+                                        <div className="modal-header-sub">Call ID: {call.id}</div>
+                                        <CallEndedBadge party={resolveCallEndParty(call)} className="call-ended-header-badge" />
+                                    </div>
                                     <button className="close-btn" onClick={() => setShowApproveModal(false)}><FaIcon className="fas fa-times" /></button>
                                 </div>
                                 <div className="modal-body">
@@ -1072,7 +1135,11 @@ const SvRequestButton = ({ call, userId, userRole, isAdminRole = false, fetchEva
                         <div className="modal-backdrop" onClick={e => { e.stopPropagation(); setShowRejectModal(false); }}>
                             <div className="modal request-modal" onClick={e => e.stopPropagation()}>
                                 <div className="modal-header">
-                                    <div><h2>Отклонить запрос</h2><div className="modal-header-sub">Call ID: {call.id}</div></div>
+                                    <div>
+                                        <h2>Отклонить запрос</h2>
+                                        <div className="modal-header-sub">Call ID: {call.id}</div>
+                                        <CallEndedBadge party={resolveCallEndParty(call)} className="call-ended-header-badge" />
+                                    </div>
                                     <button className="close-btn" onClick={() => setShowRejectModal(false)}><FaIcon className="fas fa-times" /></button>
                                 </div>
                                 <div className="modal-body">
@@ -1284,6 +1351,7 @@ const FeedbackModal = ({
                     <div>
                         <h2>Обратная связь</h2>
                         <div className="modal-header-sub">Call ID: {call.id}</div>
+                        <CallEndedBadge party={resolveCallEndParty(call)} className="call-ended-header-badge" />
                     </div>
                     <button className="close-btn" onClick={onClose}><FaIcon className="fas fa-times" /></button>
                 </div>
@@ -1519,6 +1587,7 @@ const BatchFeedbackModal = ({
                                     <span>{c.selectedDirection || '—'}</span>
                                     {c.totalScore != null && <span>Балл: {Math.round(c.totalScore)}</span>}
                                     <span>Call ID: {c.id}</span>
+                                    <CallEndedBadge party={resolveCallEndParty(c)} />
                                 </div>
                                 {audioUrls[c.id] && (
                                     <div style={{marginBottom:8}}>
@@ -1905,6 +1974,7 @@ const RandomCallModal = ({ isOpen, onClose, operator, userId, selectedMonth, sou
                                         <div style={{ minWidth: 0, flex: 1 }}>
                                             <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)', fontFamily: 'var(--font-mono)' }}>{c.phone || '—'}</div>
                                             <div style={{ fontSize: 11, color: 'var(--text-3)' }}>{c.datetime || '—'}{c.duration_sec != null ? ` · ${Math.round(c.duration_sec)} сек` : ''}</div>
+                                            <CallEndedBadge party={resolveCallEndParty(c)} className="call-ended-result-badge" />
                                         </div>
                                     </div>
                                 ))}
@@ -3052,6 +3122,8 @@ const EvaluationModal = ({
 
     const handleSubmit = async (draft = false) => {
         setIsSubmitting(true);
+        const importedCallId = existingEvaluation?.importedCallId
+            ?? (existingEvaluation?.is_imported ? existingEvaluation.id : null);
         const fd = new FormData();
         const criteriaCommentSummary = criteria
             .map((c, i) => comments[i] ? `${c.name}: ${comments[i]}` : '')
@@ -3078,6 +3150,7 @@ const EvaluationModal = ({
         const ad = getAppealDateISO();
         if (ad) fd.append('appeal_date', ad);
         if (existingEvaluation?.isReevaluation) { fd.append('previous_version_id', existingEvaluation.id); fd.append('is_correction', true); }
+        if (importedCallId != null) fd.append('imported_call_id', String(importedCallId));
         if (callFile) fd.append('audio_file', callFile);
         try {
             if (isCalibrationAddCallMode) {
@@ -3124,7 +3197,9 @@ const EvaluationModal = ({
                     isDraft: draft,
                     assignedMonth,
                     isCorrection: existingEvaluation?.isReevaluation || false,
-                    appeal_date: ad
+                    appeal_date: ad,
+                    callEndParty: resolveCallEndParty(existingEvaluation),
+                    importedCallId
                 });
                 onClose();
             } else emitCallEvaluationToast('Ошибка: ' + res.error, 'error');
@@ -3154,6 +3229,7 @@ const EvaluationModal = ({
                     <div>
                         <h2>{title}</h2>
                         <div className="modal-header-sub">Оператор: {activeOperator?.name || 'Не выбран'}</div>
+                        <CallEndedBadge party={resolveCallEndParty(existingEvaluation)} className="call-ended-header-badge" />
                     </div>
                     <button className="close-btn" onClick={onClose}><FaIcon className="fas fa-times" /></button>
                 </div>
@@ -3845,6 +3921,8 @@ const App = ({ user, initialSelection }) => {
         totalScore: ev.score != null ? parseFloat(ev.score).toFixed(2) : null,
         date: ev.evaluation_date ? ev.evaluation_date.split('T')[0] : '',
         phoneNumber: ev.phone_number,
+        callEndParty: ev.call_end_party ?? null,
+        importedCallId: ev.imported_call_id ?? (ev.is_imported ? ev.id : null),
         combinedComment: ev.comment,
         appeal_date: ev.appeal_date || '-',
         selectedDirection: ev.direction?.name || operator?.direction || '-',
@@ -4654,12 +4732,20 @@ const App = ({ user, initialSelection }) => {
                 directionId: data.directionId ?? selectedOperator?.direction_id, directions: data.directions,
                 phoneNumber: data.phoneNumber, assignedMonth: data.assignedMonth, isCorrection: data.isCorrection,
                 appeal_date: data.appeal_date, is_imported: false,
+                callEndParty: data.callEndParty ?? resolveCallEndParty(editingEval),
+                importedCallId: data.importedCallId
+                    ?? editingEval?.importedCallId
+                    ?? (editingEval?.is_imported ? editingEval.id : null),
                 commentVisibleToOperator: data.commentVisibleToOperator !== false,
                 questionResolved: !!data.questionResolved,
                 resolvedFirstContact: data.questionResolved ? !!data.resolvedFirstContact : null,
                 feedback: null,
                 sv_request: false, sv_request_approved: false,
                 _rawEvaluation: {
+                    call_end_party: data.callEndParty ?? resolveCallEndParty(editingEval),
+                    imported_call_id: data.importedCallId
+                        ?? editingEval?.importedCallId
+                        ?? (editingEval?.is_imported ? editingEval.id : null),
                     comment_visible_to_operator: data.commentVisibleToOperator !== false,
                     question_resolved: !!data.questionResolved,
                     resolved_first_contact: data.questionResolved ? !!data.resolvedFirstContact : null
@@ -5684,7 +5770,10 @@ const App = ({ user, initialSelection }) => {
                                                 )}
                                             </td>
                                             <td style={{color:'var(--text-2)'}}>{call.selectedDirection || '—'}</td>
-                                            <td style={{fontFamily:'var(--font-mono)',fontSize:12}}>{call.phoneNumber || '—'}</td>
+                                            <td>
+                                                <div className="call-phone-value">{call.phoneNumber || '—'}</div>
+                                                <CallEndedBadge party={resolveCallEndParty(call)} className="call-ended-cell-badge" />
+                                            </td>
                                             <td>
                                                 {call.totalScore != null ? (
                                                     <span className={`score-chip ${getScoreClass(call.totalScore)}`}>{Math.round(call.totalScore)}</span>
@@ -5776,6 +5865,7 @@ const App = ({ user, initialSelection }) => {
                                                             <div className="expanded-meta-item"><strong>Оценщик:</strong> {call._rawEvaluation?.evaluator || '—'}</div>
                                                             <div className="expanded-meta-item"><strong>Дата оценки:</strong> {fmtDate(call._rawEvaluation?.evaluation_date||call.date)}</div>
                                                             <div className="expanded-meta-item"><strong>Дата обращения:</strong> {fmtDate(call._rawEvaluation?.appeal_date||call.appeal_date)}</div>
+                                                            <CallEndedBadge party={resolveCallEndParty(call)} />
                                                             <div className="expanded-meta-item"><strong>Показ оператору:</strong> {call.commentVisibleToOperator !== false ? 'Да' : 'Нет'}</div>
                                                             <div className="expanded-meta-item"><strong>Вопрос решен:</strong> {call.questionResolved ? 'Да' : 'Нет'}</div>
                                                             <div className="expanded-meta-item"><strong>С первого обращения:</strong> {call.questionResolved ? (call.resolvedFirstContact ? 'Да' : 'Нет') : 'N/A'}</div>
@@ -6093,6 +6183,7 @@ const App = ({ user, initialSelection }) => {
                                                             <div style={{ fontSize: 12, color: 'var(--text-2)' }}>
                                                                 {requestItem.direction?.name || '—'}
                                                             </div>
+                                                            <CallEndedBadge party={resolveCallEndParty(requestItem)} className="call-ended-cell-badge" />
                                                         </td>
                                                         <td style={{ fontSize: 12, color: 'var(--text-2)' }}>{fmtDate(requestItem.sv_request_at)}</td>
                                                         <td>
@@ -6134,6 +6225,7 @@ const App = ({ user, initialSelection }) => {
                                                                         <div className="expanded-meta-item"><strong>Инициатор:</strong> {requestItem.sv_request_by_name || '—'} ({getReevaluationRequestRoleLabel(requestItem.sv_request_by_role)})</div>
                                                                         <div className="expanded-meta-item"><strong>Дата запроса:</strong> {fmtDate(requestItem.sv_request_at)}</div>
                                                                         <div className="expanded-meta-item"><strong>Телефон:</strong> {requestItem.phone_number || '—'}</div>
+                                                                        <CallEndedBadge party={resolveCallEndParty(requestItem)} />
                                                                         <div className="expanded-meta-item"><strong>Направление:</strong> {requestItem.direction?.name || '—'}</div>
                                                                         <div className="expanded-meta-item"><strong>Исходный балл:</strong> {requestItem.score != null ? Math.round(requestItem.score) : '—'}</div>
                                                                         <div className="expanded-meta-item"><strong>Оценщик:</strong> {requestItem.evaluator || '—'}</div>
@@ -7075,7 +7167,10 @@ const App = ({ user, initialSelection }) => {
                                 <div key={i} className="version-item">
                                     <div className="version-item-header">
                                         <span className="version-badge">Версия {versionHistory.length - i}</span>
-                                        <span style={{fontSize:12,color:'var(--text-2)',fontFamily:'var(--font-mono)'}}>{v.evaluation_date?.split('T')[0]}</span>
+                                        <div className="version-item-meta">
+                                            <CallEndedBadge party={resolveCallEndParty(v)} />
+                                            <span style={{fontSize:12,color:'var(--text-2)',fontFamily:'var(--font-mono)'}}>{v.evaluation_date?.split('T')[0]}</span>
+                                        </div>
                                     </div>
                                     <div className="version-grid">
                                         <div><strong>{v.score}</strong>Балл</div>

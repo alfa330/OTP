@@ -373,6 +373,20 @@ def _normalize_phone(phone: Optional[str]) -> Optional[str]:
     # Оставим, например, последние 10-11 цифр (зависит от вашей логики)
     return digits
 
+
+_CALL_END_PARTIES = frozenset({'operator', 'client', 'system', 'transfer', 'unknown'})
+
+
+def _normalize_call_end_party(value: Optional[str]) -> Optional[str]:
+    """Return the canonical call-ending party stored by the evaluation journal."""
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return None
+    return normalized if normalized in _CALL_END_PARTIES else 'unknown'
+
+
 def _parse_datetime_raw(dt_str: Optional[str]) -> Optional[datetime]:
     if not dt_str:
         return None
@@ -1555,6 +1569,7 @@ class Database:
                     sv_request_rejected_at TIMESTAMP,
                     sv_request_reject_comment TEXT,
                     sv_request_approve_comment TEXT,
+                    call_end_party VARCHAR(16),
                     UNIQUE(evaluator_id, operator_id, month, phone_number, appeal_date, score, comment, is_draft)
                 );
             """)
@@ -1564,6 +1579,10 @@ class Database:
             cursor.execute("""
                 ALTER TABLE calls
                 ADD COLUMN IF NOT EXISTS sv_request_approve_comment TEXT;
+            """)
+            cursor.execute("""
+                ALTER TABLE calls
+                ADD COLUMN IF NOT EXISTS call_end_party VARCHAR(16);
             """)
 
             # Идемпотентная миграция уникального ключа оценок: добавляем appeal_date,
@@ -1620,14 +1639,97 @@ class Database:
                     imported_at TIMESTAMP WITH TIME ZONE DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
                     evaluated_at TIMESTAMP WITH TIME ZONE,
                     evaluated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-                    notes TEXT
+                    notes TEXT,
+                    call_end_party VARCHAR(16),
+                    call_end_party_checked_at TIMESTAMP WITH TIME ZONE
                 );
                 ALTER TABLE imported_calls ADD COLUMN IF NOT EXISTS audio_path TEXT;
+                ALTER TABLE imported_calls ADD COLUMN IF NOT EXISTS call_end_party VARCHAR(16);
+                ALTER TABLE imported_calls ADD COLUMN IF NOT EXISTS call_end_party_checked_at TIMESTAMP WITH TIME ZONE;
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_imported_calls_external_id_month ON imported_calls (external_id, month);
                 CREATE INDEX IF NOT EXISTS idx_imported_calls_month ON imported_calls(month);
                 CREATE INDEX IF NOT EXISTS idx_imported_calls_operator_id ON imported_calls(operator_id);
                 CREATE INDEX IF NOT EXISTS idx_imported_calls_status ON imported_calls(status);
                 CREATE INDEX IF NOT EXISTS idx_imported_calls_phone_normalized ON imported_calls(phone_normalized);
+                CREATE INDEX IF NOT EXISTS idx_imported_calls_eval_match
+                    ON imported_calls(operator_id, month, phone_normalized, datetime_raw);
+                CREATE INDEX IF NOT EXISTS idx_imported_calls_end_party_backfill
+                    ON imported_calls(call_end_party_checked_at, external_id)
+                    WHERE call_end_party = 'unknown';
+            """)
+            # Старые записи imported_calls — это телефонные звонки. До появления этого поля
+            # источник не сохранялся, поэтому сначала честно отмечаем их как неизвестные;
+            # фоновая синхронизация Oktell затем заменит значение на точное, где это возможно.
+            cursor.execute("""
+                UPDATE imported_calls
+                SET call_end_party = 'unknown'
+                WHERE call_end_party IS NULL;
+            """)
+            cursor.execute("""
+                ALTER TABLE calls
+                ADD COLUMN IF NOT EXISTS imported_call_id INTEGER;
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1
+                        FROM pg_constraint
+                        WHERE conrelid = 'calls'::regclass
+                          AND conname = 'calls_imported_call_id_fkey'
+                    ) THEN
+                        ALTER TABLE calls
+                        ADD CONSTRAINT calls_imported_call_id_fkey
+                        FOREIGN KEY (imported_call_id)
+                        REFERENCES imported_calls(id)
+                        ON DELETE SET NULL;
+                    END IF;
+                END $$;
+                CREATE INDEX IF NOT EXISTS idx_calls_imported_call_id
+                    ON calls(imported_call_id);
+            """)
+            # Однократная совместимость для оценок, созданных до явной связи с imported_calls.
+            # Не связываем неоднозначные исторические дубли с произвольной записью.
+            cursor.execute("""
+                UPDATE calls AS c
+                SET imported_call_id = (
+                    SELECT ic.id
+                    FROM imported_calls AS ic
+                    WHERE ic.operator_id = c.operator_id
+                      AND ic.month = c.month
+                      AND ic.phone_normalized = regexp_replace(c.phone_number, '[^0-9]', '', 'g')
+                      AND ic.datetime_raw AT TIME ZONE 'UTC' = c.appeal_date
+                )
+                WHERE c.imported_call_id IS NULL
+                  AND c.appeal_date IS NOT NULL
+                  AND 1 = (
+                      SELECT COUNT(*)
+                      FROM imported_calls AS ic
+                      WHERE ic.operator_id = c.operator_id
+                        AND ic.month = c.month
+                        AND ic.phone_normalized = regexp_replace(c.phone_number, '[^0-9]', '', 'g')
+                        AND ic.datetime_raw AT TIME ZONE 'UTC' = c.appeal_date
+                  );
+            """)
+            cursor.execute("""
+                UPDATE calls AS c
+                SET call_end_party = ic.call_end_party
+                FROM imported_calls AS ic
+                WHERE c.imported_call_id = ic.id
+                  AND (c.call_end_party IS NULL OR c.call_end_party = 'unknown')
+                  AND ic.call_end_party IS NOT NULL;
+            """)
+            cursor.execute("""
+                UPDATE calls AS c
+                SET call_end_party = 'unknown'
+                WHERE c.call_end_party IS NULL
+                  AND c.appeal_date IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1
+                      FROM imported_calls AS ic
+                      WHERE ic.operator_id = c.operator_id
+                        AND ic.month = c.month
+                        AND ic.phone_normalized = regexp_replace(c.phone_number, '[^0-9]', '', 'g')
+                        AND ic.datetime_raw AT TIME ZONE 'UTC' = c.appeal_date
+                  );
             """)
 
             cursor.execute("""
@@ -19298,6 +19400,7 @@ class Database:
                             question_resolved=False,
                             resolved_first_contact=None,
                             external_id=None,
+                            imported_call_id=None,
                             c2d_snapshot_id=None,
                             chat_quotes=None):
         """
@@ -19316,6 +19419,11 @@ class Database:
         scores_json = json.dumps(scores) if scores else None
         criterion_comments_json = json.dumps(criterion_comments) if criterion_comments else None
         chat_quotes_json = json.dumps(chat_quotes) if chat_quotes else None
+        call_end_party = None
+        try:
+            linked_imported_call_id = int(imported_call_id) if imported_call_id not in (None, '') else None
+        except (TypeError, ValueError):
+            linked_imported_call_id = None
 
         with self._get_cursor() as cursor:
             # Проверка существования direction_id одним запросом
@@ -19324,28 +19432,71 @@ class Database:
                 if not cursor.fetchone():
                     direction_id = None
 
-            if is_correction and previous_version_id and not audio_path:
-                cursor.execute("SELECT audio_path FROM calls WHERE id = %s", (previous_version_id,))
-                result = cursor.fetchone()
-                if result and result[0]:
-                    audio_path = result[0]
-
-            # Оценка импортированного звонка без нового файла: наследуем запись из
-            # imported_calls (для TEZ/Binotel там лежит путь к записи в GCS), чтобы
-            # у оценённого звонка сохранилась та же аудиозапись.
-            if not audio_path and not is_correction and phone_number and appeal_date:
+            if is_correction and previous_version_id:
                 cursor.execute(
-                    """
-                    SELECT audio_path FROM imported_calls
-                    WHERE phone_normalized = %s AND month = %s
-                      AND datetime_raw = %s AND audio_path IS NOT NULL
-                    LIMIT 1
-                    """,
-                    (_normalize_phone(phone_number), month, appeal_date)
-                )
-                imported_audio = cursor.fetchone()
-                if imported_audio and imported_audio[0]:
-                    audio_path = imported_audio[0]
+                    "SELECT audio_path, call_end_party, imported_call_id FROM calls WHERE id = %s",
+                    (previous_version_id,))
+                result = cursor.fetchone()
+                if result:
+                    if not audio_path and result[0]:
+                        audio_path = result[0]
+                    call_end_party = _normalize_call_end_party(result[1])
+                    linked_imported_call_id = result[2]
+
+            # Оценка импортированного звонка наследует аудио и установленную интеграцией
+            # сторону завершения. Клиентскую форму для этого поля намеренно не используем.
+            if not is_correction:
+                imported_call = None
+                if linked_imported_call_id:
+                    cursor.execute(
+                        """
+                        SELECT id, audio_path, call_end_party
+                        FROM imported_calls
+                        WHERE id = %s AND operator_id = %s AND month = %s
+                          AND phone_normalized = %s
+                          AND datetime_raw = %s::timestamp AT TIME ZONE 'UTC'
+                        LIMIT 1
+                        """,
+                        (
+                            linked_imported_call_id,
+                            operator_id,
+                            month,
+                            _normalize_phone(phone_number),
+                            appeal_date,
+                        )
+                    )
+                    imported_call = cursor.fetchone()
+                if imported_call is None and external_id:
+                    cursor.execute(
+                        """
+                        SELECT id, audio_path, call_end_party
+                        FROM imported_calls
+                        WHERE external_id = %s AND operator_id = %s AND month = %s
+                        LIMIT 1
+                        """,
+                        (external_id, operator_id, month)
+                    )
+                    imported_call = cursor.fetchone()
+                if imported_call is None and phone_number and appeal_date:
+                    cursor.execute(
+                        """
+                        SELECT id, audio_path, call_end_party
+                        FROM imported_calls
+                        WHERE phone_normalized = %s AND operator_id = %s AND month = %s
+                          AND datetime_raw = %s::timestamp AT TIME ZONE 'UTC'
+                        ORDER BY id DESC
+                        LIMIT 1
+                        """,
+                        (_normalize_phone(phone_number), operator_id, month, appeal_date)
+                    )
+                    imported_call = cursor.fetchone()
+                if imported_call:
+                    linked_imported_call_id = imported_call[0]
+                    if not audio_path and imported_call[1]:
+                        audio_path = imported_call[1]
+                    call_end_party = _normalize_call_end_party(imported_call[2])
+                else:
+                    linked_imported_call_id = None
 
             # Объединенная проверка черновика и существующей оценки
             cursor.execute("""
@@ -19400,7 +19551,9 @@ class Database:
                             is_correction = %s,
                             direction_id = %s,
                             c2d_snapshot_id = COALESCE(%s, c2d_snapshot_id),
-                            chat_quotes = COALESCE(%s::jsonb, chat_quotes)
+                            chat_quotes = COALESCE(%s::jsonb, chat_quotes),
+                            call_end_party = %s,
+                            imported_call_id = %s
                         WHERE id = %s
                         RETURNING id
                     """, (
@@ -19411,6 +19564,8 @@ class Database:
                         direction_id,
                         int(c2d_snapshot_id) if c2d_snapshot_id is not None else None,
                         chat_quotes_json,
+                        call_end_party,
+                        linked_imported_call_id,
                         call_id
                     ))
                     call_id = cursor.fetchone()[0]
@@ -19428,14 +19583,23 @@ class Database:
 
                     # Перед возвратом — пометить imported_calls (если найдено)
                     try:
-                        if external_id:
+                        if linked_imported_call_id:
                             cursor.execute("""
                                 UPDATE imported_calls
                                 SET status = 'evaluated',
                                     evaluated_at = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty',
                                     evaluated_by = %s
-                                WHERE external_id = %s AND month = %s AND status != 'evaluated'
-                            """, (evaluator_id, external_id, month))
+                                WHERE id = %s AND status != 'evaluated'
+                            """, (evaluator_id, linked_imported_call_id))
+                        elif external_id:
+                            cursor.execute("""
+                                UPDATE imported_calls
+                                SET status = 'evaluated',
+                                    evaluated_at = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty',
+                                    evaluated_by = %s
+                                WHERE external_id = %s AND operator_id = %s
+                                  AND month = %s AND status != 'evaluated'
+                            """, (evaluator_id, external_id, operator_id, month))
                         else:
                             # попытаться найти по телефону + дате (точное совпадение)
                             if phone_number and appeal_date:
@@ -19445,8 +19609,11 @@ class Database:
                                     SET status = 'evaluated',
                                         evaluated_at = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty',
                                         evaluated_by = %s
-                                    WHERE phone_normalized = %s AND month = %s AND datetime_raw = %s AND status != 'evaluated'
-                                """, (evaluator_id, phone_norm, month, appeal_date))
+                                    WHERE phone_normalized = %s AND operator_id = %s
+                                      AND month = %s
+                                      AND datetime_raw = %s::timestamp AT TIME ZONE 'UTC'
+                                      AND status != 'evaluated'
+                                """, (evaluator_id, phone_norm, operator_id, month, appeal_date))
                     except Exception as e:
                         logging.exception("Error marking imported_call as evaluated: %s", e)
 
@@ -19471,9 +19638,9 @@ class Database:
                     comment_visible_to_operator, question_resolved, resolved_first_contact,
                     audio_path, is_draft, is_correction, previous_version_id,
                     scores, criterion_comments, direction_id, appeal_date,
-                    c2d_snapshot_id, chat_quotes
+                    c2d_snapshot_id, chat_quotes, call_end_party, imported_call_id
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (
                 evaluator_id, operator_id, month, phone_number, score, comment,
@@ -19481,7 +19648,7 @@ class Database:
                 audio_path, is_draft, is_correction, previous_version_id,
                 scores_json, criterion_comments_json, direction_id, appeal_date,
                 int(c2d_snapshot_id) if c2d_snapshot_id is not None else None,
-                chat_quotes_json
+                chat_quotes_json, call_end_party, linked_imported_call_id
             ))
             call_id = cursor.fetchone()[0]
 
@@ -19498,14 +19665,23 @@ class Database:
 
             # После успешного создания — помечаем imported_calls как evaluated (если можем сопоставить)
             try:
-                if external_id:
+                if linked_imported_call_id:
                     cursor.execute("""
                         UPDATE imported_calls
                         SET status = 'evaluated',
                             evaluated_at = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty',
                             evaluated_by = %s
-                        WHERE external_id = %s AND month = %s AND status != 'evaluated'
-                    """, (evaluator_id, external_id, month))
+                        WHERE id = %s AND status != 'evaluated'
+                    """, (evaluator_id, linked_imported_call_id))
+                elif external_id:
+                    cursor.execute("""
+                        UPDATE imported_calls
+                        SET status = 'evaluated',
+                            evaluated_at = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty',
+                            evaluated_by = %s
+                        WHERE external_id = %s AND operator_id = %s
+                          AND month = %s AND status != 'evaluated'
+                    """, (evaluator_id, external_id, operator_id, month))
                 else:
                     if phone_number and appeal_date:
                         phone_norm = _normalize_phone(phone_number)
@@ -19514,8 +19690,11 @@ class Database:
                             SET status = 'evaluated',
                                 evaluated_at = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty',
                                 evaluated_by = %s
-                            WHERE phone_normalized = %s AND month = %s AND datetime_raw = %s AND status != 'evaluated'
-                        """, (evaluator_id, phone_norm, month, appeal_date))
+                            WHERE phone_normalized = %s AND operator_id = %s
+                              AND month = %s
+                              AND datetime_raw = %s::timestamp AT TIME ZONE 'UTC'
+                              AND status != 'evaluated'
+                        """, (evaluator_id, phone_norm, operator_id, month, appeal_date))
             except Exception as e:
                 logging.exception("Error marking imported_call as evaluated: %s", e)
 
@@ -19557,15 +19736,18 @@ class Database:
                     duration = c.get('durationSec')
                     audio_path = c.get('audioPath') or c.get('audio_path')
                     notes = c.get('notes')
+                    call_end_party = _normalize_call_end_party(
+                        c.get('callEndParty') if 'callEndParty' in c else c.get('call_end_party')
+                    ) or 'unknown'
 
                     try:
                         cur.execute("""
                             INSERT INTO imported_calls
                             (external_id, operator_name, operator_id, month, datetime_raw,
                             phone_number, phone_normalized, duration_sec, desired, available,
-                            status, imported_at, audio_path, notes)
+                            status, imported_at, audio_path, notes, call_end_party)
                             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'not_evaluated',
-                                    CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty',%s,%s)
+                                    CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty',%s,%s,%s)
                             ON CONFLICT (external_id, month) DO UPDATE
                             SET operator_name = EXCLUDED.operator_name,
                                 operator_id = COALESCE(EXCLUDED.operator_id, imported_calls.operator_id),
@@ -19577,11 +19759,17 @@ class Database:
                                 available = COALESCE(EXCLUDED.available, imported_calls.available),
                                 audio_path = COALESCE(EXCLUDED.audio_path, imported_calls.audio_path),
                                 notes = COALESCE(EXCLUDED.notes, imported_calls.notes),
+                                call_end_party = COALESCE(
+                                    NULLIF(EXCLUDED.call_end_party, 'unknown'),
+                                    imported_calls.call_end_party,
+                                    EXCLUDED.call_end_party
+                                ),
                                 status = COALESCE(imported_calls.status, 'not_evaluated'),
                                 imported_at = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'
                             """,
                             (external_id, op_name, operator_id, month, parsed_dt, phone,
-                             phone_norm, duration, desired, available, audio_path, notes)
+                             phone_norm, duration, desired, available, audio_path, notes,
+                             call_end_party)
                         )
                         # cur.rowcount может быть ненадёжен для ON CONFLICT; просто учитываем как imported/updated логически
                         imported += 1
@@ -19598,7 +19786,8 @@ class Database:
         }
 
     def import_single_random_call(self, *, operator_id, operator_name, external_id, month,
-                                  datetime_raw, phone, duration_sec, notes=None, audio_path=None):
+                                  datetime_raw, phone, duration_sec, notes=None, audio_path=None,
+                                  call_end_party=None):
         """Кладёт ОДИН звонок в imported_calls как НЕ оценённый (status='not_evaluated') —
         для кнопки «Случайный звонок» в журнале. Возвращает id новой строки или None, если
         такой звонок уже импортирован (ON CONFLICT (external_id, month)).
@@ -19611,15 +19800,109 @@ class Database:
             cur.execute("""
                 INSERT INTO imported_calls
                 (external_id, operator_name, operator_id, month, datetime_raw,
-                 phone_number, phone_normalized, duration_sec, status, imported_at, notes, audio_path)
+                 phone_number, phone_normalized, duration_sec, status, imported_at, notes,
+                 audio_path, call_end_party)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'not_evaluated',
-                        CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty', %s, %s)
+                        CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty', %s, %s, %s)
                 ON CONFLICT (external_id, month) DO NOTHING
                 RETURNING id
             """, (external_id, operator_name, operator_id, month, parsed_dt,
-                  phone, phone_norm, duration_sec, notes, audio_path))
+                  phone, phone_norm, duration_sec, notes, audio_path,
+                  _normalize_call_end_party(call_end_party) or 'unknown'))
             row = cur.fetchone()
         return int(row[0]) if row else None
+
+    def get_unknown_oktell_call_external_ids(self, limit=10000, after_external_id=None):
+        """UUID imports with no exact party yet; Binotel generalCallID values are numeric."""
+        after_external_id = (
+            str(after_external_id).strip().lower() if after_external_id else None
+        )
+        with self._get_cursor() as cur:
+            cur.execute(
+                """
+                SELECT LOWER(external_id) AS external_id
+                FROM imported_calls
+                WHERE call_end_party = 'unknown'
+                  AND external_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                  AND (
+                      call_end_party_checked_at IS NULL
+                      OR call_end_party_checked_at < CURRENT_TIMESTAMP - INTERVAL '7 days'
+                  )
+                  AND (%s IS NULL OR LOWER(external_id) > %s)
+                GROUP BY LOWER(external_id)
+                ORDER BY MIN(call_end_party_checked_at) NULLS FIRST, LOWER(external_id)
+                LIMIT %s
+                """,
+                (
+                    after_external_id,
+                    after_external_id,
+                    max(1, min(int(limit or 10000), 50000)),
+                )
+            )
+            return [str(row[0]).lower() for row in cur.fetchall() if row and row[0]]
+
+    def mark_oktell_call_end_parties_checked(self, external_ids):
+        """Prevent unresolved legacy UUIDs from starving later backfill pages."""
+        values = [
+            (str(external_id).strip().lower(),)
+            for external_id in (external_ids or [])
+            if external_id
+        ]
+        if not values:
+            return 0
+        with self._get_cursor() as cur:
+            execute_values(
+                cur,
+                """
+                UPDATE imported_calls AS ic
+                SET call_end_party_checked_at = CURRENT_TIMESTAMP
+                FROM (VALUES %s) AS data(external_id)
+                WHERE LOWER(ic.external_id) = data.external_id
+                  AND ic.call_end_party = 'unknown'
+                """,
+                values,
+                page_size=len(values)
+            )
+            return max(int(cur.rowcount or 0), 0)
+
+    def update_imported_call_end_parties(self, party_by_external_id):
+        """Persist exact provider results and refresh linked evaluation snapshots."""
+        values = []
+        for external_id, party in (party_by_external_id or {}).items():
+            normalized = _normalize_call_end_party(party)
+            if external_id and normalized and normalized != 'unknown':
+                values.append((str(external_id).strip().lower(), normalized))
+        if not values:
+            return 0
+
+        with self._get_cursor() as cur:
+            execute_values(
+                cur,
+                """
+                UPDATE imported_calls AS ic
+                SET call_end_party = data.call_end_party
+                FROM (VALUES %s) AS data(external_id, call_end_party)
+                WHERE LOWER(ic.external_id) = data.external_id
+                  AND (ic.call_end_party IS NULL OR ic.call_end_party = 'unknown')
+                RETURNING ic.id
+                """,
+                values,
+                page_size=len(values)
+            )
+            updated_ids = [row[0] for row in cur.fetchall()]
+            if updated_ids:
+                cur.execute(
+                    """
+                    UPDATE calls AS c
+                    SET call_end_party = ic.call_end_party
+                    FROM imported_calls AS ic
+                    WHERE c.imported_call_id = ic.id
+                      AND c.imported_call_id = ANY(%s)
+                      AND (c.call_end_party IS NULL OR c.call_end_party = 'unknown')
+                    """,
+                    (updated_ids,)
+                )
+        return len(updated_ids)
 
     def set_imported_call_audio_path(self, imported_id, audio_path):
         """Проставляет audio_path импортированному звонку (фоновая заливка записи в GCS)."""
@@ -21606,7 +21889,9 @@ class Database:
                 c.resolved_first_contact,
                 c.sv_request_approve_comment,
                 c.c2d_snapshot_id,
-                c.chat_quotes
+                c.chat_quotes,
+                c.call_end_party,
+                c.imported_call_id
             FROM calls c
             JOIN latest_calls lc ON c.id::text = lc.id_text
             LEFT JOIN directions d ON c.direction_id = d.id  
@@ -21678,7 +21963,9 @@ class Database:
                 NULL::boolean AS resolved_first_contact,
                 NULL::text AS sv_request_approve_comment,
                 NULL::integer AS c2d_snapshot_id,
-                NULL::jsonb AS chat_quotes
+                NULL::jsonb AS chat_quotes,
+                ic.call_end_party,
+                ic.id AS imported_call_id
             FROM imported_calls ic
             WHERE ic.operator_id = %s AND ic.status = 'not_evaluated'
         """
@@ -21805,6 +22092,8 @@ class Database:
                         "sv_request_approve_comment": row[48],
                         "c2d_snapshot_id": row[49],
                         "chat_quotes": row[50] if row[50] else [],
+                        "call_end_party": row[51],
+                        "imported_call_id": row[52],
                         "feedback": feedback_payload,
                         "feedback_sla": feedback_sla_payload
                     }
@@ -21853,7 +22142,8 @@ class Database:
                 corr.score AS correction_score,
                 corr.evaluator_name AS correction_evaluator_name,
                 TO_CHAR(corr.created_at, 'YYYY-MM-DD HH24:MI') AS correction_created_at,
-                c.sv_request_approve_comment
+                c.sv_request_approve_comment,
+                c.call_end_party
             FROM calls c
             JOIN users op ON op.id = c.operator_id
             LEFT JOIN users sv ON sv.id = op.supervisor_id
@@ -21946,7 +22236,8 @@ class Database:
                     "correction_score": float(row[29]) if row[29] is not None else None,
                     "correction_evaluator_name": row[30],
                     "correction_created_at": row[31],
-                    "sv_request_approve_comment": row[32]
+                    "sv_request_approve_comment": row[32],
+                    "call_end_party": row[33]
                 }
             )
 
