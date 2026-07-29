@@ -2593,7 +2593,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         const [selectedTab, setSelectedTab] = useState('work_time');
 
-        // ── Меню-бар вкладок («Работа/Метрики/…» + «Направления») ──
+        // ── Меню-бар вкладок («Работа/Показатели/…» + «Направления») ──
         // Раньше открытость складывалась из ДВУХ независимых состояний (hover и
         // «закреплено кликом»), и они гасили друг друга: клик по уже наведённой
         // шапке снимал закрепление, но hover держал меню открытым — пользователь
@@ -3817,7 +3817,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             try {
                 const text = await uploadFile.text();
                 if (detectChatReportType(parseCsvHeaderLine(text))) {
-                fallbackToast('Это отчёт «Метрики чатов». Загружайте его справа: Метрики → Отчёты.', 'error');
+                fallbackToast('Это отчёт «Метрики чатов». Загружайте его справа: Показатели → Синхронизация.', 'error');
                 setUploadFile(null);
                 return;
                 }
@@ -4909,8 +4909,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 tabs: keys.map(key => byKey.get(key)).filter(Boolean)
             });
             return [
-                buildGroup('Работа', 'fa-clock', 'blue', ['work_time', 'break_time', 'calls', 'dial_time', 'talk_time', 'chats', 'efficiency', 'tez_successes']),
-                buildGroup('Метрики', 'fa-chart-line', 'cyan', ['avg_score', 'response_time']),
+                buildGroup('Работа', 'fa-clock', 'blue', ['work_time', 'break_time']),
+                buildGroup('Показатели', 'fa-chart-line', 'cyan', ['calls', 'dial_time', 'talk_time', 'chats', 'efficiency', 'tez_successes', 'avg_score', 'response_time']),
                 buildGroup('Активности', 'fa-layer-group', 'emerald', ['trainings', 'technical_issues', 'offline_activity', 'no_phone']),
                 buildGroup('Деньги', 'fa-coins', 'slate', ['bonuses', 'fines'])
             ].filter(group => group.tabs.length > 0);
@@ -5062,6 +5062,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             let sumTalkTime = 0;
             let sumChats = 0;
             let sumTezPlan = 0; // сумма индивидуальных планов успешек (только tez_op)
+            let sumTezSuccesses = 0; // успешки только по видимым строкам
             let hasTezPlanRows = false;
 
             for (const op of filteredOperators) {
@@ -5130,6 +5131,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             sumDialTime += getHoursMetricTotal(op, 'total_dial_time', 'dial_time');
             sumTalkTime += getHoursMetricTotal(op, 'total_talk_time', 'talk_time');
             sumChats += getHoursMetricTotal(op, 'total_chats', 'chats');
+            const tezDayMap = tezSuccessMap?.[String(op.operator_id)] || {};
+            sumTezSuccesses += Object.values(tezDayMap).reduce((sum, value) => sum + (Number(value) || 0), 0);
 
             // compute fines per operator (support both array of fines and legacy fine_amount)
             if (op.daily) {
@@ -5174,9 +5177,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             offlineActivitiesTotal,
             noPhoneTotal,
             sumTezPlan,
+            sumTezSuccesses,
             hasTezPlanRows
             };
-        }, [filteredOperators, trainingsMap, technicalIssuesMap, offlineActivitiesMap, tezPlanPerFte, month]);
+        }, [filteredOperators, trainingsMap, technicalIssuesMap, offlineActivitiesMap, tezPlanPerFte, month, tezSuccessMap]);
 
         // Red → amber → green gradient by percentage (0..100)
         function efficiencyGradient(pct) {
@@ -6389,11 +6393,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </div>
                 </div>
 
-                {/* === Метрика === */}
+                {/* === Группы показателей === */}
                 <div className="rounded-2xl border border-slate-200 bg-slate-50/80 p-2 relative">
                     <div className="flex flex-wrap items-center gap-2">
                         {WORKHOURS_METRIC_GROUPS.map(group => {
-                            const isMetricsGroup = group.label === 'Метрики';
+                            const isIndicatorsGroup = group.label === 'Показатели';
                             const groupHasCalls = Array.isArray(group.tabs) && group.tabs.some(t => t && t.key === 'calls');
                             const activeInGroup = group.tabs.some(tab => tab.key === selectedTab);
                             const validSurgeCount = cloneChatMetricsSurgeWindows(chatMetricsSurgeWindows).filter(w => w.start && w.end).length;
@@ -6472,7 +6476,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </button>
                                                 );
                                             })}
-                                            {isChatModel && isMetricsGroup && (
+                                            {isChatModel && isIndicatorsGroup && (
                                                 <div className="border-t border-slate-100 mt-1 pt-1.5 px-2 flex flex-col gap-1">
                                                     <button
                                                         type="button"
@@ -7330,7 +7334,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         }}
                         disabled={isDayUploadDisabled}
                         className={`text-xs font-semibold px-2 py-1 rounded ${isDayUploadDisabled ? 'text-gray-400 cursor-not-allowed' : 'hover:bg-gray-100'}`}
-                        title={isChatModel ? 'Для чат-группы отчёты загружаются через Метрики → Отчёты' : (isAdminWithoutSupervisorSelected ? 'Сначала выберите группу' : 'Загрузить файл на выбранный день')}
+                        title={isChatModel ? 'Для чат-группы отчёты загружаются через Показатели → Синхронизация' : (isAdminWithoutSupervisorSelected ? 'Сначала выберите группу' : 'Загрузить файл на выбранный день')}
                         >
                         {formatHeaderLabel(day)}
                         </button>
@@ -7358,10 +7362,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Всего чатов</div>
                     )}
                     {selectedTab === 'tez_successes' && (
-                    <>
-                        <div className={`${hoursSummaryColClass} w-32 bg-gray-50 text-sm font-medium`}>Успешек</div>
-                        <div className={`${hoursSummaryColClass} w-40 bg-gray-50 text-sm font-medium`}>План / выполнение</div>
-                    </>
+                    <div className={`${hoursSummaryColClass} w-72 bg-gray-50 text-sm font-medium`}>
+                        Выполнение нормы успешек (%)
+                    </div>
                     )}
                     {selectedTab === 'avg_score' && (
                     <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Средняя оценка</div>
@@ -7640,19 +7643,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         month,
                                     });
                                     const plan = planRes?.plan;
-                                    const pct = plan ? (total / plan) * 100 : null;
+                                    const pct = plan > 0 ? (total / plan) * 100 : null;
                                     const pctClass = pct == null ? 'text-gray-400'
                                         : pct >= 100 ? 'text-emerald-700'
                                         : pct >= 60 ? 'text-amber-600' : 'text-rose-600';
                                     return (
-                                        <>
-                                            <div className={`${hoursSummaryColClass} w-32 text-sm font-semibold ${total > 0 ? 'text-emerald-700' : 'text-gray-400'}`}>
-                                                {total}
-                                            </div>
-                                            <div className={`${hoursSummaryColClass} w-40 text-sm ${pctClass}`}>
-                                                {plan == null ? '—' : `${formatNumber(plan, 1)} · ${pct.toFixed(0)}%`}
-                                            </div>
-                                        </>
+                                        <div
+                                            className={`${hoursSummaryColClass} w-72 text-sm font-semibold ${pctClass}`}
+                                            title={plan > 0 ? `Успешки: ${total}; индивидуальный план: ${formatNumber(plan, 1)}` : 'Индивидуальный план не задан'}
+                                        >
+                                            {pct == null ? '—' : `${pct.toFixed(0)}%`}
+                                        </div>
                                     );
                                 })()}
 
@@ -7748,7 +7749,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         <div className={hoursNormColClass}>{footerTotals.sumNorm}</div>
                         {showTezPlanColumn && (
                         <div className={hoursNormColClass}>
-                            {footerTotals.hasTezPlanRows ? footerTotals.sumTezPlan.toLocaleString('ru-RU', { maximumFractionDigits: 1 }) : '—'}
+                            {selectedTab === 'tez_successes' ? (
+                                <>
+                                    <div className="text-[10px] font-medium uppercase tracking-wide text-gray-500">Общий план</div>
+                                    <div>{footerTotals.hasTezPlanRows ? footerTotals.sumTezPlan.toLocaleString('ru-RU', { maximumFractionDigits: 1 }) : '—'}</div>
+                                </>
+                            ) : (
+                                footerTotals.hasTezPlanRows ? footerTotals.sumTezPlan.toLocaleString('ru-RU', { maximumFractionDigits: 1 }) : '—'
+                            )}
                         </div>
                         )}
 
@@ -7783,16 +7791,31 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </div>
                         )}
 
-                        {selectedTab === 'tez_successes' && (
-                        <>
-                            <div className={`${hoursSummaryColClass} w-32 text-sm font-semibold text-emerald-700`}>
-                                {Object.values(tezSuccessMap || {}).reduce((sum, dm) => sum + Object.values(dm).reduce((a, b) => a + (Number(b) || 0), 0), 0)}
-                            </div>
-                            <div className={`${hoursSummaryColClass} w-40 text-sm`}>
-                                {footerTotals.hasTezPlanRows ? `${footerTotals.sumTezPlan.toLocaleString('ru-RU', { maximumFractionDigits: 1 })} план` : '—'}
-                            </div>
-                        </>
-                        )}
+                        {selectedTab === 'tez_successes' && (() => {
+                            const total = footerTotals.sumTezSuccesses;
+                            const plan = footerTotals.hasTezPlanRows ? footerTotals.sumTezPlan : null;
+                            const pct = plan > 0 ? (total / plan) * 100 : null;
+                            const pctClass = pct == null ? 'text-gray-400'
+                                : pct >= 100 ? 'text-emerald-700'
+                                : pct >= 60 ? 'text-amber-600' : 'text-rose-600';
+                            return (
+                                <div
+                                    className={`${hoursSummaryColClass} w-72 text-sm`}
+                                    title={plan > 0 ? `${total} / ${formatNumber(plan, 1)} × 100%` : 'Общий план не задан'}
+                                >
+                                    <div className="grid w-full grid-cols-2 divide-x divide-gray-200">
+                                        <div className="px-1">
+                                            <div className="text-[10px] font-medium uppercase tracking-wide text-gray-500">Успешки</div>
+                                            <div className="font-semibold text-emerald-700">{total}</div>
+                                        </div>
+                                        <div className="px-1">
+                                            <div className="text-[10px] font-medium uppercase tracking-wide text-gray-500">Выполнение</div>
+                                            <div className={`font-semibold ${pctClass}`}>{pct == null ? '—' : `${pct.toFixed(0)}%`}</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            );
+                        })()}
 
                         {selectedTab === 'efficiency' && (
                         <>
@@ -7862,7 +7885,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     <p className="text-sm text-gray-600 mb-2">Формат файла: <span className="font-medium">ФИО, Дата, Кол-во поступивших</span>. Будут обработаны и сохранены все даты из файла.</p>
                     {isChatModel && (
                         <p className="text-xs text-cyan-700 bg-cyan-50 border border-cyan-100 rounded-md px-3 py-2 mb-3">
-                            Отчёты «Метрики чатов» загружайте справа: группа «Метрики» → кнопка «Отчёты».
+                            Отчёты «Метрики чатов» загружайте справа: группа «Показатели» → кнопка «Синхронизация».
                         </p>
                     )}
                     <input type="file" accept=".xlsx,.xls,.csv" onChange={e => setUploadFile(e.target.files?.[0] || null)} className="mb-3" />

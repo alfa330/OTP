@@ -33,12 +33,26 @@ class TezOpHoursFrontendTests(unittest.TestCase):
         self.assertIn("if (isTezOpContext)", block)
         self.assertIn("if (t.key === 'calls')", block)
 
-    def test_new_tabs_are_in_work_metric_group(self):
-        expected = (
-            "['work_time', 'break_time', 'calls', 'dial_time', 'talk_time', "
-            "'chats', 'efficiency', 'tez_successes']"
+    def test_work_and_indicator_groups_are_logically_split(self):
+        groups_start = self.src.index("const WORKHOURS_METRIC_GROUPS = useMemo(")
+        groups_end = self.src.index("}, [VIEW_TABS]);", groups_start)
+        groups = self.src[groups_start:groups_end]
+
+        self.assertIn(
+            "buildGroup('Работа', 'fa-clock', 'blue', ['work_time', 'break_time'])",
+            groups,
         )
-        self.assertIn(expected, self.src)
+        self.assertIn(
+            "buildGroup('Показатели', 'fa-chart-line', 'cyan', "
+            "['calls', 'dial_time', 'talk_time', 'chats', 'efficiency', "
+            "'tez_successes', 'avg_score', 'response_time'])",
+            groups,
+        )
+        self.assertNotIn("buildGroup('Метрики'", groups)
+        self.assertIn("const isIndicatorsGroup = group.label === 'Показатели';", self.src)
+        self.assertIn("isChatModel && isIndicatorsGroup", self.src)
+        self.assertIn("Показатели → Синхронизация", self.src)
+        self.assertNotIn("Метрики → Отчёты", self.src)
 
     def test_data_presence_filter_knows_new_daily_and_aggregate_fields(self):
         start = self.src.index("const hasAnyHoursIndicators = (op) =>")
@@ -84,6 +98,43 @@ class TezOpHoursFrontendTests(unittest.TestCase):
         self.assertIn("const aggregateValue = aggregates[aggregateKey]", block)
         self.assertIn("Object.values(daily).reduce", block)
         self.assertIn("Number(dayData[dailyKey])", block)
+
+    def test_success_rows_show_only_completion_and_footer_keeps_all_totals(self):
+        header_anchor = self.src.index("{/* Right summary headers */}")
+        header_start = self.src.index("{selectedTab === 'tez_successes' && (", header_anchor)
+        header_end = self.src.index("{selectedTab === 'avg_score'", header_start)
+        header = self.src[header_start:header_end]
+        self.assertIn("Выполнение нормы успешек (%)", header)
+        self.assertEqual(header.count("hoursSummaryColClass"), 1)
+        self.assertNotIn("План / выполнение", header)
+
+        rows_anchor = self.src.index("{/* Right summary values */}")
+        rows_start = self.src.index("{selectedTab === 'tez_successes' && (() => {", rows_anchor)
+        rows_end = self.src.index("{selectedTab === 'avg_score'", rows_start)
+        rows = self.src[rows_start:rows_end]
+        self.assertIn("const pct = plan > 0 ? (total / plan) * 100 : null;", rows)
+        self.assertIn("{pct == null ? '—' : `${pct.toFixed(0)}%`}", rows)
+        self.assertEqual(rows.count("hoursSummaryColClass"), 1)
+        self.assertNotIn("`${formatNumber(plan, 1)} · ${pct.toFixed(0)}%`", rows)
+
+        footer_totals_start = self.src.index("const footerTotals = useMemo(")
+        footer_totals_end = self.src.index("// Red → amber → green gradient", footer_totals_start)
+        footer_totals = self.src[footer_totals_start:footer_totals_end]
+        self.assertIn("let sumTezSuccesses = 0;", footer_totals)
+        self.assertIn("tezSuccessMap?.[String(op.operator_id)]", footer_totals)
+        self.assertIn("sumTezSuccesses,", footer_totals)
+        self.assertIn("month, tezSuccessMap]", footer_totals)
+
+        footer_anchor = self.src.index("{/* FOOTER: итоговые строки */}")
+        footer_start = self.src.index("{selectedTab === 'tez_successes' && (() => {", footer_anchor)
+        footer_end = self.src.index("{selectedTab === 'efficiency'", footer_start)
+        footer = self.src[footer_start:footer_end]
+        footer_row = self.src[footer_anchor:footer_end]
+        self.assertIn("footerTotals.sumTezSuccesses", footer)
+        self.assertIn("footerTotals.sumTezPlan", footer)
+        self.assertIn("Общий план", footer_row)
+        self.assertIn("Выполнение", footer)
+        self.assertIn("const pct = plan > 0 ? (total / plan) * 100 : null;", footer)
 
 
 if __name__ == "__main__":
