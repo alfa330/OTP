@@ -2592,47 +2592,82 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const chatMetricsInputRef = useRef(null);
 
         const [selectedTab, setSelectedTab] = useState('work_time');
-        const [pinnedGroups, setPinnedGroups] = useState([]);
-        const [hoveredGroup, setHoveredGroup] = useState(null);
-        const [directionsHovered, setDirectionsHovered] = useState(false);
-        const [directionsPinned, setDirectionsPinned] = useState(false);
 
-        const hoverTimeoutRef = useRef(null);
-        const directionsHoverTimeoutRef = useRef(null);
+        // ── Меню-бар вкладок («Работа/Метрики/…» + «Направления») ──
+        // Раньше открытость складывалась из ДВУХ независимых состояний (hover и
+        // «закреплено кликом»), и они гасили друг друга: клик по уже наведённой
+        // шапке снимал закрепление, но hover держал меню открытым — пользователь
+        // видел, что клик «ничего не делает». Плюс закрепить можно было сразу
+        // несколько меню, и они наслаивались поверх таблицы.
+        // Теперь одно состояние: открыто ровно одно меню.
+        const DIRECTIONS_MENU_ID = '__directions__';
+        const [openMenu, setOpenMenu] = useState(null);
+        const menuHoverTimeoutRef = useRef(null);
+        // На тач-устройствах mouseenter стреляет вместе с тапом: без этой
+        // проверки тап открывал бы и тут же закрывал меню.
+        const menuHoverCapable = useMemo(() => (
+            typeof window !== 'undefined'
+            && typeof window.matchMedia === 'function'
+            && window.matchMedia('(hover: hover) and (pointer: fine)').matches
+        ), []);
 
-        const handleMouseEnter = (groupLabel) => {
-            if (hoverTimeoutRef.current) {
-                clearTimeout(hoverTimeoutRef.current);
-                hoverTimeoutRef.current = null;
+        const clearMenuHoverTimeout = useCallback(() => {
+            if (menuHoverTimeoutRef.current) {
+                clearTimeout(menuHoverTimeoutRef.current);
+                menuHoverTimeoutRef.current = null;
             }
-            setHoveredGroup(groupLabel);
-        };
+        }, []);
 
-        const handleMouseLeave = () => {
-            if (hoverTimeoutRef.current) {
-                clearTimeout(hoverTimeoutRef.current);
-            }
-            hoverTimeoutRef.current = setTimeout(() => {
-                setHoveredGroup(null);
+        const closeMenus = useCallback(() => {
+            clearMenuHoverTimeout();
+            setOpenMenu(null);
+        }, [clearMenuHoverTimeout]);
+
+        const handleMenuMouseEnter = useCallback((menuId) => {
+            if (!menuHoverCapable) return;
+            clearMenuHoverTimeout();
+            setOpenMenu(menuId);
+        }, [menuHoverCapable, clearMenuHoverTimeout]);
+
+        const handleMenuMouseLeave = useCallback((menuId) => {
+            if (!menuHoverCapable) return;
+            clearMenuHoverTimeout();
+            // Небольшая отсрочка — чтобы курсор успел пересечь зазор между
+            // шапкой и выпадающим списком.
+            menuHoverTimeoutRef.current = setTimeout(() => {
+                menuHoverTimeoutRef.current = null;
+                setOpenMenu(prev => (prev === menuId ? null : prev));
             }, 180);
-        };
+        }, [menuHoverCapable, clearMenuHoverTimeout]);
 
-        const handleDirectionsMouseEnter = () => {
-            if (directionsHoverTimeoutRef.current) {
-                clearTimeout(directionsHoverTimeoutRef.current);
-                directionsHoverTimeoutRef.current = null;
-            }
-            setDirectionsHovered(true);
-        };
+        // Клик по шапке всегда даёт видимый результат: открытое меню закрывает,
+        // закрытое — открывает (и закрывает соседнее).
+        const toggleMenu = useCallback((menuId) => {
+            clearMenuHoverTimeout();
+            setOpenMenu(prev => (prev === menuId ? null : menuId));
+        }, [clearMenuHoverTimeout]);
 
-        const handleDirectionsMouseLeave = () => {
-            if (directionsHoverTimeoutRef.current) {
-                clearTimeout(directionsHoverTimeoutRef.current);
-            }
-            directionsHoverTimeoutRef.current = setTimeout(() => {
-                setDirectionsHovered(false);
-            }, 180);
-        };
+        // Клик мимо меню и Escape закрывают его — иначе список висел над
+        // таблицей до повторного попадания в шапку.
+        useEffect(() => {
+            if (!openMenu) return undefined;
+            const handlePointerDown = (event) => {
+                const target = event.target;
+                if (target && typeof target.closest === 'function' && target.closest('[data-hours-menu]')) return;
+                closeMenus();
+            };
+            const handleKeyDown = (event) => {
+                if (event.key === 'Escape') closeMenus();
+            };
+            document.addEventListener('pointerdown', handlePointerDown, true);
+            document.addEventListener('keydown', handleKeyDown);
+            return () => {
+                document.removeEventListener('pointerdown', handlePointerDown, true);
+                document.removeEventListener('keydown', handleKeyDown);
+            };
+        }, [openMenu, closeMenus]);
+
+        useEffect(() => () => clearMenuHoverTimeout(), [clearMenuHoverTimeout]);
 
         // Training modal component resolver: avoid direct identifier access to prevent TDZ in prod bundles
         const TrainingModalComponent = (typeof window !== 'undefined' ? window.TrainingModal : null);
@@ -4881,14 +4916,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             ].filter(group => group.tabs.length > 0);
         }, [VIEW_TABS]);
 
-        const toggleGroupPin = (groupLabel) => {
-            setPinnedGroups(prev =>
-                prev.includes(groupLabel)
-                    ? prev.filter(l => l !== groupLabel)
-                    : [...prev, groupLabel]
-            );
-        };
-
 
 
         const selectedHourCellKeySet = useMemo(() => {
@@ -6273,8 +6300,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     <span className="mx-1 h-6 w-px bg-slate-300" aria-hidden="true" />
 
                     <div
-                        onMouseEnter={handleDirectionsMouseEnter}
-                        onMouseLeave={handleDirectionsMouseLeave}
+                        data-hours-menu="directions"
+                        onMouseEnter={() => handleMenuMouseEnter(DIRECTIONS_MENU_ID)}
+                        onMouseLeave={() => handleMenuMouseLeave(DIRECTIONS_MENU_ID)}
                         className={`relative rounded-full border bg-white p-1 shadow-sm flex items-center transition-all duration-300 gap-1 ${
                             !selectedDirections.includes('all')
                                 ? 'border-blue-200 ring-1 ring-blue-100'
@@ -6283,9 +6311,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     >
                         <button
                             type="button"
-                            onClick={() => setDirectionsPinned(prev => !prev)}
+                            onClick={() => toggleMenu(DIRECTIONS_MENU_ID)}
+                            aria-haspopup="menu"
+                            aria-expanded={openMenu === DIRECTIONS_MENU_ID}
                             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-bold uppercase tracking-wide transition-colors duration-200 focus:outline-none ${
-                                directionsHovered || directionsPinned
+                                openMenu === DIRECTIONS_MENU_ID
                                     ? 'text-slate-700 bg-slate-50'
                                     : !selectedDirections.includes('all')
                                         ? 'text-blue-700 bg-blue-50/50'
@@ -6305,17 +6335,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             </span>
                             <FaIcon
                                 className={`fas fa-chevron-down ml-1 text-[9px] text-slate-400 transition-transform duration-300 ${
-                                    directionsHovered || directionsPinned ? 'rotate-180 text-blue-600' : ''
+                                    openMenu === DIRECTIONS_MENU_ID ? 'rotate-180 text-blue-600' : ''
                                 }`}
                             />
                         </button>
 
-                        <div className={`tab-dropdown ${(directionsHovered || directionsPinned) ? 'open' : ''}`}>
+                        <div className={`tab-dropdown ${openMenu === DIRECTIONS_MENU_ID ? 'open' : ''}`} role="menu">
                             <div className="flex flex-col min-w-[200px] max-h-[250px] overflow-y-auto workhours-modal-scroll">
                                 <button
                                     type="button"
                                     onClick={() => {
                                         setSelectedDirections(['all']);
+                                        // «Все направления» — конечный выбор, тут меню закрываем;
+                                        // отдельные направления оставляют его открытым (мультивыбор).
+                                        closeMenus();
                                     }}
                                     className={`flex items-center justify-between w-full px-4 py-2 text-left text-xs sm:text-sm font-medium transition-colors hover:bg-slate-50 ${
                                         selectedDirections.includes('all')
@@ -6328,7 +6361,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         <FaIcon className="fas fa-check text-blue-600 text-[10px] ml-2" />
                                     )}
                                 </button>
-                                
+
                                 <div className="h-px bg-slate-100 my-1" />
 
                                 {directionOptions.map(d => {
@@ -6371,12 +6404,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     : group.tone === 'slate'
                                         ? 'text-slate-600'
                                         : 'text-blue-600';
-                            const isOpen = pinnedGroups.includes(group.label) || hoveredGroup === group.label;
+                            const isOpen = openMenu === group.label;
                             return (
                                 <div
                                     key={group.label}
-                                    onMouseEnter={() => handleMouseEnter(group.label)}
-                                    onMouseLeave={handleMouseLeave}
+                                    data-hours-menu={group.label}
+                                    onMouseEnter={() => handleMenuMouseEnter(group.label)}
+                                    onMouseLeave={() => handleMenuMouseLeave(group.label)}
                                     className={`relative rounded-full border bg-white p-1 shadow-sm flex items-center transition-all duration-300 gap-1 ${
                                         activeInGroup
                                             ? 'border-blue-200 ring-1 ring-blue-100'
@@ -6385,7 +6419,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 >
                                     <button
                                         type="button"
-                                        onClick={() => toggleGroupPin(group.label)}
+                                        onClick={() => toggleMenu(group.label)}
+                                        aria-haspopup="menu"
+                                        aria-expanded={isOpen}
                                         className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-bold uppercase tracking-wide transition-colors duration-200 focus:outline-none ${
                                             isOpen
                                                 ? 'text-slate-700 bg-slate-50'
@@ -6410,7 +6446,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         />
                                     </button>
 
-                                    <div className={`tab-dropdown ${isOpen ? 'open' : ''}`}>
+                                    <div className={`tab-dropdown ${isOpen ? 'open' : ''}`} role="menu">
                                         <div className="flex flex-col min-w-[200px]">
                                             {group.tabs.map(tab => {
                                                 const isSelected = selectedTab === tab.key;
@@ -6420,8 +6456,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         type="button"
                                                         onClick={() => {
                                                             setSelectedTab(tab.key);
-                                                            setPinnedGroups([]);
-                                                            setHoveredGroup(null);
+                                                            closeMenus();
                                                         }}
                                                         className={`flex items-center justify-between w-full px-4 py-2 text-left text-xs sm:text-sm font-medium transition-colors hover:bg-slate-50 ${
                                                             isSelected 
@@ -6444,8 +6479,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         onClick={(e) => {
                                                             e.stopPropagation();
                                                             openChatMetricsSyncDialog();
-                                                            setPinnedGroups([]);
-                                                            setHoveredGroup(null);
+                                                            closeMenus();
                                                         }}
                                                         disabled={chatMetricsImportState.loading}
                                                         className={`flex items-center gap-1.5 px-3 py-1.5 text-left text-xs font-semibold rounded-lg transition border ${
@@ -6468,8 +6502,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             setLowRatingSearch('');
                                                             setLowRatingPagination(prev => ({ ...prev, page: 1 }));
                                                             setShowLowRatingReviews(prev => !prev);
-                                                            setPinnedGroups([]);
-                                                            setHoveredGroup(null);
+                                                            closeMenus();
                                                         }}
                                                         className={`flex items-center gap-1.5 px-3 py-1.5 text-left text-xs font-semibold rounded-lg transition border ${
                                                             showLowRatingReviews
@@ -6486,8 +6519,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             e.stopPropagation();
                                                             setChatMetricsSurgeMonth(normalizeMonthKey(month));
                                                             setShowChatMetricsSurgeEditor(true);
-                                                            setPinnedGroups([]);
-                                                            setHoveredGroup(null);
+                                                            closeMenus();
                                                         }}
                                                         className={`flex items-center gap-1.5 px-3 py-1.5 text-left text-xs font-semibold rounded-lg transition border ${
                                                             showChatMetricsSurgeEditor 
@@ -6507,8 +6539,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         onClick={(e) => {
                                                             e.stopPropagation();
                                                             openOktellCallsSyncDialog();
-                                                            setPinnedGroups([]);
-                                                            setHoveredGroup(null);
+                                                            closeMenus();
                                                         }}
                                                         disabled={oktellCallsSyncLoading}
                                                         className={`flex items-center gap-1.5 px-3 py-1.5 text-left text-xs font-semibold rounded-lg transition border ${
@@ -6530,8 +6561,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         onClick={(e) => {
                                                             e.stopPropagation();
                                                             setSalesOverlay('leads');
-                                                            setPinnedGroups([]);
-                                                            setHoveredGroup(null);
+                                                            closeMenus();
                                                         }}
                                                         className="flex items-center gap-1.5 px-3 py-1.5 text-left text-xs font-semibold rounded-lg transition border bg-indigo-50 border-indigo-200 text-indigo-800 hover:bg-indigo-100"
                                                         title="База лидов, план, воронка и успешки операторов ОП"

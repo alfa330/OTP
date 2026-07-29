@@ -514,6 +514,57 @@ class SubjectPromptTests(unittest.TestCase):
         self.assertNotIn("ТРАНСКРИПТ ЗВОНКА:", chat_body["messages"][0]["content"])
 
 
+class QueueRowTests(unittest.TestCase):
+    """Очередь ревью: одна строка на оба субъекта, с баллом ИИ."""
+
+    def setUp(self):
+        self.queue = (ROOT / "src" / "components" / "call_qa" / "QueueList.jsx").read_text(
+            encoding="utf-8")
+
+    def test_queue_returns_the_ai_score(self):
+        """Балл — то, по чему выбирают, что открывать первым; без него в очереди
+        видно только флаги, а они есть почти у каждой карточки."""
+        api = (ROOT / "call_qa" / "api.py").read_text(encoding="utf-8")
+        head = api[api.index("def review_queue_list"):api.index("def review_queue_count")]
+        self.assertIn("rc.payload->'ai_score'", head)
+        self.assertIn("rc.payload->'score_breakdown'", head)
+        self.assertIn('"ai_score": r[13]', head)
+        self.assertIn('"unchecked_weight"', head)
+
+    def test_row_shows_score_and_the_part_it_did_not_check(self):
+        self.assertIn("c.ai_score", self.queue)
+        self.assertIn("c.unchecked_weight", self.queue)
+        self.assertIn("зачтено без проверки", self.queue)
+
+    def test_chat_tab_reuses_the_same_row(self):
+        chat = (ROOT / "src" / "components" / "call_qa" / "ChatQueue.jsx").read_text(
+            encoding="utf-8")
+        view = (ROOT / "src" / "components" / "call_qa" / "CallQaView.jsx").read_text(
+            encoding="utf-8")
+        for src in (chat, view):
+            self.assertIn("from './QueueList'", src)
+            self.assertIn("<QueueList items=", src)
+
+    def test_reason_labels_carry_a_hint(self):
+        """Короткая подпись на бейдже, полная формулировка — в подсказке."""
+        from call_qa.review.queue import REASON_PRIORITY
+        for key in REASON_PRIORITY:
+            self.assertIn(f"{key}:", self.queue)
+        self.assertIn("hint:", self.queue)
+        self.assertIn("VISIBLE_REASONS", self.queue)
+
+    def test_evaluated_chats_stay_reachable_after_the_rename(self):
+        """Вкладка «Оценки» стала «Звонками» и фильтрует звонки — оценённые чаты
+        обязаны остаться видимыми в своей вкладке."""
+        view = (ROOT / "src" / "components" / "call_qa" / "CallQaView.jsx").read_text(
+            encoding="utf-8")
+        chat = (ROOT / "src" / "components" / "call_qa" / "ChatQueue.jsx").read_text(
+            encoding="utf-8")
+        self.assertIn("label: 'Звонки'", view)
+        self.assertIn('subject="call"', view)
+        self.assertIn('subject="wz_episode"', chat)
+
+
 class ScoreBreakdownTests(unittest.TestCase):
     """Балл зачитывает непроверяемые критерии — это должно быть видно."""
 

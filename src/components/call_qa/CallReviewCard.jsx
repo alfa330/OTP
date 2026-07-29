@@ -7,7 +7,7 @@ import {
     MessageSquare, Paperclip, ImageOff, Users,
 } from 'lucide-react';
 import {
-    APPLE_FONT, iosCard, iosInput, iosBtnPrimary, iosBtnGhost, IosBadge,
+    APPLE_FONT, iosCard, iosInput, iosBtnPrimary, iosBtnGhost, IosBadge, scoreTone,
 } from '../ui/ios';
 
 /* Карточка ревью одного субъекта оценки — центральный экран взаимодействия с ИИ.
@@ -18,7 +18,6 @@ import {
 
 const SUBJECT_CHAT = 'wz_episode';
 
-const scoreTone = (s) => (s == null ? 'slate' : s >= 70 ? 'green' : s >= 50 ? 'amber' : 'red');
 const formatTimestamp = (ms) => {
     const total = Math.max(0, Math.floor(Number(ms || 0) / 1000));
     return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
