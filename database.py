@@ -29986,6 +29986,70 @@ class Database:
     def _normalize_import_status_key(self, status_key_value):
         return ' '.join(str(status_key_value or '').strip().lower().split())
 
+    def _status_transition_signature(self, status_key_value, state_note_value=None):
+        """Canonical state identity used for semantic no-op detection."""
+        status_key = self._normalize_import_status_key(status_key_value)
+        state_note = str(state_note_value or '').strip() or None
+        return status_key, state_note
+
+    def _canonicalize_status_transition_events(self, events):
+        """Drop zero-duration/no-op transitions without losing real A -> B -> A.
+
+        iCORE Phone historically emitted timestamps with one-second precision.
+        A short CONFIRMED -> DISCONNECTED pair could therefore have the same
+        event_at. Only the last event at an instant can own positive time; earlier
+        states at that exact timestamp are zero-duration. After resolving those
+        ties, repeated identical states are semantic no-ops and are collapsed.
+        """
+        last_by_timestamp = []
+        for raw_event in (events or []):
+            event = dict(raw_event or {})
+            event_at = event.get('event_at')
+            if last_by_timestamp and last_by_timestamp[-1].get('event_at') == event_at:
+                last_by_timestamp[-1] = event
+            else:
+                last_by_timestamp.append(event)
+
+        canonical = []
+        for event in last_by_timestamp:
+            signature = self._status_transition_signature(
+                event.get('status_key'),
+                event.get('state_note')
+            )
+            if canonical and self._status_transition_signature(
+                canonical[-1].get('status_key'),
+                canonical[-1].get('state_note')
+            ) == signature:
+                continue
+            canonical.append(event)
+        return canonical
+
+    def _merge_adjacent_status_timeline_segments(self, segments):
+        """Merge presentation rows that represent one uninterrupted state."""
+        merged = []
+        for raw_segment in (segments or []):
+            segment = dict(raw_segment or {})
+            can_merge = (
+                merged
+                and merged[-1].get('end') == segment.get('start')
+                and self._status_transition_signature(
+                    merged[-1].get('stateKey'),
+                    merged[-1].get('stateNote')
+                ) == self._status_transition_signature(
+                    segment.get('stateKey'),
+                    segment.get('stateNote')
+                )
+            )
+            if not can_merge:
+                merged.append(segment)
+                continue
+            merged[-1]['end'] = segment.get('end')
+            merged[-1]['durationSec'] = (
+                int(merged[-1].get('durationSec') or 0)
+                + int(segment.get('durationSec') or 0)
+            )
+        return merged
+
     def _status_import_event_kind_from_key(self, status_key_value, event_kind_value=None):
         kind = str(event_kind_value or '').strip().lower()
         if kind in ('status', 'action'):
@@ -30099,7 +30163,7 @@ class Database:
                     id, operator_id, event_at, status_key, state_note, event_kind
                 FROM candidates
                 WHERE event_at >= %s
-                ORDER BY operator_id, event_at ASC, id ASC
+                ORDER BY operator_id, event_at ASC, id DESC
             )
             SELECT id, operator_id, event_at, status_key, state_note, event_kind
             FROM (
@@ -30156,7 +30220,9 @@ class Database:
         segment_values = []
         now_dt = datetime.now()
         for op_id in op_ids:
-            events_list = events_by_operator.get(int(op_id)) or []
+            events_list = self._canonicalize_status_transition_events(
+                events_by_operator.get(int(op_id)) or []
+            )
             if not events_list:
                 continue
 
@@ -32837,6 +32903,7 @@ class Database:
                     str(item.get('end') or ''),
                     str(item.get('stateKey') or '')
                 ))
+                segments[:] = self._merge_adjacent_status_timeline_segments(segments)
 
         return result
 
@@ -36424,6 +36491,71 @@ class Database:
                 norm_client_id = norm_client_id[:64]
 
         with self._get_cursor() as cursor:
+            # Serialize semantic comparison + INSERT + rebuild for this operator.
+            # The unique client_event_id index handles transport retries; this lock
+            # additionally prevents concurrent new GUIDs for the same state from
+            # both passing the no-op check.
+            self._lock_operator_status_segments_tx(cursor, [operator_id])
+
+            if norm_client_id:
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM operator_status_events
+                    WHERE operator_id = %s
+                      AND client_event_id = %s
+                    LIMIT 1
+                    """,
+                    (operator_id, norm_client_id)
+                )
+                if cursor.fetchone() is not None:
+                    return {
+                        'duplicate': True,
+                        'operator_id': operator_id,
+                        'event_date': event_date_obj.strftime('%Y-%m-%d'),
+                        'status_key': norm_status_key,
+                    }
+
+            if norm_kind == 'status':
+                action_status_keys = sorted({
+                    self._normalize_import_status_key(item)
+                    for item in CHAT_MANAGER_ACTION_STATUS_KEYS
+                    if self._normalize_import_status_key(item)
+                })
+                cursor.execute(
+                    """
+                    SELECT status_key, state_note
+                    FROM operator_status_events
+                    WHERE operator_id = %s
+                      AND event_at <= %s
+                      AND COALESCE(event_kind, 'status') <> 'action'
+                      AND COALESCE(is_authoritative, FALSE) = FALSE
+                      AND NOT (LOWER(TRIM(status_key)) = ANY(%s))
+                    ORDER BY event_at DESC, id DESC
+                    LIMIT 1
+                    """,
+                    (operator_id, event_at_obj, action_status_keys)
+                )
+                previous_state = cursor.fetchone()
+                if (
+                    previous_state is not None
+                    and self._status_transition_signature(
+                        previous_state[0],
+                        previous_state[1]
+                    ) == self._status_transition_signature(
+                        norm_status_key,
+                        norm_note
+                    )
+                ):
+                    return {
+                        'duplicate': False,
+                        'noop': True,
+                        'operator_id': operator_id,
+                        'event_date': event_date_obj.strftime('%Y-%m-%d'),
+                        'status_key': norm_status_key,
+                        'event_kind': norm_kind,
+                    }
+
             cursor.execute(
                 """
                 INSERT INTO operator_status_events
