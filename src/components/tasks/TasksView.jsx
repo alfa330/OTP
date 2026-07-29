@@ -6892,6 +6892,7 @@ const TasksView = ({
           <TaskBoardWorkspace
             mode={workspaceTab}
             tasks={tasks}
+            recipients={recipients}
             loading={isTasksLoading}
             currentUserId={currentUserId}
             isAdmin={isAdminLikeRole(currentUserRole)}

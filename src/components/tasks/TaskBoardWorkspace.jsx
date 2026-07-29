@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { createPortal } from 'react-dom';
 import { Maximize2, Minimize2 } from 'lucide-react';
 import { APPLE_FONT } from '../ui/ios';
+import CustomSelect from '../ui/CustomSelect';
 import FullscreenSheet from '../common/FullscreenSheet';
 
 /*
@@ -29,6 +30,13 @@ const PRIORITY_DOT = {
   critical: { color: '#e11d48', label: 'Критичная' },
   urgent:   { color: '#f59e0b', label: 'Срочная' },
 };
+
+const BOARD_PRIORITY_ORDER = { critical: 0, urgent: 1, normal: 2 };
+
+export const BOARD_SORT_OPTIONS = [
+  { value: 'freshness', label: 'По свежести' },
+  { value: 'importance', label: 'По важности' },
+];
 
 const TAG_LABEL = { task: 'Задача', problem: 'Проблема', suggestion: 'Предложение' };
 
@@ -69,6 +77,20 @@ const parseDate = (value) => {
   if (!value) return null;
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+/** Стабильный порядок канбана: новые карточки сверху, важность — с тем же tie-break. */
+export const compareBoardTasks = (left, right, sortMode = 'freshness') => {
+  if (sortMode === 'importance') {
+    const leftPriority = BOARD_PRIORITY_ORDER[left?.priority] ?? BOARD_PRIORITY_ORDER.normal;
+    const rightPriority = BOARD_PRIORITY_ORDER[right?.priority] ?? BOARD_PRIORITY_ORDER.normal;
+    if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+  }
+
+  const leftCreatedAt = parseDate(left?.created_at)?.getTime() || 0;
+  const rightCreatedAt = parseDate(right?.created_at)?.getTime() || 0;
+  if (leftCreatedAt !== rightCreatedAt) return rightCreatedAt - leftCreatedAt;
+  return Number(right?.id || 0) - Number(left?.id || 0);
 };
 
 const startOfDay = (date) => {
@@ -1267,6 +1289,7 @@ const WIP_STORAGE_KEY = 'otp.tasks.board.wipLimit';
 const TaskBoardWorkspace = ({
   mode,
   tasks,
+  recipients = [],
   loading,
   currentUserId,
   isAdmin,
@@ -1278,6 +1301,7 @@ const TaskBoardWorkspace = ({
   notify,
 }) => {
   const [scope, setScope] = useState('my');
+  const [boardSort, setBoardSort] = useState('freshness');
   const [overrides, setOverrides] = useState({});
   const [wipLimit, setWipLimit] = useState(() => {
     if (typeof window === 'undefined') return 0;
@@ -1312,10 +1336,45 @@ const TaskBoardWorkspace = ({
     [tasks, overrides]
   );
 
+  const boardPeople = useMemo(() => {
+    const byId = new Map();
+    const addPerson = (person) => {
+      const id = Number(person?.id || 0);
+      if (!id || id === currentUserId) return;
+      const current = byId.get(id);
+      byId.set(id, {
+        ...(current || {}),
+        ...person,
+        id,
+        name: String(person?.name || current?.name || `Сотрудник #${id}`).trim(),
+      });
+    };
+    recipients.forEach(addPerson);
+    effectiveTasks.forEach((task) => {
+      addPerson(task?.assignee);
+      addPerson(task?.creator);
+    });
+    return [...byId.values()].sort((left, right) =>
+      String(left.name || '').localeCompare(String(right.name || ''), 'ru')
+    );
+  }, [recipients, effectiveTasks, currentUserId]);
+
+  const adminScopeOptions = useMemo(() => [
+    { value: 'my', label: 'Моя доска' },
+    { value: 'assigned', label: 'Задачи на мне' },
+    { value: 'all', label: 'Все доски' },
+    ...boardPeople.map((person) => ({ value: `person:${person.id}`, label: person.name })),
+  ], [boardPeople]);
+
   const scopedTasks = useMemo(() => {
     if (scope === 'all') return effectiveTasks;
     if (scope === 'assigned') {
       return effectiveTasks.filter((task) => Number(task?.assignee?.id || 0) === currentUserId);
+    }
+    if (scope.startsWith('person:')) {
+      const personId = Number(scope.slice('person:'.length) || 0);
+      return effectiveTasks.filter((task) =>
+        Number(task?.assignee?.id || 0) === personId || Number(task?.creator?.id || 0) === personId);
     }
     return effectiveTasks.filter((task) =>
       Number(task?.assignee?.id || 0) === currentUserId || Number(task?.creator?.id || 0) === currentUserId);
@@ -1356,12 +1415,11 @@ const TaskBoardWorkspace = ({
       if (columnId === 'done' && isDoneArchived(task, now)) archived.push(entry);
       else buckets[columnId].push(entry);
     });
-    buckets.backlog.sort((a, b) => (a.task.backlog_rank ?? 1e9) - (b.task.backlog_rank ?? 1e9));
-    const acceptedTime = (entry) => acceptedAtOf(entry.task)?.getTime() || 0;
-    buckets.done.sort((a, b) => acceptedTime(b) - acceptedTime(a));
-    archived.sort((a, b) => acceptedTime(b) - acceptedTime(a));
+    const compareEntries = (left, right) => compareBoardTasks(left.task, right.task, boardSort);
+    BOARD_COLUMNS.forEach((column) => buckets[column.id].sort(compareEntries));
+    archived.sort(compareEntries);
     return { tasksByColumn: buckets, archivedDone: archived };
-  }, [scopedTasks, dropContext]);
+  }, [scopedTasks, dropContext, boardSort]);
 
   const applyBoardPatch = useCallback(async (task, patch, optimistic = null) => {
     if (!patch || !Object.keys(patch).length) return;
@@ -1424,7 +1482,32 @@ const TaskBoardWorkspace = ({
   return (
     <div className="tb-scope space-y-3" style={{ fontFamily: APPLE_FONT }}>
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <SegmentedControl value={scope} options={scopeOptions} onChange={setScope} />
+        <div className="flex flex-1 flex-wrap items-center gap-2">
+          {isAdmin ? (
+            <CustomSelect
+              className="w-full sm:w-[240px]"
+              variant="ios"
+              ariaLabel="Выбор доски сотрудника"
+              value={scope}
+              options={adminScopeOptions}
+              onChange={setScope}
+              searchable={adminScopeOptions.length > 8}
+              searchPlaceholder="Найти сотрудника…"
+            />
+          ) : (
+            <SegmentedControl value={scope} options={scopeOptions} onChange={setScope} />
+          )}
+          {mode === 'board' && (
+            <CustomSelect
+              className="w-full sm:w-[170px]"
+              variant="ios"
+              ariaLabel="Сортировка карточек"
+              value={boardSort}
+              options={BOARD_SORT_OPTIONS}
+              onChange={setBoardSort}
+            />
+          )}
+        </div>
         {mode === 'board' && (
           <span className="text-[11.5px] text-slate-400">
             {archivedDone.length > 0

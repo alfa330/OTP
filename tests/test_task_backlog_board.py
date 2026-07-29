@@ -14,6 +14,7 @@ DATABASE_PATH = ROOT / "database.py"
 APP_PATH = ROOT / "bot_schedule2.py"
 WORKSPACE_PATH = ROOT / "src" / "components" / "tasks" / "TaskBoardWorkspace.jsx"
 TASKS_VIEW_PATH = ROOT / "src" / "components" / "tasks" / "TasksView.jsx"
+CUSTOM_SELECT_PATH = ROOT / "src" / "components" / "ui" / "CustomSelect.jsx"
 APP_JSX_PATH = ROOT / "src" / "App.jsx"
 CLI_PATH = ROOT / "scripts" / "task_board.py"
 SKILL_PATH = ROOT / ".claude" / "skills" / "task-board" / "SKILL.md"
@@ -107,6 +108,12 @@ class TaskDbLayerTests(unittest.TestCase):
 
     def test_backlog_sorted_by_rank(self):
         self.assertIn('"t.backlog_rank ASC NULLS LAST, t.created_at DESC, t.id DESC"', self.src)
+
+    def test_global_admin_task_visibility_is_not_limited_to_own_tasks(self):
+        start = self.src.index("    def get_tasks_for_requester(")
+        block = self.src[start:self.src.index("    def update_task_status(", start)]
+        self.assertIn("if role_has_min(role, 'admin'):\n            pass", block)
+        self.assertIn("if only_my_flag:", block)
 
     def test_regulation_templates_skip_backlog(self):
         start = self.src.index("    def materialize_due_regulation_tasks(")
@@ -206,6 +213,38 @@ class WorkspaceFrontendTests(unittest.TestCase):
         self.assertIn("urgent:", block)
         self.assertNotIn("normal:", block)
 
+    def test_admin_can_open_a_named_employee_board(self):
+        self.assertIn("import CustomSelect from '../ui/CustomSelect';", self.src)
+        self.assertIn("recipients = [],", self.src)
+        self.assertIn("{isAdmin ? (", self.src)
+        self.assertIn("value: `person:${person.id}`", self.src)
+        self.assertIn("addPerson(task?.assignee);", self.src)
+        self.assertIn("addPerson(task?.creator);", self.src)
+        self.assertIn("Number(task?.assignee?.id || 0) === personId || Number(task?.creator?.id || 0) === personId", self.src)
+        self.assertIn('ariaLabel="Выбор доски сотрудника"', self.src)
+
+    def test_board_sort_defaults_to_freshness_and_is_stable(self):
+        self.assertIn("const [boardSort, setBoardSort] = useState('freshness');", self.src)
+        start = self.src.index("export const compareBoardTasks =")
+        block = self.src[start:self.src.index("const startOfDay", start)]
+        self.assertIn("sortMode === 'importance'", block)
+        self.assertIn("critical: 0, urgent: 1, normal: 2", self.src)
+        self.assertIn("rightCreatedAt - leftCreatedAt", block)
+        self.assertIn("Number(right?.id || 0) - Number(left?.id || 0)", block)
+
+    def test_every_kanban_column_uses_selected_sort(self):
+        start = self.src.index("const { tasksByColumn, archivedDone } = useMemo(() => {")
+        block = self.src[start:self.src.index("}, [scopedTasks, dropContext, boardSort]);", start)]
+        self.assertIn("compareBoardTasks(left.task, right.task, boardSort)", block)
+        self.assertIn("BOARD_COLUMNS.forEach((column) => buckets[column.id].sort(compareEntries));", block)
+        self.assertIn("archived.sort(compareEntries);", block)
+
+    def test_manual_backlog_order_remains_separate(self):
+        start = self.src.index("const backlogTasks = useMemo(")
+        block = self.src[start:self.src.index("// «Готово»", start)]
+        self.assertIn("a?.backlog_rank", block)
+        self.assertIn("return aRank - bRank;", block)
+
 
 class TasksViewIntegrationTests(unittest.TestCase):
     def setUp(self):
@@ -224,6 +263,7 @@ class TasksViewIntegrationTests(unittest.TestCase):
             "onBoardUpdate={updateBoardItems}",
             "onStatusAction={handleBoardStatusAction}",
             "onCreateBacklogItem={openBacklogCreate}",
+            "recipients={recipients}",
         ):
             self.assertIn(prop, self.src)
 
@@ -244,6 +284,17 @@ class TasksViewIntegrationTests(unittest.TestCase):
 
     def test_workspace_uses_site_font_not_section_font(self):
         self.assertIn(".tv-root .tb-scope, .tv-root .tb-scope *", self.src)
+
+    def test_board_controls_use_shared_custom_ios_select(self):
+        select_src = _read(CUSTOM_SELECT_PATH)
+        self.assertIn("variant = 'default'", select_src)
+        self.assertIn("const isIos = variant === 'ios';", select_src)
+        self.assertIn("fontFamily: isIos ? APPLE_FONT : undefined", select_src)
+        self.assertIn("const moveActive = (direction) =>", select_src)
+        self.assertIn("event.key === 'ArrowDown' || event.key === 'ArrowUp'", select_src)
+        self.assertIn("aria-activedescendant", select_src)
+        self.assertIn("requestAnimationFrame(() => btnRef.current?.focus())", select_src)
+        self.assertIn('variant="ios"', _read(WORKSPACE_PATH))
 
 
 class CliTests(unittest.TestCase):
@@ -853,10 +904,10 @@ class DoneArchiveTests(unittest.TestCase):
 
     def test_buckets_split_archive_out(self):
         start = self.src.index("const { tasksByColumn, archivedDone } = useMemo(() => {")
-        block = self.src[start:self.src.index("}, [scopedTasks, dropContext]);", start)]
+        block = self.src[start:self.src.index("}, [scopedTasks, dropContext, boardSort]);", start)]
         self.assertIn("if (columnId === 'done' && isDoneArchived(task, now)) archived.push(entry);", block)
-        # Свежее принятое — сверху.
-        self.assertIn("buckets.done.sort((a, b) => acceptedTime(b) - acceptedTime(a));", block)
+        # Архив остаётся доступен и подчиняется выбранному единому порядку канбана.
+        self.assertIn("archived.sort(compareEntries);", block)
 
     def test_archive_is_reachable_not_lost(self):
         self.assertIn("archiveOpen", self.src)
