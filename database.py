@@ -28394,6 +28394,144 @@ class Database:
         with self._get_cursor() as cursor:
             return self._get_supervisor_group_ids_tx(cursor, supervisor_id, as_of)
 
+    def get_billing_operator_efficiency_report(
+        self,
+        start_day,
+        end_day,
+        department_id=None,
+        allow_all=False,
+    ):
+        """Эффективность операторов по группам за произвольный период.
+
+        Эффективность считается так же, как в разделе «Расчёт часов»:
+        сумма часов эффективности / сумма рабочих часов × 100. Если в старой
+        строке daily_hours ещё нет group_id, группа восстанавливается по
+        историческому членству оператора на дату строки.
+        """
+        if isinstance(start_day, str):
+            start_day = datetime.strptime(start_day, '%Y-%m-%d').date()
+        if isinstance(end_day, str):
+            end_day = datetime.strptime(end_day, '%Y-%m-%d').date()
+        if not start_day or not end_day or end_day < start_day:
+            raise ValueError("Invalid billing efficiency period")
+
+        rate_month = end_day.strftime('%Y-%m')
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                WITH source_days AS (
+                    SELECT
+                        dh.operator_id,
+                        COALESCE(
+                            dh.group_id,
+                            (
+                                SELECT gom.group_id
+                                FROM group_operator_memberships gom
+                                WHERE gom.operator_id = dh.operator_id
+                                  AND gom.start_date <= dh.day
+                                  AND (gom.end_date IS NULL OR gom.end_date >= dh.day)
+                                ORDER BY gom.start_date DESC, gom.group_id
+                                LIMIT 1
+                            )
+                        ) AS group_id,
+                        COALESCE(dh.work_time, 0) AS work_time,
+                        COALESCE(dh.efficiency, 0) AS efficiency
+                    FROM daily_hours dh
+                    WHERE dh.day >= %s AND dh.day <= %s
+                ),
+                operator_totals AS (
+                    SELECT
+                        group_id,
+                        operator_id,
+                        SUM(work_time) AS work_hours,
+                        SUM(efficiency) AS efficiency_hours
+                    FROM source_days
+                    WHERE group_id IS NOT NULL
+                    GROUP BY group_id, operator_id
+                    HAVING SUM(work_time) > 0
+                )
+                SELECT
+                    g.id,
+                    g.name,
+                    u.id,
+                    u.name,
+                    COALESCE(
+                        (
+                            SELECT wh.rate
+                            FROM work_hours wh
+                            WHERE wh.operator_id = u.id
+                              AND wh.rate IS NOT NULL
+                              AND wh.month <= %s
+                            ORDER BY wh.month DESC
+                            LIMIT 1
+                        ),
+                        u.rate,
+                        1.0
+                    ) AS rate,
+                    ot.work_hours,
+                    ot.efficiency_hours
+                FROM operator_totals ot
+                JOIN groups g ON g.id = ot.group_id
+                JOIN users u ON u.id = ot.operator_id
+                WHERE COALESCE(NULLIF(g.calculation_model_code, ''), 'operator') = 'operator'
+                  AND (%s OR g.department_id = %s)
+                ORDER BY g.name, u.name
+                """,
+                (start_day, end_day, rate_month, bool(allow_all), department_id),
+            )
+            rows = cursor.fetchall() or []
+
+        groups_by_id = {}
+        for group_id, group_name, operator_id, operator_name, rate, work_hours, efficiency_hours in rows:
+            work_value = float(work_hours or 0.0)
+            if work_value <= 0:
+                continue
+            efficiency_value = max(
+                0.0,
+                min(100.0, (float(efficiency_hours or 0.0) / work_value) * 100.0),
+            )
+            group = groups_by_id.setdefault(
+                int(group_id),
+                {
+                    "group_id": int(group_id),
+                    "group_name": str(group_name or f"Группа {group_id}"),
+                    "operators": [],
+                },
+            )
+            group["operators"].append({
+                "operator_id": int(operator_id),
+                "operator": str(operator_name or f"Оператор {operator_id}"),
+                "rate": float(rate if rate is not None else 1.0),
+                "efficiency": efficiency_value,
+            })
+
+        groups = sorted(
+            groups_by_id.values(),
+            key=lambda item: (item["group_name"].casefold(), item["group_id"]),
+        )
+        for group in groups:
+            group["operators"].sort(
+                key=lambda item: (-item["efficiency"], item["operator"].casefold()),
+            )
+            efficiencies = [item["efficiency"] for item in group["operators"]]
+            group["average_efficiency"] = (
+                sum(efficiencies) / len(efficiencies) if efficiencies else None
+            )
+
+        group_averages = [
+            group["average_efficiency"]
+            for group in groups
+            if group["average_efficiency"] is not None
+        ]
+        return {
+            "date_from": start_day.isoformat(),
+            "date_to": end_day.isoformat(),
+            "groups": groups,
+            "average_efficiency": (
+                sum(group_averages) / len(group_averages) if group_averages else None
+            ),
+        }
+
     # ──────────────────────────── ГРУППЫ: CRUD и членство ────────────────────────────
     # Модель расчёта группы задаётся ТОЛЬКО при создании и не меняется (смена модели =
     # архив + создание/переиспользование). Принадлежность операторов/СВ — историческая

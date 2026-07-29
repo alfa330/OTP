@@ -10,20 +10,23 @@ bot_schedule2.py через AST и исполняются в изолирова�
 
 import ast
 import re
+import textwrap
 import unittest
 from datetime import date, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 
 BOT_PATH = Path(__file__).resolve().parents[1] / "bot_schedule2.py"
+DATABASE_PATH = Path(__file__).resolve().parents[1] / "database.py"
 
 FUNCTION_NAMES = [
     "_oktell_billing_range_exceeds_limit",
+    "_oktell_billing_parse_date_args",
     "_oktell_billing_parse_time",
     "_oktell_billing_minute_filter",
     "_oktell_billing_sql",
@@ -52,6 +55,7 @@ FUNCTION_NAMES = [
     "_oktell_billing_export_columns",
     "_oktell_billing_export_values",
     "_oktell_billing_export_workbook",
+    "_oktell_billing_efficiency_workbook",
 ]
 
 CONST_NAMES = (
@@ -84,8 +88,11 @@ def _extract_namespace(oktell_query=None, page_size=1000, chunk_days=7):
         "timedelta": timedelta,
         "BytesIO": BytesIO,
         "Workbook": Workbook,
+        "Alignment": Alignment,
+        "Border": Border,
         "Font": Font,
         "PatternFill": PatternFill,
+        "Side": Side,
         "get_column_letter": get_column_letter,
         "_OKTELL_GREETING_ABANDON": "Бросили трубку на приветствии",
         "_OKTELL_FAILED_CALL": "Неудачный звонок",
@@ -103,6 +110,27 @@ def _extract_namespace(oktell_query=None, page_size=1000, chunk_days=7):
     }
     exec(compile(ast.Module(body=consts + selected, type_ignores=[]), str(BOT_PATH), "exec"), ns)
     return ns
+
+
+def _extract_database_method(method_name):
+    source = DATABASE_PATH.read_text(encoding="utf-8-sig")
+    module = ast.parse(source)
+    method = next(
+        (
+            node
+            for item in module.body
+            if isinstance(item, ast.ClassDef) and item.name == "Database"
+            for node in item.body
+            if isinstance(node, ast.FunctionDef) and node.name == method_name
+        ),
+        None,
+    )
+    if method is None:
+        raise AssertionError(f"Не найден Database.{method_name}")
+    method_source = ast.get_source_segment(source, method)
+    namespace = {"datetime": datetime}
+    exec("class Database:\n" + textwrap.indent(textwrap.dedent(method_source), "    "), namespace)
+    return getattr(namespace["Database"], method_name)
 
 
 class ParseTimeTests(unittest.TestCase):
@@ -572,6 +600,155 @@ class BuildOperatorReportTests(unittest.TestCase):
         self.assertEqual(len(states_rows), 2)
         self.assertIn("Call_Systems_hst", calls[0])
         self.assertIn("A_Cube_CC_OperatorStates", calls[1])
+
+    def test_efficiency_workbook_matches_grouped_template(self):
+        ns = _extract_namespace()
+        params = {
+            "start_day": date(2026, 7, 1),
+            "end_day": date(2026, 7, 26),
+            "minute_from": 0,
+            "minute_to": 1439,
+        }
+        report = {
+            "groups": [
+                {
+                    "group_name": "Группа А",
+                    "operators": [
+                        {"operator": "Оператор 1", "rate": 0.5, "efficiency": 72.6},
+                        {"operator": "Оператор 2", "rate": 0.75, "efficiency": 47.4},
+                    ],
+                    "average_efficiency": 60.0,
+                },
+                {
+                    "group_name": "Группа Б",
+                    "operators": [
+                        {"operator": "Оператор 3", "rate": 1.0, "efficiency": 70.0},
+                    ],
+                    "average_efficiency": 70.0,
+                },
+                {
+                    "group_name": "Группа В",
+                    "operators": [
+                        {"operator": "Оператор 4", "rate": 0.75, "efficiency": 35.0},
+                    ],
+                    "average_efficiency": 35.0,
+                },
+            ],
+            "average_efficiency": 55.0,
+        }
+
+        output = ns["_oktell_billing_efficiency_workbook"](params, report)
+        wb = load_workbook(output)
+        self.assertEqual(wb.sheetnames, ["Эффективность"])
+        ws = wb.active
+        self.assertEqual(
+            ws["A1"].value,
+            "Эффективность операторов за период 01.07.2026–26.07.2026",
+        )
+        self.assertEqual([ws["A2"].value, ws["E2"].value, ws["I2"].value], [
+            None, None, None,
+        ])
+        self.assertEqual([ws["A3"].value, ws["B3"].value, ws["C3"].value], [
+            "Оператор", "Ставка", "Эффективность",
+        ])
+        self.assertEqual([ws["A4"].value, ws["B4"].value, ws["C4"].value], [
+            "Оператор 1", 0.5, 72.6,
+        ])
+        self.assertEqual(ws["C4"].fill.fgColor.rgb, "0063BE7B")
+        self.assertEqual(ws["C5"].fill.fgColor.rgb, "00F9C36A")
+        self.assertEqual(ws["A6"].value, "Средняя эффективность группы")
+        self.assertEqual(ws["C6"].value, 60.0)
+        self.assertEqual(ws["E5"].value, "Средняя эффективность группы")
+        self.assertEqual(ws["I5"].value, "Средняя эффективность группы")
+        self.assertEqual(ws["A8"].value, "Средняя эффективность всех групп")
+        self.assertEqual(ws["C8"].value, 55.0)
+        self.assertEqual(ws["C8"].number_format, "0")
+        self.assertEqual(ws["A3"].border.left.style, "thin")
+        self.assertEqual(ws.freeze_panes, "A4")
+        self.assertFalse(ws.sheet_view.showGridLines)
+
+    def test_efficiency_workbook_handles_empty_period(self):
+        ns = _extract_namespace()
+        params = {
+            "start_day": date(2026, 7, 1),
+            "end_day": date(2026, 7, 26),
+            "minute_from": 0,
+            "minute_to": 1439,
+        }
+        output = ns["_oktell_billing_efficiency_workbook"](
+            params,
+            {"groups": [], "average_efficiency": None},
+        )
+        ws = load_workbook(output).active
+        self.assertEqual(ws["A3"].value, "Нет данных за выбранный период")
+
+
+class BillingEfficiencyDataTests(unittest.TestCase):
+    class FakeCursor:
+        def __init__(self, rows):
+            self.rows = rows
+            self.sql = ""
+            self.params = None
+
+        def execute(self, sql, params):
+            self.sql = sql
+            self.params = params
+
+        def fetchall(self):
+            return self.rows
+
+    class CursorContext:
+        def __init__(self, cursor):
+            self.cursor = cursor
+
+        def __enter__(self):
+            return self.cursor
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+    def test_groups_sort_operators_and_average_like_reference(self):
+        method = _extract_database_method("get_billing_operator_efficiency_report")
+        cursor = self.FakeCursor([
+            (2, "Группа Б", 20, "Низкий", 0.75, 10.0, 4.0),
+            (1, "Группа А", 10, "Средний", 0.5, 10.0, 6.0),
+            (1, "Группа А", 11, "Высокий", 1.0, 10.0, 8.0),
+        ])
+
+        class FakeDatabase:
+            pass
+
+        db = FakeDatabase()
+        db._get_cursor = lambda: self.CursorContext(cursor)
+        report = method(
+            db,
+            date(2026, 7, 1),
+            date(2026, 7, 26),
+            department_id=7,
+            allow_all=False,
+        )
+
+        self.assertEqual([group["group_name"] for group in report["groups"]], [
+            "Группа А", "Группа Б",
+        ])
+        self.assertEqual(
+            [item["operator"] for item in report["groups"][0]["operators"]],
+            ["Высокий", "Средний"],
+        )
+        self.assertEqual(report["groups"][0]["average_efficiency"], 70.0)
+        self.assertEqual(report["groups"][1]["average_efficiency"], 40.0)
+        self.assertEqual(report["average_efficiency"], 55.0)
+        self.assertEqual(cursor.params, (
+            date(2026, 7, 1),
+            date(2026, 7, 26),
+            "2026-07",
+            False,
+            7,
+        ))
+        self.assertIn("dh.group_id", cursor.sql)
+        self.assertIn("group_operator_memberships", cursor.sql)
+        self.assertIn("g.department_id = %s", cursor.sql)
+        self.assertIn("HAVING SUM(work_time) > 0", cursor.sql)
 
 
 class FetchChunkingTests(unittest.TestCase):
