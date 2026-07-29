@@ -1,5 +1,5 @@
 import React, { useEffect, useImperativeHandle, useMemo, useRef, useState, forwardRef } from 'react';
-import { Loader2, AlertCircle, Bot, FileText, Headset, Quote, ExternalLink, X, Lock } from 'lucide-react';
+import { Loader2, AlertCircle, Bot, FileText, Headset, Quote, ExternalLink, X, Lock, Mic, Image as ImageIcon, Sparkles } from 'lucide-react';
 
 /* Лента переписки снапшота (Chat2Desk/Wazzup) — общая для всех мест, где чат
  * показывается: док «Мои оценки» (ChatSnapshotModal) и полноэкранная проверка
@@ -100,6 +100,33 @@ function Media({ msg, light }) {
             <div className="flex flex-wrap items-center gap-1.5">{pieces}</div>
             {zoom && <ImageLightbox url={zoom} onClose={() => setZoom(null)} />}
         </>
+    );
+}
+
+/* Аннотация вложения от ИИ: транскрипт голосового / описание фото / разбор PDF.
+ * Показывается только если сообщение её несёт (m.annotation) — в обычных снапшотах
+ * Chat2Desk/Wazzup её нет, поэтому для тех мест рендер не меняется. */
+function MediaAnnotation({ ann, light }) {
+    if (!ann) return null;
+    const label = ann.kind === 'audio' ? 'Транскрипт (ИИ)'
+        : ann.kind === 'document' ? 'Разбор PDF (ИИ)' : 'Описание фото (ИИ)';
+    const Icon = ann.kind === 'audio' ? Mic : ann.kind === 'document' ? FileText : ImageIcon;
+    if (ann.status === 'ready' && ann.text) {
+        return (
+            <div className={`mt-1 rounded-lg px-2 py-1.5 text-[12px] leading-snug ${
+                light ? 'bg-white/15 text-white/95' : 'bg-indigo-50/80 text-slate-700 ring-1 ring-indigo-100'}`}>
+                <div className={`mb-0.5 flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide ${
+                    light ? 'text-white/80' : 'text-indigo-500'}`}>
+                    <Sparkles size={10} /><Icon size={10} /> {label}
+                </div>
+                <div className="whitespace-pre-wrap break-words italic">{ann.text}</div>
+            </div>
+        );
+    }
+    return (
+        <div className={`mt-1 flex items-center gap-1 text-[11px] italic ${light ? 'text-white/70' : 'text-slate-400'}`}>
+            <Icon size={10} /> вложение не расшифровано
+        </div>
     );
 }
 
@@ -247,7 +274,8 @@ const ChatThread = forwardRef(function ChatThread({
                                     <Lock size={11} /> Внутренний комментарий{m.author ? ` · ${m.author}` : ''}
                                 </div>
                             )}
-                            {hasMedia && <div className={m.text ? 'mb-1' : ''}><Media msg={m} light={out} /></div>}
+                            {hasMedia && <div className={m.text || m.annotation ? 'mb-1' : ''}><Media msg={m} light={out} /></div>}
+                            {m.annotation && <MediaAnnotation ann={m.annotation} light={out} />}
                             {m.text && (
                                 <div className="whitespace-pre-wrap break-words">
                                     {highlightText(m.text, quotesByMessage[String(m.id)])}
