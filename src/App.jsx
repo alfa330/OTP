@@ -11916,6 +11916,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const s = t % 60;
             return `${plannerStatusPad2(h)}:${plannerStatusPad2(m)}:${plannerStatusPad2(s)}`;
             };
+            const plannerStatusFormatMinuteTime = (minutes) => {
+            const rawSeconds = Math.round((Number(minutes) || 0) * 60);
+            const t = ((rawSeconds % 86400) + 86400) % 86400;
+            const h = Math.floor(t / 3600);
+            const m = Math.floor((t % 3600) / 60);
+            const s = t % 60;
+            return `${plannerStatusPad2(h)}:${plannerStatusPad2(m)}:${plannerStatusPad2(s)}`;
+            };
             const plannerStatusFormatDateTime = (value) => {
             const d = value instanceof Date ? value : new Date(value);
             if (!d || Number.isNaN(d.getTime())) return '—';
@@ -11970,10 +11978,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             if (!startDayKey || !endDayKey || !targetDayKey) return null;
             if (targetDayKey < startDayKey || targetDayKey > endDayKey) return null;
             let startMin = (plannerStatusDayKey(sDate) === dateKey)
-                ? (sDate.getHours() * 60 + sDate.getMinutes() + (sDate.getSeconds() / 60))
+                ? (sDate.getHours() * 60 + sDate.getMinutes() + (sDate.getSeconds() / 60) + (sDate.getMilliseconds() / 60000))
                 : 0;
             let endMin = (plannerStatusDayKey(eDate) === dateKey)
-                ? (eDate.getHours() * 60 + eDate.getMinutes() + (eDate.getSeconds() / 60))
+                ? (eDate.getHours() * 60 + eDate.getMinutes() + (eDate.getSeconds() / 60) + (eDate.getMilliseconds() / 60000))
                 : 1440;
             startMin = Math.max(0, Math.min(1440, startMin));
             endMin = Math.max(0, Math.min(1440, endMin));
@@ -28407,10 +28415,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             >
                                                 <div className="flex items-center justify-between gap-2">
                                                     <span className={`px-1.5 py-0.5 rounded border ${tone.pill}`}>{seg.stateName || seg.stateKey || 'Статус'}</span>
-                                                    <span className="tabular-nums text-slate-600">{formatMinutesOnly(segDurationMin)}</span>
+                                                    <span className="tabular-nums text-slate-600">{plannerStatusFormatDuration(Number(seg?.durationSec) > 0 ? Number(seg.durationSec) : segDurationMin * 60)}</span>
                                                 </div>
                                                 <div className="mt-1 text-slate-700 tabular-nums">
-                                                    {minutesToTime(seg.startMin)} — {minutesToTime(seg.endMin)}
+                                                    {plannerStatusFormatMinuteTime(seg.startMin)} — {plannerStatusFormatMinuteTime(seg.endMin)}
                                                 </div>
                                                 {seg.stateNote && (
                                                     <div className="mt-1 text-[11px] text-slate-500">
@@ -30097,8 +30105,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             const sDate = seg.start instanceof Date ? seg.start : new Date(seg.start);
                             const eDate = seg.end instanceof Date ? seg.end : new Date(seg.end);
                             if (Number.isNaN(sDate.getTime()) || Number.isNaN(eDate.getTime())) return null;
-                            let startMin = (plannerStatusDayKey(sDate) === dateKey) ? (sDate.getHours() * 60 + sDate.getMinutes() + (sDate.getSeconds() / 60)) : 0;
-                            let endMin = (plannerStatusDayKey(eDate) === dateKey) ? (eDate.getHours() * 60 + eDate.getMinutes() + (eDate.getSeconds() / 60)) : 1440;
+                            let startMin = (plannerStatusDayKey(sDate) === dateKey) ? (sDate.getHours() * 60 + sDate.getMinutes() + (sDate.getSeconds() / 60) + (sDate.getMilliseconds() / 60000)) : 0;
+                            let endMin = (plannerStatusDayKey(eDate) === dateKey) ? (eDate.getHours() * 60 + eDate.getMinutes() + (eDate.getSeconds() / 60) + (eDate.getMilliseconds() / 60000)) : 1440;
                             startMin = Math.max(0, Math.min(1440, startMin));
                             endMin = Math.max(0, Math.min(1440, endMin));
                             if (endMin <= startMin) return null;

@@ -376,6 +376,10 @@ class TezStatusAuthoritativeSegmentTests(unittest.TestCase):
                 return kind or "status"
 
             @staticmethod
+            def _canonicalize_status_transition_events(events):
+                return list(events or [])
+
+            @staticmethod
             def _split_status_segment_datetimes_by_day(start_value, end_value):
                 return [{
                     "status_date": start_value.date(),
@@ -401,6 +405,10 @@ class TezStatusAuthoritativeSegmentTests(unittest.TestCase):
             if "WITH candidates AS" in query
         )
         self.assertIn("COALESCE(is_authoritative, FALSE) = FALSE", candidates_sql)
+        self.assertIn(
+            "ORDER BY operator_id, event_at ASC, id DESC",
+            candidates_sql,
+        )
         delete_sql = next(
             query for query in cursor.queries
             if query.startswith("DELETE FROM operator_status_segments")
