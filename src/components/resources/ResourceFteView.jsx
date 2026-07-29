@@ -2060,6 +2060,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
   const [billingReports, setBillingReports] = useState({ park: null, line: null, operator: null, detail: null });
   const [isBillingLoading, setIsBillingLoading] = useState(false);
   const [isBillingExporting, setIsBillingExporting] = useState(false);
+  const [billingExportType, setBillingExportType] = useState('general');
   const [billingErrors, setBillingErrors] = useState({ park: '', line: '', operator: '', detail: '' });
   const [billingExpandedDays, setBillingExpandedDays] = useState(() => new Set());
   const [billingDetailPage, setBillingDetailPage] = useState(1);
@@ -2214,6 +2215,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
           time_from: billingApplied.timeFrom,
           time_to: billingApplied.timeTo,
           mode: billingMode,
+          report_type: billingExportType,
         },
         headers: buildHeaders(),
         responseType: 'blob',
@@ -2221,7 +2223,9 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
       const url = window.URL.createObjectURL(response.data);
       const link = document.createElement('a');
       link.href = url;
-      link.download = `oktell_billing_${billingMode}_${billingApplied.from}_${billingApplied.to}.xlsx`;
+      link.download = billingExportType === 'efficiency'
+        ? `operator_efficiency_${billingApplied.from}_${billingApplied.to}.xlsx`
+        : `oktell_billing_${billingMode}_${billingApplied.from}_${billingApplied.to}.xlsx`;
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -2238,7 +2242,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
     } finally {
       setIsBillingExporting(false);
     }
-  }, [apiRoot, billingApplied, billingMode, buildHeaders, notify]);
+  }, [apiRoot, billingApplied, billingExportType, billingMode, buildHeaders, notify]);
 
   useEffect(() => {
     fetchOverview();
@@ -3803,11 +3807,29 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                     <RefreshCw size={16} className={isBillingLoading ? 'animate-spin' : ''} />
                     {isBillingLoading ? 'Загрузка...' : 'Сформировать'}
                   </button>
+                  <select
+                    value={billingExportType}
+                    onChange={(event) => setBillingExportType(event.target.value)}
+                    disabled={isBillingExporting || isBillingLoading}
+                    aria-label="Вид выгрузки Excel"
+                    title="Выберите формат Excel-отчёта"
+                    className="h-14 max-w-[250px] rounded-xl border-2 border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-sky-400 focus:ring-2 focus:ring-sky-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <option value="general">Общая (текущая)</option>
+                    <option value="efficiency">По эффективности операторов</option>
+                  </select>
                   <button
                     type="button"
                     onClick={exportBillingExcel}
-                    disabled={isBillingExporting || isBillingLoading || !billingReport}
-                    title="Скачать текущий разрез в Excel (за применённый период)"
+                    disabled={
+                      isBillingExporting
+                      || isBillingLoading
+                      || Boolean(billingRangeError)
+                      || (billingExportType === 'general' && !billingReport)
+                    }
+                    title={billingExportType === 'efficiency'
+                      ? 'Скачать эффективность операторов по группам'
+                      : 'Скачать текущий разрез в Excel за применённый период'}
                     className="inline-flex h-14 items-center gap-2 rounded-xl border-2 border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     <FileDown size={16} className={isBillingExporting ? 'animate-pulse text-emerald-600' : 'text-emerald-600'} />
@@ -3835,6 +3857,9 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
                   <span className="tabular-nums">{billingPeriodDays > 0 ? `${billingPeriodDays} дн. · ${formatDate(billingFrom)} — ${formatDate(billingTo)}` : 'Период не выбран'}</span>
                   <span className="tabular-nums">время {billingTimeFrom}–{billingTimeTo} включительно</span>
+                  {billingExportType === 'efficiency' ? (
+                    <span>Excel по эффективности считается за полные дни; фильтр времени не применяется</span>
+                  ) : null}
                   {billingMode === 'operator' ? (
                     <span>OCC — разговоры и обработка ко всему времени в системе; UTZ — время без пауз</span>
                   ) : billingMode === 'detail' ? (

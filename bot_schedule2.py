@@ -6466,9 +6466,8 @@ def _oktell_billing_range_exceeds_limit(start_day, end_day):
     return (end_day - start_day).days + 1 > OKTELL_BILLING_MAX_RANGE_DAYS
 
 
-def _oktell_billing_parse_request_args():
-    """Общий разбор параметров отчетов «Биллинг Oktell». Возвращает
-    (params_dict, error_response, status) — при ошибке params_dict is None."""
+def _oktell_billing_parse_date_args():
+    """Период биллинга без зависимости от Oktell (для локальных отчётов)."""
     date_from = request.args.get('date_from') or request.args.get('date') or None
     date_to = request.args.get('date_to') or date_from
     start_day = _oktell_parse_date(date_from)
@@ -6479,6 +6478,18 @@ def _oktell_billing_parse_request_args():
         return None, jsonify({"error": "date_to должен быть не раньше date_from"}), 400
     if _oktell_billing_range_exceeds_limit(start_day, end_day):
         return None, jsonify({"error": f"Период отчета не может быть больше {OKTELL_BILLING_MAX_RANGE_DAYS} дней"}), 400
+
+    return {
+        'start_day': start_day,
+        'end_day': end_day,
+    }, None, None
+
+
+def _oktell_billing_parse_request_args():
+    """Общий разбор параметров отчётов Oktell, включая время и готовность интеграции."""
+    params, error_response, error_status = _oktell_billing_parse_date_args()
+    if params is None:
+        return None, error_response, error_status
 
     minute_from = _oktell_billing_parse_time(request.args.get('time_from') or '00:00')
     minute_to = _oktell_billing_parse_time(request.args.get('time_to') or '23:59')
@@ -6491,8 +6502,7 @@ def _oktell_billing_parse_request_args():
         return None, jsonify({"error": "Интеграция с Oktell недоступна: OKTELL_IP/OKTELL_API_TOKEN не задан"}), 503
 
     return {
-        'start_day': start_day,
-        'end_day': end_day,
+        **params,
         'minute_from': minute_from,
         'minute_to': minute_to,
     }, None, None
@@ -6636,6 +6646,47 @@ def api_resource_fte_oktell_billing_export():
     requester_id, guard_response, guard_status = _resource_fte_route_guard()
     if guard_response is not None:
         return guard_response, guard_status
+
+    report_type = str(request.args.get('report_type') or 'general').strip().lower()
+    if report_type not in ('general', 'efficiency'):
+        return jsonify({"error": "report_type должен быть general или efficiency"}), 400
+
+    if report_type == 'efficiency':
+        params, error_response, error_status = _oktell_billing_parse_date_args()
+        if params is None:
+            return error_response, error_status
+        try:
+            requester = db.get_user(id=int(requester_id))
+            requester_role = normalize_role_value(requester[3] if requester else None)
+            allow_all = _is_global_admin_requester(requester_role, requester_id)
+            department_id = (
+                None
+                if allow_all
+                else _department_scope_id_for_requester(requester_id)
+            )
+            if not allow_all and department_id is None:
+                return jsonify({"error": "Не удалось определить отдел пользователя"}), 403
+            report = db.get_billing_operator_efficiency_report(
+                params['start_day'],
+                params['end_day'],
+                department_id=department_id,
+                allow_all=allow_all,
+            )
+            output = _oktell_billing_efficiency_workbook(params, report)
+        except Exception:
+            logging.exception("Oktell billing efficiency export failed")
+            return jsonify({"error": "Не удалось сформировать отчёт по эффективности операторов"}), 500
+
+        filename = (
+            "operator_efficiency_"
+            f"{params['start_day'].strftime('%Y-%m-%d')}_{params['end_day'].strftime('%Y-%m-%d')}.xlsx"
+        )
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name=filename,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
 
     params, error_response, error_status = _oktell_billing_parse_request_args()
     if params is None:
@@ -28269,6 +28320,163 @@ def _oktell_billing_export_workbook(mode, params, report, sl_seconds):
     for i, width in enumerate([12] + widths, start=1):
         ws_days.column_dimensions[get_column_letter(i)].width = width
     ws_days.freeze_panes = 'A2'
+
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output
+
+
+def _oktell_billing_efficiency_workbook(params, report):
+    """Excel по образцу: отдельный трёхколоночный блок на каждую группу."""
+    groups = report.get('groups') or []
+    block_width = 3
+    block_gap = 1
+    last_column = max(block_width, len(groups) * (block_width + block_gap) - block_gap)
+    start_day = params['start_day']
+    end_day = params['end_day']
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Эффективность'
+    ws.sheet_view.showGridLines = False
+    ws.freeze_panes = 'A4'
+    ws.page_setup.orientation = 'landscape'
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.print_title_rows = '1:3'
+
+    title = (
+        'Эффективность операторов за период '
+        f"{start_day.strftime('%d.%m.%Y')}–{end_day.strftime('%d.%m.%Y')}"
+    )
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=last_column)
+    title_cell = ws.cell(row=1, column=1, value=title)
+    title_cell.font = Font(bold=True, size=14)
+    title_cell.alignment = Alignment(horizontal='center', vertical='center')
+    ws.row_dimensions[1].height = 24
+
+    thin_side = Side(style='thin', color='000000')
+    block_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+    header_font = Font(bold=True, color='000000')
+    average_font = Font(bold=True, color='000000')
+    header_fill = PatternFill(start_color='F8FAFC', end_color='F8FAFC', fill_type='solid')
+
+    def _efficiency_fill(value):
+        value = float(value or 0.0)
+        if value >= 70:
+            color = '63BE7B'
+        elif value >= 65:
+            color = '81C784'
+        elif value >= 60:
+            color = 'C4D97B'
+        elif value >= 55:
+            color = 'FFEB84'
+        elif value >= 45:
+            color = 'F9C36A'
+        else:
+            color = 'F8696B'
+        return PatternFill(start_color=color, end_color=color, fill_type='solid')
+
+    if not groups:
+        ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=3)
+        empty_cell = ws.cell(row=3, column=1, value='Нет данных за выбранный период')
+        empty_cell.font = Font(italic=True, color='64748B')
+        empty_cell.alignment = Alignment(horizontal='center')
+    else:
+        for group_index, group in enumerate(groups):
+            start_column = 1 + group_index * (block_width + block_gap)
+            end_column = start_column + block_width - 1
+
+            headers = ('Оператор', 'Ставка', 'Эффективность')
+            widths = (38, 10, 17)
+            for offset, (header, width) in enumerate(zip(headers, widths)):
+                column = start_column + offset
+                cell = ws.cell(row=3, column=column, value=header)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.border = block_border
+                cell.alignment = Alignment(
+                    horizontal='left' if offset == 0 else 'center',
+                    vertical='center',
+                )
+                ws.column_dimensions[get_column_letter(column)].width = width
+
+            operators = group.get('operators') or []
+            for row_offset, operator in enumerate(operators, start=4):
+                operator_cell = ws.cell(
+                    row=row_offset,
+                    column=start_column,
+                    value=operator.get('operator') or '',
+                )
+                rate_cell = ws.cell(
+                    row=row_offset,
+                    column=start_column + 1,
+                    value=float(operator.get('rate') or 0.0),
+                )
+                efficiency = float(operator.get('efficiency') or 0.0)
+                efficiency_cell = ws.cell(
+                    row=row_offset,
+                    column=start_column + 2,
+                    value=efficiency,
+                )
+                operator_cell.alignment = Alignment(horizontal='left', vertical='center')
+                rate_cell.alignment = Alignment(horizontal='center', vertical='center')
+                efficiency_cell.alignment = Alignment(horizontal='center', vertical='center')
+                rate_cell.number_format = '0.##'
+                efficiency_cell.number_format = '0.##'
+                efficiency_cell.fill = _efficiency_fill(efficiency)
+                for cell in (operator_cell, rate_cell, efficiency_cell):
+                    cell.border = block_border
+
+            average_row = 4 + len(operators)
+            ws.merge_cells(
+                start_row=average_row,
+                start_column=start_column,
+                end_row=average_row,
+                end_column=start_column + 1,
+            )
+            average_label = ws.cell(
+                row=average_row,
+                column=start_column,
+                value='Средняя эффективность группы',
+            )
+            average_label.font = average_font
+            average_label.alignment = Alignment(horizontal='left', vertical='center')
+            average_value = ws.cell(
+                row=average_row,
+                column=start_column + 2,
+                value=group.get('average_efficiency'),
+            )
+            average_value.font = average_font
+            average_value.number_format = '0.00'
+            average_value.alignment = Alignment(horizontal='center', vertical='center')
+            for column in range(start_column, end_column + 1):
+                ws.cell(row=average_row, column=column).border = block_border
+
+            if group_index < len(groups) - 1:
+                ws.column_dimensions[get_column_letter(end_column + 1)].width = 3
+
+        overall_row = 4 + max(len(group.get('operators') or []) for group in groups) + 2
+        ws.merge_cells(start_row=overall_row, start_column=1, end_row=overall_row, end_column=2)
+        overall_label = ws.cell(
+            row=overall_row,
+            column=1,
+            value='Средняя эффективность всех групп',
+        )
+        overall_label.font = average_font
+        overall_label.alignment = Alignment(horizontal='left', vertical='center')
+        overall_value = ws.cell(
+            row=overall_row,
+            column=3,
+            value=report.get('average_efficiency'),
+        )
+        overall_value.font = average_font
+        overall_value.number_format = '0'
+        overall_value.alignment = Alignment(horizontal='center', vertical='center')
+        for column in range(1, 4):
+            ws.cell(row=overall_row, column=column).border = block_border
 
     output = BytesIO()
     wb.save(output)
