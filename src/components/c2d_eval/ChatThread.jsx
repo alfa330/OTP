@@ -1,5 +1,5 @@
 import React, { useEffect, useImperativeHandle, useMemo, useRef, useState, forwardRef } from 'react';
-import { Loader2, AlertCircle, Bot, FileText, Headset, Quote, ExternalLink, X, Lock, Mic, Image as ImageIcon, Sparkles } from 'lucide-react';
+import { Loader2, AlertCircle, Bot, FileText, Headset, Quote, ExternalLink, X, Lock, Mic, Image as ImageIcon, Sparkles, ChevronDown } from 'lucide-react';
 
 /* Лента переписки снапшота (Chat2Desk/Wazzup) — общая для всех мест, где чат
  * показывается: док «Мои оценки» (ChatSnapshotModal) и полноэкранная проверка
@@ -107,25 +107,44 @@ function Media({ msg, light }) {
  * Показывается только если сообщение её несёт (m.annotation) — в обычных снапшотах
  * Chat2Desk/Wazzup её нет, поэтому для тех мест рендер не меняется. */
 function MediaAnnotation({ ann, light }) {
+    const [open, setOpen] = useState(false);
     if (!ann) return null;
-    const label = ann.kind === 'audio' ? 'Транскрипт (ИИ)'
-        : ann.kind === 'document' ? 'Разбор PDF (ИИ)' : 'Описание фото (ИИ)';
-    const Icon = ann.kind === 'audio' ? Mic : ann.kind === 'document' ? FileText : ImageIcon;
-    if (ann.status === 'ready' && ann.text) {
+    const [label, Icon] = ann.kind === 'audio' ? ['Транскрипт голосового', Mic]
+        : ann.kind === 'document' ? ['Разбор документа', FileText]
+        : ['Описание фото', ImageIcon];
+    if (ann.status !== 'ready' || !ann.text) {
         return (
-            <div className={`mt-1 rounded-lg px-2 py-1.5 text-[12px] leading-snug ${
-                light ? 'bg-white/15 text-white/95' : 'bg-indigo-50/80 text-slate-700 ring-1 ring-indigo-100'}`}>
-                <div className={`mb-0.5 flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide ${
-                    light ? 'text-white/80' : 'text-indigo-500'}`}>
-                    <Sparkles size={10} /><Icon size={10} /> {label}
-                </div>
-                <div className="whitespace-pre-wrap break-words italic">{ann.text}</div>
+            <div className={`mt-1.5 flex items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-[11.5px] italic ${
+                light ? 'bg-white/10 text-white/70' : 'bg-slate-100 text-slate-400'}`}>
+                <Icon size={12} /> вложение не расшифровано
             </div>
         );
     }
+    // Раскрывающаяся плашка в стиле iOS: заголовок с иконкой ✨ + превью в одну
+    // строку, по тапу плавно (grid-rows) разворачивается полный текст.
+    const shell = light ? 'bg-white/12 ring-white/20' : 'bg-slate-50 ring-slate-200/80';
+    const accent = light ? 'text-white/85' : 'text-indigo-500';
+    const preview = light ? 'text-white/55' : 'text-slate-400';
+    const bodyCls = light ? 'text-white/90' : 'text-slate-600';
     return (
-        <div className={`mt-1 flex items-center gap-1 text-[11px] italic ${light ? 'text-white/70' : 'text-slate-400'}`}>
-            <Icon size={10} /> вложение не расшифровано
+        <div className={`mt-1.5 overflow-hidden rounded-xl ring-1 ${shell}`}>
+            <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open}
+                    aria-label={open ? `Скрыть: ${label}` : `Показать: ${label}`}
+                    className={`flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left transition ${
+                        light ? 'hover:bg-white/10' : 'hover:bg-slate-100'} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50`}>
+                <Sparkles size={11} className={`shrink-0 ${accent}`} />
+                <Icon size={12} className={`shrink-0 ${accent}`} />
+                <span className={`shrink-0 text-[11px] font-semibold ${accent}`}>{label}</span>
+                {!open && <span className={`min-w-0 flex-1 truncate text-[11.5px] ${preview}`}>{ann.text}</span>}
+                <ChevronDown size={13} className={`ml-auto shrink-0 transition-transform ${accent} ${open ? 'rotate-180' : ''}`} />
+            </button>
+            <div className={`grid transition-all duration-200 ease-out ${open ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`}>
+                <div className="overflow-hidden">
+                    <div className={`whitespace-pre-wrap break-words px-2.5 pb-2 pt-0.5 text-[12.5px] leading-relaxed ${bodyCls}`}>
+                        {ann.text}
+                    </div>
+                </div>
+            </div>
         </div>
     );
 }
