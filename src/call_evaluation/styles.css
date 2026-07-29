@@ -885,6 +885,32 @@
         .badge-red { background: var(--red-light); color: var(--red); }
         .badge-muted { background: var(--surface-2); color: var(--text-2); }
         .badge-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+        .call-ended-badge {
+            max-width: 100%;
+            padding: 2px 7px;
+            border: 1px solid var(--border);
+            background: var(--surface-2);
+            color: var(--text-2);
+            font-family: var(--font);
+            font-size: 10.5px;
+            font-weight: 500;
+            line-height: 1.25;
+            white-space: nowrap;
+        }
+        .call-ended-badge svg {
+            color: var(--text-3);
+            flex-shrink: 0;
+            font-size: 9px;
+        }
+        .call-phone-value {
+            font-family: var(--font-mono);
+            font-size: 12px;
+        }
+        .call-ended-cell-badge,
+        .call-ended-result-badge,
+        .call-ended-header-badge {
+            margin-top: 5px;
+        }
         .resolution-badges {
             display: flex;
             align-items: center;
@@ -1295,7 +1321,8 @@
 
         /* ── Version history item ── */
         .version-item { border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; margin-bottom: 12px; }
-        .version-item-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+        .version-item-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+        .version-item-meta { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
         .version-badge { font-size: 11px; font-weight: 600; background: var(--accent-light); color: var(--accent); padding: 2px 8px; border-radius: 100px; }
         .version-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; font-size: 12px; color: var(--text-2); }
         .version-grid strong { color: var(--text); font-weight: 500; display: block; font-size: 13px; }

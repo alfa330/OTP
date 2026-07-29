@@ -143,6 +143,48 @@ def _to_int(value, default=0):
             return default
 
 
+def normalize_call_end_party(value, call_type=-1):
+    """Map Binotel's whoHungUp value to the journal's provider-neutral enum."""
+    raw = "" if value is None else str(value).strip()
+    if not raw:
+        return "unknown"
+
+    compact = re.sub(r"[\s_\-./]+", "", raw.casefold())
+    operator_values = {
+        "employee", "operator", "agent", "manager", "staff", "internal",
+        "internalnumber", "extension", "user",
+        "сотрудник", "оператор", "менеджер", "працівник",
+    }
+    client_values = {
+        "client", "customer", "external", "externalnumber", "abonent",
+        "subscriber", "otherparty",
+        "клиент", "абонент", "клієнт",
+    }
+    system_values = {
+        "system", "pbx", "ivr", "api", "timeout", "network",
+        "система", "атс",
+    }
+    if compact in operator_values:
+        return "operator"
+    if compact in client_values:
+        return "client"
+    if compact in system_values:
+        return "system"
+
+    direction = _to_int(call_type, default=-1)
+    if compact in {"caller", "calling", "originator"}:
+        if direction == CALL_TYPE_INCOMING:
+            return "client"
+        if direction == CALL_TYPE_OUTGOING:
+            return "operator"
+    if compact in {"callee", "called", "recipient", "answerer"}:
+        if direction == CALL_TYPE_INCOMING:
+            return "operator"
+        if direction == CALL_TYPE_OUTGOING:
+            return "client"
+    return "unknown"
+
+
 class BinotelApiClient:
     """Минимальный клиент Binotel API 4.0 (key/secret)."""
 
@@ -227,6 +269,7 @@ class BinotelApiClient:
         billsec = _to_int(raw.get("billsec"), default=0)
         waitsec = _to_int(raw.get("waitsec"), default=0)
         start_time = _to_int(raw.get("startTime") or raw.get("startTimeUTC") or raw.get("start_time"), default=0)
+        who_hung_up = raw.get("whoHungUp") if "whoHungUp" in raw else raw.get("who_hung_up")
         # employeeData несёт имя/почту сотрудника, обслужившего звонок. Один и тот же
         # sip (internalNumber) со временем закрепляют за разными операторами, поэтому
         # сопоставлять звонок с нашим оператором нужно ПО ИМЕНИ, а не по номеру.
@@ -248,6 +291,8 @@ class BinotelApiClient:
             "employee_name": emp_name,
             "employee_email": emp_email,
             "recording_status": str(raw.get("recordingStatus") or "").strip().lower(),
+            "call_end_party": normalize_call_end_party(who_hung_up, call_type),
+            "call_end_raw": "" if who_hung_up is None else str(who_hung_up).strip(),
         }
 
     @staticmethod

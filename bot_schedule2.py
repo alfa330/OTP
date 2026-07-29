@@ -19439,7 +19439,8 @@ def get_call_versions(call_id):
                         c.id, c.score, c.comment, c.phone_number, c.month, 
                         c.audio_path, c.created_at, c.is_correction,
                         u.name as evaluator_name,
-                        c.previous_version_id  
+                        c.previous_version_id,
+                        c.call_end_party
                     FROM calls c
                     JOIN users u ON c.evaluator_id = u.id
                     WHERE c.id = %s
@@ -19458,6 +19459,7 @@ def get_call_versions(call_id):
                     "evaluation_date": version[6].strftime('%Y-%m-%d %H:%M'),
                     "is_correction": version[7],
                     "evaluator_name": version[8],
+                    "call_end_party": version[10],
                     "audio_url": None  # Будет заполнено позже
                 })
                 
@@ -19917,6 +19919,7 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
             external_id=gid, month=month, datetime_raw=dt_raw,
             phone=c['external_number'], duration_sec=c['billsec'],
             notes=f"random:{requester_id}:binotel",
+            call_end_party=c.get('call_end_party') or 'unknown',
         )
         existing.add(gid)  # чтобы не выбрать тот же дважды (и на гонке — пропустить)
         if new_id:
@@ -19930,6 +19933,7 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
                 "phone": c['external_number'],
                 "duration_sec": c['billsec'],
                 "direction": "in" if c['call_type'] == tez_binotel_calls.CALL_TYPE_INCOMING else "out",
+                "call_end_party": c.get('call_end_party') or 'unknown',
                 "audio_pending": True,
             })
 
@@ -20080,12 +20084,15 @@ def fetch_random_evaluation_call():
             if not audio_path:
                 audio_missing += 1
                 continue
+            call_end_party = _oktell_call_end_party(
+                c.get('ct'), c.get('stop_side'), c.get('reason_stop'))
             new_id = db.import_single_random_call(
                 operator_id=operator_id, operator_name=operator_name,
                 external_id=conn_id, month=month, datetime_raw=c.get('dt_raw'),
                 phone=c.get('phone'), duration_sec=c.get('talk_sec'),
                 notes=f"random:{requester_id}:oktell",
                 audio_path=audio_path,
+                call_end_party=call_end_party,
             )
             existing.add(conn_id)  # чтобы не выбрать тот же дважды (и на гонке — пропустить)
             if new_id:
@@ -20098,6 +20105,7 @@ def fetch_random_evaluation_call():
                     "phone": c.get('phone'),
                     "duration_sec": c.get('talk_sec'),
                     "direction": "in" if int(c.get('ct') or 0) == 5 else "out",
+                    "call_end_party": call_end_party,
                     "audio_path": audio_path,
                     "audio_pending": False,
                 })
@@ -20408,6 +20416,15 @@ def sync_eval_calls_oktell():
             return jsonify({"error": f"Синхронизация пропущена: {reason or 'unknown'}", "sync": result}), 400
         if status == 'failed':
             return jsonify({"error": result.get('error') or "Синхронизация не выполнена", "sync": result}), 502
+        try:
+            result["call_end_party_backfill"] = backfill_oktell_call_end_parties(
+                batch_size=500, max_batches=8)
+        except Exception:
+            logging.exception("Manual Oktell call-end-party backfill failed")
+            result["call_end_party_backfill"] = {
+                "status": "failed",
+                "updated": 0,
+            }
 
         return jsonify({
             "status": "success",
@@ -20763,6 +20780,16 @@ def receive_call_evaluation():
         direction_id = request.form.get('direction')
         previous_version_id = request.form.get('previous_version_id')
         is_correction = request.form.get('is_correction', 'false').lower() == 'true'
+        imported_call_id = request.form.get('imported_call_id')
+        if imported_call_id not in (None, ''):
+            try:
+                imported_call_id = int(imported_call_id)
+                if imported_call_id <= 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                return jsonify({"error": "imported_call_id must be a positive integer"}), 400
+        else:
+            imported_call_id = None
 
         evaluator = db.get_user(name=evaluator_name)
         operator = db.get_user(name=operator_name)
@@ -20909,6 +20936,7 @@ def receive_call_evaluation():
             appeal_date=appeal_date,
             question_resolved=question_resolved,
             resolved_first_contact=resolved_first_contact,
+            imported_call_id=imported_call_id,
             c2d_snapshot_id=c2d_snapshot_id,
             chat_quotes=chat_quotes
         )
@@ -28347,6 +28375,87 @@ def _oktell_eval_connection_types_clause(incoming=True, outgoing=True):
     return "(" + ", ".join(types) + ")"
 
 
+def _oktell_call_end_party(connection_type, stop_side, reason_stop):
+    """Map Oktell StopSide/ReasonStop to a provider-neutral journal value."""
+    try:
+        reason_stop = int(reason_stop)
+    except (TypeError, ValueError):
+        return 'unknown'
+
+    # Flash/hold is a transfer, not an operator/client hangup.
+    if reason_stop == 6:
+        return 'transfer'
+    # IVR, server-side failures and connection loss are system termination.
+    if reason_stop in (1, 3, 4, 5):
+        return 'system'
+    if reason_stop != 2:
+        return 'unknown'
+    try:
+        connection_type = int(connection_type)
+        stop_side = int(stop_side)
+    except (TypeError, ValueError):
+        return 'unknown'
+    if stop_side not in (0, 1):
+        return 'unknown'
+
+    operator_side = 0 if connection_type == 1 else 1 if connection_type == 5 else None
+    if operator_side is None:
+        return 'unknown'
+    return 'operator' if stop_side == operator_side else 'client'
+
+
+def _oktell_call_end_party_rows_sql(conn_ids):
+    normalized_ids = [_oktell_normalize_conn_id(conn_id) for conn_id in conn_ids]
+    ids_sql = ", ".join("'" + conn_id + "'" for conn_id in normalized_ids)
+    return (
+        "SELECT LOWER(CONVERT(varchar(36), s.Id)) AS conn_id, "
+        "s.ConnectionType AS ct, s.StopSide AS stop_side, s.ReasonStop AS reason_stop "
+        "FROM oktell.dbo.A_Stat_Connections_1x1 s "
+        f"WHERE s.Id IN ({ids_sql})"
+    )
+
+
+def backfill_oktell_call_end_parties(batch_size=500, max_batches=8):
+    """Gradually enrich legacy UUID imports without blocking app/database startup."""
+    if not _oktell_api_ready():
+        return {'status': 'skipped', 'reason': 'missing_token', 'updated': 0}
+
+    batch_size = max(1, min(int(batch_size or 500), 500))
+    max_batches = max(1, min(int(max_batches or 1), 20))
+    checked = 0
+    updated = 0
+    batches = 0
+    after_external_id = None
+
+    for _ in range(max_batches):
+        conn_ids = db.get_unknown_oktell_call_external_ids(
+            limit=batch_size,
+            after_external_id=after_external_id,
+        )
+        if not conn_ids:
+            break
+        after_external_id = conn_ids[-1]
+        batches += 1
+        checked += len(conn_ids)
+        rows = _oktell_query(_oktell_call_end_party_rows_sql(conn_ids))
+        exact_parties = {}
+        for row in rows:
+            party = _oktell_call_end_party(
+                row.get('ct'), row.get('stop_side'), row.get('reason_stop'))
+            if party != 'unknown':
+                exact_parties[str(row.get('conn_id') or '').lower()] = party
+        batch_updated = db.update_imported_call_end_parties(exact_parties)
+        db.mark_oktell_call_end_parties_checked(conn_ids)
+        updated += batch_updated
+
+    return {
+        'status': 'success',
+        'checked': checked,
+        'updated': updated,
+        'batches': batches,
+    }
+
+
 def _oktell_eval_operators_sql(mstart, mnext, min_d, max_d, conn_types=_OKTELL_EVAL_CONNECTION_TYPES):
     # Операторы с подходящими записанными звонками за период (исходящие+входящие) + сколько
     # доступно. UUID оператора считаем в подзапросе, группируем снаружи. Джойн к OperatorInfo
@@ -28367,11 +28476,13 @@ def _oktell_eval_operators_sql(mstart, mnext, min_d, max_d, conn_types=_OKTELL_E
 def _oktell_eval_sample_sql(mstart, mnext, auserids, cap, min_d, max_d, conn_types=_OKTELL_EVAL_CONNECTION_TYPES):
     ids = ", ".join("'" + str(a).replace("'", "") + "'" for a in auserids)
     return (
-        "SELECT q.auserid, q.conn_id, q.phone, q.dt_raw, q.talk_sec, q.ct FROM ("
+        "SELECT q.auserid, q.conn_id, q.phone, q.dt_raw, q.talk_sec, q.ct, "
+        "q.stop_side, q.reason_stop FROM ("
         f"SELECT LOWER(CONVERT(varchar(36), {_OKTELL_EVAL_OPERATOR_UID_EXPR})) AS auserid, LOWER(CONVERT(varchar(36), s.Id)) AS conn_id, "
         f"{_OKTELL_EVAL_PHONE_EXPR} AS phone, "
         "CONVERT(varchar(10), s.TimeStart, 104) + ' ' + CONVERT(varchar(8), s.TimeStart, 108) AS dt_raw, "
         "DATEDIFF(second, s.TimeAnswer, s.TimeStop) AS talk_sec, s.ConnectionType AS ct, "
+        "s.StopSide AS stop_side, s.ReasonStop AS reason_stop, "
         f"ROW_NUMBER() OVER (PARTITION BY {_OKTELL_EVAL_OPERATOR_UID_EXPR} ORDER BY NEWID()) AS rn "
         "FROM oktell.dbo.A_Stat_Connections_1x1 s "
         f"WHERE s.TimeStart >= '{mstart}' AND s.TimeStart < '{mnext}' "
@@ -28480,8 +28591,14 @@ def sync_oktell_evaluation_calls(month=None, date_from=None, date_to=None, trigg
                     'operator': otp_name,
                     'desired': target,
                     'available': available,
-                    'calls': [{'id': c.get('conn_id'), 'datetimeRaw': c.get('dt_raw'),
-                               'phone': c.get('phone'), 'durationSec': c.get('talk_sec')} for c in chosen],
+                    'calls': [{
+                        'id': c.get('conn_id'),
+                        'datetimeRaw': c.get('dt_raw'),
+                        'phone': c.get('phone'),
+                        'durationSec': c.get('talk_sec'),
+                        'callEndParty': _oktell_call_end_party(
+                            c.get('ct'), c.get('stop_side'), c.get('reason_stop')),
+                    } for c in chosen],
                 })
             month_added = 0
             ready_operators = 0
@@ -43605,6 +43722,18 @@ async def run_oktell_operator_statuses_sync_async(triggered_by='scheduler'):
         logging.info("Post-status eval distribution: %s", (dist or {}).get('status'))
     except Exception:
         logging.exception("Post-status eval distribution failed")
+    try:
+        backfill = await loop.run_in_executor(
+            executor_pool,
+            lambda: backfill_oktell_call_end_parties(batch_size=500, max_batches=8)
+        )
+        logging.info(
+            "Post-status call-end-party backfill: status=%s updated=%s",
+            (backfill or {}).get('status'),
+            (backfill or {}).get('updated'),
+        )
+    except Exception:
+        logging.exception("Post-status call-end-party backfill failed")
     return res
 
 
