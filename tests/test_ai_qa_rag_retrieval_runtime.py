@@ -18,6 +18,15 @@ class _Cursor:
         return False
 
     def execute(self, sql, params=None):
+        # Настоящий psycopg2 подставляет параметры сам и падает на несовпадении
+        # («not all arguments converted»). Фейковый курсор молча принимал любой
+        # запрос, поэтому потерянный %s доезжал до прода — проверяем здесь.
+        if params is not None and not isinstance(params, dict):
+            placeholders = sql.count("%s")
+            if placeholders != len(params):
+                raise AssertionError(
+                    f"плейсхолдеров {placeholders}, параметров {len(params)}: "
+                    f"{' '.join(sql.split())[:160]}")
         self.executed.append((" ".join(sql.split()), params))
 
     def fetchall(self):

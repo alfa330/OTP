@@ -536,14 +536,17 @@ class QueueRowTests(unittest.TestCase):
         self.assertIn("c.unchecked_weight", self.queue)
         self.assertIn("зачтено без проверки", self.queue)
 
-    def test_chat_tab_reuses_the_same_row(self):
+    def test_queue_lives_in_one_place_only(self):
+        """Очередь ревью одна на оба субъекта. Во вкладке «Чаты» второй очереди
+        быть не должно — там только чаты."""
         chat = (ROOT / "src" / "components" / "call_qa" / "ChatQueue.jsx").read_text(
             encoding="utf-8")
         view = (ROOT / "src" / "components" / "call_qa" / "CallQaView.jsx").read_text(
             encoding="utf-8")
-        for src in (chat, view):
-            self.assertIn("from './QueueList'", src)
-            self.assertIn("<QueueList items=", src)
+        self.assertIn("from './QueueList'", view)
+        self.assertIn("<QueueList items=", view)
+        self.assertNotIn("QueueList", chat)
+        self.assertNotIn("review-queue", chat)
 
     def test_reason_labels_carry_a_hint(self):
         """Короткая подпись на бейдже, полная формулировка — в подсказке."""
