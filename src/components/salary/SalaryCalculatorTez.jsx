@@ -1,13 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import FaIcon from '../common/FaIcon';
+import SalaryCalculationResult from './SalaryCalculationResult';
 import { calculateTezLineSalary, calculateTezOpSalary, calculateTezOpMonthlyPlan, TEZ_NORM_HOURS } from '../../utils/salaryFormula';
-
-const money = (v) =>
-  new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(
-    Number.isFinite(Number(v)) ? Number(v) : 0
-  ) + ' ₸';
-
-const pct = (v) => `${(Number(v) || 0).toFixed(2)}%`;
 
 const Field = ({ label, icon, iconColor, children }) => (
   <div className="p-4 sm:p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
@@ -29,20 +23,15 @@ const numberInput = (value, onChange, extra = {}) => (
   />
 );
 
-const Row = ({ label, value, strong, alt }) => (
-  <div className={`flex items-center justify-between gap-3 px-3 sm:px-4 py-2 ${alt ? 'bg-gray-50' : 'bg-white'}`}>
-    <div className="text-sm text-gray-600">{label}</div>
-    <div className={`text-right ${strong ? 'font-semibold text-gray-900' : 'font-medium text-gray-800'}`}>{value}</div>
-  </div>
-);
-
 /**
  * Калькулятор зарплаты для направлений отдела TEZ.
  * model: 'tez_line' (Линия/тех поддержка) | 'tez_op' (ОП).
  * Формулы — src/utils/salaryFormula.js (выведены из таблиц расчёта владельца).
  * planPrefill (для ОП): { plan_target, plan_fact } из /api/operator_plan, если есть.
+ * hoursPrefill: часы/норма/план/факт, перенесённые из раздела «Мои часы»
+ * (применяется по смене hoursPrefillNonce, чтобы повторный переход перезаполнял поля).
  */
-const SalaryCalculatorTez = ({ model = 'tez_line', planPrefill = null }) => {
+const SalaryCalculatorTez = ({ model = 'tez_line', planPrefill = null, hoursPrefill = null, hoursPrefillNonce = 0 }) => {
   const isOp = model === 'tez_op';
   const [hoursNorm, setHoursNorm] = useState(String(TEZ_NORM_HOURS));
   const [hoursWorked, setHoursWorked] = useState('');
@@ -62,6 +51,26 @@ const SalaryCalculatorTez = ({ model = 'tez_line', planPrefill = null }) => {
       setPlanPerFte(String(planPrefill.plan_per_fte));
     }
   }, [isOp, planPrefill]);
+
+  // Переход из «Моих часов»: подставляем реальные часы месяца, норму и — для ОП —
+  // план с фактом успешек, чтобы оператор видел ровно свой расчёт.
+  useEffect(() => {
+    if (!hoursPrefill) return;
+    if (hoursPrefill.model && hoursPrefill.model !== model) return;
+    if (hoursPrefill.hoursNorm !== undefined) setHoursNorm(String(hoursPrefill.hoursNorm ?? ''));
+    if (hoursPrefill.hoursWorked !== undefined) setHoursWorked(String(hoursPrefill.hoursWorked ?? ''));
+    if (hoursPrefill.fines !== undefined) setFines(String(hoursPrefill.fines ?? ''));
+    if (hoursPrefill.bonuses !== undefined) setBonuses(String(hoursPrefill.bonuses ?? ''));
+    if (isOp) {
+      if (hoursPrefill.planPerFte !== undefined) setPlanPerFte(String(hoursPrefill.planPerFte ?? ''));
+      if (hoursPrefill.planFact !== undefined) setPlanFact(String(hoursPrefill.planFact ?? ''));
+      setIsNewbie(Boolean(hoursPrefill.newbie));
+    } else {
+      if (hoursPrefill.quality !== undefined) setQuality(String(hoursPrefill.quality ?? ''));
+      if (hoursPrefill.experienceMonths !== undefined) setExperienceMonths(String(hoursPrefill.experienceMonths ?? ''));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hoursPrefillNonce]);
 
   // Индивидуальный план по правилам владельца: ставка / переработка / новичок ×0,8
   // (см. calculateTezOpMonthlyPlan). Ставка выводится из нормы (норма / 176).
@@ -175,41 +184,11 @@ const SalaryCalculatorTez = ({ model = 'tez_line', planPrefill = null }) => {
         </button>
       </div>
 
-      {/* Результат */}
-      <div className="mt-6 p-4 sm:p-6 bg-gray-50 rounded-lg shadow-sm border border-gray-200">
-        <h3 className="text-lg font-semibold mb-1 text-gray-800">Результат расчёта</h3>
-        <p className="text-sm text-gray-500 mb-4">{isOp ? 'Оклад + бонус за успешки' : 'Оклад + бонус за качество + бонус за стаж'}</p>
-
-        <div className="divide-y divide-gray-100 rounded-lg overflow-hidden border bg-white">
-          <Row label={`Оклад (${money(isOp ? 150000 / 176 : 100000 / 176)}/ч × ${(Number(hoursWorked) || 0)} ч)`} value={money(result.oklad)} />
-          {!isOp && (
-            <>
-              <Row alt label={`Бонус за качество (${pct((result.qualityPercent || 0) * 100)} к окладу)`} value={money(result.bonusQuality)} />
-              <Row label={`Бонус за стаж (${pct((result.seniorityPercent || 0) * 100)})`} value={money(result.bonusSeniority)} />
-            </>
-          )}
-          {isOp && (
-            <Row alt label={`Бонус за успешки (% сделок ${pct((result.dealPercent || 0) * 100)})`} value={money(result.bonusDeals)} />
-          )}
-          <Row alt={!isOp} label="Штрафы" value={`− ${money(result.fines)}`} />
-          <Row alt={isOp} label="Удержано 50%" value={`− ${money(result.withholding)}`} />
-          <Row label="Бонусы" value={`+ ${money(result.bonuses)}`} />
-        </div>
-
-        <div className="mt-4 bg-white p-4 rounded border-l-4 border-l-green-500 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-          <div>
-            <div className="text-sm text-gray-600">Итого к выплате</div>
-            <div className="text-xl sm:text-2xl font-bold text-green-600 mt-1 break-words">{money(result.finalSalary)}</div>
-          </div>
-          <div className="text-sm text-gray-600 text-left sm:text-right">
-            <div>Норма часов: <span className="font-medium text-gray-800">{(Number(hoursNorm) || 0).toFixed(2)}</span></div>
-            <div className="mt-1">Выполнение нормы: <span className="font-medium text-gray-800">{pct(result.hoursPercentage)}</span></div>
-            {isOp && (
-              <div className="mt-1">% сделок: <span className="font-medium text-gray-800">{pct((result.dealPercent || 0) * 100)}</span></div>
-            )}
-          </div>
-        </div>
-      </div>
+      {/* Результат — общая карточка со СЗоВ: шапка, сводка, компоненты, итог, детали */}
+      <SalaryCalculationResult
+        salaryResult={result}
+        label={isOp ? 'Оператор ОП TEZ' : 'Оператор Линия TEZ'}
+      />
     </div>
   );
 };

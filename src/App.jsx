@@ -27,7 +27,7 @@ import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
 import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, IosBadge } from './components/ui/ios';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId } from './utils/roles';
 import { departmentAllowsView, departmentHidesColleagueSchedules, departmentRestrictsViews, departmentUsesSimpleEmployeeAccounting, firstAllowedView } from './utils/departmentViews';
-import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan } from './utils/salaryFormula';
+import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan, calculateTezOpSalary, calculateTezLineSalary } from './utils/salaryFormula';
 
 const CHUNK_RELOAD_STORAGE_KEY = 'otp_chunk_reload_attempted';
 const PINNED_TASK_STORAGE_KEY_PREFIX = 'otp_pinned_task';
@@ -249,9 +249,18 @@ const normalizeSalaryCalculatorType = (value) => {
     return SALARY_CALCULATOR_TYPES.has(normalized) ? normalized : 'call';
 };
 
-const normalizeWorkHoursCalculationModelCode = (value) => (
-    String(value || '').trim() === 'chat_manager' ? 'chat_manager' : 'operator'
-);
+// Коды моделей расчёта, которые «Мои часы» умеют различать. Неизвестный код —
+// операторская модель (легаси-поведение). Раньше здесь схлопывалось всё, кроме
+// chat_manager, из-за чего оператор ОП TEZ выглядел как обычный оператор СЗоВ.
+const WORK_HOURS_KNOWN_MODEL_CODES = new Set([
+    'operator', 'chat_manager', 'tez_line', 'tez_op',
+    'op_verificator', 'op_yandex_reg', 'op_osnova', 'op_potok',
+]);
+
+const normalizeWorkHoursCalculationModelCode = (value) => {
+    const code = String(value || '').trim();
+    return WORK_HOURS_KNOWN_MODEL_CODES.has(code) ? code : 'operator';
+};
 
 const getWorkHoursFallbackModelCode = (hoursData) => normalizeWorkHoursCalculationModelCode(
     hoursData?.calculation_model_code ||
@@ -8088,6 +8097,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             onChange={e => updateCellField('efficiency', e.target.value)}
                         />
                         </label>
+                        )}
+
+                        {isTezOpContext && (
+                        /* Успешки считает ночной пересчёт по базе лидов и звонкам —
+                           вручную их не правят, поэтому строка справочная. */
+                        <div className="col-span-1 md:col-span-2 flex items-center justify-between gap-3 rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-700">
+                            <span className="flex items-center gap-2">
+                            <FaIcon className="fas fa-check-circle text-emerald-500" aria-hidden="true" /> Успешки
+                            <span className="text-gray-400">· рассчитываются автоматически</span>
+                            </span>
+                            <span className="text-sm font-semibold text-gray-900 tabular-nums">
+                            {tezSuccessMap?.[String(cellModel.operator_id)]?.[String(cellModel.day)] || 0}
+                            </span>
+                        </div>
                         )}
                     </div>
 
@@ -34000,6 +34023,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // Предзаполнение чат-калькулятора (по nonce — повторное открытие перезаполняет)
             const [salaryChatPrefill, setSalaryChatPrefill] = useState(null);
             const [salaryChatPrefillNonce, setSalaryChatPrefillNonce] = useState(0);
+            // Предзаполнение калькулятора TEZ из «Моих часов» (часы, норма, план и факт успешек).
+            const [tezCalculatorPrefill, setTezCalculatorPrefill] = useState(null);
+            const [tezCalculatorPrefillNonce, setTezCalculatorPrefillNonce] = useState(0);
             const [showPointsTable, setShowPointsTable] = useState(false);
             const [passwordData, setPasswordData] = useState({
                 user_id: '',
@@ -34060,6 +34086,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // Отдел TEZ использует собственные модели калькулятора (Линия/ОП) вместо call/chat/converter.
             const isTezSalaryDept = normalizeDepartmentCode(salaryDepartment.code) === 'tez';
             const tezSalaryModel = calculatorType === 'tez_op' ? 'tez_op' : 'tez_line';
+            // Модель самого пользователя из его же часов — чтобы оператор ОП не попадал
+            // по умолчанию на вкладку «Линия TEZ». Как только вкладку выбрали руками,
+            // автоподстановка отключается до конца сессии.
+            const tezCalculatorTypePickedRef = useRef(false);
+            const ownCalculationModelCode = useMemo(() => {
+                const list = Array.isArray(hoursData?.operators) ? hoursData.operators : [];
+                const own = list.find((o) => Number(o?.operator_id) === Number(user?.id)) || list[0] || null;
+                return resolveWorkHoursMonthModelInfo(own).modelCode;
+            }, [hoursData, user?.id]);
+            useEffect(() => {
+                if (!isTezSalaryDept || tezCalculatorTypePickedRef.current) return;
+                const own = TEZ_SALARY_CALCULATOR_TYPES.has(ownCalculationModelCode)
+                    ? ownCalculationModelCode
+                    : (TEZ_SALARY_CALCULATOR_TYPES.has(calculatorType) ? calculatorType : 'tez_line');
+                setCalculatorType((prev) => (prev === own ? prev : own));
+            }, [isTezSalaryDept, calculatorType, ownCalculationModelCode]);
             // Общий (на 1 FTE) план месяца отдела для прероллинга калькулятора ОП TEZ.
             const [tezPlanPrefill, setTezPlanPrefill] = useState(null);
             const salaryDepartmentId = user?.department_id ?? user?.departmentId ?? user?.headed_department_id ?? user?.headedDepartmentId ?? null;
@@ -38225,6 +38267,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     !Array.isArray(hoursData.chat_metrics_by_day)
                                 ) ? hoursData.chat_metrics_by_day : {};
                                 const selectedDayIsChatModel = selectedDay?.calculationModelCode === 'chat_manager' || selectedDay?.isChatModel === true;
+                                const selectedDayIsTezOp = selectedDay?.calculationModelCode === 'tez_op';
+                                // Успешка дня приходит с бэка в самом дне; карта по дням — фолбэк для дней без часов.
+                                const tezSuccessesForDay = Number(
+                                    d?.tez_successes
+                                    ?? hoursData?.tez_successes_by_day?.[String(selectedDay.day)]
+                                    ?? 0
+                                ) || 0;
                                 const chatMetrics = selectedDayIsChatModel
                                     ? (d?.chat_metrics || chatMetricsByDay[String(selectedDay.day)] || {})
                                     : {};
@@ -38300,9 +38349,41 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     value: fmtTimeLike(normalize("talk_time")),
                                     hint: "Время в разговоре",
                                     },
+                                    // ОП TEZ: к общим показателям дня добавляем свои — набор и чаты.
+                                    ...(selectedDayIsTezOp ? [
+                                        {
+                                        key: "dial_time",
+                                        label: "Набор",
+                                        icon: "fas fa-hourglass-half",
+                                        value: fmtTimeLike(normalize("dial_time")),
+                                        hint: "Время набора до ответа",
+                                        },
+                                        {
+                                        key: "chats",
+                                        label: "Чаты",
+                                        icon: "fas fa-comment-dots",
+                                        value: fmtNumber(normalize("chats"), 0),
+                                        hint: "Чаты за день",
+                                        },
+                                    ] : []),
                                 ];
 
                                 return (
+                                    <>
+                                    {selectedDayIsTezOp && (
+                                    <div className="mt-3 flex items-center gap-3 p-2 bg-white border rounded-lg shadow-sm">
+                                        <div className="flex-shrink-0 w-10 h-10 rounded-full bg-emerald-50 flex items-center justify-center text-emerald-600">
+                                        <FaIcon className="fas fa-check-circle text-lg" aria-hidden="true" />
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                        <div className="flex items-center justify-between">
+                                            <div className="text-sm font-medium text-gray-800">Успешки</div>
+                                            <div className="text-sm font-semibold text-gray-900 tabular-nums">{tezSuccessesForDay}</div>
+                                        </div>
+                                        <div className="text-xs text-gray-500">Успешки за этот день</div>
+                                        </div>
+                                    </div>
+                                    )}
                                     <div className="grid grid-cols-2 gap-3 mt-3">
                                     {metrics.map((m) => (
                                         <div key={m.key} className="flex items-center gap-3 p-2 bg-white border rounded-lg shadow-sm">
@@ -38319,6 +38400,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </div>
                                     ))}
                                     </div>
+                                    </>
                                 );
                                 })()}
                             </div>
@@ -46658,6 +46740,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const calculationModelCode = monthModelInfo.modelCode;
                                             const hasMixedCalculationModels = monthModelInfo.hasMixedModels;
                                             const isChatModel = !hasMixedCalculationModels && calculationModelCode === 'chat_manager';
+                                            // Модели TEZ: у ОП выплата считается по успешкам, у Линии — по качеству и стажу.
+                                            const isTezOpModel = !hasMixedCalculationModels && calculationModelCode === 'tez_op';
+                                            const isTezLineModel = !hasMixedCalculationModels && calculationModelCode === 'tez_line';
                                             const interactionLabel = isChatModel ? 'Чаты' : 'Звонки';
                                             const interactionPerHourLabel = isChatModel ? 'Чаты в час' : 'Звонки в час';
                                             const interactionIcon = isChatModel ? 'fas fa-comments' : 'fas fa-phone';
@@ -46842,7 +46927,55 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 experience: salaryChatExperience,
                                                 bonuses,
                                             });
-                                            const estimatedSalary = isChatModel ? estimatedChatSalary : estimatedOperatorSalary;
+                                            // --- ОП TEZ: успешки месяца и индивидуальный план (те же правила, что в учёте часов) ---
+                                            const tezSuccessesTotal = safeNum(op.aggregates?.total_tez_successes);
+                                            const tezPlanResult = isTezOpModel
+                                                ? calculateTezOpMonthlyPlan({
+                                                    planPerFte: op.tez_plan_per_fte,
+                                                    rate: op.rate,
+                                                    normHours: norm,
+                                                    factHours: regular,
+                                                    hireDate: op.hire_date,
+                                                    month: selectedMonth,
+                                                })
+                                                : null;
+                                            const tezIndividualPlan = tezPlanResult?.plan ?? null;
+                                            const tezPlanPercent = (tezIndividualPlan && tezIndividualPlan > 0)
+                                                ? (tezSuccessesTotal / tezIndividualPlan) * 100
+                                                : 0;
+                                            // Стаж в месяцах для модели Линия TEZ (в её формуле надбавка идёт по месяцам, а не по диапазону).
+                                            const tezExperienceMonths = (() => {
+                                                const raw = profileData?.hire_date || user?.hire_date || user?.hireDate
+                                                    || operatorUserRowForSalary?.hire_date || operatorUserRowForSalary?.hireDate;
+                                                const parsed = raw ? new Date(raw) : null;
+                                                if (!parsed || Number.isNaN(parsed.getTime())) return 0;
+                                                const [my, mm] = String(selectedMonth || '').split('-').map((v) => parseInt(v, 10));
+                                                const end = (Number.isFinite(my) && Number.isFinite(mm)) ? new Date(my, mm, 0) : new Date();
+                                                const months = (end.getFullYear() - parsed.getFullYear()) * 12 + (end.getMonth() - parsed.getMonth());
+                                                return Math.max(0, months);
+                                            })();
+                                            const estimatedTezSalary = isTezOpModel
+                                                ? calculateTezOpSalary({
+                                                    hoursWorked: regular,
+                                                    hoursNorm: norm,
+                                                    planTarget: tezIndividualPlan || 0,
+                                                    planFact: tezSuccessesTotal,
+                                                    fines,
+                                                    bonuses,
+                                                })
+                                                : (isTezLineModel
+                                                    ? calculateTezLineSalary({
+                                                        hoursWorked: regular,
+                                                        hoursNorm: norm,
+                                                        quality: salaryQuality,
+                                                        experienceMonths: tezExperienceMonths,
+                                                        fines,
+                                                        bonuses,
+                                                    })
+                                                    : null);
+                                            const isTezModel = isTezOpModel || isTezLineModel;
+                                            const estimatedSalary = estimatedTezSalary
+                                                || (isChatModel ? estimatedChatSalary : estimatedOperatorSalary);
                                             const formatEstimatedSalaryMoney = (value) => {
                                                 const n = Number(value);
                                                 if (!Number.isFinite(n)) return '0 ₸';
@@ -46851,11 +46984,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     maximumFractionDigits: 0,
                                                 }) + ' ₸';
                                             };
-                                            const missingSalaryInputs = [
-                                                !salaryExperience ? 'стаж' : null,
-                                                !hasSalaryQuality ? 'качество' : null,
-                                                safeNum(norm) <= 0 ? 'норма' : null,
-                                            ].filter(Boolean);
+                                            const missingSalaryInputs = isTezOpModel
+                                                ? [
+                                                    tezIndividualPlan == null ? 'план успешек' : null,
+                                                    safeNum(norm) <= 0 ? 'норма' : null,
+                                                ].filter(Boolean)
+                                                : isTezLineModel
+                                                ? [
+                                                    !hasSalaryQuality ? 'качество' : null,
+                                                    safeNum(norm) <= 0 ? 'норма' : null,
+                                                ].filter(Boolean)
+                                                : [
+                                                    !salaryExperience ? 'стаж' : null,
+                                                    !hasSalaryQuality ? 'качество' : null,
+                                                    safeNum(norm) <= 0 ? 'норма' : null,
+                                                ].filter(Boolean);
 
                                             // Раздельный расчёт ЗП при переводе посреди месяца (≥2 разных моделей по сегментам).
                                             // Часы части = база (work_time её дней) + доля общих часов (тренинг/тех/офлайн) по доле базы;
@@ -46952,6 +47095,28 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     setSalaryDualResult(dualSalaryResults);
                                                     setShowPointsTable(false);
                                                     setCalculatorType('call');
+                                                    navigateToView('salary');
+                                                    return;
+                                                }
+                                                if (isTezModel) {
+                                                    // Калькулятор TEZ: подставляем часы, норму и (для ОП) план с фактом успешек.
+                                                    setTezCalculatorPrefill({
+                                                        model: isTezOpModel ? 'tez_op' : 'tez_line',
+                                                        hoursNorm: safeNum(norm).toFixed(2),
+                                                        hoursWorked: safeNum(regular).toFixed(2),
+                                                        quality: hasSalaryQuality ? salaryQuality.toFixed(2) : '',
+                                                        experienceMonths: isTezLineModel ? String(tezExperienceMonths) : '',
+                                                        planPerFte: op.tez_plan_per_fte != null ? String(op.tez_plan_per_fte) : '',
+                                                        planFact: isTezOpModel ? String(tezSuccessesTotal) : '',
+                                                        newbie: Boolean(tezPlanResult?.isNewbie),
+                                                        fines: safeNum(fines) > 0 ? safeNum(fines).toFixed(2) : '',
+                                                        bonuses: safeNum(bonuses) > 0 ? safeNum(bonuses).toFixed(2) : '',
+                                                    });
+                                                    setTezCalculatorPrefillNonce((n) => n + 1);
+                                                    setSalaryDualResult(null);
+                                                    setShowPointsTable(false);
+                                                    tezCalculatorTypePickedRef.current = true;
+                                                    setCalculatorType(isTezOpModel ? 'tez_op' : 'tez_line');
                                                     navigateToView('salary');
                                                     return;
                                                 }
@@ -47076,7 +47241,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <div className="workhours-card bg-gray-50 rounded-xl border border-gray-200 p-5 shadow-sm">
                                                     <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2 mb-4">
                                                         <FaIcon className="fas fa-chart-line text-blue-500"></FaIcon>
-                                                        Интенсивность и корректировки
+                                                        {isTezOpModel ? 'Успешки и корректировки' : 'Интенсивность и корректировки'}
                                                     </h3>
                                                     <div className="space-y-3">
                                                         {dualSalaryResults && dualSalaryResults.length >= 2 ? (
@@ -47084,6 +47249,49 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 parts={dualSalaryResults}
                                                                 onOpenCalculator={openSalaryCalculatorWithHours}
                                                             />
+                                                        ) : isTezOpModel ? (
+                                                            /* ОП: выплата зависит от успешек, а не от интенсивности звонков —
+                                                               звонки/набор/чаты остаются в детализации дня. */
+                                                            <>
+                                                            <div className="flex items-center justify-between rounded-lg bg-white border border-gray-200 px-3 py-2.5">
+                                                            <span className="text-sm text-gray-600 flex items-center gap-2">
+                                                                <FaIcon className="fas fa-check-circle text-gray-400"></FaIcon>
+                                                                Успешки за месяц
+                                                            </span>
+                                                            <span className="text-lg font-bold text-gray-900 tabular-nums">{safeNum(tezSuccessesTotal).toFixed(0)}</span>
+                                                            </div>
+                                                            <div className="flex items-center justify-between rounded-lg bg-white border border-gray-200 px-3 py-2.5">
+                                                            <span className="text-sm text-gray-600 flex items-center gap-2">
+                                                                <FaIcon className="fas fa-bullseye text-gray-400"></FaIcon>
+                                                                План успешек
+                                                            </span>
+                                                            <span className="text-lg font-bold text-gray-900 tabular-nums" title={tezPlanResult?.lines?.join(' ') || ''}>
+                                                                {tezIndividualPlan != null ? tezIndividualPlan.toFixed(1) : '—'}
+                                                            </span>
+                                                            </div>
+                                                            {tezIndividualPlan != null && tezIndividualPlan > 0 && (
+                                                            <div className="rounded-lg bg-white border border-gray-200 px-3 py-2.5">
+                                                                <div className="flex items-center justify-between">
+                                                                <span className="text-sm text-gray-600 flex items-center gap-2">
+                                                                    <FaIcon className="fas fa-percent text-gray-400"></FaIcon>
+                                                                    Выполнение плана
+                                                                </span>
+                                                                <span className={`text-lg font-bold tabular-nums ${tezPlanPercent >= 100 ? 'text-green-600' : tezPlanPercent >= 85 ? 'text-blue-600' : 'text-amber-600'}`}>
+                                                                    {safeNum(tezPlanPercent).toFixed(1)}%
+                                                                </span>
+                                                                </div>
+                                                                <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-gray-200">
+                                                                <div
+                                                                    className={`h-full rounded-full transition-all duration-500 ${tezPlanPercent >= 100 ? 'bg-green-500' : tezPlanPercent >= 85 ? 'bg-blue-500' : 'bg-amber-500'}`}
+                                                                    style={{ width: `${Math.max(0, Math.min(100, tezPlanPercent))}%` }}
+                                                                />
+                                                                </div>
+                                                                {tezPlanResult?.caseCode && tezPlanResult.caseCode !== 'standard' && (
+                                                                <div className="mt-2 text-[11px] text-gray-500">{tezPlanResult.caseLabel}</div>
+                                                                )}
+                                                            </div>
+                                                            )}
+                                                            </>
                                                         ) : (
                                                             <>
                                                             <div className="flex items-center justify-between rounded-lg bg-white border border-gray-200 px-3 py-2.5">
@@ -47131,6 +47339,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             <div className="mt-1 text-xs text-gray-500">
                                                                 {dualSalaryResults && dualSalaryResults.length >= 2
                                                                     ? 'Сумма рассчитана отдельно по операторской и чат-модели.'
+                                                                    : isTezOpModel
+                                                                    ? `По модели «Оператор ОП TEZ»${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`
+                                                                    : isTezLineModel
+                                                                    ? `По модели «Оператор Линия TEZ»${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`
                                                                     : isChatModel
                                                                     ? 'Для чат-модели используется отдельный калькулятор.'
                                                                     : `По формуле калькулятора${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`}
@@ -47138,6 +47350,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             <div className="mt-1 text-[11px] text-gray-400">
                                                                 {dualSalaryResults && dualSalaryResults.length >= 2
                                                                     ? 'Откройте общий расчёт, чтобы посмотреть обе части подробно.'
+                                                                    : isTezOpModel
+                                                                    ? 'Оклад + бонус за успешки, минус штрафы. Удержание 50% не учтено.'
+                                                                    : isTezLineModel
+                                                                    ? 'Оклад + бонус за качество и стаж, минус штрафы. Удержание 50% не учтено.'
                                                                     : isChatModel
                                                                     ? 'Чаты, оценка и время ответа уже подтянуты в часы работы.'
                                                                     : 'Штрафы в формуле калькулятора не вычитаются.'}
@@ -47156,7 +47372,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 className="mt-3 w-full inline-flex items-center justify-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100 transition"
                                                             >
                                                                 <FaIcon className="fas fa-arrow-right"></FaIcon>
-                                                                {isChatModel ? 'Открыть чат-калькулятор' : 'Открыть в калькуляторе'}
+                                                                {isTezOpModel
+                                                                    ? 'Открыть калькулятор ОП TEZ'
+                                                                    : isTezLineModel
+                                                                    ? 'Открыть калькулятор Линия TEZ'
+                                                                    : isChatModel
+                                                                    ? 'Открыть чат-калькулятор'
+                                                                    : 'Открыть в калькуляторе'}
                                                             </button>
                                                         )}
                                                         </div>
@@ -48234,13 +48456,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         <>
                                                             <button
                                                                 className={`w-full sm:w-auto px-3 sm:px-4 py-2 rounded text-sm font-medium ${tezSalaryModel === 'tez_line' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
-                                                                onClick={() => setCalculatorType('tez_line')}
+                                                                onClick={() => { tezCalculatorTypePickedRef.current = true; setCalculatorType('tez_line'); }}
                                                             >
                                                                 Линия TEZ
                                                             </button>
                                                             <button
                                                                 className={`w-full sm:w-auto px-3 sm:px-4 py-2 rounded text-sm font-medium ${tezSalaryModel === 'tez_op' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
-                                                                onClick={() => setCalculatorType('tez_op')}
+                                                                onClick={() => { tezCalculatorTypePickedRef.current = true; setCalculatorType('tez_op'); }}
                                                             >
                                                                 ОП TEZ
                                                             </button>
@@ -48270,7 +48492,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </div>
                                                 {isTezSalaryDept ? (
                                                     <Suspense fallback={null}>
-                                                        <SalaryCalculatorTez model={tezSalaryModel} planPrefill={tezPlanPrefill} />
+                                                        <SalaryCalculatorTez
+                                                            model={tezSalaryModel}
+                                                            planPrefill={tezPlanPrefill}
+                                                            hoursPrefill={tezCalculatorPrefill}
+                                                            hoursPrefillNonce={tezCalculatorPrefillNonce}
+                                                        />
                                                     </Suspense>
                                                 ) : calculatorType === 'call' ? (
                                                     <>
