@@ -198,6 +198,22 @@ class ShiftAuctionTimeGroupNormalizationTests(unittest.TestCase):
         self.assertEqual(groups[0]["name"], "Новички")
         self.assertEqual(groups[0]["operator_ids"], [3, 4])
 
+    def test_group_may_sit_on_another_day_of_the_week(self):
+        groups = self._normalize([{
+            "starts_at": datetime(2026, 8, 5, 9, 0),
+            "ends_at": datetime(2026, 8, 5, 11, 0),
+        }])
+        self.assertEqual(groups[0]["starts_at"], datetime(2026, 8, 5, 9, 0))
+        self.assertEqual(groups[0]["ends_at"], datetime(2026, 8, 5, 11, 0))
+
+    def test_self_schedule_flag_round_trips(self):
+        groups = self._normalize([
+            {"starts_at": datetime(2026, 8, 3, 9, 0), "self_schedule_enabled": True},
+            {"starts_at": datetime(2026, 8, 3, 9, 30)},
+        ])
+        self.assertTrue(groups[0]["self_schedule_enabled"])
+        self.assertFalse(groups[1]["self_schedule_enabled"])
+
     def test_group_end_before_its_own_start_is_rejected(self):
         with self.assertRaises(ValueError) as ctx:
             self._normalize([{
@@ -305,7 +321,7 @@ class ShiftAuctionTimeGroupGatingTests(unittest.TestCase):
     def test_day_offs_follow_the_operator_window(self):
         source = _method_source("set_shift_auction_test_day_off")
 
-        self.assertIn("_get_shift_auction_operator_group_window_tx(", source)
+        self.assertIn("_get_shift_auction_operator_group_tx(", source)
         self.assertIn("day_off_starts_at, day_off_ends_at", source)
 
     def test_manager_controls_use_the_whole_run(self):
@@ -323,6 +339,109 @@ class ShiftAuctionTimeGroupGatingTests(unittest.TestCase):
         self.assertIn("UPDATE shift_auction_time_groups", source)
         self.assertIn("SET ends_at = ends_at + %s", source)
         self.assertIn("AND ends_at IS NOT NULL", source)
+
+
+class ShiftAuctionSelfScheduleTests(unittest.TestCase):
+    """«Свой график»: members place shifts themselves, capped at norm + 10 hours."""
+
+    def test_schema_carries_the_toggle_and_the_lot_marker(self):
+        self.assertIn(
+            "ALTER TABLE shift_auction_time_groups ADD COLUMN IF NOT EXISTS self_schedule_enabled BOOLEAN NOT NULL DEFAULT FALSE;",
+            DATABASE_SOURCE,
+        )
+        self.assertIn(
+            "ALTER TABLE shift_auction_test_lots ADD COLUMN IF NOT EXISTS self_scheduled_by INTEGER NULL",
+            DATABASE_SOURCE,
+        )
+
+    def test_allowance_is_ten_hours(self):
+        self.assertIn("SHIFT_AUCTION_SELF_SCHEDULE_EXTRA_MINUTES = 600", DATABASE_SOURCE)
+        self.assertIn("const AUCTION_SELF_SCHEDULE_EXTRA_MINUTES = 600;", FRONTEND_SOURCE)
+
+    def test_toggle_is_persisted_with_the_group(self):
+        source = _method_source("_save_shift_auction_time_groups_tx")
+
+        self.assertIn("self_schedule_enabled = %s", source)
+        self.assertIn('group["self_schedule_enabled"]', source)
+
+    def test_placing_a_shift_is_gated_on_the_group_toggle(self):
+        source = _method_source("self_schedule_shift_auction_shift")
+
+        self.assertIn("SELF_SCHEDULE_NOT_ALLOWED", source)
+        self.assertIn("NOT_TEST_PARTICIPANT", source)
+        self.assertIn("AUCTION_NOT_OPEN", source)
+        self.assertIn("_shift_auction_effective_window(", source)
+
+    def test_placing_a_shift_respects_the_ceiling_and_day_rules(self):
+        source = _method_source("self_schedule_shift_auction_shift")
+
+        self.assertIn("SHIFT_AUCTION_SELF_SCHEDULE_EXTRA_MINUTES", source)
+        self.assertIn("SELF_SCHEDULE_LIMIT_EXCEEDED", source)
+        for code in (
+            "SHIFT_AUCTION_STATUS_PERIOD_BLOCKED",
+            "DAY_OFF_SELECTED",
+            "DAY_ALREADY_HAS_SHIFT",
+            "SHIFT_ALREADY_STARTED",
+            "DATE_OUT_OF_RANGE",
+        ):
+            with self.subTest(code=code):
+                self.assertIn(code, source)
+
+    def test_shift_length_follows_the_rate_bucket_but_the_norm_uses_the_real_rate(self):
+        source = _method_source("self_schedule_shift_auction_shift")
+
+        self.assertIn("rate_bucket = self._shift_auction_rate_bucket(operator_rate)", source)
+        self.assertIn("SHIFT_AUCTION_RATE_SHIFT_MINUTES.get(rate_bucket)", source)
+        self.assertIn("cursor, operator_id, operator_rate,", source)
+
+    def test_shift_is_created_already_claimed_and_marked(self):
+        source = _method_source("self_schedule_shift_auction_shift")
+
+        self.assertIn("'claimed', %s, CURRENT_TIMESTAMP, %s", source)
+        self.assertIn("self_scheduled_by", source)
+        self.assertIn("'auction-self'", source)
+        # A new row cannot be patched into client state — clients must resnapshot.
+        self.assertIn('"shift_self_scheduled"', source)
+
+    def test_giving_up_a_self_scheduled_shift_removes_it(self):
+        release_source = _method_source("release_shift_auction_test_lot")
+        remove_source = _method_source("_remove_self_scheduled_shift_tx")
+
+        self.assertIn("_remove_self_scheduled_shift_tx(cursor, operator_id, lot)", release_source)
+        self.assertIn("DELETE FROM shift_auction_test_lots WHERE id = %s", remove_source)
+        self.assertIn("AND source = 'auction-self'", remove_source)
+        self.assertIn('"self_scheduled_shift_removed"', remove_source)
+
+    def test_ordinary_claims_of_such_operators_share_the_wider_ceiling(self):
+        source = _method_source("claim_shift_auction_test_lot")
+
+        self.assertIn("norm_allowance_minutes = workload[\"norm_minutes\"] + (", source)
+        self.assertIn("self.SHIFT_AUCTION_SELF_SCHEDULE_EXTRA_MINUTES if self_schedule_enabled else 0", source)
+        self.assertIn("> norm_allowance_minutes + 1", source)
+
+    def test_lot_marker_reaches_the_grid(self):
+        self.assertIn('"self_scheduled": bool(row[22]) if len(row) > 22 else False,', DATABASE_SOURCE)
+        self.assertIn("l.self_scheduled_by", DATABASE_SOURCE)
+        self.assertIn("const isSelfScheduledLot = Boolean(lot.self_scheduled);", FRONTEND_SOURCE)
+
+    def test_progress_is_measured_against_the_wider_ceiling(self):
+        source = _method_source("_get_shift_auction_participant_workloads_tx")
+
+        self.assertIn("self_schedule_operator_ids", source)
+        self.assertIn('"ceiling_minutes": ceiling_minutes,', source)
+        self.assertIn('"over_minutes": max(0, int(claimed_net) - ceiling_minutes),', source)
+        # The plain norm stays in the payload — payroll still needs it.
+        self.assertIn('"norm_minutes": norm_minutes,', source)
+        self.assertIn("workload.ceiling_minutes || workload.norm_minutes", FRONTEND_SOURCE)
+
+    def test_route_is_operator_only(self):
+        route = ROUTES_SOURCE.split("def api_shift_auction_self_schedule(")[1].split("@app.route")[0]
+
+        self.assertIn("_normalize_user_role(requester[3]) != 'operator'", route)
+        self.assertIn("db.self_schedule_shift_auction_shift(", route)
+        for code in ("SELF_SCHEDULE_NOT_ALLOWED", "SELF_SCHEDULE_LIMIT_EXCEEDED"):
+            with self.subTest(code=code):
+                self.assertIn(f'"{code}": (', ROUTES_SOURCE)
 
 
 class ShiftAuctionTimeGroupApiTests(unittest.TestCase):
@@ -373,6 +492,25 @@ class ShiftAuctionTimeGroupFrontendTests(unittest.TestCase):
 
     def test_save_is_blocked_while_a_group_window_is_broken(self):
         self.assertIn("if (timeGroupIssues.size) {", FRONTEND_SOURCE)
+
+    def test_group_day_is_picked_inside_the_auction_week(self):
+        self.assertIn("const getWeekDatesForDate = (dateValue) => {", FRONTEND_SOURCE)
+        self.assertIn("getWeekDatesForDate(draftStartsAtParts.date)", FRONTEND_SOURCE)
+        self.assertIn("patchDraftTimeGroup(group.key, { date: weekDate })", FRONTEND_SOURCE)
+
+    def test_own_end_before_the_start_rolls_to_the_next_day(self):
+        self.assertIn(
+            "sameDayEnd > windowStartsAt ? sameDayEnd : `${addDaysToDateInputValue(groupDate, 1)}T${group.endTime}`",
+            FRONTEND_SOURCE,
+        )
+
+    def test_self_schedule_is_offered_only_to_its_group(self):
+        self.assertIn(
+            "const canSelfSchedule = canClaim && !canMonitor && Boolean(settings.my_time_group?.self_schedule_enabled);",
+            FRONTEND_SOURCE,
+        )
+        self.assertIn("openSelfSchedule(item.date)", FRONTEND_SOURCE)
+        self.assertIn("self_schedule_enabled: Boolean(group.selfSchedule)", FRONTEND_SOURCE)
 
 
 if __name__ == "__main__":

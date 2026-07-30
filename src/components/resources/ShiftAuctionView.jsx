@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   Bell,
   BookOpen,
+  CalendarCheck,
   CalendarDays,
   CalendarClock,
   CheckCircle2,
@@ -138,6 +139,8 @@ const AUCTION_TIME_PRESETS = ['09:00', '12:00', '15:00', '18:00', '20:00'];
 // Week time groups: the same cap the server enforces, mirrored so the "+ Группа"
 // button can simply disappear instead of failing on save.
 const AUCTION_TIME_GROUP_LIMIT = 10;
+// How far above their norm a "свой график" group may go — mirrors the server.
+const AUCTION_SELF_SCHEDULE_EXTRA_MINUTES = 600;
 const AUCTION_WEEKDAY_LABELS = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
 // Realtime events that carry a full `payload.lot` — these can be applied to a
 // single lot in place instead of refetching the whole (heavy) snapshot.
@@ -293,37 +296,66 @@ const getAuctionWindowMinutes = (startsAt, endsAt) => {
   return Math.round((end - start) / 60000);
 };
 
-// A group only ever carries the *time* of day in the form: its dates follow the
-// auction window of the week it belongs to, so moving the week (or the main
-// start) moves its groups along instead of leaving them on a stale date.
+const addDaysToDateInputValue = (dateValue, days) => (
+  splitDateTimeInputValue(addMinutesToDateTimeInputValue(`${dateValue}T00:00`, days * 24 * 60)).date
+);
+
+// Monday-first weekday index, matching AUCTION_WEEKDAY_LABELS.
+const getWeekdayIndex = (dateValue) => {
+  const parsed = new Date(`${dateValue}T00:00:00`);
+  return Number.isNaN(parsed.getTime()) ? 0 : (parsed.getDay() + 6) % 7;
+};
+
+// Monday-first week around a date — the days a group may be moved to.
+const getWeekDatesForDate = (dateValue) => {
+  if (!dateValue) return [];
+  const anchor = new Date(`${dateValue}T00:00:00`);
+  if (Number.isNaN(anchor.getTime())) return [];
+  const mondayOffset = (anchor.getDay() + 6) % 7;
+  const monday = addDaysToDateInputValue(dateValue, -mondayOffset);
+  return Array.from({ length: 7 }, (_, index) => addDaysToDateInputValue(monday, index));
+};
+
+// A group carries a day inside the auction week plus its times. The day defaults
+// to the main start's, so moving the week (or the main start) moves the groups
+// along instead of leaving them on a stale date.
 const toDraftTimeGroup = (group) => ({
   key: `saved-${group?.id}`,
   id: normalizeOperatorId(group?.id),
   name: group?.name || '',
+  date: splitDateTimeInputValue(group?.starts_at).date,
   startTime: splitDateTimeInputValue(group?.starts_at).time,
   endTime: splitDateTimeInputValue(group?.ends_at).time,
+  selfSchedule: Boolean(group?.self_schedule_enabled),
   operatorIds: Array.isArray(group?.operator_ids)
     ? group.operator_ids.map(normalizeOperatorId).filter(Boolean)
     : []
 });
 
-// A new group starts on the main start time: the time control always shows some
+// A new group starts on the main day and time: the controls always show some
 // value, so an "empty" start would silently disagree with what the manager sees.
-const createDraftTimeGroup = (index, startTime) => ({
+const createDraftTimeGroup = (index, date, startTime) => ({
   key: `new-${Date.now().toString(36)}-${index}`,
   id: null,
   name: '',
+  date: date || '',
   startTime: startTime || '',
   endTime: '',
+  selfSchedule: false,
   operatorIds: []
 });
 
 const getTimeGroupWindow = (group, startsAt, endsAt) => {
-  const startDate = splitDateTimeInputValue(startsAt).date;
-  const endDate = splitDateTimeInputValue(endsAt).date || startDate;
+  const groupDate = group?.date || splitDateTimeInputValue(startsAt).date;
+  if (!groupDate || !group?.startTime) return { startsAt: '', endsAt: '' };
+  const windowStartsAt = `${groupDate}T${group.startTime}`;
+  if (!group.endTime) return { startsAt: windowStartsAt, endsAt: '' };
+  // An end at or before the start reads as "next morning" — the same way a night
+  // shift does. The resolved window is spelled out in the UI, nothing is hidden.
+  const sameDayEnd = `${groupDate}T${group.endTime}`;
   return {
-    startsAt: group?.startTime && startDate ? `${startDate}T${group.startTime}` : '',
-    endsAt: group?.endTime && endDate ? `${endDate}T${group.endTime}` : ''
+    startsAt: windowStartsAt,
+    endsAt: sameDayEnd > windowStartsAt ? sameDayEnd : `${addDaysToDateInputValue(groupDate, 1)}T${group.endTime}`
   };
 };
 
@@ -332,10 +364,10 @@ const getTimeGroupWindow = (group, startsAt, endsAt) => {
 const getTimeGroupIssue = (group, startsAt, endsAt) => {
   if (!startsAt) return 'Сначала задайте начало аукциона';
   if (!group?.startTime) return 'Укажите старт группы';
+  // An explicit end is always resolved to a moment after the start, so only the
+  // inherited-end case can leave the group with no window at all.
   const window = getTimeGroupWindow(group, startsAt, endsAt);
-  if (window.endsAt) {
-    return window.endsAt <= window.startsAt ? 'Завершение группы должно быть позже её старта' : '';
-  }
+  if (window.endsAt) return '';
   if (endsAt && window.startsAt >= endsAt) {
     return 'Группа стартует после общего завершения — задайте ей своё завершение';
   }
@@ -349,6 +381,7 @@ const buildTimeGroupsPayload = (groups, startsAt, endsAt) => (groups || []).map(
     name: String(group.name || '').trim(),
     starts_at: window.startsAt || null,
     ends_at: window.endsAt || null,
+    self_schedule_enabled: Boolean(group.selfSchedule),
     operator_ids: group.operatorIds || []
   };
 });
@@ -357,11 +390,17 @@ const getTimeGroupTitle = (group, index) => String(group?.name || '').trim() || 
 
 const formatTimeGroupWindowLabel = (group, startsAt, endsAt) => {
   if (!group?.startTime) return 'Старт не задан';
+  const window = getTimeGroupWindow(group, startsAt, endsAt);
+  const mainStartDate = splitDateTimeInputValue(startsAt).date;
+  const groupDate = group.date || mainStartDate;
+  const endParts = splitDateTimeInputValue(window.endsAt);
+  // The day is shown only when it differs from the auction's own — otherwise it
+  // is noise repeated on every group.
+  const dayPrefix = groupDate && groupDate !== mainStartDate ? `${formatShortDateLabel(groupDate)} · ` : '';
   const endLabel = group.endTime
-    ? group.endTime
-    : (splitDateTimeInputValue(endsAt).time || '—');
-  const inherited = !group.endTime && endsAt;
-  return `${group.startTime} → ${endLabel}${inherited ? ' (общее)' : ''}`;
+    ? `${endParts.date && endParts.date !== groupDate ? `${formatShortDateLabel(endParts.date)} ` : ''}${group.endTime}`
+    : `${splitDateTimeInputValue(endsAt).time || '—'} (общее)`;
+  return `${dayPrefix}${group.startTime} → ${endLabel}`;
 };
 
 const compareDateInputValues = (left, right) => String(left || '').localeCompare(String(right || ''));
@@ -478,6 +517,17 @@ const clockToMinutes = (value) => {
   const match = normalized.match(/^(\d{2}):(\d{2})$/);
   if (!match) return 0;
   return Number(match[1]) * 60 + Number(match[2]);
+};
+
+// Shift a "свой график" operator gets for a chosen start: the length follows their
+// rate, and a full-rate 20:00 start is the 20*08 night shift, exactly as in the grid.
+const getSelfScheduleShiftGroup = (rate, startTime) => {
+  const value = Number(rate) || 0;
+  const bucket = value <= 0.5 ? 0.5 : (value <= 0.75 ? 0.75 : 1);
+  if (bucket === 1 && normalizeClockValue(startTime) === '20:00') {
+    return AUCTION_RATE_GROUPS.find((group) => group.night) || null;
+  }
+  return AUCTION_RATE_GROUPS.find((group) => !group.night && group.rate === bucket) || null;
 };
 
 const clampNumber = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -733,6 +783,9 @@ const AuctionLotCell = ({
   // out from auto-seeded lots, and the title shows who added it.
   const isAddedLot = Boolean(lot.added_by);
   const addedToneStyle = { backgroundColor: '#ede9fe', borderColor: '#c4b5fd', color: '#5b21b6' };
+  // Shift the operator put on the calendar themselves ("свой график"): always
+  // claimed, so it only needs a marker telling it apart from auction shifts.
+  const isSelfScheduledLot = Boolean(lot.self_scheduled);
   // Tooltip rate must match the grid row: duration-derived (night lots keep their key).
   const minRate = isNightAuctionLot(lot) ? Number(lot.rate_min || 0) : getAuctionLotDurationRate(lot);
   const lotActionKey = getAuctionLotActionKey(lot);
@@ -774,7 +827,7 @@ const AuctionLotCell = ({
     : compactLabel;
 
   const title = `${label}${minRate ? ` · ставка ${formatRate(minRate)}`
-    : ''} · в норму ${formatAuctionHours(netMinutes)} ч${breakMinutes ? ` · перерыв ${formatAuctionHours(breakMinutes)} ч` : ''}${breaksLabel ? ` (${breaksLabel})` : ''}${claimBlockReason ? ` · ${claimBlockReason}` : ''}${lot.claimed_by_name ? ` · ${lot.claimed_by_name}` : ''}${postAuctionTakeable ? ` · доступно после аукциона${postAuctionSegment && !postAuctionSegment.isFull ? `: ${postAuctionSegment.start_time}–${postAuctionSegment.end_time}` : ''}` : ''}${formatPostAuctionClaimTitleSuffix(lot)}${isAddedLot ? ` · добавил ${lot.added_by_name || '—'}` : ''}`;
+    : ''} · в норму ${formatAuctionHours(netMinutes)} ч${breakMinutes ? ` · перерыв ${formatAuctionHours(breakMinutes)} ч` : ''}${breaksLabel ? ` (${breaksLabel})` : ''}${claimBlockReason ? ` · ${claimBlockReason}` : ''}${lot.claimed_by_name ? ` · ${lot.claimed_by_name}` : ''}${postAuctionTakeable ? ` · доступно после аукциона${postAuctionSegment && !postAuctionSegment.isFull ? `: ${postAuctionSegment.start_time}–${postAuctionSegment.end_time}` : ''}` : ''}${formatPostAuctionClaimTitleSuffix(lot)}${isAddedLot ? ` · добавил ${lot.added_by_name || '—'}` : ''}${isSelfScheduledLot ? ' · свой график' : ''}`;
 
   if (postAuctionTakeable) {
     return (
@@ -890,6 +943,14 @@ const AuctionLotCell = ({
           className="pointer-events-none absolute left-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-violet-600 ring-1 ring-white"
           title={`Добавленная смена · ${lot.added_by_name || '—'}`}
         />
+      ) : null}
+      {isSelfScheduledLot ? (
+        <span
+          className="pointer-events-none absolute left-0.5 top-0.5 text-teal-600"
+          title={`Свой график · ${lot.claimed_by_name || '—'}`}
+        >
+          <CalendarCheck size={9} strokeWidth={3} />
+        </span>
       ) : null}
     </>
   );
@@ -1503,6 +1564,25 @@ const OPERATOR_INSTRUCTION_STEPS = [
     ]
   },
   {
+    icon: CalendarCheck,
+    title: 'Свой график',
+    body: 'Если вашей группе открыт свой график, смены не нужно ловить в таблице: нажмите день в нижней панели, выберите время начала — конец подставится по вашей ставке. Смена сразу станет вашей и появится в общей таблице с отметкой.',
+    visual: (
+      <div className="space-y-2">
+        <div className="inline-flex h-[56px] w-[72px] flex-col items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600">
+          <span className="text-[11px] font-semibold">ср, 05</span>
+          <span className="mt-0.5 inline-flex items-center gap-0.5 text-[11px] font-bold"><Plus size={11} /> Смена</span>
+        </div>
+        <span className="block text-xs text-slate-500">Такой день в нижней панели ждёт вашу смену — нажмите на него.</span>
+      </div>
+    ),
+    nuances: [
+      'Больше нормы плюс 10 часов поставить нельзя — в окне видно, сколько осталось.',
+      'Передумали? Нажмите на день со своей сменой и подтвердите возврат — смена просто исчезнет.',
+      'На день с выходным или статусным периодом смену поставить нельзя, как и две смены на один день.'
+    ]
+  },
+  {
     icon: ListChecks,
     title: 'Шаг 2 · Выберите выходные (до 2 дней)',
     body: 'В левой панели «Мои выходные» кликайте на дни, которые хотите оставить свободными. Можно выбрать максимум 2 дня на период. Эти дни выпадут из таблицы — смены на них вы выбирать не будете.',
@@ -1900,7 +1980,7 @@ const ADMIN_INSTRUCTION_STEPS = [
   {
     icon: UserCog,
     title: 'Группы времени',
-    body: 'Части участников можно дать своё время аукциона — раньше или позже общего. В блоке «Группы времени» нажмите «Группа», задайте ей название, старт (и при необходимости своё завершение) и отметьте, кто в неё входит. Остальные заходят в общее окно.',
+    body: 'Части участников можно дать своё время аукциона — раньше или позже общего. В блоке «Группы времени» нажмите «Группа», выберите день внутри недели, задайте старт (и при необходимости своё завершение) и отметьте, кто в неё входит. Остальные заходят в общее окно.',
     visual: (
       <div className="max-w-sm space-y-2">
         <div className="overflow-hidden rounded-xl bg-white ring-1 ring-slate-200/70">
@@ -1925,9 +2005,38 @@ const ADMIN_INSTRUCTION_STEPS = [
     ),
     nuances: [
       'Группа живёт только в своей неделе: на других неделях аукциона она не действует.',
+      'День группы выбирается внутри недели общего старта — можно поставить её на другой день, не только на день аукциона.',
       'Оператор может быть только в одной группе недели.',
       'Без своего завершения группа закрывается вместе со всеми; если группа стартует позже общего завершения, своё завершение обязательно.',
       'Пауза сдвигает завершение и у групп, а не только у общего окна.'
+    ]
+  },
+  {
+    icon: CalendarCheck,
+    title: 'Свой график у группы',
+    body: 'Тумблер «Свой график» в карточке группы разрешает её участникам не разбирать готовые смены, а ставить свои: они нажимают день в нижней панели и выбирают время начала. Длина смены берётся из их ставки. Потолок жёсткий — норма плюс 10 часов, и он же начинает действовать на обычные смены этих операторов.',
+    visual: (
+      <div className="max-w-sm space-y-2">
+        <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2.5">
+          <span className="min-w-0">
+            <span className="block text-sm font-semibold text-slate-900">Свой график</span>
+            <span className="mt-0.5 block text-xs text-slate-500">Норма + 10 ч</span>
+          </span>
+          <TogglePreview on />
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="relative flex h-8 w-20 items-center justify-center rounded border border-slate-200 bg-slate-100 text-xs font-semibold tabular-nums text-slate-400">
+            09:00-18:00
+            <span className="absolute left-0.5 top-0.5 text-teal-600"><CalendarCheck size={9} strokeWidth={3} /></span>
+          </span>
+          <span className="text-[11px] text-slate-500">— так своя смена выглядит в общей таблице.</span>
+        </div>
+      </div>
+    ),
+    nuances: [
+      'Смена появляется сразу закреплённой за оператором и попадает в итоговые графики, как обычная.',
+      'Вернуть её оператор может тем же нажатием на день — смена удаляется, другим она не достаётся.',
+      'Выходные, статусные периоды и правило «одна смена в день» действуют и здесь.'
     ]
   },
   {
@@ -3362,7 +3471,9 @@ const ShiftAuctionShiftsTable = ({
           <tbody>
             {rows.map(({ operator, opId, workload }) => {
               const claimedNet = Number(workload?.claimed_net_minutes || 0);
-              const norm = Number(workload?.norm_minutes || 0);
+              // The ceiling of a "свой график" operator is their norm plus the
+              // allowance, so the sheet does not flag an intended overshoot.
+              const norm = Number(workload?.ceiling_minutes || workload?.norm_minutes || 0);
               const pct = norm > 0 ? Math.round((claimedNet / norm) * 100) : 0;
               const normCellClass = getNormCellClass(claimedNet, norm);
               return (
@@ -3442,7 +3553,7 @@ const ShiftAuctionShiftsTable = ({
                 <div className="mt-0.5 text-[12px] text-slate-500">
                   {cellModalData.operator?.direction || ''}
                   {cellModalData.operator?.direction ? ' · ' : ''}
-                  Ставка {Number(cellModalData.operator?.rate ?? 1).toFixed(2)} · {formatHours(cellModalData.workload?.claimed_net_minutes || 0)}/{formatHours(cellModalData.workload?.norm_minutes || 0)} ч
+                  Ставка {Number(cellModalData.operator?.rate ?? 1).toFixed(2)} · {formatHours(cellModalData.workload?.claimed_net_minutes || 0)}/{formatHours(cellModalData.workload?.ceiling_minutes || cellModalData.workload?.norm_minutes || 0)} ч
                 </div>
               </div>
               <div className="flex flex-col items-end gap-1.5">
@@ -3757,6 +3868,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [addShiftTarget, setAddShiftTarget] = useState(null);
   const [addShiftStart, setAddShiftStart] = useState('09:00');
   const [isAddingShift, setIsAddingShift] = useState(false);
+  // "Свой график": the operator picks the day in the bottom bar, then the start.
+  const [selfScheduleDate, setSelfScheduleDate] = useState('');
+  const [selfScheduleStart, setSelfScheduleStart] = useState('09:00');
+  const [isSelfScheduling, setIsSelfScheduling] = useState(false);
   const [journalEntries, setJournalEntries] = useState([]);
   const [journalPage, setJournalPage] = useState(1);
   const [journalPerPage] = useState(50);
@@ -4392,6 +4507,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
   const draftStartsAtParts = useMemo(() => splitDateTimeInputValue(draftStartsAt), [draftStartsAt]);
   const draftEndsAtParts = useMemo(() => splitDateTimeInputValue(draftEndsAt), [draftEndsAt]);
+  // Days a group may be moved to: the week around the auction's own start.
+  const auctionWeekDates = useMemo(
+    () => getWeekDatesForDate(draftStartsAtParts.date),
+    [draftStartsAtParts.date]
+  );
   // Only participants can sit in a group: the picker filters them out anyway, but
   // an operator unchecked after joining must not linger in the saved payload.
   const draftTimeGroupsForSave = useMemo(() => (
@@ -4781,6 +4901,12 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const canUseAuction = isTester || canMonitor || Boolean(settings.has_period_history_access);
   const canChoose = isViewingActivePeriod && isTester && (runtimeStatus === 'scheduled' || runtimeStatus === 'open');
   const canClaim = isViewingActivePeriod && isTester && runtimeStatus === 'open';
+  // "Свой график" is a property of the viewer's week time group. Its allowance
+  // is the ceiling for every shift they take, self-placed or claimed.
+  const selfScheduleAllowanceMinutes = settings.my_time_group?.self_schedule_enabled
+    ? AUCTION_SELF_SCHEDULE_EXTRA_MINUTES
+    : 0;
+  const canSelfSchedule = canClaim && !canMonitor && Boolean(settings.my_time_group?.self_schedule_enabled);
   const userRate = useMemo(() => {
     const directRate = Number(user?.rate);
     if (Number.isFinite(directRate) && directRate > 0) return directRate;
@@ -4792,22 +4918,56 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const myAuctionWorkload = useMemo(() => {
     const workdayCount = getAuctionNormWorkdayCount(lotDates.length, myBlockedDateMap.size);
     const normMinutes = Math.round(workdayCount * 8 * 60 * userRate);
+    // What actually limits the operator: the norm, plus the "свой график"
+    // allowance when their group has one. Everyone else: ceiling === norm.
+    const ceilingMinutes = normMinutes + selfScheduleAllowanceMinutes;
     const claimedNetMinutes = myClaimedLots.reduce((sum, lot) => sum + getAuctionLotNetMinutes(lot), 0);
     const claimedBreakMinutes = myClaimedLots.reduce((sum, lot) => sum + getAuctionLotBreakMinutes(lot), 0);
-    const remainingMinutes = Math.max(0, normMinutes - claimedNetMinutes);
-    const overMinutes = Math.max(0, claimedNetMinutes - normMinutes);
-    const progress = normMinutes > 0 ? clampNumber((claimedNetMinutes / normMinutes) * 100, 0, 140) : 0;
+    const remainingMinutes = Math.max(0, ceilingMinutes - claimedNetMinutes);
+    const overMinutes = Math.max(0, claimedNetMinutes - ceilingMinutes);
+    const progress = ceilingMinutes > 0 ? clampNumber((claimedNetMinutes / ceilingMinutes) * 100, 0, 140) : 0;
     return {
       workdayCount,
       normMinutes,
+      ceilingMinutes,
       claimedNetMinutes,
       claimedBreakMinutes,
       remainingMinutes,
       overMinutes,
       progress,
-      isComplete: normMinutes > 0 && claimedNetMinutes >= normMinutes - 1
+      isComplete: ceilingMinutes > 0 && claimedNetMinutes >= ceilingMinutes - 1
     };
-  }, [lotDates.length, myBlockedDateMap.size, myClaimedLots, userRate]);
+  }, [lotDates.length, myBlockedDateMap.size, myClaimedLots, selfScheduleAllowanceMinutes, userRate]);
+
+  // Everything the "своя смена" dialog needs: the shift the chosen start yields,
+  // what is still left of the norm+allowance ceiling, and why it may be blocked.
+  const selfScheduleGroup = useMemo(
+    () => getSelfScheduleShiftGroup(userRate, selfScheduleStart),
+    [selfScheduleStart, userRate]
+  );
+  const selfScheduleEndTime = useMemo(
+    () => computeAuctionEndTime(selfScheduleStart, selfScheduleGroup),
+    [selfScheduleGroup, selfScheduleStart]
+  );
+  const selfScheduleRemainingMinutes = myAuctionWorkload.remainingMinutes;
+  const selfScheduleIssue = useMemo(() => {
+    if (!selfScheduleDate) return '';
+    if (!selfScheduleEndTime) return 'Не удалось определить длину смены по вашей ставке';
+    const shiftMinutes = Number(selfScheduleGroup?.shiftMinutes || 0);
+    if (myAuctionWorkload.normMinutes > 0 && shiftMinutes > selfScheduleRemainingMinutes + 1) {
+      return `Не хватает лимита: смена ${formatAuctionHours(shiftMinutes)} ч, осталось ${formatAuctionHours(selfScheduleRemainingMinutes)} ч`;
+    }
+    const startMs = getLotStartDateTimeMs({ shift_date: selfScheduleDate, start_time: selfScheduleStart });
+    if (startMs !== null && startMs <= Date.now()) return 'Это время уже прошло';
+    return '';
+  }, [
+    myAuctionWorkload.normMinutes,
+    selfScheduleDate,
+    selfScheduleEndTime,
+    selfScheduleGroup,
+    selfScheduleRemainingMinutes,
+    selfScheduleStart
+  ]);
 
   const operatorWorkloadRows = useMemo(() => {
     if (!canMonitor) return [];
@@ -4821,12 +4981,14 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         if (!workload || workload.operator_id == null) return null;
         const operator = operatorsById.get(Number(workload.operator_id));
         if (!operator) return null;
-        const normMinutes = Number(workload.norm_minutes || 0);
+        // Progress is measured against what limits the operator: the norm, or the
+        // wider ceiling of a "свой график" group.
+        const ceilingMinutes = Number(workload.ceiling_minutes || workload.norm_minutes || 0);
         const claimedNet = Number(workload.claimed_net_minutes || 0);
         const overMinutes = Number(workload.over_minutes || 0);
         const isComplete = Boolean(workload.is_complete);
-        const progress = normMinutes > 0
-          ? clampNumber((claimedNet / normMinutes) * 100, 0, 140)
+        const progress = ceilingMinutes > 0
+          ? clampNumber((claimedNet / ceilingMinutes) * 100, 0, 140)
           : (claimedNet > 0 ? 100 : 0);
         const status = overMinutes > 0
           ? 'over'
@@ -5055,19 +5217,22 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         return;
       }
       const netMinutes = getAuctionLotNetMinutes(lot);
-      if (myAuctionWorkload.normMinutes > 0 && myAuctionWorkload.claimedNetMinutes >= myAuctionWorkload.normMinutes - 1) {
-        reasons.set(lotId, 'Норма уже набрана');
+      // "Свой график" raises the ceiling for every shift these operators take,
+      // so the grid must not grey lots out at the plain norm.
+      const ceilingMinutes = myAuctionWorkload.ceilingMinutes;
+      if (myAuctionWorkload.normMinutes > 0 && myAuctionWorkload.claimedNetMinutes >= ceilingMinutes - 1) {
+        reasons.set(lotId, selfScheduleAllowanceMinutes ? 'Лимит часов уже набран' : 'Норма уже набрана');
         return;
       }
       if (
         myAuctionWorkload.normMinutes > 0
-        && myAuctionWorkload.claimedNetMinutes + netMinutes > myAuctionWorkload.normMinutes + 1
+        && myAuctionWorkload.claimedNetMinutes + netMinutes > ceilingMinutes + 1
       ) {
-        reasons.set(lotId, `Превысит норму на ${formatAuctionHours(myAuctionWorkload.claimedNetMinutes + netMinutes - myAuctionWorkload.normMinutes)} ч`);
+        reasons.set(lotId, `Превысит лимит на ${formatAuctionHours(myAuctionWorkload.claimedNetMinutes + netMinutes - ceilingMinutes)} ч`);
       }
     });
     return reasons;
-  }, [canMonitor, isTester, isTopupActive, isViewingActivePeriod, monitoredLots, myAuctionWorkload, myBlockedDateMap, myClaimedDateSet, myClaimedLotsByDate, postAuctionClaimOptionsByLotId, selectedViewPostAuctionActive, settings.has_period_history_access, settings.rate_lock_enabled, userRate]);
+  }, [canMonitor, isTester, isTopupActive, isViewingActivePeriod, monitoredLots, myAuctionWorkload, myBlockedDateMap, myClaimedDateSet, myClaimedLotsByDate, postAuctionClaimOptionsByLotId, selectedViewPostAuctionActive, selfScheduleAllowanceMinutes, settings.has_period_history_access, settings.rate_lock_enabled, userRate]);
 
   useEffect(() => {
     if (!canUseAuction || !lotDates.length || typeof window === 'undefined') return undefined;
@@ -5189,9 +5354,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   }, [markAuctionDraftDirty]);
 
   const addDraftTimeGroup = useCallback(() => {
+    const mainStart = splitDateTimeInputValue(draftStartsAt);
     setDraftTimeGroups((groups) => {
       if (groups.length >= AUCTION_TIME_GROUP_LIMIT) return groups;
-      const group = createDraftTimeGroup(groups.length, splitDateTimeInputValue(draftStartsAt).time);
+      const group = createDraftTimeGroup(groups.length, mainStart.date, mainStart.time);
       setExpandedTimeGroupKey(group.key);
       setTimeGroupMemberQuery('');
       return [...groups, group];
@@ -5263,6 +5429,12 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     setSelectedIds(new Set());
     setDraftTimeGroups((groups) => groups.map((group) => ({ ...group, operatorIds: [] })));
   }, [markAuctionDraftDirty]);
+
+  const openSelfSchedule = useCallback((date) => {
+    if (!date) return;
+    setSelfScheduleStart('09:00');
+    setSelfScheduleDate(date);
+  }, []);
 
   const handleViewPeriodSelect = useCallback((period) => {
     const id = normalizeSchedulePlanId(period?.id);
@@ -5511,6 +5683,30 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       setIsAddingShift(false);
     }
   }, [addShiftTarget, addShiftStart, apiRoot, applySnapshot, buildHeaders, fetchSnapshot, isAddingShift, notify]);
+
+  const handleSubmitSelfSchedule = useCallback(async () => {
+    if (!selfScheduleDate || !apiRoot || isSelfScheduling) return;
+    setIsSelfScheduling(true);
+    try {
+      const response = await axios.post(
+        `${apiRoot}/api/shift_auction/self_schedule`,
+        { shift_date: selfScheduleDate, start_time: selfScheduleStart },
+        { headers: buildHeaders({ 'Content-Type': 'application/json' }) }
+      );
+      if (response?.data?.snapshot) {
+        applySnapshot(response.data.snapshot);
+      } else {
+        await fetchSnapshot({ silent: true });
+      }
+      const lot = response?.data?.lot || {};
+      notify(`Смена ${lot.start_time || selfScheduleStart}–${lot.end_time || ''} поставлена`);
+      setSelfScheduleDate('');
+    } catch (error) {
+      notify(error?.response?.data?.error || 'Не удалось поставить смену', 'error');
+    } finally {
+      setIsSelfScheduling(false);
+    }
+  }, [apiRoot, applySnapshot, buildHeaders, fetchSnapshot, isSelfScheduling, notify, selfScheduleDate, selfScheduleStart]);
 
   const handleExportAuctionReport = useCallback(async () => {
     if (!canManage || !apiRoot || isExportingAuctionReport) return;
@@ -5836,20 +6032,26 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     if (!Number.isFinite(numericId)) return;
 
     const prevLot = (lotsRef.current || []).find((l) => Number(l?.id) === numericId) || lot;
+    // A self-scheduled shift is not handed back to the pool — it disappears.
+    const isSelfScheduled = Boolean(prevLot?.self_scheduled);
 
     setReleasingLotId(numericId);
-    setLots((currentLots) => currentLots.map((l) => (
-      Number(l.id) === numericId
-        ? {
-            ...l,
-            status: 'available',
-            claimed_by: null,
-            claimed_at: null,
-            claimed_by_name: '',
-            _optimistic: true
-          }
-        : l
-    )));
+    setLots((currentLots) => (
+      isSelfScheduled
+        ? currentLots.filter((l) => Number(l.id) !== numericId)
+        : currentLots.map((l) => (
+          Number(l.id) === numericId
+            ? {
+                ...l,
+                status: 'available',
+                claimed_by: null,
+                claimed_at: null,
+                claimed_by_name: '',
+                _optimistic: true
+              }
+            : l
+        ))
+    ));
     setReleaseConfirmLot(null);
     setReleaseConfirmOptions([]);
 
@@ -5860,7 +6062,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         { headers: buildHeaders() }
       ));
       const serverLot = response?.data?.lot;
-      if (serverLot && serverLot.id) {
+      if (response?.data?.removed) {
+        setLots((currentLots) => currentLots.filter((l) => Number(l.id) !== numericId));
+        await fetchSnapshot({ silent: true });
+      } else if (serverLot && serverLot.id) {
         setLots((currentLots) => currentLots.map((l) => (
           Number(l.id) === Number(serverLot.id)
             ? { ...l, ...serverLot, _optimistic: false }
@@ -5871,11 +6076,15 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       const code = error?.response?.data?.code;
       const message = error?.response?.data?.error;
 
-      setLots((currentLots) => currentLots.map((l) => (
-        Number(l.id) === numericId && l._optimistic
-          ? { ...prevLot, _optimistic: false }
-          : l
-      )));
+      setLots((currentLots) => (
+        isSelfScheduled
+          ? currentLots
+          : currentLots.map((l) => (
+            Number(l.id) === numericId && l._optimistic
+              ? { ...prevLot, _optimistic: false }
+              : l
+          ))
+      ));
 
       await fetchSnapshot({ silent: true });
 
@@ -5924,7 +6133,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       ? `перебор ${formatAuctionHours(myAuctionWorkload.overMinutes)} ч`
       : `осталось ${formatAuctionHours(myAuctionWorkload.remainingMinutes)} ч`;
     const workloadTitle = showWorkload
-      ? ` Набрано ${formatAuctionHours(myAuctionWorkload.claimedNetMinutes)} ч из ${formatAuctionHours(myAuctionWorkload.normMinutes)} ч. Перерывы: ${formatAuctionHours(myAuctionWorkload.claimedBreakMinutes)} ч.`
+      ? ` Набрано ${formatAuctionHours(myAuctionWorkload.claimedNetMinutes)} ч из ${formatAuctionHours(myAuctionWorkload.ceilingMinutes)} ч${selfScheduleAllowanceMinutes ? ` (норма ${formatAuctionHours(myAuctionWorkload.normMinutes)} ч + ${formatAuctionHours(selfScheduleAllowanceMinutes)} ч своего графика)` : ''}. Перерывы: ${formatAuctionHours(myAuctionWorkload.claimedBreakMinutes)} ч.`
       : '';
     const title = `${settings.launch_note || `${auctionStatusLabel}: ${auctionStatusDetailText}`}${workloadTitle}`;
     return (
@@ -5944,14 +6153,16 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
             <div className="flex items-center justify-between gap-2">
               <div className="min-w-0">
                 <div className="font-semibold text-slate-950">
-                  {formatAuctionHours(myAuctionWorkload.claimedNetMinutes)} / {formatAuctionHours(myAuctionWorkload.normMinutes)} ч
+                  {formatAuctionHours(myAuctionWorkload.claimedNetMinutes)} / {formatAuctionHours(myAuctionWorkload.ceilingMinutes)} ч
                 </div>
                 <div className="truncate text-[10px] text-slate-600 sm:text-[11px]">
                   {balanceLabel} · перерывы {formatAuctionHours(myAuctionWorkload.claimedBreakMinutes)} ч
                 </div>
               </div>
               <div className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold sm:text-[11px] ${myAuctionWorkload.overMinutes > 0 ? 'bg-rose-50 text-rose-700' : myAuctionWorkload.isComplete ? 'bg-emerald-50 text-emerald-700' : 'bg-white/70 text-slate-700'}`}>
-                {myAuctionWorkload.isComplete ? 'Норма' : formatAuctionHours(myAuctionWorkload.remainingMinutes)}
+                {myAuctionWorkload.isComplete
+                  ? (selfScheduleAllowanceMinutes ? 'Лимит' : 'Норма')
+                  : formatAuctionHours(myAuctionWorkload.remainingMinutes)}
               </div>
             </div>
             <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-white/60">
@@ -6397,14 +6608,23 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                 : '';
                               const hoverTone = active ? 'hover:bg-blue-100' : 'hover:bg-slate-50';
                               const canReleaseHere = !canMonitor && canClaim && item.state === 'shift' && item.myClaimedLots?.length;
+                              // A free day of a "свой график" operator is where they put
+                              // their own shift — that beats scrolling to the column.
+                              const canSelfScheduleHere = Boolean(
+                                canSelfSchedule && item.state !== 'shift' && !item.isBlocked && !item.isDayOff
+                              );
                               const onCellClick = canReleaseHere
                                 ? () => openReleaseConfirm(item.myClaimedLots)
-                                : () => scrollToDay(item.date);
+                                : canSelfScheduleHere
+                                  ? () => openSelfSchedule(item.date)
+                                  : () => scrollToDay(item.date);
                               const cellTitle = canReleaseHere
                                 ? `${formatDateLabel(item.date)} · ${myShiftCount > 1 ? 'выберите смену для возврата' : 'нажмите, чтобы вернуть смену'}`
-                                : item.isBlocked
-                                  ? `${formatDateLabel(item.date)} · ${item.blockedLabel}`
-                                  : formatDateLabel(item.date);
+                                : canSelfScheduleHere
+                                  ? `${formatDateLabel(item.date)} · нажмите, чтобы поставить свою смену`
+                                  : item.isBlocked
+                                    ? `${formatDateLabel(item.date)} · ${item.blockedLabel}`
+                                    : formatDateLabel(item.date);
                               return (
                                 <button
                                   key={item.date}
@@ -6421,6 +6641,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                       <span className="mt-0.5 block truncate text-[10px] font-bold tabular-nums sm:text-[11px]">{myShiftLabel}</span>
                                       <span className="block truncate text-[10px] font-semibold tabular-nums sm:text-[11px]">{myShiftDuration}</span>
                                     </>
+                                  ) : canSelfScheduleHere ? (
+                                    <span className="mt-0.5 flex items-center justify-center gap-0.5 text-[10px] font-bold sm:text-[11px]">
+                                      <Plus size={11} className="shrink-0" />
+                                      Смена
+                                    </span>
                                   ) : (
                                     <span className="mt-0.5 block truncate text-[10px] font-bold tabular-nums sm:text-[11px]">{finalStatusText}</span>
                                   )}
@@ -6635,7 +6860,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                         </div>
                         <div className="mt-2 flex items-center justify-between gap-2 text-xs tabular-nums">
                           <span className="font-semibold text-slate-900">
-                            {formatAuctionHours(row.claimed_net_minutes || 0)} / {formatAuctionHours(row.norm_minutes || 0)} ч
+                            {formatAuctionHours(row.claimed_net_minutes || 0)} / {formatAuctionHours(row.ceiling_minutes || row.norm_minutes || 0)} ч
                           </span>
                           <span className="text-slate-500">{Math.round(row.progress)}%</span>
                         </div>
@@ -6947,7 +7172,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                       {draftTimeGroups.map((group, groupIndex) => {
                         const expanded = expandedTimeGroupKey === group.key;
                         const issue = timeGroupIssues.get(group.key) || '';
-                        const groupEndDate = draftEndsAtParts.date || draftStartsAtParts.date;
+                        const groupDate = group.date || draftStartsAtParts.date;
                         const memberCount = group.operatorIds.filter((id) => selectedIds.has(id)).length;
                         const pickerOperators = timeGroupMemberQuery.trim()
                           ? selectedOperators.filter((operator) => (
@@ -7004,28 +7229,57 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                   placeholder="Название группы — например, Наставники"
                                   className="h-9 w-full rounded-lg border border-slate-200 px-3 text-sm text-slate-800 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
                                 />
+                                {auctionWeekDates.length ? (
+                                  <div>
+                                    <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                                      День группы
+                                    </div>
+                                    <div className="grid grid-cols-7 gap-1">
+                                      {auctionWeekDates.map((weekDate) => {
+                                        const activeDay = groupDate === weekDate;
+                                        const isMainDay = weekDate === draftStartsAtParts.date;
+                                        return (
+                                          <button
+                                            key={weekDate}
+                                            type="button"
+                                            onClick={() => patchDraftTimeGroup(group.key, { date: weekDate })}
+                                            title={`${formatDateLabel(weekDate)}${isMainDay ? ' · день общего старта' : ''}`}
+                                            className={`h-11 rounded-lg border text-[11px] font-semibold leading-tight transition active:scale-[0.98] ${
+                                              activeDay
+                                                ? 'border-blue-500 bg-blue-50 text-blue-900'
+                                                : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                                            }`}
+                                          >
+                                            <span className="block">{AUCTION_WEEKDAY_LABELS[getWeekdayIndex(weekDate)]}</span>
+                                            <span className="block tabular-nums">{weekDate.slice(8)}</span>
+                                          </button>
+                                        );
+                                      })}
+                                    </div>
+                                  </div>
+                                ) : null}
                                 <div className="grid gap-3 md:grid-cols-2">
                                   <AuctionTimeField
                                     label="Старт группы"
-                                    dateValue={draftStartsAtParts.date}
-                                    value={group.startTime ? `${draftStartsAtParts.date}T${group.startTime}` : ''}
+                                    dateValue={groupDate}
+                                    value={group.startTime ? `${groupDate}T${group.startTime}` : ''}
                                     onChange={(value) => patchDraftTimeGroup(group.key, {
                                       startTime: splitDateTimeInputValue(value).time
                                     })}
-                                    disabled={!draftStartsAtParts.date}
+                                    disabled={!groupDate}
                                     invalid={Boolean(issue)}
                                   />
                                   <div>
                                     <AuctionTimeField
                                       label="Завершение группы"
-                                      dateValue={groupEndDate}
+                                      dateValue={groupDate}
                                       // Without its own end the field shows the inherited common
                                       // one, so what is on screen is always the effective time.
-                                      value={group.endTime ? `${groupEndDate}T${group.endTime}` : (draftEndsAt || '')}
+                                      value={group.endTime ? `${groupDate}T${group.endTime}` : (draftEndsAt || '')}
                                       onChange={(value) => patchDraftTimeGroup(group.key, {
                                         endTime: splitDateTimeInputValue(value).time
                                       })}
-                                      disabled={!groupEndDate}
+                                      disabled={!groupDate}
                                     />
                                     <div className="mt-1.5 text-xs text-slate-500">
                                       {group.endTime ? (
@@ -7039,6 +7293,20 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                       ) : 'Завершение общее — как у остальных участников.'}
                                     </div>
                                   </div>
+                                </div>
+
+                                <div className="flex items-center justify-between gap-4 rounded-xl bg-slate-50 px-3 py-2.5">
+                                  <div className="min-w-0">
+                                    <div className="text-sm font-semibold text-slate-900">Свой график</div>
+                                    <div className="mt-0.5 text-xs text-slate-500">
+                                      Участники сами ставят смены на дни в нижней панели. Потолок — норма плюс{' '}
+                                      {formatAuctionHours(AUCTION_SELF_SCHEDULE_EXTRA_MINUTES)} ч.
+                                    </div>
+                                  </div>
+                                  <IosToggle
+                                    checked={Boolean(group.selfSchedule)}
+                                    onChange={(checked) => patchDraftTimeGroup(group.key, { selfSchedule: Boolean(checked) })}
+                                  />
                                 </div>
 
                                 <div>
@@ -7555,6 +7823,88 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         </div>
       ) : null}
 
+      {selfScheduleDate ? (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/50 px-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="self-schedule-title"
+          onClick={() => { if (!isSelfScheduling) setSelfScheduleDate(''); }}
+        >
+          <div
+            className="w-full max-w-sm overflow-hidden rounded-2xl bg-white shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3 border-b border-slate-200/70 px-4 py-3.5">
+              <div className="min-w-0">
+                <h3 id="self-schedule-title" className="truncate text-[15px] font-semibold tracking-tight text-slate-900">
+                  Своя смена
+                </h3>
+                <div className="mt-0.5 truncate text-xs text-slate-500">{formatDateLabel(selfScheduleDate)}</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => { if (!isSelfScheduling) setSelfScheduleDate(''); }}
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200 hover:text-slate-700 active:scale-95"
+                title="Закрыть"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="space-y-3 px-4 py-4">
+              <div className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                Длина смены — по вашей ставке{selfScheduleGroup?.shiftMinutes ? ` (${formatAuctionHours(selfScheduleGroup.shiftMinutes)} ч)` : ''}.
+                Осталось до потолка: <span className="font-semibold tabular-nums">{formatAuctionHours(selfScheduleRemainingMinutes)} ч</span>.
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <label className="block">
+                  <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Начало</span>
+                  <input
+                    type="time"
+                    value={selfScheduleStart}
+                    disabled={isSelfScheduling}
+                    step={300}
+                    onChange={(event) => setSelfScheduleStart(normalizeClockValue(event.target.value))}
+                    className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-sm tabular-nums text-slate-900 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50 disabled:text-slate-400"
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Конец</span>
+                  <input
+                    type="text"
+                    value={selfScheduleEndTime || '—'}
+                    readOnly
+                    className="w-full cursor-default rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5 text-sm tabular-nums text-slate-500"
+                  />
+                </label>
+              </div>
+              {selfScheduleIssue ? (
+                <div className="rounded-lg bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">{selfScheduleIssue}</div>
+              ) : null}
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-slate-200/70 px-4 py-3">
+              <button
+                type="button"
+                onClick={() => setSelfScheduleDate('')}
+                disabled={isSelfScheduling}
+                className="inline-flex h-9 items-center rounded-md border border-slate-200 px-3 text-sm font-medium text-slate-600 transition hover:bg-slate-50 disabled:opacity-50"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={handleSubmitSelfSchedule}
+                disabled={isSelfScheduling || Boolean(selfScheduleIssue)}
+                className="inline-flex h-9 items-center gap-1.5 rounded-md bg-blue-600 px-3 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:opacity-60"
+              >
+                <Plus size={15} />
+                {isSelfScheduling ? 'Ставлю…' : 'Поставить'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {drilldownData ? (
         <div
           className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/50 px-4"
@@ -7592,9 +7942,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
               <div className="border-b border-slate-200 px-4 py-3 sm:px-5">
                 <div className="flex items-center justify-between gap-2 text-xs tabular-nums sm:text-sm">
                   <span className="font-semibold text-slate-900">
-                    {formatAuctionHours(drilldownData.workload.claimed_net_minutes || 0)} / {formatAuctionHours(drilldownData.workload.norm_minutes || 0)} ч
+                    {formatAuctionHours(drilldownData.workload.claimed_net_minutes || 0)} / {formatAuctionHours(drilldownData.workload.ceiling_minutes || drilldownData.workload.norm_minutes || 0)} ч
                   </span>
                   <span className="text-slate-500">
+                    {drilldownData.workload.self_schedule ? 'свой график · ' : ''}
                     {drilldownData.workload.lots_claimed_count || 0} смен
                     {drilldownData.workload.over_minutes > 0 ? ` · перебор ${formatAuctionHours(drilldownData.workload.over_minutes)} ч` : ''}
                     {drilldownData.workload.blocked_days ? ` · закрыто ${drilldownData.workload.blocked_days} дн` : ''}
@@ -7613,8 +7964,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                             : 'bg-slate-300'
                     }`}
                     style={{ width: `${clampNumber(
-                      drilldownData.workload.norm_minutes > 0
-                        ? (drilldownData.workload.claimed_net_minutes / drilldownData.workload.norm_minutes) * 100
+                      (drilldownData.workload.ceiling_minutes || drilldownData.workload.norm_minutes) > 0
+                        ? (drilldownData.workload.claimed_net_minutes
+                          / (drilldownData.workload.ceiling_minutes || drilldownData.workload.norm_minutes)) * 100
                         : (drilldownData.workload.claimed_net_minutes > 0 ? 100 : 0),
                       0,
                       100
@@ -7679,7 +8031,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
             onClick={(event) => event.stopPropagation()}
           >
             <h3 id="release-confirm-title" className="text-base font-semibold text-slate-950">
-              {hasMultipleReleaseOptions ? 'Какую смену вернуть?' : 'Хотите ли вы вернуть эту смену?'}
+              {hasMultipleReleaseOptions
+                ? 'Какую смену убрать?'
+                : releaseConfirmLot.self_scheduled
+                  ? 'Убрать свою смену?'
+                  : 'Хотите ли вы вернуть эту смену?'}
             </h3>
             <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
               <div className="text-sm font-semibold text-slate-900">{formatDateLabel(releaseConfirmLot.shift_date)}</div>
@@ -7710,9 +8066,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
               )}
             </div>
             <p className="mt-3 text-xs leading-5 text-slate-600">
-              {hasMultipleReleaseOptions
-                ? 'Выбранная смена снова станет доступной для других операторов. Остальные смены в этот день останутся у вас.'
-                : 'Смена снова станет доступной для других операторов. Это действие нельзя отменить.'}
+              {releaseConfirmLot.self_scheduled
+                ? 'Смена вашего графика просто исчезнет — другим операторам она не достанется. Поставить её заново можно тем же нажатием на день.'
+                : hasMultipleReleaseOptions
+                  ? 'Выбранная смена снова станет доступной для других операторов. Остальные смены в этот день останутся у вас.'
+                  : 'Смена снова станет доступной для других операторов. Это действие нельзя отменить.'}
             </p>
             <div className="mt-4 flex items-center justify-end gap-2">
               <button
@@ -7729,7 +8087,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                 disabled={releasingLotId !== null || !releaseConfirmLot}
                 className="inline-flex h-9 items-center justify-center rounded-lg bg-rose-600 px-3 text-xs font-semibold text-white transition hover:bg-rose-700 disabled:cursor-wait disabled:bg-rose-400 sm:text-sm"
               >
-                {releasingLotId !== null ? 'Возвращаю...' : 'Вернуть смену'}
+                {releasingLotId !== null
+                  ? (releaseConfirmLot.self_scheduled ? 'Убираю...' : 'Возвращаю...')
+                  : (releaseConfirmLot.self_scheduled ? 'Убрать смену' : 'Вернуть смену')}
               </button>
             </div>
           </div>

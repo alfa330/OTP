@@ -6988,6 +6988,8 @@ def _shift_auction_test_error_response(error):
         "AUCTION_GROUP_START_REQUIRED": ("У каждой группы должно быть время старта", 400),
         "AUCTION_GROUP_WINDOW_EMPTY": ("Окно группы пустое: завершение должно быть позже её старта", 400),
         "AUCTION_GROUP_WEEK_REQUIRED": ("Сначала выберите неделю аукциона — группы задаются для неё", 400),
+        "SELF_SCHEDULE_NOT_ALLOWED": ("Свой график вам не открыт", 403),
+        "SELF_SCHEDULE_LIMIT_EXCEEDED": ("Лимит своего графика: не больше нормы плюс 10 часов", 409),
         "AUCTION_PERIOD_NOT_FOUND": ("Недельный план для аукциона не найден", 404),
         "AUCTION_PERIOD_NOT_WEEK": ("Для аукциона можно выбрать только полную неделю", 409),
         "AUCTION_PERIOD_EMPTY": ("В выбранном недельном плане нет смен", 409),
@@ -7673,6 +7675,35 @@ def api_shift_auction_test_lot_claim(lot_id):
 
     action = 'release' if request.method == 'DELETE' else 'claim'
     return _shift_auction_test_lot_mutation_response(lot_id, action)
+
+
+@app.route('/api/shift_auction/self_schedule', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_shift_auction_self_schedule():
+    """Operator of a "свой график" group puts a shift on a day themselves."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if _normalize_user_role(requester[3]) != 'operator':
+            return jsonify({"error": "Only operators can set their own schedule"}), 403
+        payload = request.get_json(silent=True) or {}
+        result = db.self_schedule_shift_auction_shift(
+            requester_id,
+            str(payload.get('shift_date') or payload.get('date') or '').strip(),
+            str(payload.get('start_time') or '').strip(),
+        )
+        result["snapshot"] = db.get_shift_auction_test_snapshot(current_user_id=requester_id)
+        return jsonify({"status": "success", **result}), 200
+    except ValueError as error:
+        return _shift_auction_test_error_response(error)
+    except Exception as error:
+        logging.error(f"Shift auction self-schedule API error: {error}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/shift_auction/test_day_off', methods=['POST', 'DELETE', 'OPTIONS'])

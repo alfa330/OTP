@@ -3793,12 +3793,16 @@ class Database:
                     name TEXT NOT NULL DEFAULT '',
                     starts_at TIMESTAMP NULL,
                     ends_at TIMESTAMP NULL,
+                    self_schedule_enabled BOOLEAN NOT NULL DEFAULT FALSE,
                     sort_order INTEGER NOT NULL DEFAULT 0,
                     created_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+            # "Свой график": members put shifts on days themselves instead of
+            # taking prepared lots, capped at their norm plus a fixed allowance.
+            cursor.execute("ALTER TABLE shift_auction_time_groups ADD COLUMN IF NOT EXISTS self_schedule_enabled BOOLEAN NOT NULL DEFAULT FALSE;")
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_shift_auction_time_groups_plan
                 ON shift_auction_time_groups(plan_id, sort_order, id);
@@ -3879,6 +3883,9 @@ class Database:
             # "кто добавил" both in the auction grid and in the schedule planner.
             cursor.execute("ALTER TABLE shift_auction_test_lots ADD COLUMN IF NOT EXISTS added_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL;")
             cursor.execute("ALTER TABLE shift_auction_test_lots ADD COLUMN IF NOT EXISTS added_at TIMESTAMP NULL;")
+            # Shift an operator put on the calendar themselves ("свой график"):
+            # created already claimed and marked apart in the grid.
+            cursor.execute("ALTER TABLE shift_auction_test_lots ADD COLUMN IF NOT EXISTS self_scheduled_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL;")
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS shift_auction_test_day_offs (
                     operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -6785,10 +6792,11 @@ class Database:
             "name": row[2] or "",
             "starts_at": row[3].isoformat() if row[3] else None,
             "ends_at": row[4].isoformat() if row[4] else None,
-            "created_by": row[6],
-            "created_by_name": row[7] or "",
-            "created_at": row[8].isoformat() if row[8] else None,
-            "operator_ids": [int(item) for item in (row[9] or []) if item is not None],
+            "self_schedule_enabled": bool(row[5]),
+            "created_by": row[7],
+            "created_by_name": row[8] or "",
+            "created_at": row[9].isoformat() if row[9] else None,
+            "operator_ids": [int(item) for item in (row[10] or []) if item is not None],
         }
 
     def _get_shift_auction_time_groups_tx(self, cursor, plan_id=None, plan_only=False):
@@ -6813,6 +6821,7 @@ class Database:
                 g.name,
                 g.starts_at,
                 g.ends_at,
+                COALESCE(g.self_schedule_enabled, FALSE) AS self_schedule_enabled,
                 g.sort_order,
                 g.created_by,
                 cu.name AS created_by_name,
@@ -6832,16 +6841,16 @@ class Database:
         """, params)
         return [self._serialize_shift_auction_time_group_row(row) for row in (cursor.fetchall() or [])]
 
-    def _get_shift_auction_operator_group_window_tx(self, cursor, operator_id, plan_id):
-        """(starts_at, ends_at) of the operator's group for the week, or (None, None)."""
+    def _get_shift_auction_operator_group_tx(self, cursor, operator_id, plan_id):
+        """The operator's time group for the week, or ``None``."""
         try:
             operator_id = int(operator_id or 0)
         except Exception:
             operator_id = 0
         if operator_id <= 0 or plan_id is None:
-            return None, None
+            return None
         cursor.execute("""
-            SELECT g.starts_at, g.ends_at
+            SELECT g.id, g.name, g.starts_at, g.ends_at, COALESCE(g.self_schedule_enabled, FALSE)
             FROM shift_auction_time_group_members m
             JOIN shift_auction_time_groups g ON g.id = m.group_id
             WHERE m.plan_id = %s
@@ -6849,7 +6858,15 @@ class Database:
             LIMIT 1
         """, (plan_id, operator_id))
         row = cursor.fetchone()
-        return (row[0], row[1]) if row else (None, None)
+        if not row:
+            return None
+        return {
+            "id": int(row[0]),
+            "name": row[1] or "",
+            "starts_at": row[2],
+            "ends_at": row[3],
+            "self_schedule_enabled": bool(row[4]),
+        }
 
     def _serialize_shift_auction_lot_row(self, row):
         return {
@@ -6875,6 +6892,7 @@ class Database:
             "claim_segments": row[19] if len(row) > 19 and isinstance(row[19], list) else [],
             "added_by": row[20] if len(row) > 20 else None,
             "added_by_name": (row[21] or "") if len(row) > 21 else "",
+            "self_scheduled": bool(row[22]) if len(row) > 22 else False,
         }
 
     def _get_shift_auction_operator_work_shifts_tx(self, cursor, operator_id, lot_dates=None):
@@ -7032,7 +7050,8 @@ class Database:
                       AND hc.claimed_end_time IS NOT NULL
                 ), '[]'::jsonb) AS claim_segments,
                 l.added_by,
-                added_user.name AS added_by_name
+                added_user.name AS added_by_name,
+                l.self_scheduled_by
             FROM shift_auction_test_lots l
             LEFT JOIN users u ON u.id = l.claimed_by
             LEFT JOIN directions claimed_dir ON claimed_dir.id = u.direction_id
@@ -7054,7 +7073,13 @@ class Database:
         participant_workloads = []
         if include_admin_fields:
             participant_workloads = self._get_shift_auction_participant_workloads_tx(
-                cursor, participant_rows, lots, lot_dates
+                cursor, participant_rows, lots, lot_dates,
+                self_schedule_operator_ids={
+                    operator_id
+                    for group in time_groups
+                    if group.get("self_schedule_enabled") and group.get("plan_id") == settings_row[6]
+                    for operator_id in (group.get("operator_ids") or [])
+                }
             )
             cursor.execute("""
                 SELECT
@@ -7230,7 +7255,10 @@ class Database:
             return 0.75
         return 1.0
 
-    def _get_shift_auction_participant_workloads_tx(self, cursor, participant_rows, lots, lot_dates, day_offs_by_operator=None):
+    def _get_shift_auction_participant_workloads_tx(
+        self, cursor, participant_rows, lots, lot_dates,
+        day_offs_by_operator=None, self_schedule_operator_ids=None
+    ):
         # Per-operator workload (norm vs claimed) computed in one pass.
         # Only the day-off / blocked-period counters need the DB; lot stats are
         # derived from the already-loaded `lots` list.
@@ -7370,20 +7398,30 @@ class Database:
                 minutes = self._shift_auction_lot_minutes(seg['start_time'], seg['end_time'], seg['breaks'])
                 claimed_net += int(minutes.get('net_minutes') or 0)
                 claimed_break += int(minutes.get('break_minutes') or 0)
+            # What actually limits the operator: the norm, plus the allowance of a
+            # "свой график" group. Progress is measured against it so an intended
+            # overshoot is not reported as a violation, while the plain norm stays
+            # visible for payroll.
+            ceiling_minutes = norm_minutes + (
+                self.SHIFT_AUCTION_SELF_SCHEDULE_EXTRA_MINUTES
+                if op_id in (self_schedule_operator_ids or set()) else 0
+            )
             workloads.append({
                 "operator_id": op_id,
                 "rate": rate,
                 "norm_minutes": norm_minutes,
+                "ceiling_minutes": ceiling_minutes,
+                "self_schedule": ceiling_minutes != norm_minutes,
                 "workday_count": int(workday_count),
                 "claimed_net_minutes": int(claimed_net),
                 "claimed_break_minutes": int(claimed_break),
-                "remaining_minutes": max(0, norm_minutes - int(claimed_net)),
-                "over_minutes": max(0, int(claimed_net) - norm_minutes),
+                "remaining_minutes": max(0, ceiling_minutes - int(claimed_net)),
+                "over_minutes": max(0, int(claimed_net) - ceiling_minutes),
                 "blocked_days": int(blocked),
                 "selected_day_offs": int(day_offs_count.get(op_id, 0)),
                 "day_off_dates": list(day_off_dates_by_op.get(op_id, [])),
                 "lots_claimed_count": len(claimed_lots) + len(op_segments),
-                "is_complete": bool(norm_minutes > 0 and claimed_net >= norm_minutes - 1),
+                "is_complete": bool(ceiling_minutes > 0 and claimed_net >= ceiling_minutes - 1),
             })
         return workloads
 
@@ -7795,6 +7833,7 @@ class Database:
                 "name": str(raw_group.get('name') or '').strip()[:80] or f"Группа {index + 1}",
                 "starts_at": group_starts_at,
                 "ends_at": group_ends_at,
+                "self_schedule_enabled": bool(raw_group.get('self_schedule_enabled')),
                 "operator_ids": member_ids,
             })
         return groups
@@ -7825,17 +7864,26 @@ class Database:
                     SET name = %s,
                         starts_at = %s,
                         ends_at = %s,
+                        self_schedule_enabled = %s,
                         sort_order = %s,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = %s AND plan_id = %s
                     RETURNING id
-                """, (group["name"], group["starts_at"], group["ends_at"], index, group["id"], plan_id))
+                """, (
+                    group["name"], group["starts_at"], group["ends_at"],
+                    group["self_schedule_enabled"], index, group["id"], plan_id,
+                ))
             else:
                 cursor.execute("""
-                    INSERT INTO shift_auction_time_groups (plan_id, name, starts_at, ends_at, sort_order, created_by)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    INSERT INTO shift_auction_time_groups (
+                        plan_id, name, starts_at, ends_at, self_schedule_enabled, sort_order, created_by
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
-                """, (plan_id, group["name"], group["starts_at"], group["ends_at"], index, updated_by))
+                """, (
+                    plan_id, group["name"], group["starts_at"], group["ends_at"],
+                    group["self_schedule_enabled"], index, updated_by,
+                ))
             group_id = int(cursor.fetchone()[0])
             kept_ids.append(group_id)
             for operator_id in group["operator_ids"]:
@@ -8075,6 +8123,7 @@ class Database:
                         "name": group["name"],
                         "starts_at": group["starts_at"],
                         "ends_at": group["ends_at"],
+                        "self_schedule_enabled": group["self_schedule_enabled"],
                         "operator_ids": group["operator_ids"],
                     }
                     for group in (saved_groups or [])
@@ -8482,6 +8531,8 @@ class Database:
     # night shift (20:00→08:00) is validated separately as a fixed 12h window.
     SHIFT_AUCTION_RATE_SHIFT_MINUTES = {1.0: 540, 0.75: 390, 0.5: 240}
     SHIFT_AUCTION_NIGHT_SHIFT_MINUTES = 720
+    # How far above their norm a "свой график" group may go, in minutes (10 hours).
+    SHIFT_AUCTION_SELF_SCHEDULE_EXTRA_MINUTES = 600
 
     @staticmethod
     def _break_overlaps_minute_range(brk, range_start_min, range_end_min):
@@ -9036,10 +9087,12 @@ class Database:
                     l.post_claim_start_time,
                     l.post_claim_end_time,
                     -- Keep column positions aligned with the serializer: row[19] is
-                    -- claim_segments (unused here), row[20]/row[21] are added_by info.
+                    -- claim_segments (unused here), row[20]/row[21] are added_by info,
+                    -- row[22] marks a self-scheduled shift.
                     '[]'::jsonb AS claim_segments,
                     l.added_by,
-                    added_user.name AS added_by_name
+                    added_user.name AS added_by_name,
+                    l.self_scheduled_by
                 FROM shift_auction_test_lots l
                 LEFT JOIN users u ON u.id = l.claimed_by
                 LEFT JOIN directions claimed_dir ON claimed_dir.id = u.direction_id
@@ -9954,6 +10007,13 @@ class Database:
                 lots,
                 lot_dates,
                 day_offs_by_operator=day_offs_by_operator,
+                # The previewed week has its own groups — and its own allowances.
+                self_schedule_operator_ids={
+                    operator_id
+                    for group in self._get_shift_auction_time_groups_tx(cursor, plan_id, plan_only=True)
+                    if group.get("self_schedule_enabled")
+                    for operator_id in (group.get("operator_ids") or [])
+                },
             )
             my_day_offs = sorted(day_offs_by_operator.get(current_id, set()) or []) if current_id else []
             for item in claim_journal_items:
@@ -10507,27 +10567,23 @@ class Database:
                           AND COALESCE(status, '') NOT IN ('fired', 'dismissal')
                     ) AS operator_rate,
                     s.topup_started_at,
-                    -- Window of the operator's time group for the active week, if any.
-                    (
-                        SELECT g.starts_at
-                        FROM shift_auction_time_group_members m
-                        JOIN shift_auction_time_groups g ON g.id = m.group_id
-                        WHERE m.plan_id = s.selected_schedule_plan_id
-                          AND m.operator_id = %s
-                        LIMIT 1
-                    ) AS group_starts_at,
-                    (
-                        SELECT g.ends_at
-                        FROM shift_auction_time_group_members m
-                        JOIN shift_auction_time_groups g ON g.id = m.group_id
-                        WHERE m.plan_id = s.selected_schedule_plan_id
-                          AND m.operator_id = %s
-                        LIMIT 1
-                    ) AS group_ends_at,
-                    COALESCE(s.rate_lock_enabled, FALSE) AS rate_lock_enabled
+                    tg.starts_at AS group_starts_at,
+                    tg.ends_at AS group_ends_at,
+                    COALESCE(s.rate_lock_enabled, FALSE) AS rate_lock_enabled,
+                    COALESCE(tg.self_schedule_enabled, FALSE) AS self_schedule_enabled
                 FROM shift_auction_test_access s
+                -- The operator's time group for the active week, if any: their window
+                -- and whether they run on their own schedule (wider norm allowance).
+                LEFT JOIN LATERAL (
+                    SELECT g.starts_at, g.ends_at, COALESCE(g.self_schedule_enabled, FALSE) AS self_schedule_enabled
+                    FROM shift_auction_time_group_members m
+                    JOIN shift_auction_time_groups g ON g.id = m.group_id
+                    WHERE m.plan_id = s.selected_schedule_plan_id
+                      AND m.operator_id = %s
+                    LIMIT 1
+                ) tg ON TRUE
                 WHERE s.id = 1
-            """, (operator_id, operator_id, operator_id, operator_id))
+            """, (operator_id, operator_id, operator_id))
             header = cursor.fetchone()
             timings["header"] = (time.perf_counter() - started_at) * 1000
             effective_start, effective_end = (
@@ -10546,6 +10602,7 @@ class Database:
             operator_rate = float(header[6] or 1)
             is_topup_mode = bool(header[7]) and not header[4]  # topup_started_at set, auction not finished
             rate_lock_enabled = bool(header[10]) if len(header) > 10 else False
+            self_schedule_enabled = bool(header[11]) if len(header) > 11 else False
 
             started_at = time.perf_counter()
             cursor.execute("""
@@ -10650,10 +10707,15 @@ class Database:
                 lot[3],
                 lot[8] if isinstance(lot[8], list) else []
             )
+            # "Свой график" buys the group a fixed allowance over the norm — it is the
+            # only ceiling such an operator has, so it applies to ordinary claims too.
+            norm_allowance_minutes = workload["norm_minutes"] + (
+                self.SHIFT_AUCTION_SELF_SCHEDULE_EXTRA_MINUTES if self_schedule_enabled else 0
+            )
             if (
                 not is_topup_mode
                 and workload["norm_minutes"] > 0
-                and workload["claimed_net_minutes"] + candidate_minutes["net_minutes"] > workload["norm_minutes"] + 1
+                and workload["claimed_net_minutes"] + candidate_minutes["net_minutes"] > norm_allowance_minutes + 1
             ):
                 raise ValueError("SHIFT_NORM_EXCEEDED")
 
@@ -10704,25 +10766,19 @@ class Database:
                     s.paused_at,
                     s.finished_at,
                     EXISTS(SELECT 1 FROM shift_auction_test_participants WHERE operator_id = %s) AS is_participant,
-                    (
-                        SELECT g.starts_at
-                        FROM shift_auction_time_group_members m
-                        JOIN shift_auction_time_groups g ON g.id = m.group_id
-                        WHERE m.plan_id = s.selected_schedule_plan_id
-                          AND m.operator_id = %s
-                        LIMIT 1
-                    ) AS group_starts_at,
-                    (
-                        SELECT g.ends_at
-                        FROM shift_auction_time_group_members m
-                        JOIN shift_auction_time_groups g ON g.id = m.group_id
-                        WHERE m.plan_id = s.selected_schedule_plan_id
-                          AND m.operator_id = %s
-                        LIMIT 1
-                    ) AS group_ends_at
+                    tg.starts_at AS group_starts_at,
+                    tg.ends_at AS group_ends_at
                 FROM shift_auction_test_access s
+                LEFT JOIN LATERAL (
+                    SELECT g.starts_at, g.ends_at
+                    FROM shift_auction_time_group_members m
+                    JOIN shift_auction_time_groups g ON g.id = m.group_id
+                    WHERE m.plan_id = s.selected_schedule_plan_id
+                      AND m.operator_id = %s
+                    LIMIT 1
+                ) tg ON TRUE
                 WHERE s.id = 1
-            """, (operator_id, operator_id, operator_id))
+            """, (operator_id, operator_id))
             header = cursor.fetchone()
             effective_start, effective_end = (
                 self._shift_auction_effective_window(header[1], header[2], header[6], header[7])
@@ -10739,7 +10795,7 @@ class Database:
             cursor.execute("""
                 SELECT id, shift_date, start_time, end_time, rate_min, status,
                        claimed_by, claimed_at, breaks, source_schedule_plan_id, source_schedule_shift_id,
-                       COALESCE(post_auction_claimed, FALSE)
+                       COALESCE(post_auction_claimed, FALSE), self_scheduled_by
                 FROM shift_auction_test_lots
                 WHERE id = %s
                 FOR UPDATE
@@ -10753,6 +10809,11 @@ class Database:
                 raise ValueError("LOT_NOT_OWNED")
             if bool(lot[11]):
                 raise ValueError("POST_AUCTION_LOT_NOT_RELEASABLE")
+
+            # A self-scheduled shift is the operator's own creation, not a slot from
+            # the plan: giving it up removes it instead of offering it to everybody.
+            if lot[12] is not None and int(lot[12]) == operator_id:
+                return self._remove_self_scheduled_shift_tx(cursor, operator_id, lot)
 
             cursor.execute("""
                 UPDATE shift_auction_test_lots
@@ -10783,6 +10844,230 @@ class Database:
                 "operator_id": operator_id
             })
         return {"lot": lot_payload, "event": event}
+
+    def _remove_self_scheduled_shift_tx(self, cursor, operator_id, lot):
+        """Drop a shift the operator had put on the calendar themselves.
+
+        The lot has no counterpart in the weekly plan, so nothing is left behind
+        for other operators — the row and its backing shift both go away.
+        """
+        lot_id = int(lot[0])
+        source_shift_id = lot[10]
+        cursor.execute("DELETE FROM shift_auction_test_lots WHERE id = %s", (lot_id,))
+        if source_shift_id is not None:
+            cursor.execute("""
+                DELETE FROM resource_saved_schedule_shifts
+                WHERE id = %s AND source = 'auction-self'
+            """, (source_shift_id,))
+        lot_payload = {
+            "id": lot_id,
+            "shift_date": lot[1].strftime('%Y-%m-%d') if lot[1] else None,
+            "start_time": lot[2].strftime('%H:%M') if lot[2] else None,
+            "end_time": lot[3].strftime('%H:%M') if lot[3] else None,
+            "rate_min": float(lot[4] or 0),
+            "status": "removed",
+            "source_schedule_plan_id": lot[9],
+            "source_schedule_shift_id": source_shift_id,
+            "self_scheduled": True,
+        }
+        # Deliberately not a lot-patch event: the row is gone, so every client has
+        # to reconcile with a fresh snapshot instead of patching it in place.
+        event = self._insert_shift_auction_test_event(cursor, "self_scheduled_shift_removed", {
+            "lot": lot_payload,
+            "operator_id": operator_id,
+        })
+        return {"lot": lot_payload, "event": event, "removed": True}
+
+    def self_schedule_shift_auction_shift(self, operator_id, shift_date, start_time):
+        """Operator of a "свой график" group puts a shift on a day themselves.
+
+        The shift length follows their rate (a 20:00 start of a full-rate operator
+        is the 20*08 night shift, exactly as in the grid), and the total may not
+        exceed their norm plus ``SHIFT_AUCTION_SELF_SCHEDULE_EXTRA_MINUTES``.
+        """
+        operator_id = int(operator_id)
+        if hasattr(shift_date, 'strftime'):
+            date_obj = shift_date
+        else:
+            try:
+                date_obj = datetime.strptime(str(shift_date), '%Y-%m-%d').date()
+            except Exception:
+                raise ValueError("INVALID_DATE")
+        start_obj = self._normalize_schedule_time(start_time, "start_time")
+
+        with self._get_cursor() as cursor:
+            self._lock_shift_auction_operator_tx(cursor, operator_id)
+            cursor.execute("""
+                SELECT
+                    s.enabled,
+                    s.starts_at,
+                    s.ends_at,
+                    s.paused_at,
+                    s.finished_at,
+                    s.selected_schedule_plan_id,
+                    EXISTS(SELECT 1 FROM shift_auction_test_participants WHERE operator_id = %s) AS is_participant,
+                    (
+                        SELECT COALESCE(rate, 1)
+                        FROM users
+                        WHERE id = %s
+                          AND LOWER(COALESCE(role, '')) = 'operator'
+                          AND COALESCE(status, '') NOT IN ('fired', 'dismissal')
+                    ) AS operator_rate,
+                    tg.starts_at AS group_starts_at,
+                    tg.ends_at AS group_ends_at,
+                    COALESCE(tg.self_schedule_enabled, FALSE) AS self_schedule_enabled
+                FROM shift_auction_test_access s
+                LEFT JOIN LATERAL (
+                    SELECT g.starts_at, g.ends_at, COALESCE(g.self_schedule_enabled, FALSE) AS self_schedule_enabled
+                    FROM shift_auction_time_group_members m
+                    JOIN shift_auction_time_groups g ON g.id = m.group_id
+                    WHERE m.plan_id = s.selected_schedule_plan_id
+                      AND m.operator_id = %s
+                    LIMIT 1
+                ) tg ON TRUE
+                WHERE s.id = 1
+            """, (operator_id, operator_id, operator_id))
+            header = cursor.fetchone()
+            if not header:
+                raise ValueError("AUCTION_NOT_AVAILABLE")
+            effective_start, effective_end = self._shift_auction_effective_window(
+                header[1], header[2], header[8], header[9]
+            )
+            if self._get_shift_auction_test_status(header[0], effective_start, effective_end, header[3], header[4]) != "open":
+                raise ValueError("AUCTION_NOT_OPEN")
+            if (
+                not header[6]
+                or operator_id not in self._get_shift_auction_participant_ids_tx(cursor)
+            ):
+                raise ValueError("NOT_TEST_PARTICIPANT")
+            if not header[10]:
+                raise ValueError("SELF_SCHEDULE_NOT_ALLOWED")
+            if header[7] is None:
+                raise ValueError("OPERATOR_NOT_FOUND")
+
+            plan_id = int(header[5]) if header[5] is not None else None
+            operator_rate = float(header[7] or 1)
+            # Shift length comes from the grid's rate buckets, so an off-catalogue
+            # rate still maps to a real shift instead of being rejected. The norm
+            # below keeps using the operator's actual rate, as everywhere else.
+            rate_bucket = self._shift_auction_rate_bucket(operator_rate)
+            is_night = rate_bucket == 1.0 and start_obj.strftime('%H:%M') == '20:00'
+            shift_minutes = (
+                self.SHIFT_AUCTION_NIGHT_SHIFT_MINUTES if is_night
+                else self.SHIFT_AUCTION_RATE_SHIFT_MINUTES.get(rate_bucket)
+            )
+            if not shift_minutes:
+                raise ValueError("INVALID_RATE")
+            start_min = _time_to_minutes(start_obj.strftime('%H:%M'))
+            end_min = start_min + shift_minutes
+            end_obj = dt_time(hour=(end_min // 60) % 24, minute=end_min % 60)
+
+            if datetime.combine(date_obj, start_obj) <= datetime.now():
+                raise ValueError("SHIFT_ALREADY_STARTED")
+
+            lot_dates = self._get_shift_auction_lot_dates_tx(cursor)
+            if not lot_dates:
+                raise ValueError("AUCTION_NO_LOTS")
+            if date_obj not in set(lot_dates):
+                raise ValueError("DATE_OUT_OF_RANGE")
+
+            date_key = date_obj.strftime('%Y-%m-%d')
+            blocked_dates = self._get_shift_auction_operator_blocked_dates_tx(
+                cursor, operator_id, lot_dates=lot_dates
+            )
+            if any(item.get("date") == date_key for item in blocked_dates):
+                raise ValueError("SHIFT_AUCTION_STATUS_PERIOD_BLOCKED")
+
+            cursor.execute("""
+                SELECT 1 FROM shift_auction_test_day_offs
+                WHERE operator_id = %s AND day_off_date = %s
+            """, (operator_id, date_obj))
+            if cursor.fetchone():
+                raise ValueError("DAY_OFF_SELECTED")
+
+            cursor.execute("""
+                SELECT 1 FROM shift_auction_test_lots
+                WHERE claimed_by = %s AND status = 'claimed' AND shift_date = %s
+                LIMIT 1
+            """, (operator_id, date_obj))
+            if cursor.fetchone():
+                raise ValueError("DAY_ALREADY_HAS_SHIFT")
+
+            workload = self._get_shift_auction_operator_workload_tx(
+                cursor, operator_id, operator_rate,
+                lot_dates=lot_dates,
+                blocked_dates=blocked_dates
+            )
+            allowance = workload["norm_minutes"] + self.SHIFT_AUCTION_SELF_SCHEDULE_EXTRA_MINUTES
+            if workload["norm_minutes"] > 0 and workload["claimed_net_minutes"] + shift_minutes > allowance + 1:
+                raise ValueError("SELF_SCHEDULE_LIMIT_EXCEEDED")
+
+            # Backed by a real saved shift (like manager-added ones) so publishing to
+            # work schedules and the post-auction flow treat it as an ordinary shift.
+            source_shift_id = None
+            if plan_id is not None:
+                client_shift_id = (
+                    f"auction-self-{operator_id}-{date_obj.isoformat()}-{start_obj.strftime('%H%M')}"
+                )[:180]
+                cursor.execute("""
+                    INSERT INTO resource_saved_schedule_shifts (
+                        plan_id, client_shift_id, shift_date, start_minute, end_minute,
+                        start_time, end_time, duration_minutes, rate_min, label,
+                        template_id, source, tone, overnight, breaks, meta
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, '', 'auction-self', '', %s, '[]'::jsonb, %s)
+                    RETURNING id
+                """, (
+                    plan_id, client_shift_id, date_obj, start_min, end_min,
+                    start_obj, end_obj, shift_minutes, rate_bucket,
+                    f"{start_obj.strftime('%H:%M')}-{end_obj.strftime('%H:%M')}",
+                    end_min >= 24 * 60,
+                    Json({"selfScheduledBy": operator_id}),
+                ))
+                shift_row = cursor.fetchone()
+                source_shift_id = int(shift_row[0]) if shift_row else None
+
+            cursor.execute("""
+                INSERT INTO shift_auction_test_lots (
+                    shift_date, start_time, end_time, rate_min, breaks,
+                    source_schedule_plan_id, source_schedule_shift_id,
+                    status, claimed_by, claimed_at, self_scheduled_by
+                )
+                VALUES (%s, %s, %s, %s, '[]'::jsonb, %s, %s, 'claimed', %s, CURRENT_TIMESTAMP, %s)
+                RETURNING id, claimed_at
+            """, (
+                date_obj, start_obj, end_obj, rate_bucket,
+                (plan_id if source_shift_id else None), source_shift_id,
+                operator_id, operator_id,
+            ))
+            new_row = cursor.fetchone()
+
+            lot_payload = {
+                "id": int(new_row[0]),
+                "shift_date": date_key,
+                "start_time": start_obj.strftime('%H:%M'),
+                "end_time": end_obj.strftime('%H:%M'),
+                "rate_min": rate_bucket,
+                "status": "claimed",
+                "claimed_by": operator_id,
+                "claimed_at": new_row[1].isoformat() if new_row[1] else None,
+                "breaks": [],
+                "source_schedule_plan_id": (plan_id if source_shift_id else None),
+                "source_schedule_shift_id": source_shift_id,
+                "self_scheduled": True,
+            }
+            # A brand-new row cannot be patched into existing client state, so this
+            # event intentionally makes clients pull a fresh snapshot.
+            event = self._insert_shift_auction_test_event(cursor, "shift_self_scheduled", {
+                "lot": lot_payload,
+                "operator_id": operator_id,
+            })
+
+        return {
+            "lot": lot_payload,
+            "event": event,
+            "net_minutes": shift_minutes,
+        }
 
     def post_auction_claim_lot(self, operator_id, lot_id, claim_start_time=None, claim_end_time=None):
         """
@@ -12198,11 +12483,12 @@ class Database:
                 raise ValueError("AUCTION_NOT_AVAILABLE")
             # Day-offs follow the operator's own window: a group that starts later
             # must still be able to mark days off before its turn comes.
-            group_starts_at, group_ends_at = self._get_shift_auction_operator_group_window_tx(
-                cursor, operator_id, settings[5]
-            )
+            operator_group = self._get_shift_auction_operator_group_tx(cursor, operator_id, settings[5])
             day_off_starts_at, day_off_ends_at = self._shift_auction_effective_window(
-                settings[1], settings[2], group_starts_at, group_ends_at
+                settings[1],
+                settings[2],
+                (operator_group or {}).get("starts_at"),
+                (operator_group or {}).get("ends_at"),
             )
             if self._get_shift_auction_test_status(
                 settings[0], day_off_starts_at, day_off_ends_at, settings[3], settings[4]
