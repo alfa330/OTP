@@ -34,6 +34,7 @@ import {
   Square,
   Table,
   Undo2,
+  UserCog,
   Users,
   Wifi,
   X
@@ -134,6 +135,9 @@ const AUCTION_DURATION_PRESETS = [
 ];
 
 const AUCTION_TIME_PRESETS = ['09:00', '12:00', '15:00', '18:00', '20:00'];
+// Week time groups: the same cap the server enforces, mirrored so the "+ Группа"
+// button can simply disappear instead of failing on save.
+const AUCTION_TIME_GROUP_LIMIT = 10;
 const AUCTION_WEEKDAY_LABELS = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
 // Realtime events that carry a full `payload.lot` — these can be applied to a
 // single lot in place instead of refetching the whole (heavy) snapshot.
@@ -287,6 +291,77 @@ const getAuctionWindowMinutes = (startsAt, endsAt) => {
   const end = new Date(endsAt).getTime();
   if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
   return Math.round((end - start) / 60000);
+};
+
+// A group only ever carries the *time* of day in the form: its dates follow the
+// auction window of the week it belongs to, so moving the week (or the main
+// start) moves its groups along instead of leaving them on a stale date.
+const toDraftTimeGroup = (group) => ({
+  key: `saved-${group?.id}`,
+  id: normalizeOperatorId(group?.id),
+  name: group?.name || '',
+  startTime: splitDateTimeInputValue(group?.starts_at).time,
+  endTime: splitDateTimeInputValue(group?.ends_at).time,
+  operatorIds: Array.isArray(group?.operator_ids)
+    ? group.operator_ids.map(normalizeOperatorId).filter(Boolean)
+    : []
+});
+
+// A new group starts on the main start time: the time control always shows some
+// value, so an "empty" start would silently disagree with what the manager sees.
+const createDraftTimeGroup = (index, startTime) => ({
+  key: `new-${Date.now().toString(36)}-${index}`,
+  id: null,
+  name: '',
+  startTime: startTime || '',
+  endTime: '',
+  operatorIds: []
+});
+
+const getTimeGroupWindow = (group, startsAt, endsAt) => {
+  const startDate = splitDateTimeInputValue(startsAt).date;
+  const endDate = splitDateTimeInputValue(endsAt).date || startDate;
+  return {
+    startsAt: group?.startTime && startDate ? `${startDate}T${group.startTime}` : '',
+    endsAt: group?.endTime && endDate ? `${endDate}T${group.endTime}` : ''
+  };
+};
+
+// Datetime-input values are lexicographically ordered, so plain string compares
+// are enough here — no Date objects, no timezone surprises.
+const getTimeGroupIssue = (group, startsAt, endsAt) => {
+  if (!startsAt) return 'Сначала задайте начало аукциона';
+  if (!group?.startTime) return 'Укажите старт группы';
+  const window = getTimeGroupWindow(group, startsAt, endsAt);
+  if (window.endsAt) {
+    return window.endsAt <= window.startsAt ? 'Завершение группы должно быть позже её старта' : '';
+  }
+  if (endsAt && window.startsAt >= endsAt) {
+    return 'Группа стартует после общего завершения — задайте ей своё завершение';
+  }
+  return '';
+};
+
+const buildTimeGroupsPayload = (groups, startsAt, endsAt) => (groups || []).map((group) => {
+  const window = getTimeGroupWindow(group, startsAt, endsAt);
+  return {
+    id: group.id || null,
+    name: String(group.name || '').trim(),
+    starts_at: window.startsAt || null,
+    ends_at: window.endsAt || null,
+    operator_ids: group.operatorIds || []
+  };
+});
+
+const getTimeGroupTitle = (group, index) => String(group?.name || '').trim() || `Группа ${index + 1}`;
+
+const formatTimeGroupWindowLabel = (group, startsAt, endsAt) => {
+  if (!group?.startTime) return 'Старт не задан';
+  const endLabel = group.endTime
+    ? group.endTime
+    : (splitDateTimeInputValue(endsAt).time || '—');
+  const inherited = !group.endTime && endsAt;
+  return `${group.startTime} → ${endLabel}${inherited ? ' (общее)' : ''}`;
 };
 
 const compareDateInputValues = (left, right) => String(left || '').localeCompare(String(right || ''));
@@ -1217,15 +1292,16 @@ const AuctionTimeField = ({
   );
 };
 
-const getAuctionRuntimeStatus = (settings, nowMs, effectiveStartsAt = undefined) => {
+const getAuctionRuntimeStatus = (settings, nowMs, effectiveStartsAt = undefined, effectiveEndsAt = undefined) => {
   if (!settings?.enabled) return 'disabled';
   if (settings.finished_at) return 'closed';
   if (settings.paused_at) return 'paused';
-  // Favored ("избранная") operators carry an earlier effective start; everyone
-  // else (incl. managers) falls back to the main starts_at.
+  // Members of a week time group carry their own window (earlier or later);
+  // everyone else (incl. managers) falls back to the main one.
   const startsAtRaw = effectiveStartsAt === undefined ? settings.starts_at : effectiveStartsAt;
+  const endsAtRaw = effectiveEndsAt === undefined ? settings.ends_at : effectiveEndsAt;
   const startsAtMs = startsAtRaw ? new Date(startsAtRaw).getTime() : null;
-  const endsAtMs = settings.ends_at ? new Date(settings.ends_at).getTime() : null;
+  const endsAtMs = endsAtRaw ? new Date(endsAtRaw).getTime() : null;
   if (Number.isFinite(startsAtMs) && nowMs < startsAtMs) return 'scheduled';
   if (Number.isFinite(endsAtMs) && nowMs >= endsAtMs) return 'closed';
   return 'open';
@@ -1272,7 +1348,7 @@ const explainSteps = [
   }
 ];
 
-const SHIFT_AUCTION_INSTRUCTIONS_VERSION = 'v4';
+const SHIFT_AUCTION_INSTRUCTIONS_VERSION = 'v5';
 
 const StatusPillPreview = ({ tone, icon: Icon, label, detail }) => (
   <span className={`inline-flex h-9 items-center gap-2 rounded-lg border px-3 text-xs font-semibold sm:text-sm ${tone}`}>
@@ -1422,7 +1498,8 @@ const OPERATOR_INSTRUCTION_STEPS = [
       </div>
     ),
     nuances: [
-      'Если администратор включил вам ранний доступ (значок ✨ в списке участников) — аукцион откроется для вас раньше остальных, таймер это учитывает автоматически.'
+      'Если вас включили в группу времени, аукцион откроется для вас в её время — раньше или позже остальных. Таймер и статус уже учитывают это, отдельно ничего считать не нужно.',
+      'Название вашей группы видно в шапке рядом с заголовком, там же — время вашего окна.'
     ]
   },
   {
@@ -1821,25 +1898,36 @@ const ADMIN_INSTRUCTION_STEPS = [
     ]
   },
   {
-    icon: Sparkles,
-    title: 'Ранний доступ для избранной группы',
-    body: 'Отдельным участникам можно открыть аукцион раньше остальных: отметьте их значком ✨ в списке участников и задайте время раннего старта в янтарном блоке «Ранний доступ». Остальные зайдут в основное время.',
+    icon: UserCog,
+    title: 'Группы времени',
+    body: 'Части участников можно дать своё время аукциона — раньше или позже общего. В блоке «Группы времени» нажмите «Группа», задайте ей название, старт (и при необходимости своё завершение) и отметьте, кто в неё входит. Остальные заходят в общее окно.',
     visual: (
-      <div className="max-w-sm rounded-lg border border-amber-200 bg-amber-50/60 p-3">
-        <div className="flex items-center gap-2 text-sm font-semibold text-amber-900">
-          <Sparkles size={15} className="text-amber-600" />
-          Ранний доступ для избранной группы
+      <div className="max-w-sm space-y-2">
+        <div className="overflow-hidden rounded-xl bg-white ring-1 ring-slate-200/70">
+          <div className="flex items-center gap-2 px-3 py-2.5">
+            <ChevronRight size={15} className="text-slate-400" />
+            <span className="min-w-0">
+              <span className="block text-sm font-semibold text-slate-900">Наставники</span>
+              <span className="mt-0.5 block text-xs tabular-nums text-slate-500">09:00 → 12:00 (общее) · 4 в группе</span>
+            </span>
+          </div>
         </div>
-        <div className="mt-2 flex items-center justify-between gap-2 rounded-md border border-amber-200 bg-white px-3 py-2">
-          <span className="text-sm font-semibold text-slate-900">Иванов Иван</span>
-          <Sparkles size={14} className="text-amber-500" />
+        <div className="overflow-hidden rounded-xl bg-white ring-1 ring-slate-200/70">
+          <div className="flex items-center gap-2 px-3 py-2.5">
+            <ChevronRight size={15} className="text-slate-400" />
+            <span className="min-w-0">
+              <span className="block text-sm font-semibold text-slate-900">Новички</span>
+              <span className="mt-0.5 block text-xs tabular-nums text-slate-500">14:00 → 16:00 · 6 в группе</span>
+            </span>
+          </div>
         </div>
-        <div className="mt-2 text-xs text-amber-800">Старт для избранных: 09:00 · основной старт: 10:00</div>
       </div>
     ),
     nuances: [
-      'Ранний старт должен быть в день основного старта и раньше него.',
-      'Время завершения общее для всех.'
+      'Группа живёт только в своей неделе: на других неделях аукциона она не действует.',
+      'Оператор может быть только в одной группе недели.',
+      'Без своего завершения группа закрывается вместе со всеми; если группа стартует позже общего завершения, своё завершение обязательно.',
+      'Пауза сдвигает завершение и у групп, а не только у общего окна.'
     ]
   },
   {
@@ -1924,7 +2012,7 @@ const ADMIN_INSTRUCTION_STEPS = [
       </div>
     ),
     nuances: [
-      'Пауза доступна только для открытого аукциона (включая ранний доступ избранных).',
+      'Пауза доступна, пока идёт хотя бы одно окно — общее или групповое.',
       'После «Завершить» операторы больше не могут менять выбор — только просмотр итогов.'
     ]
   },
@@ -3594,10 +3682,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     launch_note: '',
     starts_at: null,
     ends_at: null,
-    favored_starts_at: null,
-    favored_operator_ids: [],
-    is_current_user_favored: false,
+    time_groups: [],
+    my_time_group: null,
     my_effective_starts_at: null,
+    my_effective_ends_at: null,
     paused_at: null,
     finished_at: null,
     status: 'disabled',
@@ -3625,10 +3713,17 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [draftNote, setDraftNote] = useState('');
   const [draftStartsAt, setDraftStartsAt] = useState('');
   const [draftEndsAt, setDraftEndsAt] = useState('');
-  const [draftFavoredStartsAt, setDraftFavoredStartsAt] = useState('');
   const [draftSchedulePlanId, setDraftSchedulePlanId] = useState('');
   const [selectedIds, setSelectedIds] = useState(() => new Set());
-  const [favoredOperatorIds, setFavoredOperatorIds] = useState(() => new Set());
+  // Week time groups. The ref keeps the groups of every configurable week (the
+  // form needs those of whichever week is picked); the draft holds the week being
+  // edited. Reloading the draft is driven by an explicit token, so an arriving
+  // snapshot can never clobber unsaved edits.
+  const [draftTimeGroups, setDraftTimeGroups] = useState([]);
+  const [expandedTimeGroupKey, setExpandedTimeGroupKey] = useState('');
+  const [timeGroupMemberQuery, setTimeGroupMemberQuery] = useState('');
+  const [timeGroupsResetToken, setTimeGroupsResetToken] = useState(0);
+  const serverTimeGroupsRef = useRef([]);
   const [query, setQuery] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -3735,16 +3830,17 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     }
   }, [instructionsStorageKey]);
 
-  // The start moment that gates the current viewer: favored operators carry an
-  // earlier effective start from the server; everyone else (incl. managers) uses
-  // the main starts_at.
+  // The window that gates the current viewer: a member of a week time group
+  // carries its own start and end (earlier or later) from the server; everyone
+  // else (incl. managers) uses the main window.
   const operatorEffectiveStartsAt = settings.my_effective_starts_at || settings.starts_at;
+  const operatorEffectiveEndsAt = settings.my_effective_ends_at || settings.ends_at;
 
   useEffect(() => {
     if (!settings.enabled) return undefined;
     if (settings.paused_at || settings.finished_at) return undefined;
     const startsAtMs = operatorEffectiveStartsAt ? new Date(operatorEffectiveStartsAt).getTime() : null;
-    const endsAtMs = settings.ends_at ? new Date(settings.ends_at).getTime() : null;
+    const endsAtMs = operatorEffectiveEndsAt ? new Date(operatorEffectiveEndsAt).getTime() : null;
     const now = Date.now();
     let nextBoundary = null;
     if (Number.isFinite(startsAtMs) && now < startsAtMs) nextBoundary = startsAtMs;
@@ -3753,7 +3849,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     const delay = Math.max(500, nextBoundary - now + 50);
     const timer = window.setTimeout(() => setStatusVersion((value) => value + 1), delay);
     return () => window.clearTimeout(timer);
-  }, [settings.enabled, settings.ends_at, settings.finished_at, settings.paused_at, operatorEffectiveStartsAt, statusVersion]);
+  }, [settings.enabled, operatorEffectiveEndsAt, settings.finished_at, settings.paused_at, operatorEffectiveStartsAt, statusVersion]);
 
   const notify = useCallback((message, type = 'success') => {
     if (typeof showToastRef.current === 'function') showToastRef.current(message, type);
@@ -3797,9 +3893,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     setDraftEndsAt(value || '');
   }, [markAuctionDraftDirty]);
 
-  const updateDraftFavoredStartsAt = useCallback((value) => {
+  const updateDraftTimeGroups = useCallback((next) => {
     markAuctionDraftDirty();
-    setDraftFavoredStartsAt(value || '');
+    setDraftTimeGroups(next);
   }, [markAuctionDraftDirty]);
 
   const updateDraftSchedulePlanId = useCallback((value) => {
@@ -3853,11 +3949,6 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     );
     const isStaleRealtime = incomingEventId < protectedEventId;
     const ids = (safe.selected_operator_ids || []).map(normalizeOperatorId).filter(Boolean);
-    const favoredIdsFromSnapshot = Array.isArray(safe.favored_operator_ids)
-      ? safe.favored_operator_ids.map(normalizeOperatorId).filter(Boolean)
-      : (Array.isArray(safe.selected_operators)
-        ? safe.selected_operators.filter((op) => op?.early_access).map((op) => normalizeOperatorId(op?.id)).filter(Boolean)
-        : []);
     const snapshotUpdatedAt = safe.updated_at || '';
     const shouldHydrateAuctionDraft = shouldHydrateShiftAuctionDraft({
       dirty: auctionDraftDirtyRef.current,
@@ -3874,10 +3965,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       launch_note: safe.launch_note || '',
       starts_at: safe.starts_at || null,
       ends_at: safe.ends_at || null,
-      favored_starts_at: safe.favored_starts_at || null,
-      favored_operator_ids: Array.isArray(safe.favored_operator_ids) ? safe.favored_operator_ids.map(normalizeOperatorId).filter(Boolean) : [],
-      is_current_user_favored: Boolean(safe.is_current_user_favored),
+      time_groups: Array.isArray(safe.time_groups) ? safe.time_groups : [],
+      my_time_group: safe.my_time_group || null,
       my_effective_starts_at: safe.my_effective_starts_at || null,
+      my_effective_ends_at: safe.my_effective_ends_at || null,
       paused_at: safe.paused_at || null,
       finished_at: safe.finished_at || null,
       status: safe.status || 'disabled',
@@ -3897,6 +3988,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       post_auction_active: Boolean(safe.post_auction_active)
     });
     setNotifyPostClaimEnabled(Boolean(safe.notify_post_claim_enabled));
+    serverTimeGroupsRef.current = Array.isArray(safe.time_groups) ? safe.time_groups : [];
     if (!isStaleRealtime) {
       setLots(Array.isArray(safe.lots) ? safe.lots : []);
       setMyDayOffs(Array.isArray(safe.my_day_offs) ? safe.my_day_offs.filter(Boolean) : []);
@@ -3914,9 +4006,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       setDraftNote(safe.launch_note || '');
       setDraftStartsAt(toDateTimeInputValue(safe.starts_at));
       setDraftEndsAt(toDateTimeInputValue(safe.ends_at));
-      setDraftFavoredStartsAt(toDateTimeInputValue(safe.favored_starts_at));
       setSelectedIds(new Set(ids));
-      setFavoredOperatorIds(new Set(favoredIdsFromSnapshot));
+      // Groups are re-derived for whichever week the form ends up on (below).
+      setTimeGroupsResetToken((token) => token + 1);
       setDraftSchedulePlanId((current) => {
         const restartablePeriods = periods.filter((period) => period?.can_restart !== false);
         const periodIds = new Set(restartablePeriods.map((period) => normalizeSchedulePlanId(period?.id)).filter(Boolean));
@@ -3962,6 +4054,19 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       setJournalLoading(false);
     }
   }, [apiRoot, buildHeaders, journalPerPage, user?.id]);
+
+  // Groups belong to a week, so the form always shows the groups of the week it
+  // is editing: re-derive them when the picked week changes and when a snapshot
+  // is allowed to refresh the draft (the token), never on every snapshot.
+  useEffect(() => {
+    const planId = normalizeSchedulePlanId(draftSchedulePlanId);
+    setDraftTimeGroups(
+      (serverTimeGroupsRef.current || [])
+        .filter((group) => planId && normalizeSchedulePlanId(group?.plan_id) === planId)
+        .map(toDraftTimeGroup)
+    );
+    setExpandedTimeGroupKey('');
+  }, [draftSchedulePlanId, timeGroupsResetToken]);
 
   const fetchSnapshot = useCallback(async ({ silent = false } = {}) => {
     if (!apiRoot || !user?.id) return;
@@ -4287,18 +4392,33 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
   const draftStartsAtParts = useMemo(() => splitDateTimeInputValue(draftStartsAt), [draftStartsAt]);
   const draftEndsAtParts = useMemo(() => splitDateTimeInputValue(draftEndsAt), [draftEndsAt]);
-  const draftFavoredStartsAtParts = useMemo(() => splitDateTimeInputValue(draftFavoredStartsAt), [draftFavoredStartsAt]);
-  // Favored start always rides on the main start's date; managers only pick the time.
-  const draftFavoredStartsAtForSave = useMemo(() => {
-    const favoredTime = draftFavoredStartsAtParts.time;
-    if (!favoredTime || !draftStartsAtParts.date) return null;
-    return `${draftStartsAtParts.date}T${favoredTime}`;
-  }, [draftFavoredStartsAtParts.time, draftStartsAtParts.date]);
-  // Only operators in the main selection can be marked favored.
-  const favoredSelectedIds = useMemo(
-    () => Array.from(favoredOperatorIds).filter((id) => selectedIds.has(id)),
-    [favoredOperatorIds, selectedIds]
-  );
+  // Only participants can sit in a group: the picker filters them out anyway, but
+  // an operator unchecked after joining must not linger in the saved payload.
+  const draftTimeGroupsForSave = useMemo(() => (
+    draftTimeGroups.map((group) => ({
+      ...group,
+      operatorIds: group.operatorIds.filter((id) => selectedIds.has(id))
+    }))
+  ), [draftTimeGroups, selectedIds]);
+  const timeGroupIssues = useMemo(() => {
+    const issues = new Map();
+    draftTimeGroups.forEach((group) => {
+      const issue = getTimeGroupIssue(group, draftStartsAt, draftEndsAt);
+      if (issue) issues.set(group.key, issue);
+    });
+    return issues;
+  }, [draftEndsAt, draftStartsAt, draftTimeGroups]);
+  // Which group each participant sits in — drives both the picker (an operator is
+  // in one group at a time) and the neutral badge in the participants list.
+  const timeGroupByOperatorId = useMemo(() => {
+    const map = new Map();
+    draftTimeGroups.forEach((group, index) => {
+      group.operatorIds.forEach((id) => {
+        if (!map.has(id)) map.set(id, { key: group.key, title: getTimeGroupTitle(group, index) });
+      });
+    });
+    return map;
+  }, [draftTimeGroups]);
   const selectedDraftPeriod = useMemo(
     () => restartablePeriods.find((period) => Number(period?.id) === Number(draftSchedulePlanId)) || null,
     [restartablePeriods, draftSchedulePlanId]
@@ -4600,13 +4720,13 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   }, [dayNavigationItems]);
 
   const runtimeStatus = useMemo(
-    () => getAuctionRuntimeStatus(settings, Date.now(), operatorEffectiveStartsAt),
+    () => getAuctionRuntimeStatus(settings, Date.now(), operatorEffectiveStartsAt, operatorEffectiveEndsAt),
     // statusVersion forces re-evaluation when a scheduled/open boundary is crossed
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [settings.enabled, settings.ends_at, settings.finished_at, settings.paused_at, operatorEffectiveStartsAt, statusVersion]
+    [settings.enabled, operatorEffectiveEndsAt, settings.finished_at, settings.paused_at, operatorEffectiveStartsAt, statusVersion]
   );
   const hasStartCountdown = runtimeStatus === 'scheduled' && Boolean(operatorEffectiveStartsAt);
-  const hasCloseCountdown = runtimeStatus === 'open' && Boolean(settings.ends_at);
+  const hasCloseCountdown = runtimeStatus === 'open' && Boolean(operatorEffectiveEndsAt);
   const auctionStatusLabel = runtimeStatus === 'scheduled'
     ? 'Откроется'
     : runtimeStatus === 'open'
@@ -4640,10 +4760,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const auctionStatusDetail = hasStartCountdown
     ? <AuctionCountdownText key="status-detail-start" target={operatorEffectiveStartsAt} />
     : hasCloseCountdown
-      ? <span key="status-detail-close">до закрытия <AuctionCountdownText target={settings.ends_at} /></span>
+      ? <span key="status-detail-close">до закрытия <AuctionCountdownText target={operatorEffectiveEndsAt} /></span>
       : <span key="status-detail-text">{auctionStatusDetailText}</span>;
   const auctionStatusShortDetail = hasCloseCountdown
-    ? <AuctionCountdownText key="status-short-close" target={settings.ends_at} />
+    ? <AuctionCountdownText key="status-short-close" target={operatorEffectiveEndsAt} />
     : hasStartCountdown
       ? <AuctionCountdownText key="status-short-start" target={operatorEffectiveStartsAt} />
       : <span key="status-short-text">{auctionStatusDetailText}</span>;
@@ -5051,13 +5171,16 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       const next = new Set(current);
       if (next.has(id)) {
         next.delete(id);
-        // Dropping a participant also drops their early-access flag.
-        setFavoredOperatorIds((favored) => {
-          if (!favored.has(id)) return favored;
-          const nextFavored = new Set(favored);
-          nextFavored.delete(id);
-          return nextFavored;
-        });
+        // Dropping a participant also drops them from their time group.
+        setDraftTimeGroups((groups) => (
+          groups.some((group) => group.operatorIds.includes(id))
+            ? groups.map((group) => (
+              group.operatorIds.includes(id)
+                ? { ...group, operatorIds: group.operatorIds.filter((memberId) => memberId !== id) }
+                : group
+            ))
+            : groups
+        ));
       } else {
         next.add(id);
       }
@@ -5065,27 +5188,62 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     });
   }, [markAuctionDraftDirty]);
 
-  const toggleFavoredOperator = useCallback((operatorId) => {
+  const addDraftTimeGroup = useCallback(() => {
+    setDraftTimeGroups((groups) => {
+      if (groups.length >= AUCTION_TIME_GROUP_LIMIT) return groups;
+      const group = createDraftTimeGroup(groups.length, splitDateTimeInputValue(draftStartsAt).time);
+      setExpandedTimeGroupKey(group.key);
+      setTimeGroupMemberQuery('');
+      return [...groups, group];
+    });
+    markAuctionDraftDirty();
+  }, [draftStartsAt, markAuctionDraftDirty]);
+
+  const patchDraftTimeGroup = useCallback((key, patch) => {
+    markAuctionDraftDirty();
+    setDraftTimeGroups((groups) => groups.map((group) => (group.key === key ? { ...group, ...patch } : group)));
+  }, [markAuctionDraftDirty]);
+
+  const removeDraftTimeGroup = useCallback((key) => {
+    markAuctionDraftDirty();
+    setDraftTimeGroups((groups) => groups.filter((group) => group.key !== key));
+    setExpandedTimeGroupKey((current) => (current === key ? '' : current));
+  }, [markAuctionDraftDirty]);
+
+  // One operator belongs to at most one group per week, so joining a group also
+  // leaves the previous one — the same rule the DB enforces.
+  const toggleTimeGroupMember = useCallback((key, operatorId) => {
     const id = normalizeOperatorId(operatorId);
     if (!id) return;
     markAuctionDraftDirty();
-    setFavoredOperatorIds((current) => {
-      const next = new Set(current);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-        // Favored implies participation — ensure the operator is selected too.
-        setSelectedIds((selected) => {
-          if (selected.has(id)) return selected;
-          const nextSelected = new Set(selected);
-          nextSelected.add(id);
-          return nextSelected;
-        });
-      }
-      return next;
+    setDraftTimeGroups((groups) => {
+      const target = groups.find((group) => group.key === key);
+      const isMember = Boolean(target?.operatorIds.includes(id));
+      return groups.map((group) => {
+        if (group.key === key) {
+          return {
+            ...group,
+            operatorIds: isMember
+              ? group.operatorIds.filter((memberId) => memberId !== id)
+              : [...group.operatorIds, id]
+          };
+        }
+        if (!isMember && group.operatorIds.includes(id)) {
+          return { ...group, operatorIds: group.operatorIds.filter((memberId) => memberId !== id) };
+        }
+        return group;
+      });
     });
-  }, [markAuctionDraftDirty]);
+    if (!draftTimeGroups.find((group) => group.key === key)?.operatorIds.includes(id)) {
+      // Group membership implies participation.
+      setSelectedIds((selected) => {
+        if (selected.has(id)) return selected;
+        const next = new Set(selected);
+        next.add(id);
+        return next;
+      });
+    }
+  }, [draftTimeGroups, markAuctionDraftDirty]);
 
   const selectAllFilteredOperators = useCallback(() => {
     if (!filteredOperators.length) return;
@@ -5103,7 +5261,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const clearSelectedOperators = useCallback(() => {
     markAuctionDraftDirty();
     setSelectedIds(new Set());
-    setFavoredOperatorIds(new Set());
+    setDraftTimeGroups((groups) => groups.map((group) => ({ ...group, operatorIds: [] })));
   }, [markAuctionDraftDirty]);
 
   const handleViewPeriodSelect = useCallback((period) => {
@@ -5119,6 +5277,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       notify('Время завершения должно быть позже старта', 'error');
       return;
     }
+    if (timeGroupIssues.size) {
+      notify(timeGroupIssues.values().next().value, 'error');
+      return;
+    }
     const draftRevisionAtSave = auctionDraftRevisionRef.current;
     setIsSaving(true);
     try {
@@ -5129,10 +5291,13 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           launch_note: draftNote,
           starts_at: draftStartsAt || null,
           ends_at: draftEndsAt || null,
-          favored_starts_at: draftFavoredStartsAtForSave,
           schedule_plan_id: selectedDraftPeriod?.id || null,
           operator_ids: Array.from(selectedIds),
-          favored_operator_ids: favoredSelectedIds
+          // Groups are saved for the week being picked; without a week there is
+          // nothing to attach them to, so the field is left out entirely.
+          ...(selectedDraftPeriod?.id
+            ? { time_groups: buildTimeGroupsPayload(draftTimeGroupsForSave, draftStartsAt, draftEndsAt) }
+            : {})
         },
         { headers: buildHeaders() }
       );
@@ -5142,11 +5307,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         const savedIds = (savedAccess.selected_operator_ids || Array.from(selectedIds))
           .map(normalizeOperatorId)
           .filter(Boolean);
-        const savedFavoredIds = (savedAccess.favored_operator_ids || favoredSelectedIds)
-          .map(normalizeOperatorId)
-          .filter((id) => id && savedIds.includes(id));
         setSelectedIds(new Set(savedIds));
-        setFavoredOperatorIds(new Set(savedFavoredIds));
         auctionDraftDirtyRef.current = false;
         auctionDraftSavedAtRef.current = savedAccess.updated_at || '';
       }
@@ -5164,7 +5325,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     } finally {
       setIsSaving(false);
     }
-  }, [apiRoot, buildHeaders, canManage, draftEnabled, draftEndsAt, draftNote, draftRangeInvalid, draftSchedulePlanId, draftStartsAt, draftFavoredStartsAtForSave, favoredSelectedIds, fetchSnapshot, notify, selectedDraftPeriod, selectedIds]);
+  }, [apiRoot, buildHeaders, canManage, draftEnabled, draftEndsAt, draftNote, draftRangeInvalid, draftSchedulePlanId, draftStartsAt, draftTimeGroupsForSave, timeGroupIssues, fetchSnapshot, notify, selectedDraftPeriod, selectedIds]);
 
   const handleRestartAuction = useCallback(async () => {
     if (!canManage || !apiRoot) return;
@@ -5853,6 +6014,12 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                     Только своя ставка
                   </span>
                 ) : null}
+                {settings.my_time_group && !canMonitor ? (
+                  <span className="ml-2 inline-flex items-center gap-1 rounded-full border border-slate-300 bg-slate-100 px-2 py-0.5 align-middle text-[11px] font-semibold text-slate-700 sm:text-xs">
+                    <UserCog size={11} />
+                    {settings.my_time_group.name}
+                  </span>
+                ) : null}
               </h1>
               <p className="mt-1 max-w-3xl text-xs leading-5 text-slate-600 sm:text-sm sm:leading-6">
                 {isTopupActive
@@ -5861,6 +6028,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                 }
                 {settings.rate_lock_enabled && !canMonitor
                   ? <> Сейчас можно брать <b className="text-sky-800">только смены своей ставки ({formatRate(userRate <= 0.5 ? 0.5 : (userRate <= 0.75 ? 0.75 : 1))})</b>.</>
+                  : null}
+                {settings.my_time_group && !canMonitor
+                  ? <> Вы в группе <b className="text-slate-900">«{settings.my_time_group.name}»</b>: выбор смен с {formatDateTimeLabel(operatorEffectiveStartsAt)}{operatorEffectiveEndsAt ? <> до {formatDateTimeLabel(operatorEffectiveEndsAt)}</> : null}.</>
                   : null}
               </p>
             </div>
@@ -6054,8 +6224,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                           ? 'Аукцион временно приостановлен.'
                           : 'Сейчас аукцион закрыт.')
                     : (runtimeStatus === 'scheduled'
-                      ? (settings.is_current_user_favored
-                        ? <>Ваш ранний доступ откроется через <AuctionCountdownText target={operatorEffectiveStartsAt} />.</>
+                      ? (settings.my_time_group
+                        ? <>Ваша группа «{settings.my_time_group.name}» заходит через <AuctionCountdownText target={operatorEffectiveStartsAt} />.</>
                         : <>Аукцион откроется через <AuctionCountdownText target={operatorEffectiveStartsAt} />.</>)
                       : runtimeStatus === 'open'
                         ? 'Нажмите “Забрать”, чтобы закрепить смену. У остальных участников она сразу станет недоступной.'
@@ -6745,54 +6915,199 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                       </button>
                     ))}
                   </div>
+                </div>
 
-                  <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50/60 p-3">
-                    <div className="flex items-center gap-2 text-sm font-semibold text-amber-900">
-                      <Sparkles size={16} className="text-amber-600" />
-                      Ранний доступ для избранной группы
-                    </div>
-                    <p className="mt-1 text-xs text-amber-800">
-                      Избранные участники смогут заходить в аукцион раньше остальных. Отметьте их в списке ниже значком{' '}
-                      <Sparkles size={12} className="inline align-text-bottom text-amber-600" /> и задайте время старта (в день основного старта).
-                    </p>
-                    <div className="mt-3 grid gap-3 md:grid-cols-2">
-                      <AuctionTimeField
-                        label="Начало раннего доступа"
-                        dateValue={draftStartsAtParts.date}
-                        value={draftFavoredStartsAt}
-                        onChange={updateDraftFavoredStartsAt}
-                        disabled={!draftStartsAtParts.date}
-                      />
-                      <div className="flex flex-col justify-center gap-2 text-xs text-amber-900">
-                        <div>
-                          Избранных операторов: <span className="font-semibold">{favoredSelectedIds.length}</span>
-                        </div>
-                        {draftFavoredStartsAtForSave ? (
-                          <div>
-                            Старт раннего доступа:{' '}
-                            <span className="font-semibold tabular-nums">{formatDateTimeLabel(draftFavoredStartsAtForSave)}</span>
-                          </div>
-                        ) : (
-                          <div className="text-amber-700">Время раннего доступа не задано — все стартуют одновременно.</div>
-                        )}
-                        {draftFavoredStartsAtForSave ? (
-                          <button
-                            type="button"
-                            onClick={() => updateDraftFavoredStartsAt('')}
-                            className="inline-flex w-fit items-center gap-1 rounded-md border border-amber-300 bg-white px-2 py-1 font-semibold text-amber-800 transition hover:bg-amber-100"
-                          >
-                            <X size={13} /> Сбросить ранний доступ
-                          </button>
-                        ) : null}
-                        {draftFavoredStartsAtForSave && draftStartsAt && draftFavoredStartsAtForSave >= toDateTimeInputValue(draftStartsAt) ? (
-                          <div className="font-semibold text-rose-600">Раннее время не раньше основного старта — преимущества нет.</div>
-                        ) : null}
-                        {draftFavoredStartsAtForSave && favoredSelectedIds.length === 0 ? (
-                          <div className="font-semibold text-rose-600">Не отмечен ни один избранный оператор.</div>
-                        ) : null}
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 sm:p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                        <UserCog size={16} className="text-blue-700" />
+                        Группы времени
                       </div>
+                      <p className="mt-1 text-xs text-slate-500">
+                        Часть участников может заходить раньше или позже общего окна.
+                        {selectedDraftPeriod
+                          ? <> Группы действуют только на неделю {formatAuctionPeriodLabel(selectedDraftPeriod)}.</>
+                          : <> Сначала выберите неделю аукциона.</>}
+                      </p>
                     </div>
+                    <button
+                      type="button"
+                      onClick={addDraftTimeGroup}
+                      disabled={!selectedDraftPeriod || draftTimeGroups.length >= AUCTION_TIME_GROUP_LIMIT}
+                      className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 transition hover:bg-slate-100 active:scale-[0.98] disabled:cursor-not-allowed disabled:text-slate-400"
+                    >
+                      <Plus size={15} />
+                      Группа
+                    </button>
                   </div>
+
+                  {draftTimeGroups.length ? (
+                    <div className="mt-3 space-y-2">
+                      {draftTimeGroups.map((group, groupIndex) => {
+                        const expanded = expandedTimeGroupKey === group.key;
+                        const issue = timeGroupIssues.get(group.key) || '';
+                        const groupEndDate = draftEndsAtParts.date || draftStartsAtParts.date;
+                        const memberCount = group.operatorIds.filter((id) => selectedIds.has(id)).length;
+                        const pickerOperators = timeGroupMemberQuery.trim()
+                          ? selectedOperators.filter((operator) => (
+                            `${operator.name} ${operator.direction || ''} ${operator.supervisor_name || ''}`
+                              .toLowerCase()
+                              .includes(timeGroupMemberQuery.trim().toLowerCase())
+                          ))
+                          : selectedOperators;
+                        return (
+                          <div
+                            key={group.key}
+                            className={`overflow-hidden rounded-xl bg-white ring-1 ${issue ? 'ring-rose-200' : 'ring-slate-200/70'}`}
+                          >
+                            <div className="flex items-center gap-2 px-3 py-2.5">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setExpandedTimeGroupKey(expanded ? '' : group.key);
+                                  setTimeGroupMemberQuery('');
+                                }}
+                                className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                              >
+                                <ChevronRight
+                                  size={16}
+                                  className={`shrink-0 text-slate-400 transition-transform ${expanded ? 'rotate-90' : ''}`}
+                                />
+                                <span className="min-w-0">
+                                  <span className="block truncate text-sm font-semibold text-slate-900">
+                                    {getTimeGroupTitle(group, groupIndex)}
+                                  </span>
+                                  <span className="mt-0.5 block truncate text-xs text-slate-500">
+                                    <span className="tabular-nums">{formatTimeGroupWindowLabel(group, draftStartsAt, draftEndsAt)}</span>
+                                    {' · '}
+                                    <span className="tabular-nums">{memberCount}</span> в группе
+                                  </span>
+                                </span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => removeDraftTimeGroup(group.key)}
+                                title="Удалить группу"
+                                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+                              >
+                                <X size={15} />
+                              </button>
+                            </div>
+
+                            {expanded ? (
+                              <div className="space-y-3 border-t border-slate-100 px-3 py-3">
+                                <input
+                                  value={group.name}
+                                  onChange={(event) => patchDraftTimeGroup(group.key, { name: event.target.value })}
+                                  maxLength={80}
+                                  placeholder="Название группы — например, Наставники"
+                                  className="h-9 w-full rounded-lg border border-slate-200 px-3 text-sm text-slate-800 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                                />
+                                <div className="grid gap-3 md:grid-cols-2">
+                                  <AuctionTimeField
+                                    label="Старт группы"
+                                    dateValue={draftStartsAtParts.date}
+                                    value={group.startTime ? `${draftStartsAtParts.date}T${group.startTime}` : ''}
+                                    onChange={(value) => patchDraftTimeGroup(group.key, {
+                                      startTime: splitDateTimeInputValue(value).time
+                                    })}
+                                    disabled={!draftStartsAtParts.date}
+                                    invalid={Boolean(issue)}
+                                  />
+                                  <div>
+                                    <AuctionTimeField
+                                      label="Завершение группы"
+                                      dateValue={groupEndDate}
+                                      // Without its own end the field shows the inherited common
+                                      // one, so what is on screen is always the effective time.
+                                      value={group.endTime ? `${groupEndDate}T${group.endTime}` : (draftEndsAt || '')}
+                                      onChange={(value) => patchDraftTimeGroup(group.key, {
+                                        endTime: splitDateTimeInputValue(value).time
+                                      })}
+                                      disabled={!groupEndDate}
+                                    />
+                                    <div className="mt-1.5 text-xs text-slate-500">
+                                      {group.endTime ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => patchDraftTimeGroup(group.key, { endTime: '' })}
+                                          className="inline-flex items-center gap-1 font-semibold text-slate-600 transition hover:text-slate-900"
+                                        >
+                                          <X size={12} /> Завершать вместе со всеми
+                                        </button>
+                                      ) : 'Завершение общее — как у остальных участников.'}
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <div>
+                                  <div className="mb-1.5 flex items-center justify-between gap-2">
+                                    <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                      Кто в группе
+                                    </span>
+                                    <span className="text-xs tabular-nums text-slate-500">{memberCount}</span>
+                                  </div>
+                                  {selectedOperators.length > 8 ? (
+                                    <input
+                                      value={timeGroupMemberQuery}
+                                      onChange={(event) => setTimeGroupMemberQuery(event.target.value)}
+                                      placeholder="Поиск по участникам"
+                                      className="mb-1.5 h-9 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                                    />
+                                  ) : null}
+                                  <div className="max-h-56 overflow-auto rounded-lg border border-slate-200">
+                                    {pickerOperators.length ? pickerOperators.map((operator) => {
+                                      const memberOf = timeGroupByOperatorId.get(operator.id);
+                                      const inThisGroup = memberOf?.key === group.key;
+                                      const inOtherGroup = Boolean(memberOf) && !inThisGroup;
+                                      return (
+                                        <button
+                                          key={operator.id}
+                                          type="button"
+                                          onClick={() => toggleTimeGroupMember(group.key, operator.id)}
+                                          className={`flex w-full items-center gap-3 border-b border-slate-100 px-3 py-2 text-left transition last:border-b-0 ${
+                                            inThisGroup ? 'bg-blue-50' : 'bg-white hover:bg-slate-50'
+                                          }`}
+                                        >
+                                          <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded border ${
+                                            inThisGroup ? 'border-blue-700 bg-blue-700 text-white' : 'border-slate-300 bg-white'
+                                          }`}
+                                          >
+                                            {inThisGroup ? <CheckCircle2 size={13} /> : null}
+                                          </span>
+                                          <span className="min-w-0 flex-1 truncate text-sm text-slate-900">{operator.name}</span>
+                                          {inOtherGroup ? (
+                                            <span className="shrink-0 truncate rounded-md bg-slate-100 px-1.5 py-0.5 text-[11px] font-semibold text-slate-500">
+                                              {memberOf.title}
+                                            </span>
+                                          ) : null}
+                                        </button>
+                                      );
+                                    }) : (
+                                      <div className="px-3 py-4 text-center text-xs text-slate-500">
+                                        {selectedOperators.length ? 'Никого не нашли.' : 'Сначала выберите участников аукциона.'}
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            ) : null}
+
+                            {issue ? (
+                              <div className="border-t border-rose-100 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">
+                                {issue}
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <p className="mt-3 rounded-lg border border-dashed border-slate-300 bg-white px-3 py-4 text-sm text-slate-500">
+                      Групп нет — все участники стартуют в общее время.
+                    </p>
+                  )}
                 </div>
 
                 <div>
@@ -6851,7 +7166,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                   {filteredOperators.length ? (
                     filteredOperators.map((operator) => {
                       const active = selectedIds.has(operator.id);
-                      const favored = favoredOperatorIds.has(operator.id);
+                      const operatorTimeGroup = timeGroupByOperatorId.get(operator.id);
                       const operatorIsWorking = isActiveShiftAuctionOperator(operator);
                       const operatorStatusLabel = getShiftAuctionOperatorStatusLabel(operator.status);
                       return (
@@ -6876,32 +7191,14 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                               {operatorStatusLabel}
                             </span>
                           ) : null}
-                          <span
-                            role="button"
-                            tabIndex={active ? 0 : -1}
-                            aria-pressed={favored}
-                            title={favored ? 'Убрать из избранной группы (ранний доступ)' : 'Дать ранний доступ (избранная группа)'}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              toggleFavoredOperator(operator.id);
-                            }}
-                            onKeyDown={(event) => {
-                              if (event.key === 'Enter' || event.key === ' ') {
-                                event.preventDefault();
-                                event.stopPropagation();
-                                toggleFavoredOperator(operator.id);
-                              }
-                            }}
-                            className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border transition ${
-                              favored
-                                ? 'border-amber-300 bg-amber-100 text-amber-700'
-                                : active
-                                  ? 'border-slate-200 bg-white text-slate-300 hover:text-amber-600'
-                                  : 'border-transparent bg-transparent text-slate-200'
-                            }`}
-                          >
-                            <Sparkles size={14} />
-                          </span>
+                          {operatorTimeGroup ? (
+                            <span
+                              title={`Группа времени: ${operatorTimeGroup.title}`}
+                              className="max-w-[8rem] shrink-0 truncate rounded-md bg-slate-100 px-1.5 py-0.5 text-[11px] font-semibold text-slate-600"
+                            >
+                              {operatorTimeGroup.title}
+                            </span>
+                          ) : null}
                         </button>
                       );
                     })
@@ -6916,20 +7213,14 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                   <Users size={17} className="text-blue-700" />
                   Тестовая группа
                 </div>
-                {favoredSelectedIds.length ? (
-                  <div className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-800">
-                    <Sparkles size={13} className="text-amber-600" />
-                    Ранний доступ: {favoredSelectedIds.length}
-                  </div>
-                ) : null}
                 <div className="mt-3 space-y-2">
                   {selectedOperators.length ? (
                     selectedOperators.map((operator) => {
-                      const favored = favoredOperatorIds.has(operator.id);
+                      const operatorTimeGroup = timeGroupByOperatorId.get(operator.id);
                       const operatorIsWorking = isActiveShiftAuctionOperator(operator);
                       const operatorStatusLabel = getShiftAuctionOperatorStatusLabel(operator.status);
                       return (
-                        <div key={operator.id} className={`flex items-center gap-2 rounded-md border px-3 py-2 ${favored ? 'border-amber-200 bg-amber-50' : 'border-slate-200 bg-white'}`}>
+                        <div key={operator.id} className="flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2">
                           <div className="min-w-0 flex-1">
                             <div className="truncate text-sm font-semibold text-slate-900">{operator.name}</div>
                             <div className="mt-0.5 truncate text-xs text-slate-500">
@@ -6937,14 +7228,14 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                               {!operatorIsWorking && operatorStatusLabel ? ` · ${operatorStatusLabel}` : ''}
                             </div>
                           </div>
-                          <button
-                            type="button"
-                            onClick={() => toggleFavoredOperator(operator.id)}
-                            title={favored ? 'Убрать из избранной группы (ранний доступ)' : 'Дать ранний доступ (избранная группа)'}
-                            className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border transition ${favored ? 'border-amber-300 bg-amber-100 text-amber-700' : 'border-slate-200 bg-white text-slate-300 hover:text-amber-600'}`}
-                          >
-                            <Sparkles size={14} />
-                          </button>
+                          {operatorTimeGroup ? (
+                            <span
+                              title={`Группа времени: ${operatorTimeGroup.title}`}
+                              className="max-w-[7rem] shrink-0 truncate rounded-md bg-slate-100 px-1.5 py-0.5 text-[11px] font-semibold text-slate-600"
+                            >
+                              {operatorTimeGroup.title}
+                            </span>
+                          ) : null}
                         </div>
                       );
                     })

@@ -3761,9 +3761,9 @@ class Database:
             cursor.execute("ALTER TABLE shift_auction_test_access ADD COLUMN IF NOT EXISTS published_to_work_schedules_by INTEGER NULL;")
             cursor.execute("ALTER TABLE shift_auction_test_access ADD COLUMN IF NOT EXISTS topup_started_at TIMESTAMP NULL;")
             cursor.execute("ALTER TABLE shift_auction_test_access ADD COLUMN IF NOT EXISTS topup_started_by INTEGER NULL;")
-            # Early-access ("избранная группа") start moment. Participants flagged
-            # with early_access can claim/release from this time instead of the
-            # main starts_at; ends_at stays shared. NULL => no early window.
+            # Legacy early-access ("избранная группа") window. Superseded by the
+            # per-week time groups below; kept only so the one-time migration can
+            # read the old config out of it.
             cursor.execute("ALTER TABLE shift_auction_test_access ADD COLUMN IF NOT EXISTS favored_starts_at TIMESTAMP NULL;")
             # Rate lock: when enabled, operators may claim only lots whose rate
             # group (derived from shift duration) matches their own users.rate.
@@ -3780,8 +3780,73 @@ class Database:
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
             """)
-            # Marks a participant as part of the early-access ("избранная") group.
+            # Legacy early-access marker, replaced by shift_auction_time_groups.
+            # Kept for the one-time migration only (see below).
             cursor.execute("ALTER TABLE shift_auction_test_participants ADD COLUMN IF NOT EXISTS early_access BOOLEAN NOT NULL DEFAULT FALSE;")
+            # Week time groups ("группы времени"): a group opens the auction for
+            # its members earlier OR later than the main window. Bound to one
+            # weekly plan on purpose — a group must not leak into other weeks.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS shift_auction_time_groups (
+                    id SERIAL PRIMARY KEY,
+                    plan_id INTEGER NOT NULL REFERENCES resource_saved_schedule_plans(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL DEFAULT '',
+                    starts_at TIMESTAMP NULL,
+                    ends_at TIMESTAMP NULL,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_shift_auction_time_groups_plan
+                ON shift_auction_time_groups(plan_id, sort_order, id);
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS shift_auction_time_group_members (
+                    group_id INTEGER NOT NULL REFERENCES shift_auction_time_groups(id) ON DELETE CASCADE,
+                    plan_id INTEGER NOT NULL,
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    PRIMARY KEY (group_id, operator_id)
+                );
+            """)
+            # One operator belongs to at most one group per week: the denormalized
+            # plan_id makes that a DB-level guarantee instead of a code convention.
+            cursor.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_shift_auction_time_group_member_week
+                ON shift_auction_time_group_members(plan_id, operator_id);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_shift_auction_time_group_members_operator
+                ON shift_auction_time_group_members(operator_id);
+            """)
+            # One-time migration of the retired "избранная группа" into a time
+            # group of the week it was configured for, so a live early window is
+            # not silently lost on deploy.
+            cursor.execute("""
+                INSERT INTO shift_auction_time_groups (plan_id, name, starts_at, created_by)
+                SELECT s.selected_schedule_plan_id, 'Ранний доступ', s.favored_starts_at, s.updated_by
+                FROM shift_auction_test_access s
+                WHERE s.id = 1
+                  AND s.selected_schedule_plan_id IS NOT NULL
+                  AND s.favored_starts_at IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1 FROM shift_auction_test_participants
+                      WHERE COALESCE(early_access, FALSE)
+                  )
+                  AND NOT EXISTS (SELECT 1 FROM shift_auction_time_groups)
+                RETURNING id, plan_id;
+            """)
+            migrated_group_row = cursor.fetchone()
+            if migrated_group_row:
+                cursor.execute("""
+                    INSERT INTO shift_auction_time_group_members (group_id, plan_id, operator_id)
+                    SELECT %s, %s, operator_id
+                    FROM shift_auction_test_participants
+                    WHERE COALESCE(early_access, FALSE)
+                    ON CONFLICT DO NOTHING;
+                """, (migrated_group_row[0], migrated_group_row[1]))
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS shift_auction_test_lots (
                     id SERIAL PRIMARY KEY,
@@ -6661,20 +6726,130 @@ class Database:
             return "closed"
         return "open"
 
-    def _shift_auction_effective_starts_at(self, starts_at, favored_starts_at, is_favored):
-        """Start moment that gates a given operator.
+    def _shift_auction_effective_window(self, starts_at, ends_at, group_starts_at=None, group_ends_at=None):
+        """Auction window that gates a given operator.
 
-        Favored ("избранная") participants open at ``favored_starts_at`` — but never
-        later than the main ``starts_at`` (a misconfigured later favored time must not
-        disadvantage them, so we take the earlier of the two). Everyone else, and any
-        run without an early window, uses the main ``starts_at``.
+        A week time group may open earlier *or* later than everyone else, so its
+        start is used as given — unlike the retired favored group, it is never
+        clamped to the main start. A group without its own end inherits the main
+        ``ends_at``.
         """
-        if not is_favored or not favored_starts_at:
-            return starts_at
-        if not starts_at:
-            # Main group has no scheduled start (already open) → favored too.
-            return None
-        return min(starts_at, favored_starts_at)
+        return (
+            group_starts_at if group_starts_at else starts_at,
+            group_ends_at if group_ends_at else ends_at,
+        )
+
+    def _shift_auction_run_bounds_tx(self, cursor, plan_id, starts_at, ends_at):
+        """Widest window across the main one and every time group of the week.
+
+        Manager controls (pause / finish / publish) act on the run as a whole: it
+        is live from the earliest group start until the latest group end. ``None``
+        keeps its "no gate at this edge" meaning — an unscheduled start or a
+        missing end widens the run instead of narrowing it.
+        """
+        windows = [(starts_at, ends_at)]
+        if plan_id is not None:
+            cursor.execute("""
+                SELECT starts_at, ends_at
+                FROM shift_auction_time_groups
+                WHERE plan_id = %s
+            """, (plan_id,))
+            for row in (cursor.fetchall() or []):
+                windows.append(self._shift_auction_effective_window(starts_at, ends_at, row[0], row[1]))
+        starts = [window[0] for window in windows]
+        ends = [window[1] for window in windows]
+        earliest = None if any(item is None for item in starts) else min(starts)
+        latest = None if any(item is None for item in ends) else max(ends)
+        return earliest, latest
+
+    @staticmethod
+    def _shift_auction_group_window(group):
+        """(starts_at, ends_at) of an already-serialized group, back as datetimes.
+
+        The snapshot's group list is shared (and cached) across viewers, so the
+        per-viewer window is derived from it instead of re-querying per operator.
+        """
+        window = []
+        for key in ("starts_at", "ends_at"):
+            text = str((group or {}).get(key) or '').strip()
+            try:
+                window.append(datetime.fromisoformat(text) if text else None)
+            except ValueError:
+                window.append(None)
+        return window[0], window[1]
+
+    def _serialize_shift_auction_time_group_row(self, row):
+        return {
+            "id": int(row[0]),
+            "plan_id": int(row[1]) if row[1] is not None else None,
+            "name": row[2] or "",
+            "starts_at": row[3].isoformat() if row[3] else None,
+            "ends_at": row[4].isoformat() if row[4] else None,
+            "created_by": row[6],
+            "created_by_name": row[7] or "",
+            "created_at": row[8].isoformat() if row[8] else None,
+            "operator_ids": [int(item) for item in (row[9] or []) if item is not None],
+        }
+
+    def _get_shift_auction_time_groups_tx(self, cursor, plan_id=None, plan_only=False):
+        """Time groups with their members.
+
+        ``plan_only`` returns just the given week; otherwise the result covers the
+        weeks a manager can still configure (current and future) plus the active
+        one, which keeps the payload bounded as weeks accumulate.
+        """
+        if plan_only:
+            if plan_id is None:
+                return []
+            scope_sql = "g.plan_id = %s"
+            params = (plan_id,)
+        else:
+            scope_sql = "p.archived_at IS NULL AND (p.date_to >= CURRENT_DATE OR g.plan_id = %s)"
+            params = (plan_id,)
+        cursor.execute(f"""
+            SELECT
+                g.id,
+                g.plan_id,
+                g.name,
+                g.starts_at,
+                g.ends_at,
+                g.sort_order,
+                g.created_by,
+                cu.name AS created_by_name,
+                g.created_at,
+                COALESCE(
+                    ARRAY_AGG(m.operator_id ORDER BY m.operator_id)
+                        FILTER (WHERE m.operator_id IS NOT NULL),
+                    '{{}}'::INTEGER[]
+                ) AS operator_ids
+            FROM shift_auction_time_groups g
+            JOIN resource_saved_schedule_plans p ON p.id = g.plan_id
+            LEFT JOIN shift_auction_time_group_members m ON m.group_id = g.id
+            LEFT JOIN users cu ON cu.id = g.created_by
+            WHERE {scope_sql}
+            GROUP BY g.id, cu.name
+            ORDER BY g.plan_id, g.sort_order, g.id
+        """, params)
+        return [self._serialize_shift_auction_time_group_row(row) for row in (cursor.fetchall() or [])]
+
+    def _get_shift_auction_operator_group_window_tx(self, cursor, operator_id, plan_id):
+        """(starts_at, ends_at) of the operator's group for the week, or (None, None)."""
+        try:
+            operator_id = int(operator_id or 0)
+        except Exception:
+            operator_id = 0
+        if operator_id <= 0 or plan_id is None:
+            return None, None
+        cursor.execute("""
+            SELECT g.starts_at, g.ends_at
+            FROM shift_auction_time_group_members m
+            JOIN shift_auction_time_groups g ON g.id = m.group_id
+            WHERE m.plan_id = %s
+              AND m.operator_id = %s
+            LIMIT 1
+        """, (plan_id, operator_id))
+        row = cursor.fetchone()
+        return (row[0], row[1]) if row else (None, None)
 
     def _serialize_shift_auction_lot_row(self, row):
         return {
@@ -6803,8 +6978,7 @@ class Database:
                 d.name AS direction_name,
                 u.supervisor_id,
                 s.name AS supervisor_name,
-                p.created_at,
-                COALESCE(p.early_access, FALSE) AS early_access
+                p.created_at
             FROM shift_auction_test_participants p
             JOIN users u ON u.id = p.operator_id
             JOIN directions d ON d.id = u.direction_id
@@ -6872,6 +7046,10 @@ class Database:
 
         selected_period_row = self._get_shift_auction_period_row_tx(cursor, settings_row[6])
         available_periods = self._get_shift_auction_available_periods_tx(cursor)
+        # Groups of every configurable week: the manager's form needs them for the
+        # week it is editing, and each viewer's own window is derived from the same
+        # list — no per-operator query on top of the cached snapshot.
+        time_groups = self._get_shift_auction_time_groups_tx(cursor, settings_row[6])
         claim_journal_rows = []
         participant_workloads = []
         if include_admin_fields:
@@ -6914,6 +7092,7 @@ class Database:
             "lot_dates": lot_dates,
             "selected_period_row": selected_period_row,
             "available_periods": available_periods,
+            "time_groups": time_groups,
             "claim_journal_rows": claim_journal_rows,
             "participant_workloads": participant_workloads
         }
@@ -7487,8 +7666,7 @@ class Database:
                     d.name AS direction_name,
                     u.supervisor_id,
                     s.name AS supervisor_name,
-                    p.created_at,
-                    COALESCE(p.early_access, FALSE) AS early_access
+                    p.created_at
                 FROM shift_auction_test_participants p
                 JOIN users u ON u.id = p.operator_id
                 JOIN directions d ON d.id = u.direction_id
@@ -7501,17 +7679,13 @@ class Database:
                 ORDER BY u.name
             """, (SHIFT_AUCTION_DIRECTION_NAME, SHIFT_AUCTION_DEPARTMENT_CODE))
             participant_rows = cursor.fetchall() or []
-            cursor.execute("SELECT favored_starts_at, COALESCE(rate_lock_enabled, FALSE) FROM shift_auction_test_access WHERE id = 1")
-            favored_row = cursor.fetchone()
-            favored_starts_at = favored_row[0] if favored_row else None
-            rate_lock_enabled = bool(favored_row[1]) if favored_row and len(favored_row) > 1 else False
+            cursor.execute("SELECT COALESCE(rate_lock_enabled, FALSE) FROM shift_auction_test_access WHERE id = 1")
+            rate_lock_row = cursor.fetchone()
+            rate_lock_enabled = bool(rate_lock_row[0]) if rate_lock_row else False
             selected_period_row = self._get_shift_auction_period_row_tx(cursor, settings_row[6])
+            time_groups = self._get_shift_auction_time_groups_tx(cursor, settings_row[6])
 
         selected_operator_ids = [int(row[0]) for row in participant_rows if row and row[0] is not None]
-        favored_operator_ids = [
-            int(row[0]) for row in participant_rows
-            if row and row[0] is not None and len(row) > 10 and row[10]
-        ]
         current_id = None
         try:
             current_id = int(current_user_id) if current_user_id is not None else None
@@ -7523,8 +7697,7 @@ class Database:
             "launch_note": settings_row[1] or "",
             "starts_at": settings_row[2].isoformat() if settings_row and settings_row[2] else None,
             "ends_at": settings_row[3].isoformat() if settings_row and settings_row[3] else None,
-            "favored_starts_at": favored_starts_at.isoformat() if favored_starts_at else None,
-            "favored_operator_ids": favored_operator_ids,
+            "time_groups": time_groups,
             "rate_lock_enabled": rate_lock_enabled,
             "paused_at": settings_row[4].isoformat() if settings_row and settings_row[4] else None,
             "finished_at": settings_row[5].isoformat() if settings_row and settings_row[5] else None,
@@ -7559,7 +7732,6 @@ class Database:
                     "supervisor_id": row[7],
                     "supervisor_name": row[8] or "",
                     "selected_at": row[9].isoformat() if row[9] else None,
-                    "early_access": bool(row[10]) if len(row) > 10 else False
                 }
                 for row in participant_rows
             ],
@@ -7577,6 +7749,117 @@ class Database:
         with self._get_cursor() as cursor:
             return operator_id in self._get_shift_auction_participant_ids_cached_tx(cursor)
 
+    SHIFT_AUCTION_TIME_GROUP_LIMIT = 10
+
+    def _normalize_shift_auction_time_groups(self, raw_groups, starts_at, ends_at):
+        """Validate the week's time groups coming from the manager's form.
+
+        Only shape and window sanity here — membership is filtered against the
+        validated participants later, inside the transaction.
+        """
+        groups = []
+        if raw_groups is None:
+            return None
+        if not isinstance(raw_groups, (list, tuple)):
+            raise ValueError("AUCTION_GROUP_INVALID")
+        if len(raw_groups) > self.SHIFT_AUCTION_TIME_GROUP_LIMIT:
+            raise ValueError("AUCTION_GROUP_LIMIT")
+        for index, raw_group in enumerate(raw_groups):
+            if not isinstance(raw_group, dict):
+                raise ValueError("AUCTION_GROUP_INVALID")
+            group_starts_at = raw_group.get('starts_at')
+            if not group_starts_at:
+                raise ValueError("AUCTION_GROUP_START_REQUIRED")
+            group_ends_at = raw_group.get('ends_at') or None
+            # A group whose own end (or the inherited main end) is not after its
+            # start would never open for anybody — reject instead of storing it.
+            effective_end = group_ends_at or ends_at
+            if effective_end and effective_end <= group_starts_at:
+                raise ValueError("AUCTION_GROUP_WINDOW_EMPTY")
+            try:
+                group_id = int(raw_group.get('id') or 0)
+            except Exception:
+                group_id = 0
+            member_ids = []
+            seen_members = set()
+            for raw_member in (raw_group.get('operator_ids') or []):
+                try:
+                    member_id = int(raw_member)
+                except Exception:
+                    continue
+                if member_id > 0 and member_id not in seen_members:
+                    seen_members.add(member_id)
+                    member_ids.append(member_id)
+            groups.append({
+                "id": group_id if group_id > 0 else None,
+                "name": str(raw_group.get('name') or '').strip()[:80] or f"Группа {index + 1}",
+                "starts_at": group_starts_at,
+                "ends_at": group_ends_at,
+                "operator_ids": member_ids,
+            })
+        return groups
+
+    def _save_shift_auction_time_groups_tx(self, cursor, plan_id, groups, valid_operator_ids, updated_by=None):
+        """Rewrite the week's groups; returns them serialized for the response.
+
+        Membership is intersected with the validated participants and deduped
+        across groups (the first group listed wins), so the DB-level "one group
+        per operator per week" index can never be hit by a legitimate save.
+        """
+        if groups is None:
+            return None
+        if not groups:
+            cursor.execute("DELETE FROM shift_auction_time_groups WHERE plan_id = %s", (plan_id,))
+            return []
+
+        cursor.execute("SELECT id FROM shift_auction_time_groups WHERE plan_id = %s", (plan_id,))
+        existing_ids = {int(row[0]) for row in (cursor.fetchall() or [])}
+
+        kept_ids = []
+        assigned_members = set()
+        member_rows = []
+        for index, group in enumerate(groups):
+            if group["id"] and group["id"] in existing_ids:
+                cursor.execute("""
+                    UPDATE shift_auction_time_groups
+                    SET name = %s,
+                        starts_at = %s,
+                        ends_at = %s,
+                        sort_order = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s AND plan_id = %s
+                    RETURNING id
+                """, (group["name"], group["starts_at"], group["ends_at"], index, group["id"], plan_id))
+            else:
+                cursor.execute("""
+                    INSERT INTO shift_auction_time_groups (plan_id, name, starts_at, ends_at, sort_order, created_by)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                """, (plan_id, group["name"], group["starts_at"], group["ends_at"], index, updated_by))
+            group_id = int(cursor.fetchone()[0])
+            kept_ids.append(group_id)
+            for operator_id in group["operator_ids"]:
+                if operator_id in valid_operator_ids and operator_id not in assigned_members:
+                    assigned_members.add(operator_id)
+                    member_rows.append((group_id, plan_id, operator_id))
+
+        cursor.execute("""
+            DELETE FROM shift_auction_time_groups
+            WHERE plan_id = %s AND NOT (id = ANY(%s))
+        """, (plan_id, kept_ids))
+        cursor.execute("DELETE FROM shift_auction_time_group_members WHERE plan_id = %s", (plan_id,))
+        if member_rows:
+            execute_values(
+                cursor,
+                """
+                INSERT INTO shift_auction_time_group_members (group_id, plan_id, operator_id)
+                VALUES %s
+                ON CONFLICT DO NOTHING
+                """,
+                member_rows
+            )
+        return self._get_shift_auction_time_groups_tx(cursor, plan_id, plan_only=True)
+
     def update_shift_auction_test_access(
         self,
         enabled=False,
@@ -7586,13 +7869,11 @@ class Database:
         starts_at=None,
         ends_at=None,
         schedule_plan_id=None,
-        favored_starts_at=None,
-        favored_operator_ids=None,
+        time_groups=None,
     ):
         if starts_at and ends_at and ends_at <= starts_at:
             raise ValueError("AUCTION_END_BEFORE_START")
-        if favored_starts_at and ends_at and ends_at <= favored_starts_at:
-            raise ValueError("AUCTION_FAVORED_START_AFTER_END")
+        normalized_groups = self._normalize_shift_auction_time_groups(time_groups, starts_at, ends_at)
         normalized_ids = []
         seen = set()
         for raw_id in (operator_ids or []):
@@ -7603,18 +7884,6 @@ class Database:
             if operator_id > 0 and operator_id not in seen:
                 seen.add(operator_id)
                 normalized_ids.append(operator_id)
-
-        favored_requested = set()
-        for raw_id in (favored_operator_ids or []):
-            try:
-                favored_id = int(raw_id)
-            except Exception:
-                continue
-            if favored_id > 0:
-                favored_requested.add(favored_id)
-        # No favored operators ⇒ no early window to persist.
-        if not favored_requested:
-            favored_starts_at = None
 
         selected_period_row = None
         selected_plan_id = None
@@ -7674,14 +7943,6 @@ class Database:
                 ))
                 valid_ids = [int(row[0]) for row in (cursor.fetchall() or [])]
 
-            # Favored operators must survive participant validation. Keying off the
-            # validated set (not the raw request) keeps the stored favored_starts_at
-            # from lingering as a no-op early window when every favored id was dropped.
-            favored_valid = [operator_id for operator_id in valid_ids if operator_id in favored_requested]
-            favored_valid_set = set(favored_valid)
-            if not favored_valid:
-                favored_starts_at = None
-
             should_refresh_lots = False
             if selected_plan_id is not None:
                 cursor.execute("""
@@ -7718,7 +7979,6 @@ class Database:
                     launch_note = %s,
                     starts_at = %s,
                     ends_at = %s,
-                    favored_starts_at = %s,
                     selected_schedule_plan_id = %s,
                     paused_at = CASE WHEN %s THEN NULL ELSE paused_at END,
                     finished_at = CASE WHEN %s THEN NULL ELSE finished_at END,
@@ -7734,7 +7994,6 @@ class Database:
                 str(launch_note or '').strip()[:1000],
                 starts_at,
                 ends_at,
-                favored_starts_at,
                 next_selected_plan_id,
                 should_reset_run_state,
                 should_reset_run_state,
@@ -7779,25 +8038,47 @@ class Database:
 
             cursor.execute("DELETE FROM shift_auction_test_participants")
             if valid_ids:
-                rows = [
-                    (operator_id, updated_by, operator_id in favored_valid_set)
-                    for operator_id in valid_ids
-                ]
+                rows = [(operator_id, updated_by) for operator_id in valid_ids]
                 execute_values(
                     cursor,
                     """
-                    INSERT INTO shift_auction_test_participants (operator_id, added_by, early_access)
+                    INSERT INTO shift_auction_test_participants (operator_id, added_by)
                     VALUES %s
                     ON CONFLICT (operator_id) DO NOTHING
                     """,
                     rows
                 )
+
+            # Time groups belong to their week, so they are written against the
+            # plan being saved and left untouched for every other week.
+            saved_groups = None
+            if normalized_groups is not None:
+                if next_selected_plan_id is None:
+                    if normalized_groups:
+                        raise ValueError("AUCTION_GROUP_WEEK_REQUIRED")
+                else:
+                    saved_groups = self._save_shift_auction_time_groups_tx(
+                        cursor,
+                        next_selected_plan_id,
+                        normalized_groups,
+                        set(valid_ids),
+                        updated_by=updated_by,
+                    )
+
             self._insert_shift_auction_test_event(cursor, "settings_updated", {
                 "enabled": bool(enabled),
                 "starts_at": starts_at.isoformat() if starts_at else None,
                 "ends_at": ends_at.isoformat() if ends_at else None,
-                "favored_starts_at": favored_starts_at.isoformat() if favored_starts_at else None,
-                "favored_operator_ids": favored_valid,
+                "time_groups": [
+                    {
+                        "id": group["id"],
+                        "name": group["name"],
+                        "starts_at": group["starts_at"],
+                        "ends_at": group["ends_at"],
+                        "operator_ids": group["operator_ids"],
+                    }
+                    for group in (saved_groups or [])
+                ],
                 "selected_operator_ids": valid_ids,
                 "selected_schedule_plan_id": next_selected_plan_id,
                 "lots_refreshed": should_refresh_lots,
@@ -7818,7 +8099,7 @@ class Database:
         now = datetime.now()
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT enabled, starts_at, ends_at, paused_at, finished_at, favored_starts_at
+                SELECT enabled, starts_at, ends_at, paused_at, finished_at, selected_schedule_plan_id
                 FROM shift_auction_test_access
                 WHERE id = 1
                 FOR UPDATE
@@ -7827,15 +8108,16 @@ class Database:
             if not row:
                 raise ValueError("AUCTION_NOT_AVAILABLE")
 
-            enabled, starts_at, ends_at, paused_at, finished_at, favored_starts_at = row
-            # The auction is "live" (and therefore pausable) as soon as the earliest
-            # group can act — i.e. once the favored early window opens, not only at the
-            # main start. Resume/finish are unaffected (they key off paused_at/ends_at).
-            earliest_start = self._shift_auction_effective_starts_at(starts_at, favored_starts_at, True)
+            enabled, starts_at, ends_at, paused_at, finished_at, selected_plan_id = row
+            # The run is "live" (and therefore pausable) from the earliest time group
+            # start until the latest group end — not only inside the main window.
+            earliest_start, latest_end = self._shift_auction_run_bounds_tx(
+                cursor, selected_plan_id, starts_at, ends_at
+            )
             current_status = self._get_shift_auction_test_status(
                 enabled,
                 earliest_start,
-                ends_at,
+                latest_end,
                 paused_at,
                 finished_at
             )
@@ -7867,6 +8149,16 @@ class Database:
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = 1
                 """, (next_ends_at, updated_by))
+                # Groups with their own end lose the same minutes to the pause as
+                # the main window, otherwise a pause would silently shorten them.
+                if selected_plan_id is not None:
+                    cursor.execute("""
+                        UPDATE shift_auction_time_groups
+                        SET ends_at = ends_at + %s,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE plan_id = %s
+                          AND ends_at IS NOT NULL
+                    """, (pause_delta, selected_plan_id))
                 event = self._insert_shift_auction_test_event(cursor, "auction_resumed", {
                     "resumed_at": now.isoformat(),
                     "paused_seconds": max(0, int(pause_delta.total_seconds())),
@@ -7916,9 +8208,14 @@ class Database:
             row = cursor.fetchone()
             if not row:
                 raise ValueError("AUCTION_NOT_AVAILABLE")
-            current_status = self._get_shift_auction_test_status(row[0], row[1], row[2], row[3], row[4])
             current_topup_started_at = row[5]
             selected_schedule_plan_id = row[6]
+            # Top-up is a run-wide switch: it may be flipped while any time group
+            # window is still open, not only inside the main one.
+            run_starts_at, run_ends_at = self._shift_auction_run_bounds_tx(
+                cursor, selected_schedule_plan_id, row[1], row[2]
+            )
+            current_status = self._get_shift_auction_test_status(row[0], run_starts_at, run_ends_at, row[3], row[4])
 
             if enable:
                 if current_status != 'open':
@@ -8431,9 +8728,16 @@ class Database:
             settings_row = cursor.fetchone()
             if not settings_row:
                 raise ValueError("AUCTION_NOT_AVAILABLE")
-            if self._get_shift_auction_test_status(*settings_row[:5]) != "closed":
-                raise ValueError("AUCTION_NOT_CLOSED")
             selected_schedule_plan_id = int(settings_row[5]) if settings_row[5] is not None else None
+            # "Closed" must hold for the whole run: a late time group may still be
+            # picking shifts after the main window has ended.
+            publish_starts_at, publish_ends_at = self._shift_auction_run_bounds_tx(
+                cursor, selected_schedule_plan_id, settings_row[1], settings_row[2]
+            )
+            if self._get_shift_auction_test_status(
+                settings_row[0], publish_starts_at, publish_ends_at, settings_row[3], settings_row[4]
+            ) != "closed":
+                raise ValueError("AUCTION_NOT_CLOSED")
 
             lot_dates = self._get_shift_auction_lot_dates_tx(cursor)
             if not lot_dates:
@@ -9179,23 +9483,30 @@ class Database:
                 if current_id else []
             )
 
-            cursor.execute("SELECT favored_starts_at, COALESCE(rate_lock_enabled, FALSE) FROM shift_auction_test_access WHERE id = 1")
-            favored_row = cursor.fetchone()
-            favored_starts_at = favored_row[0] if favored_row else None
-            rate_lock_enabled = bool(favored_row[1]) if favored_row and len(favored_row) > 1 else False
+            cursor.execute("SELECT COALESCE(rate_lock_enabled, FALSE) FROM shift_auction_test_access WHERE id = 1")
+            rate_lock_row = cursor.fetchone()
+            rate_lock_enabled = bool(rate_lock_row[0]) if rate_lock_row else False
 
         selected_operator_ids = [int(row[0]) for row in participant_rows if row and row[0] is not None]
-        favored_operator_ids = [
-            int(row[0]) for row in participant_rows
-            if row and row[0] is not None and len(row) > 10 and row[10]
-        ]
-        is_current_user_favored = bool(
-            current_id is not None and current_id in set(favored_operator_ids)
+        time_groups = common_snapshot.get("time_groups") or []
+        active_plan_id = settings_row[6] if settings_row else None
+        # The viewer's own group for the active week — groups of other weeks are in
+        # the payload for the manager's form only and must not gate anybody.
+        my_time_group = next(
+            (
+                group for group in time_groups
+                if current_id is not None
+                and group.get("plan_id") == active_plan_id
+                and current_id in (group.get("operator_ids") or [])
+            ),
+            None
         )
-        my_effective_starts_at = self._shift_auction_effective_starts_at(
+        my_group_starts_at, my_group_ends_at = self._shift_auction_group_window(my_time_group)
+        my_effective_starts_at, my_effective_ends_at = self._shift_auction_effective_window(
             settings_row[2] if settings_row else None,
-            favored_starts_at,
-            is_current_user_favored,
+            settings_row[3] if settings_row else None,
+            my_group_starts_at,
+            my_group_ends_at,
         )
         post_auction_active = bool(
             settings_row and settings_row[10]
@@ -9215,16 +9526,18 @@ class Database:
             "finished_at": settings_row[5].isoformat() if settings_row and settings_row[5] else None,
             "selected_schedule_plan_id": settings_row[6] if settings_row else None,
             "selected_period": self._serialize_shift_auction_period_row(selected_period_row),
-            "favored_starts_at": favored_starts_at.isoformat() if favored_starts_at else None,
-            "favored_operator_ids": favored_operator_ids,
-            "is_current_user_favored": is_current_user_favored,
+            # Only the manager's form needs the whole roster of groups; an operator
+            # is told about their own group and nothing more.
+            "time_groups": time_groups if include_admin_fields else [],
+            "my_time_group": my_time_group,
             "my_effective_starts_at": my_effective_starts_at.isoformat() if my_effective_starts_at else None,
-            # Operator-aware status: favored участники see "open" from their earlier
-            # effective start; everyone else (and managers) see the main timeline.
+            "my_effective_ends_at": my_effective_ends_at.isoformat() if my_effective_ends_at else None,
+            # Operator-aware status: a member of a week time group sees their own
+            # window (earlier or later); everyone else sees the main timeline.
             "status": self._get_shift_auction_test_status(
                 bool(settings_row[0]) if settings_row else False,
                 my_effective_starts_at,
-                settings_row[3] if settings_row else None,
+                my_effective_ends_at,
                 settings_row[4] if settings_row else None,
                 settings_row[5] if settings_row else None
             ),
@@ -9251,7 +9564,6 @@ class Database:
                     "supervisor_id": row[7],
                     "supervisor_name": row[8] or "",
                     "selected_at": row[9].isoformat() if row[9] else None,
-                    "early_access": bool(row[10]) if len(row) > 10 else False
                 }
                 for row in participant_rows
             ],
@@ -10195,16 +10507,34 @@ class Database:
                           AND COALESCE(status, '') NOT IN ('fired', 'dismissal')
                     ) AS operator_rate,
                     s.topup_started_at,
-                    s.favored_starts_at,
-                    (SELECT COALESCE(early_access, FALSE) FROM shift_auction_test_participants WHERE operator_id = %s) AS early_access,
+                    -- Window of the operator's time group for the active week, if any.
+                    (
+                        SELECT g.starts_at
+                        FROM shift_auction_time_group_members m
+                        JOIN shift_auction_time_groups g ON g.id = m.group_id
+                        WHERE m.plan_id = s.selected_schedule_plan_id
+                          AND m.operator_id = %s
+                        LIMIT 1
+                    ) AS group_starts_at,
+                    (
+                        SELECT g.ends_at
+                        FROM shift_auction_time_group_members m
+                        JOIN shift_auction_time_groups g ON g.id = m.group_id
+                        WHERE m.plan_id = s.selected_schedule_plan_id
+                          AND m.operator_id = %s
+                        LIMIT 1
+                    ) AS group_ends_at,
                     COALESCE(s.rate_lock_enabled, FALSE) AS rate_lock_enabled
                 FROM shift_auction_test_access s
                 WHERE s.id = 1
-            """, (operator_id, operator_id, operator_id))
+            """, (operator_id, operator_id, operator_id, operator_id))
             header = cursor.fetchone()
             timings["header"] = (time.perf_counter() - started_at) * 1000
-            effective_start = self._shift_auction_effective_starts_at(header[1], header[8], header[9]) if header else None
-            if not header or self._get_shift_auction_test_status(header[0], effective_start, header[2], header[3], header[4]) != "open":
+            effective_start, effective_end = (
+                self._shift_auction_effective_window(header[1], header[2], header[8], header[9])
+                if header else (None, None)
+            )
+            if not header or self._get_shift_auction_test_status(header[0], effective_start, effective_end, header[3], header[4]) != "open":
                 raise ValueError("AUCTION_NOT_OPEN")
             if (
                 not header[5]
@@ -10374,14 +10704,31 @@ class Database:
                     s.paused_at,
                     s.finished_at,
                     EXISTS(SELECT 1 FROM shift_auction_test_participants WHERE operator_id = %s) AS is_participant,
-                    s.favored_starts_at,
-                    (SELECT COALESCE(early_access, FALSE) FROM shift_auction_test_participants WHERE operator_id = %s) AS early_access
+                    (
+                        SELECT g.starts_at
+                        FROM shift_auction_time_group_members m
+                        JOIN shift_auction_time_groups g ON g.id = m.group_id
+                        WHERE m.plan_id = s.selected_schedule_plan_id
+                          AND m.operator_id = %s
+                        LIMIT 1
+                    ) AS group_starts_at,
+                    (
+                        SELECT g.ends_at
+                        FROM shift_auction_time_group_members m
+                        JOIN shift_auction_time_groups g ON g.id = m.group_id
+                        WHERE m.plan_id = s.selected_schedule_plan_id
+                          AND m.operator_id = %s
+                        LIMIT 1
+                    ) AS group_ends_at
                 FROM shift_auction_test_access s
                 WHERE s.id = 1
-            """, (operator_id, operator_id))
+            """, (operator_id, operator_id, operator_id))
             header = cursor.fetchone()
-            effective_start = self._shift_auction_effective_starts_at(header[1], header[6], header[7]) if header else None
-            if not header or self._get_shift_auction_test_status(header[0], effective_start, header[2], header[3], header[4]) != "open":
+            effective_start, effective_end = (
+                self._shift_auction_effective_window(header[1], header[2], header[6], header[7])
+                if header else (None, None)
+            )
+            if not header or self._get_shift_auction_test_status(header[0], effective_start, effective_end, header[3], header[4]) != "open":
                 raise ValueError("AUCTION_NOT_OPEN")
             if (
                 not header[5]
@@ -11842,12 +12189,24 @@ class Database:
         with self._get_cursor() as cursor:
             self._lock_shift_auction_operator_tx(cursor, operator_id)
             cursor.execute("""
-                SELECT enabled, starts_at, ends_at, paused_at, finished_at
+                SELECT enabled, starts_at, ends_at, paused_at, finished_at, selected_schedule_plan_id
                 FROM shift_auction_test_access
                 WHERE id = 1
             """)
             settings = cursor.fetchone()
-            if not settings or self._get_shift_auction_test_status(settings[0], settings[1], settings[2], settings[3], settings[4]) not in ("scheduled", "open"):
+            if not settings:
+                raise ValueError("AUCTION_NOT_AVAILABLE")
+            # Day-offs follow the operator's own window: a group that starts later
+            # must still be able to mark days off before its turn comes.
+            group_starts_at, group_ends_at = self._get_shift_auction_operator_group_window_tx(
+                cursor, operator_id, settings[5]
+            )
+            day_off_starts_at, day_off_ends_at = self._shift_auction_effective_window(
+                settings[1], settings[2], group_starts_at, group_ends_at
+            )
+            if self._get_shift_auction_test_status(
+                settings[0], day_off_starts_at, day_off_ends_at, settings[3], settings[4]
+            ) not in ("scheduled", "open"):
                 raise ValueError("AUCTION_NOT_AVAILABLE")
 
             if operator_id not in self._get_shift_auction_participant_ids_tx(cursor):
