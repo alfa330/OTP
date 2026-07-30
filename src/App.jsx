@@ -46541,9 +46541,55 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             : totalHoursBase + totalHoursTraining + totalHoursTechnical + totalHoursOffline;
                                           const normHours = Number(hoursOp?.norm_hours ?? 0);
                                           const hasHoursData = hoursData?.operators?.length > 0;
-                                          
+
+                                          // ОП TEZ: качество у них не в выплате и звонки почти не прослушивают,
+                                          // поэтому первые две плитки — успешки и выполнение плана.
+                                          const profileIsTezOp = resolveWorkHoursMonthModelInfo(hoursOp).modelCode === 'tez_op';
+                                          const profileSuccesses = Number(hoursOp?.aggregates?.total_tez_successes ?? 0) || 0;
+                                          const profilePlanResult = profileIsTezOp
+                                            ? calculateTezOpMonthlyPlan({
+                                                planPerFte: hoursOp?.tez_plan_per_fte,
+                                                rate: hoursOp?.rate,
+                                                normHours,
+                                                factHours: totalHours,
+                                                hireDate: hoursOp?.hire_date,
+                                                month: selectedMonth,
+                                              })
+                                            : null;
+                                          const profilePlan = profilePlanResult?.plan ?? null;
+                                          const profilePlanPercent = (profilePlan && profilePlan > 0)
+                                            ? (profileSuccesses / profilePlan) * 100
+                                            : null;
+                                          const profileSuccessesLeft = (profilePlan && profilePlan > 0)
+                                            ? Math.max(0, Math.ceil(profilePlan - profileSuccesses))
+                                            : null;
+
                                           return (
                                             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
+                                              {profileIsTezOp ? (
+                                                <>
+                                              <div className="bg-gradient-to-br from-blue-50 to-blue-100 p-3 sm:p-4 rounded-xl text-center">
+                                                <div className="text-2xl sm:text-3xl font-bold text-blue-600 tabular-nums">
+                                                  {profileSuccesses}{profilePlan != null ? `/${profilePlan.toFixed(0)}` : ''}
+                                                </div>
+                                                <div className="text-xs text-gray-600 mt-1">Успешки / план</div>
+                                                <div className={`text-[11px] mt-1 ${profileSuccessesLeft === null ? 'text-gray-500' : profileSuccessesLeft > 0 ? 'text-amber-600' : 'text-green-600'}`}>
+                                                  {profileSuccessesLeft === null
+                                                    ? 'План не задан'
+                                                    : profileSuccessesLeft > 0
+                                                      ? `Осталось ${profileSuccessesLeft}`
+                                                      : 'План выполнен'}
+                                                </div>
+                                              </div>
+                                              <div className="bg-gradient-to-br from-green-50 to-green-100 p-3 sm:p-4 rounded-xl text-center">
+                                                <div className={`text-2xl sm:text-3xl font-bold tabular-nums ${profilePlanPercent === null ? 'text-gray-400' : profilePlanPercent >= 100 ? 'text-green-600' : profilePlanPercent >= 85 ? 'text-yellow-600' : 'text-red-600'}`}>
+                                                  {profilePlanPercent === null ? '-' : `${profilePlanPercent.toFixed(0)}%`}
+                                                </div>
+                                                <div className="text-xs text-gray-600 mt-1">Выполнение плана</div>
+                                              </div>
+                                                </>
+                                              ) : (
+                                                <>
                                               <div className="bg-gradient-to-br from-blue-50 to-blue-100 p-3 sm:p-4 rounded-xl text-center">
                                                 <div className="text-2xl sm:text-3xl font-bold text-blue-600">{evalCount}/{targetEvalCount}</div>
                                                 <div className="text-xs text-gray-600 mt-1">Прослушано / нужно</div>
@@ -46557,6 +46603,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </div>
                                                 <div className="text-xs text-gray-600 mt-1">Ср. балл</div>
                                               </div>
+                                                </>
+                                              )}
                                               <div className="bg-gradient-to-br from-purple-50 to-purple-100 p-3 sm:p-4 rounded-xl text-center">
                                                 <div className="text-2xl sm:text-3xl font-bold text-purple-600">{hasHoursData ? totalHours.toFixed(0) : '-'}</div>
                                                 <div className="text-xs text-gray-600 mt-1">Часов</div>
