@@ -2362,9 +2362,14 @@ class Database:
                     force_closed BOOLEAN NOT NULL DEFAULT FALSE,
                     transcript TEXT NOT NULL,
                     context_tail TEXT,
+                    journal_evaluated_at TIMESTAMPTZ,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     UNIQUE (channel_id, chat_id, started_at)
                 );
+            """)
+            cursor.execute("""
+                ALTER TABLE wazzup_episodes
+                ADD COLUMN IF NOT EXISTS journal_evaluated_at TIMESTAMPTZ;
             """)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_wazzup_episodes_ended
@@ -2611,6 +2616,11 @@ class Database:
                 ALTER TABLE calls
                 ADD COLUMN IF NOT EXISTS c2d_snapshot_id INTEGER
                     REFERENCES c2d_chat_snapshots(id) ON DELETE SET NULL;
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_calls_c2d_snapshot
+                ON calls(c2d_snapshot_id)
+                WHERE c2d_snapshot_id IS NOT NULL;
             """)
             cursor.execute("""
                 ALTER TABLE calls
@@ -16657,23 +16667,99 @@ class Database:
                 updated += cursor.rowcount
         return updated
 
+    @staticmethod
+    def _mark_journal_evaluated_wazzup_episodes_tx(cursor):
+        """Persist the human-journal link before its 180-day snapshot expires.
+
+        A Wazzup journal evaluation points to an episode only through
+        calls.c2d_snapshot_id -> c2d_chat_snapshots and the episode natural key.
+        Snapshot retention eventually clears that link, so the episode itself
+        keeps a durable marker once a non-draft evaluation exists.
+        """
+        cursor.execute("""
+            UPDATE wazzup_episodes e
+               SET journal_evaluated_at = CURRENT_TIMESTAMP
+              FROM (
+                    SELECT DISTINCT s.wz_channel_id, s.wz_chat_id, s.episode_start
+                      FROM c2d_chat_snapshots s
+                      JOIN calls c ON c.c2d_snapshot_id = s.id
+                     WHERE s.source = 'wazzup'
+                       AND COALESCE(c.is_draft, FALSE) = FALSE
+                   ) evaluated
+             WHERE e.journal_evaluated_at IS NULL
+               AND e.channel_id = evaluated.wz_channel_id
+               AND e.chat_id = evaluated.wz_chat_id
+               AND e.started_at = evaluated.episode_start
+        """)
+        return cursor.rowcount
+
     def cleanup_wazzup_messages(self, retention_days=45):
-        """Ретеншн Wazzup: удаляет сообщения старше retention_days (~1,5 мес.)
-        и сводки чатов без активности за тот же срок. Диск прода 1 ГБ — история
-        намеренно не хранится дольше; ранние чаты смотрят в самом Wazzup."""
+        """Ретеншн Wazzup: удаляет сырые данные старше retention_days.
+
+        Эпизоды с успешной ИИ-оценкой или финальной человеческой оценкой в
+        «Журнале оценок» сохраняются бессрочно. Неоценённые эпизоды живут столько
+        же, сколько исходные сообщения. Черновик журнала временно защищает
+        эпизод, пока существует его snapshot, но не ставит бессрочную метку.
+        """
+        days = int(retention_days)
         with self._get_cursor() as cursor:
+            marked_journal_episodes = self._mark_journal_evaluated_wazzup_episodes_tx(
+                cursor)
             cursor.execute(
                 "DELETE FROM wazzup_messages WHERE dt < now() - make_interval(days => %s)",
-                (int(retention_days),))
+                (days,))
             deleted_messages = cursor.rowcount
             cursor.execute(
                 "DELETE FROM wazzup_chats WHERE last_message_at < now() - make_interval(days => %s)",
-                (int(retention_days),))
+                (days,))
             deleted_chats = cursor.rowcount
-        if deleted_messages or deleted_chats:
-            logging.info("wazzup retention: удалено %s сообщений, %s чатов",
-                         deleted_messages, deleted_chats)
-        return {'messages': deleted_messages, 'chats': deleted_chats}
+            cursor.execute("""
+                DELETE FROM wazzup_episodes e
+                 WHERE e.ended_at < now() - make_interval(days => %s)
+                   AND e.journal_evaluated_at IS NULL
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM ai_evaluation_runs r
+                        WHERE r.subject_kind = 'wz_episode'
+                          AND r.call_id = e.id
+                          AND r.status = 'succeeded'
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM ai_evaluation_meta m
+                        WHERE m.subject_kind = 'wz_episode'
+                          AND m.call_id = e.id
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM ai_review_cache rc
+                        WHERE rc.subject_kind = 'wz_episode'
+                          AND rc.call_id = e.id
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM c2d_chat_snapshots s
+                         JOIN calls c ON c.c2d_snapshot_id = s.id
+                        WHERE s.source = 'wazzup'
+                          AND s.wz_channel_id = e.channel_id
+                          AND s.wz_chat_id = e.chat_id
+                          AND s.episode_start = e.started_at
+                   )
+            """, (days,))
+            deleted_episodes = cursor.rowcount
+        if (deleted_messages or deleted_chats or deleted_episodes
+                or marked_journal_episodes):
+            logging.info(
+                "wazzup retention: удалено %s сообщений, %s чатов, "
+                "%s неоценённых эпизодов; отмечено %s эпизодов журнала",
+                deleted_messages, deleted_chats, deleted_episodes,
+                marked_journal_episodes)
+        return {
+            'messages': deleted_messages,
+            'chats': deleted_chats,
+            'episodes': deleted_episodes,
+            'journal_marked': marked_journal_episodes,
+        }
 
     def list_wazzup_authors(self):
         """Авторы исходящих сообщений Wazzup (по author_id) со статистикой
@@ -17207,6 +17293,8 @@ class Database:
         """Ретеншн раздела оценки чатов: заявки 45 дней, снапшоты переписки ~полгода.
         Оценки не удаляются (при удалении снапшота snapshot_id -> NULL по FK)."""
         with self._get_cursor() as cursor:
+            marked_journal_episodes = self._mark_journal_evaluated_wazzup_episodes_tx(
+                cursor)
             cursor.execute(
                 "DELETE FROM c2d_requests WHERE day < CURRENT_DATE - %s",
                 (int(requests_days),))
@@ -17215,10 +17303,16 @@ class Database:
                 "DELETE FROM c2d_chat_snapshots WHERE created_at < now() - make_interval(days => %s)",
                 (int(snapshots_days),))
             deleted_snapshots = cursor.rowcount
-        if deleted_requests or deleted_snapshots:
-            logging.info("c2d eval retention: удалено %s заявок, %s снапшотов",
-                         deleted_requests, deleted_snapshots)
-        return {'requests': deleted_requests, 'snapshots': deleted_snapshots}
+        if deleted_requests or deleted_snapshots or marked_journal_episodes:
+            logging.info(
+                "c2d eval retention: удалено %s заявок, %s снапшотов; "
+                "отмечено %s оценённых эпизодов Wazzup",
+                deleted_requests, deleted_snapshots, marked_journal_episodes)
+        return {
+            'requests': deleted_requests,
+            'snapshots': deleted_snapshots,
+            'wazzup_journal_marked': marked_journal_episodes,
+        }
 
     @staticmethod
     def _c2d_requests_where(date_from=None, date_to=None, operator_id=None,
