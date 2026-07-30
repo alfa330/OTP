@@ -330,9 +330,17 @@ class GroupFilterTests(unittest.TestCase):
         self.assertIn("calls_synced_at TIMESTAMP WITH TIME ZONE", src)
 
     def test_operator_day_view_exists_and_group_aware(self):
-        """Таб «Успешки»: агрегат оператор→день, месяц по дате поездки, с группой."""
-        self.assertIn("def get_tez_successes_operator_day(self, year, month, group_id=None)", self.src)
+        """Таб «Успешки»: агрегат оператор→день, месяц по дате поездки, с группой.
+
+        Сужение по operator_id добавлено для «Моих часов»: оператор получает свои
+        успешки, не открывая статистику всей группы.
+        """
+        self.assertIn(
+            "def get_tez_successes_operator_day(self, year, month, group_id=None, operator_id=None)",
+            self.src,
+        )
         self.assertIn("EXTRACT(DAY FROM s.success_date)", self.src)
+        self.assertIn('operator_sql = " AND s.operator_id = %s"', self.src)
 
 
 if __name__ == "__main__":

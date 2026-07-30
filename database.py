@@ -15941,18 +15941,25 @@ class Database:
             )
             return [{'date': r[0].isoformat(), 'successes': int(r[1] or 0)} for r in cursor.fetchall()]
 
-    def get_tez_successes_operator_day(self, year, month, group_id=None):
+    def get_tez_successes_operator_day(self, year, month, group_id=None, operator_id=None):
         """Успешки по оператору и дню — для таба «Успешки» в учёте часов.
 
         Возвращает список {operator_id, day, successes}, где day — число месяца
         успешки (= дня первой поездки). Месяц берётся по дате поездки, поэтому в
         таблицу за июль попадут и успешки от июньских лидов с поездкой до 7-го.
+
+        operator_id сужает выборку до одного оператора — так «Мои часы» получают
+        свои успешки без доступа к статистике всей группы.
         """
         params = [int(year), int(month)]
         group_sql = ''
         if group_id:
             group_sql = self._TEZ_GROUP_FILTER_SQL
             params.append(int(group_id))
+        operator_sql = ''
+        if operator_id is not None:
+            operator_sql = " AND s.operator_id = %s"
+            params.append(int(operator_id))
         with self._get_cursor() as cursor:
             cursor.execute(
                 f"""
@@ -15962,7 +15969,7 @@ class Database:
                 FROM tez_lead_successes s
                 WHERE s.year = %s AND s.month = %s
                   AND s.operator_id IS NOT NULL
-                {group_sql}
+                {group_sql}{operator_sql}
                 GROUP BY s.operator_id, EXTRACT(DAY FROM s.success_date)
                 """,
                 tuple(params)
@@ -18070,6 +18077,7 @@ class Database:
                     u.hire_date,
                     d.name as direction_name,
                     d.calculation_model_code,
+                    u.department_id,
                     COALESCE(w.norm_hours, 0) AS norm_hours,
                     COALESCE(w.regular_hours, 0) AS regular_hours,
                     COALESCE(w.total_break_time, 0) AS total_break_time,
@@ -18099,7 +18107,7 @@ class Database:
 
         # default values if user / work_hours not found
         if row:
-            name, rate, hire_date, direction_name, calculation_model_raw, norm_hours, regular_hours, total_break_time, total_talk_time, \
+            name, rate, hire_date, direction_name, calculation_model_raw, department_id, norm_hours, regular_hours, total_break_time, total_talk_time, \
                 total_calls, total_efficiency_hours, calls_per_hour, fines = row
             rate = float(rate) if rate is not None else 0.0
         else:
@@ -18108,6 +18116,7 @@ class Database:
             hire_date = None
             direction_name = None
             calculation_model_raw = None
+            department_id = None
             norm_hours = regular_hours = total_break_time = total_talk_time = 0.0
             total_calls = 0
             total_efficiency_hours = calls_per_hour = fines = 0.0
@@ -18187,6 +18196,11 @@ class Database:
             for day_data in daily_map.values()
             if isinstance(day_data, dict)
         )
+        # Успешки ОП и общий план отдела — только для модели ОП TEZ: у остальных
+        # моделей этой метрики нет, лишние запросы делать незачем.
+        tez_successes_by_day = {}
+        total_tez_successes = 0
+        tez_plan_per_fte = None
         if effective_calculation_model_code == CALCULATION_MODEL_TEZ_OP:
             total_calls = sum(
                 int(day_data.get("calls") or 0)
@@ -18204,6 +18218,20 @@ class Database:
                 if regular_hours_for_rate > 0
                 else 0.0
             )
+            # Успешка привязана к дню первой поездки, поэтому месяц успешки может
+            # отличаться от месяца лида — берём ровно тот месяц, что показываем.
+            for row_success in self.get_tez_successes_operator_day(year, mon, operator_id=operator_id):
+                day_key = str(int(row_success['day']))
+                count = int(row_success['successes'] or 0)
+                tez_successes_by_day[day_key] = count
+                total_tez_successes += count
+                entry = daily_map.get(day_key)
+                if entry is not None:
+                    entry['tez_successes'] = count
+            if department_id is not None:
+                plan_row = self.get_department_monthly_plan(int(department_id), year, mon)
+                if plan_row and plan_row.get('plan_per_fte') is not None:
+                    tez_plan_per_fte = float(plan_row['plan_per_fte'])
 
         accounted_hours = (
             float(regular_hours or 0.0)
@@ -18234,6 +18262,8 @@ class Database:
             "technical_issue_hours": round(float(technical_issue_hours), 2),
             "offline_activities_by_day": offline_activities_by_day,
             "offline_activity_hours": round(float(offline_activity_hours), 2),
+            "tez_successes_by_day": tez_successes_by_day,
+            "tez_plan_per_fte": tez_plan_per_fte,
             "aggregates": {
                 "regular_hours": float(regular_hours),
                 "total_break_time": float(total_break_time),
@@ -18241,6 +18271,7 @@ class Database:
                 "total_calls": int(total_calls),
                 "total_dial_time": float(total_dial_time),
                 "total_chats": int(total_tez_chats),
+                "total_tez_successes": int(total_tez_successes),
                 "total_efficiency_hours": float(total_efficiency_hours),
                 "calls_per_hour": float(calls_per_hour),
                 "chat_avg_score": chat_metric_totals.get("avg_score"),
