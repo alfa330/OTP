@@ -6902,8 +6902,7 @@ def api_shift_auction_test_access():
             starts_at=_parse_shift_auction_test_datetime(payload.get('starts_at')),
             ends_at=_parse_shift_auction_test_datetime(payload.get('ends_at')),
             schedule_plan_id=payload.get('schedule_plan_id') or payload.get('selected_schedule_plan_id'),
-            favored_starts_at=_parse_shift_auction_test_datetime(payload.get('favored_starts_at')),
-            favored_operator_ids=payload.get('favored_operator_ids') or [],
+            time_groups=_parse_shift_auction_time_groups(payload.get('time_groups')),
         )
         return jsonify({"status": "success", "test_access": updated}), 200
     except ValueError as error:
@@ -6911,6 +6910,29 @@ def api_shift_auction_test_access():
     except Exception as error:
         logging.error(f"Shift auction test access API error: {error}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
+
+
+def _parse_shift_auction_time_groups(raw_groups):
+    """Week time groups from the manager's form, with datetimes parsed.
+
+    ``None`` (field absent) means "leave the week's groups untouched", while an
+    empty list clears them — the distinction matters for clients that save only
+    part of the form.
+    """
+    if raw_groups is None:
+        return None
+    if not isinstance(raw_groups, list):
+        raise ValueError("AUCTION_GROUP_INVALID")
+    groups = []
+    for raw_group in raw_groups:
+        if not isinstance(raw_group, dict):
+            raise ValueError("AUCTION_GROUP_INVALID")
+        groups.append({
+            **raw_group,
+            "starts_at": _parse_shift_auction_test_datetime(raw_group.get('starts_at')),
+            "ends_at": _parse_shift_auction_test_datetime(raw_group.get('ends_at')),
+        })
+    return groups
 
 
 def _parse_shift_auction_test_datetime(value):
@@ -6961,7 +6983,11 @@ def _shift_auction_test_error_response(error):
     }
     mapping.update({
         "AUCTION_END_BEFORE_START": ("Время завершения должно быть позже старта", 400),
-        "AUCTION_FAVORED_START_AFTER_END": ("Ранний доступ должен начинаться раньше завершения аукциона", 400),
+        "AUCTION_GROUP_INVALID": ("Некорректные данные группы времени", 400),
+        "AUCTION_GROUP_LIMIT": ("Слишком много групп времени на одну неделю", 400),
+        "AUCTION_GROUP_START_REQUIRED": ("У каждой группы должно быть время старта", 400),
+        "AUCTION_GROUP_WINDOW_EMPTY": ("Окно группы пустое: завершение должно быть позже её старта", 400),
+        "AUCTION_GROUP_WEEK_REQUIRED": ("Сначала выберите неделю аукциона — группы задаются для неё", 400),
         "AUCTION_PERIOD_NOT_FOUND": ("Недельный план для аукциона не найден", 404),
         "AUCTION_PERIOD_NOT_WEEK": ("Для аукциона можно выбрать только полную неделю", 409),
         "AUCTION_PERIOD_EMPTY": ("В выбранном недельном плане нет смен", 409),

@@ -87,14 +87,15 @@ class ShiftAuctionParticipantScopeTests(unittest.TestCase):
         self.assertIn("operational_participant_rows", source)
         self.assertNotIn("for row in participant_rows:", source)
 
-    def test_favored_flag_is_derived_from_scoped_participants(self):
+    def test_viewer_time_group_is_derived_from_the_active_week_only(self):
         source = _method_source("get_shift_auction_test_snapshot")
 
-        self.assertIn("current_id in set(favored_operator_ids)", source)
-        self.assertNotIn(
-            "SELECT COALESCE(early_access, FALSE) FROM shift_auction_test_participants",
-            source,
-        )
+        # The group list covers every configurable week (the manager's form needs
+        # it), so the viewer's own window must be filtered by the active plan.
+        self.assertIn('group.get("plan_id") == active_plan_id', source)
+        self.assertIn('current_id in (group.get("operator_ids") or [])', source)
+        # Derived from the cached snapshot list — no per-operator query.
+        self.assertNotIn("_get_shift_auction_operator_group_window_tx", source)
 
     def test_period_preview_returns_only_scoped_operator_ids(self):
         source = _method_source("get_shift_auction_period_preview")
