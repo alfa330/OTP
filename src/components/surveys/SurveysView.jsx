@@ -93,7 +93,9 @@ const emptyQuestion = () => ({
     required: true,
     allowOther: false,
     options: ['', ''],
-    correctOptions: []
+    correctOptions: [],
+    points: '1',
+    partialCredit: false
 });
 
 const emptyDraft = () => ({
@@ -101,11 +103,83 @@ const emptyDraft = () => ({
     description: '',
     isTest: false,
     directionIds: [],
+    groupIds: [],
     tenureWeeksMin: '',
     tenureWeeksMax: '',
     operatorIds: [],
-    questions: [emptyQuestion()]
+    questions: [emptyQuestion()],
+    startsAt: '',
+    endsAt: '',
+    singleAttempt: true,
+    affectsQuality: false
 });
+
+/* ─── Тест по расписанию ─── */
+
+// Цветом выделен только «Активен» — это единственное состояние, в котором
+// от человека что-то требуется. Ожидание и завершение нейтральны.
+const TEST_STATUS_META = {
+    scheduled: { label: 'Запланирован', color: 'gray', icon: 'fa-clock' },
+    active: { label: 'Активен', color: 'green', icon: 'fa-play' },
+    finished: { label: 'Завершён', color: 'gray', icon: 'fa-flag-checkered' }
+};
+
+const testStatusMeta = (status) => TEST_STATUS_META[String(status || '')] || null;
+
+// datetime-local <-> ISO без сдвига часового пояса: сервер и клиент живут
+// в одном времени (Asia/Almaty), поэтому «как ввели — так и сохранили».
+const isoToLocalInput = (value) => {
+    if (!value) return '';
+    const text = String(value).replace('T', ' ');
+    const match = text.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}):(\d{2})/);
+    return match ? `${match[1]}T${match[2]}:${match[3]}` : '';
+};
+
+const localInputToIso = (value) => {
+    const text = String(value || '').trim();
+    if (!text) return null;
+    const match = text.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}):(\d{2})/);
+    return match ? `${match[1]} ${match[2]}:${match[3]}:00` : null;
+};
+
+const parseServerDateTime = (value) => {
+    if (!value) return null;
+    const text = String(value).replace('T', ' ');
+    const match = text.match(/^(\d{4})-(\d{2})-(\d{2})[ ](\d{2}):(\d{2})(?::(\d{2}))?/);
+    if (!match) {
+        const parsed = new Date(text);
+        return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+    return new Date(
+        Number(match[1]),
+        Number(match[2]) - 1,
+        Number(match[3]),
+        Number(match[4]),
+        Number(match[5]),
+        Number(match[6] || 0)
+    );
+};
+
+const formatCountdown = (msLeft) => {
+    const totalSeconds = Math.max(0, Math.floor(msLeft / 1000));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    const pad = (value) => String(value).padStart(2, '0');
+    return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${pad(minutes)}:${pad(seconds)}`;
+};
+
+const parsePointsInput = (value) => {
+    const number = Number(String(value ?? '').replace(',', '.'));
+    if (!Number.isFinite(number) || number <= 0) return null;
+    return Math.round(number * 100) / 100;
+};
+
+const formatPoints = (value) => {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return '—';
+    return String(Math.round(number * 100) / 100);
+};
 
 /* ─── small reusable primitives ─── */
 
@@ -192,6 +266,7 @@ const IosSection = ({ title, hint, children, right = null }) => (
 
 const SurveysView = ({ user, operators = [], directions = [], departments = [], showToast, apiBaseUrl, onSurveyProgressChanged }) => {
     const [surveys, setSurveys] = useState([]);
+    const [assignableGroups, setAssignableGroups] = useState([]);
     const [selectedSurveyId, setSelectedSurveyId] = useState('');
     const [showBuilder, setShowBuilder] = useState(false);
     const [repeatSourceSurveyId, setRepeatSourceSurveyId] = useState(null);
@@ -346,6 +421,31 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
         });
     }, [sanitizeOperatorIds]);
 
+    // Группы — такой же фильтр состава, как направления: выбираешь группу,
+    // а «Выбрать всех» назначает её операторов.
+    const groupOptions = useMemo(() => {
+        const rows = Array.isArray(assignableGroups) ? assignableGroups : [];
+        return rows.filter((group) => (
+            selectedDepartmentId == null
+            || group?.department_id == null
+            || Number(group.department_id) === selectedDepartmentId
+        ));
+    }, [assignableGroups, selectedDepartmentId]);
+
+    const selectedGroupOperatorIds = useMemo(() => {
+        const selected = new Set((draft.groupIds || []).map((id) => Number(id)).filter(Number.isFinite));
+        if (selected.size === 0) return null;
+        const ids = new Set();
+        (Array.isArray(assignableGroups) ? assignableGroups : []).forEach((group) => {
+            if (!selected.has(Number(group?.id))) return;
+            (group?.operator_ids || []).forEach((operatorId) => {
+                const parsed = Number(operatorId);
+                if (Number.isFinite(parsed)) ids.add(parsed);
+            });
+        });
+        return ids;
+    }, [assignableGroups, draft.groupIds]);
+
     const filteredOperators = useMemo(() => {
         const query = operatorQuery.trim().toLowerCase();
         const selectedDirections = new Set((draft.directionIds || []).map(String));
@@ -358,9 +458,11 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
             if (!byQuery) return false;
             const byDepartment = selectedDepartmentId == null || Number(operator.departmentId) === selectedDepartmentId;
             if (!byDepartment && !isAlreadySelected) return false;
+            const byGroup = selectedGroupOperatorIds == null || selectedGroupOperatorIds.has(Number(operator.id));
             // Уже выбранные операторы всегда видны, а в режиме повтора/редактирования
             // можно добрать других действующих сотрудников вне старых фильтров.
             if (isAlreadySelected) return true;
+            if (!byGroup) return false;
             if (isEditMode || isRepeatMode) return true;
 
             const byDirection = selectedDirections.size === 0 || selectedDirections.has(operator.directionId);
@@ -369,7 +471,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
             const byMax = maxWeeks == null || (hasTenure && operator.tenureWeeks <= maxWeeks);
             return byDirection && byQuery && byMin && byMax;
         });
-    }, [draft.directionIds, draft.operatorIds, draft.tenureWeeksMax, draft.tenureWeeksMin, isEditMode, isRepeatMode, normalizedOperators, operatorQuery, selectedDepartmentId]);
+    }, [draft.directionIds, draft.operatorIds, draft.tenureWeeksMax, draft.tenureWeeksMin, isEditMode, isRepeatMode, normalizedOperators, operatorQuery, selectedDepartmentId, selectedGroupOperatorIds]);
 
     const filteredOperatorIds = useMemo(
         () => filteredOperators.map((operator) => Number(operator.id)).filter(Number.isFinite),
@@ -416,6 +518,8 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
         try {
             const response = await axios.get(`${apiBaseUrl}/api/surveys`, { headers });
             setSurveys(Array.isArray(response?.data?.surveys) ? response.data.surveys : []);
+            // Состав групп приходит тем же ответом — отдельный запрос не нужен.
+            setAssignableGroups(Array.isArray(response?.data?.groups) ? response.data.groups : []);
             if (typeof onSurveyProgressChangedRef.current === 'function') {
                 onSurveyProgressChangedRef.current();
             }
@@ -636,6 +740,19 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
         return false;
     }, [getExpectedOptionsForTest]);
 
+    // Частичный зачёт: сервер присылает и признак, и начисленный балл.
+    const isTestAnswerPartiallyCorrect = useCallback((answer) => (
+        answer?.is_partially_correct === true
+        || (answer?.is_correct !== true && Number(answer?.earned_points) > 0)
+    ), []);
+
+    const testAnswerStatusMeta = useCallback((question, answer, hasAnswer) => {
+        if (!hasAnswer) return { label: 'Нет ответа', color: 'gray' };
+        if (isTestAnswerCorrect(question, answer)) return { label: 'Верно', color: 'green' };
+        if (isTestAnswerPartiallyCorrect(answer)) return { label: 'Частично', color: 'blue' };
+        return { label: 'Неверно', color: 'amber' };
+    }, [isTestAnswerCorrect, isTestAnswerPartiallyCorrect]);
+
     const hasSurveyAnswer = useCallback((question, answer) => {
         if (!question || !answer) return false;
         if (question.type === 'rating') {
@@ -763,12 +880,109 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
 
     useEffect(() => {
         if (!isOperator || !selectedSurvey) return;
+        // Черновик начатой попытки восстанавливаем: оператор мог закрыть вкладку
+        // и вернуться — выбранные ответы должны остаться на месте.
+        const draftByQuestion = new Map();
+        (selectedSurvey?.my_assignment?.draft_answers || []).forEach((answer) => {
+            const questionId = Number(answer?.question_id);
+            if (!Number.isFinite(questionId)) return;
+            draftByQuestion.set(questionId, Array.isArray(answer?.selected_options)
+                ? answer.selected_options.map((item) => String(item || '')).filter(Boolean)
+                : []);
+        });
         const initial = {};
         (selectedSurvey.questions || []).forEach((question) => {
-            initial[question.id] = { selected_options: [], answer_text: '', rating_value: '' };
+            initial[question.id] = {
+                selected_options: draftByQuestion.get(Number(question.id)) || [],
+                answer_text: '',
+                rating_value: ''
+            };
         });
         setAnswers(initial);
     }, [isOperator, selectedSurveyId, selectedSurvey]);
+
+    /* ─── Тест по расписанию: часы, таймер и автосохранение попытки ─── */
+
+    const selectedTestInfo = selectedSurvey?.is_test ? (selectedSurvey?.test || null) : null;
+    const testEndsAtDate = useMemo(
+        () => parseServerDateTime(selectedTestInfo?.ends_at),
+        [selectedTestInfo?.ends_at]
+    );
+    const testStartsAtDate = useMemo(
+        () => parseServerDateTime(selectedTestInfo?.starts_at),
+        [selectedTestInfo?.starts_at]
+    );
+    const needsTestClock = !!selectedTestInfo && (!!testEndsAtDate || !!testStartsAtDate);
+    const [testNowTs, setTestNowTs] = useState(() => Date.now());
+
+    useEffect(() => {
+        if (!needsTestClock) return undefined;
+        setTestNowTs(Date.now());
+        const timerId = window.setInterval(() => setTestNowTs(Date.now()), 1000);
+        return () => window.clearInterval(timerId);
+    }, [needsTestClock, selectedSurveyId]);
+
+    // Статус пересчитываем от текущего времени, а не только от ответа сервера:
+    // окно может закрыться, пока страница открыта.
+    const liveTestStatus = useMemo(() => {
+        if (!selectedTestInfo) return null;
+        if (testStartsAtDate && testNowTs < testStartsAtDate.getTime()) return 'scheduled';
+        if (testEndsAtDate && testNowTs >= testEndsAtDate.getTime()) return 'finished';
+        return selectedTestInfo.status || 'active';
+    }, [selectedTestInfo, testEndsAtDate, testNowTs, testStartsAtDate]);
+
+    const testMsLeft = useMemo(() => {
+        if (!testEndsAtDate) return null;
+        return Math.max(0, testEndsAtDate.getTime() - testNowTs);
+    }, [testEndsAtDate, testNowTs]);
+
+    const isTestTimeOver = !!selectedTestInfo && liveTestStatus === 'finished';
+    // Повтор теста доступен, только если он разрешён настройкой: тогда сначала
+    // показываем результат прошлой попытки, а форму — по явной кнопке.
+    const [retakeSurveyId, setRetakeSurveyId] = useState(null);
+    useEffect(() => { setRetakeSurveyId(null); }, [selectedSurveyId]);
+
+    const isSelectedSurveyCompleted = selectedSurvey?.my_assignment?.status === 'completed';
+    const canRetakeSelectedTest = (
+        !!selectedTestInfo
+        && isSelectedSurveyCompleted
+        && !!selectedSurvey?.my_assignment?.can_submit
+        && !isTestTimeOver
+    );
+    const isRetakingSelectedTest = canRetakeSelectedTest && String(retakeSurveyId) === String(selectedSurveyId);
+    const canFillSelectedSurvey = (
+        !!selectedSurvey?.my_assignment?.can_submit
+        && !isTestTimeOver
+        && (!isSelectedSurveyCompleted || isRetakingSelectedTest)
+    );
+
+    const attemptSaveTimerRef = useRef(null);
+    const attemptSaveSurveyIdRef = useRef(null);
+
+    // Черновик пишем с задержкой: каждый клик по варианту — не повод
+    // для запроса, а по окончании окна сервер отправит последнее сохранённое.
+    const scheduleAttemptDraftSave = useCallback((surveyId, answersByQuestion) => {
+        if (!apiBaseUrl || !surveyId) return;
+        attemptSaveSurveyIdRef.current = surveyId;
+        if (attemptSaveTimerRef.current) window.clearTimeout(attemptSaveTimerRef.current);
+        attemptSaveTimerRef.current = window.setTimeout(() => {
+            const payload = Object.entries(answersByQuestion || {}).map(([questionId, answer]) => ({
+                question_id: Number(questionId),
+                selected_options: Array.isArray(answer?.selected_options)
+                    ? answer.selected_options.map((item) => String(item || '')).filter(Boolean)
+                    : []
+            })).filter((item) => Number.isFinite(item.question_id));
+            axios.put(
+                `${apiBaseUrl}/api/surveys/${surveyId}/attempt`,
+                { answers: payload },
+                { headers }
+            ).catch(() => { /* черновик не критичен: отправку решает кнопка или окно теста */ });
+        }, 1200);
+    }, [apiBaseUrl, headers]);
+
+    useEffect(() => () => {
+        if (attemptSaveTimerRef.current) window.clearTimeout(attemptSaveTimerRef.current);
+    }, []);
 
     const toggleArrayValue = (setter, key, value) => {
         setter((prev) => {
@@ -882,7 +1096,13 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
     };
 
     const updateAnswer = (questionId, patch) => {
-        setAnswers((prev) => ({ ...prev, [questionId]: { ...(prev[questionId] || {}), ...patch } }));
+        setAnswers((prev) => {
+            const next = { ...prev, [questionId]: { ...(prev[questionId] || {}), ...patch } };
+            if (selectedSurvey?.is_test && liveTestStatus === 'active') {
+                scheduleAttemptDraftSave(selectedSurvey.id, next);
+            }
+            return next;
+        });
     };
 
     const resetBuilder = useCallback(() => {
@@ -939,7 +1159,9 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                     options: (type === 'rating' || type === QUESTION_TYPE_OTHER_ONLY)
                         ? []
                         : (Array.isArray(question?.options) ? question.options.map((option) => String(option || '')) : ['', '']),
-                    correctOptions: type === QUESTION_TYPE_OTHER_ONLY ? [] : toUniqueTrimmedList(question?.correct_options)
+                    correctOptions: type === QUESTION_TYPE_OTHER_ONLY ? [] : toUniqueTrimmedList(question?.correct_options),
+                    points: question?.points != null ? String(question.points) : '1',
+                    partialCredit: question?.partial_credit === true && type === 'multiple'
                 };
             })
             : [emptyQuestion()];
@@ -953,10 +1175,17 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
             description: String(survey?.description || ''),
             isTest: !!survey?.is_test,
             directionIds: (survey?.assignment?.direction_ids || []).map((id) => String(id)).filter(Boolean),
+            groupIds: (survey?.assignment?.group_ids || []).map((id) => Number(id)).filter(Number.isFinite),
             tenureWeeksMin: survey?.assignment?.tenure_weeks_min != null ? String(survey.assignment.tenure_weeks_min) : '',
             tenureWeeksMax: survey?.assignment?.tenure_weeks_max != null ? String(survey.assignment.tenure_weeks_max) : '',
             operatorIds: activeOperatorIds,
-            questions: clonedQuestions
+            questions: clonedQuestions,
+            // Повтор — это новый запуск: окно теста задаётся заново, чтобы не
+            // создать копию с уже истёкшим временем.
+            startsAt: '',
+            endsAt: '',
+            singleAttempt: survey?.test?.single_attempt !== false,
+            affectsQuality: !!survey?.test?.affects_quality
         });
         setOperatorQuery('');
         setEditingSurveyId(null);
@@ -994,7 +1223,9 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                     options: (type === 'rating' || type === QUESTION_TYPE_OTHER_ONLY)
                         ? []
                         : (Array.isArray(question?.options) ? question.options.map((option) => String(option || '')) : ['', '']),
-                    correctOptions: type === QUESTION_TYPE_OTHER_ONLY ? [] : toUniqueTrimmedList(question?.correct_options)
+                    correctOptions: type === QUESTION_TYPE_OTHER_ONLY ? [] : toUniqueTrimmedList(question?.correct_options),
+                    points: question?.points != null ? String(question.points) : '1',
+                    partialCredit: question?.partial_credit === true && type === 'multiple'
                 };
             })
             : [emptyQuestion()];
@@ -1004,10 +1235,15 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
             description: String(survey?.description || ''),
             isTest: !!survey?.is_test,
             directionIds: (survey?.assignment?.direction_ids || []).map((id) => String(id)).filter(Boolean),
+            groupIds: (survey?.assignment?.group_ids || []).map((id) => Number(id)).filter(Number.isFinite),
             tenureWeeksMin: survey?.assignment?.tenure_weeks_min != null ? String(survey.assignment.tenure_weeks_min) : '',
             tenureWeeksMax: survey?.assignment?.tenure_weeks_max != null ? String(survey.assignment.tenure_weeks_max) : '',
             operatorIds: sanitizeOperatorIds(survey?.assignment?.operator_ids || []),
-            questions: clonedQuestions
+            questions: clonedQuestions,
+            startsAt: isoToLocalInput(survey?.test?.starts_at),
+            endsAt: isoToLocalInput(survey?.test?.ends_at),
+            singleAttempt: survey?.test?.single_attempt !== false,
+            affectsQuality: !!survey?.test?.affects_quality
         });
         setOperatorQuery('');
         setRepeatSourceSurveyId(null);
@@ -1040,6 +1276,11 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                 options: normalizedOptions,
                 correct_options: normalizedCorrectOptions
             };
+            if (draft.isTest) {
+                normalizedQuestion.points = parsePointsInput(question.points) ?? 1;
+                // Частичный зачёт возможен только там, где вариантов несколько.
+                normalizedQuestion.partial_credit = payloadType === 'multiple' && !!question.partialCredit;
+            }
             const numericQuestionId = Number(question.id);
             if (isEditMode && Number.isFinite(numericQuestionId) && numericQuestionId > 0) {
                 normalizedQuestion.id = numericQuestionId;
@@ -1072,7 +1313,16 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                 if (question.type === 'single' && question.correct_options.length !== 1) {
                     return notify(`Для одиночного выбора в вопросе #${i + 1} нужен ровно один правильный ответ`, 'error');
                 }
+                if (parsePointsInput(sourceQuestion.points) == null) {
+                    return notify(`Баллы за вопрос #${i + 1} — число больше 0`, 'error');
+                }
             }
+        }
+
+        const startsAtIso = draft.isTest ? localInputToIso(draft.startsAt) : null;
+        const endsAtIso = draft.isTest ? localInputToIso(draft.endsAt) : null;
+        if (draft.isTest && startsAtIso && endsAtIso && startsAtIso >= endsAtIso) {
+            return notify('Завершение теста должно быть позже начала', 'error');
         }
 
         const payload = {
@@ -1081,11 +1331,18 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
             is_test: !!draft.isTest,
             assignment: {
                 direction_ids: (draft.directionIds || []).map((id) => Number(id)).filter(Number.isFinite),
+                group_ids: (draft.groupIds || []).map((id) => Number(id)).filter(Number.isFinite),
                 tenure_weeks_min: minWeeks,
                 tenure_weeks_max: maxWeeks,
                 operator_ids: assignmentOperatorIds
             },
-            questions: normalizedQuestions
+            questions: normalizedQuestions,
+            test: {
+                starts_at: startsAtIso,
+                ends_at: endsAtIso,
+                single_attempt: draft.isTest ? !!draft.singleAttempt : true,
+                affects_quality: draft.isTest ? !!draft.affectsQuality : false
+            }
         };
         if (isRepeatMode) {
             payload.repeat_from_survey_id = Number(repeatSourceSurveyId);
@@ -1121,7 +1378,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
     };
 
     const submitSurvey = async () => {
-        if (!selectedSurvey || !selectedSurvey?.my_assignment?.can_submit) return;
+        if (!selectedSurvey || !canFillSelectedSurvey) return;
         const preparedAnswers = (selectedSurvey.questions || []).map((question) => {
             const answer = answers[question.id] || {};
             const payload = { question_id: Number(question.id) };
@@ -1147,11 +1404,26 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
 
         setIsSubmitting(true);
         try {
-            await axios.post(`${apiBaseUrl}/api/surveys/${selectedSurvey.id}/submit`, { answers: preparedAnswers }, { headers });
-            notify('Опрос успешно пройден', 'success');
+            if (attemptSaveTimerRef.current) window.clearTimeout(attemptSaveTimerRef.current);
+            const response = await axios.post(
+                `${apiBaseUrl}/api/surveys/${selectedSurvey.id}/submit`,
+                { answers: preparedAnswers },
+                { headers }
+            );
+            const testSummary = response?.data?.result?.test_summary;
+            if (selectedSurvey?.is_test && testSummary) {
+                const percent = Number(testSummary.score_percent || 0);
+                notify(`Тест пройден · результат ${percent.toFixed(1).replace(/\.0$/, '')}%`, 'success');
+            } else {
+                notify('Опрос успешно пройден', 'success');
+            }
+            setRetakeSurveyId(null);
             await loadSurveys();
         } catch (error) {
             notify(error?.response?.data?.error || 'Не удалось отправить ответы', 'error');
+            // Время могло истечь ровно во время отправки — тогда результат
+            // закроет автоотправка, а список надо обновить.
+            if (error?.response?.status === 409) await loadSurveys();
         } finally {
             setIsSubmitting(false);
         }
@@ -1496,6 +1768,58 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                 )}
                             </IosSection>
 
+                            {/* Расписание и правила теста */}
+                            {draft.isTest && (
+                                <IosSection
+                                    title="Расписание теста"
+                                    hint="До времени начала тест не виден оператору. Начатая попытка отправится автоматически, когда время закончится — с уже выбранными ответами."
+                                >
+                                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                                        <div>
+                                            <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Начало</label>
+                                            <input
+                                                type="datetime-local"
+                                                value={draft.startsAt}
+                                                onChange={(e) => setDraft((p) => ({ ...p, startsAt: e.target.value }))}
+                                                className={`${iosInput} tabular-nums`}
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Завершение</label>
+                                            <input
+                                                type="datetime-local"
+                                                value={draft.endsAt}
+                                                min={draft.startsAt || undefined}
+                                                onChange={(e) => setDraft((p) => ({ ...p, endsAt: e.target.value }))}
+                                                className={`${iosInput} tabular-nums`}
+                                            />
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3.5 py-2.5 ring-1 ring-slate-200/60">
+                                        <div className="min-w-0">
+                                            <div className="text-[14px] font-medium text-slate-800">Одна попытка</div>
+                                            <div className="text-[12px] text-slate-500">Пройти тест можно только один раз</div>
+                                        </div>
+                                        <IosToggle
+                                            checked={!!draft.singleAttempt}
+                                            onChange={(value) => setDraft((p) => ({ ...p, singleAttempt: !!value }))}
+                                        />
+                                    </div>
+                                    <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3.5 py-2.5 ring-1 ring-slate-200/60">
+                                        <div className="min-w-0">
+                                            <div className="text-[14px] font-medium text-slate-800">Учитывать результат в качестве оператора</div>
+                                            <div className="text-[12px] text-slate-500">
+                                                Результат попадёт в журнал оценок как «Тестирование знаний»: войдёт в средний балл, но план по звонкам не уменьшит
+                                            </div>
+                                        </div>
+                                        <IosToggle
+                                            checked={!!draft.affectsQuality}
+                                            onChange={(value) => setDraft((p) => ({ ...p, affectsQuality: !!value }))}
+                                        />
+                                    </div>
+                                </IosSection>
+                            )}
+
                             {/* Фильтры назначения */}
                             <IosSection
                                 title="Фильтры назначения"
@@ -1557,6 +1881,36 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                         }`}
                                                     >
                                                         {name}
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {groupOptions.length > 0 && (
+                                    <div>
+                                        <label className="mb-1.5 block px-1 text-[12px] font-medium text-slate-500">Группы</label>
+                                        <div className="flex flex-wrap gap-1.5">
+                                            {groupOptions.map((group) => {
+                                                const groupId = Number(group?.id);
+                                                const active = (draft.groupIds || []).some((id) => Number(id) === groupId);
+                                                const membersCount = (group?.operator_ids || []).length;
+                                                return (
+                                                    <button
+                                                        key={groupId}
+                                                        type="button"
+                                                        onClick={() => toggleArrayValue(setDraft, 'groupIds', groupId)}
+                                                        className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12.5px] font-medium transition-all ${
+                                                            active
+                                                                ? 'bg-blue-600 text-white shadow-sm'
+                                                                : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                                        }`}
+                                                    >
+                                                        {group?.name || `Группа #${groupId}`}
+                                                        <span className={`tabular-nums text-[11px] ${active ? 'text-blue-100' : 'text-slate-400'}`}>
+                                                            {membersCount}
+                                                        </span>
                                                     </button>
                                                 );
                                             })}
@@ -1676,18 +2030,33 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                             : QUESTION_TYPES;
                                         return (
                                             <div key={question.id} className="rounded-2xl bg-slate-50 p-3.5 ring-1 ring-slate-200/60">
-                                                <div className="mb-2.5 flex items-center justify-between">
+                                                <div className="mb-2.5 flex items-center justify-between gap-2">
                                                     <span className="flex h-6 items-center rounded-full bg-blue-100 px-2.5 text-[11px] font-bold text-blue-700">
                                                         Вопрос {index + 1}
                                                     </span>
-                                                    <button
-                                                        disabled={draft.questions.length <= 1}
-                                                        onClick={() => setDraft((p) => ({ ...p, questions: p.questions.filter((item) => item.id !== question.id) }))}
-                                                        className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-red-50 hover:text-red-500 disabled:opacity-30"
-                                                        title="Удалить вопрос"
-                                                    >
-                                                        <FaIcon className="fas fa-trash-alt text-xs" />
-                                                    </button>
+                                                    <div className="flex items-center gap-2">
+                                                        {draft.isTest && (
+                                                            <label className="flex items-center gap-1.5 text-[12px] text-slate-500">
+                                                                Баллы
+                                                                <input
+                                                                    type="number"
+                                                                    min="0.5"
+                                                                    step="0.5"
+                                                                    value={question.points ?? '1'}
+                                                                    onChange={(e) => updateQuestion(question.id, { points: e.target.value })}
+                                                                    className="w-16 rounded-lg border-0 bg-white px-2 py-1 text-right text-[12.5px] tabular-nums text-slate-900 ring-1 ring-slate-200/60 focus:outline-none focus:ring-2 focus:ring-blue-500/70"
+                                                                />
+                                                            </label>
+                                                        )}
+                                                        <button
+                                                            disabled={draft.questions.length <= 1}
+                                                            onClick={() => setDraft((p) => ({ ...p, questions: p.questions.filter((item) => item.id !== question.id) }))}
+                                                            className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-red-50 hover:text-red-500 disabled:opacity-30"
+                                                            title="Удалить вопрос"
+                                                        >
+                                                            <FaIcon className="fas fa-trash-alt text-xs" />
+                                                        </button>
+                                                    </div>
                                                 </div>
 
                                                 <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
@@ -1717,7 +2086,9 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                                 options: (nextType === 'rating' || nextType === QUESTION_TYPE_OTHER_ONLY)
                                                                     ? []
                                                                     : (question.options?.length ? question.options : ['', '']),
-                                                                correctOptions: nextType === QUESTION_TYPE_OTHER_ONLY ? [] : nextCorrectOptions
+                                                                correctOptions: nextType === QUESTION_TYPE_OTHER_ONLY ? [] : nextCorrectOptions,
+                                                                // Один ответ — частичного зачёта быть не может.
+                                                                partialCredit: nextType === 'multiple' ? !!question.partialCredit : false
                                                             });
                                                         }}
                                                         className={`${iosInput} bg-white ring-1 ring-slate-200/60`}
@@ -1799,8 +2170,30 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                         )}
 
                                                         {draft.isTest ? (
-                                                            <div className="ml-7 text-[11.5px] text-emerald-600">
-                                                                Отметьте правильные варианты слева от текста ответа.
+                                                            <div className="ml-7 space-y-2">
+                                                                <div className="text-[11.5px] text-emerald-600">
+                                                                    Отметьте правильные варианты слева от текста ответа.
+                                                                </div>
+                                                                {/* Частичный зачёт нужен только там, где правильных
+                                                                    вариантов может быть несколько. */}
+                                                                {question.type === 'multiple' && (
+                                                                    <div className="flex items-center justify-between gap-3 rounded-xl bg-white px-3 py-2.5 ring-1 ring-slate-200/60">
+                                                                        <div className="min-w-0">
+                                                                            <div className="text-[13px] font-medium text-slate-800">
+                                                                                {question.partialCredit ? 'Частичный зачёт' : 'Всё или ничего'}
+                                                                            </div>
+                                                                            <div className="text-[11.5px] leading-snug text-slate-500">
+                                                                                {question.partialCredit
+                                                                                    ? 'Балл начисляется за угаданные варианты. Один лишний вариант — 0 за вопрос.'
+                                                                                    : 'Балл только за все правильные варианты сразу.'}
+                                                                            </div>
+                                                                        </div>
+                                                                        <IosToggle
+                                                                            checked={!!question.partialCredit}
+                                                                            onChange={(value) => updateQuestion(question.id, { partialCredit: !!value })}
+                                                                        />
+                                                                    </div>
+                                                                )}
                                                             </div>
                                                         ) : question.type === QUESTION_TYPE_OTHER_ONLY ? (
                                                             <div className="ml-7 text-[11.5px] text-slate-500">
@@ -1890,6 +2283,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                             const displayMetrics = getSurveyDisplayMetrics(survey);
                             const completionRate = displayMetrics.completionRate || 0;
                             const repeatIteration = Number(survey?.repeat?.iteration || 1);
+                            const listTestStatus = survey?.is_test ? testStatusMeta(survey?.test?.status) : null;
                             return (
                                 <div
                                     key={survey.id}
@@ -1914,12 +2308,15 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                     </span>
                                                 )}
                                             </div>
-                                            <div className="mt-1.5">
+                                            <div className="mt-1.5 space-y-1.5">
+                                                {listTestStatus && (
+                                                    <Badge color={listTestStatus.color}>{listTestStatus.label}</Badge>
+                                                )}
                                                 {canManage ? (
                                                     <div className="space-y-1">
                                                         <div className="flex items-center justify-between text-[11px] text-gray-500">
                                                             <span>Пройдено: {displayMetrics.completedCount || 0} из {displayMetrics.assignedCount || 0}</span>
-                                                            <span>{completionRate}%</span>
+                                                            <span className="tabular-nums">{completionRate}%</span>
                                                         </div>
                                                         <ProgressBar value={completionRate} color={completionRate >= 80 ? 'emerald' : 'blue'} />
                                                     </div>
@@ -1964,9 +2361,15 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                             <div className="px-5 py-4 border-b border-gray-100">
                                 <div className="flex items-start justify-between gap-3">
                                     <div>
-                                        <div className="flex items-center gap-2">
+                                        <div className="flex flex-wrap items-center gap-2">
                                             <h3 className="text-base font-bold text-gray-900">{selectedSurvey.title}</h3>
-                                            {selectedSurvey?.is_test && <Badge color="green">Тест</Badge>}
+                                            {selectedSurvey?.is_test && <Badge color="blue">Тест</Badge>}
+                                            {selectedSurvey?.is_test && testStatusMeta(liveTestStatus) && (
+                                                <Badge color={testStatusMeta(liveTestStatus).color}>
+                                                    <FaIcon className={`fas ${testStatusMeta(liveTestStatus).icon} mr-1 text-[9px]`} />
+                                                    {testStatusMeta(liveTestStatus).label}
+                                                </Badge>
+                                            )}
                                         </div>
                                         {selectedSurvey.description && (
                                             <p className="text-sm text-gray-500 mt-0.5">{selectedSurvey.description}</p>
@@ -2005,6 +2408,36 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                         </Badge>
                                     )}
                                 </div>
+
+                                {/* Окно теста: одно место, где видно расписание и правила */}
+                                {selectedSurvey?.is_test && (
+                                    <div className="flex flex-wrap gap-2 mt-3">
+                                        <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
+                                            <FaIcon className="fas fa-hourglass-start text-gray-400 text-[10px]" />
+                                            Начало: <strong className="text-gray-700 tabular-nums">{formatSurveyDateTime(selectedTestInfo?.starts_at)}</strong>
+                                        </div>
+                                        <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
+                                            <FaIcon className="fas fa-hourglass-end text-gray-400 text-[10px]" />
+                                            Завершение: <strong className="text-gray-700 tabular-nums">{formatSurveyDateTime(selectedTestInfo?.ends_at)}</strong>
+                                        </div>
+                                        <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
+                                            <FaIcon className="fas fa-star text-gray-400 text-[10px]" />
+                                            Максимум: <strong className="text-gray-700 tabular-nums">{formatPoints(selectedTestInfo?.max_points)}</strong> балл.
+                                        </div>
+                                        {selectedTestInfo?.single_attempt !== false && (
+                                            <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
+                                                <FaIcon className="fas fa-lock text-gray-400 text-[10px]" />
+                                                Одна попытка
+                                            </div>
+                                        )}
+                                        {selectedTestInfo?.affects_quality && (
+                                            <div className="flex items-center gap-1.5 text-xs text-blue-700 bg-blue-50 rounded-lg px-2.5 py-1.5">
+                                                <FaIcon className="fas fa-award text-blue-400 text-[10px]" />
+                                                Идёт в качество оператора
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
 
                                 {/* Meta row */}
                                 {(!canManage || activeTab === 'stats') && (
@@ -2082,9 +2515,48 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                             {/* Detail body */}
                             <div className="flex-1 overflow-y-auto p-5 space-y-3">
 
+                                {/* Время теста истекло, а попытка не отправлена */}
+                                {isOperator && isTestTimeOver && !isSelectedSurveyCompleted && (() => {
+                                    const hasSavedAttempt = (selectedSurvey?.my_assignment?.draft_answers || []).length > 0;
+                                    return (
+                                        <div className={`rounded-xl border p-4 ${
+                                            hasSavedAttempt ? 'border-slate-200 bg-slate-50' : 'border-amber-200 bg-amber-50'
+                                        }`}>
+                                            <div className="flex items-start gap-3">
+                                                <FaIcon className={`fas fa-hourglass-end mt-0.5 ${
+                                                    hasSavedAttempt ? 'text-slate-400' : 'text-amber-500'
+                                                }`} />
+                                                <div className={`text-sm ${hasSavedAttempt ? 'text-slate-700' : 'text-amber-800'}`}>
+                                                    <div className="font-semibold">Время теста истекло</div>
+                                                    <div className="mt-1 text-[13px]">
+                                                        {hasSavedAttempt
+                                                            ? 'Выбранные ответы сохранены — система отправит их сама, результат появится в течение минуты.'
+                                                            : 'Тест остался непройденным: попытка не начиналась.'}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    );
+                                })()}
+
                                 {/* Operator fills out survey */}
-                                {isOperator && selectedSurvey?.my_assignment?.can_submit && (
+                                {isOperator && canFillSelectedSurvey && (
                                     <div className="space-y-3">
+                                        {selectedSurvey?.is_test && testMsLeft != null && (
+                                            <div className={`sticky top-0 z-10 -mx-1 flex items-center justify-between gap-3 rounded-xl px-3.5 py-2.5 backdrop-blur ${
+                                                testMsLeft <= 60000
+                                                    ? 'bg-red-50/90 ring-1 ring-red-200'
+                                                    : 'bg-slate-50/90 ring-1 ring-slate-200/70'
+                                            }`}>
+                                                <div className="flex items-center gap-2 text-[13px] text-slate-600">
+                                                    <FaIcon className={`fas fa-stopwatch text-[11px] ${testMsLeft <= 60000 ? 'text-red-500' : 'text-slate-400'}`} />
+                                                    До завершения теста
+                                                </div>
+                                                <div className={`text-[15px] font-semibold tabular-nums ${testMsLeft <= 60000 ? 'text-red-600' : 'text-slate-800'}`}>
+                                                    {formatCountdown(testMsLeft)}
+                                                </div>
+                                            </div>
+                                        )}
                                         {(selectedSurvey.questions || []).map((question, index) => {
                                             const answer = answers[question.id] || {};
                                             return (
@@ -2097,6 +2569,17 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                             </div>
                                                             <div className="text-sm font-medium text-gray-800">{question.text}</div>
                                                         </div>
+                                                        {selectedSurvey?.is_test && question.points != null && (
+                                                            <span
+                                                                className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium tabular-nums text-slate-500"
+                                                                title={question.partial_credit
+                                                                    ? 'Балл начисляется за угаданные варианты, но один лишний вариант обнуляет вопрос'
+                                                                    : 'Балл только за все правильные варианты сразу'}
+                                                            >
+                                                                {formatPoints(question.points)} балл.
+                                                                {question.partial_credit && ' · частично'}
+                                                            </span>
+                                                        )}
                                                     </div>
 
                                                     {question.type === 'rating' ? (
@@ -2192,11 +2675,11 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                         <button
                                             onClick={submitSurvey}
                                             disabled={isSubmitting}
-                                            className="w-full py-3 rounded-xl bg-emerald-600 text-white font-medium text-sm hover:bg-emerald-700 disabled:opacity-50 transition-all shadow-sm"
+                                            className="w-full py-3 rounded-xl bg-emerald-600 text-white font-medium text-sm hover:bg-emerald-700 disabled:opacity-50 transition-all shadow-sm active:scale-[0.98]"
                                         >
                                             {isSubmitting
                                                 ? <><FaIcon className="fas fa-spinner fa-spin mr-2" />Отправка...</>
-                                                : <><FaIcon className="fas fa-paper-plane mr-2" />Завершить опрос</>}
+                                                : <><FaIcon className="fas fa-paper-plane mr-2" />{selectedSurvey?.is_test ? 'Завершить тест' : 'Завершить опрос'}</>}
                                         </button>
                                     </div>
                                 )}
@@ -2246,10 +2729,18 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                             </div>
                                                         )}
                                                         {selectedSurvey?.is_test && question.type !== 'rating' && (
-                                                            <div className="mt-1 text-xs text-emerald-700">
-                                                                Правильный ответ: {toUniqueTrimmedList(question.correct_options).length > 0
-                                                                    ? toUniqueTrimmedList(question.correct_options).join(', ')
-                                                                    : '—'}
+                                                            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                                                                <span className="text-emerald-700">
+                                                                    Правильный ответ: {toUniqueTrimmedList(question.correct_options).length > 0
+                                                                        ? toUniqueTrimmedList(question.correct_options).join(', ')
+                                                                        : '—'}
+                                                                </span>
+                                                                <span className="text-gray-500 tabular-nums">
+                                                                    Баллы: {formatPoints(question.points)}
+                                                                </span>
+                                                                {question.partial_credit && (
+                                                                    <span className="text-gray-500">Частичный зачёт</span>
+                                                                )}
                                                             </div>
                                                         )}
                                                     </div>
@@ -2260,29 +2751,70 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                 )}
 
                                 {/* Completed operator view */}
-                                {isOperator && selectedSurvey?.my_assignment?.status === 'completed' && (
+                                {isOperator && isSelectedSurveyCompleted && !isRetakingSelectedTest && (
                                     <div className="space-y-3">
-                                        <div className="text-xs text-gray-500">
-                                            Отправлено:{' '}
-                                            <strong className="text-gray-700">
-                                                {formatSurveyDateTime(selectedSurvey?.my_response?.submitted_at || selectedSurvey?.my_assignment?.submitted_at)}
-                                            </strong>
-                                        </div>
-                                        {selectedSurvey?.is_test && (
-                                            <div className="rounded-xl border border-emerald-100 bg-emerald-50 p-3">
-                                                <div className="text-xs text-emerald-700">
-                                                    Результат теста
-                                                </div>
-                                                <div className="text-sm font-semibold text-emerald-800 mt-1">
-                                                    {Number(selectedSurvey?.my_response?.test_summary?.score_percent || 0).toFixed(1).replace(/\.0$/, '')}%
-                                                </div>
-                                                <div className="text-xs text-emerald-700 mt-1">
-                                                    Верных ответов: {Number(selectedSurvey?.my_response?.test_summary?.correct_answers || 0)}
-                                                    {' '}из{' '}
-                                                    {Number(selectedSurvey?.my_response?.test_summary?.total_questions || 0)}
-                                                </div>
+                                        <div className="flex flex-wrap items-center justify-between gap-2">
+                                            <div className="text-xs text-gray-500">
+                                                Отправлено:{' '}
+                                                <strong className="text-gray-700 tabular-nums">
+                                                    {formatSurveyDateTime(selectedSurvey?.my_response?.submitted_at || selectedSurvey?.my_assignment?.submitted_at)}
+                                                </strong>
                                             </div>
-                                        )}
+                                            {canRetakeSelectedTest && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setRetakeSurveyId(selectedSurvey.id)}
+                                                    className="inline-flex items-center gap-1.5 rounded-xl bg-slate-100 px-3 py-1.5 text-[12.5px] font-medium text-slate-700 transition-colors hover:bg-slate-200 active:scale-[0.98]"
+                                                >
+                                                    <FaIcon className="fas fa-redo text-[10px]" />
+                                                    Пройти ещё раз
+                                                </button>
+                                            )}
+                                        </div>
+                                        {selectedSurvey?.is_test && (() => {
+                                            const summary = selectedSurvey?.my_response?.test_summary || {};
+                                            const percent = Number(summary.score_percent || 0);
+                                            return (
+                                                <div className={`${iosCard} p-4`}>
+                                                    <div className="flex items-baseline justify-between gap-3">
+                                                        <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                                                            Результат теста
+                                                        </div>
+                                                        {summary.is_auto_submitted && (
+                                                            <Badge color="amber">Автоотправка по времени</Badge>
+                                                        )}
+                                                    </div>
+                                                    <div className="mt-1.5 text-[26px] font-semibold tabular-nums leading-none text-slate-900">
+                                                        {percent.toFixed(1).replace(/\.0$/, '')}%
+                                                    </div>
+                                                    <div className="mt-2.5">
+                                                        <ProgressBar
+                                                            value={percent}
+                                                            color={percent >= 80 ? 'emerald' : (percent >= 60 ? 'blue' : 'amber')}
+                                                        />
+                                                    </div>
+                                                    <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-[12.5px] text-slate-500">
+                                                        <span>
+                                                            Баллы:{' '}
+                                                            <strong className="tabular-nums text-slate-800">
+                                                                {formatPoints(summary.earned_points)} / {formatPoints(summary.max_points)}
+                                                            </strong>
+                                                        </span>
+                                                        <span>
+                                                            Верных ответов:{' '}
+                                                            <strong className="tabular-nums text-slate-800">
+                                                                {Number(summary.correct_answers || 0)} / {Number(summary.total_questions || 0)}
+                                                            </strong>
+                                                        </span>
+                                                    </div>
+                                                    {selectedTestInfo?.affects_quality && (
+                                                        <div className="mt-3 text-[12px] text-slate-400">
+                                                            Результат учтён в качестве оператора как «Тестирование знаний».
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })()}
                                         {(selectedSurvey.questions || []).map((question, index) => {
                                             const answersByQuestion = selectedSurvey?.my_response?.answers_by_question || {};
                                             const answer = answersByQuestion[String(question.id)] || answersByQuestion[question.id] || null;
@@ -2291,7 +2823,10 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                 ? Number.isFinite(Number(answer?.rating_value))
                                                 : (selectedOptions.length > 0 || String(answer?.answer_text || '').trim().length > 0);
                                             const expectedOptions = getExpectedOptionsForTest(question, answer);
-                                            const isCorrect = selectedSurvey?.is_test ? isTestAnswerCorrect(question, answer) : false;
+                                            const answerStatus = selectedSurvey?.is_test
+                                                ? testAnswerStatusMeta(question, answer, hasAnswer)
+                                                : null;
+                                            const earnedPoints = Number(answer?.earned_points);
                                             return (
                                                 <div key={question.id} className="p-3 rounded-xl border border-gray-100 bg-gray-50/60 space-y-2">
                                                     <div className="flex items-start gap-3">
@@ -2300,13 +2835,16 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                         </div>
                                                         <div className="flex-1 min-w-0">
                                                             <div className="text-sm font-medium text-gray-800">{question.text}</div>
-                                                            <div className="flex items-center gap-2 mt-1">
+                                                            <div className="flex flex-wrap items-center gap-2 mt-1">
                                                                 <Badge color="gray">{questionTypeLabel(question.type)}</Badge>
                                                                 {question.required && <Badge color="blue">Обязательный</Badge>}
-                                                                {selectedSurvey?.is_test && (
-                                                                    <Badge color={!hasAnswer ? 'gray' : (isCorrect ? 'green' : 'amber')}>
-                                                                        {!hasAnswer ? 'Нет ответа' : (isCorrect ? 'Верно' : 'Неверно')}
-                                                                    </Badge>
+                                                                {answerStatus && (
+                                                                    <Badge color={answerStatus.color}>{answerStatus.label}</Badge>
+                                                                )}
+                                                                {selectedSurvey?.is_test && Number.isFinite(earnedPoints) && (
+                                                                    <span className="text-[11px] tabular-nums text-slate-500">
+                                                                        {formatPoints(earnedPoints)} / {formatPoints(question.points)} балл.
+                                                                    </span>
                                                                 )}
                                                             </div>
                                                         </div>
@@ -2317,11 +2855,13 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                             {formatQuestionAnswerText(question, answer)}
                                                         </strong>
                                                     </div>
-                                                    {selectedSurvey?.is_test && (
+                                                    {/* Правильный ответ показываем только когда он открыт:
+                                                        при разрешённом повторе внутри окна это была бы подсказка. */}
+                                                    {selectedSurvey?.is_test && expectedOptions.length > 0 && (
                                                         <div className="ml-9 text-sm text-gray-700">
                                                             <span className="text-gray-500 mr-1">Правильный ответ:</span>
                                                             <strong className="font-medium text-emerald-700 break-words">
-                                                                {expectedOptions.length > 0 ? expectedOptions.join(', ') : '—'}
+                                                                {expectedOptions.join(', ')}
                                                             </strong>
                                                         </div>
                                                     )}
@@ -2414,9 +2954,12 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                             <tr>
                                                                 <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Сотрудник</th>
                                                                 <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Статус</th>
-                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Отправлено</th>
+                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Начало</th>
+                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Завершение</th>
                                                                 <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Повтор</th>
-                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Общий балл</th>
+                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Баллы</th>
+                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Итоговая оценка</th>
+                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">В качество</th>
                                                                 <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Верно</th>
                                                                 <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Отвечено</th>
                                                             </tr>
@@ -2424,7 +2967,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                         <tbody className="divide-y divide-gray-100">
                                                             {detailedStatsRows.length === 0 && (
                                                                 <tr>
-                                                                    <td className="px-3 py-4 text-center text-gray-400" colSpan={7}>
+                                                                    <td className="px-3 py-4 text-center text-gray-400" colSpan={10}>
                                                                         Сотрудники не найдены
                                                                     </td>
                                                                 </tr>
@@ -2458,11 +3001,19 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                                             </div>
                                                                         </td>
                                                                         <td className="px-3 py-2.5 whitespace-nowrap">
-                                                                            <Badge color={isCompleted ? 'green' : 'amber'}>
-                                                                                {isCompleted ? 'Пройден' : 'Назначен'}
-                                                                            </Badge>
+                                                                            <div className="flex items-center gap-1.5">
+                                                                                <Badge color={isCompleted ? 'green' : 'amber'}>
+                                                                                    {isCompleted ? 'Пройден' : 'Назначен'}
+                                                                                </Badge>
+                                                                                {testSummary?.is_auto_submitted && (
+                                                                                    <Badge color="amber">по времени</Badge>
+                                                                                )}
+                                                                            </div>
                                                                         </td>
-                                                                        <td className="px-3 py-2.5 whitespace-nowrap text-gray-600">
+                                                                        <td className="px-3 py-2.5 whitespace-nowrap text-gray-600 tabular-nums">
+                                                                            {formatSurveyDateTime(row?.started_at)}
+                                                                        </td>
+                                                                        <td className="px-3 py-2.5 whitespace-nowrap text-gray-600 tabular-nums">
                                                                             {formatSurveyDateTime(row?.submitted_at)}
                                                                         </td>
                                                                         <td className="px-3 py-2.5 whitespace-nowrap">
@@ -2470,10 +3021,15 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                                                 #{repeatIteration}
                                                                             </Badge>
                                                                         </td>
+                                                                        <td className="px-3 py-2.5 whitespace-nowrap text-gray-700 tabular-nums">
+                                                                            {hasScore
+                                                                                ? `${formatPoints(testSummary?.earned_points)} / ${formatPoints(testSummary?.max_points)}`
+                                                                                : <span className="text-gray-400">—</span>}
+                                                                        </td>
                                                                         <td className="px-3 py-2.5 align-top">
                                                                             {hasScore ? (
                                                                                 <div className="min-w-[140px] space-y-1">
-                                                                                    <div className="text-sm font-semibold text-gray-800">
+                                                                                    <div className="text-sm font-semibold text-gray-800 tabular-nums">
                                                                                         {scoreValue.toFixed(1).replace(/\.0$/, '')}%
                                                                                     </div>
                                                                                     <ProgressBar
@@ -2485,10 +3041,20 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                                                 <span className="text-gray-400">—</span>
                                                                             )}
                                                                         </td>
-                                                                        <td className="px-3 py-2.5 whitespace-nowrap text-gray-700">
+                                                                        <td className="px-3 py-2.5 whitespace-nowrap">
+                                                                            {testSummary?.sent_to_quality ? (
+                                                                                <span className="inline-flex items-center gap-1 text-emerald-700">
+                                                                                    <FaIcon className="fas fa-check text-[10px]" />
+                                                                                    Тестирование знаний
+                                                                                </span>
+                                                                            ) : (
+                                                                                <span className="text-gray-400">—</span>
+                                                                            )}
+                                                                        </td>
+                                                                        <td className="px-3 py-2.5 whitespace-nowrap text-gray-700 tabular-nums">
                                                                             {totalQuestions > 0 ? `${correctAnswers}/${totalQuestions}` : '—'}
                                                                         </td>
-                                                                        <td className="px-3 py-2.5 whitespace-nowrap text-gray-700">
+                                                                        <td className="px-3 py-2.5 whitespace-nowrap text-gray-700 tabular-nums">
                                                                             {totalQuestions > 0 ? `${answeredQuestions}/${totalQuestions}` : '—'}
                                                                         </td>
                                                                     </tr>
@@ -2557,9 +3123,15 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                                             const hasAnswer = hasSurveyAnswer(resolved.question, resolved.answer);
                                                                             const isCorrect = isTestStatsSurvey ? isTestAnswerCorrect(resolved.question, resolved.answer) : false;
                                                                             const expectedOptions = isTestStatsSurvey ? getExpectedOptionsForTest(resolved.question, resolved.answer) : [];
+                                                                            const answerStatus = isTestStatsSurvey
+                                                                                ? testAnswerStatusMeta(resolved.question, resolved.answer, hasAnswer)
+                                                                                : null;
+                                                                            const answerEarnedPoints = Number(resolved.answer?.earned_points);
                                                                             const answerCellClass = (
                                                                                 isTestStatsSurvey && hasAnswer
-                                                                                    ? (isCorrect ? 'bg-emerald-50/70' : 'bg-amber-50/70')
+                                                                                    ? (isCorrect
+                                                                                        ? 'bg-emerald-50/70'
+                                                                                        : (answerStatus?.color === 'blue' ? 'bg-blue-50/70' : 'bg-amber-50/70'))
                                                                                     : ''
                                                                             );
                                                                             return (
@@ -2569,9 +3141,14 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                                                     </div>
                                                                                     {isTestStatsSurvey && (
                                                                                         <div className="mt-1 space-y-1">
-                                                                                            <Badge color={!hasAnswer ? 'gray' : (isCorrect ? 'green' : 'amber')}>
-                                                                                                {!hasAnswer ? 'Нет ответа' : (isCorrect ? 'Верно' : 'Неверно')}
-                                                                                            </Badge>
+                                                                                            <div className="flex flex-wrap items-center gap-1.5">
+                                                                                                <Badge color={answerStatus.color}>{answerStatus.label}</Badge>
+                                                                                                {Number.isFinite(answerEarnedPoints) && (
+                                                                                                    <span className="text-[10px] tabular-nums text-slate-500">
+                                                                                                        {formatPoints(answerEarnedPoints)} / {formatPoints(resolved.question?.points)}
+                                                                                                    </span>
+                                                                                                )}
+                                                                                            </div>
                                                                                             {expectedOptions.length > 0 && (
                                                                                                 <div className="text-[10px] text-emerald-700 break-words">
                                                                                                     Правильный: {expectedOptions.join(', ')}

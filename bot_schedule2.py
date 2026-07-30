@@ -16203,6 +16203,68 @@ def notify_supervisor():
         return jsonify({"error": f"Internal server error"}), 500
 
 
+def _survey_test_config_from_payload(data):
+    """Настройки теста из тела запроса; валидация — на стороне database.py."""
+    data = data or {}
+    test_config = data.get('test') if isinstance(data.get('test'), dict) else {}
+    return {
+        'starts_at': test_config.get('starts_at', data.get('starts_at')),
+        'ends_at': test_config.get('ends_at', data.get('ends_at')),
+        'single_attempt': test_config.get('single_attempt', data.get('single_attempt', True)),
+        'affects_quality': test_config.get('affects_quality', data.get('affects_quality', False)),
+    }
+
+
+# Один разбор кодов ошибок опроса на создание, редактирование и отправку —
+# иначе одна и та же проблема объясняется пользователю по-разному.
+_SURVEY_ERROR_MESSAGES = {
+    'SURVEY_NOT_FOUND': ("Опрос не найден", 404),
+    'SURVEY_NOT_A_TEST': ("Этот опрос не является тестом", 400),
+    'SURVEY_TITLE_REQUIRED': ("Укажите название", 400),
+    'SURVEY_QUESTIONS_REQUIRED': ("Добавьте хотя бы один вопрос", 400),
+    'SURVEY_OPERATORS_REQUIRED': ("Выберите хотя бы одного сотрудника", 400),
+    'SURVEY_INVALID_TENURE_MIN': ("Некорректный стаж «от»", 400),
+    'SURVEY_INVALID_TENURE_MAX': ("Некорректный стаж «до»", 400),
+    'SURVEY_INVALID_TENURE_RANGE': ("Стаж «от» больше стажа «до»", 400),
+    'SURVEY_INVALID_STARTS_AT': ("Некорректная дата начала теста", 400),
+    'SURVEY_INVALID_ENDS_AT': ("Некорректная дата завершения теста", 400),
+    'SURVEY_INVALID_SCHEDULE_RANGE': ("Завершение теста должно быть позже начала", 400),
+    'SURVEY_TEST_NOT_STARTED': ("Тест ещё не начался", 409),
+    'SURVEY_TEST_FINISHED': ("Время теста истекло", 409),
+    'SURVEY_ALREADY_COMPLETED': ("Тест уже пройден", 409),
+    'SURVEY_HAS_NO_QUESTIONS': ("В опросе нет вопросов", 400),
+    'SURVEY_ANSWERS_REQUIRED': ("Не переданы ответы", 400),
+    'SURVEY_EMPTY_RESPONSE': ("Ответьте хотя бы на один вопрос", 400),
+    'SURVEY_REPEAT_SOURCE_NOT_FOUND': ("Опрос для повтора не найден", 404),
+}
+_SURVEY_ERROR_PREFIX_MESSAGES = (
+    ('SURVEY_QUESTION_TEXT_REQUIRED_', "Укажите текст вопроса", 400),
+    ('SURVEY_INVALID_QUESTION_TYPE_', "Недопустимый тип вопроса", 400),
+    ('SURVEY_OPTIONS_REQUIRED_', "В вопросе должно быть минимум 2 варианта", 400),
+    ('SURVEY_TEST_RATING_NOT_ALLOWED_', "В тесте нельзя использовать вопросы-рейтинги", 400),
+    ('SURVEY_CORRECT_OPTIONS_REQUIRED_', "У каждого вопроса теста отметьте правильный ответ", 400),
+    ('SURVEY_CORRECT_OPTION_INVALID_', "Правильный ответ должен быть одним из вариантов", 400),
+    ('SURVEY_SINGLE_CORRECT_OPTION_REQUIRED_', "В вопросе с одним ответом правильный вариант должен быть один", 400),
+    ('SURVEY_INVALID_QUESTION_POINTS_', "Баллы за вопрос — число больше 0 и не больше 1000", 400),
+    ('SURVEY_REQUIRED_QUESTION_', "Ответьте на все обязательные вопросы", 400),
+    ('SURVEY_INVALID_RATING_', "Оценка должна быть от 1 до 5", 400),
+    ('SURVEY_INVALID_OPTION_', "Выбран недопустимый вариант ответа", 400),
+    ('SURVEY_TOO_MANY_OPTIONS_', "Выбрано больше вариантов, чем допускает вопрос", 400),
+    ('SURVEY_OTHER_TEXT_TOO_LONG_', "Ответ «Другое» не должен быть длиннее 500 символов", 400),
+)
+
+
+def _survey_error_response(code):
+    code = str(code)
+    if code in _SURVEY_ERROR_MESSAGES:
+        message, status = _SURVEY_ERROR_MESSAGES[code]
+        return jsonify({"error": message}), status
+    for prefix, message, status in _SURVEY_ERROR_PREFIX_MESSAGES:
+        if code.startswith(prefix):
+            return jsonify({"error": message}), status
+    return jsonify({"error": code}), 400
+
+
 @app.route('/api/surveys', methods=['GET', 'POST', 'OPTIONS'])
 @require_api_key
 def handle_surveys():
@@ -16213,17 +16275,26 @@ def handle_surveys():
 
         if request.method == 'GET':
             if requester_role == 'operator':
-                surveys = db.get_surveys_for_operator(requester_id)
-            else:
-                surveys = db.get_surveys_for_management(
-                    requester_id,
-                    requester_role,
-                    scope_department_id=getattr(g, 'survey_scope_department_id', None)
-                )
+                return jsonify({
+                    "status": "success",
+                    "surveys": db.get_surveys_for_operator(requester_id)
+                }), 200
 
+            scope_department_id = getattr(g, 'survey_scope_department_id', None)
+            # Состав групп отдаём вместе со списком: назначение «на группу»
+            # не должно стоить фронту отдельного запроса.
             return jsonify({
                 "status": "success",
-                "surveys": surveys
+                "surveys": db.get_surveys_for_management(
+                    requester_id,
+                    requester_role,
+                    scope_department_id=scope_department_id
+                ),
+                "groups": db.get_survey_assignable_groups(
+                    requester_id,
+                    requester_role,
+                    scope_department_id=scope_department_id
+                )
             }), 200
 
         if not (_is_admin_role(requester_role) or requester_role in ('sv', 'trainer')):
@@ -16293,7 +16364,8 @@ def handle_surveys():
             questions=questions,
             operator_ids=operator_ids,
             repeat_from_survey_id=repeat_from_survey_id,
-            is_test=is_test
+            is_test=is_test,
+            test_config=_survey_test_config_from_payload(data)
         )
 
         return jsonify({
@@ -16307,32 +16379,7 @@ def handle_surveys():
         }), 201
 
     except ValueError as value_error:
-        code = str(value_error)
-        if code == 'SURVEY_TITLE_REQUIRED':
-            return jsonify({"error": "Survey title is required"}), 400
-        if code == 'SURVEY_QUESTIONS_REQUIRED':
-            return jsonify({"error": "At least one question is required"}), 400
-        if code == 'SURVEY_OPERATORS_REQUIRED':
-            return jsonify({"error": "At least one operator is required"}), 400
-        if code in ('SURVEY_INVALID_TENURE_MIN', 'SURVEY_INVALID_TENURE_MAX', 'SURVEY_INVALID_TENURE_RANGE'):
-            return jsonify({"error": "Invalid tenure range"}), 400
-        if code.startswith('SURVEY_QUESTION_TEXT_REQUIRED_'):
-            return jsonify({"error": "Question text is required"}), 400
-        if code.startswith('SURVEY_INVALID_QUESTION_TYPE_'):
-            return jsonify({"error": "Invalid question type"}), 400
-        if code.startswith('SURVEY_OPTIONS_REQUIRED_'):
-            return jsonify({"error": "Question must have at least 2 options"}), 400
-        if code.startswith('SURVEY_TEST_RATING_NOT_ALLOWED_'):
-            return jsonify({"error": "Rating questions are not allowed in test mode"}), 400
-        if code.startswith('SURVEY_CORRECT_OPTIONS_REQUIRED_'):
-            return jsonify({"error": "Each test question must have at least one correct option"}), 400
-        if code.startswith('SURVEY_CORRECT_OPTION_INVALID_'):
-            return jsonify({"error": "Correct options must match question options"}), 400
-        if code.startswith('SURVEY_SINGLE_CORRECT_OPTION_REQUIRED_'):
-            return jsonify({"error": "Single-choice test questions must have exactly one correct option"}), 400
-        if code == 'SURVEY_REPEAT_SOURCE_NOT_FOUND':
-            return jsonify({"error": "Source survey for repeat not found"}), 404
-        return jsonify({"error": code}), 400
+        return _survey_error_response(value_error)
     except Exception as e:
         logging.error(f"Error in handle_surveys: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error"}), 500
@@ -16390,7 +16437,8 @@ def delete_survey(survey_id):
                 assignment=assignment,
                 questions=questions,
                 operator_ids=operator_ids,
-                is_test=is_test
+                is_test=is_test,
+                test_config=_survey_test_config_from_payload(data)
             )
             return jsonify({
                 "status": "success",
@@ -16406,34 +16454,9 @@ def delete_survey(survey_id):
         )
         return jsonify({"status": "success", "message": "Survey deleted"}), 200
     except ValueError as value_error:
-        code = str(value_error)
-        if code == 'SURVEY_NOT_FOUND':
-            return jsonify({"error": "Survey not found"}), 404
-        if code == 'SURVEY_TITLE_REQUIRED':
-            return jsonify({"error": "Survey title is required"}), 400
-        if code == 'SURVEY_QUESTIONS_REQUIRED':
-            return jsonify({"error": "At least one question is required"}), 400
-        if code == 'SURVEY_OPERATORS_REQUIRED':
-            return jsonify({"error": "At least one operator is required"}), 400
-        if code in ('SURVEY_INVALID_TENURE_MIN', 'SURVEY_INVALID_TENURE_MAX', 'SURVEY_INVALID_TENURE_RANGE'):
-            return jsonify({"error": "Invalid tenure range"}), 400
-        if code.startswith('SURVEY_QUESTION_TEXT_REQUIRED_'):
-            return jsonify({"error": "Question text is required"}), 400
-        if code.startswith('SURVEY_INVALID_QUESTION_TYPE_'):
-            return jsonify({"error": "Invalid question type"}), 400
-        if code.startswith('SURVEY_OPTIONS_REQUIRED_'):
-            return jsonify({"error": "Question must have at least 2 options"}), 400
-        if code.startswith('SURVEY_TEST_RATING_NOT_ALLOWED_'):
-            return jsonify({"error": "Rating questions are not allowed in test mode"}), 400
-        if code.startswith('SURVEY_CORRECT_OPTIONS_REQUIRED_'):
-            return jsonify({"error": "Each test question must have at least one correct option"}), 400
-        if code.startswith('SURVEY_CORRECT_OPTION_INVALID_'):
-            return jsonify({"error": "Correct options must match question options"}), 400
-        if code.startswith('SURVEY_SINGLE_CORRECT_OPTION_REQUIRED_'):
-            return jsonify({"error": "Single-choice test questions must have exactly one correct option"}), 400
-        return jsonify({"error": code}), 400
+        return _survey_error_response(value_error)
     except PermissionError:
-        return jsonify({"error": "You do not have access to manage this survey"}), 403
+        return jsonify({"error": "Нет доступа к этому опросу"}), 403
     except Exception as e:
         logging.error(f"Error in delete_survey: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error"}), 500
@@ -16465,35 +16488,48 @@ def submit_survey(survey_id):
             "result": result
         }), 200
     except ValueError as value_error:
-        code = str(value_error)
-        if code == 'SURVEY_NOT_FOUND':
-            return jsonify({"error": "Survey not found"}), 404
-        if code == 'SURVEY_ALREADY_COMPLETED':
-            return jsonify({"error": "Survey already completed"}), 409
-        if code == 'SURVEY_HAS_NO_QUESTIONS':
-            return jsonify({"error": "Survey has no questions"}), 400
-        if code == 'SURVEY_ANSWERS_REQUIRED':
-            return jsonify({"error": "Answers are required"}), 400
-        if code == 'SURVEY_EMPTY_RESPONSE':
-            return jsonify({"error": "Please answer at least one question"}), 400
-        if code.startswith('SURVEY_REQUIRED_QUESTION_'):
-            return jsonify({"error": "Please answer all required questions"}), 400
-        if code.startswith('SURVEY_INVALID_RATING_'):
-            return jsonify({"error": "Rating answer must be between 1 and 5"}), 400
-        if code.startswith('SURVEY_INVALID_OPTION_') or code.startswith('SURVEY_TOO_MANY_OPTIONS_'):
-            return jsonify({"error": "Invalid selected option"}), 400
-        if code.startswith('SURVEY_TEST_RATING_NOT_ALLOWED_'):
-            return jsonify({"error": "Test configuration is invalid for this survey"}), 400
-        if code.startswith('SURVEY_OTHER_TEXT_TOO_LONG_'):
-            return jsonify({"error": "Other answer must not exceed 500 characters"}), 400
-        return jsonify({"error": code}), 400
+        return _survey_error_response(value_error)
     except PermissionError as permission_error:
         if str(permission_error) == 'SURVEY_NOT_ASSIGNED':
-            return jsonify({"error": "Survey is not assigned to this operator"}), 403
+            return jsonify({"error": "Этот опрос вам не назначен"}), 403
         return jsonify({"error": str(permission_error)}), 403
     except Exception as e:
         logging.error(f"Error in submit_survey: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error"}), 500
+
+
+@app.route('/api/surveys/<int:survey_id>/attempt', methods=['PUT', 'OPTIONS'])
+@require_api_key
+def save_survey_attempt(survey_id):
+    """
+    Промежуточное сохранение начатой попытки теста. Нужно, чтобы по окончании
+    окна автоотправка сохранила уже выбранные ответы, даже если оператор
+    закрыл вкладку.
+    """
+    try:
+        requester_id, requester, requester_role, guard_response, guard_status = _surveys_route_guard()
+        if guard_response is not None:
+            return guard_response, guard_status
+
+        if requester_role != 'operator':
+            return jsonify({"error": "Проходить тест может только оператор"}), 403
+
+        data = request.get_json() or {}
+        result = db.save_survey_attempt_draft(
+            survey_id=survey_id,
+            operator_id=requester_id,
+            answers=data.get('answers')
+        )
+        return jsonify({"status": "success", "result": result}), 200
+    except ValueError as value_error:
+        return _survey_error_response(value_error)
+    except PermissionError as permission_error:
+        if str(permission_error) == 'SURVEY_NOT_ASSIGNED':
+            return jsonify({"error": "Этот тест вам не назначен"}), 403
+        return jsonify({"error": str(permission_error)}), 403
+    except Exception as e:
+        logging.error(f"Error in save_survey_attempt: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
 
 
 def _survey_export_format_dt(value):
@@ -16602,18 +16638,43 @@ def _survey_export_is_test_answer_correct(question, answer):
     return False
 
 
+def _survey_export_is_test_answer_partial(answer):
+    """Частичный зачёт: балл есть, но вопрос закрыт не полностью."""
+    answer = answer or {}
+    if answer.get('is_partially_correct') is True:
+        return True
+    try:
+        return not answer.get('is_correct') and float(answer.get('earned_points') or 0) > 0
+    except Exception:
+        return False
+
+
 def _survey_export_answer_text_for_test(question, answer):
     base_text = _survey_export_answer_text(question, answer)
     has_answer = _survey_export_is_answer_present(question, answer)
     if not has_answer:
         return f"{base_text} [Нет ответа]"
 
-    is_correct = _survey_export_is_test_answer_correct(question, answer)
-    status_text = 'Верно' if is_correct else 'Неверно'
+    if _survey_export_is_test_answer_correct(question, answer):
+        status_text = 'Верно'
+    elif _survey_export_is_test_answer_partial(answer):
+        status_text = 'Частично'
+    else:
+        status_text = 'Неверно'
+
+    points_note = ''
+    try:
+        earned = answer.get('earned_points')
+        maximum = (question or {}).get('points')
+        if earned is not None and maximum is not None:
+            points_note = f" {float(earned):g}/{float(maximum):g} балл."
+    except Exception:
+        points_note = ''
+
     expected_options = _survey_export_expected_options(question, answer)
     if expected_options:
-        return f"{base_text} [{status_text}] (Правильный: {', '.join(expected_options)})"
-    return f"{base_text} [{status_text}]"
+        return f"{base_text} [{status_text}]{points_note} (Правильный: {', '.join(expected_options)})"
+    return f"{base_text} [{status_text}]{points_note}"
 
 
 def _survey_export_test_row_metrics(row):
@@ -16636,10 +16697,31 @@ def _survey_export_test_row_metrics(row):
         correct_ratio = '—'
         answered_ratio = '—'
 
+    def _points(key):
+        try:
+            value = summary.get(key)
+            return float(value) if value is not None else None
+        except Exception:
+            return None
+
+    earned_points = _points('earned_points')
+    max_points = _points('max_points')
+    if earned_points is not None and max_points is not None:
+        points_ratio = f"{earned_points:g}/{max_points:g}"
+    elif max_points is not None:
+        points_ratio = f"—/{max_points:g}"
+    else:
+        points_ratio = '—'
+
     return {
         'score_percent': score_percent,
         'correct_ratio': correct_ratio,
-        'answered_ratio': answered_ratio
+        'answered_ratio': answered_ratio,
+        'points_ratio': points_ratio,
+        'earned_points': earned_points,
+        'max_points': max_points,
+        'sent_to_quality': bool(summary.get('sent_to_quality')),
+        'is_auto_submitted': bool(summary.get('is_auto_submitted'))
     }
 
 
@@ -16824,18 +16906,30 @@ def export_survey_statistics_excel(survey_id):
         ws_scores = None
         if is_test:
             ws_scores = wb.create_sheet('Баллы теста')
-            ws_scores.append(['Сотрудник', 'ID', 'Статус', 'Отправлено', 'Повторение', 'Общий балл, %', 'Верно', 'Отвечено'])
+            ws_scores.append([
+                'Сотрудник', 'ID', 'Статус', 'Начало', 'Завершение', 'Повторение',
+                'Баллы', 'Общий балл, %', 'Итоговая оценка', 'Тип оценки',
+                'Передано в качество', 'Верно', 'Отвечено'
+            ])
             for row in responses_detailed:
                 status_raw = str(row.get('status') or '').strip().lower()
                 status_label = 'Пройден' if status_raw == 'completed' else 'Назначен'
                 test_metrics = _survey_export_test_row_metrics(row)
+                score_percent = test_metrics.get('score_percent')
+                if test_metrics.get('is_auto_submitted'):
+                    status_label = f"{status_label} (автоотправка)"
                 ws_scores.append([
                     str(row.get('operator_name') or f"#{row.get('operator_id') or ''}"),
                     int(row.get('operator_id') or 0),
                     status_label,
+                    _survey_export_format_dt(row.get('started_at')),
                     _survey_export_format_dt(row.get('submitted_at')),
                     int(row.get('repeat_iteration') or repeat_iteration),
-                    test_metrics.get('score_percent') if test_metrics.get('score_percent') is not None else '—',
+                    test_metrics.get('points_ratio'),
+                    score_percent if score_percent is not None else '—',
+                    score_percent if score_percent is not None else '—',
+                    'Тестирование знаний',
+                    'Да' if test_metrics.get('sent_to_quality') else 'Нет',
                     test_metrics.get('correct_ratio'),
                     test_metrics.get('answered_ratio')
                 ])
@@ -17029,7 +17123,9 @@ def export_survey_statistics_excel(survey_id):
                     if '[Верно]' in answer_text:
                         cell.fill = answer_correct_fill
                         cell.font = answer_correct_font
-                    elif '[Неверно]' in answer_text:
+                    elif '[Неверно]' in answer_text or '[Частично]' in answer_text:
+                        # Частичный зачёт — тоже не закрытый вопрос: подсвечиваем
+                        # как незачёт, а сам балл виден рядом в тексте ячейки.
                         cell.fill = answer_incorrect_fill
                         cell.font = answer_incorrect_font
                     elif '[Нет ответа]' in answer_text:
@@ -17085,26 +17181,24 @@ def export_survey_statistics_excel(survey_id):
                     else:
                         cell.alignment = Alignment(horizontal='center', vertical='center')
 
-                    if col_idx == 6 and isinstance(cell.value, (int, float)):
+                    # H — «Общий балл, %», I — «Итоговая оценка» (та же шкала 0–100)
+                    if col_idx in (8, 9) and isinstance(cell.value, (int, float)):
                         cell.number_format = '0.0"%"'
 
                 status_cell = ws_scores.cell(row=row_idx, column=3)
                 status_text = str(status_cell.value or '').strip().lower()
-                if status_text == 'пройден':
+                if status_text.startswith('пройден'):
                     status_cell.fill = status_done_fill
                 else:
                     status_cell.fill = status_pending_fill
                 status_cell.font = Font(color='1F2937', bold=True)
 
-            ws_scores.column_dimensions['A'].width = 28
-            ws_scores.column_dimensions['B'].width = 10
-            ws_scores.column_dimensions['C'].width = 14
-            ws_scores.column_dimensions['D'].width = 20
-            ws_scores.column_dimensions['E'].width = 12
-            ws_scores.column_dimensions['F'].width = 14
-            ws_scores.column_dimensions['G'].width = 12
-            ws_scores.column_dimensions['H'].width = 12
-            ws_scores.freeze_panes = 'F2'
+            for column_letter, width in (
+                ('A', 28), ('B', 10), ('C', 20), ('D', 18), ('E', 18), ('F', 12),
+                ('G', 14), ('H', 14), ('I', 16), ('J', 20), ('K', 18), ('L', 12), ('M', 12)
+            ):
+                ws_scores.column_dimensions[column_letter].width = width
+            ws_scores.freeze_panes = 'C2'
             ws_scores.auto_filter.ref = f"A1:{get_column_letter(last_scores_col)}{max(1, last_scores_row)}"
 
         output = BytesIO()
@@ -18852,7 +18946,7 @@ def handle_monthly_report():
             with db._get_cursor() as cursor:
                 if evaluator_id is None:
                     cursor.execute("""
-                        SELECT c.score, c.created_at
+                        SELECT c.score, c.created_at, c.survey_response_id
                         FROM calls c
                         JOIN (
                             SELECT phone_number, appeal_date, MAX(created_at) as max_date
@@ -18870,7 +18964,7 @@ def handle_monthly_report():
                     """, (target_user_id, target_month, target_user_id, target_month))
                 else:
                     cursor.execute("""
-                        SELECT c.score, c.created_at
+                        SELECT c.score, c.created_at, c.survey_response_id
                         FROM calls c
                         JOIN (
                             SELECT phone_number, appeal_date, MAX(created_at) as max_date
@@ -18896,7 +18990,13 @@ def handle_monthly_report():
                             score_date = datetime.strptime(str(created_at)[:10], '%Y-%m-%d').date()
                         except Exception:
                             score_date = None
-                    result.append({"score": row[0], "date": score_date})
+                    result.append({
+                        "score": row[0],
+                        "date": score_date,
+                        # Оценка «Тестирование знаний» идёт в средний балл, но
+                        # не в «Кол-во» — план по прослушке она не закрывает.
+                        "is_knowledge_test": row[2] is not None
+                    })
                 return result
 
         def _has_monthly_evaluation_data(target_user_id, target_month):
@@ -19000,8 +19100,8 @@ def handle_monthly_report():
                     'special_score_rows': special_score_rows,
                     'scores': scores,
                     'special_scores': special_scores,
-                    'score_count': len(scores),
-                    'special_score_count': len(special_scores),
+                    'score_count': sum(1 for row in score_rows if not row.get('is_knowledge_test')),
+                    'special_score_count': sum(1 for row in special_score_rows if not row.get('is_knowledge_test')),
                     'avg_score': (sum(scores) / len(scores)) if scores else 0.0,
                     'special_avg_score': (sum(special_scores) / len(special_scores)) if special_scores else 0.0
                 })
@@ -19025,8 +19125,8 @@ def handle_monthly_report():
                     'special_score_rows': sv_special_score_rows,
                     'scores': sv_scores,
                     'special_scores': sv_special_scores,
-                    'score_count': len(sv_scores),
-                    'special_score_count': len(sv_special_scores),
+                    'score_count': sum(1 for row in sv_score_rows if not row.get('is_knowledge_test')),
+                    'special_score_count': sum(1 for row in sv_special_score_rows if not row.get('is_knowledge_test')),
                     'avg_score': (sum(sv_scores) / len(sv_scores)) if sv_scores else 0.0,
                     'special_avg_score': (sum(sv_special_scores) / len(sv_special_scores)) if sv_special_scores else 0.0
                 })
@@ -34559,9 +34659,11 @@ async def show_sv_evaluations(callback: types.CallbackQuery, state: FSMContext):
         op_id = op.get('id')
         op_name = op.get('name')
         with db._get_cursor() as cursor:
+            # Оценка «Тестирование знаний» звонком не считается — иначе план
+            # прослушки выглядел бы выполненным без прослушанных звонков.
             cursor.execute("""
-                SELECT COUNT(*), AVG(score) 
-                FROM calls 
+                SELECT COUNT(*) FILTER (WHERE survey_response_id IS NULL), AVG(score)
+                FROM calls
                 WHERE operator_id = %s AND month=%s
             """, (op_id, datetime.now().strftime('%Y-%m')))
             result = cursor.fetchone()
@@ -44121,6 +44223,29 @@ async def run_task_reminders_async():
     except Exception:
         logging.exception("task reminders job failed")
 
+
+def autoclose_due_survey_tests_job():
+    """Закрывает начатые попытки тестов, у которых истекло время."""
+    try:
+        result = db.autoclose_due_survey_tests()
+        if result.get('candidates'):
+            logging.info(
+                "Survey tests auto-close: submitted=%s failed=%s candidates=%s",
+                result.get('submitted'), result.get('failed'), result.get('candidates')
+            )
+        return result
+    except Exception:
+        logging.exception("survey tests auto-close job failed")
+        return None
+
+
+async def run_survey_tests_autoclose_async():
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(executor_pool, autoclose_due_survey_tests_job)
+    except Exception:
+        logging.exception("survey tests auto-close job failed")
+
 # === Главный запуск =============================================================================================
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('reject_reval:'))
 async def handle_reject_reval(callback_query: types.CallbackQuery, state: FSMContext):
@@ -44468,6 +44593,18 @@ if __name__ == '__main__':
         CronTrigger(minute='*/5', timezone=ZoneInfo('Asia/Almaty')),
         id='task_deadline_reminders',
         misfire_grace_time=600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # Тесты в «Опросах»: раз в минуту добираем попытки, у которых истекло
+    # время. Статус теста (Запланирован/Активен/Завершён) сам считается от
+    # окна — job нужен только чтобы не потерять начатую и не отправленную работу.
+    scheduler.add_job(
+        run_survey_tests_autoclose_async,
+        CronTrigger(minute='*', timezone=ZoneInfo('Asia/Almaty')),
+        id='survey_tests_autoclose',
+        misfire_grace_time=300,
         max_instances=1,
         coalesce=True
     )
