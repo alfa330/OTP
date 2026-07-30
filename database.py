@@ -82,8 +82,24 @@ SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE = {"key": None, "expires_at": 0.0, "value": 
 SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE_LOCK = threading.Lock()
 SHIFT_AUCTION_PARTICIPANT_CACHE = {"expires_at": 0.0, "ids": frozenset()}
 SHIFT_AUCTION_PARTICIPANT_CACHE_LOCK = threading.Lock()
+SHIFT_AUCTION_DIRECTION_NAME = 'основа'
+SHIFT_AUCTION_DEPARTMENT_CODE = 'szov'
+SHIFT_AUCTION_ACTIVE_OPERATOR_STATUS = 'working'
 
 PROXY_STATUS_VALUES = ('lost', 'returned_to_hr', 'not_received', 'on_hand')
+
+
+def _normalize_shift_auction_scope_value(value):
+    return re.sub(r'\s+', ' ', str(value or '').strip()).casefold()
+
+
+def _is_shift_auction_operational_participant_row(row):
+    return bool(
+        row
+        and len(row) > 6
+        and _normalize_shift_auction_scope_value(row[3]) == SHIFT_AUCTION_ACTIVE_OPERATOR_STATUS
+        and _normalize_shift_auction_scope_value(row[6]) == SHIFT_AUCTION_DIRECTION_NAME
+    )
 
 
 def _coerce_four_you_annotations(value):
@@ -6602,6 +6618,25 @@ class Database:
             SHIFT_AUCTION_PARTICIPANT_CACHE["ids"] = ids
             SHIFT_AUCTION_PARTICIPANT_CACHE["expires_at"] = time.time() + SHIFT_AUCTION_PARTICIPANT_CACHE_TTL_SECONDS
 
+    def _get_shift_auction_participant_ids_tx(self, cursor):
+        cursor.execute("""
+            SELECT p.operator_id
+            FROM shift_auction_test_participants p
+            JOIN users u ON u.id = p.operator_id
+            JOIN directions d ON d.id = u.direction_id
+            JOIN departments dep ON dep.id = d.department_id
+            WHERE LOWER(BTRIM(COALESCE(d.name, ''))) = %s
+              AND LOWER(BTRIM(COALESCE(dep.code, ''))) = %s
+              AND LOWER(COALESCE(u.role, '')) = 'operator'
+              AND COALESCE(u.status, '') NOT IN ('fired', 'dismissal')
+        """, (SHIFT_AUCTION_DIRECTION_NAME, SHIFT_AUCTION_DEPARTMENT_CODE))
+        participant_ids = {
+            int(row[0])
+            for row in (cursor.fetchall() or [])
+            if row and row[0] is not None
+        }
+        return participant_ids
+
     def _get_shift_auction_participant_ids_cached_tx(self, cursor):
         now = time.time()
         if SHIFT_AUCTION_PARTICIPANT_CACHE_TTL_SECONDS > 0:
@@ -6609,15 +6644,7 @@ class Database:
                 if SHIFT_AUCTION_PARTICIPANT_CACHE["expires_at"] > now:
                     return set(SHIFT_AUCTION_PARTICIPANT_CACHE["ids"])
 
-        cursor.execute("""
-            SELECT operator_id
-            FROM shift_auction_test_participants
-        """)
-        participant_ids = {
-            int(row[0])
-            for row in (cursor.fetchall() or [])
-            if row and row[0] is not None
-        }
+        participant_ids = self._get_shift_auction_participant_ids_tx(cursor)
         if SHIFT_AUCTION_PARTICIPANT_CACHE_TTL_SECONDS > 0:
             with SHIFT_AUCTION_PARTICIPANT_CACHE_LOCK:
                 SHIFT_AUCTION_PARTICIPANT_CACHE["ids"] = frozenset(participant_ids)
@@ -6653,10 +6680,15 @@ class Database:
                 COALESCE(p.early_access, FALSE) AS early_access
             FROM shift_auction_test_participants p
             JOIN users u ON u.id = p.operator_id
-            LEFT JOIN directions d ON d.id = u.direction_id
+            JOIN directions d ON d.id = u.direction_id
+            JOIN departments dep ON dep.id = d.department_id
             LEFT JOIN users s ON s.id = u.supervisor_id
+            WHERE LOWER(BTRIM(COALESCE(d.name, ''))) = %s
+              AND LOWER(BTRIM(COALESCE(dep.code, ''))) = %s
+              AND LOWER(COALESCE(u.role, '')) = 'operator'
+              AND COALESCE(u.status, '') NOT IN ('fired', 'dismissal')
             ORDER BY u.name
-        """)
+        """, (SHIFT_AUCTION_DIRECTION_NAME, SHIFT_AUCTION_DEPARTMENT_CODE))
         participant_rows = cursor.fetchall() or []
         self._cache_shift_auction_participant_ids(participant_rows)
 
@@ -6896,9 +6928,19 @@ class Database:
         # Per-operator workload (norm vs claimed) computed in one pass.
         # Only the day-off / blocked-period counters need the DB; lot stats are
         # derived from the already-loaded `lots` list.
-        if not participant_rows:
+        # Temporary statuses (Б/С, sick/annual leave, etc.) remain selectable in
+        # auction settings, but must not create rows in operational progress.
+        operational_participant_rows = [
+            row for row in (participant_rows or [])
+            if _is_shift_auction_operational_participant_row(row)
+        ]
+        if not operational_participant_rows:
             return []
-        operator_ids = [int(row[0]) for row in participant_rows if row and row[0] is not None]
+        operator_ids = [
+            int(row[0])
+            for row in operational_participant_rows
+            if row and row[0] is not None
+        ]
         if not operator_ids:
             return []
         lot_dates_list = [d for d in (lot_dates or []) if d]
@@ -6993,7 +7035,7 @@ class Database:
             claimed_by_operator[owner_id].append(lot)
 
         workloads = []
-        for row in participant_rows:
+        for row in operational_participant_rows:
             if not row or row[0] is None:
                 continue
             op_id = int(row[0])
@@ -7322,10 +7364,15 @@ class Database:
                     COALESCE(p.early_access, FALSE) AS early_access
                 FROM shift_auction_test_participants p
                 JOIN users u ON u.id = p.operator_id
-                LEFT JOIN directions d ON d.id = u.direction_id
+                JOIN directions d ON d.id = u.direction_id
+                JOIN departments dep ON dep.id = d.department_id
                 LEFT JOIN users s ON s.id = u.supervisor_id
+                WHERE LOWER(BTRIM(COALESCE(d.name, ''))) = %s
+                  AND LOWER(BTRIM(COALESCE(dep.code, ''))) = %s
+                  AND LOWER(COALESCE(u.role, '')) = 'operator'
+                  AND COALESCE(u.status, '') NOT IN ('fired', 'dismissal')
                 ORDER BY u.name
-            """)
+            """, (SHIFT_AUCTION_DIRECTION_NAME, SHIFT_AUCTION_DEPARTMENT_CODE))
             participant_rows = cursor.fetchall() or []
             cursor.execute("SELECT favored_starts_at, COALESCE(rate_lock_enabled, FALSE) FROM shift_auction_test_access WHERE id = 1")
             favored_row = cursor.fetchone()
@@ -7484,12 +7531,20 @@ class Database:
             valid_ids = []
             if normalized_ids:
                 cursor.execute("""
-                    SELECT id
-                    FROM users
-                    WHERE id = ANY(%s)
-                      AND LOWER(COALESCE(role, '')) = 'operator'
-                      AND COALESCE(status, '') NOT IN ('fired', 'dismissal')
-                """, (normalized_ids,))
+                    SELECT u.id
+                    FROM users u
+                    JOIN directions d ON d.id = u.direction_id
+                    JOIN departments dep ON dep.id = d.department_id
+                    WHERE u.id = ANY(%s)
+                      AND LOWER(COALESCE(u.role, '')) = 'operator'
+                      AND COALESCE(u.status, '') NOT IN ('fired', 'dismissal')
+                      AND LOWER(BTRIM(COALESCE(d.name, ''))) = %s
+                      AND LOWER(BTRIM(COALESCE(dep.code, ''))) = %s
+                """, (
+                    normalized_ids,
+                    SHIFT_AUCTION_DIRECTION_NAME,
+                    SHIFT_AUCTION_DEPARTMENT_CODE,
+                ))
                 valid_ids = [int(row[0]) for row in (cursor.fetchall() or [])]
 
             # Favored operators must survive participant validation. Keying off the
@@ -8257,12 +8312,7 @@ class Database:
             if not lot_dates:
                 raise ValueError("AUCTION_NO_LOTS")
 
-            cursor.execute("""
-                SELECT operator_id
-                FROM shift_auction_test_participants
-                ORDER BY operator_id
-            """)
-            operator_ids = [int(row[0]) for row in (cursor.fetchall() or []) if row and row[0] is not None]
+            operator_ids = sorted(self._get_shift_auction_participant_ids_tx(cursor))
             if not operator_ids:
                 raise ValueError("AUCTION_NO_PARTICIPANTS")
 
@@ -8479,12 +8529,7 @@ class Database:
         совпадающий с порядком обработки в publish_shift_auction_test_to_work_schedules.
         """
         with self._get_cursor() as cursor:
-            cursor.execute("""
-                SELECT operator_id
-                FROM shift_auction_test_participants
-                ORDER BY operator_id
-            """)
-            operator_ids = [int(row[0]) for row in (cursor.fetchall() or []) if row and row[0] is not None]
+            operator_ids = sorted(self._get_shift_auction_participant_ids_tx(cursor))
             if not operator_ids:
                 return []
 
@@ -9011,20 +9056,15 @@ class Database:
             favored_row = cursor.fetchone()
             favored_starts_at = favored_row[0] if favored_row else None
             rate_lock_enabled = bool(favored_row[1]) if favored_row and len(favored_row) > 1 else False
-            is_current_user_favored = False
-            if current_id:
-                cursor.execute(
-                    "SELECT COALESCE(early_access, FALSE) FROM shift_auction_test_participants WHERE operator_id = %s",
-                    (current_id,)
-                )
-                favored_flag_row = cursor.fetchone()
-                is_current_user_favored = bool(favored_flag_row and favored_flag_row[0])
 
         selected_operator_ids = [int(row[0]) for row in participant_rows if row and row[0] is not None]
         favored_operator_ids = [
             int(row[0]) for row in participant_rows
             if row and row[0] is not None and len(row) > 10 and row[10]
         ]
+        is_current_user_favored = bool(
+            current_id is not None and current_id in set(favored_operator_ids)
+        )
         my_effective_starts_at = self._shift_auction_effective_starts_at(
             settings_row[2] if settings_row else None,
             favored_starts_at,
@@ -9369,11 +9409,20 @@ class Database:
                         s.name AS supervisor_name,
                         NULL::timestamp AS selected_at
                     FROM users u
-                    LEFT JOIN directions d ON d.id = u.direction_id
+                    JOIN directions d ON d.id = u.direction_id
+                    JOIN departments dep ON dep.id = d.department_id
                     LEFT JOIN users s ON s.id = u.supervisor_id
                     WHERE u.id = ANY(%s)
+                      AND LOWER(COALESCE(u.role, '')) = 'operator'
+                      AND COALESCE(u.status, '') NOT IN ('fired', 'dismissal')
+                      AND LOWER(BTRIM(COALESCE(d.name, ''))) = %s
+                      AND LOWER(BTRIM(COALESCE(dep.code, ''))) = %s
                     ORDER BY u.name
-                """, (operator_ids,))
+                """, (
+                    operator_ids,
+                    SHIFT_AUCTION_DIRECTION_NAME,
+                    SHIFT_AUCTION_DEPARTMENT_CODE,
+                ))
                 participant_rows = cursor.fetchall() or []
 
             operator_info = {
@@ -9482,7 +9531,7 @@ class Database:
             "my_blocked_dates": my_blocked_dates,
             "my_day_offs": my_day_offs,
             "my_work_shifts": my_work_shifts,
-            "selected_operator_ids": operator_ids,
+            "selected_operator_ids": sorted(operator_info.keys()),
             "selected_operators": list(operator_info.values()),
             "participant_workloads": participant_workloads,
             "claim_journal": list(reversed(claim_journal_items[-50:])),
@@ -9530,7 +9579,7 @@ class Database:
                 current_plan_id = None
             if (
                 current_plan_id == plan_id
-                and operator_id in self._get_shift_auction_participant_ids_cached_tx(cursor)
+                and operator_id in self._get_shift_auction_participant_ids_tx(cursor)
             ):
                 return True
             cursor.execute("""
@@ -10030,7 +10079,10 @@ class Database:
             effective_start = self._shift_auction_effective_starts_at(header[1], header[8], header[9]) if header else None
             if not header or self._get_shift_auction_test_status(header[0], effective_start, header[2], header[3], header[4]) != "open":
                 raise ValueError("AUCTION_NOT_OPEN")
-            if not header[5]:
+            if (
+                not header[5]
+                or operator_id not in self._get_shift_auction_participant_ids_tx(cursor)
+            ):
                 raise ValueError("NOT_TEST_PARTICIPANT")
             if header[6] is None:
                 raise ValueError("OPERATOR_NOT_FOUND")
@@ -10204,7 +10256,10 @@ class Database:
             effective_start = self._shift_auction_effective_starts_at(header[1], header[6], header[7]) if header else None
             if not header or self._get_shift_auction_test_status(header[0], effective_start, header[2], header[3], header[4]) != "open":
                 raise ValueError("AUCTION_NOT_OPEN")
-            if not header[5]:
+            if (
+                not header[5]
+                or operator_id not in self._get_shift_auction_participant_ids_tx(cursor)
+            ):
                 raise ValueError("NOT_TEST_PARTICIPANT")
 
             cursor.execute("""
@@ -10289,7 +10344,10 @@ class Database:
                 raise ValueError("AUCTION_NOT_AVAILABLE")
             if not header[0]:
                 raise ValueError("POST_AUCTION_NOT_ACTIVE")
-            if not header[1]:
+            if (
+                not header[1]
+                or operator_id not in self._get_shift_auction_participant_ids_tx(cursor)
+            ):
                 raise ValueError("NOT_TEST_PARTICIPANT")
             if header[3] != 'operator' or header[4] in ('fired', 'dismissal'):
                 raise ValueError("OPERATOR_NOT_FOUND")
@@ -10558,16 +10616,25 @@ class Database:
             except Exception:
                 current_plan_id = None
             if current_plan_id == plan_id:
-                participant_ids.update(self._get_shift_auction_participant_ids_cached_tx(cursor))
+                participant_ids.update(self._get_shift_auction_participant_ids_tx(cursor))
             if operator_id not in participant_ids:
                 raise ValueError("NOT_TEST_PARTICIPANT")
 
             cursor.execute("""
                 SELECT u.name, u.role, COALESCE(u.status, ''), u.direction_id, d.name AS direction_name
                 FROM users u
-                LEFT JOIN directions d ON d.id = u.direction_id
+                JOIN directions d ON d.id = u.direction_id
+                JOIN departments dep ON dep.id = d.department_id
                 WHERE u.id = %s
-            """, (operator_id,))
+                  AND LOWER(COALESCE(u.role, '')) = 'operator'
+                  AND COALESCE(u.status, '') NOT IN ('fired', 'dismissal')
+                  AND LOWER(BTRIM(COALESCE(d.name, ''))) = %s
+                  AND LOWER(BTRIM(COALESCE(dep.code, ''))) = %s
+            """, (
+                operator_id,
+                SHIFT_AUCTION_DIRECTION_NAME,
+                SHIFT_AUCTION_DEPARTMENT_CODE,
+            ))
             operator_row = cursor.fetchone()
             if (
                 not operator_row
@@ -11656,8 +11723,7 @@ class Database:
             if not settings or self._get_shift_auction_test_status(settings[0], settings[1], settings[2], settings[3], settings[4]) not in ("scheduled", "open"):
                 raise ValueError("AUCTION_NOT_AVAILABLE")
 
-            cursor.execute("SELECT 1 FROM shift_auction_test_participants WHERE operator_id = %s", (operator_id,))
-            if not cursor.fetchone():
+            if operator_id not in self._get_shift_auction_participant_ids_tx(cursor):
                 raise ValueError("NOT_TEST_PARTICIPANT")
 
             cursor.execute("SELECT 1 FROM shift_auction_test_lots WHERE shift_date = %s LIMIT 1", (day_value,))
