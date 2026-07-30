@@ -237,6 +237,38 @@ class MyHoursOpMetricsTests(unittest.TestCase):
         )
 
 
+class ProfileTilesTests(unittest.TestCase):
+    """Профиль ОП: вместо прослушек и среднего балла — успешки и план."""
+
+    def setUp(self):
+        self.src = _read(APP_PATH)
+
+    def test_profile_detects_tez_op_model(self):
+        self.assertIn(
+            "const profileIsTezOp = resolveWorkHoursMonthModelInfo(hoursOp).modelCode === 'tez_op';",
+            self.src,
+        )
+
+    def test_profile_shows_successes_and_plan_for_op(self):
+        self.assertIn("Успешки / план", self.src)
+        self.assertIn("Выполнение плана", self.src)
+        self.assertIn("const profilePlanResult = profileIsTezOp", self.src)
+        self.assertIn("planPerFte: hoursOp?.tez_plan_per_fte,", self.src)
+        self.assertIn("'План не задан'", self.src)
+
+    def test_other_models_keep_evaluation_tiles(self):
+        """Прослушки и средний балл остаются у всех остальных моделей."""
+        self.assertIn("Прослушано / нужно", self.src)
+        self.assertIn("Ср. балл", self.src)
+
+    def test_hours_and_norm_tiles_are_shared(self):
+        """Часы и норма показываются всем — они вне ветвления по модели."""
+        head, _, tail = self.src.partition("const profileIsTezOp")
+        block = tail.split("Быстрые действия")[0]
+        self.assertEqual(block.count('Часов<'), 1)
+        self.assertEqual(block.count('>Норма<'), 1)
+
+
 class DayDetailSuccessesTests(unittest.TestCase):
     """Успешки в детализации дня — и в «Моих часах», и в «Учёте часов»."""
 
