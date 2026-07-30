@@ -40,6 +40,14 @@ import {
 } from 'lucide-react';
 import { isAdminLikeRole, isSupervisorRole, normalizeRole } from '../../utils/roles';
 import { IosModal, IosBadge, IosToggle, iosCard } from '../ui/ios';
+import {
+  filterOperationalShiftAuctionOperators,
+  getShiftAuctionOperatorStatusLabel,
+  isActiveShiftAuctionOperator,
+  normalizeShiftAuctionOperatorId as normalizeOperatorId,
+  normalizeShiftAuctionOperators,
+  shouldHydrateShiftAuctionDraft,
+} from './shiftAuctionParticipants';
 
 // Стабильный ключ недавнего добора: (lot_id | plan_id | source_schedule_shift_id).
 const getPostClaimKey = (claim) => {
@@ -63,43 +71,9 @@ const getPostClaimIdentity = (claim) => {
   return claim.lot_id != null ? `lot:${claim.lot_id}` : '';
 };
 
-const normalizeOperatorId = (value) => {
-  const id = Number(value);
-  return Number.isFinite(id) && id > 0 ? id : null;
-};
-
 const normalizeSchedulePlanId = (value) => {
   const id = Number(value);
   return Number.isFinite(id) && id > 0 ? id : null;
-};
-
-const isDismissedOperator = (value) => {
-  const status = String(value || '').trim().toLowerCase();
-  return status === 'fired' || status === 'dismissal' || status === 'dismissed';
-};
-
-const normalizeOperators = (operators = [], selectedOperators = []) => {
-  const rows = new Map();
-  [...(Array.isArray(operators) ? operators : []), ...(Array.isArray(selectedOperators) ? selectedOperators : [])]
-    .forEach((operator) => {
-      const id = normalizeOperatorId(operator?.id ?? operator?.operator_id);
-      if (!id) return;
-      const role = normalizeRole(operator?.role || 'operator');
-      if (role && role !== 'operator') return;
-      rows.set(id, {
-        id,
-        name: operator?.name || `Оператор #${id}`,
-        direction: operator?.direction || operator?.direction_name || '',
-        direction_id: operator?.direction_id ?? null,
-        supervisor_name: operator?.supervisor_name || '',
-        rate: Number(operator?.rate || 1),
-        status: operator?.status || ''
-      });
-    });
-
-  return Array.from(rows.values())
-    .filter((operator) => !isDismissedOperator(operator.status))
-    .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'ru'));
 };
 
 const toDateTimeInputValue = (value) => {
@@ -3030,13 +3004,12 @@ const ShiftAuctionShiftsTable = ({
   }, [lots]);
 
   const rows = useMemo(() => {
-    const sortedOperators = [...(Array.isArray(operators) ? operators : [])].sort((a, b) => {
+    const sortedOperators = filterOperationalShiftAuctionOperators(operators).sort((a, b) => {
       const dirCmp = String(a?.direction || '').localeCompare(String(b?.direction || ''), 'ru');
       if (dirCmp !== 0) return dirCmp;
       return String(a?.name || '').localeCompare(String(b?.name || ''), 'ru');
     });
     return sortedOperators
-      .filter((op) => op && op.id != null)
       .map((op) => {
         const opId = Number(op.id);
         const workload = workloadById.get(opId) || {};
@@ -3612,6 +3585,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const monitorRefreshTimerRef = useRef(null);
   const snapshotRefreshPendingRef = useRef(false);
   const fetchSnapshotRef = useRef(null);
+  const auctionDraftDirtyRef = useRef(false);
+  const auctionDraftRevisionRef = useRef(0);
+  const auctionDraftSavedAtRef = useRef('');
 
   const [settings, setSettings] = useState({
     enabled: false,
@@ -3796,6 +3772,41 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     return typeof withAccessTokenHeader === 'function' ? withAccessTokenHeader(headers) : headers;
   }, [user?.id, withAccessTokenHeader]);
 
+  const markAuctionDraftDirty = useCallback(() => {
+    auctionDraftDirtyRef.current = true;
+    auctionDraftRevisionRef.current += 1;
+  }, []);
+
+  const updateDraftEnabled = useCallback((value) => {
+    markAuctionDraftDirty();
+    setDraftEnabled(Boolean(value));
+  }, [markAuctionDraftDirty]);
+
+  const updateDraftNote = useCallback((value) => {
+    markAuctionDraftDirty();
+    setDraftNote(String(value ?? ''));
+  }, [markAuctionDraftDirty]);
+
+  const updateDraftStartsAt = useCallback((value) => {
+    markAuctionDraftDirty();
+    setDraftStartsAt(value || '');
+  }, [markAuctionDraftDirty]);
+
+  const updateDraftEndsAt = useCallback((value) => {
+    markAuctionDraftDirty();
+    setDraftEndsAt(value || '');
+  }, [markAuctionDraftDirty]);
+
+  const updateDraftFavoredStartsAt = useCallback((value) => {
+    markAuctionDraftDirty();
+    setDraftFavoredStartsAt(value || '');
+  }, [markAuctionDraftDirty]);
+
+  const updateDraftSchedulePlanId = useCallback((value) => {
+    markAuctionDraftDirty();
+    setDraftSchedulePlanId(value == null ? '' : String(value));
+  }, [markAuctionDraftDirty]);
+
   const postClaimLot = useCallback(async (lotId) => {
     const response = await axios.post(
       `${apiRoot}/api/shift_auction/test_lots/claim`,
@@ -3842,6 +3853,17 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     );
     const isStaleRealtime = incomingEventId < protectedEventId;
     const ids = (safe.selected_operator_ids || []).map(normalizeOperatorId).filter(Boolean);
+    const favoredIdsFromSnapshot = Array.isArray(safe.favored_operator_ids)
+      ? safe.favored_operator_ids.map(normalizeOperatorId).filter(Boolean)
+      : (Array.isArray(safe.selected_operators)
+        ? safe.selected_operators.filter((op) => op?.early_access).map((op) => normalizeOperatorId(op?.id)).filter(Boolean)
+        : []);
+    const snapshotUpdatedAt = safe.updated_at || '';
+    const shouldHydrateAuctionDraft = shouldHydrateShiftAuctionDraft({
+      dirty: auctionDraftDirtyRef.current,
+      snapshotUpdatedAt,
+      pendingSavedAt: auctionDraftSavedAtRef.current,
+    });
     const periods = Array.isArray(safe.available_periods) ? safe.available_periods : [];
     const selectedSchedulePlanId = normalizeSchedulePlanId(
       safe.selected_schedule_plan_id ?? safe.selected_period?.id
@@ -3886,28 +3908,28 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       lastEventIdRef.current = Math.max(lastEventIdRef.current, incomingEventId);
       setLastEventId((current) => Math.max(current, incomingEventId));
     }
-    setDraftEnabled(Boolean(safe.enabled));
-    setDraftNote(safe.launch_note || '');
-    setDraftStartsAt(toDateTimeInputValue(safe.starts_at));
-    setDraftEndsAt(toDateTimeInputValue(safe.ends_at));
-    setDraftFavoredStartsAt(toDateTimeInputValue(safe.favored_starts_at));
-    setSelectedIds(new Set(ids));
-    const favoredIdsFromSnapshot = Array.isArray(safe.favored_operator_ids)
-      ? safe.favored_operator_ids.map(normalizeOperatorId).filter(Boolean)
-      : (Array.isArray(safe.selected_operators)
-        ? safe.selected_operators.filter((op) => op?.early_access).map((op) => normalizeOperatorId(op?.id)).filter(Boolean)
-        : []);
-    setFavoredOperatorIds(new Set(favoredIdsFromSnapshot));
     setAvailablePeriods(periods);
-    setDraftSchedulePlanId((current) => {
-      const restartablePeriods = periods.filter((period) => period?.can_restart !== false);
-      const periodIds = new Set(restartablePeriods.map((period) => normalizeSchedulePlanId(period?.id)).filter(Boolean));
-      const currentId = normalizeSchedulePlanId(current);
-      if (currentId && periodIds.has(currentId)) return String(currentId);
-      if (selectedSchedulePlanId && periodIds.has(selectedSchedulePlanId)) return String(selectedSchedulePlanId);
-      const firstAvailableId = normalizeSchedulePlanId(restartablePeriods[0]?.id);
-      return firstAvailableId ? String(firstAvailableId) : '';
-    });
+    if (shouldHydrateAuctionDraft) {
+      setDraftEnabled(Boolean(safe.enabled));
+      setDraftNote(safe.launch_note || '');
+      setDraftStartsAt(toDateTimeInputValue(safe.starts_at));
+      setDraftEndsAt(toDateTimeInputValue(safe.ends_at));
+      setDraftFavoredStartsAt(toDateTimeInputValue(safe.favored_starts_at));
+      setSelectedIds(new Set(ids));
+      setFavoredOperatorIds(new Set(favoredIdsFromSnapshot));
+      setDraftSchedulePlanId((current) => {
+        const restartablePeriods = periods.filter((period) => period?.can_restart !== false);
+        const periodIds = new Set(restartablePeriods.map((period) => normalizeSchedulePlanId(period?.id)).filter(Boolean));
+        const currentId = normalizeSchedulePlanId(current);
+        if (currentId && periodIds.has(currentId)) return String(currentId);
+        if (selectedSchedulePlanId && periodIds.has(selectedSchedulePlanId)) return String(selectedSchedulePlanId);
+        const firstAvailableId = normalizeSchedulePlanId(restartablePeriods[0]?.id);
+        return firstAvailableId ? String(firstAvailableId) : '';
+      });
+      if (auctionDraftSavedAtRef.current) {
+        auctionDraftSavedAtRef.current = '';
+      }
+    }
     setViewSchedulePlanId((current) => {
       const periodIds = new Set(periods.map((period) => normalizeSchedulePlanId(period?.id)).filter(Boolean));
       const currentId = normalizeSchedulePlanId(current);
@@ -4236,7 +4258,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   }, [apiRoot, canOpenStream, user?.id]);
 
   const operatorOptions = useMemo(
-    () => normalizeOperators(operators, settings.selected_operators),
+    () => normalizeShiftAuctionOperators(operators, settings.selected_operators),
     [operators, settings.selected_operators]
   );
 
@@ -4294,6 +4316,29 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const monitoredMyWorkShifts = isViewingActivePeriod ? myWorkShifts : periodPreviewWorkShifts;
   const monitoredOperators = isViewingActivePeriod ? settings.selected_operators : periodPreviewOperators;
   const monitoredParticipantWorkloads = isViewingActivePeriod ? participantWorkloads : periodPreviewParticipantWorkloads;
+  const resolvedMonitoredOperators = useMemo(() => {
+    const participantIds = new Set(
+      (Array.isArray(monitoredOperators) ? monitoredOperators : [])
+        .map((operator) => normalizeOperatorId(operator?.id ?? operator?.operator_id))
+        .filter(Boolean)
+    );
+    const liveParticipants = (Array.isArray(operators) ? operators : [])
+      .filter((operator) => participantIds.has(normalizeOperatorId(operator?.id ?? operator?.operator_id)));
+    return normalizeShiftAuctionOperators(liveParticipants, monitoredOperators);
+  }, [monitoredOperators, operators]);
+  const operationalMonitoredOperators = useMemo(
+    () => filterOperationalShiftAuctionOperators(resolvedMonitoredOperators),
+    [resolvedMonitoredOperators]
+  );
+  const operationalMonitoredOperatorIds = useMemo(
+    () => new Set(operationalMonitoredOperators.map((operator) => Number(operator.id))),
+    [operationalMonitoredOperators]
+  );
+  const operationalMonitoredParticipantWorkloads = useMemo(
+    () => (Array.isArray(monitoredParticipantWorkloads) ? monitoredParticipantWorkloads : [])
+      .filter((workload) => operationalMonitoredOperatorIds.has(Number(workload?.operator_id))),
+    [monitoredParticipantWorkloads, operationalMonitoredOperatorIds]
+  );
   const selectedViewPostAuctionActive = isViewingActivePeriod
     ? Boolean(settings.post_auction_active)
     : Boolean(periodPreviewPostAuctionActive);
@@ -4323,12 +4368,12 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     const planId = String(matchedPeriod.id);
     setViewSchedulePlanId(planId);
     if (canManage && matchedPeriod.can_restart !== false) {
-      setDraftSchedulePlanId(planId);
+      updateDraftSchedulePlanId(planId);
       setMonitorTab('settings');
     }
     setAppliedInitialPeriodKey(initialPeriodKey);
     onInitialPeriodApplied?.();
-  }, [appliedInitialPeriodKey, availablePeriods, canManage, initialPeriodKey, onInitialPeriodApplied]);
+  }, [appliedInitialPeriodKey, availablePeriods, canManage, initialPeriodKey, onInitialPeriodApplied, updateDraftSchedulePlanId]);
 
   useEffect(() => {
     if (!selectedViewSchedulePlanId || isViewingActivePeriod) {
@@ -4647,14 +4692,15 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const operatorWorkloadRows = useMemo(() => {
     if (!canMonitor) return [];
     const operatorsById = new Map(
-      (monitoredOperators || [])
+      (operationalMonitoredOperators || [])
         .filter((operator) => operator && operator.id != null)
         .map((operator) => [Number(operator.id), operator])
     );
-    return (monitoredParticipantWorkloads || [])
+    return (operationalMonitoredParticipantWorkloads || [])
       .map((workload) => {
         if (!workload || workload.operator_id == null) return null;
-        const operator = operatorsById.get(Number(workload.operator_id)) || {};
+        const operator = operatorsById.get(Number(workload.operator_id));
+        if (!operator) return null;
         const normMinutes = Number(workload.norm_minutes || 0);
         const claimedNet = Number(workload.claimed_net_minutes || 0);
         const overMinutes = Number(workload.over_minutes || 0);
@@ -4679,7 +4725,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         };
       })
       .filter(Boolean);
-  }, [canMonitor, monitoredOperators, monitoredParticipantWorkloads]);
+  }, [canMonitor, operationalMonitoredOperators, operationalMonitoredParticipantWorkloads]);
 
   const operatorWorkloadStats = useMemo(() => {
     const stats = { total: 0, lagging: 0, complete: 0, over: 0, empty: 0 };
@@ -4696,8 +4742,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const drilldownData = useMemo(() => {
     if (!drilldownOperatorId) return null;
     const opIdNum = Number(drilldownOperatorId);
-    const operator = (monitoredOperators || []).find((op) => Number(op?.id) === opIdNum) || null;
-    const workload = (monitoredParticipantWorkloads || []).find((w) => Number(w?.operator_id) === opIdNum) || null;
+    const operator = (operationalMonitoredOperators || []).find((op) => Number(op?.id) === opIdNum) || null;
+    if (!operator) return null;
+    const workload = (operationalMonitoredParticipantWorkloads || []).find((w) => Number(w?.operator_id) === opIdNum) || null;
     const claimedLots = [];
     (monitoredLots || []).forEach((lot) => {
       if (!lot) return;
@@ -4733,7 +4780,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       workload,
       claimed_lots: claimedLots
     };
-  }, [drilldownOperatorId, monitoredLots, monitoredOperators, monitoredParticipantWorkloads]);
+  }, [drilldownOperatorId, monitoredLots, operationalMonitoredOperators, operationalMonitoredParticipantWorkloads]);
 
   // Breakdown of the clicked shift cell: all lots of the same original shift on the
   // same day (claimed slices + free remainder) → "who took which part of this shift".
@@ -4999,6 +5046,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const toggleOperator = useCallback((operatorId) => {
     const id = normalizeOperatorId(operatorId);
     if (!id) return;
+    markAuctionDraftDirty();
     setSelectedIds((current) => {
       const next = new Set(current);
       if (next.has(id)) {
@@ -5015,11 +5063,12 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       }
       return next;
     });
-  }, []);
+  }, [markAuctionDraftDirty]);
 
   const toggleFavoredOperator = useCallback((operatorId) => {
     const id = normalizeOperatorId(operatorId);
     if (!id) return;
+    markAuctionDraftDirty();
     setFavoredOperatorIds((current) => {
       const next = new Set(current);
       if (next.has(id)) {
@@ -5036,10 +5085,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       }
       return next;
     });
-  }, []);
+  }, [markAuctionDraftDirty]);
 
   const selectAllFilteredOperators = useCallback(() => {
     if (!filteredOperators.length) return;
+    markAuctionDraftDirty();
     setSelectedIds((current) => {
       const next = new Set(current);
       filteredOperators.forEach((operator) => {
@@ -5048,12 +5098,13 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       });
       return next;
     });
-  }, [filteredOperators]);
+  }, [filteredOperators, markAuctionDraftDirty]);
 
   const clearSelectedOperators = useCallback(() => {
+    markAuctionDraftDirty();
     setSelectedIds(new Set());
     setFavoredOperatorIds(new Set());
-  }, []);
+  }, [markAuctionDraftDirty]);
 
   const handleViewPeriodSelect = useCallback((period) => {
     const id = normalizeSchedulePlanId(period?.id);
@@ -5068,9 +5119,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       notify('Время завершения должно быть позже старта', 'error');
       return;
     }
+    const draftRevisionAtSave = auctionDraftRevisionRef.current;
     setIsSaving(true);
     try {
-      await axios.put(
+      const response = await axios.put(
         `${apiRoot}/api/shift_auction/test_access`,
         {
           enabled: draftEnabled,
@@ -5084,8 +5136,29 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         },
         { headers: buildHeaders() }
       );
+      const savedAccess = response?.data?.test_access || {};
+      const hasNewerUnsavedChanges = auctionDraftRevisionRef.current !== draftRevisionAtSave;
+      if (!hasNewerUnsavedChanges) {
+        const savedIds = (savedAccess.selected_operator_ids || Array.from(selectedIds))
+          .map(normalizeOperatorId)
+          .filter(Boolean);
+        const savedFavoredIds = (savedAccess.favored_operator_ids || favoredSelectedIds)
+          .map(normalizeOperatorId)
+          .filter((id) => id && savedIds.includes(id));
+        setSelectedIds(new Set(savedIds));
+        setFavoredOperatorIds(new Set(savedFavoredIds));
+        auctionDraftDirtyRef.current = false;
+        auctionDraftSavedAtRef.current = savedAccess.updated_at || '';
+      }
+      // A successful PUT changes both settings and the snapshot event cursor.
+      // Bypass a now-stale conditional GET and reconcile with the new state.
+      snapshotEtagRef.current = '';
       await fetchSnapshot({ silent: true });
-      notify(selectedDraftPeriod ? `Аукцион сохранен для недели ${formatAuctionPeriodLabel(selectedDraftPeriod)}` : 'Настройки тестового аукциона сохранены');
+      if (hasNewerUnsavedChanges) {
+        notify('Настройки на момент нажатия сохранены. Новые изменения в форме ещё не сохранены.', 'warning');
+      } else {
+        notify(selectedDraftPeriod ? `Аукцион сохранен для недели ${formatAuctionPeriodLabel(selectedDraftPeriod)}` : 'Настройки тестового аукциона сохранены');
+      }
     } catch (error) {
       notify(error?.response?.data?.error || 'Не удалось сохранить настройки аукциона смен', 'error');
     } finally {
@@ -6266,8 +6339,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
         {canMonitor && monitorTab === 'shifts_table' && (
           <ShiftAuctionShiftsTable
-            operators={monitoredOperators}
-            workloads={monitoredParticipantWorkloads}
+            operators={operationalMonitoredOperators}
+            workloads={operationalMonitoredParticipantWorkloads}
             lots={monitoredLots}
             lotDates={lotDates}
             canEdit={canManage}
@@ -6521,7 +6594,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                         </span>
                       </span>
                     </div>
-                    <IosToggle checked={draftEnabled} onChange={(next) => setDraftEnabled(next)} />
+                    <IosToggle checked={draftEnabled} onChange={updateDraftEnabled} />
                   </div>
                   <div className="flex items-center justify-between gap-4 px-3 py-3 sm:px-4">
                     <div className="flex min-w-0 items-center gap-3">
@@ -6590,7 +6663,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                         <button
                           key={period.id}
                           type="button"
-                          onClick={() => setDraftSchedulePlanId(String(period.id))}
+                          onClick={() => updateDraftSchedulePlanId(period.id)}
                           className={`rounded-lg border px-3 py-2 text-left transition ${
                             active
                               ? 'border-blue-500 bg-blue-50 text-blue-900'
@@ -6635,8 +6708,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                     <AuctionRangeCalendar
                       startsAt={draftStartsAt}
                       endsAt={draftEndsAt}
-                      onStartsAtChange={setDraftStartsAt}
-                      onEndsAtChange={setDraftEndsAt}
+                      onStartsAtChange={updateDraftStartsAt}
+                      onEndsAtChange={updateDraftEndsAt}
                     />
                   </div>
 
@@ -6645,14 +6718,14 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                       label="Начало аукциона"
                       dateValue={draftStartsAtParts.date}
                       value={draftStartsAt}
-                      onChange={setDraftStartsAt}
+                      onChange={updateDraftStartsAt}
                       disabled={!draftStartsAtParts.date}
                     />
                     <AuctionTimeField
                       label="Завершение аукциона"
                       dateValue={draftEndsAtParts.date}
                       value={draftEndsAt}
-                      onChange={setDraftEndsAt}
+                      onChange={updateDraftEndsAt}
                       disabled={!draftEndsAtParts.date}
                       invalid={draftRangeInvalid}
                     />
@@ -6664,7 +6737,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                       <button
                         key={preset.label}
                         type="button"
-                        onClick={() => setDraftEndsAt(addMinutesToDateTimeInputValue(draftStartsAt, preset.minutes))}
+                        onClick={() => updateDraftEndsAt(addMinutesToDateTimeInputValue(draftStartsAt, preset.minutes))}
                         disabled={!draftStartsAt}
                         className="rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
                       >
@@ -6687,7 +6760,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                         label="Начало раннего доступа"
                         dateValue={draftStartsAtParts.date}
                         value={draftFavoredStartsAt}
-                        onChange={setDraftFavoredStartsAt}
+                        onChange={updateDraftFavoredStartsAt}
                         disabled={!draftStartsAtParts.date}
                       />
                       <div className="flex flex-col justify-center gap-2 text-xs text-amber-900">
@@ -6705,7 +6778,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                         {draftFavoredStartsAtForSave ? (
                           <button
                             type="button"
-                            onClick={() => setDraftFavoredStartsAt('')}
+                            onClick={() => updateDraftFavoredStartsAt('')}
                             className="inline-flex w-fit items-center gap-1 rounded-md border border-amber-300 bg-white px-2 py-1 font-semibold text-amber-800 transition hover:bg-amber-100"
                           >
                             <X size={13} /> Сбросить ранний доступ
@@ -6726,7 +6799,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                   <label className="mb-2 block text-sm font-semibold text-slate-800">Текст для тестовой группы</label>
                   <textarea
                     value={draftNote}
-                    onChange={(event) => setDraftNote(event.target.value)}
+                    onChange={(event) => updateDraftNote(event.target.value)}
                     rows={3}
                     maxLength={1000}
                     placeholder="Например: Тестовый запуск начнется после проверки генерации смен."
@@ -6779,6 +6852,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                     filteredOperators.map((operator) => {
                       const active = selectedIds.has(operator.id);
                       const favored = favoredOperatorIds.has(operator.id);
+                      const operatorIsWorking = isActiveShiftAuctionOperator(operator);
+                      const operatorStatusLabel = getShiftAuctionOperatorStatusLabel(operator.status);
                       return (
                         <button
                           key={operator.id}
@@ -6796,6 +6871,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                               {operator.supervisor_name ? ` · ${operator.supervisor_name}` : ''}
                             </span>
                           </span>
+                          {!operatorIsWorking && operatorStatusLabel ? (
+                            <span className="shrink-0 rounded-md bg-amber-50 px-1.5 py-0.5 text-[11px] font-semibold text-amber-700 ring-1 ring-inset ring-amber-200">
+                              {operatorStatusLabel}
+                            </span>
+                          ) : null}
                           <span
                             role="button"
                             tabIndex={active ? 0 : -1}
@@ -6846,11 +6926,16 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                   {selectedOperators.length ? (
                     selectedOperators.map((operator) => {
                       const favored = favoredOperatorIds.has(operator.id);
+                      const operatorIsWorking = isActiveShiftAuctionOperator(operator);
+                      const operatorStatusLabel = getShiftAuctionOperatorStatusLabel(operator.status);
                       return (
                         <div key={operator.id} className={`flex items-center gap-2 rounded-md border px-3 py-2 ${favored ? 'border-amber-200 bg-amber-50' : 'border-slate-200 bg-white'}`}>
                           <div className="min-w-0 flex-1">
                             <div className="truncate text-sm font-semibold text-slate-900">{operator.name}</div>
-                            <div className="mt-0.5 truncate text-xs text-slate-500">{operator.direction || 'Без направления'}</div>
+                            <div className="mt-0.5 truncate text-xs text-slate-500">
+                              {operator.direction || 'Без направления'}
+                              {!operatorIsWorking && operatorStatusLabel ? ` · ${operatorStatusLabel}` : ''}
+                            </div>
                           </div>
                           <button
                             type="button"
