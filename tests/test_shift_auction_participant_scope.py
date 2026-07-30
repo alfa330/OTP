@@ -39,7 +39,7 @@ class ShiftAuctionParticipantScopeTests(unittest.TestCase):
         namespace = {
             "re": re,
             "SHIFT_AUCTION_ACTIVE_OPERATOR_STATUS": "working",
-            "SHIFT_AUCTION_DIRECTION_NAME": "основа",
+            "SHIFT_AUCTION_DIRECTION_NAME": "Основа",
         }
         exec(_module_function_source("_normalize_shift_auction_scope_value"), namespace)
         exec(_module_function_source("_is_shift_auction_operational_participant_row"), namespace)
@@ -54,6 +54,9 @@ class ShiftAuctionParticipantScopeTests(unittest.TestCase):
     def test_put_validates_exact_szov_osnova_but_keeps_temporary_statuses(self):
         source = _method_source("update_shift_auction_test_access")
 
+        self.assertIn("SHIFT_AUCTION_DIRECTION_NAME = 'Основа'", DATABASE_SOURCE)
+        self.assertNotIn("LOWER(BTRIM(COALESCE(d.name, ''))) = %s", source)
+        self.assertIn("BTRIM(COALESCE(d.name, '')) = %s", source)
         self.assertIn("JOIN directions d ON d.id = u.direction_id", source)
         self.assertIn("JOIN departments dep ON dep.id = d.department_id", source)
         self.assertIn("SHIFT_AUCTION_DIRECTION_NAME", source)

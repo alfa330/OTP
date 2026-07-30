@@ -82,7 +82,7 @@ SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE = {"key": None, "expires_at": 0.0, "value": 
 SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE_LOCK = threading.Lock()
 SHIFT_AUCTION_PARTICIPANT_CACHE = {"expires_at": 0.0, "ids": frozenset()}
 SHIFT_AUCTION_PARTICIPANT_CACHE_LOCK = threading.Lock()
-SHIFT_AUCTION_DIRECTION_NAME = 'основа'
+SHIFT_AUCTION_DIRECTION_NAME = 'Основа'
 SHIFT_AUCTION_DEPARTMENT_CODE = 'szov'
 SHIFT_AUCTION_ACTIVE_OPERATOR_STATUS = 'working'
 
@@ -98,7 +98,8 @@ def _is_shift_auction_operational_participant_row(row):
         row
         and len(row) > 6
         and _normalize_shift_auction_scope_value(row[3]) == SHIFT_AUCTION_ACTIVE_OPERATOR_STATUS
-        and _normalize_shift_auction_scope_value(row[6]) == SHIFT_AUCTION_DIRECTION_NAME
+        and _normalize_shift_auction_scope_value(row[6])
+        == _normalize_shift_auction_scope_value(SHIFT_AUCTION_DIRECTION_NAME)
     )
 
 
@@ -6625,7 +6626,7 @@ class Database:
             JOIN users u ON u.id = p.operator_id
             JOIN directions d ON d.id = u.direction_id
             JOIN departments dep ON dep.id = d.department_id
-            WHERE LOWER(BTRIM(COALESCE(d.name, ''))) = %s
+            WHERE BTRIM(COALESCE(d.name, '')) = %s
               AND LOWER(BTRIM(COALESCE(dep.code, ''))) = %s
               AND LOWER(COALESCE(u.role, '')) = 'operator'
               AND COALESCE(u.status, '') NOT IN ('fired', 'dismissal')
@@ -6683,7 +6684,7 @@ class Database:
             JOIN directions d ON d.id = u.direction_id
             JOIN departments dep ON dep.id = d.department_id
             LEFT JOIN users s ON s.id = u.supervisor_id
-            WHERE LOWER(BTRIM(COALESCE(d.name, ''))) = %s
+            WHERE BTRIM(COALESCE(d.name, '')) = %s
               AND LOWER(BTRIM(COALESCE(dep.code, ''))) = %s
               AND LOWER(COALESCE(u.role, '')) = 'operator'
               AND COALESCE(u.status, '') NOT IN ('fired', 'dismissal')
@@ -7367,7 +7368,7 @@ class Database:
                 JOIN directions d ON d.id = u.direction_id
                 JOIN departments dep ON dep.id = d.department_id
                 LEFT JOIN users s ON s.id = u.supervisor_id
-                WHERE LOWER(BTRIM(COALESCE(d.name, ''))) = %s
+                WHERE BTRIM(COALESCE(d.name, '')) = %s
                   AND LOWER(BTRIM(COALESCE(dep.code, ''))) = %s
                   AND LOWER(COALESCE(u.role, '')) = 'operator'
                   AND COALESCE(u.status, '') NOT IN ('fired', 'dismissal')
@@ -7538,7 +7539,7 @@ class Database:
                     WHERE u.id = ANY(%s)
                       AND LOWER(COALESCE(u.role, '')) = 'operator'
                       AND COALESCE(u.status, '') NOT IN ('fired', 'dismissal')
-                      AND LOWER(BTRIM(COALESCE(d.name, ''))) = %s
+                      AND BTRIM(COALESCE(d.name, '')) = %s
                       AND LOWER(BTRIM(COALESCE(dep.code, ''))) = %s
                 """, (
                     normalized_ids,
@@ -9415,7 +9416,7 @@ class Database:
                     WHERE u.id = ANY(%s)
                       AND LOWER(COALESCE(u.role, '')) = 'operator'
                       AND COALESCE(u.status, '') NOT IN ('fired', 'dismissal')
-                      AND LOWER(BTRIM(COALESCE(d.name, ''))) = %s
+                      AND BTRIM(COALESCE(d.name, '')) = %s
                       AND LOWER(BTRIM(COALESCE(dep.code, ''))) = %s
                     ORDER BY u.name
                 """, (
@@ -10628,7 +10629,7 @@ class Database:
                 WHERE u.id = %s
                   AND LOWER(COALESCE(u.role, '')) = 'operator'
                   AND COALESCE(u.status, '') NOT IN ('fired', 'dismissal')
-                  AND LOWER(BTRIM(COALESCE(d.name, ''))) = %s
+                  AND BTRIM(COALESCE(d.name, '')) = %s
                   AND LOWER(BTRIM(COALESCE(dep.code, ''))) = %s
             """, (
                 operator_id,
