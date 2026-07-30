@@ -3221,6 +3221,118 @@ class Database:
                 );
             """)
 
+            # ── Тест по расписанию (опрос в режиме теста) ────────────────────
+            # Статус теста (Запланирован / Активен / Завершён) НЕ хранится: он
+            # однозначно выводится из окна starts_at..ends_at, поэтому не может
+            # разойтись с реальным временем и не требует cron-а на переключение.
+            cursor.execute("ALTER TABLE surveys ADD COLUMN IF NOT EXISTS starts_at TIMESTAMP;")
+            cursor.execute("ALTER TABLE surveys ADD COLUMN IF NOT EXISTS ends_at TIMESTAMP;")
+            cursor.execute("""
+                ALTER TABLE surveys
+                ADD COLUMN IF NOT EXISTS group_ids JSONB NOT NULL DEFAULT '[]'::jsonb;
+            """)
+            cursor.execute("""
+                ALTER TABLE surveys
+                ADD COLUMN IF NOT EXISTS single_attempt BOOLEAN NOT NULL DEFAULT TRUE;
+            """)
+            cursor.execute("""
+                ALTER TABLE surveys
+                ADD COLUMN IF NOT EXISTS affects_quality BOOLEAN NOT NULL DEFAULT FALSE;
+            """)
+            cursor.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conrelid = 'surveys'::regclass
+                          AND conname = 'surveys_schedule_window_valid'
+                    ) THEN
+                        ALTER TABLE surveys
+                        ADD CONSTRAINT surveys_schedule_window_valid
+                        CHECK (starts_at IS NULL OR ends_at IS NULL OR starts_at < ends_at);
+                    END IF;
+                END $$;
+            """)
+            # Баллы за вопрос: вес вопроса в итоговом результате теста.
+            cursor.execute("""
+                ALTER TABLE survey_questions
+                ADD COLUMN IF NOT EXISTS points NUMERIC(6, 2) NOT NULL DEFAULT 1;
+            """)
+            cursor.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conrelid = 'survey_questions'::regclass
+                          AND conname = 'survey_questions_points_positive'
+                    ) THEN
+                        ALTER TABLE survey_questions
+                        ADD CONSTRAINT survey_questions_points_positive CHECK (points > 0);
+                    END IF;
+                END $$;
+            """)
+            # Частичный зачёт вопроса с несколькими ответами: балл начисляется
+            # пропорционально угаданным вариантам, но ЛЮБОЙ неверный вариант
+            # обнуляет вопрос — иначе «отметить всё» давало бы полбалла.
+            cursor.execute("""
+                ALTER TABLE survey_questions
+                ADD COLUMN IF NOT EXISTS partial_credit BOOLEAN NOT NULL DEFAULT FALSE;
+            """)
+            cursor.execute("""
+                ALTER TABLE survey_assignments
+                ADD COLUMN IF NOT EXISTS started_at TIMESTAMP;
+            """)
+            # Итог попытки считается один раз при отправке и хранится рядом с
+            # ответами: статистика и передача в качество читают готовые числа,
+            # а не пересчитывают их на каждый запрос.
+            cursor.execute("""
+                ALTER TABLE survey_responses
+                ADD COLUMN IF NOT EXISTS earned_points NUMERIC(8, 2);
+            """)
+            cursor.execute("""
+                ALTER TABLE survey_responses
+                ADD COLUMN IF NOT EXISTS max_points NUMERIC(8, 2);
+            """)
+            cursor.execute("""
+                ALTER TABLE survey_responses
+                ADD COLUMN IF NOT EXISTS score_percent NUMERIC(5, 2);
+            """)
+            cursor.execute("""
+                ALTER TABLE survey_responses
+                ADD COLUMN IF NOT EXISTS is_auto_submitted BOOLEAN NOT NULL DEFAULT FALSE;
+            """)
+            cursor.execute("""
+                ALTER TABLE survey_responses
+                ADD COLUMN IF NOT EXISTS started_at TIMESTAMP;
+            """)
+            # Черновик начатой попытки: нужен, чтобы по окончании окна
+            # автоотправка сохранила именно то, что оператор успел выбрать.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS survey_attempt_drafts (
+                    id SERIAL PRIMARY KEY,
+                    survey_id INTEGER NOT NULL REFERENCES surveys(id) ON DELETE CASCADE,
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    answers_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    started_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    UNIQUE (survey_id, operator_id)
+                );
+            """)
+            # Результат теста — обычная запись журнала оценок (calls), как и
+            # оценка чата: ссылка на попытку отличает её от прослушанного звонка.
+            # Такие строки НЕ считаются оценёнными звонками (план прослушки
+            # остаётся прежним), но входят в средний показатель качества.
+            cursor.execute("""
+                ALTER TABLE calls
+                ADD COLUMN IF NOT EXISTS survey_response_id INTEGER
+                    REFERENCES survey_responses(id) ON DELETE SET NULL;
+            """)
+            cursor.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_calls_survey_response
+                ON calls(survey_response_id)
+                WHERE survey_response_id IS NOT NULL;
+            """)
+
             # Tasks table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS tasks (
@@ -3835,6 +3947,10 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_survey_assignments_survey ON survey_assignments(survey_id);
                 CREATE INDEX IF NOT EXISTS idx_survey_responses_survey ON survey_responses(survey_id);
                 CREATE INDEX IF NOT EXISTS idx_survey_answers_response ON survey_answers(response_id);
+                CREATE INDEX IF NOT EXISTS idx_surveys_test_window
+                    ON surveys(ends_at) WHERE is_test AND ends_at IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_survey_attempt_drafts_survey
+                    ON survey_attempt_drafts(survey_id);
                 CREATE INDEX IF NOT EXISTS idx_tasks_assigned_to ON tasks(assigned_to);
                 CREATE INDEX IF NOT EXISTS idx_tasks_created_by ON tasks(created_by);
                 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
@@ -20889,11 +21005,16 @@ class Database:
             )
             offline_activity_hours += float(phone_training_totals.get(int(operator_id), 0.0) or 0.0)
 
-            # 4) Количество оценённых звонков и средняя оценка (как раньше)
+            # 4) Количество оценённых звонков и средняя оценка (как раньше).
+            # Оценка «Тестирование знаний» входит в среднюю, но звонком не
+            # считается — план прослушки от неё не уменьшается.
             cursor.execute("""
-                SELECT 
-                    (SELECT COUNT(*) FROM calls WHERE operator_id = %s AND month = %s AND is_draft = FALSE) AS call_count,
-                    (SELECT AVG(score) FROM calls WHERE operator_id = %s AND month = %s AND is_draft = FALSE) AS avg_score
+                SELECT
+                    (SELECT COUNT(*) FROM calls
+                      WHERE operator_id = %s AND month = %s AND is_draft = FALSE
+                        AND survey_response_id IS NULL) AS call_count,
+                    (SELECT AVG(score) FROM calls
+                      WHERE operator_id = %s AND month = %s AND is_draft = FALSE) AS avg_score
             """, (operator_id, current_month, operator_id, current_month))
             calls_row = cursor.fetchone()
             call_count = int(calls_row[0] or 0)
@@ -21989,10 +22110,16 @@ class Database:
                 c.c2d_snapshot_id,
                 c.chat_quotes,
                 c.call_end_party,
-                c.imported_call_id
+                c.imported_call_id,
+                c.survey_response_id,
+                ts.id AS knowledge_test_survey_id,
+                ts.title AS knowledge_test_title,
+                tr.earned_points AS knowledge_test_earned_points,
+                tr.max_points AS knowledge_test_max_points,
+                tr.is_auto_submitted AS knowledge_test_auto_submitted
             FROM calls c
             JOIN latest_calls lc ON c.id::text = lc.id_text
-            LEFT JOIN directions d ON c.direction_id = d.id  
+            LEFT JOIN directions d ON c.direction_id = d.id
             LEFT JOIN users u ON c.evaluator_id = u.id
             LEFT JOIN users su ON c.sv_request_by = su.id
             LEFT JOIN users apu ON c.sv_request_approved_by = apu.id
@@ -22000,6 +22127,8 @@ class Database:
             LEFT JOIN call_feedbacks cf ON cf.call_id = c.id
             LEFT JOIN users cf_creator ON cf.created_by = cf_creator.id
             LEFT JOIN users cf_updater ON cf.updated_by = cf_updater.id
+            LEFT JOIN survey_responses tr ON tr.id = c.survey_response_id
+            LEFT JOIN surveys ts ON ts.id = tr.survey_id
             WHERE c.operator_id = %s
         """
         params = [operator_id, operator_id, operator_id]
@@ -22063,7 +22192,13 @@ class Database:
                 NULL::integer AS c2d_snapshot_id,
                 NULL::jsonb AS chat_quotes,
                 ic.call_end_party,
-                ic.id AS imported_call_id
+                ic.id AS imported_call_id,
+                NULL::integer AS survey_response_id,
+                NULL::integer AS knowledge_test_survey_id,
+                NULL::text AS knowledge_test_title,
+                NULL::numeric AS knowledge_test_earned_points,
+                NULL::numeric AS knowledge_test_max_points,
+                NULL::boolean AS knowledge_test_auto_submitted
             FROM imported_calls ic
             WHERE ic.operator_id = %s AND ic.status = 'not_evaluated'
         """
@@ -22192,6 +22327,16 @@ class Database:
                         "chat_quotes": row[50] if row[50] else [],
                         "call_end_party": row[51],
                         "imported_call_id": row[52],
+                        "survey_response_id": row[53],
+                        # Оценка «Тестирование знаний»: не звонок, не чат —
+                        # отдельный вид оценки со ссылкой на пройденный тест.
+                        "knowledge_test": {
+                            "survey_id": row[54],
+                            "title": row[55] or '',
+                            "earned_points": float(row[56]) if row[56] is not None else None,
+                            "max_points": float(row[57]) if row[57] is not None else None,
+                            "is_auto_submitted": bool(row[58]) if row[58] is not None else False
+                        } if row[53] is not None else None,
                         "feedback": feedback_payload,
                         "feedback_sla": feedback_sla_payload
                     }
@@ -22376,6 +22521,8 @@ class Database:
             filter_clause += " AND operator_id = ANY(%s)"
             params.append(normalized_ids)
 
+        # call_count — только прослушанные звонки: оценка «Тестирование знаний»
+        # даёт средний балл, но плана по звонкам не закрывает.
         query = f"""
             WITH latest_calls AS (
                 SELECT DISTINCT ON (operator_id, phone_number, month, appeal_date)
@@ -22383,7 +22530,8 @@ class Database:
                     phone_number,
                     month,
                     appeal_date,
-                    score
+                    score,
+                    survey_response_id
                 FROM calls
                 WHERE {filter_clause}
                 ORDER BY operator_id, phone_number, month, appeal_date, created_at DESC, id DESC
@@ -22392,7 +22540,7 @@ class Database:
                 SELECT
                     operator_id,
                     COUNT(*) AS evaluation_row_count,
-                    COUNT(*) FILTER (WHERE score IS NOT NULL) AS call_count,
+                    COUNT(*) FILTER (WHERE score IS NOT NULL AND survey_response_id IS NULL) AS call_count,
                     AVG(score)::float AS avg_score
                 FROM latest_calls
                 GROUP BY operator_id
@@ -22888,11 +23036,12 @@ class Database:
             WHERE c.month = %s
         ),
         counts AS (
-            -- считаем количество последних версий звонков по оператору
+            -- считаем количество последних версий звонков по оператору;
+            -- оценка «Тестирование знаний» звонком не считается
             SELECT
                 operator_id,
                 COUNT(*) AS evaluation_row_count,
-                COUNT(*) FILTER (WHERE score IS NOT NULL) AS call_count,
+                COUNT(*) FILTER (WHERE score IS NOT NULL AND survey_response_id IS NULL) AS call_count,
                 AVG(score)::float AS avg_score
             FROM latest_calls
             GROUP BY operator_id
@@ -23271,14 +23420,15 @@ class Database:
                     GROUP BY operator_id, phone_number, month, appeal_date
                 ),
                 latest_calls AS (
-                    SELECT 
+                    SELECT
                         c.id,
-                        c.score
+                        c.score,
+                        c.survey_response_id
                     FROM calls c
-                    JOIN latest_versions lv ON 
+                    JOIN latest_versions lv ON
                         c.operator_id = lv.operator_id AND
-                        c.phone_number = lv.phone_number AND 
-                        c.month = lv.month AND 
+                        c.phone_number = lv.phone_number AND
+                        c.month = lv.month AND
                         (
                             (c.appeal_date IS NULL AND lv.appeal_date IS NULL)
                             OR c.appeal_date = lv.appeal_date
@@ -23287,7 +23437,7 @@ class Database:
                     WHERE c.operator_id = %s
                     AND c.is_draft = FALSE
                 )
-                SELECT COUNT(*), AVG(score)::float
+                SELECT COUNT(*) FILTER (WHERE survey_response_id IS NULL), AVG(score)::float
                 FROM latest_calls
             """
             cursor.execute(query, (operator_id, start_date, end_date, operator_id))
@@ -23328,7 +23478,10 @@ class Database:
                   AND created_at >= %s AND created_at <= %s
                 GROUP BY phone_number, operator_id, month, appeal_date
             )
-            SELECT c.operator_id, COUNT(*) AS cnt, AVG(c.score)::float AS avg_score
+            SELECT
+                c.operator_id,
+                COUNT(*) FILTER (WHERE c.survey_response_id IS NULL) AS cnt,
+                AVG(c.score)::float AS avg_score
             FROM calls c
             JOIN latest_versions lv
               ON c.phone_number = lv.phone_number
@@ -37783,6 +37936,391 @@ class Database:
     def _normalize_survey_role(role):
         return normalize_role_value(role)
 
+    # ── Тест по расписанию ────────────────────────────────────────────────
+    # Статус выводится из окна starts_at..ends_at и нигде не хранится: одно
+    # «время сейчас» — один ответ, рассинхрона стороннего поля не бывает.
+    SURVEY_TEST_STATUS_SCHEDULED = 'scheduled'
+    SURVEY_TEST_STATUS_ACTIVE = 'active'
+    SURVEY_TEST_STATUS_FINISHED = 'finished'
+
+    # Один список колонок на все выборки опросов: индексы читаются в
+    # _serialize_survey_list, и расходиться между тремя запросами им нельзя.
+    _SURVEY_LIST_COLUMNS = """
+                        s.id,
+                        s.title,
+                        s.description,
+                        s.created_at,
+                        s.updated_at,
+                        s.created_by,
+                        s.direction_ids,
+                        s.tenure_weeks_min,
+                        s.tenure_weeks_max,
+                        creator.id,
+                        creator.name,
+                        creator.role,
+                        s.repeat_root_id,
+                        s.repeat_iteration,
+                        s.is_test,
+                        s.group_ids,
+                        s.starts_at,
+                        s.ends_at,
+                        s.single_attempt,
+                        s.affects_quality
+    """
+    _SURVEY_QUESTION_COLUMNS = """
+                    q.id,
+                    q.survey_id,
+                    q.position,
+                    q.question_text,
+                    q.question_type,
+                    q.is_required,
+                    q.allow_other,
+                    q.options_json,
+                    q.correct_options_json,
+                    q.points,
+                    q.partial_credit
+    """
+
+    @staticmethod
+    def _parse_survey_schedule_value(value, error_code):
+        """Границы окна теста: ISO / 'YYYY-MM-DD HH:MM' / datetime. Пусто → None."""
+        if value in (None, ''):
+            return None
+        if isinstance(value, datetime):
+            return value.replace(tzinfo=None) if value.tzinfo is not None else value
+        text = str(value).strip()
+        if not text:
+            return None
+        normalized = text.replace('T', ' ')
+        if normalized.endswith('Z'):
+            normalized = normalized[:-1]
+        for fmt in ('%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d'):
+            try:
+                return datetime.strptime(normalized, fmt)
+            except ValueError:
+                continue
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            raise ValueError(error_code)
+        return parsed.replace(tzinfo=None) if parsed.tzinfo is not None else parsed
+
+    @classmethod
+    def survey_test_status(cls, starts_at, ends_at, now=None):
+        moment = now or datetime.now()
+        if starts_at is not None and moment < starts_at:
+            return cls.SURVEY_TEST_STATUS_SCHEDULED
+        if ends_at is not None and moment >= ends_at:
+            return cls.SURVEY_TEST_STATUS_FINISHED
+        return cls.SURVEY_TEST_STATUS_ACTIVE
+
+    @staticmethod
+    def survey_question_points(question):
+        """Вес вопроса в тесте. Некорректное/пустое значение → 1 балл."""
+        try:
+            points = float((question or {}).get('points'))
+        except (TypeError, ValueError):
+            return 1.0
+        if not math.isfinite(points) or points <= 0:
+            return 1.0
+        return round(points, 2)
+
+    @staticmethod
+    def survey_answer_is_correct(question_type, correct_options, selected_options, answer_text=''):
+        """Ответ верен полностью: отмечены ровно все правильные варианты."""
+        expected = [str(item) for item in (correct_options or [])]
+        selected = [str(item) for item in (selected_options or [])]
+        if str(answer_text or '').strip():
+            return False
+        if question_type == 'single':
+            return len(expected) == 1 and len(selected) == 1 and selected[0] == expected[0]
+        if question_type == 'multiple':
+            return len(expected) > 0 and set(selected) == set(expected)
+        return False
+
+    @classmethod
+    def survey_answer_score_ratio(cls, question_type, correct_options, selected_options,
+                                  answer_text='', partial_credit=False):
+        """
+        Доля балла за ответ (0..1).
+
+        По умолчанию вопрос зачитывается целиком. При включённом частичном
+        зачёте (только для вопросов с несколькими ответами) балл начисляется
+        пропорционально угаданным правильным вариантам, но любой лишний —
+        неправильный — вариант обнуляет вопрос. Иначе «отметить всё» гарантировало
+        бы часть балла, ничего не зная.
+        """
+        if cls.survey_answer_is_correct(question_type, correct_options, selected_options, answer_text):
+            return 1.0
+        if not partial_credit or question_type != 'multiple':
+            return 0.0
+        if str(answer_text or '').strip():
+            return 0.0
+
+        expected = {str(item) for item in (correct_options or [])}
+        selected = {str(item) for item in (selected_options or [])}
+        if not expected or not selected:
+            return 0.0
+        if selected - expected:
+            return 0.0
+        return len(selected & expected) / len(expected)
+
+    @classmethod
+    def score_survey_test_attempt(cls, questions, answers_by_question):
+        """
+        Итог попытки: набранные баллы, максимум и процент 0..100.
+        Вопросы без вариантов (рейтинг) в тесте не участвуют.
+        """
+        earned = 0.0
+        max_points = 0.0
+        total_questions = 0
+        answered_questions = 0
+        correct_answers = 0
+        per_question = {}
+
+        for question in questions or []:
+            question_id = int(question.get('id') or 0)
+            question_type = str(question.get('type') or '')
+            if question_type not in ('single', 'multiple'):
+                continue
+            points = cls.survey_question_points(question)
+            partial_credit = bool(question.get('partial_credit')) and question_type == 'multiple'
+            total_questions += 1
+            max_points += points
+
+            answer = (answers_by_question or {}).get(question_id) or {}
+            selected_options = list(answer.get('selected_options') or [])
+            answer_text = str(answer.get('answer_text') or '')
+            has_answer = bool(selected_options or answer_text or answer.get('rating_value') is not None)
+            if has_answer:
+                answered_questions += 1
+
+            is_correct = cls.survey_answer_is_correct(
+                question_type,
+                question.get('correct_options'),
+                selected_options,
+                answer_text
+            )
+            ratio = cls.survey_answer_score_ratio(
+                question_type,
+                question.get('correct_options'),
+                selected_options,
+                answer_text,
+                partial_credit=partial_credit
+            )
+            question_earned = round(points * ratio, 2)
+            if is_correct:
+                correct_answers += 1
+            earned += question_earned
+            per_question[question_id] = {
+                'is_correct': bool(is_correct),
+                'is_partially_correct': bool(not is_correct and question_earned > 0),
+                'points': points,
+                'earned_points': question_earned
+            }
+
+        earned = round(earned, 2)
+        score_percent = round((earned / max_points) * 100, 1) if max_points > 0 else 0.0
+        return {
+            'total_questions': int(total_questions),
+            'answered_questions': int(answered_questions),
+            'correct_answers': int(correct_answers),
+            'earned_points': earned,
+            'max_points': round(max_points, 2),
+            'score_percent': float(score_percent),
+            'per_question': per_question
+        }
+
+    @staticmethod
+    def _survey_bool(value, default=False):
+        if value is None:
+            return bool(default)
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text == '':
+                return bool(default)
+            return text in ('1', 'true', 'yes', 'on')
+        return bool(value)
+
+    @staticmethod
+    def _survey_int_id_list(values):
+        normalized = []
+        for value in values or []:
+            try:
+                parsed = int(value)
+            except Exception:
+                continue
+            if parsed > 0 and parsed not in normalized:
+                normalized.append(parsed)
+        return normalized
+
+    def _normalize_survey_definition(
+        self,
+        *,
+        title,
+        description,
+        assignment,
+        questions,
+        operator_ids,
+        is_test=False,
+        test_config=None,
+        keep_question_ids=False
+    ):
+        """
+        Единая проверка описания опроса/теста для создания и редактирования —
+        иначе правила «правильных ответов» и «баллов» разъезжаются между путями.
+        """
+        title_norm = str(title or '').strip()
+        if not title_norm:
+            raise ValueError("SURVEY_TITLE_REQUIRED")
+        if not isinstance(questions, list) or len(questions) == 0:
+            raise ValueError("SURVEY_QUESTIONS_REQUIRED")
+
+        is_test_norm = self._survey_bool(is_test)
+
+        operator_ids_norm = self._survey_int_id_list(operator_ids)
+        if not operator_ids_norm:
+            raise ValueError("SURVEY_OPERATORS_REQUIRED")
+
+        assignment = assignment or {}
+        direction_ids_norm = self._survey_int_id_list(assignment.get('direction_ids'))
+        group_ids_norm = self._survey_int_id_list(assignment.get('group_ids'))
+
+        tenure_weeks_min = assignment.get('tenure_weeks_min')
+        tenure_weeks_max = assignment.get('tenure_weeks_max')
+        try:
+            tenure_weeks_min = int(tenure_weeks_min) if tenure_weeks_min not in (None, '') else None
+        except Exception:
+            raise ValueError("SURVEY_INVALID_TENURE_MIN")
+        try:
+            tenure_weeks_max = int(tenure_weeks_max) if tenure_weeks_max not in (None, '') else None
+        except Exception:
+            raise ValueError("SURVEY_INVALID_TENURE_MAX")
+        if tenure_weeks_min is not None and tenure_weeks_min < 0:
+            raise ValueError("SURVEY_INVALID_TENURE_MIN")
+        if tenure_weeks_max is not None and tenure_weeks_max < 0:
+            raise ValueError("SURVEY_INVALID_TENURE_MAX")
+        if tenure_weeks_min is not None and tenure_weeks_max is not None and tenure_weeks_min > tenure_weeks_max:
+            raise ValueError("SURVEY_INVALID_TENURE_RANGE")
+
+        test_config = test_config or {}
+        starts_at = self._parse_survey_schedule_value(test_config.get('starts_at'), "SURVEY_INVALID_STARTS_AT")
+        ends_at = self._parse_survey_schedule_value(test_config.get('ends_at'), "SURVEY_INVALID_ENDS_AT")
+        if starts_at is not None and ends_at is not None and starts_at >= ends_at:
+            raise ValueError("SURVEY_INVALID_SCHEDULE_RANGE")
+        single_attempt = self._survey_bool(test_config.get('single_attempt'), default=True)
+        affects_quality = self._survey_bool(test_config.get('affects_quality'), default=False)
+        if not is_test_norm:
+            # Расписание и учёт в качестве — свойства теста. Для обычного опроса
+            # их не храним, чтобы поля не «залипали» при переключении режима.
+            starts_at = None
+            ends_at = None
+            affects_quality = False
+
+        normalized_questions = []
+        for idx, raw_question in enumerate(questions):
+            raw_question = raw_question or {}
+            question_id = None
+            if keep_question_ids:
+                raw_question_id = raw_question.get('id')
+                if raw_question_id not in (None, ''):
+                    try:
+                        parsed_question_id = int(raw_question_id)
+                        if parsed_question_id > 0:
+                            question_id = parsed_question_id
+                    except Exception:
+                        question_id = None
+
+            text = str(raw_question.get('text') or '').strip()
+            qtype = str(raw_question.get('type') or 'single').strip().lower()
+            required = bool(raw_question.get('required', True))
+            allow_other = bool(raw_question.get('allow_other', False))
+
+            if not text:
+                raise ValueError(f"SURVEY_QUESTION_TEXT_REQUIRED_{idx + 1}")
+            if qtype not in ('single', 'multiple', 'rating'):
+                raise ValueError(f"SURVEY_INVALID_QUESTION_TYPE_{idx + 1}")
+            if is_test_norm and qtype == 'rating':
+                raise ValueError(f"SURVEY_TEST_RATING_NOT_ALLOWED_{idx + 1}")
+
+            points = 1.0
+            # Частичный зачёт имеет смысл только там, где вариантов несколько.
+            partial_credit = is_test_norm and qtype == 'multiple' and self._survey_bool(
+                raw_question.get('partial_credit')
+            )
+            if is_test_norm:
+                raw_points = raw_question.get('points')
+                if raw_points not in (None, ''):
+                    try:
+                        points = float(raw_points)
+                    except Exception:
+                        raise ValueError(f"SURVEY_INVALID_QUESTION_POINTS_{idx + 1}")
+                    if not math.isfinite(points) or points <= 0 or points > 1000:
+                        raise ValueError(f"SURVEY_INVALID_QUESTION_POINTS_{idx + 1}")
+                    points = round(points, 2)
+
+            options_norm = []
+            correct_options_norm = []
+            if qtype != 'rating':
+                if is_test_norm:
+                    allow_other = False
+
+                for option in raw_question.get('options') or []:
+                    option_text = str(option or '').strip()
+                    if option_text and option_text not in options_norm:
+                        options_norm.append(option_text)
+
+                is_other_only_question = (qtype == 'single' and allow_other and len(options_norm) == 0)
+                if len(options_norm) < 2 and not is_other_only_question:
+                    raise ValueError(f"SURVEY_OPTIONS_REQUIRED_{idx + 1}")
+
+                for option in raw_question.get('correct_options') or []:
+                    option_text = str(option or '').strip()
+                    if option_text and option_text not in correct_options_norm:
+                        correct_options_norm.append(option_text)
+
+                if is_test_norm:
+                    if not correct_options_norm:
+                        raise ValueError(f"SURVEY_CORRECT_OPTIONS_REQUIRED_{idx + 1}")
+                    invalid_correct = [item for item in correct_options_norm if item not in options_norm]
+                    if invalid_correct:
+                        raise ValueError(f"SURVEY_CORRECT_OPTION_INVALID_{idx + 1}")
+                    if qtype == 'single' and len(correct_options_norm) != 1:
+                        raise ValueError(f"SURVEY_SINGLE_CORRECT_OPTION_REQUIRED_{idx + 1}")
+                elif is_other_only_question:
+                    correct_options_norm = []
+            else:
+                allow_other = False
+
+            normalized_questions.append({
+                'id': question_id,
+                'position': idx + 1,
+                'text': text,
+                'type': qtype,
+                'required': required,
+                'allow_other': allow_other,
+                'options': options_norm,
+                'correct_options': correct_options_norm,
+                'points': points,
+                'partial_credit': partial_credit
+            })
+
+        return {
+            'title': title_norm,
+            'description': str(description or '').strip() or None,
+            'is_test': is_test_norm,
+            'direction_ids': direction_ids_norm,
+            'group_ids': group_ids_norm,
+            'tenure_weeks_min': tenure_weeks_min,
+            'tenure_weeks_max': tenure_weeks_max,
+            'starts_at': starts_at,
+            'ends_at': ends_at,
+            'single_attempt': single_attempt,
+            'affects_quality': affects_quality,
+            'operator_ids': operator_ids_norm,
+            'questions': normalized_questions
+        }
+
     @staticmethod
     def _is_survey_operator_dismissed_status(value):
         return str(value or '').strip().lower() in ('fired', 'dismissal', 'dismissed')
@@ -37886,116 +38424,27 @@ class Database:
         with self._get_cursor() as cursor:
             return self._get_visible_lms_learner_ids_for_requester_tx(cursor, requester_id, requester_role)
 
-    def create_survey(self, title, description, created_by, assignment, questions, operator_ids, repeat_from_survey_id=None, is_test=False):
-        title_norm = str(title or '').strip()
-        description_norm = str(description or '').strip() or None
+    def create_survey(self, title, description, created_by, assignment, questions, operator_ids,
+                      repeat_from_survey_id=None, is_test=False, test_config=None):
         created_by_id = int(created_by) if created_by is not None else None
-        if isinstance(is_test, str):
-            is_test_norm = is_test.strip().lower() in ('1', 'true', 'yes', 'on')
-        else:
-            is_test_norm = bool(is_test)
-
-        if not title_norm:
-            raise ValueError("SURVEY_TITLE_REQUIRED")
-        if not isinstance(questions, list) or len(questions) == 0:
-            raise ValueError("SURVEY_QUESTIONS_REQUIRED")
-
-        operator_ids_norm = []
-        for op_id in operator_ids or []:
-            try:
-                parsed = int(op_id)
-            except Exception:
-                continue
-            if parsed > 0 and parsed not in operator_ids_norm:
-                operator_ids_norm.append(parsed)
-        if not operator_ids_norm:
-            raise ValueError("SURVEY_OPERATORS_REQUIRED")
-
-        assignment = assignment or {}
-        direction_ids_norm = []
-        for direction_id in assignment.get('direction_ids') or []:
-            try:
-                parsed = int(direction_id)
-            except Exception:
-                continue
-            if parsed > 0 and parsed not in direction_ids_norm:
-                direction_ids_norm.append(parsed)
-
-        tenure_weeks_min = assignment.get('tenure_weeks_min')
-        tenure_weeks_max = assignment.get('tenure_weeks_max')
-
-        try:
-            tenure_weeks_min = int(tenure_weeks_min) if tenure_weeks_min is not None else None
-        except Exception:
-            raise ValueError("SURVEY_INVALID_TENURE_MIN")
-        try:
-            tenure_weeks_max = int(tenure_weeks_max) if tenure_weeks_max is not None else None
-        except Exception:
-            raise ValueError("SURVEY_INVALID_TENURE_MAX")
-
-        if tenure_weeks_min is not None and tenure_weeks_min < 0:
-            raise ValueError("SURVEY_INVALID_TENURE_MIN")
-        if tenure_weeks_max is not None and tenure_weeks_max < 0:
-            raise ValueError("SURVEY_INVALID_TENURE_MAX")
-        if tenure_weeks_min is not None and tenure_weeks_max is not None and tenure_weeks_min > tenure_weeks_max:
-            raise ValueError("SURVEY_INVALID_TENURE_RANGE")
-
-        normalized_questions = []
-        for idx, raw_question in enumerate(questions):
-            text = str((raw_question or {}).get('text') or '').strip()
-            qtype = str((raw_question or {}).get('type') or 'single').strip().lower()
-            required = bool((raw_question or {}).get('required', True))
-            allow_other = bool((raw_question or {}).get('allow_other', False))
-
-            if not text:
-                raise ValueError(f"SURVEY_QUESTION_TEXT_REQUIRED_{idx + 1}")
-            if qtype not in ('single', 'multiple', 'rating'):
-                raise ValueError(f"SURVEY_INVALID_QUESTION_TYPE_{idx + 1}")
-            if is_test_norm and qtype == 'rating':
-                raise ValueError(f"SURVEY_TEST_RATING_NOT_ALLOWED_{idx + 1}")
-
-            options_norm = []
-            correct_options_norm = []
-            if qtype != 'rating':
-                if is_test_norm:
-                    allow_other = False
-
-                for option in (raw_question or {}).get('options') or []:
-                    option_text = str(option or '').strip()
-                    if option_text and option_text not in options_norm:
-                        options_norm.append(option_text)
-
-                is_other_only_question = (qtype == 'single' and allow_other and len(options_norm) == 0)
-                if len(options_norm) < 2 and not is_other_only_question:
-                    raise ValueError(f"SURVEY_OPTIONS_REQUIRED_{idx + 1}")
-
-                for option in (raw_question or {}).get('correct_options') or []:
-                    option_text = str(option or '').strip()
-                    if option_text and option_text not in correct_options_norm:
-                        correct_options_norm.append(option_text)
-
-                if is_test_norm:
-                    if not correct_options_norm:
-                        raise ValueError(f"SURVEY_CORRECT_OPTIONS_REQUIRED_{idx + 1}")
-                    invalid_correct = [item for item in correct_options_norm if item not in options_norm]
-                    if invalid_correct:
-                        raise ValueError(f"SURVEY_CORRECT_OPTION_INVALID_{idx + 1}")
-                    if qtype == 'single' and len(correct_options_norm) != 1:
-                        raise ValueError(f"SURVEY_SINGLE_CORRECT_OPTION_REQUIRED_{idx + 1}")
-                elif is_other_only_question:
-                    correct_options_norm = []
-            else:
-                allow_other = False
-
-            normalized_questions.append({
-                'position': idx + 1,
-                'text': text,
-                'type': qtype,
-                'required': required,
-                'allow_other': allow_other,
-                'options': options_norm,
-                'correct_options': correct_options_norm
-            })
+        definition = self._normalize_survey_definition(
+            title=title,
+            description=description,
+            assignment=assignment,
+            questions=questions,
+            operator_ids=operator_ids,
+            is_test=is_test,
+            test_config=test_config
+        )
+        title_norm = definition['title']
+        description_norm = definition['description']
+        is_test_norm = definition['is_test']
+        direction_ids_norm = definition['direction_ids']
+        group_ids_norm = definition['group_ids']
+        tenure_weeks_min = definition['tenure_weeks_min']
+        tenure_weeks_max = definition['tenure_weeks_max']
+        operator_ids_norm = definition['operator_ids']
+        normalized_questions = definition['questions']
 
         with self._get_cursor() as cursor:
             repeat_root_id_to_use = None
@@ -38031,11 +38480,16 @@ class Database:
                     description,
                     created_by,
                     direction_ids,
+                    group_ids,
                     tenure_weeks_min,
                     tenure_weeks_max,
                     repeat_root_id,
                     repeat_iteration,
                     is_test,
+                    starts_at,
+                    ends_at,
+                    single_attempt,
+                    affects_quality,
                     created_at,
                     updated_at
                 )
@@ -38044,6 +38498,11 @@ class Database:
                     %s,
                     %s,
                     %s::jsonb,
+                    %s::jsonb,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
                     %s,
                     %s,
                     %s,
@@ -38058,11 +38517,16 @@ class Database:
                 description_norm,
                 created_by_id,
                 json.dumps(direction_ids_norm),
+                json.dumps(group_ids_norm),
                 tenure_weeks_min,
                 tenure_weeks_max,
                 repeat_root_id_to_use,
                 repeat_iteration_to_use,
-                is_test_norm
+                is_test_norm,
+                definition['starts_at'],
+                definition['ends_at'],
+                definition['single_attempt'],
+                definition['affects_quality']
             ))
             survey_id, created_at = cursor.fetchone()
 
@@ -38079,15 +38543,17 @@ class Database:
                 cursor.execute("""
                     INSERT INTO survey_questions (
                         survey_id,
-                    position,
-                    question_text,
-                    question_type,
-                    is_required,
-                    allow_other,
-                    options_json,
-                    correct_options_json
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+                        position,
+                        question_text,
+                        question_type,
+                        is_required,
+                        allow_other,
+                        options_json,
+                        correct_options_json,
+                        points,
+                        partial_credit
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s)
                 """, (
                     survey_id,
                     question['position'],
@@ -38096,7 +38562,9 @@ class Database:
                     question['required'],
                     question['allow_other'],
                     json.dumps(question['options'], ensure_ascii=False),
-                    json.dumps(question['correct_options'], ensure_ascii=False)
+                    json.dumps(question['correct_options'], ensure_ascii=False),
+                    question['points'],
+                    question['partial_credit']
                 ))
 
             for operator_id in operator_ids_norm:
@@ -38137,130 +38605,31 @@ class Database:
                 'is_test': bool(is_test_norm)
             }
 
-    def update_survey(self, survey_id, requester_id, requester_role, title, description, assignment, questions, operator_ids, is_test=False):
+    def update_survey(self, survey_id, requester_id, requester_role, title, description, assignment,
+                      questions, operator_ids, is_test=False, test_config=None):
         survey_id = int(survey_id)
         requester_id = int(requester_id)
         role = self._normalize_survey_role(requester_role)
 
-        title_norm = str(title or '').strip()
-        description_norm = str(description or '').strip() or None
-        if isinstance(is_test, str):
-            is_test_norm = is_test.strip().lower() in ('1', 'true', 'yes', 'on')
-        else:
-            is_test_norm = bool(is_test)
-
-        if not title_norm:
-            raise ValueError("SURVEY_TITLE_REQUIRED")
-        if not isinstance(questions, list) or len(questions) == 0:
-            raise ValueError("SURVEY_QUESTIONS_REQUIRED")
-
-        operator_ids_norm = []
-        for op_id in operator_ids or []:
-            try:
-                parsed = int(op_id)
-            except Exception:
-                continue
-            if parsed > 0 and parsed not in operator_ids_norm:
-                operator_ids_norm.append(parsed)
-        if not operator_ids_norm:
-            raise ValueError("SURVEY_OPERATORS_REQUIRED")
-
-        assignment = assignment or {}
-        direction_ids_norm = []
-        for direction_id in assignment.get('direction_ids') or []:
-            try:
-                parsed = int(direction_id)
-            except Exception:
-                continue
-            if parsed > 0 and parsed not in direction_ids_norm:
-                direction_ids_norm.append(parsed)
-
-        tenure_weeks_min = assignment.get('tenure_weeks_min')
-        tenure_weeks_max = assignment.get('tenure_weeks_max')
-
-        try:
-            tenure_weeks_min = int(tenure_weeks_min) if tenure_weeks_min is not None else None
-        except Exception:
-            raise ValueError("SURVEY_INVALID_TENURE_MIN")
-        try:
-            tenure_weeks_max = int(tenure_weeks_max) if tenure_weeks_max is not None else None
-        except Exception:
-            raise ValueError("SURVEY_INVALID_TENURE_MAX")
-
-        if tenure_weeks_min is not None and tenure_weeks_min < 0:
-            raise ValueError("SURVEY_INVALID_TENURE_MIN")
-        if tenure_weeks_max is not None and tenure_weeks_max < 0:
-            raise ValueError("SURVEY_INVALID_TENURE_MAX")
-        if tenure_weeks_min is not None and tenure_weeks_max is not None and tenure_weeks_min > tenure_weeks_max:
-            raise ValueError("SURVEY_INVALID_TENURE_RANGE")
-
-        normalized_questions = []
-        for idx, raw_question in enumerate(questions):
-            question_id = None
-            raw_question_id = (raw_question or {}).get('id')
-            if raw_question_id not in (None, ''):
-                try:
-                    parsed_question_id = int(raw_question_id)
-                    if parsed_question_id > 0:
-                        question_id = parsed_question_id
-                except Exception:
-                    question_id = None
-
-            text = str((raw_question or {}).get('text') or '').strip()
-            qtype = str((raw_question or {}).get('type') or 'single').strip().lower()
-            required = bool((raw_question or {}).get('required', True))
-            allow_other = bool((raw_question or {}).get('allow_other', False))
-
-            if not text:
-                raise ValueError(f"SURVEY_QUESTION_TEXT_REQUIRED_{idx + 1}")
-            if qtype not in ('single', 'multiple', 'rating'):
-                raise ValueError(f"SURVEY_INVALID_QUESTION_TYPE_{idx + 1}")
-            if is_test_norm and qtype == 'rating':
-                raise ValueError(f"SURVEY_TEST_RATING_NOT_ALLOWED_{idx + 1}")
-
-            options_norm = []
-            correct_options_norm = []
-            if qtype != 'rating':
-                if is_test_norm:
-                    allow_other = False
-
-                for option in (raw_question or {}).get('options') or []:
-                    option_text = str(option or '').strip()
-                    if option_text and option_text not in options_norm:
-                        options_norm.append(option_text)
-
-                is_other_only_question = (qtype == 'single' and allow_other and len(options_norm) == 0)
-                if len(options_norm) < 2 and not is_other_only_question:
-                    raise ValueError(f"SURVEY_OPTIONS_REQUIRED_{idx + 1}")
-
-                for option in (raw_question or {}).get('correct_options') or []:
-                    option_text = str(option or '').strip()
-                    if option_text and option_text not in correct_options_norm:
-                        correct_options_norm.append(option_text)
-
-                if is_test_norm:
-                    if not correct_options_norm:
-                        raise ValueError(f"SURVEY_CORRECT_OPTIONS_REQUIRED_{idx + 1}")
-                    invalid_correct = [item for item in correct_options_norm if item not in options_norm]
-                    if invalid_correct:
-                        raise ValueError(f"SURVEY_CORRECT_OPTION_INVALID_{idx + 1}")
-                    if qtype == 'single' and len(correct_options_norm) != 1:
-                        raise ValueError(f"SURVEY_SINGLE_CORRECT_OPTION_REQUIRED_{idx + 1}")
-                elif is_other_only_question:
-                    correct_options_norm = []
-            else:
-                allow_other = False
-
-            normalized_questions.append({
-                'id': question_id,
-                'position': idx + 1,
-                'text': text,
-                'type': qtype,
-                'required': required,
-                'allow_other': allow_other,
-                'options': options_norm,
-                'correct_options': correct_options_norm
-            })
+        definition = self._normalize_survey_definition(
+            title=title,
+            description=description,
+            assignment=assignment,
+            questions=questions,
+            operator_ids=operator_ids,
+            is_test=is_test,
+            test_config=test_config,
+            keep_question_ids=True
+        )
+        title_norm = definition['title']
+        description_norm = definition['description']
+        is_test_norm = definition['is_test']
+        direction_ids_norm = definition['direction_ids']
+        group_ids_norm = definition['group_ids']
+        tenure_weeks_min = definition['tenure_weeks_min']
+        tenure_weeks_max = definition['tenure_weeks_max']
+        operator_ids_norm = definition['operator_ids']
+        normalized_questions = definition['questions']
 
         with self._get_cursor() as cursor:
             cursor.execute("""
@@ -38293,7 +38662,9 @@ class Database:
                             is_required = %s,
                             allow_other = %s,
                             options_json = %s::jsonb,
-                            correct_options_json = %s::jsonb
+                            correct_options_json = %s::jsonb,
+                            points = %s,
+                            partial_credit = %s
                         WHERE id = %s AND survey_id = %s
                     """, (
                         question['position'],
@@ -38303,6 +38674,8 @@ class Database:
                         question['allow_other'],
                         json.dumps(question['options'], ensure_ascii=False),
                         json.dumps(question['correct_options'], ensure_ascii=False),
+                        question['points'],
+                        question['partial_credit'],
                         question_id,
                         survey_id
                     ))
@@ -38317,9 +38690,11 @@ class Database:
                             is_required,
                             allow_other,
                             options_json,
-                            correct_options_json
+                            correct_options_json,
+                            points,
+                            partial_credit
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s)
                         RETURNING id
                     """, (
                         survey_id,
@@ -38329,7 +38704,9 @@ class Database:
                         question['required'],
                         question['allow_other'],
                         json.dumps(question['options'], ensure_ascii=False),
-                        json.dumps(question['correct_options'], ensure_ascii=False)
+                        json.dumps(question['correct_options'], ensure_ascii=False),
+                        question['points'],
+                        question['partial_credit']
                     ))
                     kept_question_ids.add(int(cursor.fetchone()[0]))
 
@@ -38346,18 +38723,28 @@ class Database:
                     title = %s,
                     description = %s,
                     direction_ids = %s::jsonb,
+                    group_ids = %s::jsonb,
                     tenure_weeks_min = %s,
                     tenure_weeks_max = %s,
                     is_test = %s,
+                    starts_at = %s,
+                    ends_at = %s,
+                    single_attempt = %s,
+                    affects_quality = %s,
                     updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 WHERE id = %s
             """, (
                 title_norm,
                 description_norm,
                 json.dumps(direction_ids_norm),
+                json.dumps(group_ids_norm),
                 tenure_weeks_min,
                 tenure_weeks_max,
                 is_test_norm,
+                definition['starts_at'],
+                definition['ends_at'],
+                definition['single_attempt'],
+                definition['affects_quality'],
                 survey_id
             ))
 
@@ -38366,6 +38753,20 @@ class Database:
             target_operator_ids = set(operator_ids_norm)
             removed_operator_ids = list(existing_operator_ids - target_operator_ids)
             if removed_operator_ids:
+                # Сначала убираем оценку «Тестирование знаний» — иначе после
+                # SET NULL осталась бы запись журнала, которую уже не отличить
+                # от прослушанного звонка.
+                cursor.execute("""
+                    DELETE FROM calls
+                    WHERE survey_response_id IN (
+                        SELECT id FROM survey_responses
+                        WHERE survey_id = %s AND operator_id = ANY(%s)
+                    )
+                """, (survey_id, removed_operator_ids))
+                cursor.execute("""
+                    DELETE FROM survey_attempt_drafts
+                    WHERE survey_id = %s AND operator_id = ANY(%s)
+                """, (survey_id, removed_operator_ids))
                 cursor.execute("""
                     DELETE FROM survey_responses
                     WHERE survey_id = %s AND operator_id = ANY(%s)
@@ -38404,7 +38805,115 @@ class Database:
                         END
                 """, (survey_id, operator_id, requester_id))
 
-            return {'id': survey_id, 'updated_at': self._survey_dt_to_iso(datetime.now())}
+            # Правка вопросов или баллов меняет правила подсчёта, поэтому уже
+            # сданные попытки пересчитываются — иначе статистика показывала бы
+            # старый процент рядом с новыми баллами, а в качестве оператора
+            # осталась бы оценка по прежней шкале.
+            if is_test_norm:
+                rescored = self._rescore_survey_responses_tx(cursor, survey_id)
+            else:
+                # Режим теста выключили — оценки «Тестирование знаний» по нему
+                # больше не имеют смысла и уходят из журнала.
+                cursor.execute("""
+                    DELETE FROM calls
+                    WHERE survey_response_id IN (
+                        SELECT id FROM survey_responses WHERE survey_id = %s
+                    )
+                """, (survey_id,))
+                rescored = 0
+
+            return {
+                'id': survey_id,
+                'updated_at': self._survey_dt_to_iso(datetime.now()),
+                'rescored_responses': int(rescored)
+            }
+
+    def _rescore_survey_responses_tx(self, cursor, survey_id):
+        """Пересчитывает сохранённые итоги попыток теста по текущим вопросам."""
+        survey_id = int(survey_id)
+        cursor.execute("""
+            SELECT
+                COALESCE(is_test, FALSE),
+                COALESCE(affects_quality, FALSE),
+                title,
+                created_by
+            FROM surveys
+            WHERE id = %s
+        """, (survey_id,))
+        survey_row = cursor.fetchone()
+        if not survey_row or not bool(survey_row[0]):
+            return 0
+        affects_quality = bool(survey_row[1])
+        survey_title = str(survey_row[2] or '')
+        survey_created_by = survey_row[3]
+
+        cursor.execute("""
+            SELECT id, question_type, correct_options_json, points, partial_credit
+            FROM survey_questions
+            WHERE survey_id = %s
+            ORDER BY position, id
+        """, (survey_id,))
+        questions = [
+            {
+                'id': int(row[0]),
+                'type': row[1],
+                'correct_options': [str(item) for item in (row[2] if isinstance(row[2], list) else [])],
+                'points': self.survey_question_points({'points': row[3]}),
+                'partial_credit': bool(row[4])
+            }
+            for row in cursor.fetchall()
+        ]
+        if not questions:
+            return 0
+
+        cursor.execute("""
+            SELECT id, operator_id
+            FROM survey_responses
+            WHERE survey_id = %s
+        """, (survey_id,))
+        responses = [(int(row[0]), int(row[1])) for row in cursor.fetchall()]
+        if not responses:
+            return 0
+
+        cursor.execute("""
+            SELECT response_id, question_id, selected_options_json, answer_text
+            FROM survey_answers
+            WHERE response_id = ANY(%s)
+        """, ([response_id for response_id, _ in responses],))
+        answers_by_response = defaultdict(dict)
+        for row in cursor.fetchall():
+            answers_by_response[int(row[0])][int(row[1])] = {
+                'selected_options': [str(item) for item in (row[2] if isinstance(row[2], list) else [])],
+                'answer_text': row[3] or ''
+            }
+
+        for response_id, operator_id in responses:
+            score = self.score_survey_test_attempt(questions, answers_by_response.get(response_id, {}))
+            cursor.execute("""
+                UPDATE survey_responses
+                SET
+                    earned_points = %s,
+                    max_points = %s,
+                    score_percent = %s
+                WHERE id = %s
+            """, (score['earned_points'], score['max_points'], score['score_percent'], response_id))
+
+            if affects_quality:
+                self._upsert_knowledge_test_evaluation_tx(
+                    cursor,
+                    survey_id=survey_id,
+                    survey_title=survey_title,
+                    survey_created_by=survey_created_by,
+                    operator_id=operator_id,
+                    response_id=response_id,
+                    score_percent=score['score_percent'],
+                    touch_timestamps=False
+                )
+            else:
+                # Учёт в качестве выключили — оценка из журнала уходит.
+                cursor.execute("DELETE FROM calls WHERE survey_response_id = %s", (response_id,))
+
+        return len(responses)
 
     def delete_survey(self, survey_id, requester_id, requester_role):
         survey_id = int(survey_id)
@@ -38425,6 +38934,14 @@ class Database:
             if (not role_has_min(role, 'admin')) and (created_by is None or int(created_by) != requester_id):
                 raise PermissionError("SURVEY_FORBIDDEN")
 
+            # Оценки «Тестирование знаний» уходят вместе с тестом: иначе после
+            # SET NULL они превратились бы в неотличимые записи журнала.
+            cursor.execute("""
+                DELETE FROM calls
+                WHERE survey_response_id IN (
+                    SELECT id FROM survey_responses WHERE survey_id = %s
+                )
+            """, (survey_id,))
             cursor.execute("DELETE FROM surveys WHERE id = %s", (survey_id,))
             return True
 
@@ -38573,6 +39090,7 @@ class Database:
         return stats
 
     def _serialize_survey_list(self, surveys_rows, questions_rows, assignments_rows, responses_rows, answers_rows):
+        now = datetime.now()
         questions_by_survey = defaultdict(list)
         question_positions_by_survey = defaultdict(dict)
         for row in questions_rows:
@@ -38589,7 +39107,9 @@ class Database:
                 'required': bool(row[5]),
                 'allow_other': bool(row[6]),
                 'options': [str(item) for item in options],
-                'correct_options': [str(item) for item in correct_options]
+                'correct_options': [str(item) for item in correct_options],
+                'points': self.survey_question_points({'points': row[9] if len(row) > 9 else None}),
+                'partial_credit': bool(row[10]) if len(row) > 10 else False
             }
             questions_by_survey[survey_id].append(question_obj)
             question_positions_by_survey[survey_id][question_id] = position
@@ -38607,7 +39127,8 @@ class Database:
                 'is_operator_dismissed': self._is_survey_operator_dismissed_status(operator_status),
                 'department_id': int(operator_department_id) if operator_department_id is not None else None,
                 'assigned_at': self._survey_dt_to_iso(row[5]),
-                'completed_at': self._survey_dt_to_iso(row[6])
+                'completed_at': self._survey_dt_to_iso(row[6]),
+                'started_at': self._survey_dt_to_iso(row[9]) if len(row) > 9 else None
             })
 
         responses_by_survey = defaultdict(list)
@@ -38615,7 +39136,13 @@ class Database:
             responses_by_survey[int(row[1])].append({
                 'id': int(row[0]),
                 'operator_id': int(row[2]),
-                'submitted_at': self._survey_dt_to_iso(row[3])
+                'submitted_at': self._survey_dt_to_iso(row[3]),
+                'started_at': self._survey_dt_to_iso(row[4]) if len(row) > 4 else None,
+                'earned_points': float(row[5]) if len(row) > 5 and row[5] is not None else None,
+                'max_points': float(row[6]) if len(row) > 6 and row[6] is not None else None,
+                'score_percent': float(row[7]) if len(row) > 7 and row[7] is not None else None,
+                'is_auto_submitted': bool(row[8]) if len(row) > 8 else False,
+                'quality_call_id': int(row[9]) if len(row) > 9 and row[9] is not None else None
             })
 
         answers_by_survey = defaultdict(list)
@@ -38666,6 +39193,13 @@ class Database:
             if len(row) > 14:
                 is_test = bool(row[14])
 
+            group_ids = row[15] if len(row) > 15 and isinstance(row[15], list) else []
+            starts_at = row[16] if len(row) > 16 else None
+            ends_at = row[17] if len(row) > 17 else None
+            single_attempt = bool(row[18]) if len(row) > 18 and row[18] is not None else True
+            affects_quality = bool(row[19]) if len(row) > 19 else False
+            test_status = self.survey_test_status(starts_at, ends_at, now=now) if is_test else None
+
             direction_ids = row[6] if isinstance(row[6], list) else []
             questions = sorted(questions_by_survey.get(survey_id, []), key=lambda item: (item['position'], item['id']))
             assignments = assignments_by_survey.get(survey_id, [])
@@ -38673,6 +39207,7 @@ class Database:
             question_positions = question_positions_by_survey.get(survey_id, {})
             test_question_meta_by_id = {}
             test_total_questions = 0
+            test_max_points = 0.0
             if is_test:
                 for question in questions:
                     question_id = int(question.get('id') or 0)
@@ -38680,10 +39215,12 @@ class Database:
                     correct_options = [str(item) for item in (question.get('correct_options') or [])]
                     test_question_meta_by_id[question_id] = {
                         'type': question_type,
-                        'correct_options': correct_options
+                        'correct_options': correct_options,
+                        'points': self.survey_question_points(question)
                     }
                     if question_type in ('single', 'multiple'):
                         test_total_questions += 1
+                        test_max_points += self.survey_question_points(question)
 
             assigned_count = len(assignments)
             completed_count = sum(1 for assignment in assignments if assignment.get('status') == 'completed')
@@ -38720,8 +39257,15 @@ class Database:
 
                 answers_by_question = {}
                 normalized_answers = []
-                test_answered_questions = 0
-                test_correct_answers = 0
+                # Итог считает та же функция, что и при отправке попытки, —
+                # иначе правила частичного зачёта разъехались бы со статистикой.
+                attempt_score = self.score_survey_test_attempt(
+                    questions,
+                    {int(answer.get('question_id')): answer for answer in response_answers}
+                ) if is_test else None
+                test_answered_questions = int((attempt_score or {}).get('answered_questions') or 0)
+                test_correct_answers = int((attempt_score or {}).get('correct_answers') or 0)
+                test_earned_points = float((attempt_score or {}).get('earned_points') or 0.0)
 
                 for answer in response_answers:
                     question_id = int(answer.get('question_id'))
@@ -38735,45 +39279,46 @@ class Database:
                     }
                     if is_test:
                         question_meta = test_question_meta_by_id.get(question_id) or {}
-                        expected_options = list(question_meta.get('correct_options') or [])
-                        question_type = str(question_meta.get('type') or '')
-                        has_answer = bool(selected_options or answer_text or answer.get('rating_value') is not None)
-                        if has_answer:
-                            test_answered_questions += 1
-
-                        is_correct_answer = False
-                        if question_type == 'single':
-                            is_correct_answer = (
-                                len(expected_options) == 1
-                                and len(selected_options) == 1
-                                and selected_options[0] == expected_options[0]
-                                and not answer_text
-                            )
-                        elif question_type == 'multiple':
-                            is_correct_answer = (
-                                len(expected_options) > 0
-                                and set(selected_options) == set(expected_options)
-                                and not answer_text
-                            )
-                        if is_correct_answer:
-                            test_correct_answers += 1
-
-                        answer_payload['is_correct'] = bool(is_correct_answer)
-                        answer_payload['expected_options'] = expected_options
+                        per_question = (attempt_score or {}).get('per_question', {}).get(question_id) or {}
+                        answer_payload['is_correct'] = bool(per_question.get('is_correct'))
+                        answer_payload['is_partially_correct'] = bool(per_question.get('is_partially_correct'))
+                        answer_payload['expected_options'] = list(question_meta.get('correct_options') or [])
+                        answer_payload['points'] = float(per_question.get('points') or question_meta.get('points') or 1.0)
+                        answer_payload['earned_points'] = float(per_question.get('earned_points') or 0.0)
 
                     answers_by_question[str(question_id)] = answer_payload
                     normalized_answers.append(answer_payload)
 
                 test_summary = None
                 if is_test:
-                    score_percent = None
-                    if response_id is not None:
-                        score_percent = round((test_correct_answers / test_total_questions) * 100, 1) if test_total_questions > 0 else 0.0
+                    # Сохранённый при отправке итог — источник истины: он же ушёл
+                    # в оценку качества. Пересчёт нужен только для старых попыток,
+                    # записанных до появления баллов.
+                    stored_percent = (operator_response or {}).get('score_percent')
+                    stored_earned = (operator_response or {}).get('earned_points')
+                    stored_max = (operator_response or {}).get('max_points')
+                    if response_id is None:
+                        score_percent = None
+                        earned_points = None
+                        max_points = round(float(test_max_points), 2)
+                    elif stored_percent is not None:
+                        score_percent = float(stored_percent)
+                        earned_points = float(stored_earned) if stored_earned is not None else round(test_earned_points, 2)
+                        max_points = float(stored_max) if stored_max is not None else round(float(test_max_points), 2)
+                    else:
+                        earned_points = round(test_earned_points, 2)
+                        max_points = round(float(test_max_points), 2)
+                        score_percent = round((earned_points / max_points) * 100, 1) if max_points > 0 else 0.0
                     test_summary = {
                         'total_questions': int(test_total_questions),
                         'answered_questions': int(test_answered_questions),
                         'correct_answers': int(test_correct_answers),
-                        'score_percent': float(score_percent) if score_percent is not None else None
+                        'earned_points': earned_points,
+                        'max_points': max_points,
+                        'score_percent': float(score_percent) if score_percent is not None else None,
+                        'is_auto_submitted': bool((operator_response or {}).get('is_auto_submitted')),
+                        'quality_call_id': (operator_response or {}).get('quality_call_id'),
+                        'sent_to_quality': (operator_response or {}).get('quality_call_id') is not None
                     }
 
                 responses_detailed.append({
@@ -38785,6 +39330,7 @@ class Database:
                     'status': assignment.get('status') or 'assigned',
                     'assigned_at': assignment.get('assigned_at'),
                     'completed_at': assignment.get('completed_at'),
+                    'started_at': (operator_response or {}).get('started_at') or assignment.get('started_at'),
                     'response_id': response_id,
                     'submitted_at': operator_response.get('submitted_at') if operator_response else None,
                     'repeat_iteration': int(repeat_iteration),
@@ -38812,8 +39358,18 @@ class Database:
                     'is_repeat': int(repeat_iteration) > 1
                 },
                 'is_test': bool(is_test),
+                'test': {
+                    'status': test_status,
+                    'starts_at': self._survey_dt_to_iso(starts_at),
+                    'ends_at': self._survey_dt_to_iso(ends_at),
+                    'single_attempt': bool(single_attempt),
+                    'affects_quality': bool(affects_quality),
+                    'max_points': round(float(test_max_points), 2),
+                    'questions_count': int(test_total_questions)
+                } if is_test else None,
                 'assignment': {
                     'direction_ids': normalized_direction_ids,
+                    'group_ids': self._survey_int_id_list(group_ids),
                     'tenure_weeks_min': row[7],
                     'tenure_weeks_max': row[8],
                     'operator_ids': [int(assignment['operator_id']) for assignment in assignments],
@@ -38878,46 +39434,18 @@ class Database:
 
         with self._get_cursor() as cursor:
             if role_has_min(role, 'admin') or role == 'trainer':
-                cursor.execute("""
+                cursor.execute(f"""
                     SELECT
-                        s.id,
-                        s.title,
-                        s.description,
-                        s.created_at,
-                        s.updated_at,
-                        s.created_by,
-                        s.direction_ids,
-                        s.tenure_weeks_min,
-                        s.tenure_weeks_max,
-                        creator.id,
-                        creator.name,
-                        creator.role,
-                        s.repeat_root_id,
-                        s.repeat_iteration,
-                        s.is_test
+                        {self._SURVEY_LIST_COLUMNS}
                     FROM surveys s
                     LEFT JOIN users creator ON creator.id = s.created_by
                     ORDER BY s.created_at DESC, s.id DESC
                 """)
             else:
                 if scope_department_id is not None:
-                    cursor.execute("""
+                    cursor.execute(f"""
                     SELECT DISTINCT
-                        s.id,
-                        s.title,
-                        s.description,
-                        s.created_at,
-                        s.updated_at,
-                        s.created_by,
-                        s.direction_ids,
-                        s.tenure_weeks_min,
-                        s.tenure_weeks_max,
-                        creator.id,
-                        creator.name,
-                        creator.role,
-                        s.repeat_root_id,
-                        s.repeat_iteration,
-                        s.is_test
+                        {self._SURVEY_LIST_COLUMNS}
                     FROM surveys s
                     LEFT JOIN users creator ON creator.id = s.created_by
                     LEFT JOIN survey_assignments sa ON sa.survey_id = s.id
@@ -38926,23 +39454,9 @@ class Database:
                     ORDER BY s.created_at DESC, s.id DESC
                 """, (requester_id, int(scope_department_id)))
                 else:
-                    cursor.execute("""
+                    cursor.execute(f"""
                     SELECT DISTINCT
-                        s.id,
-                        s.title,
-                        s.description,
-                        s.created_at,
-                        s.updated_at,
-                        s.created_by,
-                        s.direction_ids,
-                        s.tenure_weeks_min,
-                        s.tenure_weeks_max,
-                        creator.id,
-                        creator.name,
-                        creator.role,
-                        s.repeat_root_id,
-                        s.repeat_iteration,
-                        s.is_test
+                        {self._SURVEY_LIST_COLUMNS}
                     FROM surveys s
                     LEFT JOIN users creator ON creator.id = s.created_by
                     LEFT JOIN survey_assignments sa ON sa.survey_id = s.id
@@ -38965,17 +39479,9 @@ class Database:
                     scope_department_id=scope_department_id
                 ))
 
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT
-                    q.id,
-                    q.survey_id,
-                    q.position,
-                    q.question_text,
-                    q.question_type,
-                    q.is_required,
-                    q.allow_other,
-                    q.options_json,
-                    q.correct_options_json
+                    {self._SURVEY_QUESTION_COLUMNS}
                 FROM survey_questions q
                 WHERE q.survey_id = ANY(%s)
                 ORDER BY q.survey_id, q.position, q.id
@@ -38992,7 +39498,8 @@ class Database:
                     sa.assigned_at,
                     sa.completed_at,
                     u.status,
-                    u.department_id
+                    u.department_id,
+                    sa.started_at
                 FROM survey_assignments sa
                 LEFT JOIN users u ON u.id = sa.operator_id
                 WHERE sa.survey_id = ANY(%s)
@@ -39008,7 +39515,13 @@ class Database:
                     sr.id,
                     sr.survey_id,
                     sr.operator_id,
-                    sr.submitted_at
+                    sr.submitted_at,
+                    sr.started_at,
+                    sr.earned_points,
+                    sr.max_points,
+                    sr.score_percent,
+                    sr.is_auto_submitted,
+                    (SELECT c.id FROM calls c WHERE c.survey_response_id = sr.id LIMIT 1)
                 FROM survey_responses sr
                 WHERE sr.survey_id = ANY(%s)
                 ORDER BY sr.submitted_at DESC, sr.id DESC
@@ -39045,8 +39558,11 @@ class Database:
 
     def get_surveys_for_operator(self, operator_id):
         operator_id = int(operator_id)
+        now = datetime.now()
 
         with self._get_cursor() as cursor:
+            # Запланированный тест оператору не отдаём вообще: он не должен
+            # знать ни вопросов, ни вариантов до времени запуска.
             cursor.execute("""
                 SELECT
                     s.id,
@@ -39069,14 +39585,32 @@ class Database:
                     sr.submitted_at,
                     s.repeat_root_id,
                     s.repeat_iteration,
-                    s.is_test
+                    s.is_test,
+                    s.starts_at,
+                    s.ends_at,
+                    s.single_attempt,
+                    s.affects_quality,
+                    sa.started_at,
+                    sr.score_percent,
+                    sr.earned_points,
+                    sr.max_points,
+                    sr.is_auto_submitted,
+                    sd.answers_json
                 FROM survey_assignments sa
                 JOIN surveys s ON s.id = sa.survey_id
                 LEFT JOIN users creator ON creator.id = s.created_by
                 LEFT JOIN survey_responses sr
                     ON sr.survey_id = sa.survey_id
                    AND sr.operator_id = sa.operator_id
+                LEFT JOIN survey_attempt_drafts sd
+                    ON sd.survey_id = sa.survey_id
+                   AND sd.operator_id = sa.operator_id
                 WHERE sa.operator_id = %s
+                  AND (
+                      NOT COALESCE(s.is_test, FALSE)
+                      OR s.starts_at IS NULL
+                      OR s.starts_at <= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                  )
                 ORDER BY
                     CASE WHEN sa.status = 'completed' THEN 1 ELSE 0 END,
                     sa.assigned_at DESC,
@@ -39087,17 +39621,9 @@ class Database:
                 return []
 
             survey_ids = [int(row[0]) for row in surveys_rows]
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT
-                    q.id,
-                    q.survey_id,
-                    q.position,
-                    q.question_text,
-                    q.question_type,
-                    q.is_required,
-                    q.allow_other,
-                    q.options_json,
-                    q.correct_options_json
+                    {self._SURVEY_QUESTION_COLUMNS}
                 FROM survey_questions q
                 WHERE q.survey_id = ANY(%s)
                 ORDER BY q.survey_id, q.position, q.id
@@ -39120,7 +39646,9 @@ class Database:
                     'required': bool(row[5]),
                     'allow_other': bool(row[6]),
                     'options': [str(item) for item in options],
-                    'correct_options': [str(item) for item in correct_options]
+                    'correct_options': [str(item) for item in correct_options],
+                    'points': self.survey_question_points({'points': row[9] if len(row) > 9 else None}),
+                    'partial_credit': bool(row[10]) if len(row) > 10 else False
                 })
                 question_positions_by_survey[survey_id][question_id] = position
 
@@ -39164,6 +39692,11 @@ class Database:
                     except Exception:
                         repeat_iteration = 1
 
+                starts_at = row[21] if len(row) > 21 else None
+                ends_at = row[22] if len(row) > 22 else None
+                single_attempt = bool(row[23]) if len(row) > 23 and row[23] is not None else True
+                affects_quality = bool(row[24]) if len(row) > 24 else False
+
                 questions_source = sorted(
                     questions_by_survey.get(survey_id, []),
                     key=lambda item: (item.get('position', 0), item.get('id', 0))
@@ -39180,6 +39713,16 @@ class Database:
                         normalized_direction_ids.append(parsed)
 
                 assignment_status = str(row[13] or 'assigned')
+                # Правильные ответы отдаём только когда попытка уже закрыта:
+                # при разрешённом повторе внутри окна это была бы подсказка.
+                reveal_correct_options = (
+                    is_test
+                    and assignment_status == 'completed'
+                    and (
+                        single_attempt
+                        or self.survey_test_status(starts_at, ends_at, now=now) == self.SURVEY_TEST_STATUS_FINISHED
+                    )
+                )
                 questions = []
                 for question in questions_source:
                     question_copy = {
@@ -39191,7 +39734,10 @@ class Database:
                         'allow_other': bool(question.get('allow_other')),
                         'options': list(question.get('options') or [])
                     }
-                    if is_test and assignment_status == 'completed':
+                    if is_test:
+                        question_copy['points'] = self.survey_question_points(question)
+                        question_copy['partial_credit'] = bool(question.get('partial_credit'))
+                    if reveal_correct_options:
                         question_copy['correct_options'] = list(question.get('correct_options') or [])
                     questions.append(question_copy)
 
@@ -39205,12 +39751,13 @@ class Database:
                 )
 
                 my_answers_by_question = {}
-                test_total_questions = 0
-                test_answered_questions = 0
-                test_correct_answers = 0
                 question_meta_by_id = {int(item.get('id')): item for item in questions_source}
+                attempt_score = None
                 if is_test:
-                    test_total_questions = len([item for item in questions_source if item.get('type') in ('single', 'multiple')])
+                    attempt_score = self.score_survey_test_attempt(
+                        questions_source,
+                        {int(answer.get('question_id')): answer for answer in my_answers}
+                    )
                 for answer in my_answers:
                     question_id = int(answer.get('question_id'))
                     answer_selected_options = list(answer.get('selected_options') or [])
@@ -39223,35 +39770,20 @@ class Database:
                     }
                     if is_test:
                         question_meta = question_meta_by_id.get(question_id) or {}
-                        expected_options = list(question_meta.get('correct_options') or [])
-                        question_type = str(question_meta.get('type') or '')
-                        has_answer = bool(answer_selected_options or answer_text_value or answer.get('rating_value') is not None)
-                        if has_answer:
-                            test_answered_questions += 1
-
-                        is_correct_answer = False
-                        if question_type == 'single':
-                            is_correct_answer = (
-                                len(expected_options) == 1
-                                and len(answer_selected_options) == 1
-                                and answer_selected_options[0] == expected_options[0]
-                                and not answer_text_value
-                            )
-                        elif question_type == 'multiple':
-                            is_correct_answer = (
-                                set(answer_selected_options) == set(expected_options)
-                                and len(expected_options) > 0
-                                and not answer_text_value
-                            )
-                        if is_correct_answer:
-                            test_correct_answers += 1
-
-                        answer_payload['is_correct'] = bool(is_correct_answer)
-                        answer_payload['expected_options'] = expected_options
+                        per_question = (attempt_score or {}).get('per_question', {}).get(question_id) or {}
+                        answer_payload['is_correct'] = bool(per_question.get('is_correct'))
+                        answer_payload['is_partially_correct'] = bool(per_question.get('is_partially_correct'))
+                        answer_payload['points'] = float(per_question.get('points') or self.survey_question_points(question_meta))
+                        answer_payload['earned_points'] = float(per_question.get('earned_points') or 0.0)
+                        if reveal_correct_options:
+                            answer_payload['expected_options'] = list(question_meta.get('correct_options') or [])
 
                     my_answers_by_question[str(question_id)] = {
                         **answer_payload
                     }
+
+                test_status = self.survey_test_status(starts_at, ends_at, now=now) if is_test else None
+                draft_answers = row[30] if len(row) > 30 and isinstance(row[30], list) else []
 
                 my_response = None
                 if response_id is not None:
@@ -39262,13 +39794,27 @@ class Database:
                         'answers_by_question': my_answers_by_question
                     }
                     if is_test:
-                        score_percent = round((test_correct_answers / test_total_questions) * 100, 1) if test_total_questions > 0 else 0.0
+                        stored_percent = row[26] if len(row) > 26 else None
+                        stored_earned = row[27] if len(row) > 27 else None
+                        stored_max = row[28] if len(row) > 28 else None
                         my_response['test_summary'] = {
-                            'total_questions': int(test_total_questions),
-                            'answered_questions': int(test_answered_questions),
-                            'correct_answers': int(test_correct_answers),
-                            'score_percent': float(score_percent)
+                            'total_questions': int((attempt_score or {}).get('total_questions') or 0),
+                            'answered_questions': int((attempt_score or {}).get('answered_questions') or 0),
+                            'correct_answers': int((attempt_score or {}).get('correct_answers') or 0),
+                            'earned_points': float(stored_earned) if stored_earned is not None else float((attempt_score or {}).get('earned_points') or 0.0),
+                            'max_points': float(stored_max) if stored_max is not None else float((attempt_score or {}).get('max_points') or 0.0),
+                            'score_percent': float(stored_percent) if stored_percent is not None else float((attempt_score or {}).get('score_percent') or 0.0),
+                            'is_auto_submitted': bool(row[29]) if len(row) > 29 else False
                         }
+
+                # Пройти можно только внутри окна теста. Повторная попытка —
+                # только если тест это разрешает.
+                can_submit = assignment_status != 'completed'
+                if is_test:
+                    can_submit = (
+                        test_status == self.SURVEY_TEST_STATUS_ACTIVE
+                        and (assignment_status != 'completed' or not single_attempt)
+                    )
 
                 result.append({
                     'id': survey_id,
@@ -39287,6 +39833,15 @@ class Database:
                         'is_repeat': int(repeat_iteration) > 1
                     },
                     'is_test': bool(is_test),
+                    'test': {
+                        'status': test_status,
+                        'starts_at': self._survey_dt_to_iso(starts_at),
+                        'ends_at': self._survey_dt_to_iso(ends_at),
+                        'single_attempt': bool(single_attempt),
+                        'affects_quality': bool(affects_quality),
+                        'max_points': float((attempt_score or {}).get('max_points') or 0.0),
+                        'questions_count': int((attempt_score or {}).get('total_questions') or 0)
+                    } if is_test else None,
                     'assignment': {
                         'direction_ids': normalized_direction_ids,
                         'tenure_weeks_min': row[7],
@@ -39299,9 +39854,11 @@ class Database:
                         'status': assignment_status,
                         'assigned_at': self._survey_dt_to_iso(row[14]),
                         'completed_at': self._survey_dt_to_iso(row[15]),
+                        'started_at': self._survey_dt_to_iso(row[25]) if len(row) > 25 else None,
                         'response_id': response_id,
                         'submitted_at': self._survey_dt_to_iso(row[17]),
-                        'can_submit': assignment_status != 'completed'
+                        'can_submit': can_submit,
+                        'draft_answers': draft_answers
                     },
                     'my_response': my_response,
                     'statistics': {
@@ -39316,7 +39873,7 @@ class Database:
 
             return result
 
-    def submit_survey_response(self, survey_id, operator_id, answers):
+    def submit_survey_response(self, survey_id, operator_id, answers, auto_submitted=False):
         survey_id = int(survey_id)
         operator_id = int(operator_id)
 
@@ -39324,15 +39881,483 @@ class Database:
             raise ValueError("SURVEY_ANSWERS_REQUIRED")
 
         with self._get_cursor() as cursor:
+            return self._submit_survey_response_tx(
+                cursor,
+                survey_id=survey_id,
+                operator_id=operator_id,
+                answers=answers,
+                auto_submitted=auto_submitted
+            )
+
+    def _submit_survey_response_tx(self, cursor, *, survey_id, operator_id, answers, auto_submitted=False):
+        """
+        Отправка попытки. Автоотправка по окончании окна теста идёт тем же путём,
+        поэтому подсчёт баллов и передача в качество не могут разойтись
+        с обычной отправкой; отличие одно — незаполненные вопросы не блокируют.
+        """
+        cursor.execute("""
+            SELECT
+                id,
+                COALESCE(is_test, FALSE),
+                starts_at,
+                ends_at,
+                COALESCE(single_attempt, TRUE),
+                COALESCE(affects_quality, FALSE),
+                title,
+                created_by
+            FROM surveys
+            WHERE id = %s
+        """, (survey_id,))
+        survey_row = cursor.fetchone()
+        if not survey_row:
+            raise ValueError("SURVEY_NOT_FOUND")
+        is_test = bool(survey_row[1])
+        starts_at = survey_row[2]
+        ends_at = survey_row[3]
+        single_attempt = bool(survey_row[4])
+        affects_quality = bool(survey_row[5])
+        survey_title = str(survey_row[6] or '')
+        survey_created_by = survey_row[7]
+
+        if is_test and not auto_submitted:
+            test_status = self.survey_test_status(starts_at, ends_at)
+            if test_status == self.SURVEY_TEST_STATUS_SCHEDULED:
+                raise ValueError("SURVEY_TEST_NOT_STARTED")
+            if test_status == self.SURVEY_TEST_STATUS_FINISHED:
+                raise ValueError("SURVEY_TEST_FINISHED")
+
+        cursor.execute("""
+            SELECT id, status
+            FROM survey_assignments
+            WHERE survey_id = %s AND operator_id = %s
+        """, (survey_id, operator_id))
+        assignment_row = cursor.fetchone()
+        if not assignment_row:
+            raise PermissionError("SURVEY_NOT_ASSIGNED")
+
+        assignment_id = int(assignment_row[0])
+        assignment_status = str(assignment_row[1] or 'assigned')
+        # Опрос всегда одноразовый; у теста повтор разрешает переключатель
+        # «одна попытка».
+        if assignment_status == 'completed' and (not is_test or single_attempt):
+            raise ValueError("SURVEY_ALREADY_COMPLETED")
+
+        cursor.execute("""
+            SELECT
+                id,
+                question_text,
+                question_type,
+                is_required,
+                allow_other,
+                options_json,
+                correct_options_json,
+                points,
+                partial_credit
+            FROM survey_questions
+            WHERE survey_id = %s
+            ORDER BY position, id
+        """, (survey_id,))
+        question_rows = cursor.fetchall()
+        if not question_rows:
+            raise ValueError("SURVEY_HAS_NO_QUESTIONS")
+
+        questions_by_id = {}
+        for row in question_rows:
+            options = row[5] if isinstance(row[5], list) else []
+            correct_options = row[6] if len(row) > 6 and isinstance(row[6], list) else []
+            questions_by_id[int(row[0])] = {
+                'id': int(row[0]),
+                'text': row[1],
+                'type': row[2],
+                'required': bool(row[3]),
+                'allow_other': bool(row[4]),
+                'options': [str(item) for item in options],
+                'correct_options': [str(item) for item in correct_options],
+                'points': self.survey_question_points({'points': row[7] if len(row) > 7 else None}),
+                'partial_credit': bool(row[8]) if len(row) > 8 else False
+            }
+
+        answers_by_question = {}
+        for raw_answer in answers:
+            if not isinstance(raw_answer, dict):
+                continue
+            raw_question_id = raw_answer.get('question_id')
+            try:
+                question_id = int(raw_question_id)
+            except Exception:
+                continue
+            if question_id in questions_by_id:
+                answers_by_question[question_id] = raw_answer
+
+        normalized_answers = []
+        for question in questions_by_id.values():
+            raw_answer = answers_by_question.get(question['id']) or {}
+            qtype = question['type']
+            if is_test and qtype not in ('single', 'multiple'):
+                raise ValueError(f"SURVEY_TEST_RATING_NOT_ALLOWED_{question['id']}")
+
+            answer_text = str(raw_answer.get('answer_text') or '').strip()
+            if is_test:
+                answer_text = ''
+            if answer_text and not question.get('allow_other'):
+                answer_text = ''
+
+            if qtype == 'rating':
+                rating_value = raw_answer.get('rating_value')
+                if rating_value in (None, ''):
+                    if question['required'] and not auto_submitted:
+                        raise ValueError(f"SURVEY_REQUIRED_QUESTION_{question['id']}")
+                    continue
+                try:
+                    rating_value = int(rating_value)
+                except Exception:
+                    raise ValueError(f"SURVEY_INVALID_RATING_{question['id']}")
+                if rating_value < 1 or rating_value > 5:
+                    raise ValueError(f"SURVEY_INVALID_RATING_{question['id']}")
+
+                normalized_answers.append({
+                    'question_id': question['id'],
+                    'selected_options': [],
+                    'answer_text': None,
+                    'rating_value': rating_value
+                })
+                continue
+
+            raw_selected_options = raw_answer.get('selected_options')
+            if isinstance(raw_selected_options, list):
+                selected_options = [str(item or '').strip() for item in raw_selected_options if str(item or '').strip()]
+            elif raw_selected_options is None:
+                selected_options = []
+            else:
+                one = str(raw_selected_options).strip()
+                selected_options = [one] if one else []
+
+            selected_unique = []
+            for selected in selected_options:
+                if selected not in selected_unique:
+                    selected_unique.append(selected)
+
+            allowed_options = set(question.get('options') or [])
+            invalid_selected = [item for item in selected_unique if item not in allowed_options]
+            if invalid_selected and not question.get('allow_other'):
+                raise ValueError(f"SURVEY_INVALID_OPTION_{question['id']}")
+
+            valid_selected = [item for item in selected_unique if item in allowed_options]
+            if qtype == 'single' and len(valid_selected) > 1:
+                raise ValueError(f"SURVEY_TOO_MANY_OPTIONS_{question['id']}")
+
+            if qtype == 'single' and answer_text:
+                valid_selected = []
+                invalid_selected = []
+
+            if (
+                question['required']
+                and not auto_submitted
+                and not valid_selected
+                and not answer_text
+                and not (question.get('allow_other') and invalid_selected)
+            ):
+                raise ValueError(f"SURVEY_REQUIRED_QUESTION_{question['id']}")
+
+            if question.get('allow_other') and invalid_selected and not answer_text:
+                answer_text = ', '.join(invalid_selected)
+
+            if answer_text and len(answer_text) > self.SURVEY_OTHER_ANSWER_MAX_LENGTH:
+                raise ValueError(f"SURVEY_OTHER_TEXT_TOO_LONG_{question['id']}")
+
+            if not valid_selected and not answer_text:
+                continue
+
+            normalized_answers.append({
+                'question_id': question['id'],
+                'selected_options': valid_selected,
+                'answer_text': answer_text or None,
+                'rating_value': None
+            })
+
+        # Автоотправка сохраняет даже пустую попытку: «не ответил» — это
+        # результат 0, а не отсутствие попытки.
+        if not normalized_answers and not auto_submitted:
+            raise ValueError("SURVEY_EMPTY_RESPONSE")
+
+        attempt_score = None
+        if is_test:
+            attempt_score = self.score_survey_test_attempt(
+                list(questions_by_id.values()),
+                {answer['question_id']: answer for answer in normalized_answers}
+            )
+
+        cursor.execute("""
+            SELECT started_at
+            FROM survey_attempt_drafts
+            WHERE survey_id = %s AND operator_id = %s
+        """, (survey_id, operator_id))
+        draft_row = cursor.fetchone()
+        attempt_started_at = draft_row[0] if draft_row else None
+
+        cursor.execute("""
+            SELECT id
+            FROM survey_responses
+            WHERE survey_id = %s AND operator_id = %s
+        """, (survey_id, operator_id))
+        response_row = cursor.fetchone()
+
+        if response_row:
+            response_id = int(response_row[0])
+            cursor.execute("DELETE FROM survey_answers WHERE response_id = %s", (response_id,))
             cursor.execute("""
-                SELECT id, COALESCE(is_test, FALSE)
+                UPDATE survey_responses
+                SET
+                    assignment_id = %s,
+                    submitted_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    started_at = COALESCE(%s, started_at),
+                    earned_points = %s,
+                    max_points = %s,
+                    score_percent = %s,
+                    is_auto_submitted = %s
+                WHERE id = %s
+            """, (
+                assignment_id,
+                attempt_started_at,
+                (attempt_score or {}).get('earned_points'),
+                (attempt_score or {}).get('max_points'),
+                (attempt_score or {}).get('score_percent'),
+                bool(auto_submitted),
+                response_id
+            ))
+        else:
+            cursor.execute("""
+                INSERT INTO survey_responses (
+                    survey_id,
+                    operator_id,
+                    assignment_id,
+                    submitted_at,
+                    started_at,
+                    earned_points,
+                    max_points,
+                    score_percent,
+                    is_auto_submitted
+                )
+                VALUES (
+                    %s,
+                    %s,
+                    %s,
+                    (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s
+                )
+                RETURNING id
+            """, (
+                survey_id,
+                operator_id,
+                assignment_id,
+                attempt_started_at,
+                (attempt_score or {}).get('earned_points'),
+                (attempt_score or {}).get('max_points'),
+                (attempt_score or {}).get('score_percent'),
+                bool(auto_submitted)
+            ))
+            response_id = int(cursor.fetchone()[0])
+
+        for answer in normalized_answers:
+            cursor.execute("""
+                INSERT INTO survey_answers (
+                    response_id,
+                    question_id,
+                    answer_text,
+                    selected_options_json,
+                    rating_value,
+                    created_at
+                )
+                VALUES (
+                    %s,
+                    %s,
+                    %s,
+                    %s::jsonb,
+                    %s,
+                    (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                )
+            """, (
+                response_id,
+                answer['question_id'],
+                answer['answer_text'],
+                json.dumps(answer['selected_options'], ensure_ascii=False),
+                answer['rating_value']
+            ))
+
+        cursor.execute("""
+            UPDATE survey_assignments
+            SET
+                status = 'completed',
+                completed_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                started_at = COALESCE(started_at, %s)
+            WHERE id = %s
+        """, (attempt_started_at, assignment_id))
+
+        # Черновик больше не нужен: попытка закрыта.
+        cursor.execute("""
+            DELETE FROM survey_attempt_drafts
+            WHERE survey_id = %s AND operator_id = %s
+        """, (survey_id, operator_id))
+
+        quality_call_id = None
+        if is_test and affects_quality:
+            quality_call_id = self._upsert_knowledge_test_evaluation_tx(
+                cursor,
+                survey_id=survey_id,
+                survey_title=survey_title,
+                survey_created_by=survey_created_by,
+                operator_id=operator_id,
+                response_id=response_id,
+                score_percent=float((attempt_score or {}).get('score_percent') or 0.0)
+            )
+
+        cursor.execute("SELECT completed_at FROM survey_assignments WHERE id = %s", (assignment_id,))
+        completed_row = cursor.fetchone()
+        completed_at = completed_row[0] if completed_row else None
+
+        return {
+            'survey_id': survey_id,
+            'assignment_id': assignment_id,
+            'response_id': response_id,
+            'completed_at': self._survey_dt_to_iso(completed_at),
+            'is_test': bool(is_test),
+            'auto_submitted': bool(auto_submitted),
+            'test_summary': {
+                'total_questions': int((attempt_score or {}).get('total_questions') or 0),
+                'answered_questions': int((attempt_score or {}).get('answered_questions') or 0),
+                'correct_answers': int((attempt_score or {}).get('correct_answers') or 0),
+                'earned_points': float((attempt_score or {}).get('earned_points') or 0.0),
+                'max_points': float((attempt_score or {}).get('max_points') or 0.0),
+                'score_percent': float((attempt_score or {}).get('score_percent') or 0.0),
+                'sent_to_quality': quality_call_id is not None,
+                'quality_call_id': quality_call_id
+            } if is_test else None
+        }
+
+    # Заголовок записи журнала для оценки «Тестирование знаний»: он же
+    # отличает такие строки в выгрузках, где нет технических полей.
+    KNOWLEDGE_TEST_EVALUATION_PREFIX = 'Тестирование знаний: '
+
+    @classmethod
+    def knowledge_test_evaluation_label(cls, survey_title):
+        title = str(survey_title or '').strip() or 'без названия'
+        return (cls.KNOWLEDGE_TEST_EVALUATION_PREFIX + title)[:255]
+
+    def _upsert_knowledge_test_evaluation_tx(self, cursor, *, survey_id, survey_title, survey_created_by,
+                                            operator_id, response_id, score_percent, touch_timestamps=True):
+        """
+        Результат теста попадает в журнал оценок отдельной записью: она входит
+        в средний показатель качества, но не считается прослушанным звонком
+        (см. survey_response_id в подсчётах call_count).
+        """
+        cursor.execute("SELECT direction_id, supervisor_id FROM users WHERE id = %s", (operator_id,))
+        operator_row = cursor.fetchone()
+        direction_id = operator_row[0] if operator_row else None
+        supervisor_id = operator_row[1] if operator_row else None
+
+        evaluator_id = survey_created_by if survey_created_by is not None else supervisor_id
+        if evaluator_id is None:
+            # calls.evaluator_id обязателен: без автора теста запись создать
+            # нельзя, но саму попытку это ломать не должно.
+            logging.warning(
+                "Knowledge test %s: no evaluator for operator %s, quality evaluation skipped",
+                survey_id, operator_id
+            )
+            return None
+
+        score_value = max(0.0, min(100.0, round(float(score_percent or 0.0), 2)))
+        label = self.knowledge_test_evaluation_label(survey_title)
+
+        cursor.execute("SELECT id FROM calls WHERE survey_response_id = %s", (response_id,))
+        existing = cursor.fetchone()
+        if existing:
+            call_id = int(existing[0])
+            if touch_timestamps:
+                # Новая попытка — оценка датируется ею.
+                cursor.execute("""
+                    UPDATE calls
+                    SET
+                        evaluator_id = %s,
+                        phone_number = %s,
+                        appeal_date = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                        month = TO_CHAR((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'), 'YYYY-MM'),
+                        score = %s,
+                        direction_id = %s,
+                        created_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                    WHERE id = %s
+                """, (evaluator_id, label, score_value, direction_id, call_id))
+            else:
+                # Пересчёт по изменённым правилам: балл новый, дата прохождения
+                # прежняя — иначе оценка переехала бы в другой месяц.
+                cursor.execute("""
+                    UPDATE calls
+                    SET
+                        phone_number = %s,
+                        score = %s
+                    WHERE id = %s
+                """, (label, score_value, call_id))
+            return call_id
+
+        cursor.execute("""
+            INSERT INTO calls (
+                evaluator_id,
+                operator_id,
+                month,
+                phone_number,
+                appeal_date,
+                score,
+                direction_id,
+                is_draft,
+                survey_response_id,
+                created_at
+            )
+            VALUES (
+                %s,
+                %s,
+                TO_CHAR((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'), 'YYYY-MM'),
+                %s,
+                (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                %s,
+                %s,
+                FALSE,
+                %s,
+                (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+            )
+            RETURNING id
+        """, (evaluator_id, operator_id, label, score_value, direction_id, response_id))
+        return int(cursor.fetchone()[0])
+
+    def save_survey_attempt_draft(self, survey_id, operator_id, answers):
+        """
+        Промежуточное сохранение начатой попытки теста. Нужно, чтобы по
+        окончании окна автоотправка сохранила уже выбранные ответы.
+        """
+        survey_id = int(survey_id)
+        operator_id = int(operator_id)
+        if not isinstance(answers, list):
+            raise ValueError("SURVEY_ANSWERS_REQUIRED")
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT COALESCE(is_test, FALSE), starts_at, ends_at, COALESCE(single_attempt, TRUE)
                 FROM surveys
                 WHERE id = %s
             """, (survey_id,))
             survey_row = cursor.fetchone()
             if not survey_row:
                 raise ValueError("SURVEY_NOT_FOUND")
-            is_test = bool(survey_row[1])
+            if not bool(survey_row[0]):
+                raise ValueError("SURVEY_NOT_A_TEST")
+
+            test_status = self.survey_test_status(survey_row[1], survey_row[2])
+            if test_status == self.SURVEY_TEST_STATUS_SCHEDULED:
+                raise ValueError("SURVEY_TEST_NOT_STARTED")
+            if test_status == self.SURVEY_TEST_STATUS_FINISHED:
+                raise ValueError("SURVEY_TEST_FINISHED")
 
             cursor.execute("""
                 SELECT id, status
@@ -39342,217 +40367,188 @@ class Database:
             assignment_row = cursor.fetchone()
             if not assignment_row:
                 raise PermissionError("SURVEY_NOT_ASSIGNED")
-
-            assignment_id = int(assignment_row[0])
-            assignment_status = str(assignment_row[1] or 'assigned')
-            if assignment_status == 'completed':
+            if str(assignment_row[1] or '') == 'completed' and bool(survey_row[3]):
                 raise ValueError("SURVEY_ALREADY_COMPLETED")
 
-            cursor.execute("""
-                SELECT
-                    id,
-                    question_text,
-                    question_type,
-                    is_required,
-                    allow_other,
-                    options_json,
-                    correct_options_json
-                FROM survey_questions
-                WHERE survey_id = %s
-                ORDER BY position, id
-            """, (survey_id,))
-            question_rows = cursor.fetchall()
-            if not question_rows:
-                raise ValueError("SURVEY_HAS_NO_QUESTIONS")
+            allowed_question_ids = set()
+            cursor.execute("SELECT id FROM survey_questions WHERE survey_id = %s", (survey_id,))
+            for row in cursor.fetchall():
+                allowed_question_ids.add(int(row[0]))
 
-            questions_by_id = {}
-            for row in question_rows:
-                options = row[5] if isinstance(row[5], list) else []
-                correct_options = row[6] if len(row) > 6 and isinstance(row[6], list) else []
-                questions_by_id[int(row[0])] = {
-                    'id': int(row[0]),
-                    'text': row[1],
-                    'type': row[2],
-                    'required': bool(row[3]),
-                    'allow_other': bool(row[4]),
-                    'options': [str(item) for item in options],
-                    'correct_options': [str(item) for item in correct_options]
-                }
-
-            answers_by_question = {}
+            draft_answers = []
+            seen_question_ids = set()
             for raw_answer in answers:
                 if not isinstance(raw_answer, dict):
                     continue
-                raw_question_id = raw_answer.get('question_id')
                 try:
-                    question_id = int(raw_question_id)
+                    question_id = int(raw_answer.get('question_id'))
                 except Exception:
                     continue
-                if question_id in questions_by_id:
-                    answers_by_question[question_id] = raw_answer
-
-            normalized_answers = []
-            for question in questions_by_id.values():
-                raw_answer = answers_by_question.get(question['id']) or {}
-                qtype = question['type']
-                if is_test and qtype not in ('single', 'multiple'):
-                    raise ValueError(f"SURVEY_TEST_RATING_NOT_ALLOWED_{question['id']}")
-
-                answer_text = str(raw_answer.get('answer_text') or '').strip()
-                if is_test:
-                    answer_text = ''
-                if answer_text and not question.get('allow_other'):
-                    answer_text = ''
-
-                if qtype == 'rating':
-                    rating_value = raw_answer.get('rating_value')
-                    if rating_value in (None, ''):
-                        if question['required']:
-                            raise ValueError(f"SURVEY_REQUIRED_QUESTION_{question['id']}")
-                        continue
-                    try:
-                        rating_value = int(rating_value)
-                    except Exception:
-                        raise ValueError(f"SURVEY_INVALID_RATING_{question['id']}")
-                    if rating_value < 1 or rating_value > 5:
-                        raise ValueError(f"SURVEY_INVALID_RATING_{question['id']}")
-
-                    normalized_answers.append({
-                        'question_id': question['id'],
-                        'selected_options': [],
-                        'answer_text': None,
-                        'rating_value': rating_value
-                    })
+                if question_id not in allowed_question_ids or question_id in seen_question_ids:
                     continue
-
-                raw_selected_options = raw_answer.get('selected_options')
-                if isinstance(raw_selected_options, list):
-                    selected_options = [str(item or '').strip() for item in raw_selected_options if str(item or '').strip()]
-                elif raw_selected_options is None:
-                    selected_options = []
-                else:
-                    one = str(raw_selected_options).strip()
-                    selected_options = [one] if one else []
-
-                selected_unique = []
-                for selected in selected_options:
-                    if selected not in selected_unique:
-                        selected_unique.append(selected)
-
-                allowed_options = set(question.get('options') or [])
-                invalid_selected = [item for item in selected_unique if item not in allowed_options]
-                if invalid_selected and not question.get('allow_other'):
-                    raise ValueError(f"SURVEY_INVALID_OPTION_{question['id']}")
-
-                valid_selected = [item for item in selected_unique if item in allowed_options]
-                if qtype == 'single' and len(valid_selected) > 1:
-                    raise ValueError(f"SURVEY_TOO_MANY_OPTIONS_{question['id']}")
-
-                if qtype == 'single' and answer_text:
-                    valid_selected = []
-                    invalid_selected = []
-
-                if question['required'] and not valid_selected and not answer_text and not (question.get('allow_other') and invalid_selected):
-                    raise ValueError(f"SURVEY_REQUIRED_QUESTION_{question['id']}")
-
-                if question.get('allow_other') and invalid_selected and not answer_text:
-                    answer_text = ', '.join(invalid_selected)
-
-                if answer_text and len(answer_text) > self.SURVEY_OTHER_ANSWER_MAX_LENGTH:
-                    raise ValueError(f"SURVEY_OTHER_TEXT_TOO_LONG_{question['id']}")
-
-                if not valid_selected and not answer_text:
-                    continue
-
-                normalized_answers.append({
-                    'question_id': question['id'],
-                    'selected_options': valid_selected,
-                    'answer_text': answer_text or None,
-                    'rating_value': None
+                seen_question_ids.add(question_id)
+                raw_selected = raw_answer.get('selected_options')
+                selected = []
+                if isinstance(raw_selected, list):
+                    for item in raw_selected:
+                        text = str(item or '').strip()
+                        if text and text not in selected:
+                            selected.append(text)
+                draft_answers.append({
+                    'question_id': question_id,
+                    'selected_options': selected
                 })
 
-            if not normalized_answers:
-                raise ValueError("SURVEY_EMPTY_RESPONSE")
-
             cursor.execute("""
-                SELECT id
-                FROM survey_responses
-                WHERE survey_id = %s AND operator_id = %s
-            """, (survey_id, operator_id))
-            response_row = cursor.fetchone()
-
-            if response_row:
-                response_id = int(response_row[0])
-                cursor.execute("DELETE FROM survey_answers WHERE response_id = %s", (response_id,))
-                cursor.execute("""
-                    UPDATE survey_responses
-                    SET
-                        assignment_id = %s,
-                        submitted_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
-                    WHERE id = %s
-                """, (assignment_id, response_id))
-            else:
-                cursor.execute("""
-                    INSERT INTO survey_responses (
-                        survey_id,
-                        operator_id,
-                        assignment_id,
-                        submitted_at
-                    )
-                    VALUES (
-                        %s,
-                        %s,
-                        %s,
-                        (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
-                    )
-                    RETURNING id
-                """, (survey_id, operator_id, assignment_id))
-                response_id = int(cursor.fetchone()[0])
-
-            for answer in normalized_answers:
-                cursor.execute("""
-                    INSERT INTO survey_answers (
-                        response_id,
-                        question_id,
-                        answer_text,
-                        selected_options_json,
-                        rating_value,
-                        created_at
-                    )
-                    VALUES (
-                        %s,
-                        %s,
-                        %s,
-                        %s::jsonb,
-                        %s,
-                        (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
-                    )
-                """, (
-                    response_id,
-                    answer['question_id'],
-                    answer['answer_text'],
-                    json.dumps(answer['selected_options'], ensure_ascii=False),
-                    answer['rating_value']
-                ))
+                INSERT INTO survey_attempt_drafts (survey_id, operator_id, answers_json, started_at, updated_at)
+                VALUES (
+                    %s,
+                    %s,
+                    %s::jsonb,
+                    (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                )
+                ON CONFLICT (survey_id, operator_id) DO UPDATE
+                SET
+                    answers_json = EXCLUDED.answers_json,
+                    updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                RETURNING started_at
+            """, (survey_id, operator_id, json.dumps(draft_answers, ensure_ascii=False)))
+            started_at = cursor.fetchone()[0]
 
             cursor.execute("""
                 UPDATE survey_assignments
                 SET
-                    status = 'completed',
-                    completed_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                    status = CASE WHEN status = 'assigned' THEN 'in_progress' ELSE status END,
+                    started_at = COALESCE(started_at, %s)
                 WHERE id = %s
-            """, (assignment_id,))
-
-            cursor.execute("SELECT completed_at FROM survey_assignments WHERE id = %s", (assignment_id,))
-            completed_row = cursor.fetchone()
-            completed_at = completed_row[0] if completed_row else None
+            """, (started_at, int(assignment_row[0])))
 
             return {
                 'survey_id': survey_id,
-                'assignment_id': assignment_id,
-                'response_id': response_id,
-                'completed_at': self._survey_dt_to_iso(completed_at)
+                'started_at': self._survey_dt_to_iso(started_at),
+                'answers_count': len(draft_answers)
             }
+
+    def autoclose_due_survey_tests(self):
+        """
+        Тесты, у которых истекло время: начатые попытки отправляются
+        автоматически с уже выбранными ответами, чтобы результат не потерялся.
+        Не начатые попытки остаются незавершёнными — оператор к тесту не заходил.
+        """
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT d.survey_id, d.operator_id
+                FROM survey_attempt_drafts d
+                JOIN surveys s ON s.id = d.survey_id
+                WHERE COALESCE(s.is_test, FALSE)
+                  AND s.ends_at IS NOT NULL
+                  AND s.ends_at <= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                ORDER BY d.survey_id, d.operator_id
+            """)
+            pending = [(int(row[0]), int(row[1])) for row in cursor.fetchall()]
+
+        submitted = 0
+        failed = 0
+        for survey_id, operator_id in pending:
+            try:
+                with self._get_cursor() as cursor:
+                    cursor.execute("""
+                        SELECT answers_json
+                        FROM survey_attempt_drafts
+                        WHERE survey_id = %s AND operator_id = %s
+                    """, (survey_id, operator_id))
+                    draft_row = cursor.fetchone()
+                    if not draft_row:
+                        continue
+                    draft_answers = draft_row[0] if isinstance(draft_row[0], list) else []
+                    self._submit_survey_response_tx(
+                        cursor,
+                        survey_id=survey_id,
+                        operator_id=operator_id,
+                        answers=draft_answers,
+                        auto_submitted=True
+                    )
+                submitted += 1
+            except ValueError as value_error:
+                # Попытка уже закрыта — черновик убираем, иначе job будет
+                # безуспешно возвращаться к нему каждую минуту.
+                failed += 1
+                if str(value_error) == 'SURVEY_ALREADY_COMPLETED':
+                    try:
+                        with self._get_cursor() as cursor:
+                            cursor.execute("""
+                                DELETE FROM survey_attempt_drafts
+                                WHERE survey_id = %s AND operator_id = %s
+                            """, (survey_id, operator_id))
+                    except Exception:
+                        logging.exception(
+                            "Cleanup of stale survey draft %s/%s failed", survey_id, operator_id
+                        )
+                else:
+                    logging.exception(
+                        "Auto-submit of survey test %s for operator %s failed", survey_id, operator_id
+                    )
+            except Exception:
+                failed += 1
+                logging.exception(
+                    "Auto-submit of survey test %s for operator %s failed", survey_id, operator_id
+                )
+
+        return {'submitted': submitted, 'failed': failed, 'candidates': len(pending)}
+
+    def get_survey_assignable_groups(self, requester_id, requester_role, scope_department_id=None):
+        """
+        Группы с текущим составом операторов — для назначения теста «на группу».
+        Отдаётся вместе со списком опросов, чтобы фронт не делал второй запрос.
+        """
+        role = self._normalize_survey_role(requester_role)
+        if not (role_has_min(role, 'admin') or role in ('sv', 'trainer')):
+            return []
+
+        with self._get_cursor() as cursor:
+            visible_operator_ids = set(self._get_visible_operator_ids_for_requester_tx(
+                cursor,
+                requester_id,
+                role,
+                scope_department_id=scope_department_id
+            ))
+            if not visible_operator_ids:
+                return []
+
+            params = [list(visible_operator_ids)]
+            department_filter = ""
+            if scope_department_id is not None and not role_has_min(role, 'admin'):
+                department_filter = "AND (g.department_id IS NULL OR g.department_id = %s)"
+                params.append(int(scope_department_id))
+
+            cursor.execute(f"""
+                SELECT
+                    g.id,
+                    g.name,
+                    g.department_id,
+                    g.direction_id,
+                    ARRAY_AGG(gom.operator_id ORDER BY gom.operator_id)
+                FROM groups g
+                JOIN group_operator_memberships gom
+                    ON gom.group_id = g.id AND gom.end_date IS NULL
+                WHERE g.status = 'active'
+                  AND gom.operator_id = ANY(%s)
+                  {department_filter}
+                GROUP BY g.id, g.name, g.department_id, g.direction_id
+                ORDER BY g.name
+            """, tuple(params))
+
+            return [
+                {
+                    'id': int(row[0]),
+                    'name': row[1],
+                    'department_id': int(row[2]) if row[2] is not None else None,
+                    'direction_id': int(row[3]) if row[3] is not None else None,
+                    'operator_ids': self._survey_int_id_list(row[4] or [])
+                }
+                for row in cursor.fetchall()
+            ]
 
     def _task_visible_for_requester(self, requester_role, requester_id, created_by, assigned_to, assignee_role,
                                     assignee_supervisor_id, requested_by=None):

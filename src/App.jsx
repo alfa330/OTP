@@ -39863,7 +39863,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         let nextCount = 0;
 
                         if (role === 'operator') {
-                            nextCount = surveys.filter((survey) => String(survey?.my_assignment?.status || '').toLowerCase() !== 'completed').length;
+                            // Бейдж — только о том, что оператор ещё не прошёл и
+                            // ещё может пройти: тест с истёкшим временем и
+                            // разрешённый повтор уже пройденного не считаем.
+                            nextCount = surveys.filter((survey) => (
+                                survey?.my_assignment?.can_submit === true
+                                && String(survey?.my_assignment?.status || '').toLowerCase() !== 'completed'
+                            )).length;
                         } else {
                             nextCount = surveys.reduce((sum, survey) => {
                                 const pending = Number(survey?.statistics?.pending_count || 0);
@@ -46508,8 +46514,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         {(() => {
                                           const evals = operatorData?.evaluations ?? [];
                                           const evalsFiltered = evals.filter(ev => !(ev?.call?.is_imported === true || ev?.is_imported === true));
-                                          const evalCount = evalsFiltered.length;
-                                          const avgScore = evalCount > 0 ? evalsFiltered.reduce((sum, ev) => sum + Number(ev.score || 0), 0) / evalCount : 0;
+                                          // «Тестирование знаний» входит в средний балл, но прослушанным
+                                          // звонком не считается — план прослушки от него не уменьшается.
+                                          const listenedEvals = evalsFiltered.filter(ev => !ev?.knowledge_test);
+                                          const evalCount = listenedEvals.length;
+                                          const avgScore = evalsFiltered.length > 0
+                                            ? evalsFiltered.reduce((sum, ev) => sum + Number(ev.score || 0), 0) / evalsFiltered.length
+                                            : 0;
                                           const evaluationTarget = operatorData?.evaluation_target || null;
                                           const targetEvalCount = Number.isFinite(Number(evaluationTarget?.required_calls)) ? Number(evaluationTarget.required_calls) : 20;
                                           const remainingEvalCount = Math.max(0, targetEvalCount - evalCount);
@@ -47588,11 +47599,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             );
                                         };
 
-                                        const evaluationCount = evalsForCalc.length;
+                                        // Средний балл — по всем оценкам (тест тоже влияет на качество),
+                                        // а прогресс по плану — только по прослушанным звонкам:
+                                        // «Тестирование знаний» план прослушки не закрывает.
+                                        const listenedEvalsForCalc = evalsForCalc.filter(ev => !ev?.knowledge_test);
+                                        const evaluationCount = listenedEvalsForCalc.length;
                                         const averageScore =
-                                            evaluationCount > 0
-                                            ? evalsForCalc.reduce((sum, ev) => sum + Number(ev.score || 0), 0) / evaluationCount
+                                            evalsForCalc.length > 0
+                                            ? evalsForCalc.reduce((sum, ev) => sum + Number(ev.score || 0), 0) / evalsForCalc.length
                                             : 0;
+                                        const knowledgeTestEvalCount = evalsForCalc.length - evaluationCount;
                                         const targetEvalCount = Number.isFinite(Number(evaluationTarget?.required_calls)) ? Number(evaluationTarget.required_calls) : 20;
                                         const remainingEvalCount = Math.max(0, targetEvalCount - evaluationCount);
                                         const workedHoursUsed = Number(evaluationTarget?.worked_hours_used ?? evaluationTarget?.accounted_hours ?? 0);
@@ -47968,11 +47984,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     <span className="text-xs text-gray-500">#{index + 1}</span>
                                                                 </div>
                                                                 
-                                                                {/* Phone number */}
+                                                                {/* Subject: звонок, чат или пройденный тест */}
                                                                 <div className="flex items-center gap-2 mb-2">
-                                                                    <FaIcon className={`fas ${ev.c2d_snapshot_id ? 'fa-comments text-blue-400' : 'fa-phone text-gray-400'} text-xs`}></FaIcon>
-                                                                    <span className="text-sm font-medium text-gray-800">{ev.phone_number || '-'}</span>
-                                                                    {ev.c2d_snapshot_id && (
+                                                                    <FaIcon className={`fas ${
+                                                                        ev.knowledge_test
+                                                                            ? 'fa-graduation-cap text-indigo-400'
+                                                                            : (ev.c2d_snapshot_id ? 'fa-comments text-blue-400' : 'fa-phone text-gray-400')
+                                                                    } text-xs`}></FaIcon>
+                                                                    <span className="text-sm font-medium text-gray-800">
+                                                                        {ev.knowledge_test ? (ev.knowledge_test.title || 'Тест') : (ev.phone_number || '-')}
+                                                                    </span>
+                                                                    {ev.knowledge_test && (
+                                                                        <span className="inline-flex items-center rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">
+                                                                            Тестирование знаний
+                                                                        </span>
+                                                                    )}
+                                                                    {!ev.knowledge_test && ev.c2d_snapshot_id && (
                                                                         <span className="inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-[11px] font-semibold text-blue-700">Чат</span>
                                                                     )}
                                                                 </div>
@@ -47995,9 +48022,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     )}
                                                                 </div>
                                                                 
-                                                                {/* Summary */}
-                                                                <div className="text-sm text-gray-700 mb-2">{summarizeScores(ev.scores)}</div>
-                                                                
+                                                                {/* Summary: у теста вместо критериев — баллы */}
+                                                                {ev.knowledge_test ? (
+                                                                    <div className="text-sm text-gray-700 mb-2 tabular-nums">
+                                                                        Баллы: {ev.knowledge_test.earned_points != null ? ev.knowledge_test.earned_points : '—'}
+                                                                        {ev.knowledge_test.max_points != null ? ` / ${ev.knowledge_test.max_points}` : ''}
+                                                                        <span className="ml-2 text-xs text-gray-400">не считается прослушанным звонком</span>
+                                                                    </div>
+                                                                ) : (
+                                                                    <div className="text-sm text-gray-700 mb-2">{summarizeScores(ev.scores)}</div>
+                                                                )}
+
                                                                 {/* Comments preview */}
                                                                 {Array.isArray(ev.criterion_comments) && ev.criterion_comments.filter(Boolean).length > 0 ? (
                                                                     <div className="text-xs text-gray-500 line-clamp-2">
@@ -48091,6 +48126,29 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         </div>
                                                                     )}
 
+                                                                    {/* Тест оценивается баллами за вопросы, а не критериями направления */}
+                                                                    {ev.knowledge_test ? (
+                                                                    <div>
+                                                                        <h4 className="font-semibold text-gray-900 mb-2 text-sm">Тестирование знаний</h4>
+                                                                        <div className="rounded-lg border border-indigo-200 bg-indigo-50/60 p-3 space-y-1">
+                                                                            <div className="text-sm text-gray-800">{ev.knowledge_test.title || 'Тест'}</div>
+                                                                            <div className="text-xs text-gray-600 tabular-nums">
+                                                                                Баллы: {ev.knowledge_test.earned_points != null ? ev.knowledge_test.earned_points : '—'}
+                                                                                {ev.knowledge_test.max_points != null ? ` / ${ev.knowledge_test.max_points}` : ''}
+                                                                                {' · '}
+                                                                                результат {ev.score != null ? `${Number(ev.score).toFixed(1).replace(/\.0$/, '')}%` : '—'}
+                                                                            </div>
+                                                                            {ev.knowledge_test.is_auto_submitted && (
+                                                                                <div className="text-xs text-amber-700">
+                                                                                    Отправлено автоматически по истечении времени теста
+                                                                                </div>
+                                                                            )}
+                                                                            <div className="text-xs text-gray-500">
+                                                                                Влияет на средний балл качества, но не считается прослушанным звонком и не уменьшает план по звонкам.
+                                                                            </div>
+                                                                        </div>
+                                                                    </div>
+                                                                    ) : (
                                                                     <div>
                                                                         <h4 className="font-semibold text-gray-900 mb-2 text-sm">Критерии</h4>
                                                                         <div className="space-y-2">
@@ -48139,8 +48197,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             )}
                                                                         </div>
                                                                     </div>
+                                                                    )}
 
-                                                                    {!ev.c2d_snapshot_id && (
+                                                                    {!ev.c2d_snapshot_id && !ev.knowledge_test && (
                                                                     <div>
                                                                         <h4 className="font-semibold text-gray-900 mb-2 text-sm">Аудио</h4>
                                                                         {!canAccessSensitiveCallData ? (
@@ -48208,9 +48267,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         >
                                                             <td className="px-6 py-4 whitespace-nowrap">{index + 1}</td>
                                                             <td className="px-6 py-4 whitespace-nowrap flex items-center gap-2">
-                                                            {ev.c2d_snapshot_id && <FaIcon className="fas fa-comments text-blue-400 text-xs"></FaIcon>}
-                                                            <span>{ev.phone_number || '-'}</span>
-                                                            {ev.c2d_snapshot_id && (
+                                                            {ev.knowledge_test && <FaIcon className="fas fa-graduation-cap text-indigo-400 text-xs"></FaIcon>}
+                                                            {!ev.knowledge_test && ev.c2d_snapshot_id && <FaIcon className="fas fa-comments text-blue-400 text-xs"></FaIcon>}
+                                                            <span>{ev.knowledge_test ? (ev.knowledge_test.title || 'Тест') : (ev.phone_number || '-')}</span>
+                                                            {ev.knowledge_test && (
+                                                                <span className="inline-flex items-center rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">
+                                                                    Тестирование знаний
+                                                                </span>
+                                                            )}
+                                                            {!ev.knowledge_test && ev.c2d_snapshot_id && (
                                                                 <span className="inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-[11px] font-semibold text-blue-700">Чат</span>
                                                             )}
                                                             {isImported && (
@@ -48222,7 +48287,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             {ev.score != null ? Number(ev.score).toFixed(0) : '-'}
                                                             </td>
                                                             <td className="px-6 py-4 max-w-xs">
-                                                            <div className="text-sm text-gray-700">{summarizeScores(ev.scores)}</div>
+                                                            {ev.knowledge_test ? (
+                                                                <div className="text-sm text-gray-700 tabular-nums">
+                                                                    Баллы: {ev.knowledge_test.earned_points != null ? ev.knowledge_test.earned_points : '—'}
+                                                                    {ev.knowledge_test.max_points != null ? ` / ${ev.knowledge_test.max_points}` : ''}
+                                                                </div>
+                                                            ) : (
+                                                                <div className="text-sm text-gray-700">{summarizeScores(ev.scores)}</div>
+                                                            )}
                                                             {Array.isArray(ev.criterion_comments) && ev.criterion_comments.filter(Boolean).length > 0 ? (
                                                                 <div className="mt-1 text-xs text-gray-500">
                                                                 {ev.criterion_comments.filter(Boolean).slice(0,2).map((c,i)=>(
@@ -48313,6 +48385,29 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     </div>
                                                                 )}
 
+                                                                {/* Тест оценивается баллами за вопросы, критериев направления у него нет */}
+                                                                {ev.knowledge_test ? (
+                                                                <div>
+                                                                    <h4 className="font-semibold text-gray-900 mb-2">Тестирование знаний</h4>
+                                                                    <div className="rounded-md border border-indigo-200 bg-indigo-50/60 p-3 space-y-1">
+                                                                        <div className="text-sm text-gray-800">{ev.knowledge_test.title || 'Тест'}</div>
+                                                                        <div className="text-xs text-gray-600 tabular-nums">
+                                                                            Баллы: {ev.knowledge_test.earned_points != null ? ev.knowledge_test.earned_points : '—'}
+                                                                            {ev.knowledge_test.max_points != null ? ` / ${ev.knowledge_test.max_points}` : ''}
+                                                                            {' · '}
+                                                                            результат {ev.score != null ? `${Number(ev.score).toFixed(1).replace(/\.0$/, '')}%` : '—'}
+                                                                        </div>
+                                                                        {ev.knowledge_test.is_auto_submitted && (
+                                                                            <div className="text-xs text-amber-700">
+                                                                                Отправлено автоматически по истечении времени теста
+                                                                            </div>
+                                                                        )}
+                                                                        <div className="text-xs text-gray-500">
+                                                                            Влияет на средний балл качества, но не считается прослушанным звонком и не уменьшает план по звонкам.
+                                                                        </div>
+                                                                    </div>
+                                                                </div>
+                                                                ) : (
                                                                 <div>
                                                                     <h4 className="font-semibold text-gray-900 mb-2">Критерии и статусы</h4>
                                                                     <div className="overflow-x-auto rounded-md border bg-white">
@@ -48383,8 +48478,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     </table>
                                                                     </div>
                                                                 </div>
+                                                                )}
 
-                                                                {!ev.c2d_snapshot_id && (
+                                                                {!ev.c2d_snapshot_id && !ev.knowledge_test && (
                                                                 <div>
                                                                     <h4 className="font-semibold text-gray-900 mb-2">Аудио</h4>
                                                                     {!canAccessSensitiveCallData ? (
