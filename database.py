@@ -7841,9 +7841,11 @@ class Database:
     def _save_shift_auction_time_groups_tx(self, cursor, plan_id, groups, valid_operator_ids, updated_by=None):
         """Rewrite the week's groups; returns them serialized for the response.
 
-        Membership is intersected with the validated participants and deduped
-        across groups (the first group listed wins), so the DB-level "one group
-        per operator per week" index can never be hit by a legitimate save.
+        ``valid_operator_ids`` is everything this save validated against the
+        direction — participants and group members alike — so a group may hold any
+        operator of the direction. Membership is deduped across groups (the first
+        group listed wins), so the DB-level "one group per operator per week"
+        index can never be hit by a legitimate save.
         """
         if groups is None:
             return None
@@ -7932,6 +7934,13 @@ class Database:
             if operator_id > 0 and operator_id not in seen:
                 seen.add(operator_id)
                 normalized_ids.append(operator_id)
+        # A time group takes any operator of the direction, not only those already
+        # ticked as participants — joining a group is what puts them in the auction.
+        for group in (normalized_groups or []):
+            for member_id in group["operator_ids"]:
+                if member_id not in seen:
+                    seen.add(member_id)
+                    normalized_ids.append(member_id)
 
         selected_period_row = None
         selected_plan_id = None

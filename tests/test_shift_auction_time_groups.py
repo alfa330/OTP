@@ -288,10 +288,21 @@ class ShiftAuctionTimeGroupPersistenceTests(unittest.TestCase):
                 self.assertIn(statement, source)
         self.assertIn("WHERE plan_id = %s AND NOT (id = ANY(%s))", source)
 
-    def test_membership_is_intersected_with_validated_participants(self):
+    def test_membership_is_validated_against_the_direction(self):
         source = _method_source("_save_shift_auction_time_groups_tx")
 
         self.assertIn("if operator_id in valid_operator_ids and operator_id not in assigned_members:", source)
+
+    def test_group_takes_any_operator_of_the_direction(self):
+        source = _method_source("update_shift_auction_test_access")
+
+        # Group members ride along into the same direction/status validation as the
+        # ticked participants, so they may be anyone of the direction — and joining
+        # a group makes them a participant.
+        self.assertIn('for member_id in group["operator_ids"]:', source)
+        self.assertIn("normalized_ids.append(member_id)", source)
+        self.assertIn("COALESCE(u.status, '') NOT IN ('fired', 'dismissal')", source)
+        self.assertIn("BTRIM(COALESCE(d.name, '')) = %s", source)
 
     def test_favored_columns_are_no_longer_read_or_written(self):
         for method_name in (
@@ -503,6 +514,13 @@ class ShiftAuctionTimeGroupFrontendTests(unittest.TestCase):
             "sameDayEnd > windowStartsAt ? sameDayEnd : `${addDaysToDateInputValue(groupDate, 1)}T${group.endTime}`",
             FRONTEND_SOURCE,
         )
+
+    def test_group_picker_offers_every_operator_of_the_direction(self):
+        # The picker used to list only ticked participants; it now offers the same
+        # roster as the participants list itself.
+        self.assertIn("? operatorOptions.filter((operator) => (", FRONTEND_SOURCE)
+        self.assertIn("const draftTimeGroupsForSave = draftTimeGroups;", FRONTEND_SOURCE)
+        self.assertNotIn("Сначала выберите участников аукциона.", FRONTEND_SOURCE)
 
     def test_self_schedule_is_offered_only_to_its_group(self):
         self.assertIn(
