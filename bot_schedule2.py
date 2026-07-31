@@ -19815,16 +19815,17 @@ def delete_draft_evaluation(evaluation_id):
         if not requester:
             return jsonify({"error": "Requester not found"}), 403
 
+        orphan_audio_path = None
         with db._get_cursor() as cursor:
             cursor.execute("""
-                SELECT operator_id, status FROM imported_calls
+                SELECT operator_id, status, audio_path FROM imported_calls
                 WHERE id = %s
             """, (evaluation_id,))
             row = cursor.fetchone()
             if not row:
                 return jsonify({"error": "Imported call not found"}), 404
 
-            operator_id, status = row
+            operator_id, status, audio_path = row
 
             # Prevent deleting already evaluated calls
             if status == 'evaluated':
@@ -19844,6 +19845,26 @@ def delete_draft_evaluation(evaluation_id):
             cursor.execute("""
                 DELETE FROM imported_calls WHERE id = %s
             """, (evaluation_id,))
+
+            # Запись в GCS живёт только ради этой строки: без неё файл осиротеет в
+            # бакете навсегда. Но путь может быть общим — оценка наследует
+            # audio_path импортированного звонка (add_call_evaluation), — поэтому
+            # удаляем блоб только когда на него больше никто не ссылается.
+            if audio_path:
+                cursor.execute("SELECT 1 FROM calls WHERE audio_path = %s LIMIT 1", (audio_path,))
+                still_referenced = cursor.fetchone() is not None
+                if not still_referenced:
+                    cursor.execute(
+                        "SELECT 1 FROM imported_calls WHERE audio_path = %s LIMIT 1",
+                        (audio_path,))
+                    still_referenced = cursor.fetchone() is not None
+                if not still_referenced:
+                    orphan_audio_path = audio_path
+
+        # Только после коммита: если транзакция откатится, звонок останется в
+        # журнале и должен остаться слушабельным.
+        if orphan_audio_path:
+            _delete_call_record_blob(orphan_audio_path)
 
         return jsonify({"status": "success", "message": "Imported call deleted"}), 200
     except Exception as e:
@@ -19865,6 +19886,24 @@ def _upload_external_record_to_gcs(audio_bytes, filename, content_type='audio/mp
     blob = get_gcs_client().bucket(bucket_name).blob(blob_path)
     blob.upload_from_string(audio_bytes, content_type=content_type or 'audio/mpeg')
     return f"{bucket_name}/{blob_path}"
+
+
+def _delete_call_record_blob(audio_path):
+    """Удаляет запись разговора из GCS по пути 'bucket/blob' — в таком виде он
+    лежит в imported_calls.audio_path и calls.audio_path. Ошибки не критичны:
+    строку в БД уже удалили, осиротевший файл интерфейс не ломает."""
+    bucket_name, _, blob_path = str(audio_path or '').strip().partition('/')
+    if not bucket_name or not blob_path:
+        logging.warning("Skip call record blob delete: invalid path %r", audio_path)
+        return False
+    try:
+        get_gcs_client().bucket(bucket_name).blob(blob_path).delete()
+        logging.info("call record blob deleted: %s/%s", bucket_name, blob_path)
+        return True
+    except Exception:
+        logging.warning("Failed to delete call record blob %s/%s",
+                        bucket_name, blob_path, exc_info=True)
+        return False
 
 
 def _binotel_upload_record_to_gcs(audio_bytes, content_type='audio/mpeg'):
