@@ -1,4 +1,7 @@
-"""Static invariants for the supervisor_id -> groups migration."""
+"""Static invariants and focused behavior tests for the groups migration."""
+import ast
+from contextlib import contextmanager
+from datetime import date, datetime, timedelta
 import unittest
 from pathlib import Path
 
@@ -9,6 +12,189 @@ BOT = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
 APP = (ROOT / "src" / "App.jsx").read_text(encoding="utf-8-sig")
 GROUPS_VIEW = (ROOT / "src" / "components" / "groups" / "GroupsView.jsx").read_text(encoding="utf-8-sig")
 USER_MODAL = (ROOT / "src" / "components" / "modals" / "UserEditModal.jsx").read_text(encoding="utf-8-sig")
+
+
+def _membership_edit_database_class():
+    """Load only the membership-boundary code, without importing live DB setup."""
+    module = ast.parse(DB)
+    database_class = next(
+        node for node in module.body
+        if isinstance(node, ast.ClassDef) and node.name == "Database"
+    )
+    wanted_methods = {
+        "_assert_no_operator_hours_in_window_tx",
+        "update_group_membership_start_date",
+    }
+    methods = [
+        node for node in database_class.body
+        if isinstance(node, ast.FunctionDef) and node.name in wanted_methods
+    ]
+    non_empty_constant = next(
+        node for node in database_class.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "_DAILY_HOURS_NON_EMPTY"
+                for target in node.targets)
+    )
+    test_class = ast.ClassDef(
+        name="MembershipEditDatabase",
+        bases=[],
+        keywords=[],
+        body=[non_empty_constant, *methods],
+        decorator_list=[],
+    )
+    namespace = {
+        "date": date,
+        "datetime": datetime,
+        "timedelta": timedelta,
+    }
+    test_module = ast.fix_missing_locations(ast.Module(body=[test_class], type_ignores=[]))
+    exec(compile(test_module, str(ROOT / "database.py"), "exec"), namespace)
+    return namespace["MembershipEditDatabase"]
+
+
+MembershipEditDatabase = _membership_edit_database_class()
+
+
+class _MembershipEditCursor:
+    """Small stateful model for the SQL used by the membership edit method."""
+
+    def __init__(self, current_start, previous=None, daily_rows=None):
+        self.current = {
+            "id": 10,
+            "group_id": 100,
+            "operator_id": 77,
+            "start_date": current_start,
+            "end_date": None,
+        }
+        self.previous = dict(previous) if previous else None
+        self.daily_rows = [dict(row) for row in (daily_rows or [])]
+        self.executions = []
+        self._fetchone = None
+        self._fetchall = []
+
+    @staticmethod
+    def _non_empty(row):
+        return any(float(row.get(key) or 0) > 0 for key in (
+            "work_time", "training_time", "talk_time", "break_time", "calls", "fine_amount"
+        ))
+
+    def _memberships(self):
+        return [item for item in (self.previous, self.current) if item]
+
+    def _covered_by_membership(self, day_value):
+        return any(
+            item["start_date"] <= day_value
+            and (item.get("end_date") is None or item["end_date"] >= day_value)
+            for item in self._memberships()
+        )
+
+    def execute(self, query, params=None):
+        normalized = " ".join(str(query).split())
+        params = tuple(params or ())
+        self.executions.append((normalized, params))
+        self._fetchone = None
+        self._fetchall = []
+
+        if normalized.startswith("SELECT id, start_date FROM group_operator_memberships"):
+            group_id, operator_id = int(params[0]), int(params[1])
+            if (
+                self.current["group_id"] == group_id
+                and self.current["operator_id"] == operator_id
+                and self.current["end_date"] is None
+            ):
+                self._fetchone = (self.current["id"], self.current["start_date"])
+            return
+
+        if normalized.startswith("SELECT id, group_id, start_date, end_date FROM group_operator_memberships"):
+            operator_id, membership_id, old_start = int(params[0]), int(params[1]), params[2]
+            item = self.previous
+            if (
+                item
+                and item["operator_id"] == operator_id
+                and item["id"] != membership_id
+                and item.get("end_date") is not None
+                and item["end_date"] < old_start
+            ):
+                self._fetchone = (
+                    item["id"], item["group_id"], item["start_date"], item["end_date"]
+                )
+            return
+
+        if normalized.startswith("SELECT MIN(day), MAX(day), COUNT(*) FROM daily_hours"):
+            operator_id, lo, hi = int(params[0]), params[1], params[2]
+            rows = [
+                row for row in self.daily_rows
+                if int(row["operator_id"]) == operator_id
+                and lo <= row["day"] <= hi
+                and self._non_empty(row)
+            ]
+            # The production guard must distinguish an authoritative historical
+            # membership from a genuinely ungrouped day. Accommodate either a
+            # membership-aware predicate or a direct non-NULL group stamp check.
+            if "group_operator_memberships" in normalized:
+                rows = [row for row in rows if self._covered_by_membership(row["day"])]
+            elif "group_id IS NOT NULL" in normalized:
+                rows = [row for row in rows if row.get("group_id") is not None]
+            self._fetchone = (
+                min((row["day"] for row in rows), default=None),
+                max((row["day"] for row in rows), default=None),
+                len(rows),
+            )
+            return
+
+        if normalized.startswith("UPDATE group_operator_memberships SET end_date ="):
+            if not self.previous or int(params[1]) != self.previous["id"]:
+                raise AssertionError("Unexpected previous membership update")
+            self.previous["end_date"] = params[0]
+            return
+
+        if normalized.startswith("UPDATE group_operator_memberships SET start_date ="):
+            if int(params[1]) != self.current["id"]:
+                raise AssertionError("Unexpected current membership update")
+            self.current["start_date"] = params[0]
+            return
+
+        if normalized.startswith("SELECT DISTINCT TO_CHAR(day, 'YYYY-MM') FROM daily_hours"):
+            operator_id, lo, hi = int(params[0]), params[1], params[2]
+            months = sorted({
+                row["day"].strftime("%Y-%m")
+                for row in self.daily_rows
+                if int(row["operator_id"]) == operator_id and lo <= row["day"] <= hi
+            })
+            self._fetchall = [(month,) for month in months]
+            return
+
+        if normalized.startswith("UPDATE daily_hours SET group_id ="):
+            group_id, operator_id, lo, hi = params
+            for row in self.daily_rows:
+                if int(row["operator_id"]) == int(operator_id) and lo <= row["day"] <= hi:
+                    row["group_id"] = group_id
+            return
+
+        raise AssertionError(f"Unexpected SQL: {normalized}")
+
+    def fetchone(self):
+        return self._fetchone
+
+    def fetchall(self):
+        return list(self._fetchall)
+
+
+def _membership_edit_database(cursor):
+    database = MembershipEditDatabase()
+
+    @contextmanager
+    def _get_cursor():
+        yield cursor
+
+    database._get_cursor = _get_cursor
+    database.aggregate_calls = []
+    database._aggregate_month_from_daily_tx = (
+        lambda _cursor, operator_id, month: database.aggregate_calls.append(
+            (int(operator_id), month)
+        )
+    )
+    return database
 
 
 class SchemaTests(unittest.TestCase):
@@ -120,6 +306,116 @@ class CrudTests(unittest.TestCase):
 
 class MemberStartDateEditTests(unittest.TestCase):
     """Дата вступления участника правится прямо в разделе «Состав» группы."""
+
+    def test_backdate_over_nonempty_ungrouped_day_is_allowed(self):
+        cursor = _MembershipEditCursor(
+            current_start=date(2026, 7, 10),
+            daily_rows=[{
+                "operator_id": 77,
+                "day": date(2026, 7, 9),
+                "group_id": None,
+                "work_time": 8,
+            }],
+        )
+        database = _membership_edit_database(cursor)
+
+        result = database.update_group_membership_start_date(
+            group_id=100,
+            member_id=77,
+            start_date=date(2026, 7, 9),
+        )
+
+        self.assertTrue(result["changed"])
+        self.assertEqual(date(2026, 7, 9), cursor.current["start_date"])
+        self.assertEqual(100, cursor.daily_rows[0]["group_id"])
+        self.assertEqual([(77, "2026-07")], database.aggregate_calls)
+
+    def test_backdate_across_contiguous_previous_group_hours_stays_guarded(self):
+        previous = {
+            "id": 9,
+            "group_id": 200,
+            "operator_id": 77,
+            "start_date": date(2026, 6, 1),
+            "end_date": date(2026, 7, 9),
+        }
+        cursor = _MembershipEditCursor(
+            current_start=date(2026, 7, 10),
+            previous=previous,
+            daily_rows=[{
+                "operator_id": 77,
+                "day": date(2026, 7, 9),
+                "group_id": 200,
+                "work_time": 8,
+            }],
+        )
+        database = _membership_edit_database(cursor)
+
+        with self.assertRaisesRegex(ValueError, "учтённые часы"):
+            database.update_group_membership_start_date(
+                group_id=100,
+                member_id=77,
+                start_date=date(2026, 7, 9),
+            )
+
+        self.assertEqual(date(2026, 7, 10), cursor.current["start_date"])
+        self.assertEqual(date(2026, 7, 9), cursor.previous["end_date"])
+        self.assertEqual([], database.aggregate_calls)
+        self.assertFalse(any(sql.startswith("UPDATE") for sql, _ in cursor.executions))
+
+    def test_forward_shift_over_current_group_hours_stays_guarded(self):
+        cursor = _MembershipEditCursor(
+            current_start=date(2026, 7, 9),
+            daily_rows=[{
+                "operator_id": 77,
+                "day": date(2026, 7, 9),
+                "group_id": 100,
+                "work_time": 8,
+            }],
+        )
+        database = _membership_edit_database(cursor)
+
+        with self.assertRaisesRegex(ValueError, "учтённые часы"):
+            database.update_group_membership_start_date(
+                group_id=100,
+                member_id=77,
+                start_date=date(2026, 7, 10),
+            )
+
+        self.assertEqual(date(2026, 7, 9), cursor.current["start_date"])
+        self.assertEqual([], database.aggregate_calls)
+        self.assertFalse(any(sql.startswith("UPDATE") for sql, _ in cursor.executions))
+
+    def test_forward_shift_over_noncontiguous_gap_targets_no_group(self):
+        previous = {
+            "id": 9,
+            "group_id": 200,
+            "operator_id": 77,
+            "start_date": date(2026, 6, 1),
+            "end_date": date(2026, 7, 7),
+        }
+        cursor = _MembershipEditCursor(
+            current_start=date(2026, 7, 9),
+            previous=previous,
+            daily_rows=[{
+                "operator_id": 77,
+                "day": date(2026, 7, 9),
+                "group_id": 100,
+                "work_time": 0,
+            }],
+        )
+        database = _membership_edit_database(cursor)
+
+        result = database.update_group_membership_start_date(
+            group_id=100,
+            member_id=77,
+            start_date=date(2026, 7, 10),
+        )
+
+        self.assertTrue(result["changed"])
+        self.assertEqual(date(2026, 7, 10), cursor.current["start_date"])
+        self.assertEqual(date(2026, 7, 7), cursor.previous["end_date"])
+        self.assertIsNone(cursor.daily_rows[0]["group_id"])
+        self.assertEqual([(77, "2026-07")], database.aggregate_calls)
 
     def test_db_method_moves_chain_and_restamps_hours(self):
         self.assertIn(
