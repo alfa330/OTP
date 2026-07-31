@@ -37,5 +37,23 @@ class BillingExportChoiceTests(unittest.TestCase):
         self.assertIn('"operator_efficiency_"', source)
 
 
+class BillingServiceLevelFormulaTests(unittest.TestCase):
+    """SL = отвеченные за порог ожидания в очереди / все звонки, попавшие в очередь."""
+
+    def test_frontend_divides_sl_by_queue_arrivals(self):
+        source = FRONTEND_PATH.read_text(encoding="utf-8-sig")
+        self.assertIn("const slRatio = safeRatio(item.served_sl, item.arrived);", source)
+        self.assertIn("safeRatio(billingTotals.served_sl, billingTotals.arrived)", source)
+        self.assertIn("safeRatio(day.totals?.served_sl, day.totals?.arrived)", source)
+        self.assertNotIn("served_sl, item.served", source)
+        self.assertNotIn("served_sl, billingTotals.served", source)
+        self.assertNotIn("served_sl, day.totals?.served)", source)
+
+    def test_backend_export_divides_sl_by_queue_arrivals(self):
+        source = BOT_PATH.read_text(encoding="utf-8-sig")
+        self.assertIn("_oktell_billing_ratio(item.get('served_sl'), arrived)", source)
+        self.assertNotIn("_oktell_billing_ratio(item.get('served_sl'), served)", source)
+
+
 if __name__ == "__main__":
     unittest.main()

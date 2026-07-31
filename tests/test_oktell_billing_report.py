@@ -186,7 +186,10 @@ class SqlBuilderTests(unittest.TestCase):
         self.assertIn("t.route = 'incoming'", sql)
         self.assertIn("t.taxi_park <> ''", sql)
         self.assertIn("N'Неудачный звонок'", sql)
-        self.assertIn("t.LenQueue <= 25", sql)
+        # числитель SL — отвеченные (call_result 5) с ожиданием в очереди не больше порога
+        self.assertIn("t.call_result IN (5) AND t.LenQueue <= 25 THEN 1 ELSE 0 END) AS served_sl", sql)
+        # знаменатель берётся из «поступило» = всё, что попало в очередь
+        self.assertIn("t.call_result IN (13,19,5) THEN 1 ELSE 0 END) AS arrived", sql)
         # прокси не принимает несколько statement'ов
         self.assertNotIn(";", sql)
 
@@ -458,10 +461,28 @@ class BuildOperatorReportTests(unittest.TestCase):
         self.assertEqual(values[0], "Тенге Такси")
         self.assertEqual(values[1:4], [100, 80, 20])
         self.assertAlmostEqual(values[4], 0.2)   # AR
-        self.assertAlmostEqual(values[5], 0.75)  # SL
+        # SL = отвеченные за порог / все попавшие в очередь (60/100), а не / обслуженные (60/80)
+        self.assertAlmostEqual(values[5], 0.6)
         self.assertAlmostEqual(values[6], (8000 / 80) / 86400.0)  # АТТ как доля суток
         self.assertAlmostEqual(values[8], 8000 / 86400.0)
         self.assertEqual(values[10], 2)
+
+    def test_sl_denominator_is_queue_arrivals(self):
+        """SL считается от всех попавших в очередь; потерянные и сбросы на IVR не путаем."""
+        ns = _extract_namespace()
+        values = ns["_oktell_billing_export_values"]("park", {
+            "park": "iTaxi", "arrived": 200, "served": 100, "lost": 100, "served_sl": 90,
+            "greet_drop": 500, "talk_seconds": 0, "wait_ok_seconds": 0,
+            "wait_lost_seconds": 0, "total_seconds": 0,
+        })
+        self.assertAlmostEqual(values[5], 0.45)  # 90/200, а не 90/100 и не 90/700
+        # без звонков в очереди SL неопределён
+        empty = ns["_oktell_billing_export_values"]("park", {
+            "park": "iTaxi", "arrived": 0, "served": 0, "lost": 0, "served_sl": 0,
+            "greet_drop": 7, "talk_seconds": 0, "wait_ok_seconds": 0,
+            "wait_lost_seconds": 0, "total_seconds": 0,
+        })
+        self.assertEqual(empty[5], "—")
 
     def test_export_values_line_and_zero_served(self):
         ns = _extract_namespace()

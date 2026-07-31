@@ -27900,7 +27900,11 @@ def sync_oktell_resource_hours(day=None, date_from=None, date_to=None, triggered
 
 # === Oktell: «Биллинг Oktell» (Расчет ресурсов) ==================================================
 # Живой отчёт по входящим в разрезе день x таксопарк из oktell.dbo.Call_Systems_hst
-# (формулы = отчёт «Статистика входящих» .xmlr; SL = обслужено за N сек / обслужено).
+# (формулы = отчёт «Статистика входящих» .xmlr). SL = звонки, отвеченные за N сек ожидания
+# В ОЧЕРЕДИ (t.LenQueue), делённые на ВСЕ звонки, попавшие в очередь (arrived = обслуженные +
+# потерянные). Потерянные из знаменателя не выкидываем: не дождавшийся абонент — это тоже
+# нарушенный уровень сервиса. Сбросы на приветствии в очередь не попадают (LenQueue = NULL)
+# и в знаменатель не идут.
 # Ничего не сохраняем: каждый запрос UI считается напрямую в Oktell.
 OKTELL_BILLING_SL_DEFAULT_SECONDS = int(os.getenv('OKTELL_BILLING_SL_SECONDS', '20'))
 
@@ -27955,6 +27959,7 @@ def _oktell_billing_sql(date_from_compact, date_to_excl_compact, minute_from, mi
         f"{line_select}"
         f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (13,19,5) THEN 1 ELSE 0 END) AS arrived, "
         f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN 1 ELSE 0 END) AS served, "
+        # числитель SL: отвечены оператором И ждали в очереди не дольше порога (LenQueue — секунды в очереди)
         f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) AND t.LenQueue <= {int(sl_seconds)} THEN 1 ELSE 0 END) AS served_sl, "
         f"SUM(CASE WHEN t.result_call = N'{grt}' THEN 1 ELSE 0 END) AS greet_drop, "
         f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN t.total_length ELSE 0 END) AS talk_seconds, "
@@ -28551,7 +28556,8 @@ def _oktell_billing_export_values(mode, item, label=None):
         served,
         item.get('lost') or 0,
         _opt(_oktell_billing_ratio(item.get('lost'), arrived)),
-        _opt(_oktell_billing_ratio(item.get('served_sl'), served)),
+        # SL: знаменатель — все попавшие в очередь (обслуженные + потерянные), не только отвеченные
+        _opt(_oktell_billing_ratio(item.get('served_sl'), arrived)),
         _opt(None if served <= 0 else _dur(float(item.get('talk_seconds') or 0) / served)),
         _opt(None if served <= 0 else _dur(float(item.get('wait_ok_seconds') or 0) / served)),
         _dur(item.get('talk_seconds')),
@@ -28578,7 +28584,8 @@ def _oktell_billing_export_workbook(mode, params, report, sl_seconds):
     )
     note = (
         'OCC = разговоры и обработка ко всему времени в системе; UTZ = время без пауз'
-        if mode == 'operator' else f'SL — обслужено за ≤ {sl_seconds} сек ожидания'
+        if mode == 'operator'
+        else f'SL — отвечено за ≤ {sl_seconds} сек ожидания в очереди ко всем звонкам, попавшим в очередь'
     )
     header_fill = PatternFill(start_color='1F4E78', end_color='1F4E78', fill_type='solid')
     header_font = Font(color='FFFFFF', bold=True)
