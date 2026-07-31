@@ -24,13 +24,15 @@ import {
 import { normalizeRole, isAdminLikeRole, isSupervisorRole } from '../../utils/roles';
 import FaIcon from '../common/FaIcon';
 import FullscreenSheet from '../common/FullscreenSheet';
-import TaskBoardWorkspace from './TaskBoardWorkspace';
+import TaskBoardWorkspace, { boardQueryParams } from './TaskBoardWorkspace';
 import {
   ACTION_NEED_META,
   actionNeedSeenKey,
   collectTaskActionNeeds,
   countUnseenActionNeeds,
   groupTaskActionNeeds,
+  isActionNeedSeen,
+  taskActionNeed,
 } from './taskActionNeeds';
 
 /* ─── Google Fonts ─── */
@@ -189,6 +191,26 @@ styleTag.textContent = `
   /* Карточка, к которой перешли из уведомления. */
   .tb-card-focus {
     box-shadow: 0 0 0 2px #2563eb, 0 6px 18px rgba(37, 99, 235, .18) !important;
+  }
+
+  /* Собачка на карточке: задача ждёт шага этого пользователя. Гаснет по прочтении. */
+  .tb-at-marker {
+    display: inline-grid;
+    place-items: center;
+    width: 17px; height: 17px;
+    flex-shrink: 0;
+    border-radius: 50%;
+    font-size: 11.5px;
+    font-weight: 800;
+    line-height: 1;
+    animation: tbAtBlink 1.5s ease-in-out infinite;
+  }
+  @keyframes tbAtBlink {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%      { opacity: .35; transform: scale(.9); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .tb-at-marker { animation: none; }
   }
 
   /* ── Stats strip ── */
@@ -6184,6 +6206,12 @@ const TasksView = ({
   const [actionNeedsNow, setActionNeedsNow] = useState(() => Date.now());
   // Просмотренные уведомления до ответа сервера: ключ задача+причина+updated_at.
   const [actionSeenLocal, setActionSeenLocal] = useState(() => new Set());
+  // Серверная сводка по всем видимым задачам — цифры «Обзора» и бейдж бэклога.
+  const [tasksSummary, setTasksSummary] = useState(null);
+  // Локально поправленные задачи (чек-лист, отчёты) — доска накладывает их на свою страницу.
+  const [taskPatches, setTaskPatches] = useState({});
+  // Доска перезагружает страницу, когда данные раздела изменились.
+  const [boardReloadToken, setBoardReloadToken] = useState(0);
   const [workspaceTab, setWorkspaceTab] = useState(() => {
     if (typeof window === 'undefined') return 'overview';
     const stored = window.localStorage.getItem(WORKSPACE_TAB_STORAGE_KEY);
@@ -6243,16 +6271,43 @@ const TasksView = ({
     } finally { setIsRecipientsLoading(false); }
   }, [apiBaseUrl, buildHeaders, notify]);
 
+  /* «Мои задачи»: всё, где пользователь участник. Этого набора хватает группам
+     по сотрудникам, уведомлениям и закреплённой задаче — целиком базу раздел
+     больше не тянет, доска грузит свою страницу отдельным запросом. */
   const fetchTasks = useCallback(async () => {
     setIsTasksLoading(true);
     try {
-      const res  = await axios.get(`${apiBaseUrl}/api/tasks`, { headers: buildHeaders() });
+      const res  = await axios.get(`${apiBaseUrl}/api/tasks`, {
+        headers: buildHeaders(),
+        params: { only_my: 1 }
+      });
       const list = Array.isArray(res?.data?.tasks) ? res.data.tasks : [];
       setTasks(list);
       setDrawerTask(prev => prev ? (list.find(t => t.id === prev.id) ?? prev) : null);
     } catch (e) {
       notify(e?.response?.data?.error || 'Не удалось загрузить задачи', 'error');
     } finally { setIsTasksLoading(false); }
+  }, [apiBaseUrl, buildHeaders, notify]);
+
+  /* Загрузчик страницы доски: доска сотрудника — только его задачи, общая —
+     страница по количеству. Сводка нужна шапке доски, чтобы её счётчики
+     считались по всей доске, а не по видимой странице. */
+  const loadBoardTasks = useCallback(async ({ scope, mode, sort, limit, offset }) => {
+    try {
+      const res = await axios.get(`${apiBaseUrl}/api/tasks`, {
+        headers: buildHeaders(),
+        params: boardQueryParams({ scope, mode, sort, limit, offset })
+      });
+      const data = res?.data || {};
+      return {
+        tasks: Array.isArray(data.tasks) ? data.tasks : [],
+        total: Number(data?.totals?.filtered || 0),
+        summary: data?.summary || null,
+      };
+    } catch (e) {
+      notify(e?.response?.data?.error || 'Не удалось загрузить доску', 'error');
+      return { tasks: [], total: 0, summary: null };
+    }
   }, [apiBaseUrl, buildHeaders, notify]);
 
   useEffect(() => {
@@ -6302,6 +6357,7 @@ const TasksView = ({
       const totalFiltered = Number(totals?.filtered);
 
       setPagedTasks(list);
+      setTasksSummary(data?.summary || null);
       setAllTasksTotal(Number.isFinite(totalAll) ? totalAll : list.length);
       setFilteredTasksTotal(Number.isFinite(totalFiltered) ? totalFiltered : list.length);
       setDrawerTask(prev => prev ? (list.find(t => t.id === prev.id) ?? prev) : null);
@@ -6364,6 +6420,13 @@ const TasksView = ({
   );
   const actionNeedsUnseen = useMemo(() => countUnseenActionNeeds(actionNeeds), [actionNeeds]);
 
+  /* Причина по одной задаче — для мигающей собачки на карточке доски. */
+  const actionNeedOf = useCallback((task) => {
+    const need = taskActionNeed(task, currentUserId, actionNeedsNow);
+    if (!need) return null;
+    return { ...need, seen: isActionNeedSeen(task, need.kind, actionSeenLocal) };
+  }, [currentUserId, actionNeedsNow, actionSeenLocal]);
+
   useEffect(() => {
     if (typeof onActionNeedsChange === 'function') onActionNeedsChange(actionNeedsUnseen);
   }, [actionNeedsUnseen, onActionNeedsChange]);
@@ -6393,6 +6456,14 @@ const TasksView = ({
     setBoardFocus({ taskId: Number(task.id), token: Date.now() });
     setDrawerTask(task);
   }, [markActionNeedsSeen, selectWorkspaceTab]);
+
+  /* Открыл карточку — значит прочитал: собачка гаснет и счётчик падает,
+     каким бы путём задачу ни открыли (уведомление, доска, список). */
+  useEffect(() => {
+    if (!drawerTask?.id) return;
+    const need = actionNeedOf(drawerTask);
+    if (need && !need.seen) markActionNeedsSeen({ ...need, task: drawerTask });
+  }, [drawerTask, actionNeedOf, markActionNeedsSeen]);
 
   const incomingTasks = useMemo(
     () => tasks.filter(t => Number(t?.assignee?.id || 0) === currentUserId),
@@ -6472,7 +6543,9 @@ const TasksView = ({
   const refreshTasksData = useCallback(async () => {
     const jobs = [fetchTasks(), fetchPagedTasks()];
     if (isPersonDrilldown) jobs.push(fetchPersonTasks());
+    setBoardReloadToken((prev) => prev + 1);
     await Promise.all(jobs);
+    setTaskPatches({});
   }, [fetchTasks, fetchPagedTasks, fetchPersonTasks, isPersonDrilldown]);
 
   const patchTaskEverywhere = useCallback((taskId, updater) => {
@@ -6488,6 +6561,7 @@ const TasksView = ({
     setPagedTasks(prev => prev.map(replace));
     setPersonTasks(prev => prev.map(replace));
     setDrawerTask(prev => (Number(prev?.id || 0) === normalizedTaskId ? nextTask : prev));
+    setTaskPatches(prev => ({ ...prev, [normalizedTaskId]: nextTask }));
     if (Number(pinnedTaskId || 0) === normalizedTaskId) onPinnedTaskSync?.(nextTask);
   }, [drawerTask, tasks, pagedTasks, personTasks, pinnedTaskId, onPinnedTaskSync]);
 
@@ -6584,19 +6658,34 @@ const TasksView = ({
     if (!requestId || !taskId || handledFocusRequestRef.current === requestId) return;
     const nextTask = [...tasks, ...pagedTasks, ...personTasks]
       .find((task) => Number(task?.id || 0) === taskId);
-    if (!nextTask) return;
+    if (nextTask) {
+      handledFocusRequestRef.current = requestId;
+      setDrawerTask(nextTask);
+      return;
+    }
+    /* Задачи может не быть в загруженных наборах: раздел держит только «мои»,
+       а ссылка (Telegram, закреплённая задача) ведёт на любую доступную. */
     handledFocusRequestRef.current = requestId;
-    setDrawerTask(nextTask);
-  }, [focusTaskRequest, tasks, pagedTasks, personTasks]);
+    let cancelled = false;
+    axios.get(`${apiBaseUrl}/api/tasks`, { headers: buildHeaders(), params: { task_id: taskId, limit: 1 } })
+      .then((res) => {
+        const found = (Array.isArray(res?.data?.tasks) ? res.data.tasks : [])
+          .find((task) => Number(task?.id || 0) === taskId);
+        if (!cancelled && found) setDrawerTask(found);
+      })
+      .catch(() => { /* ссылка на удалённую или недоступную задачу — молча игнорируем */ });
+    return () => { cancelled = true; };
+  }, [focusTaskRequest, tasks, pagedTasks, personTasks, apiBaseUrl, buildHeaders]);
 
-  // Stats
+  /* Цифры «Обзора» — серверная сводка по всем видимым задачам: считать их
+     на клиенте нельзя, полного списка у раздела больше нет. */
   const stats = useMemo(() => ({
-    total:      tasks.length,
-    inProgress: tasks.filter(t => t.status === 'in_progress').length,
-    completed:  tasks.filter(t => t.status === 'completed' || t.status === 'accepted').length,
-    overdue:    tasks.filter(t => t.status === 'returned').length,
-    backlog:    tasks.filter(t => t.is_backlog).length,
-  }), [tasks]);
+    total:      Number(tasksSummary?.total || 0),
+    inProgress: Number(tasksSummary?.in_progress || 0),
+    completed:  Number(tasksSummary?.completed || 0),
+    overdue:    Number(tasksSummary?.returned || 0),
+    backlog:    Number(tasksSummary?.backlog || 0),
+  }), [tasksSummary]);
 
   const backlogCount = stats.backlog;
 
@@ -7171,13 +7260,15 @@ const TasksView = ({
         <div className="tv-section">
           <TaskBoardWorkspace
             mode={workspaceTab}
-            tasks={tasks}
             recipients={recipients}
-            loading={isTasksLoading}
+            loadTasks={loadBoardTasks}
+            reloadToken={boardReloadToken}
+            taskPatches={taskPatches}
             currentUserId={currentUserId}
             isAdmin={isAdminLikeRole(currentUserRole)}
             isSupervisor={isSupervisorRole(currentUserRole)}
             focusRequest={boardFocus}
+            actionNeedOf={actionNeedOf}
             onOpenTask={setDrawerTask}
             onStatusAction={handleBoardStatusAction}
             onBoardUpdate={updateBoardItems}

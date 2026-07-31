@@ -220,7 +220,8 @@ class WorkspaceFrontendTests(unittest.TestCase):
         self.assertIn("value: `person:${person.id}`", self.src)
         self.assertIn("addPerson(task?.assignee);", self.src)
         self.assertIn("addPerson(task?.creator);", self.src)
-        self.assertIn("Number(task?.assignee?.id || 0) === personId || Number(task?.creator?.id || 0) === personId", self.src)
+        # Выборку доски делает сервер, клиент её не фильтрует.
+        self.assertIn("params.person_scope = 'any';", self.src)
         self.assertIn('ariaLabel="Выбор доски сотрудника"', self.src)
 
     def test_board_sort_defaults_to_freshness_and_is_stable(self):
@@ -257,13 +258,14 @@ class TasksViewIntegrationTests(unittest.TestCase):
         self.assertEqual(ids, ["overview", "backlog", "board", "timeline"])
 
     def test_workspace_is_mounted_with_handlers(self):
-        self.assertIn("import TaskBoardWorkspace from './TaskBoardWorkspace';", self.src)
+        self.assertIn("import TaskBoardWorkspace, { boardQueryParams } from './TaskBoardWorkspace';", self.src)
         self.assertIn("<TaskBoardWorkspace", self.src)
         for prop in (
             "onBoardUpdate={updateBoardItems}",
             "onStatusAction={handleBoardStatusAction}",
             "onCreateBacklogItem={openBacklogCreate}",
             "recipients={recipients}",
+            "loadTasks={loadBoardTasks}",
         ):
             self.assertIn(prop, self.src)
 
@@ -1081,6 +1083,17 @@ class ActionNeedsBadgeTests(unittest.TestCase):
         self.assertIn("actionNeedSeenKey(need.task, need.kind)", block)
         self.assertIn("markActionNeedsSeen(need);", src)
 
+    def test_card_shows_blinking_at_marker_until_read(self):
+        src = _read(WORKSPACE_PATH)
+        self.assertIn("const ActionAtMarker = ({ kind }) => {", src)
+        self.assertIn("{actionNeed && !actionNeed.seen && <ActionAtMarker kind={actionNeed.kind} />}", src)
+        view = _read(TASKS_VIEW_PATH)
+        self.assertIn(".tb-at-marker", view)
+        self.assertIn("@keyframes tbAtBlink", view)
+        # Прочтение = открытие карточки, каким бы путём её ни открыли.
+        self.assertIn("const need = actionNeedOf(drawerTask);", view)
+        self.assertIn("prefers-reduced-motion", view)
+
     def test_frontend_rules_are_exclusive_and_skip_backlog(self):
         src = _read(self.ACTION_NEEDS_PATH)
         self.assertIn("if (!isAssignee || task?.is_backlog) return null;", src)
@@ -1106,7 +1119,7 @@ class ActionNeedsBadgeTests(unittest.TestCase):
         src = _read(WORKSPACE_PATH)
         self.assertIn("focusRequest = null,", src)
         # Карточку надо показать, даже если она вне текущей доски сотрудника.
-        self.assertIn("if (!scopedTasks.some((task) => Number(task?.id || 0) === taskId)) setScope('all');", src)
+        self.assertIn("setScope('my');", src)
         self.assertIn("cardRef.current?.scrollIntoView(", src)
         self.assertIn("tb-card-focus", src)
 
@@ -1128,6 +1141,101 @@ class ActionNeedsBadgeTests(unittest.TestCase):
         self.assertIn("TASKS_BADGE_MIN_GAP_MS", block)
         self.assertIn("window.addEventListener('focus', onWake);", block)
         self.assertIn("if (view === 'tasks' || !isPageActiveForBadges()) return;", block)
+
+
+class BoardPaginationTests(unittest.TestCase):
+    """Доска грузит страницу, а не всю базу: сотрудник — своим запросом, общая — по количеству."""
+
+    def test_board_query_is_scoped_per_board(self):
+        src = _read(WORKSPACE_PATH)
+        start = src.index("export const boardQueryParams = (")
+        block = src[start:src.index("const TaskBoardWorkspace = (", start)]
+        self.assertIn("if (mode === 'backlog') params.backlog = 'only';", block)
+        self.assertIn("if (scope === 'my') params.mine = 'any';", block)
+        self.assertIn("else if (scope === 'assigned') params.mine = 'assignee';", block)
+        self.assertIn("params.person_scope = 'any';", block)
+        self.assertIn("const params = { limit, offset };", block)
+
+    def test_page_sizes_are_a_closed_list(self):
+        src = _read(WORKSPACE_PATH)
+        self.assertIn("export const BOARD_PAGE_SIZES = [30, 60, 100];", src)
+        start = src.index("export const normalizeBoardPageSize = (value) => {")
+        block = src[start:src.index("/** Параметры запроса страницы доски", start)]
+        # Чужое значение из localStorage не должно превращаться в размер страницы.
+        self.assertIn("BOARD_PAGE_SIZES.includes(parsed)", block)
+        self.assertIn("DEFAULT_BOARD_PAGE_SIZE", block)
+
+    def test_server_caps_page_size_and_unbounded_requests(self):
+        app_src = _read(APP_PATH)
+        self.assertIn("TASKS_MAX_PAGE_SIZE = int(os.getenv('TASKS_MAX_PAGE_SIZE', '200'))", app_src)
+        self.assertIn("if limit < 1 or limit > TASKS_MAX_PAGE_SIZE:", app_src)
+        db_src = _read(DATABASE_PATH)
+        self.assertIn("TASKS_MAX_ROWS = 500", db_src)
+        start = db_src.index("        if limit is None or str(limit).strip() == '':")
+        block = db_src[start:start + 500]
+        # Запрос без limit и запрос с огромным limit одинаково упираются в потолок.
+        self.assertIn("limit_norm = self.TASKS_MAX_ROWS", block)
+        self.assertIn("limit_norm = min(limit_norm, self.TASKS_MAX_ROWS)", block)
+
+    def test_mine_filter_covers_board_scopes(self):
+        src = _read(DATABASE_PATH)
+        self.assertIn("if mine_norm == 'assignee':", src)
+        self.assertIn('base_conditions.append("t.assigned_to = %s")', src)
+        self.assertIn("elif mine_norm == 'creator':", src)
+        self.assertIn("INVALID_TASK_MINE_FILTER", src)
+        self.assertIn("INVALID_TASK_MINE_FILTER", _read(APP_PATH))
+
+    def test_person_board_summary_counts_the_whole_board(self):
+        src = _read(DATABASE_PATH)
+        # Фильтр доски сотрудника уходит в базовые условия — иначе сводка считала бы отдел.
+        self.assertIn("if person_id_norm is not None and person_scope_norm == 'any':", src)
+        self.assertIn("person_board_id = person_id_norm", src)
+        self.assertIn("AS overdue_count", src)
+        self.assertIn("AS delegated_count", src)
+        view = _read(WORKSPACE_PATH)
+        start = view.index("  const focusStats = useMemo(() => {")
+        block = view[start:view.index("  const dropContext = useMemo(", start)]
+        self.assertIn("boardSummary", block)
+        self.assertNotIn("scopedTasks.forEach", block)
+
+    def test_section_no_longer_pulls_every_task(self):
+        src = _read(TASKS_VIEW_PATH)
+        start = src.index("  const fetchTasks = useCallback(async () => {")
+        block = src[start:src.index("  const loadBoardTasks = useCallback(", start)]
+        self.assertIn("params: { only_my: 1 }", block)
+        # Цифры «Обзора» приходят серверной сводкой, а не считаются по списку.
+        self.assertIn("total:      Number(tasksSummary?.total || 0),", src)
+        self.assertIn("setTasksSummary(data?.summary || null);", src)
+        # Диплинк на задачу вне выборки догружается точечно.
+        self.assertIn("params: { task_id: taskId, limit: 1 }", src)
+
+    def test_importance_sort_is_applied_across_the_whole_board(self):
+        db_src = _read(DATABASE_PATH)
+        start = db_src.index("            importance_sql = (")
+        block = db_src[start:db_src.index("            task_query = f", start)]
+        # Тот же порядок, что в compareBoardTasks: важность, затем свежесть и id.
+        self.assertIn("CASE t.priority WHEN 'critical' THEN 0 WHEN 'urgent' THEN 1 ELSE 2 END ASC", block)
+        self.assertIn("t.created_at DESC, t.id DESC", block)
+        # Ручная очередь бэклога сортировке не подчиняется.
+        self.assertIn("if backlog_norm == 'only':", block)
+        self.assertIn("elif sort_norm == 'importance':", block)
+        self.assertIn("INVALID_TASK_SORT", db_src)
+        self.assertIn("INVALID_TASK_SORT", _read(APP_PATH))
+
+        view = _read(WORKSPACE_PATH)
+        self.assertIn("if (sort === 'importance') params.sort = 'importance';", view)
+        # Порядок задаётся сервером, поэтому смена сортировки перезапрашивает страницу.
+        self.assertIn("loadTasks({ scope, mode, sort: boardSort, limit: pageSize", view)
+        self.assertIn("}, [loadTasks, scope, mode, boardSort, page, pageSize, reloadToken]);", view)
+        self.assertIn("const changeBoardSort = useCallback((next) => {", view)
+
+    def test_pager_walks_pages_not_dom(self):
+        src = _read(WORKSPACE_PATH)
+        self.assertIn("const BoardPager = ({", src)
+        start = src.index("  /* Доска грузит только свою страницу")
+        block = src[start:src.index("  // Смена вкладки", start)]
+        self.assertIn("limit: pageSize, offset: (page - 1) * pageSize", block)
+        self.assertIn("pageRequestIdRef.current !== requestId", block)
 
 
 class SkillTests(unittest.TestCase):

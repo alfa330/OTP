@@ -2329,6 +2329,9 @@ EVENTS_BODY_MAX_CHARS = int(os.getenv('EVENTS_BODY_MAX_CHARS', '8000'))
 EVENTS_TITLE_MAX_CHARS = 255
 EVENTS_COMMENT_MAX_CHARS = int(os.getenv('EVENTS_COMMENT_MAX_CHARS', '2000'))
 EVENTS_VIDEO_SIGNED_URL_TTL_MINUTES = int(os.getenv('EVENTS_VIDEO_SIGNED_URL_TTL_MINUTES', '240'))
+# Потолок размера страницы /api/tasks. Клиент даёт выбрать 30/60/100, но защита
+# от «дай всё сразу» должна стоять на сервере, а не в интерфейсе.
+TASKS_MAX_PAGE_SIZE = int(os.getenv('TASKS_MAX_PAGE_SIZE', '200'))
 TASK_TAG_LABELS = {
     'task': 'Задача',
     'problem': 'Проблема',
@@ -17549,6 +17552,9 @@ def handle_tasks():
             only_my = only_my_raw in {'1', 'true', 'yes', 'y', 'on'}
             person_scope = (request.args.get('person_scope') or '').strip().lower() or None
             backlog_filter = (request.args.get('backlog') or '').strip().lower() or None
+            mine_filter = (request.args.get('mine') or '').strip().lower() or None
+            task_id_filter = (request.args.get('task_id') or '').strip() or None
+            sort_order = (request.args.get('sort') or '').strip().lower() or None
             person_id_raw = request.args.get('person_id')
             person_id = None
             if person_id_raw is not None and str(person_id_raw).strip() != '':
@@ -17567,8 +17573,8 @@ def handle_tasks():
                     limit = int(raw_limit)
                 except Exception:
                     return jsonify({"error": "Invalid limit param"}), 400
-                if limit < 1 or limit > 500:
-                    return jsonify({"error": "limit must be in range 1..500"}), 400
+                if limit < 1 or limit > TASKS_MAX_PAGE_SIZE:
+                    return jsonify({"error": f"limit must be in range 1..{TASKS_MAX_PAGE_SIZE}"}), 400
 
             if raw_offset is not None and str(raw_offset).strip() != '':
                 try:
@@ -17591,7 +17597,10 @@ def handle_tasks():
                     only_my=only_my,
                     person_id=person_id,
                     person_scope=person_scope,
-                    backlog=backlog_filter
+                    backlog=backlog_filter,
+                    mine=mine_filter,
+                    task_id=task_id_filter,
+                    sort=sort_order
                 )
             except ValueError as e:
                 error_code = str(e)
@@ -17611,6 +17620,12 @@ def handle_tasks():
                     return jsonify({"error": "Invalid person_scope filter"}), 400
                 if error_code == 'INVALID_TASK_BACKLOG_FILTER':
                     return jsonify({"error": "Invalid backlog filter (use only|exclude)"}), 400
+                if error_code == 'INVALID_TASK_MINE_FILTER':
+                    return jsonify({"error": "Invalid mine filter (use any|assignee|creator)"}), 400
+                if error_code == 'INVALID_TASK_ID_FILTER':
+                    return jsonify({"error": "Invalid task_id filter"}), 400
+                if error_code == 'INVALID_TASK_SORT':
+                    return jsonify({"error": "Invalid sort (use freshness|importance)"}), 400
                 raise
 
             tasks = payload.get("tasks") or []
@@ -17636,7 +17651,8 @@ def handle_tasks():
             total_all = int(payload.get("total_all", len(tasks)) or 0)
             total_filtered = int(payload.get("total_filtered", len(tasks)) or 0)
             returned = len(tasks)
-            has_more = (offset + returned) < total_filtered if limit is not None else False
+            # Потолок строк действует и без limit, поэтому «есть ещё» считаем всегда.
+            has_more = (offset + returned) < total_filtered
 
             return jsonify({
                 "status": "success",
@@ -17660,7 +17676,9 @@ def handle_tasks():
                     "only_my": only_my,
                     "person_id": person_id,
                     "person_scope": person_scope,
-                    "backlog": backlog_filter
+                    "backlog": backlog_filter,
+                    "mine": mine_filter,
+                    "sort": sort_order
                 }
             }), 200
 
