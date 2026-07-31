@@ -44334,6 +44334,15 @@ async def run_wazzup_retention_async():
         logging.exception("wazzup retention failed")
 
 
+async def run_user_sessions_retention_async():
+    # Чистка давно протухших сессий (см. db.cleanup_expired_user_sessions).
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(executor_pool, db.cleanup_expired_user_sessions)
+    except Exception:
+        logging.exception("user sessions retention failed")
+
+
 async def run_wazzup_episodes_async():
     # Ночная сборка эпизодов Wazzup (04:00 Алматы — затишье 02:00–08:00).
     loop = asyncio.get_event_loop()
@@ -44767,12 +44776,22 @@ if __name__ == '__main__':
         coalesce=True
     )
 
-    # Ретеншн переписки Wazzup (Верификаторы): сообщения старше 45 дней
+    # Ретеншн переписки Wazzup (Верификаторы): сообщения старше 30 дней
     # удаляются ежедневно в 03:30 (Asia/Almaty) — диск прода 1 ГБ.
     scheduler.add_job(
         run_wazzup_retention_async,
         CronTrigger(hour=3, minute=30, timezone=ZoneInfo('Asia/Almaty')),
         id='wazzup_retention_daily',
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # Чистка протухших сессий в 03:20 — до остальных ретеншнов, задача секундная.
+    scheduler.add_job(
+        run_user_sessions_retention_async,
+        CronTrigger(hour=3, minute=20, timezone=ZoneInfo('Asia/Almaty')),
+        id='user_sessions_retention_daily',
         misfire_grace_time=3600,
         max_instances=1,
         coalesce=True

@@ -1981,10 +1981,11 @@ class Database:
                     UNIQUE(operator_id, day)
                 );
             """)
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_daily_hours_operator_day
-                ON daily_hours(operator_id, day);
-            """)
+            # NOTE: idx_daily_hours_operator_day was a byte-for-byte duplicate of the
+            # UNIQUE(operator_id, day) constraint index above — same columns, same order.
+            # The constraint index serves every query the duplicate did, so dropping it
+            # cannot change a plan. Do not re-add.
+            cursor.execute("DROP INDEX IF EXISTS idx_daily_hours_operator_day;")
             cursor.execute("""
                 ALTER TABLE daily_hours
                 ADD COLUMN IF NOT EXISTS no_phone_minutes INTEGER NOT NULL DEFAULT 0;
@@ -2269,7 +2270,10 @@ class Database:
                 ON chat_metric_surge_windows(month, start_at);
             """)
             # Wazzup (Верификаторы): сырые сообщения из вебхука messagesAndStatuses.
-            # Ретеншн 45 дней (см. cleanup_wazzup_messages) — таблица не растёт бесконечно.
+            # Ретеншн 30 дней (см. cleanup_wazzup_messages) — таблица не растёт бесконечно.
+            # Полезная нагрузка вебхука разобрана по типизированным колонкам; целиком
+            # (колонка raw JSONB) она больше не хранится — это было 60% веса таблицы
+            # при нулевом числе читателей.
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS wazzup_messages (
                     message_id TEXT PRIMARY KEY,
@@ -2289,10 +2293,11 @@ class Database:
                     sent_from_app BOOLEAN,
                     is_edited BOOLEAN NOT NULL DEFAULT FALSE,
                     is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
-                    raw JSONB,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 );
             """)
+            # Снос raw: колонка дублировала уже разобранные поля и не имела читателей.
+            cursor.execute("ALTER TABLE wazzup_messages DROP COLUMN IF EXISTS raw;")
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_wazzup_messages_chat
                 ON wazzup_messages(channel_id, chat_id, dt);
@@ -4056,7 +4061,9 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_task_attachments_task_id ON task_attachments(task_id);
                 CREATE INDEX IF NOT EXISTS idx_task_checklist_items_task_id ON task_checklist_items(task_id, position);
                 CREATE INDEX IF NOT EXISTS idx_raw_resource_uploads_report_date ON raw_resource_uploads(report_date DESC);
-                CREATE INDEX IF NOT EXISTS idx_daily_resource_hours_report_hour ON daily_resource_hours(report_date, hour);
+                -- idx_daily_resource_hours_report_hour duplicated the UNIQUE(report_date, hour)
+                -- constraint index byte for byte; the constraint serves the same queries.
+                DROP INDEX IF EXISTS idx_daily_resource_hours_report_hour;
                 CREATE INDEX IF NOT EXISTS idx_daily_resource_summary_weekday_date ON daily_resource_summary(weekday, report_date DESC);
                 CREATE INDEX IF NOT EXISTS idx_resource_saved_schedule_plans_period ON resource_saved_schedule_plans(date_from, date_to, archived_at, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_resource_saved_schedule_shifts_plan_date ON resource_saved_schedule_shifts(plan_id, shift_date, start_time);
@@ -17237,8 +17244,8 @@ class Database:
                         message_id, channel_id, chat_type, chat_id, dt, is_echo,
                         type, text, content_uri, author_name, author_id,
                         contact_name, contact_phone, status, sent_from_app,
-                        is_edited, is_deleted, raw)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        is_edited, is_deleted)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (message_id) DO UPDATE SET
                         -- событие удаления приходит без текста: сохраняем последний
                         -- известный текст, факт удаления фиксирует is_deleted
@@ -17248,8 +17255,7 @@ class Database:
                         author_name = COALESCE(EXCLUDED.author_name, wazzup_messages.author_name),
                         author_id = COALESCE(EXCLUDED.author_id, wazzup_messages.author_id),
                         is_edited = EXCLUDED.is_edited,
-                        is_deleted = EXCLUDED.is_deleted,
-                        raw = EXCLUDED.raw
+                        is_deleted = EXCLUDED.is_deleted
                 """, (
                     str(message_id), str(channel_id), m.get('chatType'), str(chat_id),
                     dt, bool(m.get('isEcho')), m.get('type'), m.get('text'),
@@ -17257,7 +17263,6 @@ class Database:
                     str(m['authorId']) if m.get('authorId') is not None else None,
                     contact.get('name'), contact.get('phone'), m.get('status'),
                     m.get('sentFromApp'), bool(m.get('isEdited')), bool(m.get('isDeleted')),
-                    Json(m),
                 ))
                 processed += 1
                 affected[(str(channel_id), str(chat_id))] = (m.get('chatType'), contact)
@@ -17360,7 +17365,7 @@ class Database:
         """)
         return cursor.rowcount
 
-    def cleanup_wazzup_messages(self, retention_days=45):
+    def cleanup_wazzup_messages(self, retention_days=30):
         """Ретеншн Wazzup: удаляет сырые данные старше retention_days.
 
         Эпизоды с успешной ИИ-оценкой или финальной человеческой оценкой в
@@ -22561,6 +22566,32 @@ class Database:
                       AND revoked_at IS NULL
                 """, (user_id,))
             return cursor.rowcount
+
+    def cleanup_expired_user_sessions(self, grace_days=30):
+        """Удаляет давно протухшие сессии — таблица только росла.
+
+        Отзыв сессии (revoke_user_sessions/*) ставит revoked_at, но строку не
+        убирает, поэтому к моменту ввода этой чистки 6136 из 8022 строк были
+        мертвы. Удаляем только то, что не может быть использовано ни при каком
+        раскладе: истёкшие больше grace_days назад. Запас в 30 дней сознательно
+        велик — expires_at пишется в UTC, а created_at/last_seen_at в Asia/Almaty,
+        и при таком зазоре расхождение часовых поясов роли не играет.
+        Активные и недавно истёкшие сессии (их ещё видно в «Мои устройства»)
+        не трогаем.
+        """
+        days = max(int(grace_days), 7)
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                DELETE FROM user_sessions
+                 WHERE expires_at < (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
+                                    - make_interval(days => %s)
+            """, (days,))
+            deleted = cursor.rowcount
+        if deleted:
+            logging.info(
+                "user_sessions retention: удалено %s сессий, истёкших более %s дней назад",
+                deleted, days)
+        return {'deleted_sessions': deleted, 'grace_days': days}
 
     def set_session_sensitive_access(self, session_id, user_id, unlocked=True):
         with self._get_cursor() as cursor:
