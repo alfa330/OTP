@@ -19414,7 +19414,7 @@ def get_users_report():
         if headed_department_id is not None:
             headed_department_ids.add(int(headed_department_id))
 
-        # Супервайзер без отдела в подчинении выгружает отчёт только по своим операторам.
+        # Супервайзер выгружает свой отдел целиком — все группы, а не только собственных операторов.
         is_supervisor = requester_role == 'sv'
         if not is_global_admin and not headed_department_ids and not is_supervisor:
             return jsonify({"error": "Only admins, department heads and supervisors can generate users report"}), 403
@@ -19436,8 +19436,13 @@ def get_users_report():
             # A department head can never expand the export scope with a query parameter.
             report_department_ids = sorted(headed_department_ids)
         else:
-            # A supervisor is scoped to their own operators, whatever the query parameters say.
-            report_supervisor_ids = [requester_id]
+            # A supervisor gets the whole department they belong to, never a foreign one.
+            supervisor_department_id = _department_scope_id_for_requester(requester_id)
+            if supervisor_department_id is not None:
+                report_department_ids = [int(supervisor_department_id)]
+            else:
+                # Отдел не проставлен — оставляем СВ хотя бы его собственных операторов.
+                report_supervisor_ids = [requester_id]
 
         def _bool_query_arg(name, default=False):
             raw = request.args.get(name)

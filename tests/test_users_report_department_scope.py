@@ -59,7 +59,7 @@ class _UsersReportDB:
 
 
 class UsersReportEndpointScopeTests(unittest.TestCase):
-    def _call(self, *, role, headed=(), query=None, departments=None):
+    def _call(self, *, role, headed=(), query=None, departments=None, own_department=None):
         headed = {int(value) for value in headed}
         fake_db = _UsersReportDB(role, departments=departments)
         fake_request = SimpleNamespace(
@@ -86,23 +86,34 @@ class UsersReportEndpointScopeTests(unittest.TestCase):
                 "_is_global_admin_requester": is_global_admin,
                 "_headed_department_ids": lambda _user_id: frozenset(headed),
                 "_headed_department_id": lambda _user_id: min(headed) if headed else None,
+                "_department_scope_id_for_requester": (
+                    lambda _user_id: min(headed) if headed else own_department
+                ),
             },
         )
         return endpoint(), fake_db
 
-    def test_supervisor_is_scoped_to_their_own_operators(self):
-        result, fake_db = self._call(role="sv")
+    def test_supervisor_exports_every_group_of_their_own_department(self):
+        result, fake_db = self._call(role="sv", own_department=8)
 
         self.assertEqual(_response_status(result), 200)
-        self.assertEqual(fake_db.generate_calls[0]["supervisor_ids"], [10])
-        self.assertIsNone(fake_db.generate_calls[0]["department_ids"])
+        self.assertEqual(fake_db.generate_calls[0]["department_ids"], [8])
+        self.assertIsNone(fake_db.generate_calls[0]["supervisor_ids"])
 
     def test_supervisor_cannot_widen_the_scope_with_a_department_parameter(self):
         result, fake_db = self._call(
             role="sv",
-            query={"department_id": "8"},
-            departments={8: {"id": 8, "name": "Sales", "is_active": True}},
+            own_department=8,
+            query={"department_id": "9"},
+            departments={9: {"id": 9, "name": "Sales", "is_active": True}},
         )
+
+        self.assertEqual(_response_status(result), 200)
+        self.assertEqual(fake_db.generate_calls[0]["department_ids"], [8])
+        self.assertIsNone(fake_db.generate_calls[0]["supervisor_ids"])
+
+    def test_supervisor_without_a_department_falls_back_to_their_own_operators(self):
+        result, fake_db = self._call(role="sv", own_department=None)
 
         self.assertEqual(_response_status(result), 200)
         self.assertEqual(fake_db.generate_calls[0]["supervisor_ids"], [10])
@@ -233,13 +244,12 @@ class UsersReportImplementationContractTests(unittest.TestCase):
         source = _read(FRONTEND_PATH)
 
         self.assertIn(
-            "const isSupervisorReportScope = isSupervisorRole(currentUserRole) && !isDepartmentHeadUser;",
+            "const canSupervisorExportOperators = isSupervisorRole(currentUserRole) && !isDepartmentHeadUser;",
             source,
         )
-        self.assertIn("{isSupervisorReportScope && (", source)
-        self.assertIn("{!isSupervisorReportScope && (", source)
-        self.assertIn("Будут выгружены только ваши операторы.", source)
-        self.assertIn("sheetMode: isSupervisorReportScope ? 'summary' : prev.sheetMode", source)
+        self.assertIn("{canSupervisorExportOperators && (", source)
+        # Область у СВ та же, что у главы отдела, поэтому окно параметров не раздваивается.
+        self.assertNotIn("Будут выгружены только ваши операторы.", source)
 
 
 if __name__ == "__main__":
