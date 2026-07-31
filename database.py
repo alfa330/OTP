@@ -42900,6 +42900,9 @@ class Database:
 
         return created_task_ids
 
+    # Жёсткий потолок строк в одном ответе /api/tasks: защита от «отдай всё».
+    TASKS_MAX_ROWS = 500
+
     def get_task_action_needs_summary(self, requester_id):
         """
         Сколько задач ждут действия лично от пользователя — источник бейджа в сайдбаре.
@@ -43006,7 +43009,10 @@ class Database:
             only_my=False,
             person_id=None,
             person_scope=None,
-            backlog=None
+            backlog=None,
+            mine=None,
+            task_id=None,
+            sort=None
     ):
         requester_id = int(requester_id)
         role = normalize_role_value(requester_role)
@@ -43017,6 +43023,19 @@ class Database:
         only_my_flag = bool(only_my)
         person_scope_norm = (person_scope or '').strip().lower() or None
         backlog_norm = (backlog or '').strip().lower() or None
+        # sort — порядок выдачи: свежесть (по умолчанию) или важность.
+        # Важность считает сервер, иначе на постраничной доске она сортировала бы
+        # только видимую страницу.
+        sort_norm = (sort or '').strip().lower() or 'freshness'
+        if sort_norm not in {'freshness', 'importance'}:
+            raise ValueError("INVALID_TASK_SORT")
+        # mine — доски раздела: 'any' (мои, как only_my), 'assignee' (на мне), 'creator' (я поручил).
+        mine_norm = (mine or '').strip().lower() or None
+        if mine_norm == 'any':
+            only_my_flag = True
+            mine_norm = None
+        if mine_norm and mine_norm not in {'assignee', 'creator'}:
+            raise ValueError("INVALID_TASK_MINE_FILTER")
 
         if person_id is None or str(person_id).strip() == '':
             person_id_norm = None
@@ -43036,12 +43055,15 @@ class Database:
         if backlog_norm and backlog_norm not in {'only', 'exclude'}:
             raise ValueError("INVALID_TASK_BACKLOG_FILTER")
 
+        # Запрос без limit не должен уметь вытянуть всю базу — своя страховка на слое БД,
+        # даже если кто-то дёрнет API напрямую.
         if limit is None or str(limit).strip() == '':
-            limit_norm = None
+            limit_norm = self.TASKS_MAX_ROWS
         else:
             limit_norm = int(limit)
             if limit_norm <= 0:
                 raise ValueError("INVALID_TASK_LIMIT")
+            limit_norm = min(limit_norm, self.TASKS_MAX_ROWS)
 
         offset_norm = int(offset or 0)
         if offset_norm < 0:
@@ -43051,7 +43073,11 @@ class Database:
             "total": 0,
             "in_progress": 0,
             "completed": 0,
-            "returned": 0
+            "returned": 0,
+            "backlog": 0,
+            "accepted": 0,
+            "overdue": 0,
+            "delegated": 0
         }
 
         base_conditions = []
@@ -43074,8 +43100,23 @@ class Database:
             base_conditions.append("(t.created_by = %s OR t.assigned_to = %s OR t.requested_by_id = %s)")
             base_params.extend([requester_id, requester_id, requester_id])
 
-        filtered_conditions = list(base_conditions)
-        filtered_params = list(base_params)
+        if mine_norm == 'assignee':
+            base_conditions.append("t.assigned_to = %s")
+            base_params.append(requester_id)
+        elif mine_norm == 'creator':
+            base_conditions.append("(t.created_by = %s OR t.requested_by_id = %s)")
+            base_params.extend([requester_id, requester_id])
+
+        # Точечный запрос по id: диплинк на задачу, которой нет в загруженной выборке.
+        if task_id is not None and str(task_id).strip() != '':
+            try:
+                task_id_norm = int(task_id)
+            except Exception:
+                raise ValueError("INVALID_TASK_ID_FILTER")
+            if task_id_norm <= 0:
+                raise ValueError("INVALID_TASK_ID_FILTER")
+            filtered_conditions.append("t.id = %s")
+            filtered_params.append(task_id_norm)
 
         if search_text:
             like_pattern = f"%{search_text}%"
@@ -43106,6 +43147,17 @@ class Database:
         elif backlog_norm == 'exclude':
             filtered_conditions.append("t.is_backlog = FALSE")
 
+        person_board_id = None
+        if person_id_norm is not None and person_scope_norm == 'any':
+            # Доска сотрудника: фильтр уходит в базу, чтобы summary считал именно его задачи.
+            base_conditions.append("(t.created_by = %s OR t.assigned_to = %s)")
+            base_params.extend([person_id_norm, person_id_norm])
+            person_board_id = person_id_norm
+            person_id_norm = None
+
+        filtered_conditions = list(base_conditions)
+        filtered_params = list(base_params)
+
         if person_id_norm is not None:
             if person_scope_norm == 'incoming':
                 filtered_conditions.append("t.assigned_to = %s")
@@ -43125,25 +43177,45 @@ class Database:
         filtered_where_sql = f"WHERE {' AND '.join(filtered_conditions)}" if filtered_conditions else ""
 
         with self._get_cursor() as cursor:
+            # Сводка считается по базовому набору (доска целиком), а не по странице —
+            # иначе шапка доски сотрудника показывала бы «итоги текущей страницы».
+            summary_params = [self._task_now()]
+            if person_board_id is not None:
+                summary_params.extend([person_board_id, person_board_id])
+            else:
+                summary_params.extend([0, 0])
+            summary_params.extend(base_params)
             cursor.execute(f"""
                 SELECT
                     COUNT(*)::INT AS total_count,
                     COUNT(*) FILTER (WHERE t.status = 'in_progress')::INT AS in_progress_count,
                     COUNT(*) FILTER (WHERE t.status IN ('completed', 'accepted'))::INT AS completed_count,
                     COUNT(*) FILTER (WHERE t.status = 'returned')::INT AS returned_count,
-                    COUNT(*) FILTER (WHERE t.is_backlog)::INT AS backlog_count
+                    COUNT(*) FILTER (WHERE t.is_backlog)::INT AS backlog_count,
+                    COUNT(*) FILTER (WHERE t.status = 'accepted')::INT AS accepted_count,
+                    COUNT(*) FILTER (
+                        WHERE t.due_at IS NOT NULL
+                          AND t.due_at < %s
+                          AND t.status NOT IN ('completed', 'accepted')
+                    )::INT AS overdue_count,
+                    COUNT(*) FILTER (
+                        WHERE t.created_by = %s AND t.assigned_to <> %s
+                    )::INT AS delegated_count
                 FROM tasks t
                 LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 LEFT JOIN users creator ON creator.id = t.created_by
                 {base_where_sql}
-            """, tuple(base_params))
-            summary_row = cursor.fetchone() or (0, 0, 0, 0, 0)
+            """, tuple(summary_params))
+            summary_row = cursor.fetchone() or (0, 0, 0, 0, 0, 0, 0, 0)
             summary = {
                 "total": int(summary_row[0] or 0),
                 "in_progress": int(summary_row[1] or 0),
                 "completed": int(summary_row[2] or 0),
                 "returned": int(summary_row[3] or 0),
-                "backlog": int(summary_row[4] or 0)
+                "backlog": int(summary_row[4] or 0),
+                "accepted": int(summary_row[5] or 0),
+                "overdue": int(summary_row[6] or 0),
+                "delegated": int(summary_row[7] or 0)
             }
 
             cursor.execute(f"""
@@ -43157,11 +43229,18 @@ class Database:
             total_filtered = int(total_filtered_row[0] or 0) if total_filtered_row else 0
 
             # Бэклог — упорядоченная очередь приоритезации, остальные списки — свежие сверху.
-            order_by_sql = (
-                "t.backlog_rank ASC NULLS LAST, t.created_at DESC, t.id DESC"
-                if backlog_norm == 'only'
-                else "t.created_at DESC, t.id DESC"
+            # Порядок должен совпадать с compareBoardTasks во фронте: та же важность,
+            # тот же tie-break по created_at и id.
+            importance_sql = (
+                "CASE t.priority WHEN 'critical' THEN 0 WHEN 'urgent' THEN 1 ELSE 2 END ASC, "
             )
+            if backlog_norm == 'only':
+                # Бэклог — ручная очередь приоритезации, её порядок важнее сортировки.
+                order_by_sql = "t.backlog_rank ASC NULLS LAST, t.created_at DESC, t.id DESC"
+            elif sort_norm == 'importance':
+                order_by_sql = f"{importance_sql}t.created_at DESC, t.id DESC"
+            else:
+                order_by_sql = "t.created_at DESC, t.id DESC"
             task_query = f"""
                 SELECT
                     t.id, t.subject, t.description, t.tag, t.status, t.created_at, t.updated_at,

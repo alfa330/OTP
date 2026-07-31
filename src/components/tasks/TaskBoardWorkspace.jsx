@@ -4,6 +4,7 @@ import { Maximize2, Minimize2 } from 'lucide-react';
 import { APPLE_FONT } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import FullscreenSheet from '../common/FullscreenSheet';
+import { ACTION_NEED_META } from './taskActionNeeds';
 
 /*
  * Бэклог + канбан + таймлайн раздела «Задачи».
@@ -410,6 +411,25 @@ const CardFaces = ({ task, focusPersonId = 0 }) => {
   );
 };
 
+/**
+ * Собачка в правом нижнем углу карточки: задача ждёт шага именно этого пользователя.
+ * Мигает, пока уведомление не прочитано, — прочитанное больше не дёргает.
+ */
+const ActionAtMarker = ({ kind }) => {
+  const meta = ACTION_NEED_META[kind];
+  if (!meta) return null;
+  return (
+    <span
+      className="tb-at-marker"
+      style={{ color: meta.dot, background: `${meta.dot}1f` }}
+      title={`Ждёт вашего действия: ${meta.label}`}
+      aria-label={`Ждёт вашего действия: ${meta.label}`}
+    >
+      @
+    </span>
+  );
+};
+
 const PriorityDot = ({ priority }) => {
   const meta = PRIORITY_DOT[priority];
   if (!meta) return null;
@@ -485,6 +505,47 @@ const BoardPersonHeader = ({ person, stats, onReset }) => (
     </button>
   </div>
 );
+
+/** Пагинация доски: страница приходит с сервера, поэтому листаем запросами, не рендером. */
+const BoardPager = ({ from, to, total, page, totalPages, isLoading, onPageChange }) => {
+  if (total <= 0) return null;
+  const single = totalPages <= 1;
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+      <span className="text-[11.5px] text-slate-400">
+        {single
+          ? `${total} ${pluralTasks(total)}`
+          : <>Показаны <b className="font-semibold tabular-nums text-slate-500">{from}–{to}</b> из <b className="font-semibold tabular-nums text-slate-500">{total}</b></>}
+        {isLoading && <span className="ml-2 text-slate-300">обновляю…</span>}
+      </span>
+      {!single && (
+        <span className="flex items-center gap-1">
+          <button
+            type="button"
+            disabled={page <= 1 || isLoading}
+            onClick={() => onPageChange(page - 1)}
+            className="grid h-7 w-7 place-items-center rounded-lg text-[13px] text-slate-500 transition hover:bg-slate-200/70 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent"
+            aria-label="Предыдущая страница"
+          >
+            ‹
+          </button>
+          <span className="min-w-[54px] text-center text-[11.5px] tabular-nums text-slate-500">
+            {page} / {totalPages}
+          </span>
+          <button
+            type="button"
+            disabled={page >= totalPages || isLoading}
+            onClick={() => onPageChange(page + 1)}
+            className="grid h-7 w-7 place-items-center rounded-lg text-[13px] text-slate-500 transition hover:bg-slate-200/70 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent"
+            aria-label="Следующая страница"
+          >
+            ›
+          </button>
+        </span>
+      )}
+    </div>
+  );
+};
 
 const EmptyState = ({ title, hint }) => (
   <div className="grid place-items-center rounded-2xl border border-dashed border-slate-200 px-6 py-12 text-center">
@@ -836,7 +897,18 @@ const BacklogView = ({ tasks, canPlan, onOpen, onPromote, onApplyPlan, onReorder
 
 /* ─────────────── Канбан ─────────────── */
 
-const BoardCard = ({ task, canPlan, focusPersonId = 0, isFocused = false, isDragging, onOpen, onApplyPlan, onDragStart, onDragEnd }) => {
+const BoardCard = ({
+  task,
+  canPlan,
+  focusPersonId = 0,
+  isFocused = false,
+  isDragging,
+  actionNeedOf,
+  onOpen,
+  onApplyPlan,
+  onDragStart,
+  onDragEnd,
+}) => {
   const [planOpen, setPlanOpen] = useState(false);
   const planAnchorRef = useRef(null);
   const cardRef = useRef(null);
@@ -844,6 +916,7 @@ const BoardCard = ({ task, canPlan, focusPersonId = 0, isFocused = false, isDrag
   const effort = effortChipOf(task);
   const checklist = checklistProgress(task);
   const reportCount = Array.isArray(task?.reports) ? task.reports.length : 0;
+  const actionNeed = actionNeedOf?.(task) || null;
 
   // Переход из уведомления: карточку надо не только подсветить, но и показать —
   // колонки скроллятся и по горизонтали, и по вертикали.
@@ -910,6 +983,7 @@ const BoardCard = ({ task, canPlan, focusPersonId = 0, isFocused = false, isDrag
             Возврат
           </span>
         )}
+        {actionNeed && !actionNeed.seen && <ActionAtMarker kind={actionNeed.kind} />}
       </div>
 
       {planOpen && (
@@ -931,6 +1005,7 @@ const BoardView = ({
   canPlan,
   focusPersonId = 0,
   focusTaskId = 0,
+  actionNeedOf,
   wipLimit,
   onWipLimitChange,
   onOpen,
@@ -1048,6 +1123,7 @@ const BoardView = ({
                       canPlan={canPlan}
                       focusPersonId={focusPersonId}
                       isFocused={focusTaskId === entry.task.id}
+                      actionNeedOf={actionNeedOf}
                       isDragging={dragged?.task?.id === entry.task.id}
                       onOpen={onOpen}
                       onApplyPlan={onApplyPlan}
@@ -1064,6 +1140,7 @@ const BoardView = ({
                     canPlan={canPlan}
                     focusPersonId={focusPersonId}
                     isFocused={focusTaskId === entry.task.id}
+                    actionNeedOf={actionNeedOf}
                     isDragging={dragged?.task?.id === entry.task.id}
                     onOpen={onOpen}
                     onApplyPlan={onApplyPlan}
@@ -1391,16 +1468,44 @@ const TimelineView = ({ tasks, onOpen }) => {
 /* ─────────────── Оболочка ─────────────── */
 
 const WIP_STORAGE_KEY = 'otp.tasks.board.wipLimit';
+const PAGE_SIZE_STORAGE_KEY = 'otp.tasks.board.pageSize';
+
+/** Размер страницы доски. Настройка клиентская, но сервер режет по своему потолку. */
+export const BOARD_PAGE_SIZES = [30, 60, 100];
+export const DEFAULT_BOARD_PAGE_SIZE = 60;
+
+export const normalizeBoardPageSize = (value) => {
+  const parsed = Number(value);
+  return BOARD_PAGE_SIZES.includes(parsed) ? parsed : DEFAULT_BOARD_PAGE_SIZE;
+};
+
+/** Параметры запроса страницы доски: доска сотрудника грузится отдельно от общей. */
+export const boardQueryParams = ({ scope, mode, sort, limit, offset }) => {
+  const params = { limit, offset };
+  // Важность сортирует сервер: иначе на странице оказались бы просто самые свежие,
+  // а «критичные» с других страниц наверх бы не поднялись.
+  if (sort === 'importance') params.sort = 'importance';
+  if (mode === 'backlog') params.backlog = 'only';
+  if (scope === 'my') params.mine = 'any';
+  else if (scope === 'assigned') params.mine = 'assignee';
+  else if (String(scope || '').startsWith('person:')) {
+    params.person_id = Number(String(scope).slice('person:'.length) || 0);
+    params.person_scope = 'any';
+  }
+  return params;
+};
 
 const TaskBoardWorkspace = ({
   mode,
-  tasks,
   recipients = [],
-  loading,
+  loadTasks,
+  reloadToken = 0,
+  taskPatches = null,
   currentUserId,
   isAdmin,
   isSupervisor,
   focusRequest = null,
+  actionNeedOf,
   onOpenTask,
   onStatusAction,
   onBoardUpdate,
@@ -1410,10 +1515,67 @@ const TaskBoardWorkspace = ({
   const [scope, setScope] = useState('my');
   const [boardSort, setBoardSort] = useState('freshness');
   const [overrides, setOverrides] = useState({});
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(() => {
+    if (typeof window === 'undefined') return DEFAULT_BOARD_PAGE_SIZE;
+    return normalizeBoardPageSize(window.localStorage.getItem(PAGE_SIZE_STORAGE_KEY));
+  });
+  const [pageTasks, setPageTasks] = useState([]);
+  const [pageTotal, setPageTotal] = useState(0);
+  const [boardSummary, setBoardSummary] = useState(null);
+  const [isPageLoading, setIsPageLoading] = useState(true);
+  const pageRequestIdRef = useRef(0);
   const [wipLimit, setWipLimit] = useState(() => {
     if (typeof window === 'undefined') return 0;
     return Number(window.localStorage.getItem(WIP_STORAGE_KEY) || 0) || 0;
   });
+
+  /* Доска грузит только свою страницу: доска сотрудника — его задачи, общая —
+     страницу по количеству. Раздел больше не тянет все задачи разом. */
+  useEffect(() => {
+    if (typeof loadTasks !== 'function') return undefined;
+    const requestId = pageRequestIdRef.current + 1;
+    pageRequestIdRef.current = requestId;
+    let cancelled = false;
+    setIsPageLoading(true);
+    loadTasks({ scope, mode, sort: boardSort, limit: pageSize, offset: (page - 1) * pageSize })
+      .then((result) => {
+        if (cancelled || pageRequestIdRef.current !== requestId) return;
+        setPageTasks(Array.isArray(result?.tasks) ? result.tasks : []);
+        setPageTotal(Number(result?.total || 0));
+        setBoardSummary(result?.summary || null);
+      })
+      .finally(() => {
+        if (!cancelled && pageRequestIdRef.current === requestId) setIsPageLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [loadTasks, scope, mode, boardSort, page, pageSize, reloadToken]);
+
+  // Смена вкладки (бэклог/доска/таймлайн) меняет выборку — начинаем с первой страницы.
+  useEffect(() => { setPage(1); }, [mode]);
+
+  const changeScope = useCallback((next) => {
+    setScope(next);
+    setPage(1);
+  }, []);
+
+  // Смена порядка меняет всю выдачу, а не только страницу — возвращаемся к первой.
+  const changeBoardSort = useCallback((next) => {
+    setBoardSort(next);
+    setPage(1);
+  }, []);
+
+  const changePageSize = useCallback((next) => {
+    const normalized = normalizeBoardPageSize(next);
+    setPageSize(normalized);
+    setPage(1);
+    try { window.localStorage.setItem(PAGE_SIZE_STORAGE_KEY, String(normalized)); } catch (error) { /* private mode */ }
+  }, []);
+
+  const totalPages = Math.max(1, Math.ceil(pageTotal / pageSize));
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
 
   // Оптимистичные правки живут ровно до тех пор, пока сервер не подтвердит те же значения.
   useEffect(() => {
@@ -1422,7 +1584,7 @@ const TaskBoardWorkspace = ({
       if (!keys.length) return prev;
       const next = {};
       keys.forEach((key) => {
-        const task = tasks.find((item) => String(item.id) === key);
+        const task = pageTasks.find((item) => String(item.id) === key);
         if (!task) return;
         const patch = prev[key];
         const settled = Object.entries(patch).every(([field, value]) => task[field] === value);
@@ -1430,7 +1592,7 @@ const TaskBoardWorkspace = ({
       });
       return Object.keys(next).length === keys.length ? prev : next;
     });
-  }, [tasks]);
+  }, [pageTasks]);
 
   const handleWipLimitChange = useCallback((value) => {
     const normalized = Math.max(0, Math.min(99, Number(value) || 0));
@@ -1439,8 +1601,11 @@ const TaskBoardWorkspace = ({
   }, []);
 
   const effectiveTasks = useMemo(
-    () => tasks.map((task) => (overrides[task.id] ? { ...task, ...overrides[task.id] } : task)),
-    [tasks, overrides]
+    () => pageTasks.map((task) => {
+      const patched = taskPatches?.[task.id] || task;
+      return overrides[task.id] ? { ...patched, ...overrides[task.id] } : patched;
+    }),
+    [pageTasks, taskPatches, overrides]
   );
 
   const boardPeople = useMemo(() => {
@@ -1486,34 +1651,22 @@ const TaskBoardWorkspace = ({
     return boardPeople.find((person) => person.id === focusPersonId) || null;
   }, [scope, boardPeople, focusPersonId]);
 
-  const scopedTasks = useMemo(() => {
-    if (scope === 'all') return effectiveTasks;
-    if (scope === 'assigned') {
-      return effectiveTasks.filter((task) => Number(task?.assignee?.id || 0) === currentUserId);
-    }
-    if (scope.startsWith('person:')) {
-      const personId = Number(scope.slice('person:'.length) || 0);
-      return effectiveTasks.filter((task) =>
-        Number(task?.assignee?.id || 0) === personId || Number(task?.creator?.id || 0) === personId);
-    }
-    return effectiveTasks.filter((task) =>
-      Number(task?.assignee?.id || 0) === currentUserId || Number(task?.creator?.id || 0) === currentUserId);
-  }, [effectiveTasks, scope, currentUserId]);
+  // Выборку по доске делает сервер (mine / person_id), клиенту фильтровать нечего.
+  const scopedTasks = effectiveTasks;
 
+  /* Счётчики шапки берём из серверной сводки: это итоги всей доски сотрудника,
+     а не текущей страницы. */
   const focusStats = useMemo(() => {
-    if (!focusPerson) return null;
-    const now = Date.now();
-    const stats = { open: 0, inProgress: 0, overdue: 0, delegated: 0 };
-    scopedTasks.forEach((task) => {
-      if (Number(task?.creator?.id || 0) === focusPerson.id
-        && Number(task?.assignee?.id || 0) !== focusPerson.id) stats.delegated += 1;
-      if (task?.status === 'accepted') return;
-      stats.open += 1;
-      if (task?.status === 'in_progress' || task?.status === 'returned') stats.inProgress += 1;
-      if (dueTone(task, now) === 'overdue') stats.overdue += 1;
-    });
-    return stats;
-  }, [scopedTasks, focusPerson]);
+    if (!focusPerson || !boardSummary) return null;
+    const total = Number(boardSummary.total || 0);
+    const accepted = Number(boardSummary.accepted || 0);
+    return {
+      open: Math.max(0, total - accepted),
+      inProgress: Number(boardSummary.in_progress || 0) + Number(boardSummary.returned || 0),
+      overdue: Number(boardSummary.overdue || 0),
+      delegated: Number(boardSummary.delegated || 0),
+    };
+  }, [focusPerson, boardSummary]);
 
   const dropContext = useMemo(
     () => ({ currentUserId, isAdmin, isSupervisor }),
@@ -1556,8 +1709,9 @@ const TaskBoardWorkspace = ({
     return { tasksByColumn: buckets, archivedDone: archived };
   }, [scopedTasks, dropContext, boardSort]);
 
-  /* Переход из уведомления. Карточка обязана оказаться на экране, поэтому если
-     текущая доска её не показывает — переключаемся на «Все». Подсветку гасим сами:
+  /* Переход из уведомления. Если карточки нет на текущей странице — возвращаемся
+     на свою доску, первую страницу: уведомления всегда про задачи пользователя,
+     а сортировка по свежести держит их сверху. Подсветку гасим по таймеру:
      она нужна ровно для того, чтобы глаз нашёл карточку. */
   const [focusTaskId, setFocusTaskId] = useState(0);
   const focusTokenRef = useRef(0);
@@ -1566,7 +1720,10 @@ const TaskBoardWorkspace = ({
     const taskId = Number(focusRequest?.taskId || 0);
     if (!token || !taskId || focusTokenRef.current === token) return;
     focusTokenRef.current = token;
-    if (!scopedTasks.some((task) => Number(task?.id || 0) === taskId)) setScope('all');
+    if (!scopedTasks.some((task) => Number(task?.id || 0) === taskId)) {
+      setScope('my');
+      setPage(1);
+    }
     setFocusTaskId(taskId);
   }, [focusRequest, scopedTasks]);
 
@@ -1618,7 +1775,7 @@ const TaskBoardWorkspace = ({
     applyBoardPatch(task, patch);
   }, [applyBoardPatch]);
 
-  if (loading && !tasks.length) {
+  if (isPageLoading && !pageTasks.length) {
     return (
       <div className="space-y-2">
         {[0, 1, 2].map((index) => (
@@ -1634,6 +1791,10 @@ const TaskBoardWorkspace = ({
     { value: 'all', label: 'Все' },
   ];
 
+  const pageSizeOptions = BOARD_PAGE_SIZES.map((size) => ({ value: size, label: `по ${size}` }));
+  const rangeFrom = pageTotal === 0 ? 0 : (page - 1) * pageSize + 1;
+  const rangeTo = Math.min(pageTotal, (page - 1) * pageSize + pageTasks.length);
+
   return (
     <div className="tb-scope space-y-3" style={{ fontFamily: APPLE_FONT }}>
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1645,12 +1806,12 @@ const TaskBoardWorkspace = ({
               ariaLabel="Выбор доски сотрудника"
               value={scope}
               options={adminScopeOptions}
-              onChange={setScope}
+              onChange={changeScope}
               searchable={adminScopeOptions.length > 8}
               searchPlaceholder="Найти сотрудника…"
             />
           ) : (
-            <SegmentedControl value={scope} options={scopeOptions} onChange={setScope} />
+            <SegmentedControl value={scope} options={scopeOptions} onChange={changeScope} />
           )}
           {mode === 'board' && (
             <CustomSelect
@@ -1659,9 +1820,17 @@ const TaskBoardWorkspace = ({
               ariaLabel="Сортировка карточек"
               value={boardSort}
               options={BOARD_SORT_OPTIONS}
-              onChange={setBoardSort}
+              onChange={changeBoardSort}
             />
           )}
+          <CustomSelect
+            className="w-[110px]"
+            variant="ios"
+            ariaLabel="Карточек на странице"
+            value={pageSize}
+            options={pageSizeOptions}
+            onChange={changePageSize}
+          />
         </div>
         {mode === 'board' && (
           <span className="text-[11.5px] text-slate-400">
@@ -1673,7 +1842,7 @@ const TaskBoardWorkspace = ({
       </div>
 
       {focusPerson && focusStats && (
-        <BoardPersonHeader person={focusPerson} stats={focusStats} onReset={() => setScope('my')} />
+        <BoardPersonHeader person={focusPerson} stats={focusStats} onReset={() => changeScope('my')} />
       )}
 
       {mode === 'backlog' && (
@@ -1695,6 +1864,7 @@ const TaskBoardWorkspace = ({
           canPlan={canPlan}
           focusPersonId={focusPersonId}
           focusTaskId={focusTaskId}
+          actionNeedOf={actionNeedOf}
           wipLimit={wipLimit}
           onWipLimitChange={handleWipLimitChange}
           onOpen={onOpenTask}
@@ -1706,6 +1876,16 @@ const TaskBoardWorkspace = ({
       {mode === 'timeline' && (
         <TimelineView tasks={scopedTasks} onOpen={onOpenTask} />
       )}
+
+      <BoardPager
+        from={rangeFrom}
+        to={rangeTo}
+        total={pageTotal}
+        page={page}
+        totalPages={totalPages}
+        isLoading={isPageLoading}
+        onPageChange={setPage}
+      />
     </div>
   );
 };
