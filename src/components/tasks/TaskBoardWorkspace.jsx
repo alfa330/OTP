@@ -347,12 +347,65 @@ const Avatar = ({ person, size = 22 }) => {
   return (
     <span
       title={person?.name || ''}
-      className="inline-grid shrink-0 place-items-center overflow-hidden rounded-full bg-slate-200 text-[9.5px] font-semibold text-slate-600"
-      style={{ width: size, height: size }}
+      className="inline-grid shrink-0 place-items-center overflow-hidden rounded-full bg-slate-200 font-semibold text-slate-600"
+      style={{ width: size, height: size, fontSize: Math.max(9.5, Math.round(size * 0.36 * 10) / 10) }}
     >
       {url
         ? <img src={url} alt="" className="h-full w-full object-cover" loading="lazy" />
         : initials(person?.name)}
+    </span>
+  );
+};
+
+const FlowArrow = () => (
+  <svg width="9" height="9" viewBox="0 0 10 10" fill="none" aria-hidden="true" className="shrink-0 text-slate-300">
+    <path d="M1.6 5h6.4M5.8 2.6 8.2 5 5.8 7.4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+/**
+ * Лица задачи на карточке: «кто поручил → кто исполняет».
+ * На доске конкретного сотрудника его собственное лицо не повторяем в каждой карточке —
+ * оно уже в шапке доски, а полезен ровно второй участник.
+ */
+const CardFaces = ({ task, focusPersonId = 0 }) => {
+  const creator = task?.creator;
+  const assignee = task?.assignee;
+  const creatorId = Number(creator?.id || 0);
+  const assigneeId = Number(assignee?.id || 0);
+  const creatorName = creator?.name || '—';
+  const assigneeName = assignee?.name || '—';
+
+  if (creatorId && creatorId === assigneeId) {
+    return (
+      <span className="flex shrink-0 items-center" title={`Своя инициатива: ${assigneeName}`}>
+        <Avatar person={assignee} size={20} />
+      </span>
+    );
+  }
+
+  if (focusPersonId && assigneeId === focusPersonId) {
+    return (
+      <span className="flex shrink-0 items-center" title={`Поручил: ${creatorName}`}>
+        <Avatar person={creator} size={20} />
+      </span>
+    );
+  }
+
+  if (focusPersonId && creatorId === focusPersonId) {
+    return (
+      <span className="flex shrink-0 items-center gap-0.5" title={`Исполнитель: ${assigneeName}`}>
+        <FlowArrow />
+        <Avatar person={assignee} size={20} />
+      </span>
+    );
+  }
+
+  return (
+    <span className="flex shrink-0 items-center gap-0.5" title={`${creatorName} → ${assigneeName}`}>
+      <Avatar person={creator} size={20} />
+      <FlowArrow />
+      <Avatar person={assignee} size={20} />
     </span>
   );
 };
@@ -398,6 +451,39 @@ const ReportIcon = () => (
     <path d="M3 1.5h4.2L9.5 3.8V10a.5.5 0 0 1-.5.5H3a.5.5 0 0 1-.5-.5V2a.5.5 0 0 1 .5-.5Z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
     <path d="M4.4 6.3h3.2M4.4 8h2.2" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
   </svg>
+);
+
+/** Шапка доски сотрудника: чьё это пространство. Ниже, в карточках, лица уже не дублируются. */
+const BoardPersonHeader = ({ person, stats, onReset }) => (
+  <div className="flex items-center gap-3 rounded-2xl bg-white px-3.5 py-2.5 ring-1 ring-slate-200/70">
+    <span className="rounded-full ring-1 ring-slate-900/5">
+      <Avatar person={person} size={38} />
+    </span>
+    <span className="min-w-0 flex-1">
+      <span className="block truncate text-[15px] font-semibold tracking-[-0.01em] text-slate-900">
+        {person?.name || 'Сотрудник'}
+      </span>
+      <span className="mt-[1px] flex flex-wrap items-center gap-x-1.5 text-[11.5px] text-slate-400">
+        <span>Открытых: <b className="font-semibold tabular-nums text-slate-500">{stats.open}</b></span>
+        {stats.inProgress > 0 && (
+          <span>· В работе: <b className="font-semibold tabular-nums text-slate-500">{stats.inProgress}</b></span>
+        )}
+        {stats.overdue > 0 && (
+          <span className="text-rose-500">· Просрочено: <b className="font-semibold tabular-nums">{stats.overdue}</b></span>
+        )}
+        {stats.delegated > 0 && (
+          <span>· Поручено другим: <b className="font-semibold tabular-nums text-slate-500">{stats.delegated}</b></span>
+        )}
+      </span>
+    </span>
+    <button
+      type="button"
+      onClick={onReset}
+      className="shrink-0 rounded-xl px-2.5 py-1.5 text-[12.5px] font-medium text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 active:scale-[0.98]"
+    >
+      Моя доска
+    </button>
+  </div>
 );
 
 const EmptyState = ({ title, hint }) => (
@@ -750,23 +836,32 @@ const BacklogView = ({ tasks, canPlan, onOpen, onPromote, onApplyPlan, onReorder
 
 /* ─────────────── Канбан ─────────────── */
 
-const BoardCard = ({ task, canPlan, isDragging, onOpen, onApplyPlan, onDragStart, onDragEnd }) => {
+const BoardCard = ({ task, canPlan, focusPersonId = 0, isFocused = false, isDragging, onOpen, onApplyPlan, onDragStart, onDragEnd }) => {
   const [planOpen, setPlanOpen] = useState(false);
   const planAnchorRef = useRef(null);
+  const cardRef = useRef(null);
   const tone = dueTone(task);
   const effort = effortChipOf(task);
   const checklist = checklistProgress(task);
   const reportCount = Array.isArray(task?.reports) ? task.reports.length : 0;
 
+  // Переход из уведомления: карточку надо не только подсветить, но и показать —
+  // колонки скроллятся и по горизонтали, и по вертикали.
+  useEffect(() => {
+    if (!isFocused) return;
+    cardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+  }, [isFocused]);
+
   return (
     <div
+      ref={cardRef}
       draggable
       onDragStart={(event) => onDragStart(event, task)}
       onDragEnd={onDragEnd}
       onClick={() => onOpen(task)}
       className={`group relative cursor-pointer rounded-xl bg-white p-2.5 ring-1 ring-slate-200/70 transition hover:ring-slate-300 hover:shadow-[0_2px_10px_rgba(15,23,42,0.06)] ${
         isDragging ? 'opacity-40' : ''
-      }`}
+      } ${isFocused ? 'tb-card-focus' : ''}`}
     >
       <div className="flex items-start gap-1.5">
         <span className="mt-[6px]"><PriorityDot priority={task?.priority} /></span>
@@ -785,7 +880,7 @@ const BoardCard = ({ task, canPlan, isDragging, onOpen, onApplyPlan, onDragStart
       </div>
 
       <div className="mt-2 flex items-center gap-1.5">
-        <Avatar person={task?.assignee} size={20} />
+        <CardFaces task={task} focusPersonId={focusPersonId} />
         <span className="flex flex-1 flex-wrap items-center gap-1">
           {task?.due_at && (
             <MetaChip tone={tone} title={`Дедлайн: ${formatDateTimeLabel(task.due_at)}`}>
@@ -834,6 +929,8 @@ const BoardView = ({
   tasksByColumn,
   archivedDone = [],
   canPlan,
+  focusPersonId = 0,
+  focusTaskId = 0,
   wipLimit,
   onWipLimitChange,
   onOpen,
@@ -843,6 +940,11 @@ const BoardView = ({
   const [dragged, setDragged] = useState(null);
   const [hoverColumn, setHoverColumn] = useState(null);
   const [archiveOpen, setArchiveOpen] = useState(false);
+
+  // Задача из уведомления может лежать в свёрнутом архиве «Готово» — раскрываем.
+  useEffect(() => {
+    if (focusTaskId && archivedDone.some((entry) => entry.task.id === focusTaskId)) setArchiveOpen(true);
+  }, [focusTaskId, archivedDone]);
 
   const allowedColumns = useMemo(() => {
     if (!dragged) return null;
@@ -944,6 +1046,8 @@ const BoardView = ({
                       key={entry.task.id}
                       task={entry.task}
                       canPlan={canPlan}
+                      focusPersonId={focusPersonId}
+                      isFocused={focusTaskId === entry.task.id}
                       isDragging={dragged?.task?.id === entry.task.id}
                       onOpen={onOpen}
                       onApplyPlan={onApplyPlan}
@@ -958,6 +1062,8 @@ const BoardView = ({
                     key={entry.task.id}
                     task={entry.task}
                     canPlan={canPlan}
+                    focusPersonId={focusPersonId}
+                    isFocused={focusTaskId === entry.task.id}
                     isDragging={dragged?.task?.id === entry.task.id}
                     onOpen={onOpen}
                     onApplyPlan={onApplyPlan}
@@ -1294,6 +1400,7 @@ const TaskBoardWorkspace = ({
   currentUserId,
   isAdmin,
   isSupervisor,
+  focusRequest = null,
   onOpenTask,
   onStatusAction,
   onBoardUpdate,
@@ -1366,6 +1473,19 @@ const TaskBoardWorkspace = ({
     ...boardPeople.map((person) => ({ value: `person:${person.id}`, label: person.name })),
   ], [boardPeople]);
 
+  // На чьей доске мы стоим: для персональной доски — выбранный сотрудник, иначе сам пользователь.
+  // Это лицо в карточках не повторяем — вместо него показываем второго участника задачи.
+  const focusPersonId = useMemo(() => {
+    if (scope.startsWith('person:')) return Number(scope.slice('person:'.length) || 0);
+    if (scope === 'all') return 0;
+    return currentUserId;
+  }, [scope, currentUserId]);
+
+  const focusPerson = useMemo(() => {
+    if (!scope.startsWith('person:')) return null;
+    return boardPeople.find((person) => person.id === focusPersonId) || null;
+  }, [scope, boardPeople, focusPersonId]);
+
   const scopedTasks = useMemo(() => {
     if (scope === 'all') return effectiveTasks;
     if (scope === 'assigned') {
@@ -1379,6 +1499,21 @@ const TaskBoardWorkspace = ({
     return effectiveTasks.filter((task) =>
       Number(task?.assignee?.id || 0) === currentUserId || Number(task?.creator?.id || 0) === currentUserId);
   }, [effectiveTasks, scope, currentUserId]);
+
+  const focusStats = useMemo(() => {
+    if (!focusPerson) return null;
+    const now = Date.now();
+    const stats = { open: 0, inProgress: 0, overdue: 0, delegated: 0 };
+    scopedTasks.forEach((task) => {
+      if (Number(task?.creator?.id || 0) === focusPerson.id
+        && Number(task?.assignee?.id || 0) !== focusPerson.id) stats.delegated += 1;
+      if (task?.status === 'accepted') return;
+      stats.open += 1;
+      if (task?.status === 'in_progress' || task?.status === 'returned') stats.inProgress += 1;
+      if (dueTone(task, now) === 'overdue') stats.overdue += 1;
+    });
+    return stats;
+  }, [scopedTasks, focusPerson]);
 
   const dropContext = useMemo(
     () => ({ currentUserId, isAdmin, isSupervisor }),
@@ -1420,6 +1555,26 @@ const TaskBoardWorkspace = ({
     archived.sort(compareEntries);
     return { tasksByColumn: buckets, archivedDone: archived };
   }, [scopedTasks, dropContext, boardSort]);
+
+  /* Переход из уведомления. Карточка обязана оказаться на экране, поэтому если
+     текущая доска её не показывает — переключаемся на «Все». Подсветку гасим сами:
+     она нужна ровно для того, чтобы глаз нашёл карточку. */
+  const [focusTaskId, setFocusTaskId] = useState(0);
+  const focusTokenRef = useRef(0);
+  useEffect(() => {
+    const token = Number(focusRequest?.token || 0);
+    const taskId = Number(focusRequest?.taskId || 0);
+    if (!token || !taskId || focusTokenRef.current === token) return;
+    focusTokenRef.current = token;
+    if (!scopedTasks.some((task) => Number(task?.id || 0) === taskId)) setScope('all');
+    setFocusTaskId(taskId);
+  }, [focusRequest, scopedTasks]);
+
+  useEffect(() => {
+    if (!focusTaskId) return undefined;
+    const timer = setTimeout(() => setFocusTaskId(0), 4000);
+    return () => clearTimeout(timer);
+  }, [focusTaskId]);
 
   const applyBoardPatch = useCallback(async (task, patch, optimistic = null) => {
     if (!patch || !Object.keys(patch).length) return;
@@ -1517,6 +1672,10 @@ const TaskBoardWorkspace = ({
         )}
       </div>
 
+      {focusPerson && focusStats && (
+        <BoardPersonHeader person={focusPerson} stats={focusStats} onReset={() => setScope('my')} />
+      )}
+
       {mode === 'backlog' && (
         <BacklogView
           tasks={backlogTasks}
@@ -1534,6 +1693,8 @@ const TaskBoardWorkspace = ({
           tasksByColumn={tasksByColumn}
           archivedDone={archivedDone}
           canPlan={canPlan}
+          focusPersonId={focusPersonId}
+          focusTaskId={focusTaskId}
           wipLimit={wipLimit}
           onWipLimitChange={handleWipLimitChange}
           onOpen={onOpenTask}

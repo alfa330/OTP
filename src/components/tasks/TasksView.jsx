@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom';
 import axios from 'axios';
 import {
+  Bell,
   CalendarClock,
   CheckCircle2,
   ChevronDown,
@@ -24,6 +25,7 @@ import { normalizeRole, isAdminLikeRole, isSupervisorRole } from '../../utils/ro
 import FaIcon from '../common/FaIcon';
 import FullscreenSheet from '../common/FullscreenSheet';
 import TaskBoardWorkspace from './TaskBoardWorkspace';
+import { ACTION_NEED_META, collectTaskActionNeeds, groupTaskActionNeeds } from './taskActionNeeds';
 
 /* ─── Google Fonts ─── */
 const fontLink = document.createElement('link');
@@ -89,6 +91,82 @@ styleTag.textContent = `
     margin: 0;
   }
   .tv-topbar-actions { display: flex; align-items: center; gap: 8px; }
+
+  /* ── Уведомления «задача ждёт вас» ── */
+  .tv-inbox { position: relative; display: inline-flex; }
+  .tv-inbox-btn { position: relative; padding-right: 12px; }
+  .tv-inbox-btn.is-hot { background: #fff1f2; border-color: #fecdd3; color: var(--rose); }
+  .tv-inbox-btn.is-hot:hover:not(:disabled) { background: #ffe4e6; border-color: #fda4af; color: var(--rose); }
+  .tv-inbox-count {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 18px; height: 18px; padding: 0 5px;
+    border-radius: 99px;
+    background: var(--rose); color: #fff;
+    font-size: 10.5px; font-weight: 700; line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+  .tv-inbox-pop {
+    position: absolute; top: calc(100% + 8px); right: 0; z-index: 60;
+    width: min(384px, calc(100vw - 32px));
+    background: var(--surface);
+    border-radius: 16px;
+    border: 1px solid var(--border);
+    box-shadow: 0 18px 48px rgba(15, 23, 42, .16);
+    overflow: hidden;
+    animation: tvInboxIn .16s cubic-bezier(.22,.9,.3,1);
+  }
+  @keyframes tvInboxIn {
+    from { opacity: 0; transform: translateY(-6px) scale(.985); }
+    to   { opacity: 1; transform: none; }
+  }
+  .tv-inbox-head {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+    padding: 13px 16px 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .tv-inbox-title { font-size: 14px; font-weight: 600; color: var(--ink); }
+  .tv-inbox-sub { font-size: 11.5px; color: var(--ink-3); }
+  .tv-inbox-scroll { max-height: min(60vh, 460px); overflow-y: auto; padding: 6px; }
+  .tv-inbox-group-label {
+    display: flex; align-items: center; gap: 6px;
+    padding: 8px 10px 5px;
+    font-size: 10px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  .tv-inbox-item {
+    width: 100%;
+    display: flex; align-items: flex-start; gap: 9px;
+    padding: 9px 10px;
+    border: 0; border-radius: 10px;
+    background: transparent; cursor: pointer; text-align: left;
+    transition: background .13s ease;
+  }
+  .tv-inbox-item:hover { background: var(--surface-2); }
+  .tv-inbox-item:active { background: #f0efec; }
+  .tv-inbox-dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 6px; flex-shrink: 0; }
+  .tv-inbox-item-main { min-width: 0; flex: 1; }
+  .tv-inbox-item-subject {
+    display: block;
+    font-size: 13px; font-weight: 500; color: var(--ink);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .tv-inbox-item-meta {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    margin-top: 2px;
+    font-size: 11.5px; color: var(--ink-3);
+  }
+  .tv-inbox-item-due { color: var(--rose); font-weight: 600; }
+  .tv-inbox-empty {
+    padding: 26px 18px 30px;
+    text-align: center;
+  }
+  .tv-inbox-empty-title { display: block; font-size: 13px; font-weight: 600; color: var(--ink-2); }
+  .tv-inbox-empty-sub { display: block; margin-top: 4px; font-size: 11.5px; color: var(--ink-3); }
+
+  /* Карточка, к которой перешли из уведомления. */
+  .tb-card-focus {
+    box-shadow: 0 0 0 2px #2563eb, 0 6px 18px rgba(37, 99, 235, .18) !important;
+  }
 
   /* ── Stats strip ── */
   .tv-stats-strip {
@@ -5882,6 +5960,114 @@ export const PinnedTaskWidget = React.memo(({
   return canUseDocumentPictureInPicture ? null : widgetMarkup;
 });
 
+/* ─── Уведомления: задачи, которые ждут действия пользователя ─── */
+
+const inboxCounterpartLabel = (need) => {
+  if (need?.kind === 'review') {
+    const name = need?.task?.assignee?.name;
+    return name ? `Сдал: ${name}` : 'Ждёт приёмки';
+  }
+  const name = need?.task?.creator?.name;
+  return name ? `Поручил: ${name}` : '';
+};
+
+const TaskInbox = ({ needs, onOpen }) => {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+  const count = needs.length;
+  const groups = useMemo(() => groupTaskActionNeeds(needs), [needs]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onDocMouseDown = (event) => {
+      if (rootRef.current && !rootRef.current.contains(event.target)) setOpen(false);
+    };
+    const onKey = (event) => { if (event.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDocMouseDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocMouseDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  // Уведомления исчезают по мере закрытия задач — пустую панель не держим открытой.
+  useEffect(() => {
+    if (!count) setOpen(false);
+  }, [count]);
+
+  return (
+    <span className="tv-inbox" ref={rootRef}>
+      <button
+        type="button"
+        className={`tv-btn tv-btn-ghost tv-inbox-btn ${count > 0 ? 'is-hot' : ''}`}
+        onClick={() => setOpen((prev) => !prev)}
+        title={count > 0 ? `Задач ждут вашего действия: ${count}` : 'Задач, ждущих вашего действия, нет'}
+        aria-haspopup="true"
+        aria-expanded={open ? 'true' : 'false'}
+      >
+        <Bell size={13} strokeWidth={2} />
+        Ждут вас
+        {count > 0 && <span className="tv-inbox-count">{count > 99 ? '99+' : count}</span>}
+      </button>
+
+      {open && (
+        <div className="tv-inbox-pop" role="dialog" aria-label="Задачи, которые ждут вас">
+          <div className="tv-inbox-head">
+            <span className="tv-inbox-title">Ждут вашего действия</span>
+            <span className="tv-inbox-sub">
+              {count > 0 ? `${count} ${pluralRu(count, 'задача', 'задачи', 'задач')}` : 'пусто'}
+            </span>
+          </div>
+
+          {count === 0 ? (
+            <div className="tv-inbox-empty">
+              <span className="tv-inbox-empty-title">Всё разобрано</span>
+              <span className="tv-inbox-empty-sub">Ни одна задача не ждёт вашего шага.</span>
+            </div>
+          ) : (
+            <div className="tv-inbox-scroll">
+              {groups.map((group) => {
+                const meta = ACTION_NEED_META[group.kind];
+                return (
+                  <div key={group.kind}>
+                    <div className="tv-inbox-group-label">
+                      <span className="tv-inbox-dot" style={{ background: meta.dot, marginTop: 0 }} />
+                      {meta.title} · {group.items.length}
+                    </div>
+                    {group.items.map((need) => (
+                      <button
+                        key={need.task.id}
+                        type="button"
+                        className="tv-inbox-item"
+                        onClick={() => { setOpen(false); onOpen(need); }}
+                      >
+                        <span className="tv-inbox-dot" style={{ background: meta.dot }} />
+                        <span className="tv-inbox-item-main">
+                          <span className="tv-inbox-item-subject">{need.task?.subject || 'Без темы'}</span>
+                          <span className="tv-inbox-item-meta">
+                            <span>{inboxCounterpartLabel(need) || meta.hint}</span>
+                            {need.dueAt && (
+                              <span className={need.kind === 'overdue' ? 'tv-inbox-item-due' : ''}>
+                                · {need.kind === 'overdue' ? 'просрочено с' : 'до'} {fmtShortDateTime(need.task.due_at)}
+                              </span>
+                            )}
+                          </span>
+                        </span>
+                        <ChevronRight />
+                      </button>
+                    ))}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </span>
+  );
+};
+
 /* ─── Skeleton loading ─── */
 const SkeletonList = ({ count = 4 }) => (
   <div className="tv-task-list">
@@ -5903,6 +6089,7 @@ const TasksView = ({
   onPinnedTaskSync,
   focusTaskRequest,
   externalRefreshToken = 0,
+  onActionNeedsChange,
 }) => {
   const currentUserRole = normalizeRole(user?.role);
   const canAccessTasks = isAdminLikeRole(currentUserRole) || isSupervisorRole(currentUserRole) || currentUserRole === 'trainer';
@@ -5954,6 +6141,10 @@ const TasksView = ({
   const hasSyncedDrawerUrlRef   = useRef(false);
   const [form, setForm] = useState(() => buildEmptyTaskForm());
   const [notesOpen, setNotesOpen] = useState(false);
+  // Карточка, к которой ведёт клик по уведомлению: доска подсветит её и подскроллит.
+  const [boardFocus, setBoardFocus] = useState(null);
+  // Дедлайн истекает без перезагрузки страницы — пересчитываем «просрочено» раз в минуту.
+  const [actionNeedsNow, setActionNeedsNow] = useState(() => Date.now());
   const [workspaceTab, setWorkspaceTab] = useState(() => {
     if (typeof window === 'undefined') return 'overview';
     const stored = window.localStorage.getItem(WORKSPACE_TAB_STORAGE_KEY);
@@ -5963,6 +6154,11 @@ const TasksView = ({
   const selectWorkspaceTab = useCallback((tabId) => {
     setWorkspaceTab(tabId);
     try { window.localStorage.setItem(WORKSPACE_TAB_STORAGE_KEY, tabId); } catch (error) { /* private mode */ }
+  }, []);
+
+  useEffect(() => {
+    const timer = setInterval(() => setActionNeedsNow(Date.now()), 60000);
+    return () => clearInterval(timer);
   }, []);
 
   const showToastRef = useRef(showToast);
@@ -6119,6 +6315,27 @@ const TasksView = ({
   }, []);
 
   const currentUserId = Number(user?.id || 0);
+
+  /* Уведомления раздела: задачи, ждущие шага именно этого пользователя.
+     Считаем по уже загруженному полному списку — отдельный запрос не нужен,
+     а бейдж сайдбара живёт на том же правиле (см. taskActionNeeds.js). */
+  const actionNeeds = useMemo(
+    () => collectTaskActionNeeds(tasks, currentUserId, actionNeedsNow),
+    [tasks, currentUserId, actionNeedsNow]
+  );
+
+  useEffect(() => {
+    if (typeof onActionNeedsChange === 'function') onActionNeedsChange(actionNeeds.length);
+  }, [actionNeeds.length, onActionNeedsChange]);
+
+  // Переход из уведомления: доска → нужная карточка → карточка задачи.
+  const openActionNeed = useCallback((need) => {
+    const task = need?.task;
+    if (!task?.id) return;
+    selectWorkspaceTab('board');
+    setBoardFocus({ taskId: Number(task.id), token: Date.now() });
+    setDrawerTask(task);
+  }, [selectWorkspaceTab]);
 
   const incomingTasks = useMemo(
     () => tasks.filter(t => Number(t?.assignee?.id || 0) === currentUserId),
@@ -6838,6 +7055,7 @@ const TasksView = ({
       <div className="tv-topbar">
         <h1 className="tv-topbar-title">Задачи</h1>
         <div className="tv-topbar-actions">
+          <TaskInbox needs={actionNeeds} onOpen={openActionNeed} />
           <button
             className={`tv-btn ${notesOpen ? 'tv-btn-amber' : 'tv-btn-ghost'}`}
             type="button"
@@ -6897,6 +7115,7 @@ const TasksView = ({
             currentUserId={currentUserId}
             isAdmin={isAdminLikeRole(currentUserRole)}
             isSupervisor={isSupervisorRole(currentUserRole)}
+            focusRequest={boardFocus}
             onOpenTask={setDrawerTask}
             onStatusAction={handleBoardStatusAction}
             onBoardUpdate={updateBoardItems}

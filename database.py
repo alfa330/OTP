@@ -42878,6 +42878,64 @@ class Database:
 
         return created_task_ids
 
+    def get_task_action_needs_summary(self, requester_id):
+        """
+        Сколько задач ждут действия лично от пользователя — источник бейджа в сайдбаре.
+
+        Правила ровно те же, что считает раздел на клиенте
+        (src/components/tasks/taskActionNeeds.js) — если меняете здесь, меняйте и там:
+          overdue  — я исполнитель, дедлайн прошёл, задача не закрыта;
+          returned — мне вернули на доработку;
+          review   — я поручитель, исполнитель сдал работу и ждёт приёмки;
+          fresh    — мне поручили, к работе ещё не приступил.
+        Категории взаимоисключающие: одна задача считается один раз.
+        Бэклог не трогаем — это очередь планирования, а не работа.
+        """
+        requester_id = int(requester_id)
+        now = self._task_now()
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    COUNT(*) FILTER (
+                        WHERE t.assigned_to = %s
+                          AND t.is_backlog = FALSE
+                          AND t.status IN ('assigned', 'in_progress', 'returned')
+                          AND t.due_at IS NOT NULL
+                          AND t.due_at < %s
+                    )::INT,
+                    COUNT(*) FILTER (
+                        WHERE t.assigned_to = %s
+                          AND t.is_backlog = FALSE
+                          AND t.status = 'returned'
+                          AND (t.due_at IS NULL OR t.due_at >= %s)
+                    )::INT,
+                    COUNT(*) FILTER (
+                        WHERE t.status = 'completed'
+                          AND COALESCE(t.requested_by_id, t.created_by) = %s
+                    )::INT,
+                    COUNT(*) FILTER (
+                        WHERE t.assigned_to = %s
+                          AND t.is_backlog = FALSE
+                          AND t.status = 'assigned'
+                          AND (t.due_at IS NULL OR t.due_at >= %s)
+                    )::INT
+                FROM tasks t
+            """, (
+                requester_id, now,
+                requester_id, now,
+                requester_id,
+                requester_id, now
+            ))
+            row = cursor.fetchone() or (0, 0, 0, 0)
+
+        breakdown = {
+            "overdue": int(row[0] or 0),
+            "returned": int(row[1] or 0),
+            "review": int(row[2] or 0),
+            "fresh": int(row[3] or 0)
+        }
+        return {"count": sum(breakdown.values()), "breakdown": breakdown}
+
     def get_tasks_for_requester(
             self,
             requester_id,

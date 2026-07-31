@@ -998,6 +998,80 @@ class ReportCliTests(unittest.TestCase):
         self.assertEqual(self.module.parse_duration_to_minutes(args.spent), 150)
 
 
+class ActionNeedsBadgeTests(unittest.TestCase):
+    """Уведомления «задача ждёт вас»: раздел, бейдж сайдбара и SQL считают одно и то же."""
+
+    ACTION_NEEDS_PATH = ROOT / "src" / "components" / "tasks" / "taskActionNeeds.js"
+
+    def test_sql_summary_mirrors_frontend_rules(self):
+        src = _read(DATABASE_PATH)
+        start = src.index("    def get_task_action_needs_summary(self, requester_id):")
+        block = src[start:src.index("    def get_tasks_for_requester(", start)]
+        # Просрочка — только у исполнителя и только по живым статусам.
+        self.assertIn("t.status IN ('assigned', 'in_progress', 'returned')", block)
+        self.assertIn("t.due_at < %s", block)
+        # Приёмку ждёт поручитель, а если его нет — постановщик.
+        self.assertIn("COALESCE(t.requested_by_id, t.created_by) = %s", block)
+        self.assertIn("t.status = 'completed'", block)
+        # Бэклог не считается: это очередь планирования.
+        self.assertEqual(block.count("t.is_backlog = FALSE"), 3)
+        self.assertIn("taskActionNeeds.js", block)
+
+    def test_endpoint_is_guarded_like_the_rest_of_the_section(self):
+        src = _read(APP_PATH)
+        self.assertIn("@app.route('/api/tasks/action_required', methods=['GET', 'OPTIONS'])", src)
+        start = src.index("def get_task_action_required_count():")
+        block = src[start:src.index("@app.route('/api/tasks/notes'", start)]
+        self.assertIn("_task_route_guard()", block)
+        self.assertIn("db.get_task_action_needs_summary(requester_id)", block)
+
+    def test_frontend_rules_are_exclusive_and_skip_backlog(self):
+        src = _read(self.ACTION_NEEDS_PATH)
+        self.assertIn("if (!isAssignee || task?.is_backlog) return null;", src)
+        self.assertIn("return { kind: 'overdue', dueAt };", src)
+        self.assertIn("return { kind: 'returned', dueAt };", src)
+        self.assertIn("return { kind: 'review', dueAt };", src)
+        self.assertIn("return { kind: 'fresh', dueAt };", src)
+
+    def test_section_shows_notifications_and_jumps_to_the_card(self):
+        src = _read(TASKS_VIEW_PATH)
+        self.assertIn("collectTaskActionNeeds", src)
+        self.assertIn("<TaskInbox needs={actionNeeds} onOpen={openActionNeed} />", src)
+        # Клик по уведомлению: доска → подсветка карточки → карточка задачи.
+        start = src.index("const openActionNeed = useCallback((need) => {")
+        block = src[start:src.index("}, [selectWorkspaceTab]);", start)]
+        self.assertIn("selectWorkspaceTab('board')", block)
+        self.assertIn("setBoardFocus({ taskId: Number(task.id), token: Date.now() })", block)
+        self.assertIn("setDrawerTask(task)", block)
+
+    def test_board_reveals_the_focused_card(self):
+        src = _read(WORKSPACE_PATH)
+        self.assertIn("focusRequest = null,", src)
+        # Карточку надо показать, даже если она вне текущей доски сотрудника.
+        self.assertIn("if (!scopedTasks.some((task) => Number(task?.id || 0) === taskId)) setScope('all');", src)
+        self.assertIn("cardRef.current?.scrollIntoView(", src)
+        self.assertIn("tb-card-focus", src)
+
+    def test_sidebar_badge_is_wired(self):
+        src = _read(APP_JSX_PATH)
+        self.assertIn("/api/tasks/action_required", src)
+        self.assertIn("const renderTasksSidebarButtonInner = () => (", src)
+        # Пункт «Задачи» рендерится в нескольких ветках меню — бейдж нужен во всех.
+        self.assertEqual(src.count("{renderTasksSidebarButtonInner()}"), 3)
+        self.assertIn("tasksActionRequiredCount,", src)
+        self.assertIn("onActionNeedsChange={handleTasksActionNeedsChange}", src)
+
+    def test_sidebar_badge_does_not_poll_in_background(self):
+        src = _read(APP_JSX_PATH)
+        start = src.index("const fetchTasksActionRequiredRef = useRef(null);")
+        block = src[start:src.index("const handleTasksActionNeedsChange", start)]
+        # Обновление только по событиям (вход, возврат фокуса, смена раздела).
+        self.assertNotIn("setInterval", block)
+        self.assertIn("TASKS_BADGE_MIN_GAP_MS", block)
+        self.assertIn("window.addEventListener('focus', onWake);", block)
+        self.assertIn("if (view === 'tasks' || !isPageActiveForBadges()) return;", block)
+
+
 class SkillTests(unittest.TestCase):
     def test_skill_describes_connection(self):
         src = _read(SKILL_PATH)
