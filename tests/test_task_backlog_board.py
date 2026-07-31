@@ -215,11 +215,9 @@ class WorkspaceFrontendTests(unittest.TestCase):
 
     def test_admin_can_open_a_named_employee_board(self):
         self.assertIn("import CustomSelect from '../ui/CustomSelect';", self.src)
-        self.assertIn("recipients = [],", self.src)
+        self.assertIn("people = [],", self.src)
         self.assertIn("{isAdmin ? (", self.src)
         self.assertIn("value: `person:${person.id}`", self.src)
-        self.assertIn("addPerson(task?.assignee);", self.src)
-        self.assertIn("addPerson(task?.creator);", self.src)
         # Выборку доски делает сервер, клиент её не фильтрует.
         self.assertIn("params.person_scope = 'any';", self.src)
         self.assertIn('ariaLabel="Выбор доски сотрудника"', self.src)
@@ -1156,14 +1154,14 @@ class BoardPaginationTests(unittest.TestCase):
         self.assertIn("params.person_scope = 'any';", block)
         self.assertIn("const params = { limit, offset };", block)
 
-    def test_page_sizes_are_a_closed_list(self):
+    def test_chunk_sizes_are_a_closed_list(self):
         src = _read(WORKSPACE_PATH)
-        self.assertIn("export const BOARD_PAGE_SIZES = [30, 60, 100];", src)
-        start = src.index("export const normalizeBoardPageSize = (value) => {")
-        block = src[start:src.index("/** Параметры запроса страницы доски", start)]
-        # Чужое значение из localStorage не должно превращаться в размер страницы.
-        self.assertIn("BOARD_PAGE_SIZES.includes(parsed)", block)
-        self.assertIn("DEFAULT_BOARD_PAGE_SIZE", block)
+        self.assertIn("export const BOARD_CHUNK_SIZES = [20, 40, 60];", src)
+        start = src.index("export const normalizeBoardChunk = (value) => {")
+        block = src[start:src.index("/** Колонка доски", start)]
+        # Чужое значение из localStorage не должно превращаться в размер порции.
+        self.assertIn("BOARD_CHUNK_SIZES.includes(parsed)", block)
+        self.assertIn("DEFAULT_BOARD_CHUNK", block)
 
     def test_server_caps_page_size_and_unbounded_requests(self):
         app_src = _read(APP_PATH)
@@ -1224,18 +1222,70 @@ class BoardPaginationTests(unittest.TestCase):
 
         view = _read(WORKSPACE_PATH)
         self.assertIn("if (sort === 'importance') params.sort = 'importance';", view)
-        # Порядок задаётся сервером, поэтому смена сортировки перезапрашивает страницу.
-        self.assertIn("loadTasks({ scope, mode, sort: boardSort, limit: pageSize", view)
-        self.assertIn("}, [loadTasks, scope, mode, boardSort, page, pageSize, reloadToken]);", view)
+        # Порядок задаётся сервером, поэтому смена сортировки перезапрашивает выборку.
+        self.assertIn("sort: boardSort,", view)
         self.assertIn("const changeBoardSort = useCallback((next) => {", view)
+        self.assertIn("resetColumns();", view)
 
-    def test_pager_walks_pages_not_dom(self):
+    def test_columns_load_more_with_honest_remainder(self):
         src = _read(WORKSPACE_PATH)
+        # Колонка = свой срез статусов, поэтому её остаток считается в базе.
+        start = src.index("export const BOARD_COLUMN_QUERY = {")
+        block = src[start:src.index("/** Параметры запроса выборки доски", start)]
+        self.assertIn("progress: { status: 'in_progress,returned', backlog: 'exclude' }", block)
+        self.assertIn("backlog:  { backlog: 'only' }", block)
+        self.assertIn("hidden: Math.max(0, total - loaded)", src)
+        self.assertIn("Показать ещё ${Math.min(chunkSize, meta.hidden)} · не показано ${meta.hidden}", src)
+        # Догрузка дописывает хвост, а не перезапрашивает всё с нуля.
+        self.assertIn("offset: state.tasks.length, append: true", src)
+        self.assertIn("BOARD_MAX_LOADED_PER_COLUMN = 200", src)
+        # Пагинатор остаётся только там, где список один.
+        self.assertIn("{!isBoardMode && (", src)
         self.assertIn("const BoardPager = ({", src)
-        start = src.index("  /* Доска грузит только свою страницу")
-        block = src[start:src.index("  // Смена вкладки", start)]
-        self.assertIn("limit: pageSize, offset: (page - 1) * pageSize", block)
-        self.assertIn("pageRequestIdRef.current !== requestId", block)
+
+    def test_status_filter_accepts_a_list(self):
+        src = _read(DATABASE_PATH)
+        self.assertIn("status_values = [part.strip().lower() for part in str(status or '').split(',') if part.strip()]", src)
+        self.assertIn('filtered_conditions.append("t.status = ANY(%s)")', src)
+
+
+class BoardPeopleAndBacklogActionTests(unittest.TestCase):
+    """Список досок и ручной возврат задачи в бэклог."""
+
+    def test_board_people_exclude_fired_and_carry_department(self):
+        src = _read(DATABASE_PATH)
+        start = src.index("    def get_task_board_people(self, requester_id, requester_role):")
+        block = src[start:src.index("    def _task_now(self):", start)]
+        self.assertIn("COALESCE(u.status, 'working') <> 'fired'", block)
+        self.assertIn("LEFT JOIN departments d ON d.id = u.department_id", block)
+        # СВ и тренер видят только тех, с кем пересеклись по задачам.
+        self.assertIn("(t.created_by = %s OR t.assigned_to = %s OR t.requested_by_id = %s)", block)
+        self.assertIn("@app.route('/api/tasks/board_people', methods=['GET', 'OPTIONS'])", _read(APP_PATH))
+
+    def test_board_selector_groups_people_by_department(self):
+        src = _read(WORKSPACE_PATH)
+        self.assertIn("groupLabel: person.department || 'Без отдела',", src)
+        # Список приходит с сервера, а не собирается из загруженных карточек.
+        start = src.index("  const boardPeople = useMemo(() => people")
+        block = src[start:src.index("  const adminScopeOptions = useMemo(", start)]
+        self.assertNotIn("effectiveTasks", block)
+        select_src = _read(CUSTOM_SELECT_PATH)
+        self.assertIn("const startsGroup = groupLabel && groupLabel !== (filtered[index - 1]?.groupLabel || '');", select_src)
+        view = _read(TASKS_VIEW_PATH)
+        self.assertIn("/api/tasks/board_people", view)
+        self.assertIn("people={boardPeople}", view)
+
+    def test_assigned_task_can_be_sent_back_to_backlog(self):
+        src = _read(TASKS_VIEW_PATH)
+        # Те же права, что и у переноса карточки мышью: постановщик или админ.
+        self.assertIn("if ((isAdmin || isCreator) && s === 'assigned' && !task?.is_backlog)", src)
+        self.assertIn("action: 'to_backlog', label: 'В бэклог'", src)
+        self.assertIn("if (btn.action === 'to_backlog') { onMoveToBacklog?.(task); return; }", src)
+        start = src.index("  const moveTaskToBacklog = useCallback(async (task) => {")
+        block = src[start:src.index("  const openBacklogCreate = useCallback(", start)]
+        self.assertIn("updateBoardItems([{ task_id: taskId, is_backlog: true }])", block)
+        # В виджете закреплённой задачи планирование не показываем.
+        self.assertIn("!['edit', 'delete', 'to_backlog'].includes(btn.action)", src)
 
 
 class SkillTests(unittest.TestCase):

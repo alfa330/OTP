@@ -41401,6 +41401,58 @@ class Database:
             for row in rows
         ]
 
+    def get_task_board_people(self, requester_id, requester_role):
+        """
+        Сотрудники, у которых есть задачи, — источник списка досок в разделе.
+        Уволенных не отдаём: их доска уже история, а список от них пухнет.
+        Отдел нужен, чтобы список группировался, а не был сплошной простынёй.
+        """
+        requester_id = int(requester_id)
+        role = normalize_role_value(requester_role)
+        conditions = ["COALESCE(u.status, 'working') <> 'fired'"]
+        params = []
+        if not role_has_min(role, 'admin'):
+            if role not in ('sv', 'trainer'):
+                return []
+            # Видит только тех, с кем пересекается по задачам.
+            conditions.append("(t.created_by = %s OR t.assigned_to = %s OR t.requested_by_id = %s)")
+            params.extend([requester_id, requester_id, requester_id])
+
+        where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        with self._get_cursor() as cursor:
+            cursor.execute(f"""
+                SELECT
+                    u.id,
+                    u.name,
+                    u.role,
+                    d.id,
+                    d.name,
+                    u.avatar_bucket,
+                    u.avatar_blob_path,
+                    COUNT(*)::INT AS task_count
+                FROM users u
+                JOIN tasks t ON t.assigned_to = u.id OR t.created_by = u.id
+                LEFT JOIN departments d ON d.id = u.department_id
+                {where_sql}
+                GROUP BY u.id, u.name, u.role, d.id, d.name, u.avatar_bucket, u.avatar_blob_path
+                ORDER BY u.name
+            """, tuple(params))
+            rows = cursor.fetchall()
+
+        return [
+            {
+                "id": row[0],
+                "name": row[1],
+                "role": row[2],
+                "department_id": row[3],
+                "department": row[4],
+                "avatar_bucket": row[5],
+                "avatar_blob_path": row[6],
+                "task_count": int(row[7] or 0),
+            }
+            for row in rows
+        ]
+
     def _task_now(self):
         return datetime.now()
 
@@ -43022,7 +43074,9 @@ class Database:
         requester_id = int(requester_id)
         role = normalize_role_value(requester_role)
         search_text = (search or '').strip()
-        status_norm = (status or '').strip().lower() or None
+        # Статус приходит списком: колонка «В работе» — это in_progress + returned.
+        status_values = [part.strip().lower() for part in str(status or '').split(',') if part.strip()]
+        status_norm = status_values[0] if len(status_values) == 1 else None
         tag_norm = (tag or '').strip().lower() or None
         priority_norm = (priority or '').strip().lower() or None
         only_my_flag = bool(only_my)
@@ -43049,8 +43103,9 @@ class Database:
             if person_id_norm <= 0:
                 raise ValueError("INVALID_TASK_PERSON_ID_FILTER")
 
-        if status_norm and status_norm not in {'assigned', 'in_progress', 'completed', 'accepted', 'returned'}:
-            raise ValueError("INVALID_TASK_STATUS_FILTER")
+        for status_value in status_values:
+            if status_value not in {'assigned', 'in_progress', 'completed', 'accepted', 'returned'}:
+                raise ValueError("INVALID_TASK_STATUS_FILTER")
         if tag_norm and tag_norm not in {'task', 'problem', 'suggestion'}:
             raise ValueError("INVALID_TASK_TAG_FILTER")
         if priority_norm and priority_norm not in {'normal', 'urgent', 'critical'}:
@@ -43135,9 +43190,12 @@ class Database:
             """)
             filtered_params.extend([like_pattern, like_pattern, like_pattern, like_pattern])
 
-        if status_norm:
+        if len(status_values) == 1:
             filtered_conditions.append("t.status = %s")
-            filtered_params.append(status_norm)
+            filtered_params.append(status_values[0])
+        elif status_values:
+            filtered_conditions.append("t.status = ANY(%s)")
+            filtered_params.append(status_values)
 
         if tag_norm:
             filtered_conditions.append("t.tag = %s")

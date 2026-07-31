@@ -2740,9 +2740,14 @@ const buildTaskActionButtons = (task, currentUserId, currentUserRole) => {
   const isAssignee = assigneeId === currentUserId;
   const isCreator  = creatorId === currentUserId;
   const isSuperAdmin = normalizeRole(currentUserRole) === 'super_admin';
+  const isAdmin    = isAdminLikeRole(normalizeRole(currentUserRole));
   const canReview  = canReviewTask(task, currentUserId, currentUserRole);
   const s = task?.status;
   const btns = [];
+  /* Вернуть в бэклог можно только не начатую задачу — те же права, что и у
+     переноса карточки мышью на доске (постановщик или админ). */
+  if ((isAdmin || isCreator) && s === 'assigned' && !task?.is_backlog)
+    btns.push({ action: 'to_backlog', label: 'В бэклог', cls: 'tv-btn-ghost' });
   if (isAssignee && (s === 'assigned' || s === 'returned'))
     btns.push({ action: 'in_progress', label: 'Принять в работу', cls: 'tv-btn-amber' });
   if (isAssignee && (s === 'in_progress' || s === 'returned'))
@@ -4652,7 +4657,7 @@ const TaskReportsBlock = ({
 const TaskDrawer = React.memo(({
   task, onClose, actionLoadingKey,
   getActionButtons, openCompleteModal, openStatusModal, updateStatus, downloadAttachment,
-  onEditTask, onDeleteTask, onTogglePinTask, onCopyTaskLink, onToggleChecklistItem, onSaveChecklistNote,
+  onEditTask, onDeleteTask, onTogglePinTask, onCopyTaskLink, onMoveToBacklog, onToggleChecklistItem, onSaveChecklistNote,
   isPinned, currentUserId, currentUserRole, onSubmitReport, onPatchReport, onRemoveReport,
 }) => {
   const sm = STATUS_META[task.status] || { label: task.status, badge: 'tv-badge-gray' };
@@ -4950,6 +4955,7 @@ const TaskDrawer = React.memo(({
                   onClick={() => {
                     if (btn.action === 'completed') { openCompleteModal(task); return; }
                     if (btn.action === 'returned' || btn.action === 'reopened') { openStatusModal(task, btn.action); return; }
+                    if (btn.action === 'to_backlog') { onMoveToBacklog?.(task); return; }
                     updateStatus(task.id, btn.action);
                   }}
                 >
@@ -5046,9 +5052,10 @@ export const PinnedTaskWidget = React.memo(({
   const progress = checklistProgress(checklist);
   const activePalette = PIN_PALETTES.find((item) => item.id === paletteId) || PIN_PALETTES[0];
   const canUseDocumentPictureInPicture = typeof window !== 'undefined' && Boolean(window.documentPictureInPicture?.requestWindow);
+  // Виджет ведёт задачу по статусам; планирование (в бэклог) — дело раздела.
   const actionButtons = useMemo(
     () => buildTaskActionButtons(task, currentUserId, currentUserRole)
-      .filter((btn) => !['edit', 'delete'].includes(btn.action)),
+      .filter((btn) => !['edit', 'delete', 'to_backlog'].includes(btn.action)),
     [task, currentUserId, currentUserRole]
   );
   const managementButtons = useMemo(
@@ -6155,6 +6162,7 @@ const TasksView = ({
   const [tasks,               setTasks]               = useState([]);
   const [pagedTasks,          setPagedTasks]          = useState([]);
   const [recipients,          setRecipients]          = useState([]);
+  const [boardPeople,         setBoardPeople]         = useState([]);
   const [isTasksLoading,      setIsTasksLoading]      = useState(false);
   const [isPagedTasksLoading, setIsPagedTasksLoading] = useState(false);
   const [isRecipientsLoading, setIsRecipientsLoading] = useState(false);
@@ -6260,6 +6268,17 @@ const TasksView = ({
     buildHeaders,
     notify,
   });
+
+  /* Сотрудники для переключателя досок: сервер отдаёт только тех, у кого есть
+     задачи, без уволенных и с отделом для группировки. */
+  const fetchBoardPeople = useCallback(async () => {
+    try {
+      const res = await axios.get(`${apiBaseUrl}/api/tasks/board_people`, { headers: buildHeaders() });
+      setBoardPeople(Array.isArray(res?.data?.people) ? res.data.people : []);
+    } catch (e) {
+      setBoardPeople([]);
+    }
+  }, [apiBaseUrl, buildHeaders]);
 
   const fetchRecipients = useCallback(async () => {
     setIsRecipientsLoading(true);
@@ -6382,8 +6401,9 @@ const TasksView = ({
   useEffect(() => {
     if (!user || !canAccessTasks) return;
     fetchRecipients();
+    fetchBoardPeople();
     fetchTasks();
-  }, [user, canAccessTasks, fetchRecipients, fetchTasks]);
+  }, [user, canAccessTasks, fetchRecipients, fetchBoardPeople, fetchTasks]);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -7048,6 +7068,15 @@ const TasksView = ({
     updateStatus(task.id, action);
   }, [openCompleteModal, openStatusModal, updateStatus]);
 
+  /* Перенос задачи в бэклог кнопкой — то же действие, что и перетаскивание
+     карточки в колонку «Бэклог», но доступное из карточки задачи. */
+  const moveTaskToBacklog = useCallback(async (task) => {
+    const taskId = Number(task?.id || 0);
+    if (!taskId) return;
+    const ok = await updateBoardItems([{ task_id: taskId, is_backlog: true }]);
+    if (ok) notify('Задача убрана в бэклог');
+  }, [updateBoardItems, notify]);
+
   const openBacklogCreate = useCallback(() => {
     setForm(buildEmptyTaskForm({ isBacklog: true }));
     setSelectedFiles([]);
@@ -7260,7 +7289,7 @@ const TasksView = ({
         <div className="tv-section">
           <TaskBoardWorkspace
             mode={workspaceTab}
-            recipients={recipients}
+            people={boardPeople}
             loadTasks={loadBoardTasks}
             reloadToken={boardReloadToken}
             taskPatches={taskPatches}
@@ -7481,6 +7510,7 @@ const TasksView = ({
           onEditTask={openEditModal}
           onDeleteTask={openDeleteModal}
           onCopyTaskLink={copyTaskLink}
+          onMoveToBacklog={moveTaskToBacklog}
           onToggleChecklistItem={toggleChecklistItem}
           onSaveChecklistNote={saveChecklistNote}
           currentUserId={currentUserId}

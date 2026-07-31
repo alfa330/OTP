@@ -12,7 +12,9 @@ import { APPLE_FONT } from './ios';
  * Props:
  *   value             — текущее значение (примитив)
  *   onChange(v)       — вызывается со значением выбранной опции (НЕ event)
- *   options           — [{ value, label, disabled? }]
+ *   options           — [{ value, label, disabled?, groupLabel? }]
+ *                       groupLabel включает заголовки-разделители: они рисуются
+ *                       при смене группы и не участвуют в выборе/клавиатуре
  *   placeholder       — текст, когда ничего не выбрано
  *   disabled          — заблокирован
  *   className         — класс на обёртку (для ширины/отступов)
@@ -250,7 +252,9 @@ export default function CustomSelect({
               filtered.map((o, index) => {
                 const isSel = String(o.value) === String(value ?? '');
                 const isActive = index === activeIndex;
-                return (
+                const groupLabel = o.groupLabel || '';
+                const startsGroup = groupLabel && groupLabel !== (filtered[index - 1]?.groupLabel || '');
+                const option = (
                   <button
                     key={String(o.value)}
                     id={`${listboxId}-option-${index}`}
@@ -280,6 +284,20 @@ export default function CustomSelect({
                       </svg>
                     )}
                   </button>
+                );
+                if (!startsGroup) return option;
+                return (
+                  <React.Fragment key={`group-${groupLabel}-${String(o.value)}`}>
+                    <div
+                      role="presentation"
+                      className={isIos
+                        ? 'px-3 pb-1 pt-2.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400'
+                        : 'px-3 pb-1 pt-2.5 text-[10px] font-semibold uppercase tracking-wider text-gray-400'}
+                    >
+                      {groupLabel}
+                    </div>
+                    {option}
+                  </React.Fragment>
                 );
               })
             )}
