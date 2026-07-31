@@ -233,11 +233,10 @@ class WorkspaceFrontendTests(unittest.TestCase):
         self.assertIn("Number(right?.id || 0) - Number(left?.id || 0)", block)
 
     def test_every_kanban_column_uses_selected_sort(self):
-        start = self.src.index("const { tasksByColumn, archivedDone } = useMemo(() => {")
+        start = self.src.index("const tasksByColumn = useMemo(() => {")
         block = self.src[start:self.src.index("}, [scopedTasks, dropContext, boardSort]);", start)]
         self.assertIn("compareBoardTasks(left.task, right.task, boardSort)", block)
         self.assertIn("BOARD_COLUMNS.forEach((column) => buckets[column.id].sort(compareEntries));", block)
-        self.assertIn("archived.sort(compareEntries);", block)
 
     def test_manual_backlog_order_remains_separate(self):
         start = self.src.index("const backlogTasks = useMemo(")
@@ -880,72 +879,41 @@ class SkillExpectationsTests(unittest.TestCase):
         self.assertIn("npm run build", self.src)
 
 
-class DoneArchiveTests(unittest.TestCase):
-    """«Готово» — скользящее окно: принятое давно не должно забивать доску."""
+class DoneColumnTests(unittest.TestCase):
+    """
+    «Готово» ничего не прячет. Архив на 7 дней убрали вместе с догрузкой в колонке:
+    при постраничной выдаче он врал бы про остаток — скрытые карточки считались
+    загруженными, и «не показано N» было бы меньше правды.
+    """
 
     def setUp(self):
         self.src = _read(WORKSPACE_PATH)
 
-    def test_window_is_one_week(self):
-        self.assertIn("export const DONE_ARCHIVE_DAYS = 7;", self.src)
+    def test_board_has_no_hidden_cards(self):
+        for gone in ('DONE_ARCHIVE_DAYS', 'isDoneArchived', 'archivedDone', 'archiveOpen'):
+            self.assertNotIn(gone, self.src, f'{gone} остался — на доске снова есть скрытые карточки')
+        self.assertNotIn('Скрыть архив', self.src)
 
-    def test_archive_counts_from_acceptance_not_completion(self):
-        start = self.src.index("export const acceptedAtOf = (task) => {")
-        block = self.src[start:self.src.index("export const isDoneArchived", start)]
-        # Идём по истории с конца — берём последнюю приёмку.
-        self.assertIn("history[index]?.status_code === 'accepted'", block)
-        self.assertIn("for (let index = history.length - 1; index >= 0; index -= 1)", block)
-        # completed_at только как запасной вариант.
-        self.assertIn("return parseDate(task?.completed_at) || parseDate(task?.updated_at);", block)
-
-    def test_only_accepted_tasks_are_archived(self):
-        start = self.src.index("export const isDoneArchived = (task, now = Date.now()) => {")
-        block = self.src[start:self.src.index("const actualEndOf", start)]
-        self.assertIn("if (task?.status !== 'accepted') return false;", block)
-        self.assertIn("DONE_ARCHIVE_DAYS * DAY", block)
-
-    def test_buckets_split_archive_out(self):
-        start = self.src.index("const { tasksByColumn, archivedDone } = useMemo(() => {")
+    def test_done_column_is_an_ordinary_column(self):
+        start = self.src.index("  const tasksByColumn = useMemo(() => {")
         block = self.src[start:self.src.index("}, [scopedTasks, dropContext, boardSort]);", start)]
-        self.assertIn("if (columnId === 'done' && isDoneArchived(task, now)) archived.push(entry);", block)
-        # Архив остаётся доступен и подчиняется выбранному единому порядку канбана.
-        self.assertIn("archived.sort(compareEntries);", block)
+        # Никаких особых правил для 'done': та же раскладка и тот же порядок.
+        self.assertNotIn("'done'", block)
+        self.assertIn("buckets[columnId].push(", block)
+        self.assertIn("compareBoardTasks(left.task, right.task, boardSort)", block)
 
-    def test_archive_is_reachable_not_lost(self):
-        self.assertIn("archiveOpen", self.src)
-        self.assertIn("Скрыть архив", self.src)
-        self.assertIn("`Архив · ${archivedDone.length}", self.src)
-
-    def test_cli_mirrors_the_same_rule(self):
+    def test_cli_has_no_archive_either(self):
         cli = _read(CLI_PATH)
-        self.assertIn("DONE_ARCHIVE_DAYS = 7", cli)
-        self.assertIn("def is_done_archived(task, now=None):", cli)
-        self.assertIn("if task.get('status') != 'accepted':", cli)
-        self.assertIn("--archive", cli)
+        for gone in ('DONE_ARCHIVE_DAYS', 'is_done_archived', '--archive'):
+            self.assertNotIn(gone, cli, f'{gone} остался в CLI — правило разъехалось с доской')
+        # Момент приёмки всё ещё нужен: по нему «Готово» сортируется.
+        self.assertIn("def accepted_at(task):", cli)
 
-    def test_cli_archive_helpers_behave(self):
-        module = _load_cli_module()
-        from datetime import datetime as dt, timedelta as td
-        now = dt(2026, 7, 28, 12, 0, 0)
-        fresh = {"status": "accepted", "history": [
-            {"status_code": "accepted", "changed_at": (now - td(days=2)).isoformat()}]}
-        stale = {"status": "accepted", "history": [
-            {"status_code": "accepted", "changed_at": (now - td(days=10)).isoformat()}]}
-        in_review = {"status": "completed", "completed_at": (now - td(days=30)).isoformat()}
-        self.assertFalse(module.is_done_archived(fresh, now))
-        self.assertTrue(module.is_done_archived(stale, now))
-        # Не принятую задачу архив не забирает, даже если она давно «выполнена».
-        self.assertFalse(module.is_done_archived(in_review, now))
-
-    def test_cli_prefers_last_acceptance(self):
-        module = _load_cli_module()
-        from datetime import datetime as dt
-        task = {"status": "accepted", "completed_at": "2026-07-01T10:00:00", "history": [
-            {"status_code": "accepted", "changed_at": "2026-07-02T10:00:00"},
-            {"status_code": "returned", "changed_at": "2026-07-03T10:00:00"},
-            {"status_code": "accepted", "changed_at": "2026-07-27T10:00:00"},
-        ]}
-        self.assertEqual(module.accepted_at(task), dt(2026, 7, 27, 10, 0, 0))
+    def test_skill_documents_the_new_rule(self):
+        skill = _read(SKILL_PATH)
+        self.assertNotIn('--archive', skill)
+        self.assertIn('Посмотреть ещё', skill)
+        self.assertIn('Архива у «Готово» больше нет', skill)
 
 
 class TimelineFullscreenTests(unittest.TestCase):
