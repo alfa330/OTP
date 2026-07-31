@@ -1025,6 +1025,62 @@ class ActionNeedsBadgeTests(unittest.TestCase):
         self.assertIn("_task_route_guard()", block)
         self.assertIn("db.get_task_action_needs_summary(requester_id)", block)
 
+    def test_read_marker_table_is_per_user_and_per_task(self):
+        src = _read(DATABASE_PATH)
+        start = src.index("CREATE TABLE IF NOT EXISTS task_action_reads (")
+        block = src[start:src.index(");", start)]
+        self.assertIn("user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE", block)
+        self.assertIn("task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE", block)
+        self.assertIn("kind VARCHAR(16) NOT NULL", block)
+        self.assertIn("PRIMARY KEY (user_id, task_id)", block)
+
+    def test_seen_notifications_leave_the_counter(self):
+        src = _read(DATABASE_PATH)
+        start = src.index("    def get_task_action_needs_summary(self, requester_id):")
+        block = src[start:src.index("    def mark_task_action_seen(", start)]
+        self.assertIn("LEFT JOIN task_action_reads r ON r.task_id = t.id AND r.user_id = %s", block)
+        # У каждой причины своя проверка отметки: сменилась причина или задачу
+        # тронули после просмотра — уведомление снова считается.
+        for kind in ("overdue", "returned", "review", "fresh"):
+            self.assertIn(
+                f"AND (r.task_id IS NULL OR r.kind <> '{kind}' OR r.seen_at < t.updated_at)",
+                block,
+            )
+
+    def test_marking_seen_is_idempotent_and_returns_fresh_count(self):
+        src = _read(DATABASE_PATH)
+        start = src.index("    def mark_task_action_seen(self, requester_id, task_id, kind):")
+        block = src[start:src.index("    def get_tasks_for_requester(", start)]
+        self.assertIn("ON CONFLICT (user_id, task_id) DO UPDATE", block)
+        self.assertIn("INVALID_TASK_ACTION_KIND", block)
+        self.assertIn("return self.get_task_action_needs_summary(requester_id)", block)
+        # Задача отдаёт свою отметку клиенту, иначе раздел не знает о просмотре.
+        self.assertIn("LEFT JOIN task_action_reads action_read", src)
+        self.assertIn('"action_seen": ({', src)
+
+    def test_seen_endpoint_is_registered(self):
+        src = _read(APP_PATH)
+        self.assertIn(
+            "@app.route('/api/tasks/<int:task_id>/action_seen', methods=['POST', 'OPTIONS'])",
+            src,
+        )
+        start = src.index("def mark_task_action_seen(task_id):")
+        block = src[start:src.index("@app.route('/api/tasks/notes'", start)]
+        self.assertIn("_task_route_guard()", block)
+        self.assertIn("db.mark_task_action_seen(requester_id, task_id, payload.get('kind'))", block)
+        self.assertIn('"Invalid action kind"', block)
+
+    def test_section_marks_notification_seen_on_open(self):
+        src = _read(TASKS_VIEW_PATH)
+        self.assertIn("countUnseenActionNeeds", src)
+        # Бейдж считает только новые.
+        self.assertIn("onActionNeedsChange(actionNeedsUnseen)", src)
+        start = src.index("const markActionNeedsSeen = useCallback(")
+        block = src[start:src.index("// Переход из уведомления", start)]
+        self.assertIn("/api/tasks/${need.task.id}/action_seen", block)
+        self.assertIn("actionNeedSeenKey(need.task, need.kind)", block)
+        self.assertIn("markActionNeedsSeen(need);", src)
+
     def test_frontend_rules_are_exclusive_and_skip_backlog(self):
         src = _read(self.ACTION_NEEDS_PATH)
         self.assertIn("if (!isAssignee || task?.is_backlog) return null;", src)
@@ -1036,10 +1092,12 @@ class ActionNeedsBadgeTests(unittest.TestCase):
     def test_section_shows_notifications_and_jumps_to_the_card(self):
         src = _read(TASKS_VIEW_PATH)
         self.assertIn("collectTaskActionNeeds", src)
-        self.assertIn("<TaskInbox needs={actionNeeds} onOpen={openActionNeed} />", src)
+        self.assertIn("<TaskInbox", src)
+        self.assertIn("needs={actionNeeds}", src)
+        self.assertIn("onOpen={openActionNeed}", src)
         # Клик по уведомлению: доска → подсветка карточки → карточка задачи.
         start = src.index("const openActionNeed = useCallback((need) => {")
-        block = src[start:src.index("}, [selectWorkspaceTab]);", start)]
+        block = src[start:src.index("}, [markActionNeedsSeen, selectWorkspaceTab]);", start)]
         self.assertIn("selectWorkspaceTab('board')", block)
         self.assertIn("setBoardFocus({ taskId: Number(task.id), token: Date.now() })", block)
         self.assertIn("setDrawerTask(task)", block)

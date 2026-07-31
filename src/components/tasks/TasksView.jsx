@@ -25,7 +25,13 @@ import { normalizeRole, isAdminLikeRole, isSupervisorRole } from '../../utils/ro
 import FaIcon from '../common/FaIcon';
 import FullscreenSheet from '../common/FullscreenSheet';
 import TaskBoardWorkspace from './TaskBoardWorkspace';
-import { ACTION_NEED_META, collectTaskActionNeeds, groupTaskActionNeeds } from './taskActionNeeds';
+import {
+  ACTION_NEED_META,
+  actionNeedSeenKey,
+  collectTaskActionNeeds,
+  countUnseenActionNeeds,
+  groupTaskActionNeeds,
+} from './taskActionNeeds';
 
 /* ─── Google Fonts ─── */
 const fontLink = document.createElement('link');
@@ -156,6 +162,23 @@ styleTag.textContent = `
     font-size: 11.5px; color: var(--ink-3);
   }
   .tv-inbox-item-due { color: var(--rose); font-weight: 600; }
+  /* Просмотренное остаётся в списке (задача-то ждёт), но в счётчик уже не идёт. */
+  .tv-inbox-item.is-seen { opacity: .5; }
+  .tv-inbox-item.is-seen:hover { opacity: .75; }
+  .tv-inbox-item.is-seen .tv-inbox-item-subject { font-weight: 400; }
+  .tv-inbox-foot {
+    display: flex; justify-content: flex-end;
+    padding: 8px 10px;
+    border-top: 1px solid var(--border);
+    background: var(--surface-2);
+  }
+  .tv-inbox-mark-all {
+    border: 0; background: transparent; cursor: pointer;
+    padding: 4px 8px; border-radius: 8px;
+    font-size: 12px; font-weight: 500; color: var(--ink-3);
+    transition: all .13s ease;
+  }
+  .tv-inbox-mark-all:hover { color: var(--ink); background: #ecebe7; }
   .tv-inbox-empty {
     padding: 26px 18px 30px;
     text-align: center;
@@ -5971,7 +5994,7 @@ const inboxCounterpartLabel = (need) => {
   return name ? `Поручил: ${name}` : '';
 };
 
-const TaskInbox = ({ needs, onOpen }) => {
+const TaskInbox = ({ needs, unseenCount, onOpen, onMarkAllSeen }) => {
   const [open, setOpen] = useState(false);
   const rootRef = useRef(null);
   const count = needs.length;
@@ -6000,15 +6023,17 @@ const TaskInbox = ({ needs, onOpen }) => {
     <span className="tv-inbox" ref={rootRef}>
       <button
         type="button"
-        className={`tv-btn tv-btn-ghost tv-inbox-btn ${count > 0 ? 'is-hot' : ''}`}
+        className={`tv-btn tv-btn-ghost tv-inbox-btn ${unseenCount > 0 ? 'is-hot' : ''}`}
         onClick={() => setOpen((prev) => !prev)}
-        title={count > 0 ? `Задач ждут вашего действия: ${count}` : 'Задач, ждущих вашего действия, нет'}
+        title={unseenCount > 0
+          ? `Новых задач, ждущих вашего действия: ${unseenCount}`
+          : (count > 0 ? `Все ${count} просмотрены, но ещё ждут действия` : 'Задач, ждущих вашего действия, нет')}
         aria-haspopup="true"
         aria-expanded={open ? 'true' : 'false'}
       >
         <Bell size={13} strokeWidth={2} />
         Ждут вас
-        {count > 0 && <span className="tv-inbox-count">{count > 99 ? '99+' : count}</span>}
+        {unseenCount > 0 && <span className="tv-inbox-count">{unseenCount > 99 ? '99+' : unseenCount}</span>}
       </button>
 
       {open && (
@@ -6016,7 +6041,9 @@ const TaskInbox = ({ needs, onOpen }) => {
           <div className="tv-inbox-head">
             <span className="tv-inbox-title">Ждут вашего действия</span>
             <span className="tv-inbox-sub">
-              {count > 0 ? `${count} ${pluralRu(count, 'задача', 'задачи', 'задач')}` : 'пусто'}
+              {count > 0
+                ? `${count} ${pluralRu(count, 'задача', 'задачи', 'задач')}${unseenCount > 0 ? ` · ${unseenCount} ${pluralRu(unseenCount, 'новая', 'новые', 'новых')}` : ''}`
+                : 'пусто'}
             </span>
           </div>
 
@@ -6026,41 +6053,51 @@ const TaskInbox = ({ needs, onOpen }) => {
               <span className="tv-inbox-empty-sub">Ни одна задача не ждёт вашего шага.</span>
             </div>
           ) : (
-            <div className="tv-inbox-scroll">
-              {groups.map((group) => {
-                const meta = ACTION_NEED_META[group.kind];
-                return (
-                  <div key={group.kind}>
-                    <div className="tv-inbox-group-label">
-                      <span className="tv-inbox-dot" style={{ background: meta.dot, marginTop: 0 }} />
-                      {meta.title} · {group.items.length}
-                    </div>
-                    {group.items.map((need) => (
-                      <button
-                        key={need.task.id}
-                        type="button"
-                        className="tv-inbox-item"
-                        onClick={() => { setOpen(false); onOpen(need); }}
-                      >
-                        <span className="tv-inbox-dot" style={{ background: meta.dot }} />
-                        <span className="tv-inbox-item-main">
-                          <span className="tv-inbox-item-subject">{need.task?.subject || 'Без темы'}</span>
-                          <span className="tv-inbox-item-meta">
-                            <span>{inboxCounterpartLabel(need) || meta.hint}</span>
-                            {need.dueAt && (
-                              <span className={need.kind === 'overdue' ? 'tv-inbox-item-due' : ''}>
-                                · {need.kind === 'overdue' ? 'просрочено с' : 'до'} {fmtShortDateTime(need.task.due_at)}
-                              </span>
-                            )}
+            <>
+              <div className="tv-inbox-scroll">
+                {groups.map((group) => {
+                  const meta = ACTION_NEED_META[group.kind];
+                  return (
+                    <div key={group.kind}>
+                      <div className="tv-inbox-group-label">
+                        <span className="tv-inbox-dot" style={{ background: meta.dot, marginTop: 0 }} />
+                        {meta.title} · {group.items.length}
+                      </div>
+                      {group.items.map((need) => (
+                        <button
+                          key={need.task.id}
+                          type="button"
+                          className={`tv-inbox-item ${need.seen ? 'is-seen' : ''}`}
+                          title={need.seen ? 'Уже просмотрено — в счётчик не идёт' : undefined}
+                          onClick={() => { setOpen(false); onOpen(need); }}
+                        >
+                          <span className="tv-inbox-dot" style={{ background: meta.dot }} />
+                          <span className="tv-inbox-item-main">
+                            <span className="tv-inbox-item-subject">{need.task?.subject || 'Без темы'}</span>
+                            <span className="tv-inbox-item-meta">
+                              <span>{inboxCounterpartLabel(need) || meta.hint}</span>
+                              {need.dueAt && (
+                                <span className={need.kind === 'overdue' ? 'tv-inbox-item-due' : ''}>
+                                  · {need.kind === 'overdue' ? 'просрочено с' : 'до'} {fmtShortDateTime(need.task.due_at)}
+                                </span>
+                              )}
+                            </span>
                           </span>
-                        </span>
-                        <ChevronRight />
-                      </button>
-                    ))}
-                  </div>
-                );
-              })}
-            </div>
+                          <ChevronRight />
+                        </button>
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
+              {unseenCount > 0 && (
+                <div className="tv-inbox-foot">
+                  <button type="button" className="tv-inbox-mark-all" onClick={() => onMarkAllSeen(needs)}>
+                    Отметить все просмотренными
+                  </button>
+                </div>
+              )}
+            </>
           )}
         </div>
       )}
@@ -6145,6 +6182,8 @@ const TasksView = ({
   const [boardFocus, setBoardFocus] = useState(null);
   // Дедлайн истекает без перезагрузки страницы — пересчитываем «просрочено» раз в минуту.
   const [actionNeedsNow, setActionNeedsNow] = useState(() => Date.now());
+  // Просмотренные уведомления до ответа сервера: ключ задача+причина+updated_at.
+  const [actionSeenLocal, setActionSeenLocal] = useState(() => new Set());
   const [workspaceTab, setWorkspaceTab] = useState(() => {
     if (typeof window === 'undefined') return 'overview';
     const stored = window.localStorage.getItem(WORKSPACE_TAB_STORAGE_KEY);
@@ -6320,22 +6359,40 @@ const TasksView = ({
      Считаем по уже загруженному полному списку — отдельный запрос не нужен,
      а бейдж сайдбара живёт на том же правиле (см. taskActionNeeds.js). */
   const actionNeeds = useMemo(
-    () => collectTaskActionNeeds(tasks, currentUserId, actionNeedsNow),
-    [tasks, currentUserId, actionNeedsNow]
+    () => collectTaskActionNeeds(tasks, currentUserId, actionNeedsNow, actionSeenLocal),
+    [tasks, currentUserId, actionNeedsNow, actionSeenLocal]
   );
+  const actionNeedsUnseen = useMemo(() => countUnseenActionNeeds(actionNeeds), [actionNeeds]);
 
   useEffect(() => {
-    if (typeof onActionNeedsChange === 'function') onActionNeedsChange(actionNeeds.length);
-  }, [actionNeeds.length, onActionNeedsChange]);
+    if (typeof onActionNeedsChange === 'function') onActionNeedsChange(actionNeedsUnseen);
+  }, [actionNeedsUnseen, onActionNeedsChange]);
+
+  /* Открыли уведомление — гасим его в счётчике. Задача из списка не исчезает:
+     она всё ещё ждёт действия, просто перестаёт быть новостью. Локальный набор
+     ключей даёт мгновенный отклик, сервер помнит отметку между сессиями. */
+  const markActionNeedsSeen = useCallback(async (items) => {
+    const fresh = (Array.isArray(items) ? items : [items]).filter((need) => need?.task?.id && !need.seen);
+    if (!fresh.length) return;
+    setActionSeenLocal((prev) => {
+      const next = new Set(prev);
+      fresh.forEach((need) => next.add(actionNeedSeenKey(need.task, need.kind)));
+      return next;
+    });
+    await Promise.all(fresh.map((need) => axios
+      .post(`${apiBaseUrl}/api/tasks/${need.task.id}/action_seen`, { kind: need.kind }, { headers: buildHeaders() })
+      .catch(() => null)));
+  }, [apiBaseUrl, buildHeaders]);
 
   // Переход из уведомления: доска → нужная карточка → карточка задачи.
   const openActionNeed = useCallback((need) => {
     const task = need?.task;
     if (!task?.id) return;
+    markActionNeedsSeen(need);
     selectWorkspaceTab('board');
     setBoardFocus({ taskId: Number(task.id), token: Date.now() });
     setDrawerTask(task);
-  }, [selectWorkspaceTab]);
+  }, [markActionNeedsSeen, selectWorkspaceTab]);
 
   const incomingTasks = useMemo(
     () => tasks.filter(t => Number(t?.assignee?.id || 0) === currentUserId),
@@ -7055,7 +7112,12 @@ const TasksView = ({
       <div className="tv-topbar">
         <h1 className="tv-topbar-title">Задачи</h1>
         <div className="tv-topbar-actions">
-          <TaskInbox needs={actionNeeds} onOpen={openActionNeed} />
+          <TaskInbox
+            needs={actionNeeds}
+            unseenCount={actionNeedsUnseen}
+            onOpen={openActionNeed}
+            onMarkAllSeen={markActionNeedsSeen}
+          />
           <button
             className={`tv-btn ${notesOpen ? 'tv-btn-amber' : 'tv-btn-ghost'}`}
             type="button"

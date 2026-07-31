@@ -3524,6 +3524,19 @@ class Database:
                   );
             """)
 
+            # Отметка «уведомление просмотрено»: гасит счётчик «ждут вас», но не задачу.
+            # Ключ — пользователь+задача; kind и seen_at нужны, чтобы отметка сгорала,
+            # когда причина сменилась (не начата → просрочена) или задачу тронули снова.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS task_action_reads (
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    kind VARCHAR(16) NOT NULL,
+                    seen_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    PRIMARY KEY (user_id, task_id)
+                );
+            """)
+
             # Personal notes inside the Tasks section
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS task_notes (
@@ -42899,6 +42912,8 @@ class Database:
           fresh    — мне поручили, к работе ещё не приступил.
         Категории взаимоисключающие: одна задача считается один раз.
         Бэклог не трогаем — это очередь планирования, а не работа.
+        Просмотренные уведомления (task_action_reads) в счётчик не идут — иначе
+        число растёт и перестаёт что-либо значить.
         """
         requester_id = int(requester_id)
         now = self._task_now()
@@ -42911,29 +42926,35 @@ class Database:
                           AND t.status IN ('assigned', 'in_progress', 'returned')
                           AND t.due_at IS NOT NULL
                           AND t.due_at < %s
+                          AND (r.task_id IS NULL OR r.kind <> 'overdue' OR r.seen_at < t.updated_at)
                     )::INT,
                     COUNT(*) FILTER (
                         WHERE t.assigned_to = %s
                           AND t.is_backlog = FALSE
                           AND t.status = 'returned'
                           AND (t.due_at IS NULL OR t.due_at >= %s)
+                          AND (r.task_id IS NULL OR r.kind <> 'returned' OR r.seen_at < t.updated_at)
                     )::INT,
                     COUNT(*) FILTER (
                         WHERE t.status = 'completed'
                           AND COALESCE(t.requested_by_id, t.created_by) = %s
+                          AND (r.task_id IS NULL OR r.kind <> 'review' OR r.seen_at < t.updated_at)
                     )::INT,
                     COUNT(*) FILTER (
                         WHERE t.assigned_to = %s
                           AND t.is_backlog = FALSE
                           AND t.status = 'assigned'
                           AND (t.due_at IS NULL OR t.due_at >= %s)
+                          AND (r.task_id IS NULL OR r.kind <> 'fresh' OR r.seen_at < t.updated_at)
                     )::INT
                 FROM tasks t
+                LEFT JOIN task_action_reads r ON r.task_id = t.id AND r.user_id = %s
             """, (
                 requester_id, now,
                 requester_id, now,
                 requester_id,
-                requester_id, now
+                requester_id, now,
+                requester_id
             ))
             row = cursor.fetchone() or (0, 0, 0, 0)
 
@@ -42944,6 +42965,33 @@ class Database:
             "fresh": int(row[3] or 0)
         }
         return {"count": sum(breakdown.values()), "breakdown": breakdown}
+
+    TASK_ACTION_NEED_KINDS = ('overdue', 'returned', 'review', 'fresh')
+
+    def mark_task_action_seen(self, requester_id, task_id, kind):
+        """
+        Отметить уведомление просмотренным. Гасится только счётчик: сама задача
+        остаётся в списке и вернётся в счётчик, если причина сменится или задачу
+        снова тронут (сравнение seen_at с tasks.updated_at).
+        """
+        kind_norm = (kind or '').strip().lower()
+        if kind_norm not in self.TASK_ACTION_NEED_KINDS:
+            raise ValueError("INVALID_TASK_ACTION_KIND")
+
+        requester_id = int(requester_id)
+        task_id = int(task_id)
+        with self._get_cursor() as cursor:
+            cursor.execute("SELECT 1 FROM tasks WHERE id = %s", (task_id,))
+            if not cursor.fetchone():
+                raise ValueError("TASK_NOT_FOUND")
+            cursor.execute("""
+                INSERT INTO task_action_reads (user_id, task_id, kind, seen_at)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (user_id, task_id) DO UPDATE
+                SET kind = EXCLUDED.kind,
+                    seen_at = EXCLUDED.seen_at
+            """, (requester_id, task_id, kind_norm, self._task_now()))
+        return self.get_task_action_needs_summary(requester_id)
 
     def get_tasks_for_requester(
             self,
@@ -43128,16 +43176,20 @@ class Database:
                     t.is_backlog, t.backlog_rank, t.estimate_minutes,
                     t.planned_start_at, t.started_at,
                     t.requested_by_id, COALESCE(origin_user.name, t.requested_by_name),
-                    t.reminder_minutes_before, t.reminder_sent_at
+                    t.reminder_minutes_before, t.reminder_sent_at,
+                    action_read.kind, action_read.seen_at
                 FROM tasks t
                 LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 LEFT JOIN users creator ON creator.id = t.created_by
                 LEFT JOIN users completed_user ON completed_user.id = t.completed_by
                 LEFT JOIN users origin_user ON origin_user.id = t.requested_by_id
+                LEFT JOIN task_action_reads action_read
+                       ON action_read.task_id = t.id AND action_read.user_id = %s
                 {filtered_where_sql}
                 ORDER BY {order_by_sql}
             """
-            task_query_params = list(filtered_params)
+            # Параметр JOIN'а идёт раньше условий WHERE — порядок плейсхолдеров важен.
+            task_query_params = [requester_id] + list(filtered_params)
             if limit_norm is not None:
                 task_query += "\n                LIMIT %s"
                 task_query_params.append(limit_norm)
@@ -43298,6 +43350,11 @@ class Database:
                 } if (row[36] or row[37]) else None),
                 "reminder_minutes_before": row[38],
                 "reminder_sent_at": self._task_dt_to_iso(row[39]),
+                # Отметка «уведомление просмотрено» — своя у каждого пользователя.
+                "action_seen": ({
+                    "kind": row[40],
+                    "seen_at": self._task_dt_to_iso(row[41])
+                } if row[40] else None),
                 "history": history_map.get(task_id, []),
                 "attachments": initial_attachments,
                 "completion_attachments": result_attachments,
