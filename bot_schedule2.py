@@ -17301,6 +17301,26 @@ def get_task_recipients():
         return jsonify({"error": f"Internal server error"}), 500
 
 
+@app.route('/api/tasks/action_required', methods=['GET', 'OPTIONS'])
+@require_api_key
+def get_task_action_required_count():
+    """Бейдж сайдбара: сколько задач ждут действия лично от пользователя."""
+    try:
+        requester_id, requester, guard_response, guard_status = _task_route_guard()
+        if guard_response is not None:
+            return guard_response, guard_status
+
+        summary = db.get_task_action_needs_summary(requester_id)
+        return jsonify({
+            "status": "success",
+            "count": summary.get("count", 0),
+            "breakdown": summary.get("breakdown", {})
+        }), 200
+    except Exception as e:
+        logging.error(f"Error in get_task_action_required_count: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/tasks/notes', methods=['GET', 'POST', 'OPTIONS'])
 @require_api_key
 def handle_task_notes():

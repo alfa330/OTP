@@ -33966,6 +33966,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [resourceFteInitialView, setResourceFteInitialView] = useState('');
             const [shiftAuctionInitialPeriod, setShiftAuctionInitialPeriod] = useState(null);
             const [pendingSurveysBadgeCount, setPendingSurveysBadgeCount] = useState(0);
+            // Бейдж «Задачи»: сколько задач ждут действия лично от пользователя.
+            const [tasksActionRequiredCount, setTasksActionRequiredCount] = useState(0);
             const [eventsUnreadCount, setEventsUnreadCount] = useState(0);
             const [fourYouUnreadCount, setFourYouUnreadCount] = useState(0);
             const [newSvName, setNewSvName] = useState('');
@@ -39905,6 +39907,34 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 });
             };
 
+            // Бейдж раздела «Задачи»: задачи, ждущие шага пользователя (просрочка,
+            // возврат на доработку, приёмка, ещё не начатая). Правила совпадают с
+            // уведомлениями внутри раздела — см. src/components/tasks/taskActionNeeds.js.
+            const canSeeTasksBadge = Boolean(user?.id) && (
+                isAdminLikeRoleFn(currentUserRole)
+                || isSupervisorRole(currentUserRole)
+                || currentUserRole === 'trainer'
+                || isDepartmentHeadUser
+            );
+            const fetchTasksActionRequiredCount = async () => {
+                if (!canSeeTasksBadge) {
+                    if (isMounted.current) setTasksActionRequiredCount(0);
+                    return;
+                }
+                const requestKey = `fetchTasksActionRequiredCount:${user.id}`;
+                return runSingleFlight(requestKey, async () => {
+                    try {
+                        const response = await axios.get(`${API_BASE_URL}/api/tasks/action_required`, {
+                            headers: withAccessTokenHeader({ 'X-User-Id': user.id })
+                        });
+                        const count = Number(response?.data?.count);
+                        if (isMounted.current) setTasksActionRequiredCount(Math.max(0, Number.isFinite(count) ? count : 0));
+                    } catch (err) {
+                        // Бейдж не критичен — молча игнорируем сетевые сбои.
+                    }
+                });
+            };
+
             // Бейдж новых фото раздела «4 You» (виден только пользователям с доступом).
             const fetchFourYouUnreadCount = async () => {
                 if (!user?.id || !canAccessFourYouForUser(user)) {
@@ -42406,6 +42436,52 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (view === 'events') setEventsUnreadCount(0);
             }, [view]);
 
+            // Задачи: бейдж «ждут вашего действия». Без фонового опроса — задача
+            // появляется от чужого действия, а не сама по себе, и увидеть её нужно
+            // ровно когда пользователь вернулся к вкладке. Поэтому обновляем при
+            // входе, при возврате фокуса и при смене раздела, но не чаще раза в
+            // 5 минут. Пока открыт раздел «Задачи», свежее число присылает он сам.
+            const TASKS_BADGE_MIN_GAP_MS = 5 * 60 * 1000;
+            const fetchTasksActionRequiredRef = useRef(null);
+            fetchTasksActionRequiredRef.current = fetchTasksActionRequiredCount;
+            const tasksBadgeFetchedAtRef = useRef(0);
+            const tasksBadgeUserRef = useRef(0);
+            useEffect(() => {
+                if (!canSeeTasksBadge) {
+                    setTasksActionRequiredCount(0);
+                    tasksBadgeFetchedAtRef.current = 0;
+                    return undefined;
+                }
+                // Сменился пользователь — прошлый счётчик и его «свежесть» не в счёт.
+                if (tasksBadgeUserRef.current !== Number(user?.id || 0)) {
+                    tasksBadgeUserRef.current = Number(user?.id || 0);
+                    tasksBadgeFetchedAtRef.current = 0;
+                }
+                const refreshIfStale = () => {
+                    // Раздел открыт — счётчик приходит из него, запрос был бы лишним.
+                    if (view === 'tasks' || !isPageActiveForBadges()) return;
+                    const now = Date.now();
+                    if (now - tasksBadgeFetchedAtRef.current < TASKS_BADGE_MIN_GAP_MS) return;
+                    tasksBadgeFetchedAtRef.current = now;
+                    fetchTasksActionRequiredRef.current?.();
+                };
+                refreshIfStale();
+                const onWake = () => refreshIfStale();
+                window.addEventListener('focus', onWake);
+                document.addEventListener('visibilitychange', onWake);
+                return () => {
+                    window.removeEventListener('focus', onWake);
+                    document.removeEventListener('visibilitychange', onWake);
+                };
+            }, [user?.id, canSeeTasksBadge, view]);
+
+            /* Раздел «Задачи» считает те же правила по уже загруженному списку и
+               отдаёт число сюда — бейдж меняется сразу после действия, без запроса. */
+            const handleTasksActionNeedsChange = useCallback((count) => {
+                tasksBadgeFetchedAtRef.current = Date.now();
+                setTasksActionRequiredCount(Math.max(0, Number(count) || 0));
+            }, []);
+
             // 4 You: бейдж новых фото. Та же схема, что у «Ивентов»: опрос при
             // загрузке пользователя, при возврате фокуса и фоном раз в 45 c
             // (только пока вкладка активна); при заходе в раздел гасим
@@ -42538,6 +42614,34 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </span>
                     );
                 };
+                // Бейдж «Задачи» (rose): задачи, ждущие действия пользователя.
+                const renderTasksSidebarLabelInner = () => (
+                    <span className="sidebar-text inline-flex items-center gap-2">
+                        <span>Задачи</span>
+                        {tasksActionRequiredCount > 0 && (
+                            <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-semibold leading-none">
+                                {tasksActionRequiredCount > 99 ? '99+' : tasksActionRequiredCount}
+                            </span>
+                        )}
+                    </span>
+                );
+                const renderTasksSidebarCompactBadgeInner = () => {
+                    if (tasksActionRequiredCount <= 0) return null;
+                    return (
+                        <span className="sidebar-surveys-collapsed-badge inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-semibold leading-none">
+                            {tasksActionRequiredCount > 9 ? '9+' : tasksActionRequiredCount}
+                        </span>
+                    );
+                };
+                const renderTasksSidebarButtonInner = () => (
+                    <button
+                        onClick={(e) => handleSidebarViewNavigation(e, 'tasks')}
+                        title={tasksActionRequiredCount > 0 ? `Задач ждут вашего действия: ${tasksActionRequiredCount}` : undefined}
+                        className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'tasks' ? 'bg-blue-700' : ''}`}
+                    >
+                        <FaIcon className="fas fa-tasks"></FaIcon> {renderTasksSidebarCompactBadgeInner()} {renderTasksSidebarLabelInner()}
+                    </button>
+                );
                 // Бейдж новых ивентов (rose). Раздел «Ивенты» виден всем ролям,
                 // поэтому пункт рендерится в общей части меню без departmentAllowsView.
                 const renderEventsSidebarLabelInner = () => (
@@ -42829,9 +42933,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             {renderSidebarDividerInner()}
 
                                             <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'tasks')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'tasks' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-tasks"></FaIcon> <span className="sidebar-text">Задачи</span>
-                                                </button>
+                                                {renderTasksSidebarButtonInner()}
                                             </li>
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'salary')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'salary' ? 'bg-blue-700' : ''}`}>
@@ -43093,9 +43195,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             )}
                                             {departmentAllowsView(user, 'tasks') && (
                                             <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'tasks')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'tasks' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-tasks"></FaIcon> <span className="sidebar-text">Задачи</span>
-                                                </button>
+                                                {renderTasksSidebarButtonInner()}
                                             </li>
                                             )}
                                             {departmentAllowsView(user, 'contests') && (
@@ -43127,9 +43227,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </button>
                                             </li>
                                             <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'tasks')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'tasks' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-tasks"></FaIcon> <span className="sidebar-text">Задачи</span>
-                                                </button>
+                                                {renderTasksSidebarButtonInner()}
                                             </li>
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'surveys')} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
@@ -43401,6 +43499,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 isEmployeesClosing,
                 employeesDropdownPos,
                 pendingSurveysBadgeCount,
+                tasksActionRequiredCount,
                 eventsUnreadCount,
                 fourYouUnreadCount,
                 selectedSvId,
@@ -45318,6 +45417,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         onPinnedTaskSync={handlePinnedTaskSync}
                                         focusTaskRequest={taskFocusRequest}
                                         externalRefreshToken={taskRefreshToken}
+                                        onActionNeedsChange={handleTasksActionNeedsChange}
                                     />
                                 ))}
                                 {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} departments={departments} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
@@ -46414,6 +46514,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         onPinnedTaskSync={handlePinnedTaskSync}
                                         focusTaskRequest={taskFocusRequest}
                                         externalRefreshToken={taskRefreshToken}
+                                        onActionNeedsChange={handleTasksActionNeedsChange}
                                     />
                                 ))}
                                 {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} departments={departments} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
