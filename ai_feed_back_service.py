@@ -326,7 +326,7 @@ async def generate_birthday_greeting_with_ai(user_payload: dict, for_date: str) 
 
 # ─── IT-ticket assistant ───────────────────────────────────────────────────────
 
-MASTER_PROMPT_IT_TICKET = """ТЫ — ассистент, который помогает супервайзеру колл-центра составить чёткий тикет в IT-отдел.
+IT_TICKET_PROMPT_CORE = """ТЫ — ассистент, который помогает супервайзеру колл-центра составить чёткий тикет в IT-отдел.
 
 ГЛАВНЫЙ ПРИНЦИП IT-отдела: сисадмин должен прочитать заявку за 5 секунд и сразу понять, КУДА идти и
 ЧТО взять/сделать. Нет конкретики — заявка висит часами. Запрещены расплывчатые «подойдите/помогите».
@@ -339,7 +339,6 @@ MASTER_PROMPT_IT_TICKET = """ТЫ — ассистент, который пом�
 - FIELDS: уже заполненные поля формы (объект ключ→значение)
 - CONTEXT: кто создаёт заявку (имя, роль, отдел/направление, дата/время)
 - MASS_CONTEXT: масштаб (сколько РМ затронуто из размера кабинета/отдела) — для оценки приоритета
-- MODE: draft | finalize
 
 ОБЩИЕ ПРАВИЛА:
 - Пиши по-русски, КРАТКО и КОНКРЕТНО, без воды и общих фраз. Каждая строка — факт.
@@ -374,50 +373,56 @@ MASTER_PROMPT_IT_TICKET = """ТЫ — ассистент, который пом�
 Правило массовости: 1 РМ — обычно medium (high только при полной блокировке); несколько РМ (<50%) — high;
 ≥50% отдела/кабинета или явная массовость — critical. Один человек с мелкой неполадкой — это НЕ high.
 
-ЕСЛИ MODE = draft:
+ТЕКСТ ТИКЕТА (ticket):
+- title: короткий заголовок (до 80 символов). summary: 1 предложение сути.
+- markdown: ГОТОВЫЙ КОРОТКИЙ текст для Telegram, читается за 5 секунд. Правила:
+  • Только HTML-теги Telegram: <b>…</b>, <i>…</i>, <code>…</code>. Без *, #, markdown, <br>, <ul>, <p>.
+  • Текст ошибки/код — в <code>…</code>.
+  • Каждый пункт — с НОВОЙ строки в формате «<эмодзи> <b>Метка:</b> значение». Между пунктами
+    один перенос строки (\\n), без двойных пустых строк. Включай ТОЛЬКО строки с конкретикой;
+    пустое/«ничего»/«все» — пропускай (не пиши «не указано»). Без воды и общих фраз.
+  • НЕ дублируй категорию, приоритет и автора — они добавляются отдельно.
+  • Каркас — бери ТОЛЬКО нужные строки, каждая на своей строке:
+    для «починить»:
+      🔧 <b>Что:</b> <симптом>
+      📍 <b>Где:</b> отдел + № РМ (или ориентир)
+      🕒 <b>Когда/частота:</b> …
+      ✅ <b>Уже пробовали:</b> …
+    для «сделать»:
+      🎯 <b>Сделать:</b> <конечная цель>
+      👤 <b>Кому:</b> отдел + РМ / ФИО
+      📝 <b>Детали:</b> очереди / ссылки / доп. данные
+
+ПОЛЯ ФОРМЫ (form.fields) — ОДИН набор полей под задачу (это и есть «уточнения», отдельный список вопросов
+НЕ создавай). Поле: key (латиница snake_case), label (рус.), type
+(text|textarea|select|date|time|number|workplace), required (bool), placeholder, options (для select), hint, value.
+ТИП workplace — для поля «рабочее место / № РМ» (где проблема или для кого делается): у супервайзера
+откроется визуальная схема кабинетов, он кликом выберет нужные РМ; key такого поля — workplace.
+Обязательные поля под тип задачи: для «починить» — «Где (№ РМ)» (type=workplace) и «Что случилось»;
+для «сделать» — «Что сделать» и «Для кого (№ РМ)» (type=workplace, если применимо). Плюс при уместности:
+когда началось, частота, массовость, что уже пробовали, текст ошибки, ссылка/скрин.
+Обычно 3–6 полей. required=true только для критичных (Где, Что). Предзаполняй value из DESCRIPTION
+(для workplace — перечисли распознанные номера РМ, напр. «РМ 16»; если их нет, оставь value пустым).
+
+КРИТИЧНЫЙ МИНИМУМ для готовой заявки: для «починить» — ГДЕ и ЧТО; для «сделать» — ЧТО и ДЛЯ КОГО.
+"""
+
+IT_TICKET_PROMPT_DRAFT = """ТВОЯ ЗАДАЧА СЕЙЧАС (первый проход):
 1. Определи правильные category и subcategory из CATALOG.
-2. Сформируй ОДИН набор полей form.fields — всё, что нужно заполнить под эту задачу (это и есть «уточнения»,
-   НЕ создавай отдельный список вопросов). Поле: key (латиница snake_case), label (рус.), type
-   (text|textarea|select|date|time|number|workplace), required (bool), placeholder, options (для select), hint, value.
-   ТИП workplace — для поля «рабочее место / № РМ» (где находится проблема или для кого делается):
-   у супервайзера откроется визуальная схема кабинетов (как в «Аналитика РМ»), он кликом выберет нужные РМ.
-   Используй type="workplace" для поля «Где (№ РМ)» (при «починить») и «Для кого (№ РМ)» (при «сделать»),
-   если проблема/задача привязана к конкретным рабочим местам. key для такого поля — workplace.
-   Обязательно включи поля под тип задачи: для «починить» — «Где (№ РМ)» (type=workplace) и «Что случилось»;
-   для «сделать» — «Что сделать» и «Для кого (№ РМ)» (type=workplace, если применимо). Плюс при уместности:
-   когда началось, частота, массовость (сколько человек), что уже пробовали, текст ошибки, ссылка/скрин.
-   Обычно 3–6 полей. required=true только для критичных (Где, Что). Предзаполняй value из DESCRIPTION
-   (для workplace — перечисли распознанные номера РМ, напр. «РМ 16»; если их нет, оставь value пустым).
-3. priority: low|medium|high|critical — строго по правилам блока ПРИОРИТЕТ выше (учитывай MASS_CONTEXT).
-4. ticket — предварительный черновик (title, summary, markdown по правилам ниже).
-5. status = "draft".
+2. Сформируй form.fields по правилам выше и priority по блоку ПРИОРИТЕТ (учитывай MASS_CONTEXT).
+3. Составь ticket (title, summary, markdown) из того, что уже известно.
+4. status: если в DESCRIPTION/FIELDS уже есть КРИТИЧНЫЙ МИНИМУМ — ставь "ready" (заявку можно отправлять
+   как есть, поля остаются для необязательного уточнения). Если критичного не хватает — ставь "draft"
+   и пометь недостающие поля required=true.
+"""
 
-ЕСЛИ MODE = finalize:
-1. Собирай заявку из имеющегося. status="need_more_info" возвращай ТОЛЬКО если не хватает КРИТИЧНОГО
-   (для «починить» — где или что; для «сделать» — что или для кого): тогда добавь эти поля в form.fields
-   с required=true (отдельный список вопросов НЕ создавай). Иначе status="ready".
-2. При status="ready" составь ticket:
-   - title: короткий заголовок (до 80 символов).
-   - summary: 1 предложение сути.
-   - markdown: ГОТОВЫЙ КОРОТКИЙ текст для Telegram, читается за 5 секунд. Правила:
-     • Только HTML-теги Telegram: <b>…</b>, <i>…</i>, <code>…</code>. Без *, #, markdown, <br>, <ul>, <p>.
-     • Текст ошибки/код — в <code>…</code>.
-     • Каждый пункт — с НОВОЙ строки в формате «<эмодзи> <b>Метка:</b> значение». Между пунктами
-       один перенос строки (\n), без двойных пустых строк. Включай ТОЛЬКО строки с конкретикой;
-       пустое/«ничего»/«все» — пропускай (не пиши «не указано»). Без воды и общих фраз.
-     • НЕ дублируй категорию, приоритет и автора — они добавляются отдельно.
-     • Каркас — бери ТОЛЬКО нужные строки, каждая на своей строке:
-       для «починить»:
-         🔧 <b>Что:</b> <симптом>
-         📍 <b>Где:</b> отдел + № РМ (или ориентир)
-         🕒 <b>Когда/частота:</b> …
-         ✅ <b>Уже пробовали:</b> …
-       для «сделать»:
-         🎯 <b>Сделать:</b> <конечная цель>
-         👤 <b>Кому:</b> отдел + РМ / ФИО
-         📝 <b>Детали:</b> очереди / ссылки / доп. данные
+IT_TICKET_PROMPT_FINALIZE = """ТВОЯ ЗАДАЧА СЕЙЧАС (сборка финальной заявки):
+1. Собери заявку из имеющегося. status="need_more_info" возвращай ТОЛЬКО если не хватает КРИТИЧНОГО
+   МИНИМУМА: тогда добавь эти поля в form.fields с required=true. Иначе status="ready".
+2. При status="ready" составь ticket (title, summary, markdown) по правилам выше.
+"""
 
-ФОРМАТ ОТВЕТА — СТРОГО ОДИН JSON-объект, без markdown-ограждений и текста вокруг:
+IT_TICKET_PROMPT_JSON = """ФОРМАТ ОТВЕТА — СТРОГО ОДИН JSON-объект, без markdown-ограждений и текста вокруг:
 {
   "status": "draft" | "need_more_info" | "ready",
   "profile": "op" | "szov",
@@ -430,6 +435,56 @@ MASTER_PROMPT_IT_TICKET = """ТЫ — ассистент, который пом�
   "ticket": { "title": "...", "summary": "...", "markdown": "..." }
 }
 """
+
+# Схема ответа для structured output (Gemini responseSchema / OpenAI-совместимый json_schema).
+# Модель декодирует строго в эту форму — не тратит токены на ограждения ```json и не ломает парсер.
+IT_TICKET_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "status": {"type": "string", "enum": ["draft", "need_more_info", "ready"]},
+        "category": {"type": "string"},
+        "subcategory": {"type": "string"},
+        "category_adjusted": {"type": "boolean"},
+        "category_adjustment_note": {"type": "string"},
+        "priority": {"type": "string", "enum": ["low", "medium", "high", "critical"]},
+        "form": {
+            "type": "object",
+            "properties": {
+                "fields": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "key": {"type": "string"},
+                            "label": {"type": "string"},
+                            "type": {
+                                "type": "string",
+                                "enum": ["text", "textarea", "select", "date", "time", "number", "workplace"],
+                            },
+                            "required": {"type": "boolean"},
+                            "placeholder": {"type": "string"},
+                            "options": {"type": "array", "items": {"type": "string"}},
+                            "hint": {"type": "string"},
+                            "value": {"type": "string"},
+                        },
+                        "required": ["key", "label", "type"],
+                    },
+                },
+            },
+            "required": ["fields"],
+        },
+        "ticket": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "summary": {"type": "string"},
+                "markdown": {"type": "string"},
+            },
+            "required": ["title", "summary", "markdown"],
+        },
+    },
+    "required": ["status", "category", "priority", "form", "ticket"],
+}
 
 
 def _extract_json_block(raw_text: str):
@@ -446,14 +501,41 @@ def _extract_json_block(raw_text: str):
     return cleaned
 
 
-# Коды ответа Gemini, при которых имеет смысл повторить запрос (перегрузка / временный сбой)
+# Коды ответа, при которых имеет смысл повторить запрос (перегрузка / временный сбой)
 GEMINI_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 # 404 = модель недоступна для ключа → пробуем следующую модель в цепочке
 GEMINI_FALLBACK_STATUS = GEMINI_RETRYABLE_STATUS | {404}
 
 # Цепочка моделей: если первая перегружена / недоступна / таймаутит — берём следующую.
 # У моделей раздельные пулы мощностей, поэтому перегрузка одной не означает перегрузку всех.
-DEFAULT_GEMINI_MODEL_CHAIN = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-flash-lite"]
+#
+# Порядок — по скорости, а не по «крутизне»: задача (разобрать описание и собрать JSON)
+# простая, и самая лёгкая модель решает её не хуже, но заметно быстрее. У flash-lite ещё и
+# выше лимит бесплатных запросов, поэтому она первая.
+DEFAULT_GEMINI_MODEL_CHAIN = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash"]
+
+# Модели, у которых «мышление» (reasoning) можно выключить нулевым бюджетом. Для этой задачи
+# оно не нужно, а стоит нескольких секунд и токенов на каждый запрос.
+# gemini-2.5-pro сюда НЕ входит: у неё мышление не отключается и нулевой бюджет вернёт 400.
+GEMINI_THINKING_OFF_MODELS = ("gemini-2.5-flash",)
+
+# Groq (бесплатный тариф) — OpenAI-совместимый API, отдаёт токены в разы быстрее Gemini.
+# Подключается сам, как только в окружении появляется GROQ_API_KEY.
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+DEFAULT_GROQ_MODEL_CHAIN = ["llama-3.3-70b-versatile"]
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+# Таймаут одной попытки. Держим коротким: лучше быстро уйти на следующую модель,
+# чем ждать зависшую. Переопределяется env IT_TICKET_AI_TIMEOUT.
+DEFAULT_IT_TICKET_TIMEOUT = 20.0
+
+
+def _it_ticket_timeout() -> float:
+    try:
+        value = float(os.getenv("IT_TICKET_AI_TIMEOUT", "") or DEFAULT_IT_TICKET_TIMEOUT)
+    except (TypeError, ValueError):
+        return DEFAULT_IT_TICKET_TIMEOUT
+    return value if value > 0 else DEFAULT_IT_TICKET_TIMEOUT
 
 
 def _gemini_model_chain():
@@ -463,8 +545,69 @@ def _gemini_model_chain():
     return models or list(DEFAULT_GEMINI_MODEL_CHAIN)
 
 
-async def _gemini_generate_once(model: str, payload: dict, timeout: float, attempts: int):
-    """Запрос к одной модели (с ретраями внутри). Возвращает (result, try_next).
+def _groq_model_chain():
+    """Цепочка моделей Groq; переопределяется env GROQ_MODEL_CHAIN (через запятую)."""
+    raw = os.getenv("GROQ_MODEL_CHAIN", "")
+    models = [m.strip() for m in raw.split(",") if m.strip()] if raw else []
+    return models or list(DEFAULT_GROQ_MODEL_CHAIN)
+
+
+def _it_ticket_provider_chain():
+    """Общая цепочка «провайдер:модель» для IT-тикетов.
+
+    Groq (если задан ключ) идёт первым — он самый быстрый; Gemini остаётся запасным,
+    так что при отсутствии/сбое Groq всё продолжает работать как раньше.
+    Полностью переопределяется env IT_TICKET_AI_CHAIN, напр.:
+        IT_TICKET_AI_CHAIN=groq:llama-3.3-70b-versatile,gemini:gemini-2.5-flash-lite
+    """
+    raw = os.getenv("IT_TICKET_AI_CHAIN", "")
+    if raw.strip():
+        chain = []
+        for item in raw.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            provider, _, model = item.partition(":")
+            provider = provider.strip().lower()
+            model = model.strip()
+            if provider in ("groq", "gemini") and model:
+                chain.append((provider, model))
+        if chain:
+            return chain
+
+    chain = []
+    if GROQ_API_KEY:
+        chain.extend(("groq", m) for m in _groq_model_chain())
+    if GEMINI_API_KEY:
+        chain.extend(("gemini", m) for m in _gemini_model_chain())
+    return chain
+
+
+def _gemini_generation_config(model: str, plain: bool = False) -> dict:
+    """generationConfig под быстрый структурированный ответ.
+
+    Ключевое для скорости: thinkingBudget=0 у моделей 2.5-flash* — без него Gemini тратит
+    несколько секунд на скрытые рассуждения, которые этой задаче не нужны.
+
+    plain=True — «безопасный» вариант без ускоряющих полей: используется как запасной,
+    если модель отвергла запрос (400). Так новая настройка не может сломать фичу целиком.
+    """
+    config = {
+        "temperature": 0.2,
+        "topP": 0.9,
+        "maxOutputTokens": 4096,
+    }
+    if plain:
+        return config
+    config["responseMimeType"] = "application/json"
+    config["responseSchema"] = IT_TICKET_RESPONSE_SCHEMA
+    if model.startswith(GEMINI_THINKING_OFF_MODELS):
+        config["thinkingConfig"] = {"thinkingBudget": 0}
+    return config
+
+
+async def _gemini_generate_once(model: str, prompt: str, timeout: float, attempts: int):
+    """Запрос к одной модели Gemini (с ретраями внутри). Возвращает (result, try_next).
 
     try_next=True → имеет смысл попробовать следующую модель цепочки (перегрузка/таймаут/404).
     result: распарсенный dict при успехе; {'error': <code>} или None при ошибке.
@@ -473,10 +616,31 @@ async def _gemini_generate_once(model: str, payload: dict, timeout: float, attem
         "https://generativelanguage.googleapis.com/v1beta/models/"
         f"{model}:generateContent?key={GEMINI_API_KEY}"
     )
-    for attempt in range(1, attempts + 1):
+    plain_config = False
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": _gemini_generation_config(model),
+        "safetySettings": safety_settings,
+    }
+    attempt = 0
+    while attempt < attempts:
+        attempt += 1
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(api_url, json=payload)
+
+            # 400 на ускоренной конфигурации (схема ответа / нулевой бюджет мышления)
+            # — один раз переспрашиваем ту же модель «как раньше», без этих полей.
+            # Отдельная попытка: она не должна съедать бюджет обычных ретраев.
+            if response.status_code == 400 and not plain_config:
+                logger.warning(
+                    f"IT-ticket Gemini {model} → 400 на ускоренной конфигурации, "
+                    f"повтор без неё: {response.text[:200]}"
+                )
+                plain_config = True
+                payload["generationConfig"] = _gemini_generation_config(model, plain=True)
+                attempt -= 1
+                continue
 
             if response.status_code in GEMINI_FALLBACK_STATUS:
                 logger.warning(
@@ -489,9 +653,11 @@ async def _gemini_generate_once(model: str, payload: dict, timeout: float, attem
 
             response.raise_for_status()
             result = response.json()
+            # Сбой одной модели (блокировка, битый JSON) — повод отдать запрос следующей,
+            # а не показывать супервайзеру ошибку: у моделей разные фильтры и декодеры.
             if "candidates" not in result or not result["candidates"]:
                 logger.error(f"Gemini {model}: пустой/заблокированный ответ (IT ticket).")
-                return {"error": "ai_blocked"}, False
+                return {"error": "ai_blocked"}, True
             candidate = result["candidates"][0]
             raw_text = candidate.get("content", {}).get("parts", [{}])[0].get("text", "")
             cleaned = _extract_json_block(raw_text)
@@ -499,7 +665,7 @@ async def _gemini_generate_once(model: str, payload: dict, timeout: float, attem
                 return json.loads(cleaned), False
             except json.JSONDecodeError as e:
                 logger.error(f"IT-ticket JSON parse error ({model}): {e}. Cleaned: {cleaned[:300]}")
-                return {"error": "json_parse_error", "raw_response": raw_text}, False
+                return {"error": "json_parse_error", "raw_response": raw_text}, True
 
         except (httpx.TimeoutException, httpx.TransportError) as e:
             logger.warning(
@@ -510,47 +676,102 @@ async def _gemini_generate_once(model: str, payload: dict, timeout: float, attem
                 continue
             return {"error": "ai_timeout"}, True
         except httpx.HTTPStatusError as e:
-            # Неретраебельная ошибка (например, 400) — общая для всех моделей, дальше не идём
             logger.error(f"IT-ticket HTTP error ({model}): {e.response.status_code} - {e.response.text[:300]}")
-            return None, False
+            return {"error": "ai_failed"}, True
         except Exception as e:
             logger.exception(f"Unexpected error contacting Gemini ({model}, IT ticket): {e}")
-            return None, False
+            return {"error": "ai_failed"}, True
 
     return {"error": "ai_unavailable"}, True
 
 
-async def _call_gemini_json(full_prompt: str, timeout: float = 30.0, attempts: int = 1) -> dict | None:
-    """Вызывает Gemini с ЦЕПОЧКОЙ моделей (fallback при перегрузке/таймауте/404).
+async def _groq_generate_once(model: str, prompt: str, timeout: float, attempts: int):
+    """Запрос к одной модели Groq. Контракт возврата — как у _gemini_generate_once."""
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "max_tokens": 4096,
+        "response_format": {"type": "json_object"},
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    for attempt in range(1, attempts + 1):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(GROQ_API_URL, json=payload, headers=headers)
 
-    Если первая модель отвечает 503 «high demand» / 429 / таймаутит / 404 — берётся
-    следующая модель из цепочки. Возвращает:
+            if response.status_code in GEMINI_FALLBACK_STATUS:
+                logger.warning(
+                    f"IT-ticket Groq {model} → {response.status_code} (попытка {attempt}/{attempts})"
+                )
+                if attempt < attempts and response.status_code in GEMINI_RETRYABLE_STATUS:
+                    await asyncio.sleep(min(2 ** attempt, 6))
+                    continue
+                return {"error": "ai_unavailable", "status": response.status_code}, True
+
+            response.raise_for_status()
+            result = response.json()
+            choices = result.get("choices") or []
+            if not choices:
+                logger.error(f"Groq {model}: пустой ответ (IT ticket).")
+                return {"error": "ai_blocked"}, True
+            raw_text = (choices[0].get("message") or {}).get("content") or ""
+            cleaned = _extract_json_block(raw_text)
+            try:
+                return json.loads(cleaned), False
+            except json.JSONDecodeError as e:
+                logger.error(f"IT-ticket JSON parse error (groq {model}): {e}. Cleaned: {cleaned[:300]}")
+                # Битый JSON от одной модели — повод попробовать следующую, а не сдаваться.
+                return {"error": "json_parse_error", "raw_response": raw_text}, True
+
+        except (httpx.TimeoutException, httpx.TransportError) as e:
+            logger.warning(f"IT-ticket Groq {model} network/timeout (попытка {attempt}/{attempts}): {e!r}")
+            if attempt < attempts:
+                await asyncio.sleep(min(2 ** attempt, 6))
+                continue
+            return {"error": "ai_timeout"}, True
+        except httpx.HTTPStatusError as e:
+            logger.error(f"IT-ticket Groq HTTP error ({model}): {e.response.status_code} - {e.response.text[:300]}")
+            return {"error": "ai_failed"}, True
+        except Exception as e:
+            logger.exception(f"Unexpected error contacting Groq ({model}, IT ticket): {e}")
+            return {"error": "ai_failed"}, True
+
+    return {"error": "ai_unavailable"}, True
+
+
+async def _call_ai_json(full_prompt: str, timeout: float | None = None, attempts: int = 1) -> dict | None:
+    """Вызывает ЦЕПОЧКУ «провайдер:модель» до первого удачного ответа.
+
+    Если модель перегружена (503/429), таймаутит или недоступна (404) — берётся следующая.
+    Возвращает:
       - dict с результатом при успехе;
       - {'error': <code>} для понятных клиенту ошибок (ai_unavailable / ai_timeout /
         ai_blocked / json_parse_error);
-      - None при невосстановимой/неожиданной ошибке (например, 400).
+      - None, если не настроен ни один ключ.
     """
-    if not GEMINI_API_KEY:
-        logger.error("Gemini API key is not configured.")
+    chain = _it_ticket_provider_chain()
+    if not chain:
+        logger.error("IT-ticket: не настроен ни один ключ ИИ (GEMINI_API_KEY / GROQ_API_KEY).")
         return None
 
-    payload = {
-        "contents": [{"parts": [{"text": full_prompt}]}],
-        "generationConfig": {**generation_config, "maxOutputTokens": 8192},
-        "safetySettings": safety_settings,
-    }
+    if timeout is None:
+        timeout = _it_ticket_timeout()
 
-    chain = _gemini_model_chain()
     last_error = {"error": "ai_unavailable"}
-    for idx, model in enumerate(chain):
-        result, try_next = await _gemini_generate_once(model, payload, timeout, attempts)
+    for idx, (provider, model) in enumerate(chain):
+        runner = _groq_generate_once if provider == "groq" else _gemini_generate_once
+        result, try_next = await runner(model, full_prompt, timeout, attempts)
         if not try_next:
             return result
         if isinstance(result, dict) and result.get("error"):
             last_error = result
         if idx + 1 < len(chain):
-            logger.warning(f"IT-ticket: переключаюсь на следующую модель после {model}")
-            await asyncio.sleep(0.5)
+            logger.warning(f"IT-ticket: переключаюсь на следующую модель после {provider}:{model}")
     return last_error
 
 
@@ -585,9 +806,6 @@ async def generate_it_ticket_with_ai(mode: str, payload: dict) -> dict | None:
     """
     if not isinstance(payload, dict):
         return None
-    if not GEMINI_API_KEY:
-        logger.error("Gemini API key is not configured.")
-        return None
 
     mode = (mode or "draft").strip().lower()
     if mode not in ("draft", "finalize"):
@@ -612,19 +830,25 @@ async def generate_it_ticket_with_ai(mode: str, payload: dict) -> dict | None:
         logger.exception("Failed to load IT-ticket admin instructions")
         extra_instructions = ""
 
+    # Пустой блок инструкций не отправляем вовсе — это лишние токены в каждом запросе.
     instructions_block = (
         "---АКТУАЛЬНЫЕ ИНСТРУКЦИИ ОТ АДМИНИСТРАТОРА / ГЛАВЫ ОТДЕЛА---\n"
         "Эти инструкции добавлены вручную и описывают недавние изменения. "
         "При конфликте с общими правилами выше — следуй ИМ.\n"
-        f"{extra_instructions if extra_instructions else '(инструкций нет)'}\n"
+        f"{extra_instructions}\n"
         "---КОНЕЦ ИНСТРУКЦИЙ---\n"
-    )
+    ) if extra_instructions.strip() else ""
+
+    # В запрос уходит только блок нужного режима: инструкции второго режима модели
+    # не нужны, а каждый лишний токен промпта — это время ответа.
+    mode_block = IT_TICKET_PROMPT_DRAFT if mode == "draft" else IT_TICKET_PROMPT_FINALIZE
 
     full_prompt = (
-        f"{MASTER_PROMPT_IT_TICKET}\n"
+        f"{IT_TICKET_PROMPT_CORE}\n"
+        f"{mode_block}\n"
+        f"{IT_TICKET_PROMPT_JSON}\n"
         f"{instructions_block}"
         f"---INPUT---\n"
-        f"MODE: {mode}\n"
         f"PROFILE: {profile}\n"
         f"CATALOG:\n{_it_catalog_block(profile)}\n"
         f"CATEGORY: {category}\n"
@@ -637,7 +861,7 @@ async def generate_it_ticket_with_ai(mode: str, payload: dict) -> dict | None:
         f"ВЕРНИ СТРОГО ОДИН JSON-ОБЪЕКТ ПО ШАБЛОНУ."
     )
 
-    result = await _call_gemini_json(full_prompt)
+    result = await _call_ai_json(full_prompt)
     if isinstance(result, dict) and not result.get("error"):
         result.setdefault("profile", profile)
         if category:
