@@ -48,8 +48,6 @@ COLUMN_TITLES = [
     ('done', 'Готово'),
 ]
 STATUS_ACTIONS = ('in_progress', 'completed', 'accepted', 'returned', 'reopened')
-# То же окно, что на доске: принятое раньше уходит в архив колонки «Готово».
-DONE_ARCHIVE_DAYS = 7
 
 
 def _load_env(path):
@@ -171,22 +169,13 @@ def parse_iso(value):
 
 
 def accepted_at(task):
-    """Момент приёмки — точка отсчёта архива «Готово» (как во фронте)."""
+    """Момент приёмки: по нему сортируется «Готово» — свежепринятое сверху."""
     for item in reversed(task.get('history') or []):
         if item.get('status_code') == 'accepted':
             parsed = parse_iso(item.get('changed_at'))
             if parsed:
                 return parsed
     return parse_iso(task.get('completed_at')) or parse_iso(task.get('updated_at'))
-
-
-def is_done_archived(task, now=None):
-    if task.get('status') != 'accepted':
-        return False
-    moment = accepted_at(task)
-    if not moment:
-        return False
-    return (now or datetime.now()) - moment > timedelta(days=DONE_ARCHIVE_DAYS)
 
 
 DURATION_RE = re.compile(r'(?P<value>\d+)\s*(?P<unit>[dhmдчм]+)', re.IGNORECASE)
@@ -324,13 +313,8 @@ def cmd_board(client, args):
 
     now = datetime.now()
     buckets = {key: [] for key, _ in COLUMN_TITLES}
-    archived = []
     for task in tasks:
-        column = column_of(task)
-        if column == 'done' and is_done_archived(task, now) and not args.archive:
-            archived.append(task)
-        else:
-            buckets[column].append(task)
+        buckets[column_of(task)].append(task)
 
     print(f'Доска задач · {client.user_name} (id {client.user_id}) · всего {len(tasks)}')
     for key, title in COLUMN_TITLES:
@@ -344,9 +328,6 @@ def cmd_board(client, args):
             print('   —')
         for task in items:
             print('   ' + task_line(task, now))
-        if key == 'done' and archived:
-            print(f'   … + {len(archived)} в архиве (принято больше {DONE_ARCHIVE_DAYS} дней назад, '
-                  f'показать: --archive)')
 
 
 def cmd_backlog(client, args):
@@ -695,8 +676,6 @@ def build_parser():
     board = sub.add_parser('board', help='канбан по колонкам')
     board.add_argument('--mine', action='store_true', help='только мои задачи')
     board.add_argument('--assignee', type=int, help='фильтр по id исполнителя')
-    board.add_argument('--archive', action='store_true',
-                       help=f'показать и «Готово» старше {DONE_ARCHIVE_DAYS} дней (по умолчанию в архиве)')
     board.set_defaults(func=cmd_board)
 
     backlog = sub.add_parser('backlog', help='бэклог в порядке приоритета')

@@ -58,9 +58,6 @@ const MINUTE = 60 * 1000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
-/** Через сколько принятая задача уходит из «Готово» в архив, чтобы доска не забивалась. */
-export const DONE_ARCHIVE_DAYS = 7;
-
 /* ─────────────── Утилиты ─────────────── */
 
 export const columnOfTask = (task) => {
@@ -212,30 +209,6 @@ const actualStartOf = (task) => {
   const history = Array.isArray(task?.history) ? task.history : [];
   const started = history.find((item) => item?.status_code === 'in_progress');
   return parseDate(started?.changed_at);
-};
-
-/**
- * Момент приёмки задачи — точка отсчёта архива «Готово».
- * Берём из истории статусов; completed_at годится только как запасной вариант,
- * иначе задача, принятая сегодня, но выполненная 10 дней назад, сразу бы исчезла.
- */
-export const acceptedAtOf = (task) => {
-  const history = Array.isArray(task?.history) ? task.history : [];
-  for (let index = history.length - 1; index >= 0; index -= 1) {
-    if (history[index]?.status_code === 'accepted') {
-      const parsed = parseDate(history[index].changed_at);
-      if (parsed) return parsed;
-    }
-  }
-  return parseDate(task?.completed_at) || parseDate(task?.updated_at);
-};
-
-/** Принятая задача старше окна — на доске её не показываем. */
-export const isDoneArchived = (task, now = Date.now()) => {
-  if (task?.status !== 'accepted') return false;
-  const acceptedAt = acceptedAtOf(task);
-  if (!acceptedAt) return false;
-  return now - acceptedAt.getTime() > DONE_ARCHIVE_DAYS * DAY;
 };
 
 const actualEndOf = (task) => {
@@ -1143,7 +1116,6 @@ const BoardCard = ({
 
 const BoardView = ({
   tasksByColumn,
-  archivedDone = [],
   canPlan,
   focusPersonId = 0,
   focusTaskId = 0,
@@ -1158,12 +1130,6 @@ const BoardView = ({
 }) => {
   const [dragged, setDragged] = useState(null);
   const [hoverColumn, setHoverColumn] = useState(null);
-  const [archiveOpen, setArchiveOpen] = useState(false);
-
-  // Задача из уведомления может лежать в свёрнутом архиве «Готово» — раскрываем.
-  useEffect(() => {
-    if (focusTaskId && archivedDone.some((entry) => entry.task.id === focusTaskId)) setArchiveOpen(true);
-  }, [focusTaskId, archivedDone]);
 
   const allowedColumns = useMemo(() => {
     if (!dragged) return null;
@@ -1199,7 +1165,6 @@ const BoardView = ({
           const isAllowed = !allowedColumns || allowedColumns.has(column.id);
           const isHover = hoverColumn === column.id && isAllowed;
           const isProgress = column.id === 'progress';
-          const isDone = column.id === 'done';
 
           return (
             <section
@@ -1261,7 +1226,7 @@ const BoardView = ({
               )}
 
               <div className="flex min-h-[72px] flex-col gap-1.5">
-                {items.length === 0 && !(isDone && archivedDone.length > 0) ? (
+                {items.length === 0 ? (
                   <p className="px-1.5 py-3 text-[11.5px] text-slate-400">{column.caption}</p>
                 ) : (
                   items.map((entry) => (
@@ -1279,34 +1244,6 @@ const BoardView = ({
                       onDragEnd={handleDragEnd}
                     />
                   ))
-                )}
-
-                {isDone && archiveOpen && archivedDone.map((entry) => (
-                  <BoardCard
-                    key={entry.task.id}
-                    task={entry.task}
-                    canPlan={canPlan}
-                    focusPersonId={focusPersonId}
-                    isFocused={focusTaskId === entry.task.id}
-                    actionNeedOf={actionNeedOf}
-                    isDragging={dragged?.task?.id === entry.task.id}
-                    onOpen={onOpen}
-                    onApplyPlan={onApplyPlan}
-                    onDragStart={(event, task) => handleDragStart(event, task, entry.resolve)}
-                    onDragEnd={handleDragEnd}
-                  />
-                ))}
-
-                {isDone && archivedDone.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => setArchiveOpen((prev) => !prev)}
-                    className="rounded-lg px-1.5 py-2 text-left text-[11.5px] text-slate-400 transition hover:bg-slate-200/60 hover:text-slate-600"
-                  >
-                    {archiveOpen
-                      ? 'Скрыть архив'
-                      : `Архив · ${archivedDone.length} ${pluralTasks(archivedDone.length)}`}
-                  </button>
                 )}
 
                 {meta.hidden > 0 && (
@@ -1937,27 +1874,22 @@ const TaskBoardWorkspace = ({
 
   // «Готово» — скользящее окно: принятое больше недели назад уезжает в архив колонки,
   // иначе доска со временем превращается в свалку выполненного.
-  const { tasksByColumn, archivedDone } = useMemo(() => {
-    const now = Date.now();
+  const tasksByColumn = useMemo(() => {
     const buckets = Object.fromEntries(BOARD_COLUMNS.map((column) => [column.id, []]));
-    const archived = [];
     scopedTasks.forEach((task) => {
       const columnId = columnOfTask(task);
       if (!buckets[columnId]) return;
-      const entry = { task, resolve: (toColumn) => resolveBoardDrop(task, toColumn, dropContext) };
-      if (columnId === 'done' && isDoneArchived(task, now)) archived.push(entry);
-      else buckets[columnId].push(entry);
+      buckets[columnId].push({ task, resolve: (toColumn) => resolveBoardDrop(task, toColumn, dropContext) });
     });
     const compareEntries = (left, right) => compareBoardTasks(left.task, right.task, boardSort);
     BOARD_COLUMNS.forEach((column) => buckets[column.id].sort(compareEntries));
-    archived.sort(compareEntries);
-    return { tasksByColumn: buckets, archivedDone: archived };
+    return buckets;
   }, [scopedTasks, dropContext, boardSort]);
 
-  /* Переход из уведомления. Если карточки нет на текущей странице — возвращаемся
-     на свою доску, первую страницу: уведомления всегда про задачи пользователя,
-     а сортировка по свежести держит их сверху. Подсветку гасим по таймеру:
-     она нужна ровно для того, чтобы глаз нашёл карточку. */
+  /* Переход из уведомления. Если карточки нет в загруженной порции — возвращаемся
+     на свою доску: уведомления всегда про задачи пользователя, а сортировка по
+     свежести держит их сверху. Подсветку гасим по таймеру: она нужна ровно для
+     того, чтобы глаз нашёл карточку. */
   const [focusTaskId, setFocusTaskId] = useState(0);
   const focusTokenRef = useRef(0);
   useEffect(() => {
@@ -2080,9 +2012,7 @@ const TaskBoardWorkspace = ({
         </div>
         {mode === 'board' && (
           <span className="text-[11.5px] text-slate-400">
-            {archivedDone.length > 0
-              ? `Перетащите карточку между колонками · принятое больше ${DONE_ARCHIVE_DAYS} дней назад — в архиве колонки «Готово»`
-              : 'Перетащите карточку между колонками, чтобы сменить статус'}
+            Перетащите карточку между колонками, чтобы сменить статус
           </span>
         )}
       </div>
@@ -2106,7 +2036,6 @@ const TaskBoardWorkspace = ({
       {mode === 'board' && (
         <BoardView
           tasksByColumn={tasksByColumn}
-          archivedDone={archivedDone}
           canPlan={canPlan}
           focusPersonId={focusPersonId}
           focusTaskId={focusTaskId}
