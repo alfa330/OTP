@@ -19414,10 +19414,13 @@ def get_users_report():
         if headed_department_id is not None:
             headed_department_ids.add(int(headed_department_id))
 
-        if not is_global_admin and not headed_department_ids:
-            return jsonify({"error": "Only admins and department heads can generate users report"}), 403
+        # Супервайзер без отдела в подчинении выгружает отчёт только по своим операторам.
+        is_supervisor = requester_role == 'sv'
+        if not is_global_admin and not headed_department_ids and not is_supervisor:
+            return jsonify({"error": "Only admins, department heads and supervisors can generate users report"}), 403
 
         report_department_ids = None
+        report_supervisor_ids = None
         requested_department_id = request.args.get('department_id')
         if is_global_admin:
             if requested_department_id not in (None, ''):
@@ -19429,9 +19432,12 @@ def get_users_report():
                 if not department or department.get('is_active') is False:
                     return jsonify({"error": "Department not found"}), 404
                 report_department_ids = [requested_department_id]
-        else:
+        elif headed_department_ids:
             # A department head can never expand the export scope with a query parameter.
             report_department_ids = sorted(headed_department_ids)
+        else:
+            # A supervisor is scoped to their own operators, whatever the query parameters say.
+            report_supervisor_ids = [requester_id]
 
         def _bool_query_arg(name, default=False):
             raw = request.args.get(name)
@@ -19457,7 +19463,8 @@ def get_users_report():
             include_dismissal_details=include_dismissal_details,
             sheet_mode=sheet_mode,
             period_month=period_month,
-            department_ids=report_department_ids
+            department_ids=report_department_ids,
+            supervisor_ids=report_supervisor_ids
         )
         if not filename or not content:
             return jsonify({"error": "Failed to generate report"}), 500

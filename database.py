@@ -27273,7 +27273,8 @@ class Database:
         include_dismissal_details: bool = True,
         sheet_mode: str = 'summary_and_supervisors',
         period_month: str = None,
-        department_ids=None
+        department_ids=None,
+        supervisor_ids=None
     ):
         """
         Generates an Excel report of operators with extended profile fields:
@@ -27288,6 +27289,9 @@ class Database:
             regardless of their current status. Overrides include_fired.
         :param department_ids: Optional iterable of department IDs. None exports all departments;
             an iterable restricts every report sheet to operators from those departments.
+        :param supervisor_ids: Optional iterable of supervisor user IDs. None exports every
+            supervisor; an iterable restricts the export to their own operators. Combines with
+            department_ids (both filters apply).
         :return: (filename, content) or (None, None) on error.
         """
         try:
@@ -27320,18 +27324,14 @@ class Database:
             if sheet_mode not in ('summary', 'supervisors', 'summary_and_supervisors'):
                 sheet_mode = 'summary_and_supervisors'
 
-            normalized_department_ids = None
-            if department_ids is not None:
-                raw_department_ids = (
-                    department_ids
-                    if isinstance(department_ids, (list, tuple, set, frozenset))
-                    else [department_ids]
-                )
-                normalized_department_ids = sorted({
-                    int(department_id)
-                    for department_id in raw_department_ids
-                    if department_id not in (None, '')
-                })
+            def _normalize_id_filter(raw_ids):
+                if raw_ids is None:
+                    return None
+                values = raw_ids if isinstance(raw_ids, (list, tuple, set, frozenset)) else [raw_ids]
+                return sorted({int(value) for value in values if value not in (None, '')})
+
+            normalized_department_ids = _normalize_id_filter(department_ids)
+            normalized_supervisor_ids = _normalize_id_filter(supervisor_ids)
 
             if period_start and period_end:
                 filename = f"users_report_{period_start.strftime('%Y-%m')}.xlsx"
@@ -27357,10 +27357,14 @@ class Database:
                         AND COALESCE(NULLIF(LOWER(TRIM(u.status)), ''), 'working') NOT IN ('fired', 'dismissal')
                     """
                 department_filter_sql = ""
+                supervisor_filter_sql = ""
                 query_params = []
                 if normalized_department_ids is not None:
                     department_filter_sql = "AND u.department_id = ANY(%s)"
                     query_params.append(normalized_department_ids)
+                if normalized_supervisor_ids is not None:
+                    supervisor_filter_sql = "AND u.supervisor_id = ANY(%s)"
+                    query_params.append(normalized_supervisor_ids)
 
                 users_report_query = f"""
                     SELECT
@@ -27437,6 +27441,7 @@ class Database:
                     ) status_history ON TRUE
                     WHERE u.role = 'operator'
                     {department_filter_sql}
+                    {supervisor_filter_sql}
                     {status_filter_sql}
                     ORDER BY s.name, u.name
                 """
