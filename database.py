@@ -4057,6 +4057,15 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority);
                 CREATE INDEX IF NOT EXISTS idx_tasks_due_at ON tasks(due_at);
                 CREATE INDEX IF NOT EXISTS idx_tasks_recurrence_next ON tasks(recurrence_next_at);
+                -- Доска грузит колонки: срез по статусу + порядок по свежести.
+                CREATE INDEX IF NOT EXISTS idx_tasks_status_created
+                    ON tasks(status, created_at DESC, id DESC);
+                -- Доска сотрудника и «мои задачи»: тот же порядок в рамках участника.
+                CREATE INDEX IF NOT EXISTS idx_tasks_assigned_created
+                    ON tasks(assigned_to, created_at DESC, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_tasks_created_by_created
+                    ON tasks(created_by, created_at DESC, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_tasks_requested_by ON tasks(requested_by_id);
                 CREATE INDEX IF NOT EXISTS idx_task_status_history_task_id ON task_status_history(task_id);
                 CREATE INDEX IF NOT EXISTS idx_task_attachments_task_id ON task_attachments(task_id);
                 CREATE INDEX IF NOT EXISTS idx_task_checklist_items_task_id ON task_checklist_items(task_id, position);
@@ -43100,7 +43109,8 @@ class Database:
             backlog=None,
             mine=None,
             task_id=None,
-            sort=None
+            sort=None,
+            include_summary=True
     ):
         requester_id = int(requester_id)
         role = normalize_role_value(requester_role)
@@ -43198,6 +43208,19 @@ class Database:
             base_conditions.append("(t.created_by = %s OR t.requested_by_id = %s)")
             base_params.extend([requester_id, requester_id])
 
+        person_board_id = None
+        if person_id_norm is not None and person_scope_norm == 'any':
+            # Доска сотрудника: фильтр уходит в базовые условия, чтобы summary считал
+            # именно его задачи, а не весь отдел.
+            base_conditions.append("(t.created_by = %s OR t.assigned_to = %s)")
+            base_params.extend([person_id_norm, person_id_norm])
+            person_board_id = person_id_norm
+            person_id_norm = None
+
+        # Базовый набор собран — дальше идут фильтры выборки поверх него.
+        filtered_conditions = list(base_conditions)
+        filtered_params = list(base_params)
+
         # Точечный запрос по id: диплинк на задачу, которой нет в загруженной выборке.
         if task_id is not None and str(task_id).strip() != '':
             try:
@@ -43241,17 +43264,6 @@ class Database:
         elif backlog_norm == 'exclude':
             filtered_conditions.append("t.is_backlog = FALSE")
 
-        person_board_id = None
-        if person_id_norm is not None and person_scope_norm == 'any':
-            # Доска сотрудника: фильтр уходит в базу, чтобы summary считал именно его задачи.
-            base_conditions.append("(t.created_by = %s OR t.assigned_to = %s)")
-            base_params.extend([person_id_norm, person_id_norm])
-            person_board_id = person_id_norm
-            person_id_norm = None
-
-        filtered_conditions = list(base_conditions)
-        filtered_params = list(base_params)
-
         if person_id_norm is not None:
             if person_scope_norm == 'incoming':
                 filtered_conditions.append("t.assigned_to = %s")
@@ -43273,50 +43285,58 @@ class Database:
         with self._get_cursor() as cursor:
             # Сводка считается по базовому набору (доска целиком), а не по странице —
             # иначе шапка доски сотрудника показывала бы «итоги текущей страницы».
-            summary_params = [self._task_now()]
-            if person_board_id is not None:
-                summary_params.extend([person_board_id, person_board_id])
-            else:
-                summary_params.extend([0, 0])
-            summary_params.extend(base_params)
-            cursor.execute(f"""
-                SELECT
-                    COUNT(*)::INT AS total_count,
-                    COUNT(*) FILTER (WHERE t.status = 'in_progress')::INT AS in_progress_count,
-                    COUNT(*) FILTER (WHERE t.status IN ('completed', 'accepted'))::INT AS completed_count,
-                    COUNT(*) FILTER (WHERE t.status = 'returned')::INT AS returned_count,
-                    COUNT(*) FILTER (WHERE t.is_backlog)::INT AS backlog_count,
-                    COUNT(*) FILTER (WHERE t.status = 'accepted')::INT AS accepted_count,
-                    COUNT(*) FILTER (
-                        WHERE t.due_at IS NOT NULL
-                          AND t.due_at < %s
-                          AND t.status NOT IN ('completed', 'accepted')
-                    )::INT AS overdue_count,
-                    COUNT(*) FILTER (
-                        WHERE t.created_by = %s AND t.assigned_to <> %s
-                    )::INT AS delegated_count
-                FROM tasks t
+            # Это семь агрегатов по всей видимой базе, поэтому колонки доски просят
+            # её ровно один раз на загрузку, а не каждым запросом.
+            # Сводка — семь агрегатов по всей видимой базе. Колонки доски просят её
+            # ровно один раз на загрузку, остальные запросы её пропускают.
+            summary = dict(summary_empty)
+            if include_summary:
+                summary_params = [self._task_now()]
+                summary_params.extend(
+                    [person_board_id, person_board_id] if person_board_id is not None else [0, 0]
+                )
+                summary_params.extend(base_params)
+                cursor.execute(f"""
+                    SELECT
+                        COUNT(*)::INT AS total_count,
+                        COUNT(*) FILTER (WHERE t.status = 'in_progress')::INT AS in_progress_count,
+                        COUNT(*) FILTER (WHERE t.status IN ('completed', 'accepted'))::INT AS completed_count,
+                        COUNT(*) FILTER (WHERE t.status = 'returned')::INT AS returned_count,
+                        COUNT(*) FILTER (WHERE t.is_backlog)::INT AS backlog_count,
+                        COUNT(*) FILTER (WHERE t.status = 'accepted')::INT AS accepted_count,
+                        COUNT(*) FILTER (
+                            WHERE t.due_at IS NOT NULL
+                              AND t.due_at < %s
+                              AND t.status NOT IN ('completed', 'accepted')
+                        )::INT AS overdue_count,
+                        COUNT(*) FILTER (
+                            WHERE t.created_by = %s AND t.assigned_to <> %s
+                        )::INT AS delegated_count
+                    FROM tasks t
+                    {base_where_sql}
+                """, tuple(summary_params))
+                summary_row = cursor.fetchone() or (0, 0, 0, 0, 0, 0, 0, 0)
+                summary = {
+                    "total": int(summary_row[0] or 0),
+                    "in_progress": int(summary_row[1] or 0),
+                    "completed": int(summary_row[2] or 0),
+                    "returned": int(summary_row[3] or 0),
+                    "backlog": int(summary_row[4] or 0),
+                    "accepted": int(summary_row[5] or 0),
+                    "overdue": int(summary_row[6] or 0),
+                    "delegated": int(summary_row[7] or 0)
+                }
+
+            # JOIN'ы к users нужны только поиску по имени — в остальных случаях
+            # счёт идёт по одной таблице.
+            count_joins_sql = """
                 LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 LEFT JOIN users creator ON creator.id = t.created_by
-                {base_where_sql}
-            """, tuple(summary_params))
-            summary_row = cursor.fetchone() or (0, 0, 0, 0, 0, 0, 0, 0)
-            summary = {
-                "total": int(summary_row[0] or 0),
-                "in_progress": int(summary_row[1] or 0),
-                "completed": int(summary_row[2] or 0),
-                "returned": int(summary_row[3] or 0),
-                "backlog": int(summary_row[4] or 0),
-                "accepted": int(summary_row[5] or 0),
-                "overdue": int(summary_row[6] or 0),
-                "delegated": int(summary_row[7] or 0)
-            }
-
+            """ if search_text else ""
             cursor.execute(f"""
                 SELECT COUNT(*)::INT
                 FROM tasks t
-                LEFT JOIN users assignee ON assignee.id = t.assigned_to
-                LEFT JOIN users creator ON creator.id = t.created_by
+                {count_joins_sql}
                 {filtered_where_sql}
             """, tuple(filtered_params))
             total_filtered_row = cursor.fetchone()

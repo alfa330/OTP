@@ -16,6 +16,7 @@ WORKSPACE_PATH = ROOT / "src" / "components" / "tasks" / "TaskBoardWorkspace.jsx
 TASKS_VIEW_PATH = ROOT / "src" / "components" / "tasks" / "TasksView.jsx"
 CUSTOM_SELECT_PATH = ROOT / "src" / "components" / "ui" / "CustomSelect.jsx"
 APP_JSX_PATH = ROOT / "src" / "App.jsx"
+BOARD_QUERY_PATH = ROOT / "src" / "components" / "tasks" / "boardQuery.js"
 CLI_PATH = ROOT / "scripts" / "task_board.py"
 SKILL_PATH = ROOT / ".claude" / "skills" / "task-board" / "SKILL.md"
 
@@ -219,7 +220,7 @@ class WorkspaceFrontendTests(unittest.TestCase):
         self.assertIn("{isAdmin ? (", self.src)
         self.assertIn("value: `person:${person.id}`", self.src)
         # Выборку доски делает сервер, клиент её не фильтрует.
-        self.assertIn("params.person_scope = 'any';", self.src)
+        self.assertIn("params.person_scope = 'any';", _read(BOARD_QUERY_PATH))
         self.assertIn('ariaLabel="Выбор доски сотрудника"', self.src)
 
     def test_board_sort_defaults_to_freshness_and_is_stable(self):
@@ -256,7 +257,8 @@ class TasksViewIntegrationTests(unittest.TestCase):
         self.assertEqual(ids, ["overview", "backlog", "board", "timeline"])
 
     def test_workspace_is_mounted_with_handlers(self):
-        self.assertIn("import TaskBoardWorkspace, { boardQueryParams } from './TaskBoardWorkspace';", self.src)
+        self.assertIn("import TaskBoardWorkspace from './TaskBoardWorkspace';", self.src)
+        self.assertIn("import { boardQueryParams } from './boardQuery';", self.src)
         self.assertIn("<TaskBoardWorkspace", self.src)
         for prop in (
             "onBoardUpdate={updateBoardItems}",
@@ -1145,9 +1147,9 @@ class BoardPaginationTests(unittest.TestCase):
     """Доска грузит страницу, а не всю базу: сотрудник — своим запросом, общая — по количеству."""
 
     def test_board_query_is_scoped_per_board(self):
-        src = _read(WORKSPACE_PATH)
+        src = _read(BOARD_QUERY_PATH)
         start = src.index("export const boardQueryParams = (")
-        block = src[start:src.index("const TaskBoardWorkspace = (", start)]
+        block = src[start:]
         self.assertIn("if (mode === 'backlog') params.backlog = 'only';", block)
         self.assertIn("if (scope === 'my') params.mine = 'any';", block)
         self.assertIn("else if (scope === 'assigned') params.mine = 'assignee';", block)
@@ -1155,13 +1157,11 @@ class BoardPaginationTests(unittest.TestCase):
         self.assertIn("const params = { limit, offset };", block)
 
     def test_chunk_sizes_are_a_closed_list(self):
-        src = _read(WORKSPACE_PATH)
+        # Поведение проверяется в tests/board_query.test.mjs, здесь — что модуль на месте.
+        src = _read(BOARD_QUERY_PATH)
         self.assertIn("export const BOARD_CHUNK_SIZES = [20, 40, 60];", src)
-        start = src.index("export const normalizeBoardChunk = (value) => {")
-        block = src[start:src.index("/** Колонка доски", start)]
-        # Чужое значение из localStorage не должно превращаться в размер порции.
-        self.assertIn("BOARD_CHUNK_SIZES.includes(parsed)", block)
-        self.assertIn("DEFAULT_BOARD_CHUNK", block)
+        self.assertIn("BOARD_CHUNK_SIZES.includes(parsed)", src)
+        self.assertIn("import { boardQueryParams } from './boardQuery';", _read(TASKS_VIEW_PATH))
 
     def test_server_caps_page_size_and_unbounded_requests(self):
         app_src = _read(APP_PATH)
@@ -1220,8 +1220,8 @@ class BoardPaginationTests(unittest.TestCase):
         self.assertIn("INVALID_TASK_SORT", db_src)
         self.assertIn("INVALID_TASK_SORT", _read(APP_PATH))
 
+        self.assertIn("if (sort === 'importance') params.sort = 'importance';", _read(BOARD_QUERY_PATH))
         view = _read(WORKSPACE_PATH)
-        self.assertIn("if (sort === 'importance') params.sort = 'importance';", view)
         # Порядок задаётся сервером, поэтому смена сортировки перезапрашивает выборку.
         self.assertIn("sort: boardSort,", view)
         self.assertIn("const changeBoardSort = useCallback((next) => {", view)
@@ -1230,10 +1230,13 @@ class BoardPaginationTests(unittest.TestCase):
     def test_columns_load_more_with_honest_remainder(self):
         src = _read(WORKSPACE_PATH)
         # Колонка = свой срез статусов, поэтому её остаток считается в базе.
-        start = src.index("export const BOARD_COLUMN_QUERY = {")
-        block = src[start:src.index("/** Параметры запроса выборки доски", start)]
+        query_src = _read(BOARD_QUERY_PATH)
+        start = query_src.index("export const BOARD_COLUMN_QUERY = {")
+        block = query_src[start:query_src.index("export const BOARD_CHUNK_SIZES", start)]
         self.assertIn("progress: { status: 'in_progress,returned', backlog: 'exclude' }", block)
         self.assertIn("backlog:  { backlog: 'only' }", block)
+
+        src = _read(WORKSPACE_PATH)
         self.assertIn("hidden: Math.max(0, total - loaded)", src)
         self.assertIn("Показать ещё ${Math.min(chunkSize, meta.hidden)} · не показано ${meta.hidden}", src)
         # Догрузка дописывает хвост, а не перезапрашивает всё с нуля.
@@ -1247,6 +1250,78 @@ class BoardPaginationTests(unittest.TestCase):
         src = _read(DATABASE_PATH)
         self.assertIn("status_values = [part.strip().lower() for part in str(status or '').split(',') if part.strip()]", src)
         self.assertIn('filtered_conditions.append("t.status = ANY(%s)")', src)
+
+
+class TaskQueryBuilderTests(unittest.TestCase):
+    """
+    Сборка условий выборки. Порядок здесь ломается молча: список фильтров
+    инициализировался после первых append'ов, и раздел «Бэклог» отвечал 500
+    (UnboundLocalError: filtered_conditions). Проверяем по AST, а не по тексту.
+    """
+
+    def setUp(self):
+        import ast
+        tree = ast.parse(_read(DATABASE_PATH))
+        self.func = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == 'get_tasks_for_requester'
+        )
+        self.ast = ast
+
+    def _first_use_is_assignment(self, name):
+        for node in self.ast.walk(self.func):
+            if isinstance(node, self.ast.Name) and node.id == name:
+                return isinstance(node.ctx, self.ast.Store)
+            if isinstance(node, self.ast.Attribute) and isinstance(node.value, self.ast.Name)                     and node.value.id == name:
+                return False
+        self.fail(f"{name} не встречается в get_tasks_for_requester")
+
+    def test_locals_are_assigned_before_use(self):
+        for name in ('base_conditions', 'base_params', 'filtered_conditions', 'filtered_params'):
+            self.assertTrue(
+                self._first_use_is_assignment(name),
+                f"{name} используется раньше, чем создан — запрос упадёт на первом же фильтре",
+            )
+
+    def test_filtered_starts_from_base(self):
+        src = _read(DATABASE_PATH)
+        start = src.index("    def get_tasks_for_requester(")
+        block = src[start:src.index("        base_where_sql = ", start)]
+        init_at = block.index("filtered_conditions = list(base_conditions)")
+        # Фильтры выборки добавляются только после копирования базовых условий.
+        for filter_marker in (
+            'filtered_conditions.append("t.status = %s")',
+            'filtered_conditions.append("t.is_backlog = TRUE")',
+            'filtered_conditions.append("t.id = %s")',
+        ):
+            self.assertGreater(block.index(filter_marker), init_at, filter_marker)
+        # Доска сотрудника уходит в базовые условия до копирования.
+        self.assertLess(block.index("person_board_id = person_id_norm"), init_at)
+
+    def test_summary_is_optional(self):
+        src = _read(DATABASE_PATH)
+        self.assertIn("include_summary=True", src)
+        self.assertIn("if include_summary:", src)
+        app_src = _read(APP_PATH)
+        self.assertIn("include_summary = (request.args.get('summary') or '')", app_src)
+        # Колонки доски просят сводку ровно один раз за загрузку.
+        view = _read(WORKSPACE_PATH)
+        self.assertIn("withSummary: !append && columnId === BOARD_COLUMNS[0].id,", view)
+
+    def test_board_loader_passes_the_column_through(self):
+        src = _read(TASKS_VIEW_PATH)
+        start = src.index("  const loadBoardTasks = useCallback(async (")
+        block = src[start:src.index("  useEffect(() => {", start)]
+        # Без column все пять запросов были одинаковыми, а колонки показывали одно и то же.
+        self.assertIn("column", block.split(')')[0])
+        self.assertIn("boardQueryParams({ scope, mode, sort, column, limit, offset, withSummary })", block)
+
+    def test_column_queries_are_covered_by_indexes(self):
+        src = _read(DATABASE_PATH)
+        self.assertIn("idx_tasks_status_created", src)
+        self.assertIn("ON tasks(status, created_at DESC, id DESC)", src)
+        self.assertIn("ON tasks(assigned_to, created_at DESC, id DESC)", src)
+        self.assertIn("ON tasks(created_by, created_at DESC, id DESC)", src)
 
 
 class BoardPeopleAndBacklogActionTests(unittest.TestCase):

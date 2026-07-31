@@ -5,6 +5,9 @@ import { APPLE_FONT } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import FullscreenSheet from '../common/FullscreenSheet';
 import { ACTION_NEED_META } from './taskActionNeeds';
+import { BOARD_CHUNK_SIZES, DEFAULT_BOARD_CHUNK, normalizeBoardChunk } from './boardQuery';
+
+export { BOARD_COLUMN_QUERY, BOARD_CHUNK_SIZES, DEFAULT_BOARD_CHUNK, boardQueryParams, normalizeBoardChunk } from './boardQuery';
 
 /*
  * Бэклог + канбан + таймлайн раздела «Задачи».
@@ -1494,44 +1497,6 @@ const TimelineView = ({ tasks, onOpen }) => {
 const WIP_STORAGE_KEY = 'otp.tasks.board.wipLimit';
 const CHUNK_STORAGE_KEY = 'otp.tasks.board.chunkSize';
 
-/**
- * Сколько карточек подгружать за раз: в канбане — в каждую колонку, в бэклоге и
- * таймлайне — на страницу. Настройка клиентская, но сервер режет по своему потолку.
- */
-export const BOARD_CHUNK_SIZES = [20, 40, 60];
-export const DEFAULT_BOARD_CHUNK = 20;
-
-export const normalizeBoardChunk = (value) => {
-  const parsed = Number(value);
-  return BOARD_CHUNK_SIZES.includes(parsed) ? parsed : DEFAULT_BOARD_CHUNK;
-};
-
-/** Колонка доски = свой срез статусов: запрашиваем и досчитываем её отдельно. */
-export const BOARD_COLUMN_QUERY = {
-  backlog:  { backlog: 'only' },
-  todo:     { status: 'assigned', backlog: 'exclude' },
-  progress: { status: 'in_progress,returned', backlog: 'exclude' },
-  review:   { status: 'completed', backlog: 'exclude' },
-  done:     { status: 'accepted', backlog: 'exclude' },
-};
-
-/** Параметры запроса выборки доски: колонка, доска сотрудника, порядок, страница. */
-export const boardQueryParams = ({ scope, mode, sort, column, limit, offset }) => {
-  const params = { limit, offset };
-  // Важность сортирует сервер: иначе в выборку попали бы просто самые свежие,
-  // а «критичные» из хвоста наверх бы не поднялись.
-  if (sort === 'importance') params.sort = 'importance';
-  if (column && BOARD_COLUMN_QUERY[column]) Object.assign(params, BOARD_COLUMN_QUERY[column]);
-  else if (mode === 'backlog') params.backlog = 'only';
-  if (scope === 'my') params.mine = 'any';
-  else if (scope === 'assigned') params.mine = 'assignee';
-  else if (String(scope || '').startsWith('person:')) {
-    params.person_id = Number(String(scope).slice('person:'.length) || 0);
-    params.person_scope = 'any';
-  }
-  return params;
-};
-
 /** Сколько карточек одна колонка может держать загруженными: страховка от бесконечной догрузки. */
 const BOARD_MAX_LOADED_PER_COLUMN = 200;
 
@@ -1597,6 +1562,8 @@ const TaskBoardWorkspace = ({
       column: columnId,
       limit,
       offset,
+      // Сводка нужна одна на всю доску — её приносит первая колонка.
+      withSummary: !append && columnId === BOARD_COLUMNS[0].id,
     });
     if (columnRequestIdRef.current[columnId] !== requestId) return;
     const incoming = Array.isArray(result?.tasks) ? result.tasks : [];
@@ -1612,7 +1579,7 @@ const TaskBoardWorkspace = ({
         [columnId]: { tasks: merged, total: Number(result?.total || 0), loading: false },
       };
     });
-    if (columnId === 'todo' && !append) setBoardSummary(result?.summary || null);
+    if (columnId === BOARD_COLUMNS[0].id && !append) setBoardSummary(result?.summary || null);
   }, [loadTasks, scope, boardSort]);
 
   const boardReloadKey = `${scope}|${boardSort}|${reloadToken}|${chunkSize}`;

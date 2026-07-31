@@ -24,7 +24,8 @@ import {
 import { normalizeRole, isAdminLikeRole, isSupervisorRole } from '../../utils/roles';
 import FaIcon from '../common/FaIcon';
 import FullscreenSheet from '../common/FullscreenSheet';
-import TaskBoardWorkspace, { boardQueryParams } from './TaskBoardWorkspace';
+import TaskBoardWorkspace from './TaskBoardWorkspace';
+import { boardQueryParams } from './boardQuery';
 import {
   ACTION_NEED_META,
   actionNeedSeenKey,
@@ -6311,11 +6312,11 @@ const TasksView = ({
   /* Загрузчик страницы доски: доска сотрудника — только его задачи, общая —
      страница по количеству. Сводка нужна шапке доски, чтобы её счётчики
      считались по всей доске, а не по видимой странице. */
-  const loadBoardTasks = useCallback(async ({ scope, mode, sort, limit, offset }) => {
+  const loadBoardTasks = useCallback(async ({ scope, mode, sort, column, limit, offset, withSummary }) => {
     try {
       const res = await axios.get(`${apiBaseUrl}/api/tasks`, {
         headers: buildHeaders(),
-        params: boardQueryParams({ scope, mode, sort, limit, offset })
+        params: boardQueryParams({ scope, mode, sort, column, limit, offset, withSummary })
       });
       const data = res?.data || {};
       return {

@@ -17577,6 +17577,8 @@ def handle_tasks():
             mine_filter = (request.args.get('mine') or '').strip().lower() or None
             task_id_filter = (request.args.get('task_id') or '').strip() or None
             sort_order = (request.args.get('sort') or '').strip().lower() or None
+            # summary=0 — не считать сводку: колонки доски просят её один раз на загрузку.
+            include_summary = (request.args.get('summary') or '').strip().lower() not in {'0', 'false', 'no'}
             person_id_raw = request.args.get('person_id')
             person_id = None
             if person_id_raw is not None and str(person_id_raw).strip() != '':
@@ -17622,7 +17624,8 @@ def handle_tasks():
                     backlog=backlog_filter,
                     mine=mine_filter,
                     task_id=task_id_filter,
-                    sort=sort_order
+                    sort=sort_order,
+                    include_summary=include_summary
                 )
             except ValueError as e:
                 error_code = str(e)
@@ -17670,8 +17673,9 @@ def handle_tasks():
                     creator.pop("avatar_bucket", None)
                     creator.pop("avatar_blob_path", None)
 
-            total_all = int(payload.get("total_all", len(tasks)) or 0)
             total_filtered = int(payload.get("total_filtered", len(tasks)) or 0)
+            # Без сводки общего числа мы не считали — отдаём отфильтрованное, а не длину страницы.
+            total_all = int(payload.get("total_all") or 0) or total_filtered
             returned = len(tasks)
             # Потолок строк действует и без limit, поэтому «есть ещё» считаем всегда.
             has_more = (offset + returned) < total_filtered
