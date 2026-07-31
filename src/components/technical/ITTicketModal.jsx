@@ -1,25 +1,57 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import FaIcon from '../common/FaIcon';
+import { APPLE_FONT, iosCard, iosInput, iosGroupLabel, iosBtnPrimary, iosBtnSecondary } from '../ui/ios';
 import { SEAT_W, SEAT_H, cabinetSeatNumbers, cabinetLabel, CabinetMap } from './workplaceLayout';
 
-// ─── Styling tokens (clean macOS/iOS look) ─────────────────────────────────────
-const FIELD_CLASS =
-    'mt-1 w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-800 shadow-sm transition focus:outline-none focus:ring-2 focus:ring-indigo-400/60 focus:border-indigo-400';
-const LABEL_CLASS = 'text-[11px] font-semibold uppercase tracking-wide text-slate-500';
-const CARD_CLASS = 'rounded-2xl border border-slate-200/80 bg-white/90 p-4 shadow-sm';
+// ─── Styling tokens — общие примитивы дизайн-системы (src/components/ui/ios.jsx) ──
+const FIELD_CLASS = `mt-1.5 ${iosInput}`;
+const LABEL_CLASS = iosGroupLabel;
+const CARD_CLASS = `${iosCard} p-4`;
 
+// Приоритет — единственное место в модале, где цвет несёт смысл, поэтому красим
+// только выбранный вариант; остальные остаются нейтральными.
 const PRIORITY_META = {
-    low: { label: 'Низкий', cls: 'bg-emerald-100 text-emerald-700 border-emerald-200' },
-    medium: { label: 'Средний', cls: 'bg-sky-100 text-sky-700 border-sky-200' },
-    high: { label: 'Высокий', cls: 'bg-amber-100 text-amber-700 border-amber-200' },
-    critical: { label: 'Критический', cls: 'bg-rose-100 text-rose-700 border-rose-200' },
+    low: { label: 'Низкий', cls: 'bg-slate-200 text-slate-700' },
+    medium: { label: 'Средний', cls: 'bg-blue-100 text-blue-700' },
+    high: { label: 'Высокий', cls: 'bg-amber-100 text-amber-700' },
+    critical: { label: 'Критический', cls: 'bg-rose-100 text-rose-700' },
 };
 const PRIORITY_ORDER = ['low', 'medium', 'high', 'critical'];
 
+// Подсказка под «i»: текст живёт в тултипе и не шумит на экране постоянно.
+const InfoHint = memo(function InfoHint({ text, align = 'right' }) {
+    const [open, setOpen] = useState(false);
+    return (
+        <span className="relative inline-flex shrink-0" onMouseLeave={() => setOpen(false)}>
+            <button
+                type="button"
+                aria-label="Подсказка"
+                onClick={() => setOpen((o) => !o)}
+                onMouseEnter={() => setOpen(true)}
+                className={`grid h-[18px] w-[18px] place-items-center rounded-full text-[10px] font-bold transition-colors ${
+                    open ? 'bg-slate-600 text-white' : 'bg-slate-200 text-slate-500 hover:bg-slate-300'
+                }`}
+            >
+                i
+            </button>
+            {open && (
+                <span
+                    role="tooltip"
+                    className={`absolute bottom-full z-30 mb-2 w-64 rounded-xl bg-slate-800/95 px-3 py-2 text-[11.5px] font-normal normal-case leading-relaxed tracking-normal text-white shadow-lg backdrop-blur ${
+                        align === 'right' ? 'right-0' : 'left-0'
+                    }`}
+                >
+                    {text}
+                </span>
+            )}
+        </span>
+    );
+});
+
 // Понятные сообщения для кодов ошибок ИИ от бэкенда
 const AI_ERROR_MESSAGES = {
-    ai_unavailable: 'Сервис ИИ (Google Gemini) сейчас перегружен. Подождите 10–20 секунд и нажмите ещё раз — либо заполните поля и отправьте заявку вручную.',
+    ai_unavailable: 'Сервис ИИ сейчас перегружен. Подождите 10–20 секунд и нажмите ещё раз — либо заполните поля и отправьте заявку вручную.',
     ai_timeout: 'ИИ слишком долго отвечает (перегрузка). Попробуйте ещё раз — либо отправьте заявку вручную.',
     ai_blocked: 'ИИ не смог сформировать ответ. Уточните описание и попробуйте снова.',
     json_parse_error: 'ИИ вернул некорректный ответ. Попробуйте ещё раз.',
@@ -74,8 +106,8 @@ const PickerSeat = memo(function PickerSeat({ n, selected, onToggle }) {
             onClick={() => onToggle(n)}
             className={`flex items-center justify-center rounded-sm border text-[15px] font-medium transition-all hover:-translate-y-0.5 ${
                 selected
-                    ? 'border-indigo-600 bg-indigo-600 text-white shadow-md ring-2 ring-indigo-300'
-                    : 'border-slate-300 bg-white text-slate-600 hover:border-indigo-300 hover:bg-indigo-50'
+                    ? 'border-blue-600 bg-blue-600 text-white shadow-md ring-2 ring-blue-300'
+                    : 'border-slate-300 bg-white text-slate-600 hover:border-blue-300 hover:bg-blue-50'
             }`}
             style={{ width: SEAT_W, height: SEAT_H, flexShrink: 0 }}
             title={`РМ ${n}${selected ? ' — выбрано' : ''}`}
@@ -145,8 +177,8 @@ const WorkplacePicker = memo(function WorkplacePicker({ cabinets, value, onChang
                             onClick={() => setActiveId(c.id)}
                             className={`rounded-lg px-2.5 py-1 text-[11px] font-semibold transition-colors ${
                                 activeId === c.id
-                                    ? 'bg-indigo-600 text-white shadow'
-                                    : 'border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
+                                    ? 'bg-blue-600 text-white shadow'
+                                    : 'border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100'
                             }`}
                         >
                             {cabinetLabel(c)}
@@ -294,24 +326,24 @@ const ChannelManager = memo(function ChannelManager({
 
     return (
         <div className="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-3">
-            <button
-                type="button"
-                onClick={() => setOpen((o) => !o)}
-                className="flex w-full items-center justify-between text-sm font-semibold text-slate-700"
-            >
-                <span className="flex items-center gap-2">
-                    <FaIcon className="fas fa-gear text-slate-500" style={{ width: '0.9em', height: '0.9em' }} />
-                    Управление каналами
-                </span>
-                <FaIcon className="fas fa-chevron-down text-slate-400"
-                    style={{ width: '0.8em', height: '0.8em', transform: open ? 'rotate(180deg)' : 'none', transition: 'transform .2s' }} />
-            </button>
+            <div className="flex items-center justify-between gap-2">
+                <button
+                    type="button"
+                    onClick={() => setOpen((o) => !o)}
+                    className="flex flex-1 items-center justify-between gap-2 text-sm font-semibold text-slate-700"
+                >
+                    <span className="flex items-center gap-2">
+                        <FaIcon className="fas fa-gear text-slate-500" style={{ width: '0.9em', height: '0.9em' }} />
+                        Управление каналами
+                    </span>
+                    <FaIcon className="fas fa-chevron-down text-slate-400"
+                        style={{ width: '0.8em', height: '0.8em', transform: open ? 'rotate(180deg)' : 'none', transition: 'transform .2s' }} />
+                </button>
+                {open && <InfoHint text="Добавьте бота в нужную группу или канал — он появится в списке сам. Либо укажите chat_id вручную, например -1001234567890." />}
+            </div>
 
             {open && (
                 <div className="mt-3 space-y-3">
-                    <div className="rounded-xl border border-dashed border-slate-300 bg-white p-3 text-[12px] text-slate-500">
-                        Добавьте бота в нужную группу/канал — он появится здесь автоматически. Либо добавьте вручную по <code>chat_id</code> (например, <code>-1001234567890</code>).
-                    </div>
                     <div className="flex gap-2">
                         <input
                             type="text"
@@ -324,7 +356,7 @@ const ChannelManager = memo(function ChannelManager({
                             type="button"
                             onClick={addChannel}
                             disabled={busy}
-                            className={`shrink-0 inline-flex items-center gap-2 rounded-xl px-4 text-sm font-semibold text-white transition ${busy ? 'bg-indigo-400' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+                            className={`shrink-0 inline-flex items-center gap-2 rounded-xl px-4 text-sm font-semibold text-white transition ${busy ? 'bg-blue-400' : 'bg-blue-600 hover:bg-blue-700'}`}
                         >
                             <FaIcon className={`fas ${busy ? 'fa-spinner fa-spin' : 'fa-plus'}`} style={{ width: '0.85em', height: '0.85em' }} />
                             Добавить
@@ -436,28 +468,27 @@ const InstructionsEditor = memo(function InstructionsEditor({ apiBaseUrl, buildH
 
     return (
         <div className={CARD_CLASS}>
-            <button
-                type="button"
-                onClick={toggleOpen}
-                className="flex w-full items-center justify-between text-sm font-semibold text-slate-700"
-            >
-                <span className="flex items-center gap-2">
-                    <FaIcon className="fas fa-lightbulb text-amber-500" style={{ width: '0.95em', height: '0.95em' }} />
-                    Инструкции для ИИ
-                    <span className="text-[11px] font-normal text-slate-400">актуальные изменения для бота</span>
-                </span>
-                <FaIcon className="fas fa-chevron-down text-slate-400"
-                    style={{ width: '0.8em', height: '0.8em', transform: open ? 'rotate(180deg)' : 'none', transition: 'transform .2s' }} />
-            </button>
+            <div className="flex items-center justify-between gap-2">
+                <button
+                    type="button"
+                    onClick={toggleOpen}
+                    className="flex flex-1 items-center justify-between gap-2 text-sm font-semibold text-slate-700"
+                >
+                    <span className="flex items-center gap-2">
+                        <FaIcon className="fas fa-lightbulb text-slate-500" style={{ width: '0.95em', height: '0.95em' }} />
+                        Инструкции для ИИ
+                    </span>
+                    <FaIcon className="fas fa-chevron-down text-slate-400"
+                        style={{ width: '0.8em', height: '0.8em', transform: open ? 'rotate(180deg)' : 'none', transition: 'transform .2s' }} />
+                </button>
+                {open && <InfoHint text="Заметки добавляются к заданию для ИИ и важнее базовых правил. Сюда пишут недавние изменения: новый софт, переименование систем, новые рабочие места." />}
+            </div>
 
             {open && (
                 <div className="mt-3 space-y-3">
-                    <p className="text-[12px] text-slate-500">
-                        Эти заметки добавляются к промпту ИИ и имеют приоритет при конфликте с базовыми правилами. Удобно фиксировать недавние изменения (например, новый софт, переименование систем, новые РМ).
-                    </p>
                     {loading ? (
                         <div className="flex items-center gap-2 text-sm text-slate-500">
-                            <FaIcon className="fas fa-spinner fa-spin text-indigo-500" style={{ width: '1em', height: '1em' }} />
+                            <FaIcon className="fas fa-spinner fa-spin text-blue-500" style={{ width: '1em', height: '1em' }} />
                             Загрузка…
                         </div>
                     ) : editable.length === 0 ? (
@@ -471,7 +502,7 @@ const InstructionsEditor = memo(function InstructionsEditor({ apiBaseUrl, buildH
                                             key={p}
                                             type="button"
                                             onClick={() => setActiveProfile(p)}
-                                            className={`rounded-lg px-3 py-1 text-xs font-semibold transition ${activeProfile === p ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                                            className={`rounded-lg px-3 py-1 text-xs font-semibold transition ${activeProfile === p ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
                                         >
                                             {INSTRUCTION_PROFILE_LABELS[p] || p}
                                         </button>
@@ -495,7 +526,7 @@ const InstructionsEditor = memo(function InstructionsEditor({ apiBaseUrl, buildH
                                     type="button"
                                     onClick={save}
                                     disabled={saving || !dirty}
-                                    className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold text-white transition ${(saving || !dirty) ? 'bg-indigo-300' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+                                    className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold text-white transition ${(saving || !dirty) ? 'bg-blue-300' : 'bg-blue-600 hover:bg-blue-700'}`}
                                 >
                                     <FaIcon className={`fas ${saving ? 'fa-spinner fa-spin' : 'fa-save'}`} style={{ width: '0.85em', height: '0.85em' }} />
                                     {saving ? 'Сохранение…' : 'Сохранить'}
@@ -575,14 +606,16 @@ const CatalogEditor = memo(function CatalogEditor({ apiBaseUrl, buildHeaders, no
 
     return (
         <div className={CARD_CLASS}>
-            <button type="button" onClick={() => setOpen((o) => !o)} className="flex w-full items-center justify-between text-sm font-semibold text-slate-700">
-                <span className="flex items-center gap-2">
-                    <FaIcon className="fas fa-list text-indigo-500" style={{ width: '0.95em', height: '0.95em' }} />
-                    Категории и типы проблем
-                    <span className="text-[11px] font-normal text-slate-400">редактирование каталога</span>
-                </span>
-                <FaIcon className="fas fa-chevron-down text-slate-400" style={{ width: '0.8em', height: '0.8em', transform: open ? 'rotate(180deg)' : 'none', transition: 'transform .2s' }} />
-            </button>
+            <div className="flex items-center justify-between gap-2">
+                <button type="button" onClick={() => setOpen((o) => !o)} className="flex flex-1 items-center justify-between gap-2 text-sm font-semibold text-slate-700">
+                    <span className="flex items-center gap-2">
+                        <FaIcon className="fas fa-list text-slate-500" style={{ width: '0.95em', height: '0.95em' }} />
+                        Категории и типы проблем
+                    </span>
+                    <FaIcon className="fas fa-chevron-down text-slate-400" style={{ width: '0.8em', height: '0.8em', transform: open ? 'rotate(180deg)' : 'none', transition: 'transform .2s' }} />
+                </button>
+                {open && <InfoHint text="Список категорий и типов проблем, из которого ИИ выбирает тему заявки. Пустые названия не сохраняются; изменения сразу применяются к форме и подсказкам ИИ." />}
+            </div>
 
             {open && (
                 <div className="mt-3 space-y-3">
@@ -596,7 +629,7 @@ const CatalogEditor = memo(function CatalogEditor({ apiBaseUrl, buildHeaders, no
                             <div className="inline-flex flex-wrap gap-1 rounded-xl bg-slate-100 p-0.5">
                                 {profiles.map((p) => (
                                     <button key={p} type="button" onClick={() => setActiveProfile(p)}
-                                        className={`rounded-lg px-3 py-1 text-xs font-semibold transition ${activeProfile === p ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
+                                        className={`rounded-lg px-3 py-1 text-xs font-semibold transition ${activeProfile === p ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
                                         {profLabel(p)}
                                     </button>
                                 ))}
@@ -613,7 +646,7 @@ const CatalogEditor = memo(function CatalogEditor({ apiBaseUrl, buildHeaders, no
                                     const isOpen = expandedCat === ci;
                                     const count = (c.items || []).length;
                                     return (
-                                        <div key={ci} className={`overflow-hidden rounded-xl border bg-white transition-colors ${isOpen ? 'border-indigo-200 shadow-sm' : 'border-slate-200'}`}>
+                                        <div key={ci} className={`overflow-hidden rounded-xl border bg-white transition-colors ${isOpen ? 'border-blue-200 shadow-sm' : 'border-slate-200'}`}>
                                             {/* Свёрнутая строка категории */}
                                             <div className="flex items-center">
                                                 <button type="button" onClick={() => toggleCat(ci)} className="flex min-w-0 flex-1 items-center gap-2.5 px-3 py-2.5 text-left">
@@ -650,7 +683,7 @@ const CatalogEditor = memo(function CatalogEditor({ apiBaseUrl, buildHeaders, no
                                                                 </div>
                                                             ))}
                                                             <button type="button" onClick={() => addItem(ci)}
-                                                                className="text-[12px] font-medium text-indigo-600 hover:text-indigo-700">
+                                                                className="text-[12px] font-medium text-blue-600 hover:text-blue-700">
                                                                 <FaIcon className="fas fa-plus" style={{ width: '0.7em', height: '0.7em' }} /> Добавить тип
                                                             </button>
                                                         </div>
@@ -664,16 +697,15 @@ const CatalogEditor = memo(function CatalogEditor({ apiBaseUrl, buildHeaders, no
 
                             <div className="flex flex-wrap items-center justify-between gap-2">
                                 <button type="button" onClick={addCat}
-                                    className="inline-flex items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 hover:bg-indigo-100">
+                                    className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100">
                                     <FaIcon className="fas fa-plus" style={{ width: '0.8em', height: '0.8em' }} /> Добавить категорию
                                 </button>
                                 <button type="button" onClick={save} disabled={saving}
-                                    className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold text-white transition ${saving ? 'bg-indigo-300' : 'bg-indigo-600 hover:bg-indigo-700'}`}>
+                                    className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold text-white transition ${saving ? 'bg-blue-300' : 'bg-blue-600 hover:bg-blue-700'}`}>
                                     <FaIcon className={`fas ${saving ? 'fa-spinner fa-spin' : 'fa-save'}`} style={{ width: '0.85em', height: '0.85em' }} />
                                     {saving ? 'Сохранение…' : 'Сохранить каталог'}
                                 </button>
                             </div>
-                            <p className="text-[11px] text-slate-400">Пустые названия не сохраняются. Изменения сразу применяются к форме и подсказкам ИИ.</p>
                         </>
                     )}
                 </div>
@@ -983,43 +1015,34 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
 
     return (
         <div
-            className="fixed inset-0 z-[120] flex items-center justify-center p-3 sm:p-4"
-            style={{ backgroundColor: 'rgba(15,23,42,0.45)', backdropFilter: 'blur(6px)' }}
-            onClick={(e) => { if (e.target === e.currentTarget && !sending) onClose(); }}
+            className="fixed inset-0 z-[120] flex items-stretch justify-center bg-slate-900/40 backdrop-blur-md sm:items-center sm:p-6"
+            style={{ fontFamily: APPLE_FONT }}
+            onMouseDown={(e) => { if (e.target === e.currentTarget && !sending) onClose(); }}
         >
-            <style>{`
-                @keyframes itTicketIn { from { opacity:0; transform: scale(0.97) translateY(10px); } to { opacity:1; transform: scale(1) translateY(0); } }
-            `}</style>
-            <div
-                className="flex w-full max-w-5xl flex-col overflow-hidden rounded-3xl border border-white/60 bg-slate-50 shadow-2xl"
-                style={{ maxHeight: '94vh', animation: 'itTicketIn .22s ease' }}
-            >
-                {/* Header */}
-                <div className="relative shrink-0 px-6 py-5 text-white" style={{ background: 'linear-gradient(135deg,#4f46e5 0%,#2563eb 55%,#0ea5e9 100%)' }}>
+            <div className="flex w-full max-w-5xl flex-col overflow-hidden bg-slate-50 shadow-2xl ring-1 ring-slate-900/10 sm:max-h-[92vh] sm:rounded-3xl">
+                {/* Header — как в общей IosModal: белый с размытием, без градиента */}
+                <div className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-200/70 bg-white/80 px-5 py-3.5 backdrop-blur-xl">
+                    <div className="min-w-0">
+                        <h3 className="truncate text-[15px] font-semibold text-slate-900">Тикет в IT-отдел</h3>
+                        <p className="truncate text-[12px] text-slate-500">
+                            {channelReady ? `Уйдёт в «${activePin?.channel_title || 'закреплённый канал'}»` : 'Канал не закреплён'}
+                        </p>
+                    </div>
                     <button
                         type="button"
                         onClick={() => { if (!sending) onClose(); }}
-                        className="absolute right-4 top-4 rounded-full p-1.5 text-white/70 transition hover:bg-white/20 hover:text-white"
+                        className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200 active:scale-95"
                         aria-label="Закрыть"
                     >
-                        <FaIcon className="fas fa-times" style={{ width: '1.1em', height: '1.1em' }} />
+                        <FaIcon className="fas fa-times" style={{ width: '0.9em', height: '0.9em' }} />
                     </button>
-                    <div className="flex items-center gap-3">
-                        <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-white/20 backdrop-blur">
-                            <FaIcon className="fas fa-headset" style={{ width: '1.3em', height: '1.3em' }} />
-                        </div>
-                        <div>
-                            <h3 className="text-lg font-bold leading-tight">Тикет в IT-отдел</h3>
-                            <p className="text-[13px] text-white/80">ИИ поможет составить понятную заявку и отправит её в нужный канал</p>
-                        </div>
-                    </div>
                 </div>
 
                 {/* Body */}
-                <div className="flex-1 overflow-y-auto p-5">
+                <div className="flex-1 overflow-y-auto px-5 py-4">
                     {loadingCatalog ? (
                         <div className="flex items-center gap-2 p-6 text-sm text-slate-500">
-                            <FaIcon className="fas fa-spinner fa-spin text-indigo-500" style={{ width: '1em', height: '1em' }} />
+                            <FaIcon className="fas fa-spinner fa-spin text-blue-500" style={{ width: '1em', height: '1em' }} />
                             Загрузка каталога…
                         </div>
                     ) : (
@@ -1036,7 +1059,7 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                                                     key={p}
                                                     type="button"
                                                     onClick={() => { setProfile(p); setCategoryName(''); setSubcategory(''); resetAfterCategoryChange(); }}
-                                                    className={`rounded-lg px-3 py-1 text-xs font-semibold transition ${profile === p ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                                                    className={`rounded-lg px-3 py-1 text-xs font-semibold transition ${profile === p ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
                                                 >
                                                     {profileLabel(p)}{p === defaultProfile ? ' •' : ''}
                                                 </button>
@@ -1092,28 +1115,26 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                                         />
                                     </label>
 
-                                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                                    <div className="mt-3">
                                         <button
                                             type="button"
                                             onClick={() => callAi('draft')}
                                             disabled={aiBusy}
-                                            className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold text-white transition ${aiBusy ? 'bg-indigo-400' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+                                            className={iosBtnPrimary}
                                         >
                                             <FaIcon className={`fas ${aiMode === 'draft' ? 'fa-spinner fa-spin' : 'fa-sparkles'}`} style={{ width: '0.9em', height: '0.9em' }} />
-                                            {aiMode === 'draft' ? 'ИИ думает…' : 'Сформировать с ИИ'}
+                                            {aiMode === 'draft' ? 'Формирую…' : 'Сформировать с ИИ'}
                                         </button>
-                                        <span className="text-[12px] text-slate-400">Подберёт поля и задаст вопросы, если чего-то не хватает</span>
                                     </div>
                                 </div>
 
                                 {/* AI-generated form fields (единый блок: и детали, и уточнения) */}
                                 {aiFields.length > 0 && (
                                     <div className={CARD_CLASS}>
-                                        <div className="flex items-center gap-2 text-sm font-bold text-slate-700">
-                                            <FaIcon className="fas fa-list text-indigo-500" style={{ width: '1em', height: '1em' }} />
-                                            Детали заявки
+                                        <div className="flex items-center justify-between gap-2">
+                                            <span className={LABEL_CLASS}>Детали заявки</span>
+                                            <InfoHint text="Поля подобрал ИИ под вашу задачу. Отмеченные * обязательны — без них сисадмин не поймёт, куда идти. Остальные заполняйте по желанию." />
                                         </div>
-                                        <p className="mt-1 text-[12px] text-slate-400">Заполните поля (особенно отмеченные *) — ИИ соберёт из них готовый тикет.</p>
                                         <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
                                             {aiFields.map((f) => {
                                                 const isWide = ['workplace', 'textarea'].includes(String(f?.type || '').toLowerCase());
@@ -1129,40 +1150,34 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                                                 );
                                             })}
                                         </div>
-                                    </div>
-                                )}
-
-                                {/* Continue CTA — собрать готовый текст из деталей */}
-                                {aiFields.length > 0 && (
-                                    <div className="rounded-2xl border border-indigo-200 bg-indigo-50/60 p-3">
                                         <button
                                             type="button"
                                             onClick={() => callAi('finalize')}
                                             disabled={aiBusy}
-                                            className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold text-white transition ${aiBusy ? 'bg-indigo-400' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+                                            className={`${iosBtnPrimary} mt-4 w-full`}
                                         >
                                             <FaIcon className={`fas ${aiMode === 'finalize' ? 'fa-spinner fa-spin' : (composed ? 'fa-rotate' : 'fa-circle-check')}`} style={{ width: '0.95em', height: '0.95em' }} />
-                                            {aiMode === 'finalize' ? 'Собираю заявку…' : (composed ? 'Пересобрать заявку с ИИ' : 'Продолжить — собрать заявку')}
+                                            {aiMode === 'finalize' ? 'Собираю…' : (composed ? 'Пересобрать заявку' : 'Собрать заявку')}
                                         </button>
-                                        <p className="mt-1.5 text-center text-[11px] text-indigo-500/80">
-                                            ИИ учтёт ответы и детали и соберёт готовый текст справа
-                                        </p>
                                     </div>
                                 )}
                             </div>
 
                             {/* ── ПРАВАЯ КОЛОНКА — готовый тикет ── */}
                             <div className="space-y-4">
-                                {/* Priority */}
+                                {/* Priority — сегментный контрол; цвет только у выбранного */}
                                 <div className={CARD_CLASS}>
-                                    <span className={LABEL_CLASS}>Приоритет</span>
-                                    <div className="mt-2 flex flex-wrap gap-2">
+                                    <div className="flex items-center justify-between gap-2">
+                                        <span className={LABEL_CLASS}>Приоритет</span>
+                                        <InfoHint text="ИИ ставит приоритет по массовости: сколько рабочих мест затронуто и блокируется ли работа. Можно поправить вручную." />
+                                    </div>
+                                    <div className="mt-2 grid grid-cols-4 gap-1 rounded-xl bg-slate-100 p-0.5">
                                         {PRIORITY_ORDER.map((p) => (
                                             <button
                                                 key={p}
                                                 type="button"
                                                 onClick={() => setPriority(p)}
-                                                className={`rounded-full border px-3 py-1 text-xs font-semibold transition ${priority === p ? PRIORITY_META[p].cls : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50'}`}
+                                                className={`rounded-lg px-2 py-1.5 text-[12px] font-semibold transition-all active:scale-[0.98] ${priority === p ? `${PRIORITY_META[p].cls} shadow-sm` : 'text-slate-500 hover:text-slate-700'}`}
                                             >
                                                 {PRIORITY_META[p].label}
                                             </button>
@@ -1176,31 +1191,22 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                                         <span className={LABEL_CLASS}>
                                             Текст заявки {composed && <span className="text-emerald-600">· готово</span>}
                                         </span>
-                                        <button
-                                            type="button"
-                                            onClick={() => callAi('finalize')}
-                                            disabled={aiBusy}
-                                            className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition ${aiBusy ? 'border-slate-200 text-slate-400' : 'border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100'}`}
-                                        >
-                                            <FaIcon className={`fas ${aiMode === 'finalize' ? 'fa-spinner fa-spin' : 'fa-sparkles'}`} style={{ width: '0.8em', height: '0.8em' }} />
-                                            {aiMode === 'finalize' ? 'Оформляю…' : 'Оформить с ИИ'}
-                                        </button>
+                                        <InfoHint text="Текст можно править вручную. Разметка Telegram: <b>жирный</b>, <i>курсив</i>, <code>код</code>. Категория, приоритет и автор добавятся автоматически." />
                                     </div>
                                     <textarea
                                         value={previewText}
                                         onChange={(e) => setPreviewText(e.target.value)}
                                         rows={14}
-                                        placeholder="Здесь появится готовый текст заявки. Можно отредактировать вручную перед отправкой."
+                                        placeholder="Здесь появится готовый текст заявки."
                                         className={FIELD_CLASS + ' font-mono text-[12.5px] leading-relaxed'}
                                     />
-                                    <p className="mt-1 text-[11px] text-slate-400">Разметка Telegram: &lt;b&gt;жирный&lt;/b&gt;, &lt;i&gt;курсив&lt;/i&gt;, &lt;code&gt;код&lt;/code&gt;.</p>
                                 </div>
 
                                 {/* Channel (закрепляет админ / глава отдела) */}
                                 <div className={CARD_CLASS}>
                                     <div className="flex items-center justify-between gap-2">
                                         <span className={LABEL_CLASS}>Канал · «{profileLabel(profile)}»</span>
-                                        <button type="button" onClick={() => { loadChannels(); refreshMeta(); }} className="text-[12px] font-medium text-indigo-600 hover:text-indigo-700">
+                                        <button type="button" onClick={() => { loadChannels(); refreshMeta(); }} className="text-[12px] font-medium text-blue-600 hover:text-blue-700">
                                             <FaIcon className="fas fa-rotate" style={{ width: '0.8em', height: '0.8em' }} /> Обновить
                                         </button>
                                     </div>
@@ -1245,7 +1251,7 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                                                     type="button"
                                                     onClick={pinChannel}
                                                     disabled={pinning || String(activePin?.channel_id || '') === String(pinDraftId || '')}
-                                                    className={`shrink-0 inline-flex items-center gap-2 rounded-xl px-4 text-sm font-semibold text-white transition ${(pinning || String(activePin?.channel_id || '') === String(pinDraftId || '')) ? 'bg-indigo-300' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+                                                    className={`shrink-0 inline-flex items-center gap-2 rounded-xl px-4 text-sm font-semibold text-white transition ${(pinning || String(activePin?.channel_id || '') === String(pinDraftId || '')) ? 'bg-blue-300' : 'bg-blue-600 hover:bg-blue-700'}`}
                                                 >
                                                     <FaIcon className={`fas ${pinning ? 'fa-spinner fa-spin' : 'fa-paperclip'}`} style={{ width: '0.85em', height: '0.85em' }} />
                                                     {pinning ? 'Сохранение…' : 'Закрепить'}
@@ -1296,32 +1302,25 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                     )}
                 </div>
 
-                {/* Footer */}
-                <div className="shrink-0 flex items-center justify-between gap-3 border-t border-slate-200 bg-white/80 px-6 py-4">
-                    <span className="text-[11px] text-slate-400">
-                        {channelReady
-                            ? <>Заявка уйдёт в «{activePin?.channel_title || 'закреплённый канал'}»</>
-                            : 'Канал не закреплён — отправка недоступна'}
-                    </span>
-                    <div className="flex items-center gap-3">
-                        <button
-                            type="button"
-                            onClick={() => { if (!sending) onClose(); }}
-                            className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
-                        >
-                            Отмена
-                        </button>
-                        <button
-                            type="button"
-                            onClick={handleSend}
-                            disabled={sending || aiBusy || !channelReady}
-                            title={!channelReady ? 'Канал закрепляет админ или глава отдела' : undefined}
-                            className={`inline-flex items-center gap-2 rounded-xl px-5 py-2 text-sm font-semibold text-white shadow-sm transition ${(sending || !channelReady) ? 'bg-emerald-400 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700'}`}
-                        >
-                            <FaIcon className={`fas ${sending ? 'fa-spinner fa-spin' : 'fa-paper-plane'}`} style={{ width: '0.9em', height: '0.9em' }} />
-                            {sending ? 'Отправка…' : 'Отправить тикет'}
-                        </button>
-                    </div>
+                {/* Footer — состояние канала уже показано в шапке, здесь только действия */}
+                <div className="flex shrink-0 items-center justify-end gap-2 border-t border-slate-200/70 bg-white/80 px-5 py-3 backdrop-blur-xl">
+                    <button
+                        type="button"
+                        onClick={() => { if (!sending) onClose(); }}
+                        className={iosBtnSecondary}
+                    >
+                        Отмена
+                    </button>
+                    <button
+                        type="button"
+                        onClick={handleSend}
+                        disabled={sending || aiBusy || !channelReady}
+                        title={!channelReady ? 'Канал закрепляет админ или глава отдела' : undefined}
+                        className={`${iosBtnPrimary} bg-emerald-600 hover:bg-emerald-700`}
+                    >
+                        <FaIcon className={`fas ${sending ? 'fa-spinner fa-spin' : 'fa-paper-plane'}`} style={{ width: '0.9em', height: '0.9em' }} />
+                        {sending ? 'Отправка…' : 'Отправить тикет'}
+                    </button>
                 </div>
             </div>
         </div>

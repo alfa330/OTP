@@ -23305,8 +23305,8 @@ def it_ticket_ai_assist():
             fut = asyncio.run_coroutine_threadsafe(
                 generate_it_ticket_with_ai(mode, ai_payload), loop
             )
-            # Запас под повторные попытки к Gemini (3 × 35с + бэкофф)
-            result = fut.result(timeout=150)
+            # Запас под перебор цепочки моделей (3 × 20с + сеть)
+            result = fut.result(timeout=75)
         else:
             result = asyncio.run(generate_it_ticket_with_ai(mode, ai_payload))
 
