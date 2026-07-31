@@ -7299,6 +7299,7 @@ const TasksView = ({
             isSupervisor={isSupervisorRole(currentUserRole)}
             focusRequest={boardFocus}
             actionNeedOf={actionNeedOf}
+            isTaskOpen={Boolean(drawerTask)}
             onOpenTask={setDrawerTask}
             onStatusAction={handleBoardStatusAction}
             onBoardUpdate={updateBoardItems}

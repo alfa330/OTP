@@ -876,7 +876,22 @@ const BacklogView = ({ tasks, canPlan, onOpen, onPromote, onApplyPlan, onReorder
 
 const COLUMN_BROWSER_PAGE = 40;
 
-const ColumnBrowser = ({ column, scope, sort, loadTasks, actionNeedOf, canPlan, onApplyPlan, onOpenTask, onClose }) => {
+/* Окно статуса живёт НИЖЕ карточки задачи (.tv-overlay 40 / .tv-drawer 50) и её
+   модалок: открытая задача перекрывает окно, а закрытая возвращает к нему. */
+const COLUMN_BROWSER_Z = 30;
+
+const ColumnBrowser = ({
+  column,
+  scope,
+  sort,
+  loadTasks,
+  actionNeedOf,
+  canPlan,
+  isTaskOpen = false,
+  onApplyPlan,
+  onOpenTask,
+  onClose,
+}) => {
   const [tasks, setTasks] = useState([]);
   const [total, setTotal] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
@@ -888,12 +903,9 @@ const ColumnBrowser = ({ column, scope, sort, loadTasks, actionNeedOf, canPlan, 
   const days = useMemo(() => groupTasksByDay(tasks), [tasks]);
   const hasMore = tasks.length < total;
 
-  /* Карточка задачи живёт в разделе и по z-index ниже полноэкранного окна —
-     открывая задачу, окно закрываем, иначе карточка окажется под ним. */
-  const openTask = useCallback((task) => {
-    onClose();
-    onOpenTask(task);
-  }, [onClose, onOpenTask]);
+  /* Задачу открываем поверх окна: окно живёт ниже карточки задачи по z-index
+     (COLUMN_BROWSER_Z < .tv-drawer), поэтому закрывать его не нужно — закрыл
+     задачу и остался там же, где смотрел. */
 
   const loadPage = useCallback(async (offset) => {
     if (loadingRef.current) return;
@@ -947,6 +959,9 @@ const ColumnBrowser = ({ column, scope, sort, loadTasks, actionNeedOf, canPlan, 
     <FullscreenSheet
       open
       wide
+      z={COLUMN_BROWSER_Z}
+      // Esc при открытой задаче закрывает задачу, а не оба слоя сразу.
+      closeOnEscape={!isTaskOpen}
       icon="fa-layer-group"
       title={column.title}
       subtitle={total > 0
@@ -974,7 +989,7 @@ const ColumnBrowser = ({ column, scope, sort, loadTasks, actionNeedOf, canPlan, 
                     task={task}
                     canPlan={canPlan}
                     actionNeedOf={actionNeedOf}
-                    onOpen={openTask}
+                    onOpen={onOpenTask}
                     onApplyPlan={onApplyPlan}
                   />
                 </div>
@@ -1580,6 +1595,7 @@ const TaskBoardWorkspace = ({
   isSupervisor,
   focusRequest = null,
   actionNeedOf,
+  isTaskOpen = false,
   onOpenTask,
   onStatusAction,
   onBoardUpdate,
@@ -2062,6 +2078,7 @@ const TaskBoardWorkspace = ({
           loadTasks={loadTasks}
           actionNeedOf={actionNeedOf}
           canPlan={canPlan}
+          isTaskOpen={isTaskOpen}
           onApplyPlan={handleApplyPlan}
           onOpenTask={onOpenTask}
           onClose={() => setBrowsedColumn(null)}

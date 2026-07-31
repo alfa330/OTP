@@ -1344,12 +1344,39 @@ class ColumnBrowserTests(unittest.TestCase):
         self.assertIn("const isDraggable = typeof onDragStart === 'function';", self.src)
         self.assertIn("draggable={isDraggable}", self.src)
 
-    def test_opening_a_task_closes_the_window(self):
-        # Карточка задачи по z-index ниже полноэкранного окна: не закрыв окно,
-        # пользователь кликнул бы по карточке и не увидел ничего.
-        self.assertIn("const openTask = useCallback((task) => {", self.block)
-        self.assertIn("onClose();", self.block)
-        self.assertIn("onOpen={openTask}", self.block)
+    def test_task_opens_over_the_window_without_closing_it(self):
+        # Окно живёт ниже карточки задачи и её модалок: закрыл задачу — остался там,
+        # где смотрел. Раньше окно закрывалось, и приходилось открывать его заново.
+        self.assertIn("const COLUMN_BROWSER_Z = 30;", self.src)
+        self.assertIn("z={COLUMN_BROWSER_Z}", self.block)
+        self.assertIn("onOpen={onOpenTask}", self.block)
+        self.assertNotIn("const openTask = useCallback", self.block)
+        # Esc при открытой задаче закрывает задачу, а не оба слоя.
+        self.assertIn("closeOnEscape={!isTaskOpen}", self.block)
+        self.assertIn("isTaskOpen={Boolean(drawerTask)}", _read(TASKS_VIEW_PATH))
+        sheet = _read(ROOT / "src" / "components" / "common" / "FullscreenSheet.jsx")
+        self.assertIn("closeOnEscape = true,", sheet)
+        self.assertIn("if (e.key === 'Escape' && closeOnEscape) onClose?.();", sheet)
+
+    def test_window_stays_below_the_task_layers(self):
+        """
+        Инвариант слоёв: окно статуса ниже оверлея задачи, самой карточки и её
+        модалок. Иначе клик по карточке в окне открывает задачу под окном —
+        визуально «ничего не произошло».
+        """
+        browser_z = int(re.search(r"const COLUMN_BROWSER_Z = (\d+);", self.src).group(1))
+        view = _read(TASKS_VIEW_PATH)
+
+        def z_of(selector):
+            block = view[view.index(selector):]
+            return int(re.search(r"z-index:\s*(\d+);", block).group(1))
+
+        overlay_z = z_of("  .tv-overlay {")
+        drawer_z = z_of("  .tv-drawer {")
+        modal_z = z_of("  .tv-modal-overlay {")
+        self.assertLess(browser_z, overlay_z, 'окно перекрыло бы затемнение задачи')
+        self.assertLess(browser_z, drawer_z, 'карточка задачи открылась бы под окном')
+        self.assertLess(browser_z, modal_z, 'модалки задачи открылись бы под окном')
 
     def test_scroll_loads_the_next_page(self):
         self.assertIn("new IntersectionObserver(", self.block)

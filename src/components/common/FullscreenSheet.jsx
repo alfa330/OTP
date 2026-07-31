@@ -15,6 +15,8 @@ import FaIcon from './FaIcon';
  *  - children: содержимое
  *  - z: z-index (по умолчанию 140)
  *  - wide: снять ограничение ширины контента (для таблиц/таймлайнов на весь экран)
+ *  - closeOnEscape: реагировать на Esc (выключают, когда поверх окна открыто своё
+ *    окно — например карточка задачи: Esc должен закрывать её, а не оба слоя)
  */
 const FullscreenSheet = ({
   open,
@@ -26,11 +28,12 @@ const FullscreenSheet = ({
   children,
   z = 140,
   wide = false,
+  closeOnEscape = true,
 }) => {
   useEffect(() => {
     if (!open) return undefined;
     const onKey = (e) => {
-      if (e.key === 'Escape') onClose?.();
+      if (e.key === 'Escape' && closeOnEscape) onClose?.();
     };
     document.addEventListener('keydown', onKey);
     const prevOverflow = document.body.style.overflow;
@@ -39,7 +42,7 @@ const FullscreenSheet = ({
       document.removeEventListener('keydown', onKey);
       document.body.style.overflow = prevOverflow;
     };
-  }, [open, onClose]);
+  }, [open, onClose, closeOnEscape]);
 
   if (!open) return null;
 
