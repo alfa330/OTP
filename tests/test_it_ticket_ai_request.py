@@ -59,7 +59,8 @@ class GeminiGenerationConfigTests(unittest.TestCase):
         # не применит исправленную ИИ тему.
         required = set(service.IT_TICKET_RESPONSE_SCHEMA["required"])
         for field in ("category", "subcategory", "category_adjusted",
-                      "category_adjustment_note", "priority", "form", "ticket", "status"):
+                      "category_adjustment_note", "priority", "form", "checks",
+                      "ticket", "status"):
             with self.subTest(field=field):
                 self.assertIn(field, required)
 
@@ -267,6 +268,17 @@ class PromptAssemblyTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(result["category_adjusted"])
         self.assertIn("телефони", result["category_adjustment_note"].lower())
+
+    async def test_prompt_demands_specific_advice_not_filler(self):
+        # Смысл советов — чтобы у отправителя был ответ на «что уже пробовали».
+        # Общие фразы такой ответ не дают, поэтому промпт их прямо запрещает,
+        # а на нечего-проверять разрешает пустой список.
+        core = service.IT_TICKET_PROMPT_CORE
+        self.assertIn("ЧТО ПОПРОБОВАТЬ ДО ЗАЯВКИ", core)
+        self.assertIn("ЗАПРЕЩЕНЫ", core)
+        self.assertIn("проверьте настройки", core)
+        self.assertIn("НЕ придумывай пункты ради количества", core)
+        self.assertIn("для «сделать» верни []", core)
 
     async def test_draft_may_return_ready_in_one_call(self):
         # Первый проход должен уметь сразу отдать готовую заявку, если критичное уже известно —
