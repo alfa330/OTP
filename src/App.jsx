@@ -33913,9 +33913,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const isAdminLikeRole = isAdminLikeRoleFn(currentUserRole) && !isScopedDepartmentHead;
             const isDepartmentManager = isSupervisorRole(currentUserRole) || isScopedDepartmentHead;
             const isPlainTrainer = currentUserRole === 'trainer' && !isDepartmentHeadUser;
-            // Выгрузка операторов в Excel: у СВ без отдела в подчинении она ограничена его же операторами
-            // (у главы отдела — всем отделом), поэтому и состав выгрузки, и подсказки в модалке другие.
-            const isSupervisorReportScope = isSupervisorRole(currentUserRole) && !isDepartmentHeadUser;
+            // Выгрузка операторов в Excel из раздела СВ: область та же, что у главы отдела —
+            // весь свой отдел со всеми группами, поэтому окно параметров у них одинаковое.
+            const canSupervisorExportOperators = isSupervisorRole(currentUserRole) && !isDepartmentHeadUser;
             const canUseAdminEmployeeAccounting = isAdminLikeRole || isDepartmentHeadUser;
             const canFilterByDepartment = isAdminLikeRole || isPlainTrainer;
             const canUsePinnedTasks = isAdminLikeRole || isDepartmentManager || isPlainTrainer;
@@ -39037,9 +39037,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     if (isLoading) return;
                     setUsersReportOptions((prev) => ({
                         ...prev,
-                        departmentId: isAdminLikeRole ? (manageUsersDeptFilter || '') : '',
-                        // У СВ выгрузка всегда по одному супервайзеру — листы «по СВ» ничего не добавят.
-                        sheetMode: isSupervisorReportScope ? 'summary' : prev.sheetMode
+                        departmentId: isAdminLikeRole ? (manageUsersDeptFilter || '') : ''
                     }));
                     if (isAdminLikeRole && departments.length === 0) {
                         fetchDepartments();
@@ -45768,7 +45766,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </button>
                                         )}
 
-                                        {isSupervisorReportScope && (
+                                        {canSupervisorExportOperators && (
                                         <button
                                             onClick={openUsersReportModal}
                                             disabled={isLoading}
@@ -49275,16 +49273,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </label>
                                         ) : (
                                             <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
-                                                <FaIcon className={`fas ${isSupervisorReportScope ? 'fa-users' : 'fa-building'} text-slate-400`} />
-                                                <span>
-                                                    {isSupervisorReportScope
-                                                        ? 'Будут выгружены только ваши операторы.'
-                                                        : 'Будут выгружены только операторы вашего отдела.'}
-                                                </span>
+                                                <FaIcon className="fas fa-building text-slate-400" />
+                                                <span>Будут выгружены только операторы вашего отдела.</span>
                                             </div>
                                         )}
 
-                                        {!isSupervisorReportScope && (
                                         <div>
                                             <div className="mb-3 flex items-center justify-between gap-3">
                                                 <div>
@@ -49320,7 +49313,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 })}
                                             </div>
                                         </div>
-                                        )}
 
                                         <div className="rounded-xl border border-slate-200 bg-white p-4">
                                             <div className="mb-2 flex items-start justify-between gap-3">
