@@ -1,7 +1,9 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import axios from 'axios';
 import FaIcon from '../common/FaIcon';
 import { APPLE_FONT, iosCard, iosInput, iosGroupLabel, iosBtnPrimary, iosBtnSecondary } from '../ui/ios';
+import { parseTelegramText } from './telegramText';
 import { SEAT_W, SEAT_H, cabinetSeatNumbers, cabinetLabel, CabinetMap } from './workplaceLayout';
 
 // ─── Styling tokens — общие примитивы дизайн-системы (src/components/ui/ios.jsx) ──
@@ -20,44 +22,108 @@ const PRIORITY_META = {
 const PRIORITY_ORDER = ['low', 'medium', 'high', 'critical'];
 
 // Подсказка под «i»: текст живёт в тултипе и не шумит на экране постоянно.
-const InfoHint = memo(function InfoHint({ text, align = 'right' }) {
-    const [open, setOpen] = useState(false);
+// Рисуется порталом в body с координатами от кнопки — иначе его обрезает
+// скроллящееся тело модалки, а у верхних карточек он уходит за край экрана.
+const TIP_W = 264;
+const InfoHint = memo(function InfoHint({ text }) {
+    const btnRef = useRef(null);
+    const [pos, setPos] = useState(null);
+
+    const place = useCallback(() => {
+        const el = btnRef.current;
+        if (!el) return;
+        const r = el.getBoundingClientRect();
+        const margin = 8;
+        // Сверху мало места — разворачиваем подсказку вниз.
+        const below = window.innerHeight - r.bottom;
+        const flipDown = r.top < 140 && below > r.top;
+        const left = Math.max(margin, Math.min(
+            r.left + r.width / 2 - TIP_W / 2,
+            window.innerWidth - TIP_W - margin,
+        ));
+        setPos({ left, top: flipDown ? r.bottom + margin : r.top - margin, flipDown });
+    }, []);
+
+    const close = useCallback(() => setPos(null), []);
+
+    useEffect(() => {
+        if (!pos) return undefined;
+        // Позиция посчитана от вьюпорта — при скролле/ресайзе она устареет.
+        window.addEventListener('scroll', close, true);
+        window.addEventListener('resize', close);
+        return () => {
+            window.removeEventListener('scroll', close, true);
+            window.removeEventListener('resize', close);
+        };
+    }, [pos, close]);
+
     return (
-        <span className="relative inline-flex shrink-0" onMouseLeave={() => setOpen(false)}>
+        <>
             <button
+                ref={btnRef}
                 type="button"
                 aria-label="Подсказка"
-                onClick={() => setOpen((o) => !o)}
-                onMouseEnter={() => setOpen(true)}
-                className={`grid h-[18px] w-[18px] place-items-center rounded-full text-[10px] font-bold transition-colors ${
-                    open ? 'bg-slate-600 text-white' : 'bg-slate-200 text-slate-500 hover:bg-slate-300'
+                onClick={() => (pos ? close() : place())}
+                onMouseEnter={place}
+                onMouseLeave={close}
+                className={`grid h-[18px] w-[18px] shrink-0 place-items-center rounded-full text-[10px] font-bold transition-colors ${
+                    pos ? 'bg-slate-600 text-white' : 'bg-slate-200 text-slate-500 hover:bg-slate-300'
                 }`}
             >
                 i
             </button>
-            {open && (
+            {pos && createPortal(
                 <span
                     role="tooltip"
-                    className={`absolute bottom-full z-30 mb-2 w-64 rounded-xl bg-slate-800/95 px-3 py-2 text-[11.5px] font-normal normal-case leading-relaxed tracking-normal text-white shadow-lg backdrop-blur ${
-                        align === 'right' ? 'right-0' : 'left-0'
-                    }`}
+                    style={{
+                        position: 'fixed',
+                        left: pos.left,
+                        top: pos.top,
+                        width: TIP_W,
+                        transform: pos.flipDown ? undefined : 'translateY(-100%)',
+                        fontFamily: APPLE_FONT,
+                    }}
+                    className="z-[200] block rounded-xl bg-slate-800/95 px-3 py-2 text-[11.5px] font-normal normal-case leading-relaxed tracking-normal text-white shadow-xl backdrop-blur"
                 >
                     {text}
-                </span>
+                </span>,
+                document.body,
             )}
-        </span>
+        </>
     );
 });
 
-// Понятные сообщения для кодов ошибок ИИ от бэкенда
+// Короткие сообщения об ошибках ИИ: уведомление не должно разрастаться на пол-экрана,
+// а что делать дальше (заполнить поля и отправить вручную) видно на самом экране.
 const AI_ERROR_MESSAGES = {
-    ai_unavailable: 'Сервис ИИ сейчас перегружен. Подождите 10–20 секунд и нажмите ещё раз — либо заполните поля и отправьте заявку вручную.',
-    ai_timeout: 'ИИ слишком долго отвечает (перегрузка). Попробуйте ещё раз — либо отправьте заявку вручную.',
-    ai_blocked: 'ИИ не смог сформировать ответ. Уточните описание и попробуйте снова.',
-    json_parse_error: 'ИИ вернул некорректный ответ. Попробуйте ещё раз.',
-    ai_failed: 'Сервис ИИ временно недоступен. Попробуйте позже — либо отправьте заявку вручную.',
+    ai_unavailable: 'ИИ перегружен — попробуйте ещё раз',
+    ai_timeout: 'ИИ долго отвечает — попробуйте ещё раз',
+    ai_blocked: 'ИИ не понял описание — уточните его',
+    json_parse_error: 'Некорректный ответ ИИ — попробуйте ещё раз',
+    ai_failed: 'ИИ временно недоступен',
 };
-const aiErrorText = (code) => AI_ERROR_MESSAGES[code] || 'ИИ не смог обработать запрос. Попробуйте ещё раз или заполните заявку вручную.';
+const aiErrorText = (code) => AI_ERROR_MESSAGES[code] || 'ИИ не смог обработать запрос';
+
+// ─── Предпросмотр текста как в Telegram ───────────────────────────────────────
+// Показываем не сырые теги, а результат. Разбор — в telegramText.js (там же тесты):
+// dangerouslySetInnerHTML не используем, текст приходит от ИИ и вставлять его
+// как HTML нельзя. Неизвестные теги остаются видимым текстом, ничего не теряется.
+const nodesToReact = (nodes) => nodes.map((node, i) => {
+    if (typeof node === 'string') return node;
+    const mono = node.tag === 'code' || node.tag === 'pre';
+    return React.createElement(
+        node.tag,
+        { key: i, className: mono ? 'rounded bg-white px-1 py-0.5 font-mono text-[12px] text-slate-800' : undefined },
+        ...nodesToReact(node.children),
+    );
+});
+
+const TelegramPreview = memo(function TelegramPreview({ text }) {
+    if (!String(text || '').trim()) {
+        return <span className="text-slate-400">Здесь появится готовый текст заявки.</span>;
+    }
+    return <>{nodesToReact(parseTelegramText(text))}</>;
+});
 
 // ─── Workplace (РМ) visual picker ─────────────────────────────────────────────
 // Показывает схему кабинетов (как в «Аналитика РМ»); супервайзер кликом выбирает
@@ -730,6 +796,7 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
     const [previewText, setPreviewText] = useState('');
     const [ticketTitle, setTicketTitle] = useState('');
     const [composed, setComposed] = useState(false);
+    const [editingText, setEditingText] = useState(false);
 
     const [channels, setChannels] = useState([]);
     const [canManage, setCanManage] = useState(Boolean(canManageChannels));
@@ -901,7 +968,7 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
     // ── AI calls ──
     const callAi = useCallback(async (mode) => {
         if (!description.trim() && !categoryName) {
-            toast('Опишите проблему или выберите категорию', 'error');
+            toast('Опишите проблему', 'error');
             return;
         }
         setAiMode(mode);
@@ -941,9 +1008,10 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                 if (subMatch && (adjusted || !subcategory)) { setSubcategory(subMatch); subApplied = true; }
             }
 
+            // Пояснение показываем баннером в карточке темы. Дублировать его тостом
+            // не нужно: текст длинный, и уведомление разрастается на пол-экрана.
             if (adjusted && (catMatch || subApplied) && result.category_adjustment_note) {
                 setCategoryNote(String(result.category_adjustment_note));
-                toast(`ИИ скорректировал тему: ${result.category_adjustment_note}`, 'info');
             } else {
                 setCategoryNote('');
             }
@@ -967,14 +1035,14 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
             if (result.status === 'ready') {
                 if (ticketMd) setPreviewText(ticketMd);
                 setComposed(true);
-                toast('Заявка готова — проверьте текст и отправьте', 'success');
+                toast('Заявка готова', 'success');
             } else if (result.status === 'need_more_info') {
                 setComposed(false);
-                toast('Заполните обязательные поля (отмечены *) и нажмите ещё раз', 'info');
+                toast('Заполните обязательные поля', 'info');
             } else {
                 // draft
                 if (ticketMd && !previewText.trim()) setPreviewText(ticketMd);
-                toast('Черновик сформирован — заполните детали и оформите заявку', 'success');
+                toast('Черновик готов', 'success');
             }
         } catch (err) {
             toast(aiErrorText(err?.response?.data?.error), 'error');
@@ -986,8 +1054,8 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
     // ── send ──
     const handleSend = useCallback(async () => {
         const body = (previewText || '').trim() || description.trim();
-        if (!body) { toast('Пустой текст заявки. Опишите проблему или оформите её с ИИ', 'error'); return; }
-        if (!channelReady) { toast('Канал не закреплён. Обратитесь к админу или главе отдела', 'error'); return; }
+        if (!body) { toast('Текст заявки пустой', 'error'); return; }
+        if (!channelReady) { toast('Канал не закреплён', 'error'); return; }
         setSending(true);
         try {
             const res = await axios.post(`${apiBaseUrl}/api/it_tickets/send`, {
@@ -1185,21 +1253,36 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                                     </div>
                                 </div>
 
-                                {/* Preview / final text */}
+                                {/* Preview / final text — по умолчанию так, как придёт в Telegram */}
                                 <div className={CARD_CLASS}>
                                     <div className="flex flex-wrap items-center justify-between gap-2">
                                         <span className={LABEL_CLASS}>
                                             Текст заявки {composed && <span className="text-emerald-600">· готово</span>}
                                         </span>
-                                        <InfoHint text="Текст можно править вручную. Разметка Telegram: <b>жирный</b>, <i>курсив</i>, <code>код</code>. Категория, приоритет и автор добавятся автоматически." />
+                                        <div className="flex items-center gap-1.5">
+                                            <button
+                                                type="button"
+                                                onClick={() => setEditingText((v) => !v)}
+                                                className="rounded-lg px-2 py-1 text-[12px] font-semibold text-blue-600 transition-colors hover:bg-blue-50 active:scale-[0.98]"
+                                            >
+                                                {editingText ? 'Готово' : 'Изменить'}
+                                            </button>
+                                            <InfoHint text="Так заявка будет выглядеть в Telegram. Нажмите «Изменить», чтобы поправить текст вручную — там доступна разметка: <b>жирный</b>, <i>курсив</i>, <code>код</code>. Категория, приоритет и автор добавятся автоматически." />
+                                        </div>
                                     </div>
-                                    <textarea
-                                        value={previewText}
-                                        onChange={(e) => setPreviewText(e.target.value)}
-                                        rows={14}
-                                        placeholder="Здесь появится готовый текст заявки."
-                                        className={FIELD_CLASS + ' font-mono text-[12.5px] leading-relaxed'}
-                                    />
+                                    {editingText ? (
+                                        <textarea
+                                            value={previewText}
+                                            onChange={(e) => setPreviewText(e.target.value)}
+                                            rows={14}
+                                            placeholder="Здесь появится готовый текст заявки."
+                                            className={FIELD_CLASS + ' font-mono text-[12.5px] leading-relaxed'}
+                                        />
+                                    ) : (
+                                        <div className="mt-1.5 min-h-[19rem] whitespace-pre-wrap rounded-xl bg-slate-100 px-3.5 py-2.5 text-[13.5px] leading-relaxed text-slate-900">
+                                            <TelegramPreview text={previewText} />
+                                        </div>
+                                    )}
                                 </div>
 
                                 {/* Channel (закрепляет админ / глава отдела) */}
