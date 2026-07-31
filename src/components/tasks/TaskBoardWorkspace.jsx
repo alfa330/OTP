@@ -1535,6 +1535,7 @@ const TaskBoardWorkspace = ({
   const [isPageLoading, setIsPageLoading] = useState(true);
   const pageRequestIdRef = useRef(0);
   const [columnState, setColumnState] = useState(emptyColumnState);
+  const [columnsResetToken, setColumnsResetToken] = useState(0);
   const columnRequestIdRef = useRef({});
   const columnLoadedKeyRef = useRef({});
   const [wipLimit, setWipLimit] = useState(() => {
@@ -1555,23 +1556,35 @@ const TaskBoardWorkspace = ({
     const requestId = (columnRequestIdRef.current[columnId] || 0) + 1;
     columnRequestIdRef.current[columnId] = requestId;
     setColumnState((prev) => ({ ...prev, [columnId]: { ...prev[columnId], loading: true } }));
-    const result = await loadTasks({
-      scope,
-      mode: 'board',
-      sort: boardSort,
-      column: columnId,
-      limit,
-      offset,
-      // Сводка нужна одна на всю доску — её приносит первая колонка.
-      withSummary: !append && columnId === BOARD_COLUMNS[0].id,
-    });
-    if (columnRequestIdRef.current[columnId] !== requestId) return;
+    let result = null;
+    try {
+      result = await loadTasks({
+        scope,
+        mode: 'board',
+        sort: boardSort,
+        column: columnId,
+        limit,
+        offset,
+        // Сводка нужна одна на всю доску — её приносит первая колонка.
+        withSummary: !append && columnId === BOARD_COLUMNS[0].id,
+      });
+    } finally {
+      // Даже если загрузка сорвалась, колонка обязана выйти из состояния «гружусь»,
+      // иначе доска залипает в скелетоне.
+      if (columnRequestIdRef.current[columnId] === requestId && !result) {
+        setColumnState((prev) => ({
+          ...prev,
+          [columnId]: { ...prev[columnId], tasks: prev[columnId]?.tasks || [], loading: false },
+        }));
+      }
+    }
+    if (columnRequestIdRef.current[columnId] !== requestId || !result) return;
     const incoming = Array.isArray(result?.tasks) ? result.tasks : [];
     setColumnState((prev) => {
       const current = prev[columnId] || { tasks: [] };
       // Догрузка дописывает хвост; список мог сдвинуться, поэтому склеиваем по id.
       const merged = append
-        ? [...new Map([...current.tasks, ...incoming].map((task) => [task.id, task])).values()]
+        ? [...new Map([...(current.tasks || []), ...incoming].map((task) => [task.id, task])).values()]
         : incoming;
       columnLimitsRef.current[columnId] = merged.length || limit;
       return {
@@ -1582,7 +1595,7 @@ const TaskBoardWorkspace = ({
     if (columnId === BOARD_COLUMNS[0].id && !append) setBoardSummary(result?.summary || null);
   }, [loadTasks, scope, boardSort]);
 
-  const boardReloadKey = `${scope}|${boardSort}|${reloadToken}|${chunkSize}`;
+  const boardReloadKey = `${scope}|${boardSort}|${reloadToken}|${chunkSize}|${columnsResetToken}`;
   useEffect(() => {
     if (!isBoardMode) return;
     BOARD_COLUMNS.forEach((column) => {
@@ -1604,9 +1617,13 @@ const TaskBoardWorkspace = ({
     fetchColumn(columnId, { limit: chunkSize, offset: state.tasks.length, append: true });
   }, [columnState, fetchColumn, chunkSize]);
 
+  /* Сброс обязан заканчиваться загрузкой. Раньше ключ перезагрузки собирался
+     только из scope/sort/порции, поэтому повторный выбор того же значения
+     обнулял колонки и оставлял доску в вечном скелетоне. */
   const resetColumns = useCallback(() => {
     columnLimitsRef.current = {};
     setColumnState(emptyColumnState());
+    setColumnsResetToken((prev) => prev + 1);
   }, []);
 
   /* Бэклог и таймлайн — один список, им хватает обычной страницы. */
@@ -1630,31 +1647,39 @@ const TaskBoardWorkspace = ({
   }, [isBoardMode, loadTasks, scope, mode, boardSort, page, chunkSize, reloadToken]);
 
   // Смена вкладки (бэклог/доска/таймлайн) меняет выборку — начинаем сначала.
+  // На первом рендере не сбрасываем: колонки и так грузятся с нуля.
+  const previousModeRef = useRef(mode);
   useEffect(() => {
+    if (previousModeRef.current === mode) return;
+    previousModeRef.current = mode;
     setPage(1);
     resetColumns();
   }, [mode, resetColumns]);
 
+  // Повторный выбор того же значения — не работа: ничего не сбрасываем и не грузим.
   const changeScope = useCallback((next) => {
+    if (next === scope) return;
     setScope(next);
     setPage(1);
     resetColumns();
-  }, [resetColumns]);
+  }, [scope, resetColumns]);
 
   // Смена порядка меняет всю выдачу, а не только видимое — начинаем сначала.
   const changeBoardSort = useCallback((next) => {
+    if (next === boardSort) return;
     setBoardSort(next);
     setPage(1);
     resetColumns();
-  }, [resetColumns]);
+  }, [boardSort, resetColumns]);
 
   const changeChunkSize = useCallback((next) => {
     const normalized = normalizeBoardChunk(next);
+    if (normalized === chunkSize) return;
     setChunkSize(normalized);
     setPage(1);
     resetColumns();
     try { window.localStorage.setItem(CHUNK_STORAGE_KEY, String(normalized)); } catch (error) { /* private mode */ }
-  }, [resetColumns]);
+  }, [chunkSize, resetColumns]);
 
   // Страница могла уехать за конец списка (задачи закрыли) — подтягиваем обратно.
   useEffect(() => {

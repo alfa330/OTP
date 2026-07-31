@@ -1246,6 +1246,29 @@ class BoardPaginationTests(unittest.TestCase):
         self.assertIn("{!isBoardMode && (", src)
         self.assertIn("const BoardPager = ({", src)
 
+    def test_repeating_the_same_choice_does_not_blank_the_board(self):
+        src = _read(WORKSPACE_PATH)
+        # Повторный клик по уже выбранному значению обнулял колонки, а ключ
+        # перезагрузки не менялся — доска оставалась в вечном скелетоне.
+        self.assertIn("if (next === scope) return;", src)
+        self.assertIn("if (next === boardSort) return;", src)
+        self.assertIn("if (normalized === chunkSize) return;", src)
+        # Любой сброс всё равно обязан привести к загрузке.
+        self.assertIn("setColumnsResetToken((prev) => prev + 1);", src)
+        self.assertIn(
+            "const boardReloadKey = `${scope}|${boardSort}|${reloadToken}|${chunkSize}|${columnsResetToken}`;",
+            src,
+        )
+        # На первом рендере сброс не нужен — колонки и так грузятся с нуля.
+        self.assertIn("if (previousModeRef.current === mode) return;", src)
+
+    def test_failed_column_load_does_not_stick_in_skeleton(self):
+        src = _read(WORKSPACE_PATH)
+        start = src.index("  const fetchColumn = useCallback(async (columnId, {")
+        block = src[start:src.index("  const boardReloadKey =", start)]
+        self.assertIn("} finally {", block)
+        self.assertIn("loading: false", block.split("} finally {")[1])
+
     def test_status_filter_accepts_a_list(self):
         src = _read(DATABASE_PATH)
         self.assertIn("status_values = [part.strip().lower() for part in str(status or '').split(',') if part.strip()]", src)
