@@ -1,4 +1,8 @@
-"""Department isolation tests for the employee/operator Excel export."""
+"""Scope isolation tests for the employee/operator Excel export.
+
+Covers both scopes the export supports: a department head exports their whole
+department, a supervisor exports only their own operators.
+"""
 
 import ast
 import copy
@@ -86,6 +90,39 @@ class UsersReportEndpointScopeTests(unittest.TestCase):
         )
         return endpoint(), fake_db
 
+    def test_supervisor_is_scoped_to_their_own_operators(self):
+        result, fake_db = self._call(role="sv")
+
+        self.assertEqual(_response_status(result), 200)
+        self.assertEqual(fake_db.generate_calls[0]["supervisor_ids"], [10])
+        self.assertIsNone(fake_db.generate_calls[0]["department_ids"])
+
+    def test_supervisor_cannot_widen_the_scope_with_a_department_parameter(self):
+        result, fake_db = self._call(
+            role="sv",
+            query={"department_id": "8"},
+            departments={8: {"id": 8, "name": "Sales", "is_active": True}},
+        )
+
+        self.assertEqual(_response_status(result), 200)
+        self.assertEqual(fake_db.generate_calls[0]["supervisor_ids"], [10])
+        self.assertIsNone(fake_db.generate_calls[0]["department_ids"])
+
+    def test_supervisor_heading_a_department_exports_the_whole_department(self):
+        result, fake_db = self._call(role="sv", headed={7})
+
+        self.assertEqual(_response_status(result), 200)
+        self.assertEqual(fake_db.generate_calls[0]["department_ids"], [7])
+        self.assertIsNone(fake_db.generate_calls[0]["supervisor_ids"])
+
+    def test_admins_and_heads_are_not_narrowed_to_a_supervisor(self):
+        for role, headed in (("admin", ()), ("super_admin", ()), ("operator", (7,))):
+            with self.subTest(role=role, headed=headed):
+                result, fake_db = self._call(role=role, headed=headed)
+
+                self.assertEqual(_response_status(result), 200)
+                self.assertIsNone(fake_db.generate_calls[0]["supervisor_ids"])
+
     def test_global_admin_can_select_one_active_department(self):
         result, fake_db = self._call(
             role="admin",
@@ -166,6 +203,23 @@ class UsersReportImplementationContractTests(unittest.TestCase):
         self.assertIn("query_params.append(normalized_department_ids)", method_source)
         self.assertIn("{department_filter_sql}", method_source)
 
+    def test_database_query_applies_a_bound_supervisor_filter(self):
+        source = _read(DATABASE_PATH)
+        module = ast.parse(source)
+        database_class = next(
+            node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "Database"
+        )
+        method = next(
+            node for node in database_class.body
+            if isinstance(node, ast.FunctionDef) and node.name == "generate_users_report"
+        )
+        method_source = ast.get_source_segment(source, method)
+
+        self.assertIn("supervisor_ids", [arg.arg for arg in method.args.args])
+        self.assertIn("u.supervisor_id = ANY(%s)", method_source)
+        self.assertIn("query_params.append(normalized_supervisor_ids)", method_source)
+        self.assertIn("{supervisor_filter_sql}", method_source)
+
     def test_frontend_exposes_admin_department_selection_and_sends_it(self):
         source = _read(FRONTEND_PATH)
 
@@ -174,6 +228,18 @@ class UsersReportImplementationContractTests(unittest.TestCase):
         self.assertIn("params.set('department_id', exportOptions.departmentId)", source)
         self.assertIn("Будут выгружены только операторы вашего отдела.", source)
         self.assertIn('<option value="">Все отделы</option>', source)
+
+    def test_frontend_gives_supervisors_their_own_export_entry_point(self):
+        source = _read(FRONTEND_PATH)
+
+        self.assertIn(
+            "const isSupervisorReportScope = isSupervisorRole(currentUserRole) && !isDepartmentHeadUser;",
+            source,
+        )
+        self.assertIn("{isSupervisorReportScope && (", source)
+        self.assertIn("{!isSupervisorReportScope && (", source)
+        self.assertIn("Будут выгружены только ваши операторы.", source)
+        self.assertIn("sheetMode: isSupervisorReportScope ? 'summary' : prev.sheetMode", source)
 
 
 if __name__ == "__main__":
