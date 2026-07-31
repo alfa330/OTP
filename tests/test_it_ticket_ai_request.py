@@ -67,6 +67,14 @@ class ProviderChainTests(unittest.TestCase):
         self.assertEqual(chain[0][0], "groq")
         self.assertIn("gemini", [provider for provider, _ in chain])
 
+    def test_two_groq_models_for_burst_headroom(self):
+        # Лимит токенов в минуту у каждой модели свой, поэтому вторая модель Groq —
+        # это запас на пик перед уходом на Gemini, а не дубль первой.
+        models = service.DEFAULT_GROQ_MODEL_CHAIN
+        self.assertGreaterEqual(len(models), 2)
+        self.assertEqual(len(set(models)), len(models))
+        self.assertEqual(models[0], "llama-3.3-70b-versatile")
+
     def test_gemini_only_when_groq_key_absent(self):
         with mock.patch.object(service, "GROQ_API_KEY", None), \
                 mock.patch.object(service, "GEMINI_API_KEY", "gem_test"):

@@ -521,8 +521,15 @@ GEMINI_THINKING_OFF_MODELS = ("gemini-2.5-flash",)
 
 # Groq (бесплатный тариф) — OpenAI-совместимый API, отдаёт токены в разы быстрее Gemini.
 # Подключается сам, как только в окружении появляется GROQ_API_KEY.
+#
+# Замеры 2026-07-31 на реальном промпте IT-тикета (~3000 токенов на запрос):
+#   llama-3.3-70b-versatile — 1,9с, лимит 12000 ток/мин → ~4 заявки в минуту;
+#   openai/gpt-oss-20b      — 1,9с, лимит  8000 ток/мин → ~2 заявки в минуту;
+#   openai/gpt-oss-120b     — 4,7с (модель «рассуждает»), лимит 8000 — не берём.
+# Лимит токенов у каждой модели свой, поэтому вторая модель — это запас на пик,
+# а не дубль: упёрлись в лимит первой → сразу пробуем вторую, и только потом Gemini.
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-DEFAULT_GROQ_MODEL_CHAIN = ["llama-3.3-70b-versatile"]
+DEFAULT_GROQ_MODEL_CHAIN = ["llama-3.3-70b-versatile", "openai/gpt-oss-20b"]
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 # Таймаут одной попытки. Держим коротким: лучше быстро уйти на следующую модель,
