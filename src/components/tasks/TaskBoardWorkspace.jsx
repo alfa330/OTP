@@ -6,6 +6,7 @@ import CustomSelect from '../ui/CustomSelect';
 import FullscreenSheet from '../common/FullscreenSheet';
 import { ACTION_NEED_META } from './taskActionNeeds';
 import { BOARD_CHUNK_SIZES, DEFAULT_BOARD_CHUNK, normalizeBoardChunk } from './boardQuery';
+import { groupTasksByDay } from './boardGrouping';
 
 export { BOARD_COLUMN_QUERY, BOARD_CHUNK_SIZES, DEFAULT_BOARD_CHUNK, boardQueryParams, normalizeBoardChunk } from './boardQuery';
 
@@ -898,6 +899,142 @@ const BacklogView = ({ tasks, canPlan, onOpen, onPromote, onApplyPlan, onReorder
   );
 };
 
+/* ─────────────── Окно статуса: дни по вертикали, карточки по горизонтали ─────────────── */
+
+const COLUMN_BROWSER_PAGE = 40;
+
+const ColumnBrowser = ({ column, scope, sort, loadTasks, actionNeedOf, canPlan, onApplyPlan, onOpenTask, onClose }) => {
+  const [tasks, setTasks] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [isLoading, setIsLoading] = useState(true);
+  const [failed, setFailed] = useState(false);
+  const sentinelRef = useRef(null);
+  const requestIdRef = useRef(0);
+  const loadingRef = useRef(false);
+
+  const days = useMemo(() => groupTasksByDay(tasks), [tasks]);
+  const hasMore = tasks.length < total;
+
+  /* Карточка задачи живёт в разделе и по z-index ниже полноэкранного окна —
+     открывая задачу, окно закрываем, иначе карточка окажется под ним. */
+  const openTask = useCallback((task) => {
+    onClose();
+    onOpenTask(task);
+  }, [onClose, onOpenTask]);
+
+  const loadPage = useCallback(async (offset) => {
+    if (loadingRef.current) return;
+    loadingRef.current = true;
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
+    setIsLoading(true);
+    let result = null;
+    try {
+      result = await loadTasks({
+        scope,
+        mode: 'board',
+        sort,
+        column: column.id,
+        limit: COLUMN_BROWSER_PAGE,
+        offset,
+        withSummary: false,
+      });
+    } finally {
+      loadingRef.current = false;
+      if (requestIdRef.current === requestId) setIsLoading(false);
+    }
+    if (requestIdRef.current !== requestId) return;
+    if (!result) {
+      setFailed(true);
+      return;
+    }
+    const incoming = Array.isArray(result.tasks) ? result.tasks : [];
+    setTotal(Number(result.total || 0));
+    setTasks((prev) => (offset === 0
+      ? incoming
+      // Страницы могли сдвинуться, пока листали, — склеиваем по id.
+      : [...new Map([...prev, ...incoming].map((task) => [task.id, task])).values()]));
+  }, [loadTasks, scope, sort, column.id]);
+
+  useEffect(() => { loadPage(0); }, [loadPage]);
+
+  // Догрузка по прокрутке: следим за маячком в конце списка, а не за скроллом
+  // конкретного контейнера — окно рисуется в общей полноэкранной обёртке.
+  useEffect(() => {
+    const node = sentinelRef.current;
+    if (!node || !hasMore || failed) return undefined;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting) && !loadingRef.current) loadPage(tasks.length);
+    }, { rootMargin: '240px' });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [hasMore, failed, loadPage, tasks.length]);
+
+  return createPortal(
+    <FullscreenSheet
+      open
+      wide
+      icon="fa-layer-group"
+      title={column.title}
+      subtitle={total > 0
+        ? `${tasks.length} из ${total} ${pluralTasks(total)} · Esc чтобы выйти`
+        : 'Esc чтобы выйти'}
+      onClose={onClose}
+    >
+      <div className="tb-scope space-y-5" style={{ fontFamily: APPLE_FONT }}>
+        {days.length === 0 && !isLoading && (
+          <EmptyState title="Пусто" hint={`В колонке «${column.title}» сейчас нет задач.`} />
+        )}
+
+        {days.map((day) => (
+          <section key={day.key}>
+            <header className="mb-2 flex items-baseline gap-2 px-0.5">
+              <h4 className="text-[13px] font-semibold text-slate-800">{day.label}</h4>
+              <span className="text-[11.5px] tabular-nums text-slate-400">
+                {day.tasks.length} {pluralTasks(day.tasks.length)}
+              </span>
+            </header>
+            <div className="-mx-1 flex gap-2.5 overflow-x-auto px-1 pb-2">
+              {day.tasks.map((task) => (
+                <div key={task.id} className="w-[268px] shrink-0">
+                  <BoardCard
+                    task={task}
+                    canPlan={canPlan}
+                    actionNeedOf={actionNeedOf}
+                    onOpen={openTask}
+                    onApplyPlan={onApplyPlan}
+                  />
+                </div>
+              ))}
+            </div>
+          </section>
+        ))}
+
+        <div ref={sentinelRef} className="h-px" />
+
+        {isLoading && (
+          <div className="flex gap-2.5">
+            {[0, 1, 2].map((index) => (
+              <div key={index} className="h-20 w-[268px] shrink-0 animate-pulse rounded-xl bg-slate-200/70" />
+            ))}
+          </div>
+        )}
+
+        {failed && (
+          <p className="px-1 text-[12px] text-rose-500">
+            Не удалось загрузить продолжение. Закройте окно и откройте снова.
+          </p>
+        )}
+
+        {!hasMore && !isLoading && days.length > 0 && (
+          <p className="px-1 pb-2 text-[11.5px] text-slate-400">Это все задачи в колонке.</p>
+        )}
+      </div>
+    </FullscreenSheet>,
+    document.body
+  );
+};
+
 /* ─────────────── Канбан ─────────────── */
 
 const BoardCard = ({
@@ -928,11 +1065,13 @@ const BoardCard = ({
     cardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
   }, [isFocused]);
 
+  const isDraggable = typeof onDragStart === 'function';
+
   return (
     <div
       ref={cardRef}
-      draggable
-      onDragStart={(event) => onDragStart(event, task)}
+      draggable={isDraggable}
+      onDragStart={isDraggable ? (event) => onDragStart(event, task) : undefined}
       onDragEnd={onDragEnd}
       onClick={() => onOpen(task)}
       className={`group relative cursor-pointer rounded-xl bg-white p-2.5 ring-1 ring-slate-200/70 transition hover:ring-slate-300 hover:shadow-[0_2px_10px_rgba(15,23,42,0.06)] ${
@@ -1010,8 +1149,7 @@ const BoardView = ({
   focusTaskId = 0,
   actionNeedOf,
   columnMeta = {},
-  chunkSize = DEFAULT_BOARD_CHUNK,
-  onLoadMore,
+  onBrowseColumn,
   wipLimit,
   onWipLimitChange,
   onOpen,
@@ -1171,22 +1309,15 @@ const BoardView = ({
                   </button>
                 )}
 
-                {meta.hidden > 0 && (meta.atCap ? (
-                  <p className="px-1.5 py-2 text-[11px] leading-snug text-slate-400">
-                    Показано {meta.loaded} из {meta.total} — дальше сузьте доску или воспользуйтесь поиском.
-                  </p>
-                ) : (
+                {meta.hidden > 0 && (
                   <button
                     type="button"
-                    disabled={meta.loading}
-                    onClick={() => onLoadMore?.(column.id)}
-                    className="mt-0.5 rounded-lg border border-dashed border-slate-300 px-2 py-2 text-[11.5px] font-medium text-slate-500 transition hover:border-slate-400 hover:bg-white hover:text-slate-700 disabled:cursor-wait disabled:opacity-60"
+                    onClick={() => onBrowseColumn?.(column)}
+                    className="mt-0.5 rounded-lg border border-dashed border-slate-300 px-2 py-2 text-[11.5px] font-medium text-slate-500 transition hover:border-slate-400 hover:bg-white hover:text-slate-700"
                   >
-                    {meta.loading
-                      ? 'Загружаю…'
-                      : `Показать ещё ${Math.min(chunkSize, meta.hidden)} · не показано ${meta.hidden}`}
+                    Посмотреть ещё · не показано {meta.hidden}
                   </button>
-                ))}
+                )}
               </div>
             </section>
           );
@@ -1497,9 +1628,6 @@ const TimelineView = ({ tasks, onOpen }) => {
 const WIP_STORAGE_KEY = 'otp.tasks.board.wipLimit';
 const CHUNK_STORAGE_KEY = 'otp.tasks.board.chunkSize';
 
-/** Сколько карточек одна колонка может держать загруженными: страховка от бесконечной догрузки. */
-const BOARD_MAX_LOADED_PER_COLUMN = 200;
-
 const emptyColumnState = () => Object.fromEntries(
   BOARD_COLUMNS.map((column) => [column.id, { tasks: [], total: 0, loading: true }])
 );
@@ -1536,6 +1664,8 @@ const TaskBoardWorkspace = ({
   const pageRequestIdRef = useRef(0);
   const [columnState, setColumnState] = useState(emptyColumnState);
   const [columnsResetToken, setColumnsResetToken] = useState(0);
+  // Открытая колонка «в полный рост»: дни по вертикали, карточки по горизонтали.
+  const [browsedColumn, setBrowsedColumn] = useState(null);
   const columnRequestIdRef = useRef({});
   const columnLoadedKeyRef = useRef({});
   const [wipLimit, setWipLimit] = useState(() => {
@@ -1546,12 +1676,11 @@ const TaskBoardWorkspace = ({
   const isBoardMode = mode === 'board';
 
   /* Канбан грузится колонками: у каждой свой срез статусов, свой счётчик из базы
-     и своя кнопка «Показать ещё». Так остаток «сколько не показано» — честный,
+     и своя кнопка «Посмотреть ещё». Так остаток «сколько не показано» — честный,
      а не «сколько не попало в общую страницу».
-     Сколько карточек держим в колонке, живёт в ref: это не должно перезапускать
-     эффект перезагрузки, иначе догрузка гоняла бы колонку по кругу. */
-  const columnLimitsRef = useRef({});
-  const fetchColumn = useCallback(async (columnId, { limit, offset = 0, append = false }) => {
+     В колонке всегда ровно одна порция: копить карточки в узкой колонке смысла
+     нет, весь хвост смотрят в окне статуса. */
+  const fetchColumn = useCallback(async (columnId, { limit }) => {
     if (typeof loadTasks !== 'function') return;
     const requestId = (columnRequestIdRef.current[columnId] || 0) + 1;
     columnRequestIdRef.current[columnId] = requestId;
@@ -1564,9 +1693,9 @@ const TaskBoardWorkspace = ({
         sort: boardSort,
         column: columnId,
         limit,
-        offset,
+        offset: 0,
         // Сводка нужна одна на всю доску — её приносит первая колонка.
-        withSummary: !append && columnId === BOARD_COLUMNS[0].id,
+        withSummary: columnId === BOARD_COLUMNS[0].id,
       });
     } finally {
       // Даже если загрузка сорвалась, колонка обязана выйти из состояния «гружусь»,
@@ -1579,49 +1708,30 @@ const TaskBoardWorkspace = ({
       }
     }
     if (columnRequestIdRef.current[columnId] !== requestId || !result) return;
-    const incoming = Array.isArray(result?.tasks) ? result.tasks : [];
-    setColumnState((prev) => {
-      const current = prev[columnId] || { tasks: [] };
-      // Догрузка дописывает хвост; список мог сдвинуться, поэтому склеиваем по id.
-      const merged = append
-        ? [...new Map([...(current.tasks || []), ...incoming].map((task) => [task.id, task])).values()]
-        : incoming;
-      columnLimitsRef.current[columnId] = merged.length || limit;
-      return {
-        ...prev,
-        [columnId]: { tasks: merged, total: Number(result?.total || 0), loading: false },
-      };
-    });
-    if (columnId === BOARD_COLUMNS[0].id && !append) setBoardSummary(result?.summary || null);
+    setColumnState((prev) => ({
+      ...prev,
+      [columnId]: {
+        tasks: Array.isArray(result.tasks) ? result.tasks : [],
+        total: Number(result.total || 0),
+        loading: false,
+      },
+    }));
+    if (columnId === BOARD_COLUMNS[0].id) setBoardSummary(result.summary || null);
   }, [loadTasks, scope, boardSort]);
 
   const boardReloadKey = `${scope}|${boardSort}|${reloadToken}|${chunkSize}|${columnsResetToken}`;
   useEffect(() => {
     if (!isBoardMode) return;
-    BOARD_COLUMNS.forEach((column) => {
-      // После действий на доске возвращаем ровно столько карточек, сколько было
-      // показано, — иначе раскрытая колонка схлопывалась бы на каждый перенос.
-      const keep = Math.min(
-        Math.max(chunkSize, columnLimitsRef.current[column.id] || 0),
-        BOARD_MAX_LOADED_PER_COLUMN
-      );
-      fetchColumn(column.id, { limit: keep, offset: 0 });
-    });
+    // В колонке всегда ровно одна порция: остальное смотрят в окне статуса.
+    BOARD_COLUMNS.forEach((column) => fetchColumn(column.id, { limit: chunkSize }));
     // boardReloadKey собирает все причины перезагрузки колонок.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isBoardMode, boardReloadKey, fetchColumn]);
-
-  const showMoreInColumn = useCallback((columnId) => {
-    const state = columnState[columnId];
-    if (!state || state.loading) return;
-    fetchColumn(columnId, { limit: chunkSize, offset: state.tasks.length, append: true });
-  }, [columnState, fetchColumn, chunkSize]);
 
   /* Сброс обязан заканчиваться загрузкой. Раньше ключ перезагрузки собирался
      только из scope/sort/порции, поэтому повторный выбор того же значения
      обнулял колонки и оставлял доску в вечном скелетоне. */
   const resetColumns = useCallback(() => {
-    columnLimitsRef.current = {};
     setColumnState(emptyColumnState());
     setColumnsResetToken((prev) => prev + 1);
   }, []);
@@ -1706,7 +1816,6 @@ const TaskBoardWorkspace = ({
       total,
       loaded,
       hidden: Math.max(0, total - loaded),
-      atCap: loaded >= BOARD_MAX_LOADED_PER_COLUMN,
       loading: Boolean(state.loading),
     }];
   })), [columnState]);
@@ -1963,7 +2072,7 @@ const TaskBoardWorkspace = ({
           <CustomSelect
             className="w-[110px]"
             variant="ios"
-            ariaLabel={isBoardMode ? 'Карточек в колонке за раз' : 'Карточек на странице'}
+            ariaLabel={isBoardMode ? 'Карточек в колонке' : 'Карточек на странице'}
             value={chunkSize}
             options={chunkOptions}
             onChange={changeChunkSize}
@@ -2003,8 +2112,7 @@ const TaskBoardWorkspace = ({
           focusTaskId={focusTaskId}
           actionNeedOf={actionNeedOf}
           columnMeta={columnMeta}
-          chunkSize={chunkSize}
-          onLoadMore={showMoreInColumn}
+          onBrowseColumn={setBrowsedColumn}
           wipLimit={wipLimit}
           onWipLimitChange={handleWipLimitChange}
           onOpen={onOpenTask}
@@ -2015,6 +2123,20 @@ const TaskBoardWorkspace = ({
 
       {mode === 'timeline' && (
         <TimelineView tasks={scopedTasks} onOpen={onOpenTask} />
+      )}
+
+      {browsedColumn && (
+        <ColumnBrowser
+          column={browsedColumn}
+          scope={scope}
+          sort={boardSort}
+          loadTasks={loadTasks}
+          actionNeedOf={actionNeedOf}
+          canPlan={canPlan}
+          onApplyPlan={handleApplyPlan}
+          onOpenTask={onOpenTask}
+          onClose={() => setBrowsedColumn(null)}
+        />
       )}
 
       {!isBoardMode && (

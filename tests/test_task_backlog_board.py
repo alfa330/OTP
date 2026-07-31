@@ -1227,7 +1227,7 @@ class BoardPaginationTests(unittest.TestCase):
         self.assertIn("const changeBoardSort = useCallback((next) => {", view)
         self.assertIn("resetColumns();", view)
 
-    def test_columns_load_more_with_honest_remainder(self):
+    def test_columns_show_one_chunk_and_hand_the_rest_to_the_window(self):
         src = _read(WORKSPACE_PATH)
         # Колонка = свой срез статусов, поэтому её остаток считается в базе.
         query_src = _read(BOARD_QUERY_PATH)
@@ -1238,10 +1238,12 @@ class BoardPaginationTests(unittest.TestCase):
 
         src = _read(WORKSPACE_PATH)
         self.assertIn("hidden: Math.max(0, total - loaded)", src)
-        self.assertIn("Показать ещё ${Math.min(chunkSize, meta.hidden)} · не показано ${meta.hidden}", src)
-        # Догрузка дописывает хвост, а не перезапрашивает всё с нуля.
-        self.assertIn("offset: state.tasks.length, append: true", src)
-        self.assertIn("BOARD_MAX_LOADED_PER_COLUMN = 200", src)
+        # Остаток — не кнопка догрузки, а вход в окно статуса.
+        self.assertIn("Посмотреть ещё · не показано {meta.hidden}", src)
+        self.assertIn("onClick={() => onBrowseColumn?.(column)}", src)
+        self.assertNotIn("append: true", src)
+        # В колонке всегда ровно одна порция, копить карточки в ней незачем.
+        self.assertIn("BOARD_COLUMNS.forEach((column) => fetchColumn(column.id, { limit: chunkSize }));", src)
         # Пагинатор остаётся только там, где список один.
         self.assertIn("{!isBoardMode && (", src)
         self.assertIn("const BoardPager = ({", src)
@@ -1329,7 +1331,9 @@ class TaskQueryBuilderTests(unittest.TestCase):
         self.assertIn("include_summary = (request.args.get('summary') or '')", app_src)
         # Колонки доски просят сводку ровно один раз за загрузку.
         view = _read(WORKSPACE_PATH)
-        self.assertIn("withSummary: !append && columnId === BOARD_COLUMNS[0].id,", view)
+        self.assertIn("withSummary: columnId === BOARD_COLUMNS[0].id,", view)
+        # Окно статуса листает страницами и сводку не трогает вовсе.
+        self.assertIn("withSummary: false,", view)
 
     def test_board_loader_passes_the_column_through(self):
         src = _read(TASKS_VIEW_PATH)
@@ -1345,6 +1349,47 @@ class TaskQueryBuilderTests(unittest.TestCase):
         self.assertIn("ON tasks(status, created_at DESC, id DESC)", src)
         self.assertIn("ON tasks(assigned_to, created_at DESC, id DESC)", src)
         self.assertIn("ON tasks(created_by, created_at DESC, id DESC)", src)
+
+
+class ColumnBrowserTests(unittest.TestCase):
+    """Окно статуса: дни по вертикали, карточки по горизонтали, догрузка прокруткой."""
+
+    def setUp(self):
+        self.src = _read(WORKSPACE_PATH)
+        start = self.src.index("const ColumnBrowser = ({")
+        self.block = self.src[start:self.src.index("const BoardCard = ({", start)]
+
+    def test_window_opens_from_the_column_footer(self):
+        self.assertIn("<ColumnBrowser", self.src)
+        self.assertIn("onBrowseColumn={setBrowsedColumn}", self.src)
+        self.assertIn("column={browsedColumn}", self.src)
+        # Окно живёт в общей полноэкранной обёртке и рисуется в портал.
+        self.assertIn("createPortal(", self.block)
+        self.assertIn("<FullscreenSheet", self.block)
+
+    def test_days_go_down_and_cards_go_right(self):
+        self.assertIn("groupTasksByDay(tasks)", self.block)
+        # Карточки дня — горизонтальная лента фиксированной ширины.
+        self.assertIn('className="-mx-1 flex gap-2.5 overflow-x-auto px-1 pb-2"', self.block)
+        self.assertIn('className="w-[268px] shrink-0"', self.block)
+        # Карточка вне доски не перетаскивается.
+        self.assertIn("const isDraggable = typeof onDragStart === 'function';", self.src)
+        self.assertIn("draggable={isDraggable}", self.src)
+
+    def test_opening_a_task_closes_the_window(self):
+        # Карточка задачи по z-index ниже полноэкранного окна: не закрыв окно,
+        # пользователь кликнул бы по карточке и не увидел ничего.
+        self.assertIn("const openTask = useCallback((task) => {", self.block)
+        self.assertIn("onClose();", self.block)
+        self.assertIn("onOpen={openTask}", self.block)
+
+    def test_scroll_loads_the_next_page(self):
+        self.assertIn("new IntersectionObserver(", self.block)
+        self.assertIn("loadPage(tasks.length)", self.block)
+        self.assertIn("const hasMore = tasks.length < total;", self.block)
+        # Догрузка склеивает страницы по id и не стреляет параллельно сама в себя.
+        self.assertIn("if (loadingRef.current) return;", self.block)
+        self.assertIn("new Map([...prev, ...incoming].map((task) => [task.id, task]))", self.block)
 
 
 class BoardPeopleAndBacklogActionTests(unittest.TestCase):
