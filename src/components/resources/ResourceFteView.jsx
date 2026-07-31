@@ -1643,7 +1643,8 @@ const TimeRangePicker = ({ label, startValue, endValue, onRangeChange }) => {
 const BillingTable = ({ rows, totals, totalsLabel = 'Итого', mode = 'park' }) => {
   const renderMetricsCells = (item) => {
     const arRatio = safeRatio(item.lost, item.arrived);
-    const slRatio = safeRatio(item.served_sl, item.served);
+    // SL: отвеченные за порог ожидания ко ВСЕМ попавшим в очередь (обслуженные + потерянные)
+    const slRatio = safeRatio(item.served_sl, item.arrived);
     const attSeconds = safeRatio(item.talk_seconds, item.served);
     const waitSeconds = safeRatio(item.wait_ok_seconds, item.served);
     return (
@@ -2284,7 +2285,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
     ? Math.min(billingDetailTotal, billingDetailPageStart + billingDetailRows.length - 1)
     : 0;
   const billingArRatio = billingTotals ? safeRatio(billingTotals.lost, billingTotals.arrived) : null;
-  const billingSlRatio = billingTotals ? safeRatio(billingTotals.served_sl, billingTotals.served) : null;
+  const billingSlRatio = billingTotals ? safeRatio(billingTotals.served_sl, billingTotals.arrived) : null;
   const billingOperatorTotals = billingMode === 'operator' && billingTotals ? billingOperatorActivity(billingTotals) : null;
   const billingAttSeconds = billingTotals ? safeRatio(billingTotals.talk_seconds, billingTotals.served) : null;
   const billingAhtSeconds = billingTotals
@@ -3865,7 +3866,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                   ) : billingMode === 'detail' ? (
                     <span>Одна строка — один звонок; на странице 25 звонков</span>
                   ) : (
-                    <span>SL — обслужено за ≤ {billingReport?.sl_threshold_seconds ?? 20} сек ожидания</span>
+                    <span>SL — отвечено за ≤ {billingReport?.sl_threshold_seconds ?? 20} сек ожидания в очереди ко всем звонкам, попавшим в очередь</span>
                   )}
                   {billingRangeError ? <span className="font-semibold text-rose-600">{billingRangeError}</span> : null}
                 </div>
@@ -3928,7 +3929,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                       icon={TrendingUp}
                       label="SL"
                       value={billingSlRatio === null ? '—' : formatPercent(billingSlRatio, 1)}
-                      hint={`Обслужено за ≤ ${billingReport?.sl_threshold_seconds ?? 20} сек`}
+                      hint={`Ответ за ≤ ${billingReport?.sl_threshold_seconds ?? 20} сек от поступивших`}
                       tone={billingSlRatio !== null && billingSlRatio >= 0.8 ? 'emerald' : billingSlRatio !== null && billingSlRatio >= 0.6 ? 'amber' : 'rose'}
                     />
                     <StatCard icon={Clock3} label="Время разговора" value={formatDurationHms(billingTotals.talk_seconds)} hint={`Общее время ${formatDurationHms(billingTotals.total_seconds)}`} tone="slate" />
@@ -4013,7 +4014,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                       {billingDays.map((day) => {
                         const expanded = billingExpandedDays.has(day.date);
                         const dayAr = billingMode === 'operator' ? null : safeRatio(day.totals?.lost, day.totals?.arrived);
-                        const daySl = billingMode === 'operator' ? null : safeRatio(day.totals?.served_sl, day.totals?.served);
+                        const daySl = billingMode === 'operator' ? null : safeRatio(day.totals?.served_sl, day.totals?.arrived);
                         const dayOcc = billingMode === 'operator' ? billingOperatorActivity(day.totals || {}).occ : null;
                         return (
                           <section key={day.date} className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
