@@ -23069,6 +23069,46 @@ def _tg_send_message(chat_id, text, parse_mode='HTML'):
         return None, str(e)
 
 
+ICORE_TICKET_IMAGE_EXT = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'}
+IT_TICKET_ATTACH_MAX_BYTES = 20 * 1024 * 1024  # предел Telegram для загрузки ботом
+
+
+def _tg_send_attachment(chat_id, file_storage, reply_to_message_id=None, caption=None):
+    """Отправляет вложение заявки в чат. Возвращает (result, error).
+
+    Скриншоты уходят как photo (сразу видны в чате), остальное — как document,
+    чтобы не терять качество и расширение. Файл прикрепляем ОТВЕТОМ к сообщению
+    заявки: подпись у медиа ограничена 1024 символами, а текст тикета длиннее.
+    """
+    token = os.getenv('BOT_TOKEN')
+    if not token:
+        return None, "BOT_TOKEN не настроен"
+    name = os.path.basename(str(getattr(file_storage, 'filename', '') or 'attachment'))
+    ext = os.path.splitext(name)[1].lower()
+    as_photo = ext in ICORE_TICKET_IMAGE_EXT
+    method = 'sendPhoto' if as_photo else 'sendDocument'
+    field = 'photo' if as_photo else 'document'
+    data = {"chat_id": chat_id}
+    if reply_to_message_id:
+        data["reply_to_message_id"] = reply_to_message_id
+    if caption:
+        data["caption"] = caption[:1000]
+    try:
+        file_storage.stream.seek(0)
+        resp = requests.post(
+            f"https://api.telegram.org/bot{token}/{method}",
+            data=data,
+            files={field: (name, file_storage.stream, file_storage.mimetype or 'application/octet-stream')},
+            timeout=60,
+        )
+        payload = resp.json()
+        if not payload.get("ok"):
+            return None, payload.get("description") or f"HTTP {resp.status_code}"
+        return payload.get("result") or {}, None
+    except Exception as e:
+        return None, str(e)
+
+
 def _it_channel_public(channel, is_admin=False):
     """Урезает данные канала для не-админов (скрываем chat_id/служебное)."""
     if not channel:
@@ -23377,7 +23417,28 @@ def it_ticket_send():
         requester_id, requester, role, err = _it_ticket_authorize()
         if err:
             return err
-        payload = request.get_json(silent=True) or {}
+
+        # Со вложением заявка приходит multipart, без него — обычным JSON (как раньше).
+        attachment = request.files.get('attachment')
+        if attachment is not None and not str(attachment.filename or '').strip():
+            attachment = None
+        if attachment is not None or request.form:
+            payload = dict(request.form)
+            try:
+                payload['fields'] = json.loads(payload.get('fields') or '{}')
+            except (TypeError, ValueError):
+                payload['fields'] = {}
+        else:
+            payload = request.get_json(silent=True) or {}
+
+        if attachment is not None:
+            attachment.stream.seek(0, os.SEEK_END)
+            size = attachment.stream.tell()
+            attachment.stream.seek(0)
+            if size == 0:
+                attachment = None
+            elif size > IT_TICKET_ATTACH_MAX_BYTES:
+                return jsonify({"error": "Файл больше 20 МБ — Telegram его не примет"}), 400
 
         body = str(payload.get('body') or '').strip()
         if not body:
@@ -23450,6 +23511,18 @@ def it_ticket_send():
             return jsonify({"error": f"Не удалось отправить заявку в Telegram: {send_err}"}), 502
 
         message_id = result.get('message_id')
+
+        # Вложение уходит ответом к заявке. Если не прошло — саму заявку уже отправили,
+        # откатывать нечего: сообщаем об этом отдельно, а не роняем всю отправку.
+        attach_error = None
+        if attachment is not None:
+            _attach_result, attach_error = _tg_send_attachment(
+                channel['chat_id'], attachment, reply_to_message_id=message_id,
+                caption='📎 Вложение к заявке',
+            )
+            if attach_error:
+                logging.warning("IT ticket attachment not sent: %s", attach_error)
+
         ticket = db.record_it_ticket(
             profile=profile, category=category, subcategory=subcategory, priority=priority,
             title=title, body=body, fields=fields, channel_id=channel.get('id'),
@@ -23462,6 +23535,7 @@ def it_ticket_send():
             "ticket_id": ticket.get('id'),
             "message_id": message_id,
             "channel_title": channel.get('title'),
+            "attachment_error": attach_error,
         }), 201
     except Exception as e:
         logging.error(f"Error sending IT ticket: {e}", exc_info=True)

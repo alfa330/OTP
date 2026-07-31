@@ -183,8 +183,9 @@ const PickerSeat = memo(function PickerSeat({ n, selected, onToggle }) {
     );
 });
 
-const WorkplacePicker = memo(function WorkplacePicker({ cabinets, value, onChange }) {
+const WorkplacePicker = memo(function WorkplacePicker({ cabinets, value, onChange, invalid = false }) {
     const list = useMemo(() => (Array.isArray(cabinets) ? cabinets : []), [cabinets]);
+    const listSig = useMemo(() => list.map((c) => c.id).join(','), [list]);
     const [activeId, setActiveId] = useState(() => list[0]?.id || null);
     const [selected, setSelected] = useState(() => initSelectedFromValue(value, list));
 
@@ -203,19 +204,58 @@ const WorkplacePicker = memo(function WorkplacePicker({ cabinets, value, onChang
     const selectedRef = useRef(selected);
     selectedRef.current = selected;
 
+    // Помним, что отдали наружу сами и против какого набора кабинетов, — чтобы
+    // отличить собственное значение от пришедшего извне.
+    const syncRef = useRef({ value: null, sig: null });
+
+    const emit = useCallback((next) => {
+        const text = buildWorkplaceValue(next, list);
+        syncRef.current = { value: text, sig: listSig };
+        onChange(text);
+    }, [list, listSig, onChange]);
+
+    // Значение пришло извне — ИИ распознал РМ из описания («РМ 16») — отмечаем их
+    // на схеме. Пересобираем и когда подгрузились кабинеты: на первом рендере
+    // раскладки может ещё не быть, и отмечать было не на чём.
+    useEffect(() => {
+        const incoming = String(value ?? '');
+        const own = incoming === syncRef.current.value;
+        if (own && syncRef.current.sig === listSig) return;
+        syncRef.current = { value: incoming, sig: listSig };
+        setSelected(initSelectedFromValue(incoming, list));
+    }, [value, list, listSig]);
+
     const toggle = useCallback((n) => {
         if (!active) return;
         const key = seatKey(active.id, n);
         const next = new Set(selectedRef.current);
         if (next.has(key)) next.delete(key); else next.add(key);
         setSelected(next);
-        onChange(buildWorkplaceValue(next, list));
-    }, [active, list, onChange]);
+        emit(next);
+    }, [active, emit]);
+
+    const activeSeats = useMemo(() => (active ? cabinetSeatNumbers(active) : []), [active]);
+    const allActiveSelected = activeSeats.length > 0
+        && activeSeats.every((n) => selected.has(seatKey(active.id, n)));
+
+    // «Все РМ» — для массовых сбоев: отметить сразу весь кабинет, а не 30 мест кликами.
+    const toggleAllActive = useCallback(() => {
+        if (!active) return;
+        const next = new Set(selectedRef.current);
+        const seats = cabinetSeatNumbers(active);
+        const turnOff = seats.every((n) => next.has(seatKey(active.id, n)));
+        seats.forEach((n) => {
+            const key = seatKey(active.id, n);
+            if (turnOff) next.delete(key); else next.add(key);
+        });
+        setSelected(next);
+        emit(next);
+    }, [active, emit]);
 
     const clearAll = useCallback(() => {
         setSelected(new Set());
-        onChange('');
-    }, [onChange]);
+        emit(new Set());
+    }, [emit]);
 
     if (list.length === 0) {
         // Нет доступной раскладки — деградируем до обычного текстового ввода.
@@ -225,7 +265,7 @@ const WorkplacePicker = memo(function WorkplacePicker({ cabinets, value, onChang
                 value={value ?? ''}
                 onChange={(e) => onChange(e.target.value)}
                 placeholder="Напр.: РМ 16 СЗоВ"
-                className={FIELD_CLASS}
+                className={invalid ? `${FIELD_CLASS} ring-2 ring-rose-400 bg-rose-50` : FIELD_CLASS}
             />
         );
     }
@@ -233,7 +273,9 @@ const WorkplacePicker = memo(function WorkplacePicker({ cabinets, value, onChang
     const summary = buildWorkplaceValue(selected, list);
 
     return (
-        <div className="mt-1 rounded-xl border border-slate-200 bg-white p-2.5 shadow-sm">
+        <div className={`mt-1.5 rounded-xl border bg-white p-2.5 shadow-sm ${
+            invalid ? 'border-rose-300 ring-2 ring-rose-400' : 'border-slate-200'
+        }`}>
             {list.length > 1 && (
                 <div className="mb-2 flex flex-wrap gap-1.5">
                     {list.map((c) => (
@@ -264,36 +306,63 @@ const WorkplacePicker = memo(function WorkplacePicker({ cabinets, value, onChang
                     Нет доступной раскладки кабинета.
                 </div>
             )}
-            <div className="mt-2 flex items-center justify-between gap-2">
-                <span className="text-[12px] text-slate-500">
+            <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                <span className="min-w-0 text-[12px] text-slate-500">
                     {summary ? <><span className="font-semibold text-slate-700">Выбрано:</span> {summary}</> : 'Кликните по местам на схеме'}
                 </span>
-                {selected.size > 0 && (
-                    <button
-                        type="button"
-                        onClick={clearAll}
-                        className="shrink-0 rounded-lg border border-slate-200 px-2 py-1 text-[11px] font-semibold text-slate-500 hover:bg-slate-50"
-                    >
-                        Очистить
-                    </button>
-                )}
+                <div className="flex shrink-0 items-center gap-1">
+                    {activeSeats.length > 0 && (
+                        <button
+                            type="button"
+                            role="checkbox"
+                            aria-checked={allActiveSelected}
+                            onClick={toggleAllActive}
+                            className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-[11.5px] font-semibold text-slate-600 transition-colors hover:bg-slate-100 active:scale-[0.98]"
+                        >
+                            <span className={`grid h-[15px] w-[15px] place-items-center rounded-[4px] border transition-colors ${
+                                allActiveSelected ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white'
+                            }`}>
+                                {allActiveSelected && (
+                                    <svg width="9" height="9" viewBox="0 0 10 10" fill="none">
+                                        <path d="M1 5.2l2.6 2.6L9 2.4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                                    </svg>
+                                )}
+                            </span>
+                            Все РМ
+                        </button>
+                    )}
+                    {selected.size > 0 && (
+                        <button
+                            type="button"
+                            onClick={clearAll}
+                            className="rounded-lg px-2 py-1 text-[11.5px] font-semibold text-slate-500 transition-colors hover:bg-slate-100 active:scale-[0.98]"
+                        >
+                            Очистить
+                        </button>
+                    )}
+                </div>
             </div>
         </div>
     );
 });
 
 // ─── Dynamic field renderer ─────────────────────────────────────────────────
-const DynamicField = memo(function DynamicField({ field, value, onChange, cabinets }) {
+const DynamicField = memo(function DynamicField({ field, value, onChange, cabinets, invalid = false }) {
     const type = String(field?.type || 'text').toLowerCase();
+    // Незаполненное обязательное поле подсвечиваем красным только после попытки
+    // отправки — до неё красный на пустой форме был бы ложной тревогой.
+    const fieldClass = invalid
+        ? `${FIELD_CLASS} ring-2 ring-rose-400 bg-rose-50`
+        : FIELD_CLASS;
     const common = {
         value: value ?? '',
         onChange: (e) => onChange(field.key, e.target.value),
         placeholder: field?.placeholder || '',
-        className: FIELD_CLASS,
+        className: fieldClass,
     };
     return (
         <label className="block">
-            <span className={LABEL_CLASS}>
+            <span className={`${LABEL_CLASS} ${invalid ? 'text-rose-600' : ''}`}>
                 {field?.label || field?.key}
                 {field?.required && <span className="text-rose-500"> *</span>}
             </span>
@@ -302,6 +371,7 @@ const DynamicField = memo(function DynamicField({ field, value, onChange, cabine
                     cabinets={cabinets}
                     value={value}
                     onChange={(val) => onChange(field.key, val)}
+                    invalid={invalid}
                 />
             ) : type === 'textarea' ? (
                 <textarea {...common} rows={3} />
@@ -797,6 +867,11 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
     const [ticketTitle, setTicketTitle] = useState('');
     const [composed, setComposed] = useState(false);
     const [editingText, setEditingText] = useState(false);
+    const [attachment, setAttachment] = useState(null);
+    const [triedSend, setTriedSend] = useState(false);
+    const [aiChecks, setAiChecks] = useState([]);
+    const [doneChecks, setDoneChecks] = useState(() => new Set());
+    const fileInputRef = useRef(null);
 
     const [channels, setChannels] = useState([]);
     const [canManage, setCanManage] = useState(Boolean(canManageChannels));
@@ -842,7 +917,26 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
     }, [apiBaseUrl, buildHeaders, applyMeta]);
 
     useEffect(() => {
-        if (!isOpen) return;
+        if (!isOpen) return undefined;
+        // Каждое открытие — чистая форма. Модалка не размонтируется при закрытии,
+        // поэтому без сброса после отправки в окне остаётся прошлый тикет; заодно
+        // снимаем категорию, которая могла остаться от другого профиля.
+        setCategoryName('');
+        setSubcategory('');
+        setCategoryNote('');
+        setDescription('');
+        setAiFields([]);
+        setFieldValues({});
+        setPriority('medium');
+        setPreviewText('');
+        setTicketTitle('');
+        setComposed(false);
+        setEditingText(false);
+        setAttachment(null);
+        setTriedSend(false);
+        setAiChecks([]);
+        setDoneChecks(new Set());
+
         let alive = true;
         setLoadingCatalog(true);
         (async () => {
@@ -884,6 +978,7 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
 
     const resetAfterCategoryChange = useCallback(() => {
         setAiFields([]); setFieldValues({});
+        setAiChecks([]); setDoneChecks(new Set());
         setComposed(false); setPreviewText(''); setTicketTitle(''); setCategoryNote('');
     }, []);
 
@@ -1029,6 +1124,12 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                 });
             }
 
+            // Советы «что попробовать до заявки». Приходят только для поломок;
+            // для задач «сделать» список пустой — секцию тогда не показываем.
+            if (Array.isArray(result.checks)) {
+                setAiChecks(result.checks.map((c) => String(c || '').trim()).filter(Boolean));
+            }
+
             const ticketMd = result?.ticket?.markdown || result?.ticket?.summary || '';
             if (result?.ticket?.title) setTicketTitle(result.ticket.title);
 
@@ -1051,30 +1152,98 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
         }
     }, [apiBaseUrl, buildHeaders, profile, categoryName, subcategory, description, fieldValues, previewText, toast, catalog, buildMassContext]);
 
+    // Незаполненные обязательные поля — без них сисадмин не поймёт, куда идти,
+    // поэтому отправку блокируем, а поля подсвечиваем.
+    const missingRequired = useMemo(() => (
+        (aiFields || [])
+            .filter((f) => f?.required)
+            .filter((f) => !String(fieldValues[f.key] ?? '').trim())
+    ), [aiFields, fieldValues]);
+    const missingKeys = useMemo(
+        () => new Set(missingRequired.map((f) => f.key)),
+        [missingRequired],
+    );
+
+    // Куда писать отмеченные проверки. Ищем поле «что уже пробовали» среди тех, что
+    // подобрал ИИ; если такого нет — кладём под ключ tried: поля всё равно уходят
+    // в ИИ при сборке заявки, и он впишет их в текст.
+    const triedFieldKey = useMemo(() => {
+        const hit = (aiFields || []).find((f) => (
+            /пробов|уже\s*дел|tried|attempt/i.test(`${f?.key || ''} ${f?.label || ''}`)
+        ));
+        return hit?.key || 'tried';
+    }, [aiFields]);
+
+    const toggleCheck = useCallback((idx) => {
+        setDoneChecks((prev) => {
+            const next = new Set(prev);
+            if (next.has(idx)) next.delete(idx); else next.add(idx);
+            // Отмеченные проверки и есть ответ на «что уже пробовали» — собираем его
+            // сразу, чтобы супервайзеру не пришлось пересказывать это руками.
+            const done = aiChecks.filter((_, i) => next.has(i));
+            setFieldValues((vals) => ({
+                ...vals,
+                [triedFieldKey]: done.length ? `Пробовали, не помогло: ${done.join('; ')}` : '',
+            }));
+            return next;
+        });
+    }, [aiChecks, triedFieldKey]);
+
+    const pickAttachment = useCallback((file) => {
+        if (!file) return;
+        const LIMIT = 20 * 1024 * 1024; // предел Telegram для загрузки ботом
+        if (file.size > LIMIT) { toast('Файл больше 20 МБ', 'error'); return; }
+        setAttachment(file);
+    }, [toast]);
+
     // ── send ──
     const handleSend = useCallback(async () => {
+        setTriedSend(true);
         const body = (previewText || '').trim() || description.trim();
         if (!body) { toast('Текст заявки пустой', 'error'); return; }
         if (!channelReady) { toast('Канал не закреплён', 'error'); return; }
+        if (missingRequired.length > 0) {
+            toast(`Заполните обязательные поля: ${missingRequired.map((f) => f.label || f.key).join(', ')}`, 'error');
+            return;
+        }
         setSending(true);
         try {
-            const res = await axios.post(`${apiBaseUrl}/api/it_tickets/send`, {
-                profile,
-                category: categoryName,
-                subcategory,
-                priority,
-                title: ticketTitle,
-                body,
-                fields: fieldValues,
-            }, { headers: buildHeaders() });
+            // Со вложением отправляем multipart, без него — обычным JSON.
+            let res;
+            if (attachment) {
+                const form = new FormData();
+                form.append('profile', profile);
+                form.append('category', categoryName);
+                form.append('subcategory', subcategory);
+                form.append('priority', priority);
+                form.append('title', ticketTitle);
+                form.append('body', body);
+                form.append('fields', JSON.stringify(fieldValues));
+                form.append('attachment', attachment, attachment.name);
+                res = await axios.post(`${apiBaseUrl}/api/it_tickets/send`, form, { headers: buildHeaders() });
+            } else {
+                res = await axios.post(`${apiBaseUrl}/api/it_tickets/send`, {
+                    profile,
+                    category: categoryName,
+                    subcategory,
+                    priority,
+                    title: ticketTitle,
+                    body,
+                    fields: fieldValues,
+                }, { headers: buildHeaders() });
+            }
             toast(`Заявка отправлена${res?.data?.channel_title ? ` в «${res.data.channel_title}»` : ''}`, 'success');
+            // Заявка ушла, а файл — нет: молчать нельзя, иначе супервайзер будет
+            // думать, что скриншот в чате есть.
+            if (res?.data?.attachment_error) toast('Файл не прикрепился — отправьте его в чат вручную', 'error');
             onClose();
         } catch (err) {
             toast(err?.response?.data?.error || 'Не удалось отправить заявку', 'error');
         } finally {
             setSending(false);
         }
-    }, [apiBaseUrl, buildHeaders, previewText, description, channelReady, profile, categoryName, subcategory, priority, ticketTitle, fieldValues, toast, onClose]);
+    }, [apiBaseUrl, buildHeaders, previewText, description, channelReady, profile, categoryName,
+        subcategory, priority, ticketTitle, fieldValues, missingRequired, attachment, toast, onClose]);
 
     if (!isOpen) return null;
 
@@ -1196,6 +1365,46 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                                     </div>
                                 </div>
 
+                                {/* Что попробовать до заявки — половина поломок закрывается здесь,
+                                    а отмеченное становится ответом на «что уже пробовали» */}
+                                {aiChecks.length > 0 && (
+                                    <div className={CARD_CLASS}>
+                                        <div className="flex items-center justify-between gap-2">
+                                            <span className={LABEL_CLASS}>Попробуйте сначала</span>
+                                            <InfoHint text="Это первое, о чём спросит сисадмин. Отметьте то, что сделали — ответ на «что уже пробовали» подставится в заявку сам. Если что-то из этого помогло, заявка не нужна." />
+                                        </div>
+                                        <ul className="mt-2 space-y-1">
+                                            {aiChecks.map((check, i) => {
+                                                const done = doneChecks.has(i);
+                                                return (
+                                                    <li key={`${i}-${check.slice(0, 24)}`}>
+                                                        <button
+                                                            type="button"
+                                                            role="checkbox"
+                                                            aria-checked={done}
+                                                            onClick={() => toggleCheck(i)}
+                                                            className="flex w-full items-start gap-2.5 rounded-xl px-2 py-1.5 text-left transition-colors hover:bg-slate-50 active:scale-[0.99]"
+                                                        >
+                                                            <span className={`mt-[2px] grid h-[17px] w-[17px] shrink-0 place-items-center rounded-[5px] border transition-colors ${
+                                                                done ? 'border-emerald-500 bg-emerald-500 text-white' : 'border-slate-300 bg-white'
+                                                            }`}>
+                                                                {done && (
+                                                                    <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                                                                        <path d="M1 5.2l2.6 2.6L9 2.4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                                                                    </svg>
+                                                                )}
+                                                            </span>
+                                                            <span className={`text-[13px] leading-snug ${done ? 'text-slate-400 line-through' : 'text-slate-700'}`}>
+                                                                {check}
+                                                            </span>
+                                                        </button>
+                                                    </li>
+                                                );
+                                            })}
+                                        </ul>
+                                    </div>
+                                )}
+
                                 {/* AI-generated form fields (единый блок: и детали, и уточнения) */}
                                 {aiFields.length > 0 && (
                                     <div className={CARD_CLASS}>
@@ -1213,11 +1422,17 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                                                             value={fieldValues[f.key]}
                                                             onChange={setFieldValue}
                                                             cabinets={workplaceCabinets}
+                                                            invalid={triedSend && missingKeys.has(f.key)}
                                                         />
                                                     </div>
                                                 );
                                             })}
                                         </div>
+                                        {triedSend && missingRequired.length > 0 && (
+                                            <p className="mt-2 text-[12px] font-medium text-rose-600">
+                                                Заполните поля со звёздочкой — без них заявку не примут.
+                                            </p>
+                                        )}
                                         <button
                                             type="button"
                                             onClick={() => callAi('finalize')}
@@ -1283,6 +1498,43 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                                             <TelegramPreview text={previewText} />
                                         </div>
                                     )}
+
+                                    {/* Вложение: скриншот почти всегда объясняет проблему быстрее текста */}
+                                    <div className="mt-3 border-t border-slate-200/70 pt-3">
+                                        <input
+                                            ref={fileInputRef}
+                                            type="file"
+                                            className="hidden"
+                                            accept="image/*,.pdf,.txt,.log,.doc,.docx,.xls,.xlsx,.zip"
+                                            onChange={(e) => { pickAttachment(e.target.files?.[0]); e.target.value = ''; }}
+                                        />
+                                        {attachment ? (
+                                            <div className="flex items-center gap-2 rounded-xl bg-slate-100 px-3 py-2">
+                                                <FaIcon className="fas fa-paperclip text-slate-500 shrink-0" style={{ width: '0.85em', height: '0.85em' }} />
+                                                <span className="min-w-0 flex-1 truncate text-[12.5px] text-slate-700">{attachment.name}</span>
+                                                <span className="shrink-0 text-[11px] tabular-nums text-slate-400">
+                                                    {(attachment.size / 1024 / 1024).toFixed(1)} МБ
+                                                </span>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setAttachment(null)}
+                                                    aria-label="Убрать файл"
+                                                    className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-slate-400 transition-colors hover:bg-slate-200 hover:text-slate-600"
+                                                >
+                                                    <FaIcon className="fas fa-times" style={{ width: '0.75em', height: '0.75em' }} />
+                                                </button>
+                                            </div>
+                                        ) : (
+                                            <button
+                                                type="button"
+                                                onClick={() => fileInputRef.current?.click()}
+                                                className="inline-flex items-center gap-2 rounded-xl px-2 py-1.5 text-[12.5px] font-semibold text-blue-600 transition-colors hover:bg-blue-50 active:scale-[0.98]"
+                                            >
+                                                <FaIcon className="fas fa-paperclip" style={{ width: '0.85em', height: '0.85em' }} />
+                                                Прикрепить файл
+                                            </button>
+                                        )}
+                                    </div>
                                 </div>
 
                                 {/* Channel (закрепляет админ / глава отдела) */}
@@ -1398,7 +1650,12 @@ const ITTicketModal = ({ isOpen, onClose, apiBaseUrl, buildHeaders, notify, canM
                         type="button"
                         onClick={handleSend}
                         disabled={sending || aiBusy || !channelReady}
-                        title={!channelReady ? 'Канал закрепляет админ или глава отдела' : undefined}
+                        title={
+                            !channelReady ? 'Канал закрепляет админ или глава отдела'
+                                : missingRequired.length > 0
+                                    ? `Не заполнено: ${missingRequired.map((f) => f.label || f.key).join(', ')}`
+                                    : undefined
+                        }
                         className={`${iosBtnPrimary} bg-emerald-600 hover:bg-emerald-700`}
                     >
                         <FaIcon className={`fas ${sending ? 'fa-spinner fa-spin' : 'fa-paper-plane'}`} style={{ width: '0.9em', height: '0.9em' }} />
