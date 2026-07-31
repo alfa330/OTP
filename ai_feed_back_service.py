@@ -483,7 +483,15 @@ IT_TICKET_RESPONSE_SCHEMA = {
             "required": ["title", "summary", "markdown"],
         },
     },
-    "required": ["status", "category", "priority", "form", "ticket"],
+    # ВАЖНО: необязательные поля модель под схемой просто не заполняет. Поэтому
+    # subcategory и category_adjusted* обязаны быть здесь: без subcategory на экране
+    # остаётся пустым «Тип проблемы», а без category_adjusted фронт не применит
+    # исправленную ИИ тему (см. callAi в ITTicketModal.jsx) — пользователь останется
+    # со своей неверной категорией. Пустая строка/false — допустимые значения.
+    "required": [
+        "status", "category", "subcategory", "priority",
+        "category_adjusted", "category_adjustment_note", "form", "ticket",
+    ],
 }
 
 
@@ -875,6 +883,11 @@ async def generate_it_ticket_with_ai(mode: str, payload: dict) -> dict | None:
             result.setdefault("category", category)
         if subcategory:
             result.setdefault("subcategory", subcategory)
+        # Пользователь не выбирал категорию — исправлять было нечего, что бы ни ответила
+        # модель. Иначе на экране всплывает баннер «ИИ скорректировал тему» на пустом месте.
+        if not category and not subcategory:
+            result["category_adjusted"] = False
+            result["category_adjustment_note"] = ""
     return result
 
 

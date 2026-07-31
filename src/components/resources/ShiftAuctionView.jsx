@@ -2006,6 +2006,7 @@ const ADMIN_INSTRUCTION_STEPS = [
     nuances: [
       'Группа живёт только в своей неделе: на других неделях аукциона она не действует.',
       'День группы выбирается внутри недели общего старта — можно поставить её на другой день, не только на день аукциона.',
+      'В группу можно взять любого оператора направления (кроме уволенных) — он не обязан быть заранее отмечен в списке участников: попав в группу, он автоматически становится участником аукциона.',
       'Оператор может быть только в одной группе недели.',
       'Без своего завершения группа закрывается вместе со всеми; если группа стартует позже общего завершения, своё завершение обязательно.',
       'Пауза сдвигает завершение и у групп, а не только у общего окна.'
@@ -4512,14 +4513,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     () => getWeekDatesForDate(draftStartsAtParts.date),
     [draftStartsAtParts.date]
   );
-  // Only participants can sit in a group: the picker filters them out anyway, but
-  // an operator unchecked after joining must not linger in the saved payload.
-  const draftTimeGroupsForSave = useMemo(() => (
-    draftTimeGroups.map((group) => ({
-      ...group,
-      operatorIds: group.operatorIds.filter((id) => selectedIds.has(id))
-    }))
-  ), [draftTimeGroups, selectedIds]);
+  // A group takes any operator of the direction, not only those already ticked as
+  // participants — joining a group is what puts them into the auction.
+  const draftTimeGroupsForSave = draftTimeGroups;
   const timeGroupIssues = useMemo(() => {
     const issues = new Map();
     draftTimeGroups.forEach((group) => {
@@ -7150,7 +7146,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                         Группы времени
                       </div>
                       <p className="mt-1 text-xs text-slate-500">
-                        Часть участников может заходить раньше или позже общего окна.
+                        Часть операторов может заходить раньше или позже общего окна. В группу можно взять
+                        любого оператора направления — он сразу становится участником аукциона.
                         {selectedDraftPeriod
                           ? <> Группы действуют только на неделю {formatAuctionPeriodLabel(selectedDraftPeriod)}.</>
                           : <> Сначала выберите неделю аукциона.</>}
@@ -7173,14 +7170,14 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                         const expanded = expandedTimeGroupKey === group.key;
                         const issue = timeGroupIssues.get(group.key) || '';
                         const groupDate = group.date || draftStartsAtParts.date;
-                        const memberCount = group.operatorIds.filter((id) => selectedIds.has(id)).length;
+                        const memberCount = group.operatorIds.length;
                         const pickerOperators = timeGroupMemberQuery.trim()
-                          ? selectedOperators.filter((operator) => (
+                          ? operatorOptions.filter((operator) => (
                             `${operator.name} ${operator.direction || ''} ${operator.supervisor_name || ''}`
                               .toLowerCase()
                               .includes(timeGroupMemberQuery.trim().toLowerCase())
                           ))
-                          : selectedOperators;
+                          : operatorOptions;
                         return (
                           <div
                             key={group.key}
@@ -7316,11 +7313,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                     </span>
                                     <span className="text-xs tabular-nums text-slate-500">{memberCount}</span>
                                   </div>
-                                  {selectedOperators.length > 8 ? (
+                                  {operatorOptions.length > 8 ? (
                                     <input
                                       value={timeGroupMemberQuery}
                                       onChange={(event) => setTimeGroupMemberQuery(event.target.value)}
-                                      placeholder="Поиск по участникам"
+                                      placeholder="Поиск по оператору, направлению или СВ"
                                       className="mb-1.5 h-9 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
                                     />
                                   ) : null}
@@ -7344,7 +7341,13 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                           >
                                             {inThisGroup ? <CheckCircle2 size={13} /> : null}
                                           </span>
-                                          <span className="min-w-0 flex-1 truncate text-sm text-slate-900">{operator.name}</span>
+                                          <span className="min-w-0 flex-1">
+                                            <span className="block truncate text-sm text-slate-900">{operator.name}</span>
+                                            <span className="block truncate text-[11px] text-slate-500">
+                                              {operator.direction || 'Без направления'} · ставка {Number(operator.rate || 1).toFixed(2)}
+                                              {operator.supervisor_name ? ` · ${operator.supervisor_name}` : ''}
+                                            </span>
+                                          </span>
                                           {inOtherGroup ? (
                                             <span className="shrink-0 truncate rounded-md bg-slate-100 px-1.5 py-0.5 text-[11px] font-semibold text-slate-500">
                                               {memberOf.title}
@@ -7354,7 +7357,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                       );
                                     }) : (
                                       <div className="px-3 py-4 text-center text-xs text-slate-500">
-                                        {selectedOperators.length ? 'Никого не нашли.' : 'Сначала выберите участников аукциона.'}
+                                        {operatorOptions.length ? 'Никого не нашли.' : 'Операторы не найдены.'}
                                       </div>
                                     )}
                                   </div>

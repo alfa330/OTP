@@ -53,6 +53,16 @@ class GeminiGenerationConfigTests(unittest.TestCase):
         self.assertEqual(config["responseMimeType"], "application/json")
         self.assertIs(config["responseSchema"], service.IT_TICKET_RESPONSE_SCHEMA)
 
+    def test_fields_the_ui_depends_on_are_required_by_schema(self):
+        # Поля, не помеченные обязательными, модель под схемой не заполняет:
+        # без subcategory пустует «Тип проблемы», без category_adjusted фронт
+        # не применит исправленную ИИ тему.
+        required = set(service.IT_TICKET_RESPONSE_SCHEMA["required"])
+        for field in ("category", "subcategory", "category_adjusted",
+                      "category_adjustment_note", "priority", "form", "ticket", "status"):
+            with self.subTest(field=field):
+                self.assertIn(field, required)
+
     def test_lightest_model_goes_first(self):
         self.assertEqual(service.DEFAULT_GEMINI_MODEL_CHAIN[0], "gemini-2.5-flash-lite")
 
@@ -227,6 +237,36 @@ class PromptAssemblyTests(unittest.IsolatedAsyncioTestCase):
     async def test_admin_instructions_included_when_present(self):
         prompt = await self._prompt_for("draft", instructions="Oktell заменён на X")
         self.assertIn("Oktell заменён на X", prompt)
+
+    async def _result_for(self, ai_answer, payload):
+        async def fake_call(prompt, *a, **kw):
+            return dict(ai_answer)
+
+        with mock.patch.object(service, "_call_ai_json", side_effect=fake_call), \
+                mock.patch.object(service.db, "get_combined_it_ticket_instructions", return_value=""), \
+                mock.patch.object(service, "_effective_it_catalog",
+                                  return_value=service.IT_TICKET_CATALOG):
+            return await service.generate_it_ticket_with_ai("draft", payload)
+
+    async def test_no_adjust_banner_when_user_picked_nothing(self):
+        # Исправлять нечего — баннер «ИИ скорректировал тему» показывать не за что.
+        result = await self._result_for(
+            {"status": "ready", "category": "Телефония", "category_adjusted": True,
+             "category_adjustment_note": "выбрал сам"},
+            {"profile": "op", "description": "нет звука", "fields": {}},
+        )
+        self.assertFalse(result["category_adjusted"])
+        self.assertEqual(result["category_adjustment_note"], "")
+
+    async def test_adjust_banner_kept_when_user_had_picked_category(self):
+        result = await self._result_for(
+            {"status": "ready", "category": "Телефония", "category_adjusted": True,
+             "category_adjustment_note": "речь про телефонию, а не про ПК"},
+            {"profile": "op", "description": "нет звонков", "fields": {},
+             "category": "Компьютер и периферия"},
+        )
+        self.assertTrue(result["category_adjusted"])
+        self.assertIn("телефони", result["category_adjustment_note"].lower())
 
     async def test_draft_may_return_ready_in_one_call(self):
         # Первый проход должен уметь сразу отдать готовую заявку, если критичное уже известно —
