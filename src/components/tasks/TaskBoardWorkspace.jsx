@@ -1006,6 +1006,9 @@ const BoardView = ({
   focusPersonId = 0,
   focusTaskId = 0,
   actionNeedOf,
+  columnMeta = {},
+  chunkSize = DEFAULT_BOARD_CHUNK,
+  onLoadMore,
   wipLimit,
   onWipLimitChange,
   onOpen,
@@ -1043,7 +1046,7 @@ const BoardView = ({
     setHoverColumn(null);
   };
 
-  const inProgressCount = tasksByColumn.progress?.length || 0;
+  const inProgressCount = Number(columnMeta.progress?.total ?? (tasksByColumn.progress?.length || 0));
   const wipExceeded = Number(wipLimit) > 0 && inProgressCount > Number(wipLimit);
 
   return (
@@ -1051,6 +1054,7 @@ const BoardView = ({
       <div className="flex min-w-max gap-2.5">
         {BOARD_COLUMNS.map((column) => {
           const items = tasksByColumn[column.id] || [];
+          const meta = columnMeta[column.id] || { total: items.length, hidden: 0, loading: false };
           const isAllowed = !allowedColumns || allowedColumns.has(column.id);
           const isHover = hoverColumn === column.id && isAllowed;
           const isProgress = column.id === 'progress';
@@ -1079,8 +1083,11 @@ const BoardView = ({
               <header className="flex items-center justify-between gap-2 px-1.5 pb-2 pt-1">
                 <span className="flex items-baseline gap-1.5">
                   <span className="text-[12.5px] font-semibold text-slate-700">{column.title}</span>
-                  <span className={`text-[11.5px] tabular-nums ${wipExceeded && isProgress ? 'font-semibold text-amber-600' : 'text-slate-400'}`}>
-                    {items.length}
+                  <span
+                    className={`text-[11.5px] tabular-nums ${wipExceeded && isProgress ? 'font-semibold text-amber-600' : 'text-slate-400'}`}
+                    title={meta.hidden > 0 ? `Показано ${items.length} из ${meta.total}` : undefined}
+                  >
+                    {meta.total || items.length}
                     {isProgress && Number(wipLimit) > 0 && `/${wipLimit}`}
                   </span>
                 </span>
@@ -1160,6 +1167,23 @@ const BoardView = ({
                       : `Архив · ${archivedDone.length} ${pluralTasks(archivedDone.length)}`}
                   </button>
                 )}
+
+                {meta.hidden > 0 && (meta.atCap ? (
+                  <p className="px-1.5 py-2 text-[11px] leading-snug text-slate-400">
+                    Показано {meta.loaded} из {meta.total} — дальше сузьте доску или воспользуйтесь поиском.
+                  </p>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={meta.loading}
+                    onClick={() => onLoadMore?.(column.id)}
+                    className="mt-0.5 rounded-lg border border-dashed border-slate-300 px-2 py-2 text-[11.5px] font-medium text-slate-500 transition hover:border-slate-400 hover:bg-white hover:text-slate-700 disabled:cursor-wait disabled:opacity-60"
+                  >
+                    {meta.loading
+                      ? 'Загружаю…'
+                      : `Показать ещё ${Math.min(chunkSize, meta.hidden)} · не показано ${meta.hidden}`}
+                  </button>
+                ))}
               </div>
             </section>
           );
@@ -1468,24 +1492,37 @@ const TimelineView = ({ tasks, onOpen }) => {
 /* ─────────────── Оболочка ─────────────── */
 
 const WIP_STORAGE_KEY = 'otp.tasks.board.wipLimit';
-const PAGE_SIZE_STORAGE_KEY = 'otp.tasks.board.pageSize';
+const CHUNK_STORAGE_KEY = 'otp.tasks.board.chunkSize';
 
-/** Размер страницы доски. Настройка клиентская, но сервер режет по своему потолку. */
-export const BOARD_PAGE_SIZES = [30, 60, 100];
-export const DEFAULT_BOARD_PAGE_SIZE = 60;
+/**
+ * Сколько карточек подгружать за раз: в канбане — в каждую колонку, в бэклоге и
+ * таймлайне — на страницу. Настройка клиентская, но сервер режет по своему потолку.
+ */
+export const BOARD_CHUNK_SIZES = [20, 40, 60];
+export const DEFAULT_BOARD_CHUNK = 20;
 
-export const normalizeBoardPageSize = (value) => {
+export const normalizeBoardChunk = (value) => {
   const parsed = Number(value);
-  return BOARD_PAGE_SIZES.includes(parsed) ? parsed : DEFAULT_BOARD_PAGE_SIZE;
+  return BOARD_CHUNK_SIZES.includes(parsed) ? parsed : DEFAULT_BOARD_CHUNK;
 };
 
-/** Параметры запроса страницы доски: доска сотрудника грузится отдельно от общей. */
-export const boardQueryParams = ({ scope, mode, sort, limit, offset }) => {
+/** Колонка доски = свой срез статусов: запрашиваем и досчитываем её отдельно. */
+export const BOARD_COLUMN_QUERY = {
+  backlog:  { backlog: 'only' },
+  todo:     { status: 'assigned', backlog: 'exclude' },
+  progress: { status: 'in_progress,returned', backlog: 'exclude' },
+  review:   { status: 'completed', backlog: 'exclude' },
+  done:     { status: 'accepted', backlog: 'exclude' },
+};
+
+/** Параметры запроса выборки доски: колонка, доска сотрудника, порядок, страница. */
+export const boardQueryParams = ({ scope, mode, sort, column, limit, offset }) => {
   const params = { limit, offset };
-  // Важность сортирует сервер: иначе на странице оказались бы просто самые свежие,
-  // а «критичные» с других страниц наверх бы не поднялись.
+  // Важность сортирует сервер: иначе в выборку попали бы просто самые свежие,
+  // а «критичные» из хвоста наверх бы не поднялись.
   if (sort === 'importance') params.sort = 'importance';
-  if (mode === 'backlog') params.backlog = 'only';
+  if (column && BOARD_COLUMN_QUERY[column]) Object.assign(params, BOARD_COLUMN_QUERY[column]);
+  else if (mode === 'backlog') params.backlog = 'only';
   if (scope === 'my') params.mine = 'any';
   else if (scope === 'assigned') params.mine = 'assignee';
   else if (String(scope || '').startsWith('person:')) {
@@ -1495,9 +1532,16 @@ export const boardQueryParams = ({ scope, mode, sort, limit, offset }) => {
   return params;
 };
 
+/** Сколько карточек одна колонка может держать загруженными: страховка от бесконечной догрузки. */
+const BOARD_MAX_LOADED_PER_COLUMN = 200;
+
+const emptyColumnState = () => Object.fromEntries(
+  BOARD_COLUMNS.map((column) => [column.id, { tasks: [], total: 0, loading: true }])
+);
+
 const TaskBoardWorkspace = ({
   mode,
-  recipients = [],
+  people = [],
   loadTasks,
   reloadToken = 0,
   taskPatches = null,
@@ -1516,29 +1560,96 @@ const TaskBoardWorkspace = ({
   const [boardSort, setBoardSort] = useState('freshness');
   const [overrides, setOverrides] = useState({});
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(() => {
-    if (typeof window === 'undefined') return DEFAULT_BOARD_PAGE_SIZE;
-    return normalizeBoardPageSize(window.localStorage.getItem(PAGE_SIZE_STORAGE_KEY));
+  const [chunkSize, setChunkSize] = useState(() => {
+    if (typeof window === 'undefined') return DEFAULT_BOARD_CHUNK;
+    return normalizeBoardChunk(window.localStorage.getItem(CHUNK_STORAGE_KEY));
   });
   const [pageTasks, setPageTasks] = useState([]);
   const [pageTotal, setPageTotal] = useState(0);
   const [boardSummary, setBoardSummary] = useState(null);
   const [isPageLoading, setIsPageLoading] = useState(true);
   const pageRequestIdRef = useRef(0);
+  const [columnState, setColumnState] = useState(emptyColumnState);
+  const columnRequestIdRef = useRef({});
+  const columnLoadedKeyRef = useRef({});
   const [wipLimit, setWipLimit] = useState(() => {
     if (typeof window === 'undefined') return 0;
     return Number(window.localStorage.getItem(WIP_STORAGE_KEY) || 0) || 0;
   });
 
-  /* Доска грузит только свою страницу: доска сотрудника — его задачи, общая —
-     страницу по количеству. Раздел больше не тянет все задачи разом. */
+  const isBoardMode = mode === 'board';
+
+  /* Канбан грузится колонками: у каждой свой срез статусов, свой счётчик из базы
+     и своя кнопка «Показать ещё». Так остаток «сколько не показано» — честный,
+     а не «сколько не попало в общую страницу».
+     Сколько карточек держим в колонке, живёт в ref: это не должно перезапускать
+     эффект перезагрузки, иначе догрузка гоняла бы колонку по кругу. */
+  const columnLimitsRef = useRef({});
+  const fetchColumn = useCallback(async (columnId, { limit, offset = 0, append = false }) => {
+    if (typeof loadTasks !== 'function') return;
+    const requestId = (columnRequestIdRef.current[columnId] || 0) + 1;
+    columnRequestIdRef.current[columnId] = requestId;
+    setColumnState((prev) => ({ ...prev, [columnId]: { ...prev[columnId], loading: true } }));
+    const result = await loadTasks({
+      scope,
+      mode: 'board',
+      sort: boardSort,
+      column: columnId,
+      limit,
+      offset,
+    });
+    if (columnRequestIdRef.current[columnId] !== requestId) return;
+    const incoming = Array.isArray(result?.tasks) ? result.tasks : [];
+    setColumnState((prev) => {
+      const current = prev[columnId] || { tasks: [] };
+      // Догрузка дописывает хвост; список мог сдвинуться, поэтому склеиваем по id.
+      const merged = append
+        ? [...new Map([...current.tasks, ...incoming].map((task) => [task.id, task])).values()]
+        : incoming;
+      columnLimitsRef.current[columnId] = merged.length || limit;
+      return {
+        ...prev,
+        [columnId]: { tasks: merged, total: Number(result?.total || 0), loading: false },
+      };
+    });
+    if (columnId === 'todo' && !append) setBoardSummary(result?.summary || null);
+  }, [loadTasks, scope, boardSort]);
+
+  const boardReloadKey = `${scope}|${boardSort}|${reloadToken}|${chunkSize}`;
   useEffect(() => {
-    if (typeof loadTasks !== 'function') return undefined;
+    if (!isBoardMode) return;
+    BOARD_COLUMNS.forEach((column) => {
+      // После действий на доске возвращаем ровно столько карточек, сколько было
+      // показано, — иначе раскрытая колонка схлопывалась бы на каждый перенос.
+      const keep = Math.min(
+        Math.max(chunkSize, columnLimitsRef.current[column.id] || 0),
+        BOARD_MAX_LOADED_PER_COLUMN
+      );
+      fetchColumn(column.id, { limit: keep, offset: 0 });
+    });
+    // boardReloadKey собирает все причины перезагрузки колонок.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isBoardMode, boardReloadKey, fetchColumn]);
+
+  const showMoreInColumn = useCallback((columnId) => {
+    const state = columnState[columnId];
+    if (!state || state.loading) return;
+    fetchColumn(columnId, { limit: chunkSize, offset: state.tasks.length, append: true });
+  }, [columnState, fetchColumn, chunkSize]);
+
+  const resetColumns = useCallback(() => {
+    columnLimitsRef.current = {};
+    setColumnState(emptyColumnState());
+  }, []);
+
+  /* Бэклог и таймлайн — один список, им хватает обычной страницы. */
+  useEffect(() => {
+    if (isBoardMode || typeof loadTasks !== 'function') return undefined;
     const requestId = pageRequestIdRef.current + 1;
     pageRequestIdRef.current = requestId;
     let cancelled = false;
     setIsPageLoading(true);
-    loadTasks({ scope, mode, sort: boardSort, limit: pageSize, offset: (page - 1) * pageSize })
+    loadTasks({ scope, mode, sort: boardSort, limit: chunkSize, offset: (page - 1) * chunkSize })
       .then((result) => {
         if (cancelled || pageRequestIdRef.current !== requestId) return;
         setPageTasks(Array.isArray(result?.tasks) ? result.tasks : []);
@@ -1549,33 +1660,69 @@ const TaskBoardWorkspace = ({
         if (!cancelled && pageRequestIdRef.current === requestId) setIsPageLoading(false);
       });
     return () => { cancelled = true; };
-  }, [loadTasks, scope, mode, boardSort, page, pageSize, reloadToken]);
+  }, [isBoardMode, loadTasks, scope, mode, boardSort, page, chunkSize, reloadToken]);
 
-  // Смена вкладки (бэклог/доска/таймлайн) меняет выборку — начинаем с первой страницы.
-  useEffect(() => { setPage(1); }, [mode]);
+  // Смена вкладки (бэклог/доска/таймлайн) меняет выборку — начинаем сначала.
+  useEffect(() => {
+    setPage(1);
+    resetColumns();
+  }, [mode, resetColumns]);
 
   const changeScope = useCallback((next) => {
     setScope(next);
     setPage(1);
-  }, []);
+    resetColumns();
+  }, [resetColumns]);
 
-  // Смена порядка меняет всю выдачу, а не только страницу — возвращаемся к первой.
+  // Смена порядка меняет всю выдачу, а не только видимое — начинаем сначала.
   const changeBoardSort = useCallback((next) => {
     setBoardSort(next);
     setPage(1);
-  }, []);
+    resetColumns();
+  }, [resetColumns]);
 
-  const changePageSize = useCallback((next) => {
-    const normalized = normalizeBoardPageSize(next);
-    setPageSize(normalized);
+  const changeChunkSize = useCallback((next) => {
+    const normalized = normalizeBoardChunk(next);
+    setChunkSize(normalized);
     setPage(1);
-    try { window.localStorage.setItem(PAGE_SIZE_STORAGE_KEY, String(normalized)); } catch (error) { /* private mode */ }
-  }, []);
+    resetColumns();
+    try { window.localStorage.setItem(CHUNK_STORAGE_KEY, String(normalized)); } catch (error) { /* private mode */ }
+  }, [resetColumns]);
 
-  const totalPages = Math.max(1, Math.ceil(pageTotal / pageSize));
+  // Страница могла уехать за конец списка (задачи закрыли) — подтягиваем обратно.
   useEffect(() => {
-    if (page > totalPages) setPage(totalPages);
-  }, [page, totalPages]);
+    const lastPage = Math.max(1, Math.ceil(pageTotal / chunkSize));
+    if (page > lastPage) setPage(lastPage);
+  }, [page, pageTotal, chunkSize]);
+
+  /* Строки канбана — объединение загруженных колонок: перетаскивание и
+     оптимистичные правки продолжают работать на общем списке. */
+  const boardRows = useMemo(() => {
+    if (!isBoardMode) return pageTasks;
+    const byId = new Map();
+    BOARD_COLUMNS.forEach((column) => {
+      (columnState[column.id]?.tasks || []).forEach((task) => byId.set(task.id, task));
+    });
+    return [...byId.values()];
+  }, [isBoardMode, pageTasks, columnState]);
+
+  const columnMeta = useMemo(() => Object.fromEntries(BOARD_COLUMNS.map((column) => {
+    const state = columnState[column.id] || {};
+    const loaded = (state.tasks || []).length;
+    const total = Number(state.total || 0);
+    return [column.id, {
+      total,
+      loaded,
+      hidden: Math.max(0, total - loaded),
+      atCap: loaded >= BOARD_MAX_LOADED_PER_COLUMN,
+      loading: Boolean(state.loading),
+    }];
+  })), [columnState]);
+
+  const isColumnsLoading = useMemo(
+    () => BOARD_COLUMNS.some((column) => columnState[column.id]?.loading),
+    [columnState]
+  );
 
   // Оптимистичные правки живут ровно до тех пор, пока сервер не подтвердит те же значения.
   useEffect(() => {
@@ -1584,7 +1731,7 @@ const TaskBoardWorkspace = ({
       if (!keys.length) return prev;
       const next = {};
       keys.forEach((key) => {
-        const task = pageTasks.find((item) => String(item.id) === key);
+        const task = boardRows.find((item) => String(item.id) === key);
         if (!task) return;
         const patch = prev[key];
         const settled = Object.entries(patch).every(([field, value]) => task[field] === value);
@@ -1592,7 +1739,7 @@ const TaskBoardWorkspace = ({
       });
       return Object.keys(next).length === keys.length ? prev : next;
     });
-  }, [pageTasks]);
+  }, [boardRows]);
 
   const handleWipLimitChange = useCallback((value) => {
     const normalized = Math.max(0, Math.min(99, Number(value) || 0));
@@ -1601,41 +1748,38 @@ const TaskBoardWorkspace = ({
   }, []);
 
   const effectiveTasks = useMemo(
-    () => pageTasks.map((task) => {
+    () => boardRows.map((task) => {
       const patched = taskPatches?.[task.id] || task;
       return overrides[task.id] ? { ...patched, ...overrides[task.id] } : patched;
     }),
-    [pageTasks, taskPatches, overrides]
+    [boardRows, taskPatches, overrides]
   );
 
-  const boardPeople = useMemo(() => {
-    const byId = new Map();
-    const addPerson = (person) => {
-      const id = Number(person?.id || 0);
-      if (!id || id === currentUserId) return;
-      const current = byId.get(id);
-      byId.set(id, {
-        ...(current || {}),
-        ...person,
-        id,
-        name: String(person?.name || current?.name || `Сотрудник #${id}`).trim(),
-      });
-    };
-    recipients.forEach(addPerson);
-    effectiveTasks.forEach((task) => {
-      addPerson(task?.assignee);
-      addPerson(task?.creator);
-    });
-    return [...byId.values()].sort((left, right) =>
-      String(left.name || '').localeCompare(String(right.name || ''), 'ru')
-    );
-  }, [recipients, effectiveTasks, currentUserId]);
+  /* Список досок приходит с сервера: у кого есть задачи, кроме уволенных.
+     Собирать его из загруженных карточек нельзя — доска грузится порциями. */
+  const boardPeople = useMemo(() => people
+    .filter((person) => Number(person?.id || 0) && Number(person.id) !== currentUserId)
+    .sort((left, right) => {
+      const leftDept = String(left.department || 'я');
+      const rightDept = String(right.department || 'я');
+      if (leftDept !== rightDept) {
+        // Сотрудники без отдела — в конце списка, отдельной группой.
+        if (!left.department) return 1;
+        if (!right.department) return -1;
+        return leftDept.localeCompare(rightDept, 'ru');
+      }
+      return String(left.name || '').localeCompare(String(right.name || ''), 'ru');
+    }), [people, currentUserId]);
 
   const adminScopeOptions = useMemo(() => [
     { value: 'my', label: 'Моя доска' },
     { value: 'assigned', label: 'Задачи на мне' },
     { value: 'all', label: 'Все доски' },
-    ...boardPeople.map((person) => ({ value: `person:${person.id}`, label: person.name })),
+    ...boardPeople.map((person) => ({
+      value: `person:${person.id}`,
+      label: person.name,
+      groupLabel: person.department || 'Без отдела',
+    })),
   ], [boardPeople]);
 
   // На чьей доске мы стоим: для персональной доски — выбранный сотрудник, иначе сам пользователь.
@@ -1775,7 +1919,7 @@ const TaskBoardWorkspace = ({
     applyBoardPatch(task, patch);
   }, [applyBoardPatch]);
 
-  if (isPageLoading && !pageTasks.length) {
+  if (isBoardMode ? (isColumnsLoading && !boardRows.length) : (isPageLoading && !pageTasks.length)) {
     return (
       <div className="space-y-2">
         {[0, 1, 2].map((index) => (
@@ -1791,9 +1935,10 @@ const TaskBoardWorkspace = ({
     { value: 'all', label: 'Все' },
   ];
 
-  const pageSizeOptions = BOARD_PAGE_SIZES.map((size) => ({ value: size, label: `по ${size}` }));
-  const rangeFrom = pageTotal === 0 ? 0 : (page - 1) * pageSize + 1;
-  const rangeTo = Math.min(pageTotal, (page - 1) * pageSize + pageTasks.length);
+  const chunkOptions = BOARD_CHUNK_SIZES.map((size) => ({ value: size, label: `по ${size}` }));
+  const rangeFrom = pageTotal === 0 ? 0 : (page - 1) * chunkSize + 1;
+  const rangeTo = Math.min(pageTotal, (page - 1) * chunkSize + pageTasks.length);
+  const totalPages = Math.max(1, Math.ceil(pageTotal / chunkSize));
 
   return (
     <div className="tb-scope space-y-3" style={{ fontFamily: APPLE_FONT }}>
@@ -1826,10 +1971,10 @@ const TaskBoardWorkspace = ({
           <CustomSelect
             className="w-[110px]"
             variant="ios"
-            ariaLabel="Карточек на странице"
-            value={pageSize}
-            options={pageSizeOptions}
-            onChange={changePageSize}
+            ariaLabel={isBoardMode ? 'Карточек в колонке за раз' : 'Карточек на странице'}
+            value={chunkSize}
+            options={chunkOptions}
+            onChange={changeChunkSize}
           />
         </div>
         {mode === 'board' && (
@@ -1865,6 +2010,9 @@ const TaskBoardWorkspace = ({
           focusPersonId={focusPersonId}
           focusTaskId={focusTaskId}
           actionNeedOf={actionNeedOf}
+          columnMeta={columnMeta}
+          chunkSize={chunkSize}
+          onLoadMore={showMoreInColumn}
           wipLimit={wipLimit}
           onWipLimitChange={handleWipLimitChange}
           onOpen={onOpenTask}
@@ -1877,15 +2025,17 @@ const TaskBoardWorkspace = ({
         <TimelineView tasks={scopedTasks} onOpen={onOpenTask} />
       )}
 
-      <BoardPager
-        from={rangeFrom}
-        to={rangeTo}
-        total={pageTotal}
-        page={page}
-        totalPages={totalPages}
-        isLoading={isPageLoading}
-        onPageChange={setPage}
-      />
+      {!isBoardMode && (
+        <BoardPager
+          from={rangeFrom}
+          to={rangeTo}
+          total={pageTotal}
+          page={page}
+          totalPages={totalPages}
+          isLoading={isPageLoading}
+          onPageChange={setPage}
+        />
+      )}
     </div>
   );
 };

@@ -17304,6 +17304,28 @@ def get_task_recipients():
         return jsonify({"error": f"Internal server error"}), 500
 
 
+@app.route('/api/tasks/board_people', methods=['GET', 'OPTIONS'])
+@require_api_key
+def get_task_board_people():
+    """Список сотрудников для переключателя досок: без уволенных, с отделами."""
+    try:
+        requester_id, requester, guard_response, guard_status = _task_route_guard()
+        if guard_response is not None:
+            return guard_response, guard_status
+
+        requester_role = getattr(g, 'effective_task_role', requester[3])
+        people = db.get_task_board_people(requester_id, requester_role)
+        for person in people:
+            person["avatar_url"] = _build_avatar_signed_url(
+                person.pop("avatar_bucket", None),
+                person.pop("avatar_blob_path", None)
+            )
+        return jsonify({"status": "success", "people": people}), 200
+    except Exception as e:
+        logging.error(f"Error in get_task_board_people: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/tasks/action_required', methods=['GET', 'OPTIONS'])
 @require_api_key
 def get_task_action_required_count():
