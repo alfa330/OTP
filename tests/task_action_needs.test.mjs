@@ -2,7 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  actionNeedSeenKey,
   collectTaskActionNeeds,
+  countUnseenActionNeeds,
+  isActionNeedSeen,
   reviewAuthorityId,
   taskActionNeed,
 } from '../src/components/tasks/taskActionNeeds.js';
@@ -16,6 +19,7 @@ const task = (fields) => ({
   id: 1,
   status: 'assigned',
   is_backlog: false,
+  updated_at: '2026-07-31T09:00:00',
   assignee: { id: ME, name: 'Я' },
   creator: { id: 42, name: 'Руководитель' },
   ...fields,
@@ -92,8 +96,53 @@ test('список ждущих задач: сначала срочные, вн�
   assert.deepEqual(needs.map((need) => need.kind), ['overdue', 'overdue', 'returned', 'review', 'fresh']);
 });
 
-test('задача считается один раз — счётчик бейджа равен длине списка', () => {
+test('задача считается один раз — одна причина на задачу', () => {
   const needs = collectTaskActionNeeds([task({ id: 20, status: 'returned', due_at: PAST })], ME, NOW);
   assert.equal(needs.length, 1);
   assert.equal(needs[0].kind, 'overdue');
+});
+
+test('просмотренное уведомление остаётся в списке, но уходит из счётчика', () => {
+  const seenTask = task({ id: 30, action_seen: { kind: 'fresh', seen_at: '2026-07-31T09:30:00' } });
+  const needs = collectTaskActionNeeds([seenTask, task({ id: 31 })], ME, NOW);
+
+  assert.equal(needs.length, 2);
+  assert.equal(countUnseenActionNeeds(needs), 1);
+  // Непросмотренные — выше просмотренных внутри группы.
+  assert.deepEqual(needs.map((need) => need.task.id), [31, 30]);
+  assert.deepEqual(needs.map((need) => need.seen), [false, true]);
+});
+
+test('отметка сгорает, когда причина сменилась', () => {
+  const escalated = task({
+    id: 32,
+    due_at: PAST,
+    action_seen: { kind: 'fresh', seen_at: '2026-07-31T09:30:00' },
+  });
+  assert.equal(isActionNeedSeen(escalated, 'overdue'), false);
+  assert.equal(countUnseenActionNeeds(collectTaskActionNeeds([escalated], ME, NOW)), 1);
+});
+
+test('отметка сгорает, когда задачу тронули после просмотра', () => {
+  const touchedAgain = task({
+    id: 33,
+    status: 'returned',
+    updated_at: '2026-07-31T11:00:00',
+    action_seen: { kind: 'returned', seen_at: '2026-07-31T10:00:00' },
+  });
+  assert.equal(isActionNeedSeen(touchedAgain, 'returned'), false);
+
+  const stillSeen = { ...touchedAgain, action_seen: { kind: 'returned', seen_at: '2026-07-31T11:00:00' } };
+  assert.equal(isActionNeedSeen(stillSeen, 'returned'), true);
+});
+
+test('локальная отметка гасит счётчик до ответа сервера', () => {
+  const pending = task({ id: 34 });
+  const localSeen = new Set([actionNeedSeenKey(pending, 'fresh')]);
+
+  assert.equal(countUnseenActionNeeds(collectTaskActionNeeds([pending], ME, NOW)), 1);
+  assert.equal(countUnseenActionNeeds(collectTaskActionNeeds([pending], ME, NOW, localSeen)), 0);
+  // Ключ включает updated_at: после правки задачи локальная отметка не подходит.
+  const edited = { ...pending, updated_at: '2026-07-31T11:30:00' };
+  assert.equal(countUnseenActionNeeds(collectTaskActionNeeds([edited], ME, NOW, localSeen)), 1);
 });

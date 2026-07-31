@@ -17321,6 +17321,36 @@ def get_task_action_required_count():
         return jsonify({"error": "Internal server error"}), 500
 
 
+@app.route('/api/tasks/<int:task_id>/action_seen', methods=['POST', 'OPTIONS'])
+@require_api_key
+def mark_task_action_seen(task_id):
+    """Уведомление просмотрено: гасим его в счётчике, задачу не трогаем."""
+    try:
+        requester_id, requester, guard_response, guard_status = _task_route_guard()
+        if guard_response is not None:
+            return guard_response, guard_status
+
+        payload = request.get_json(silent=True) or {}
+        try:
+            summary = db.mark_task_action_seen(requester_id, task_id, payload.get('kind'))
+        except ValueError as e:
+            error_code = str(e)
+            if error_code == 'INVALID_TASK_ACTION_KIND':
+                return jsonify({"error": "Invalid action kind"}), 400
+            if error_code == 'TASK_NOT_FOUND':
+                return jsonify({"error": "Task not found"}), 404
+            raise
+
+        return jsonify({
+            "status": "success",
+            "count": summary.get("count", 0),
+            "breakdown": summary.get("breakdown", {})
+        }), 200
+    except Exception as e:
+        logging.error(f"Error in mark_task_action_seen: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/tasks/notes', methods=['GET', 'POST', 'OPTIONS'])
 @require_api_key
 def handle_task_notes():

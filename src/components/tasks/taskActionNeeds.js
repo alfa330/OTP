@@ -77,22 +77,45 @@ export const taskActionNeed = (task, userId, now = Date.now()) => {
   return null;
 };
 
+/** Ключ отметки «просмотрено»: сменилась причина или задачу тронули — отметка сгорает. */
+export const actionNeedSeenKey = (task, kind) =>
+  `${Number(task?.id || 0)}:${kind}:${task?.updated_at || ''}`;
+
+/**
+ * Просмотрено ли уведомление. Серверная отметка (task.action_seen) переживает
+ * перезагрузку, локальный набор ключей закрывает мгновение до ответа сервера.
+ */
+export const isActionNeedSeen = (task, kind, localSeen = null) => {
+  if (localSeen && localSeen.has(actionNeedSeenKey(task, kind))) return true;
+  const seen = task?.action_seen;
+  if (!seen || seen.kind !== kind || !seen.seen_at) return false;
+  const seenAt = new Date(seen.seen_at).getTime();
+  const updatedAt = new Date(task?.updated_at || 0).getTime();
+  if (Number.isNaN(seenAt)) return false;
+  return Number.isNaN(updatedAt) ? true : seenAt >= updatedAt;
+};
+
 /** Список задач, ждущих пользователя: срочные сверху, внутри группы — по дедлайну. */
-export const collectTaskActionNeeds = (tasks, userId, now = Date.now()) => {
+export const collectTaskActionNeeds = (tasks, userId, now = Date.now(), localSeen = null) => {
   const list = [];
   (Array.isArray(tasks) ? tasks : []).forEach((task) => {
     const need = taskActionNeed(task, userId, now);
-    if (need) list.push({ ...need, task });
+    if (need) list.push({ ...need, task, seen: isActionNeedSeen(task, need.kind, localSeen) });
   });
   return list.sort((left, right) => {
     const byKind = ACTION_NEED_META[left.kind].order - ACTION_NEED_META[right.kind].order;
     if (byKind !== 0) return byKind;
+    if (left.seen !== right.seen) return left.seen ? 1 : -1;
     const leftDue = left.dueAt ? left.dueAt.getTime() : Number.POSITIVE_INFINITY;
     const rightDue = right.dueAt ? right.dueAt.getTime() : Number.POSITIVE_INFINITY;
     if (leftDue !== rightDue) return leftDue - rightDue;
     return Number(right.task?.id || 0) - Number(left.task?.id || 0);
   });
 };
+
+/** Счётчик бейджа: просмотренные не в счёт, иначе число только растёт. */
+export const countUnseenActionNeeds = (needs) =>
+  (Array.isArray(needs) ? needs : []).filter((need) => !need.seen).length;
 
 /** Разбивка по причинам — для подзаголовков панели уведомлений. */
 export const groupTaskActionNeeds = (needs) => {
