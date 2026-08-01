@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { Suspense, lazy, useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from 'react';
 import { useLocation } from 'react-router-dom';
 import axios from 'axios';
 import _ from 'lodash';
@@ -42037,6 +42037,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 };
             }, [user?.id]);
 
+            /* Ширину сайдбара читают не только обычный контент, но и fixed-слои,
+               отрендеренные порталом в document.body (окно статуса в «Задачах»).
+               Переменная --app-sidebar-offset живёт на :root, а состояние
+               сворачивания к ней приносит этот класс — см. src/styles.css.
+               Именно useLayoutEffect: сайдбар по умолчанию свёрнут, и с обычным
+               useEffect первый кадр рисовался бы с отступом развёрнутого — заметный
+               скачок контента при каждой загрузке. */
+            useLayoutEffect(() => {
+                document.body.classList.toggle('sidebar-collapsed', sidebarCollapsed);
+                return () => document.body.classList.remove('sidebar-collapsed');
+            }, [sidebarCollapsed]);
+
             useEffect(() => {
                 if (view === 'events') setEventsUnreadCount(0);
             }, [view]);
@@ -43358,7 +43370,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     : view === 'ai_qa'
                                         ? 'px-3 pb-6 pt-20 md:p-8 bg-gray-50 min-h-screen overflow-y-auto'
                                         : 'p-8 bg-gray-50 min-h-screen overflow-y-auto'
-                        } ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}
+                        }`}
                         style={isCallEvaluationView ? { backgroundColor: '#f7f7f5' } : undefined}
                     >
                         {birthdayBannerVisible && view !== 'four_you' && (

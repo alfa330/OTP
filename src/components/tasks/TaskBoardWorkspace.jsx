@@ -592,7 +592,9 @@ const PlanPopover = ({ task, canPlan, anchorRef, onApply, onClose }) => {
   return createPortal(
     <div
       ref={ref}
-      className="fixed z-[95] rounded-2xl bg-white p-3 shadow-[0_12px_40px_rgba(15,23,42,0.16)] ring-1 ring-slate-900/10"
+      // 105 — выше окна статуса (90) и выше сайдбара, поднятого на время его показа
+      // (100, см. body.sheet-beside-sidebar в src/styles.css), но ниже карточки задачи (110).
+      className="fixed z-[105] rounded-2xl bg-white p-3 shadow-[0_12px_40px_rgba(15,23,42,0.16)] ring-1 ring-slate-900/10"
       onClick={(event) => event.stopPropagation()}
       style={{
         fontFamily: APPLE_FONT,
@@ -876,10 +878,12 @@ const BacklogView = ({ tasks, canPlan, onOpen, onPromote, onApplyPlan, onReorder
 
 const COLUMN_BROWSER_PAGE = 40;
 
-/* Окно статуса: выше сайдбара приложения (z-50) и гамбургера (60), но ниже
-   карточки задачи и её модалок (110/111/120 — см. шкалу слоёв в TasksView).
-   Открытая задача перекрывает окно, закрытая возвращает к нему. */
+/* Окно статуса занимает область контента и не накрывает сайдбар: слева отступ на
+   его ширину (--app-sidebar-offset из :root, см. src/styles.css). По слою — выше
+   раздела и гамбургера (60), но ниже карточки задачи и её модалок (110/111/120):
+   открытая задача перекрывает окно, закрытая возвращает к нему. */
 const COLUMN_BROWSER_Z = 90;
+const COLUMN_BROWSER_OFFSET_LEFT = 'var(--app-sidebar-offset, 0px)';
 
 const ColumnBrowser = ({
   column,
@@ -961,6 +965,7 @@ const ColumnBrowser = ({
       open
       wide
       z={COLUMN_BROWSER_Z}
+      offsetLeft={COLUMN_BROWSER_OFFSET_LEFT}
       // Esc при открытой задаче закрывает задачу, а не оба слоя сразу.
       closeOnEscape={!isTaskOpen}
       icon="fa-layer-group"
@@ -1563,6 +1568,7 @@ const TimelineView = ({ tasks, onOpen }) => {
         open
         wide
         z={COLUMN_BROWSER_Z}
+        offsetLeft={COLUMN_BROWSER_OFFSET_LEFT}
         icon="fa-chart-gantt"
         title="Таймлайн задач"
         subtitle={`${rows.length} ${rows.length === 1 ? 'задача' : 'задач'} в окне · Esc чтобы выйти`}
@@ -1890,8 +1896,8 @@ const TaskBoardWorkspace = ({
     [scopedTasks]
   );
 
-  // «Готово» — скользящее окно: принятое больше недели назад уезжает в архив колонки,
-  // иначе доска со временем превращается в свалку выполненного.
+  // Раскладка по колонкам одинаковая для всех: «Готово» ничего не прячет. Архив на
+  // неделю убрали вместе с догрузкой в колонке — остальное смотрят в окне статуса.
   const tasksByColumn = useMemo(() => {
     const buckets = Object.fromEntries(BOARD_COLUMNS.map((column) => [column.id, []]));
     scopedTasks.forEach((task) => {
