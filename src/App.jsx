@@ -12764,12 +12764,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // Отдел TEZ грузит статусы вручную (CSV/XLSX) и не использует синки Oktell/Chat2Desk.
             const plannerDepartmentCode = String(user?.department_code ?? user?.departmentCode ?? '').toLowerCase();
             const isTezPlanner = plannerDepartmentCode === 'tez';
-            // Отдел продаж: отметки прихода/ухода живут в Clockster (face-терминал) —
-            // в меню «⋮» есть свой синк, часы/опоздания считаются по сменам iCORE.
-            // Глава отдела учитывается по возглавляемому отделу: свой department_id
-            // у него может быть не проставлен.
-            const plannerHeadedDepartmentCode = String(user?.headed_department_code ?? user?.headedDepartmentCode ?? '').toLowerCase();
-            const isOpPlanner = plannerDepartmentCode === 'op' || plannerHeadedDepartmentCode === 'op';
             const isAdminLikePlanner = isAdminLikeRoleFn(user?.role);
             // Фронт офисы не используют Oktell/Binotel/Chat2Desk — в меню «⋮»
             // скрыты все кнопки синхронизаций и статусов Chat2Desk.
@@ -12901,16 +12895,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [showEditStatusJournal, setShowEditStatusJournal] = useState(false);
             const [editTimelineFocusedStatusKey, setEditTimelineFocusedStatusKey] = useState('');
             const [showDayBreaksModal, setShowDayBreaksModal] = useState(false);
-            // Отметки Clockster (приход/уход, только ОП): список отметок дня в модалке
-            // таймлайна + ручные правки (тип/добавить/удалить). Правки сохраняются в
-            // оверрайдах на бэке и переживают ночной ре-синк Clockster.
-            const canManageAttendanceMarks = isOpPlanner || isAdminLikePlanner;
-            const [attendanceMarks, setAttendanceMarks] = useState({ key: '', list: [], loading: false, error: '', available: false });
-            const [attendanceMarkDraft, setAttendanceMarkDraft] = useState({ time: '', kind: 'in' });
-            const [attendanceMarkBusy, setAttendanceMarkBusy] = useState(false);
-            // Пояснения к отметкам держим свёрнутыми под «ⓘ»: в списке важны сами
-            // отметки, а не текст вокруг них.
-            const [attendanceHintOpen, setAttendanceHintOpen] = useState(false);
             const [isLoading, setIsLoading] = useState(false);
             const [bulkActionState, setBulkActionState] = useState({ loading: false, action: '' });
             const [dayAggregateLoading, setDayAggregateLoading] = useState(false);
@@ -17254,352 +17238,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             };
 
-            // === Отметки Clockster в модалке таймлайна дня (только ОП) ===
-            const fetchAttendanceMarks = async (opId, dateKey) => {
-                const key = `${opId}|${dateKey}`;
-                // available=false до успешного ответа: отдел ОПЕРАТОРА знает только
-                // бэкенд (в планировщике у оператора есть направление, но не отдел),
-                // поэтому секцию показываем строго по факту 200. Иначе админ, открыв
-                // оператора СЗоВ/ТЭЗ, видел бы её мелькание до ответа 400.
-                // Но при ПЕРЕзагрузке того же дня (после правки отметки) доступность
-                // сохраняем — иначе таб «Отметки» на миг исчезает и модалку сбрасывает
-                // на «Смены» прямо во время работы.
-                setAttendanceMarks(prev => ({
-                    ...prev,
-                    key,
-                    loading: true,
-                    error: '',
-                    available: prev.key === key ? prev.available : false
-                }));
-                try {
-                    const response = await fetch(`${API_BASE_URL}/api/attendance_marks?operator_id=${opId}&date=${dateKey}`, {
-                        credentials: 'include',
-                        headers: withAccessTokenHeader({ 'X-User-Id': user?.id })
-                    });
-                    const payload = await response.json().catch(() => ({}));
-                    if (!response.ok) {
-                        throw new Error(payload?.error || `HTTP ${response.status}`);
-                    }
-                    setAttendanceMarks({ key, list: payload?.marks || [], loading: false, error: '', available: true });
-                } catch (error) {
-                    setAttendanceMarks({ key, list: [], loading: false, error: error?.message || 'Не удалось загрузить отметки', available: false });
-                }
-            };
-
-            // Грузим отметки при открытии модалки дня (одиночный день, не bulk) —
-            // от этого зависит и появление таба «Отметки», и секция в таймлайне.
-            useEffect(() => {
-                if (!canManageAttendanceMarks || !modalState.open || !modalState.opId || !modalState.date
-                    || modalState.multipleDates) {
-                    return;
-                }
-                setAttendanceMarkDraft({ time: '', kind: 'in' });
-                fetchAttendanceMarks(modalState.opId, String(modalState.date));
-                // eslint-disable-next-line react-hooks/exhaustive-deps
-            }, [canManageAttendanceMarks, modalState.open, modalState.opId, modalState.date, modalState.multipleDates]);
-
-
-            // После правки отметки таймлайн/итоги пересчитаны на бэке — принудительно
-            // перезагружаем статусы видимого диапазона (тот же приём, что у синков).
-            const refreshPlannerAfterAttendanceMarkChange = async (dateKey) => {
-                plannerLoadedStatusRangeKeysRef.current = new Set();
-                plannerLoadingStatusRangeKeysRef.current = new Set();
-                plannerActiveStatusWindowKeyRef.current = '';
-                const rangeStart = String(plannerStatusFetchRange?.start || dateKey || '').trim();
-                const rangeEnd = String(plannerStatusFetchRange?.end || dateKey || '').trim();
-                if (rangeStart && rangeEnd) {
-                    await fetchPlannerImportedStatusesForRange(rangeStart, rangeEnd, { force: true });
-                }
-            };
-
-            const mutateAttendanceMark = async ({ method, path, body }) => {
-                if (attendanceMarkBusy || !modalState.opId || !modalState.date) return;
-                setAttendanceMarkBusy(true);
-                try {
-                    const response = await fetch(`${API_BASE_URL}${path}`, {
-                        method,
-                        credentials: 'include',
-                        headers: withAccessTokenHeader({ 'Content-Type': 'application/json', 'X-User-Id': user?.id }),
-                        body: body ? JSON.stringify(body) : undefined
-                    });
-                    const payload = await response.json().catch(() => ({}));
-                    if (!response.ok) {
-                        throw new Error(payload?.error || `HTTP ${response.status}`);
-                    }
-                    await fetchAttendanceMarks(modalState.opId, String(modalState.date));
-                    await refreshPlannerAfterAttendanceMarkChange(String(modalState.date));
-                    emitAppToast(payload?.message || 'Отметка обновлена', 'success');
-                } catch (error) {
-                    console.error('Error mutating attendance mark:', error);
-                    emitAppToast(error?.message || 'Не удалось изменить отметку', 'error');
-                } finally {
-                    setAttendanceMarkBusy(false);
-                }
-            };
-
-            const addAttendanceMark = () => {
-                const timeText = String(attendanceMarkDraft.time || '').trim();
-                if (!/^\d{2}:\d{2}$/.test(timeText)) {
-                    emitAppToast('Укажите время отметки (ЧЧ:ММ)', 'warning');
-                    return;
-                }
-                mutateAttendanceMark({
-                    method: 'POST',
-                    path: '/api/attendance_marks',
-                    body: {
-                        operator_id: modalState.opId,
-                        event_at: `${modalState.date} ${timeText}:00`,
-                        kind: attendanceMarkDraft.kind === 'out' ? 'out' : 'in'
-                    }
-                });
-            };
-
-            const toggleAttendanceMarkKind = (mark) => mutateAttendanceMark({
-                method: 'PUT',
-                path: `/api/attendance_marks/${mark.id}`,
-                body: { operator_id: modalState.opId, kind: mark.kind === 'in' ? 'out' : 'in' }
-            });
-
-            const deleteAttendanceMark = (mark) => mutateAttendanceMark({
-                method: 'DELETE',
-                path: `/api/attendance_marks/${mark.id}`,
-                body: { operator_id: modalState.opId }
-            });
-
-            // Секция отметок рисуется в двух местах: таб «Отметки» модалки дня
-            // (основное) и панель таймлайна (там рядом видны полосы статусов).
-            // Секция отметок в стиле дизайн-системы проекта (components/ui/ios):
-            // сгруппированный список строк, сегментированный контрол типа, мягкие
-            // карточки. Рисуется в двух местах: таб «Отметки» модалки дня (основное)
-            // и панель таймлайна (там рядом видны полосы статусов).
-            const renderAttendanceMarksSection = ({ compact = false } = {}) => {
-                const marks = attendanceMarks.list || [];
-                const kindMeta = (mark) => (mark.kind === 'in'
-                    ? { label: 'Приход', icon: 'fa-arrow-right', dot: 'bg-emerald-50 text-emerald-600 ring-emerald-100' }
-                    : { label: 'Уход', icon: 'fa-sign-out-alt', dot: 'bg-slate-100 text-slate-500 ring-slate-200' });
-
-                return (
-                    <div style={{ fontFamily: APPLE_FONT }} className={compact ? 'mb-3' : ''}>
-                        <div className="flex items-end justify-between gap-2 mb-1.5">
-                            <div className="flex items-center gap-1">
-                                <span className={iosGroupLabel}>Отметки за день</span>
-                                <button
-                                    type="button"
-                                    onClick={() => setAttendanceHintOpen(v => !v)}
-                                    className={`grid h-[18px] w-[18px] place-items-center rounded-full transition ${
-                                        attendanceHintOpen ? 'bg-blue-100 text-blue-600' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600'
-                                    }`}
-                                    title="Как это работает"
-                                    aria-label="Как это работает"
-                                    aria-expanded={attendanceHintOpen ? 'true' : 'false'}
-                                >
-                                    <FaIcon className="fas fa-circle-info text-[11px]"></FaIcon>
-                                </button>
-                            </div>
-                            {marks.length > 0 && (
-                                <span className="px-1 text-[11px] tabular-nums text-slate-400">
-                                    {marks.filter(m => m.kind === 'in').length} прих. · {marks.filter(m => m.kind === 'out').length} ух.
-                                </span>
-                            )}
-                        </div>
-
-                        {attendanceHintOpen && (
-                            <div className="mb-2 space-y-1.5 rounded-xl bg-blue-50/70 px-3 py-2.5 text-[11.5px] leading-relaxed text-blue-900/80 ring-1 ring-blue-100">
-                                <p>
-                                    Терминал Clockster один на вход и выход, поэтому тип отметки иногда определяется
-                                    неверно — переключите его кнопкой <FaIcon className="fas fa-random mx-0.5 text-[10px]"></FaIcon>.
-                                </p>
-                                <p>Правки сохраняются и не теряются при ночной синхронизации.</p>
-                                <p>
-                                    Часы и опоздание пересчитываются сразу: отработанным считается пересечение
-                                    смены с промежутком «приход → уход».
-                                </p>
-                                <p>
-                                    «Уход (авто)» появляется, когда уход не отмечен — добавьте свою отметку ухода,
-                                    и авто-закрытие исчезнет.
-                                </p>
-                            </div>
-                        )}
-
-                        <div className={`${iosCard} overflow-hidden`}>
-                            {attendanceMarks.loading ? (
-                                <div className="flex items-center gap-2 px-4 py-3.5 text-[13px] text-slate-400">
-                                    <FaIcon className="fas fa-spinner fa-spin text-[12px]"></FaIcon>
-                                    Загрузка отметок…
-                                </div>
-                            ) : marks.length === 0 ? (
-                                <div className="flex flex-col items-center gap-1 px-4 py-6 text-center">
-                                    <div className="grid h-9 w-9 place-items-center rounded-full bg-slate-100 text-slate-400">
-                                        <FaIcon className="fas fa-door-open text-[13px]"></FaIcon>
-                                    </div>
-                                    <div className="text-[13px] font-medium text-slate-500">Отметок за этот день нет</div>
-                                    <div className="text-[12px] text-slate-400">Их можно добавить вручную ниже</div>
-                                </div>
-                            ) : (
-                                <ul className="divide-y divide-slate-100">
-                                    {marks.map((mark) => {
-                                        const meta = kindMeta(mark);
-                                        const timeText = String(mark.event_at || '').slice(11, 16);
-                                        // Авто-закрытие правке не подлежит: оно живёт, только пока нет
-                                        // настоящей отметки ухода (добавьте свою — авто исчезнет).
-                                        const isAuto = !!mark.auto;
-                                        return (
-                                            <li
-                                                key={`att-mark-${mark.id}`}
-                                                className={`flex items-center gap-3 px-3.5 py-2.5 ${isAuto ? 'bg-slate-50/60' : 'bg-white'}`}
-                                            >
-                                                <div className={`grid h-8 w-8 shrink-0 place-items-center rounded-full ring-1 ${isAuto ? 'bg-white text-slate-400 ring-slate-200' : meta.dot}`}>
-                                                    <FaIcon className={`fas ${isAuto ? 'fa-wand-magic-sparkles' : meta.icon} text-[12px]`}></FaIcon>
-                                                </div>
-
-                                                <div className="min-w-0 flex-1">
-                                                    <div className="flex items-baseline gap-2">
-                                                        <span className={`text-[15px] font-semibold tabular-nums ${isAuto ? 'text-slate-500' : 'text-slate-900'}`}>
-                                                            {timeText}
-                                                        </span>
-                                                        <span className={`text-[13px] ${isAuto ? 'text-slate-400' : 'text-slate-500'}`}>
-                                                            {meta.label}
-                                                        </span>
-                                                    </div>
-                                                </div>
-
-                                                {mark.manual && !isAuto && <IosBadge tone="blue">вручную</IosBadge>}
-                                                {isAuto && <IosBadge tone="slate">авто</IosBadge>}
-
-                                                {!isAuto && (
-                                                    <div className="flex shrink-0 items-center gap-1">
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => toggleAttendanceMarkKind(mark)}
-                                                            disabled={attendanceMarkBusy}
-                                                            className="grid h-8 w-8 place-items-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 active:scale-95 disabled:opacity-40"
-                                                            title={mark.kind === 'in' ? 'Сменить на «Уход»' : 'Сменить на «Приход»'}
-                                                        >
-                                                            <FaIcon className="fas fa-random text-[12px]"></FaIcon>
-                                                        </button>
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => deleteAttendanceMark(mark)}
-                                                            disabled={attendanceMarkBusy}
-                                                            className="grid h-8 w-8 place-items-center rounded-full text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 active:scale-95 disabled:opacity-40"
-                                                            title="Удалить отметку"
-                                                        >
-                                                            <FaIcon className="fas fa-times text-[12px]"></FaIcon>
-                                                        </button>
-                                                    </div>
-                                                )}
-                                            </li>
-                                        );
-                                    })}
-                                </ul>
-                            )}
-                        </div>
-
-                        {!attendanceMarks.loading && (
-                        <>
-                            <div className={`${iosGroupLabel} mt-4 mb-1.5 block`}>Добавить отметку</div>
-                            <div className={`${iosCard} flex flex-wrap items-center gap-2 p-3`}>
-                                <input
-                                    type="time"
-                                    value={attendanceMarkDraft.time}
-                                    onChange={(e) => setAttendanceMarkDraft(prev => ({ ...prev, time: e.target.value }))}
-                                    className={`${iosInput} w-auto min-w-[104px] flex-none tabular-nums`}
-                                />
-                                <div className="inline-flex flex-none rounded-xl bg-slate-100 p-0.5">
-                                    {[{ key: 'in', label: 'Приход' }, { key: 'out', label: 'Уход' }].map(opt => {
-                                        const active = attendanceMarkDraft.kind === opt.key;
-                                        return (
-                                            <button
-                                                key={opt.key}
-                                                type="button"
-                                                onClick={() => setAttendanceMarkDraft(prev => ({ ...prev, kind: opt.key }))}
-                                                className={`rounded-[10px] px-3.5 py-2 text-[13px] font-medium transition-all ${
-                                                    active ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'
-                                                }`}
-                                            >
-                                                {opt.label}
-                                            </button>
-                                        );
-                                    })}
-                                </div>
-                                <button
-                                    type="button"
-                                    onClick={addAttendanceMark}
-                                    disabled={attendanceMarkBusy || !attendanceMarkDraft.time}
-                                    className={`${iosBtnPrimary} ml-auto`}
-                                >
-                                    <FaIcon className={`fas ${attendanceMarkBusy ? 'fa-spinner fa-spin' : 'fa-plus'} text-[11px]`}></FaIcon>
-                                    Добавить
-                                </button>
-                            </div>
-                        </>
-                        )}
-                    </div>
-                );
-            };
-
-            // === Синхронизация отметок Clockster (приход/уход отдела продаж) за видимый диапазон ===
-            const CLOCKSTER_SYNC_MAX_DAYS = 10;
-            const syncPlannerClocksterStatuses = async () => {
-                if (!user?.id || plannerStatusApiSyncLoading || plannerStatusAnomalyLoading || plannerOktellSyncLoading) return;
-                const visibleDaysSorted = (Array.isArray(visibleRange) ? [...visibleRange] : [])
-                    .map(day => String(day || '').trim())
-                    .filter(day => /^\d{4}-\d{2}-\d{2}$/.test(day))
-                    .sort((a, b) => a.localeCompare(b));
-                if (visibleDaysSorted.length === 0) {
-                    emitAppToast('Нет дат для синхронизации отметок Clockster', 'warning');
-                    return;
-                }
-                // Лимит эндпоинта — 10 дней: при более широком видимом диапазоне
-                // синкаем его последние (самые свежие) 10 дней.
-                const clippedDays = visibleDaysSorted.slice(-CLOCKSTER_SYNC_MAX_DAYS);
-                const syncStart = clippedDays[0];
-                const syncEnd = clippedDays[clippedDays.length - 1];
-
-                setPlannerStatusApiSyncLoading(true);
-                setPlannerStatusAnomalyError('');
-                setPlannerStatusImportSummary(null);
-                setPlannerStatusAnomalyOnly(false);
-                try {
-                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/sync_statuses_clockster`, {
-                        method: 'POST',
-                        credentials: 'include',
-                        headers: withAccessTokenHeader({
-                            'Content-Type': 'application/json',
-                            'X-User-Id': user?.id
-                        }),
-                        body: JSON.stringify({ date_from: syncStart, date_to: syncEnd })
-                    });
-                    const payload = await response.json().catch(() => ({}));
-                    if (!response.ok) {
-                        throw new Error(payload?.error || `HTTP ${response.status}`);
-                    }
-                    setPlannerStatusImportSummary({ ...(payload?.import || {}), message: payload?.message || '' });
-                    setPlannerStatusAnomalyFileName(syncStart === syncEnd
-                        ? `Clockster ${syncStart}`
-                        : `Clockster ${syncStart} - ${syncEnd}`);
-
-                    // Не замораживаем планировщик снапшотом «анализа»: сбрасываем кэш окон
-                    // и перезагружаем видимый диапазон (см. Chat2Desk/Binotel синки выше).
-                    plannerLoadedStatusRangeKeysRef.current = new Set();
-                    plannerLoadingStatusRangeKeysRef.current = new Set();
-                    plannerActiveStatusWindowKeyRef.current = '';
-                    const rangeStart = String(plannerStatusFetchRange?.start || syncStart || '').trim();
-                    const rangeEnd = String(plannerStatusFetchRange?.end || syncEnd || '').trim();
-                    if (rangeStart && rangeEnd) {
-                        await fetchPlannerImportedStatusesForRange(rangeStart, rangeEnd, { force: true });
-                    }
-                    emitAppToast(payload?.message || 'Отметки Clockster синхронизированы', 'success');
-                } catch (error) {
-                    console.error('Error syncing Clockster attendance:', error);
-                    const message = error?.message || 'Не удалось синхронизировать отметки Clockster';
-                    setPlannerStatusAnomalyError(message);
-                    emitAppToast(message, 'error');
-                } finally {
-                    setPlannerStatusApiSyncLoading(false);
-                }
-            };
-
             // === Синхронизация статусов операторов из Oktell (телефония) ===
             const OKTELL_SYNC_MAX_DAYS = 3;
             const BINOTEL_SYNC_MAX_DAYS = 10;
@@ -19670,19 +19308,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const modalTabShifts = !modalShowTabs || modalActiveTab === 'shifts';
             const modalTabStatus = !modalShowTabs || modalActiveTab === 'status';
             const modalTabControl = !modalShowTabs || modalActiveTab === 'control';
-            // Таб «Отметки» (приход/уход из Clockster) есть только у операторов ОП:
-            // available выставляется по факту успешного ответа бэкенда, который и
-            // знает отдел оператора.
-            const modalShowAttendanceTab = modalShowTabs && canManageAttendanceMarks && attendanceMarks.available;
-            const modalTabAttendance = modalShowAttendanceTab && modalActiveTab === 'attendance';
-            // Таб пропал (другой оператор / массовое выделение) — не оставляем модалку
-            // на пустой вкладке. Во время загрузки не дёргаем: иначе правка отметки
-            // (которая перезапрашивает список) выкидывала бы со вкладки.
-            useEffect(() => {
-                if (modalActiveTab === 'attendance' && !modalShowAttendanceTab && !attendanceMarks.loading) {
-                    setModalActiveTab('shifts');
-                }
-            }, [modalActiveTab, modalShowAttendanceTab, attendanceMarks.loading]);
             const modalActiveScheduleStatus = useMemo(() => {
                 if (isBulkSelectionModal) return null;
                 if (!modalState?.opId || !modalState?.date) return null;
@@ -24698,20 +24323,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 {excelTransferState.importing ? 'Импорт...' : 'Импорт Excel'}
                                             </button>
 
-                                            {!plannerSyncActionsHidden && (isOpPlanner || isAdminLikePlanner) && (
-                                            <button
-                                                onClick={() => {
-                                                    setShowPlannerTopActionsMenu(false);
-                                                    syncPlannerClocksterStatuses();
-                                                }}
-                                                disabled={plannerStatusApiSyncLoading || plannerStatusAnomalyLoading || plannerOktellSyncLoading}
-                                                className="w-full px-3 py-2 rounded-xl border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
-                                                title="Синхронизировать отметки прихода/ухода отдела продаж из Clockster за видимый диапазон (до 10 дней)"
-                                            >
-                                                <FaIcon className={`fas ${plannerStatusApiSyncLoading ? 'fa-spinner fa-spin' : 'fa-user-clock'}`}></FaIcon>
-                                                {plannerStatusApiSyncLoading ? 'Синхронизация...' : 'Отметки Clockster'}
-                                            </button>
-                                            )}
                                             {!plannerSyncActionsHidden && (isTezPlanner || isAdminLikePlanner) && (
                                             <button
                                                 onClick={() => {
@@ -26082,7 +25693,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {[
                                     { key: 'shifts', label: 'Смены', icon: 'fa-clock' },
                                     { key: 'status', label: 'Статус', icon: 'fa-user-clock' },
-                                    ...(modalShowAttendanceTab ? [{ key: 'attendance', label: 'Отметки', icon: 'fa-door-open' }] : []),
                                     { key: 'control', label: 'Контроль', icon: 'fa-shield-alt' }
                                 ].map(tab => {
                                     const active = modalActiveTab === tab.key;
@@ -26122,12 +25732,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 )}
                             </div>
                         </label>
-                    </div>
-                    )}
-
-                    {!isBulkSelectionModal && modalTabAttendance && (
-                    <div className="mb-6">
-                        {renderAttendanceMarksSection()}
                     </div>
                     )}
 
@@ -28673,8 +28277,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <div className="text-[11px] text-slate-400">Нет статусов в пределах смены</div>
                                         )}
                                     </div>
-
-                                    {canManageAttendanceMarks && attendanceMarks.available && renderAttendanceMarksSection({ compact: true })}
 
                                     <div className="flex items-start gap-2">
                                         <div className="w-14 shrink-0">

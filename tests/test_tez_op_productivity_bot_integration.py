@@ -105,7 +105,7 @@ class TezOpProductivityBotSourceTests(unittest.TestCase):
 
     def test_productivity_job_is_separate_and_uses_default_period(self):
         start = BOT_SOURCE.index("async def tez_op_productivity_sync_job():")
-        end = BOT_SOURCE.index("async def clockster_attendance_sync_job():", start)
+        end = BOT_SOURCE.index("async def tez_op_successes_job():", start)
         job = BOT_SOURCE[start:end]
 
         self.assertIn("run_in_executor", job)

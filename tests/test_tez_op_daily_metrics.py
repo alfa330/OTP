@@ -245,7 +245,7 @@ class TezStatusAuthoritativeSegmentTests(unittest.TestCase):
         bot_source = BOT_PATH.read_text(encoding="utf-8-sig")
         importer = bot_source[
             bot_source.index("def _tez_status_sync_importer("):
-            bot_source.index("\n\n# Отметки Clockster", bot_source.index("def _tez_status_sync_importer("))
+            bot_source.index("\n\ndef _chat_metrics_parse_date(", bot_source.index("def _tez_status_sync_importer("))
         ]
         self.assertIn("'segments_authoritative': True", importer)
 
