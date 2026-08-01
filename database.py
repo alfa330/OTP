@@ -941,6 +941,36 @@ def get_pool():
                 )
     return POOL
 
+
+# ── Привязка дня к группе оператора ───────────────────────────────────────────
+# «Учёт часов» фильтрует дни по daily_hours.group_id, а «Мои часы» показывают все
+# дни оператора (агрегат work_hours не привязан к группе). Пока членство в группе
+# заводят задним числом — а его почти всегда заводят позже, чем человек реально
+# вышел в группу, — дни ДО start_date не покрыты ни одним членством, получают
+# group_id = NULL и выпадают из группового отчёта. Итог: у оператора в «Моих
+# часах» больше часов, чем СВ видит в «Учёте часов».
+#
+# Поэтому день, не покрытый ни одним членством, достаётся БЛИЖАЙШЕМУ по времени
+# членству — но только из тех, что пересекают ТОТ ЖЕ МЕСЯЦ. Месяц здесь единица
+# отчётности: так день не уедет в группу, к которой оператор в этом месяце вообще
+# не имел отношения, и закрытые месяцы (снимки) не переписываются задним числом.
+# Оператор совсем без членства в этом месяце остаётся с NULL — это уже другой
+# случай (человека не завели в группу), и лечится он заведением членства.
+#
+# {m} — алиас group_operator_memberships, {day} — выражение даты дня.
+MEMBERSHIP_MONTH_OVERLAP_SQL = (
+    "{m}.start_date <= (date_trunc('month', {day}) + INTERVAL '1 month - 1 day')::date"
+    " AND ({m}.end_date IS NULL OR {m}.end_date >= date_trunc('month', {day})::date)"
+)
+# 0 — членство покрывает день; иначе расстояние в днях до ближайшей его границы.
+MEMBERSHIP_DAY_DISTANCE_SQL = (
+    "CASE"
+    " WHEN {m}.start_date > {day} THEN {m}.start_date - {day}"
+    " WHEN {m}.end_date IS NOT NULL AND {m}.end_date < {day} THEN {day} - {m}.end_date"
+    " ELSE 0 END"
+)
+
+
 class Database:
     SURVEY_OTHER_ANSWER_MAX_LENGTH = 500
     SCHEMA_INIT_LOCK_KEY = 915904137
@@ -4884,10 +4914,17 @@ class Database:
                 cursor.execute("ROLLBACK TO SAVEPOINT sp_null_group_backfill")
                 logging.error("null group_id backfill skipped: %s", exc, exc_info=True)
 
-    def _backfill_null_group_id_tx(self, cursor):
-        """Идемпотентно проставляет group_id строкам daily_hours/work_hours, где он NULL,
-        по членству оператора: для daily — группа на день строки; для work_hours — группа на
-        конец месяца. Трогает только NULL-строки, у которых есть подходящее членство."""
+    def _stamp_orphan_group_ids_tx(self, cursor, operator_id=None):
+        """Проставляет group_id строкам daily_hours/work_hours, где он NULL: для daily —
+        по дню строки, для work_hours — по концу месяца. Покрывающее членство приоритетнее;
+        если его нет, строка достаётся ближайшему членству того же месяца
+        (MEMBERSHIP_MONTH_OVERLAP_SQL) — иначе день не виден в «Учёте часов», хотя в «Моих
+        часах» считается. Без членства в этом месяце строка остаётся NULL.
+
+        Идемпотентно (трогает только NULL). operator_id=None — по всем операторам.
+        Возвращает (сколько daily, сколько work_hours)."""
+        scope = "" if operator_id is None else " AND {}.operator_id = %(operator_id)s"
+        params = {} if operator_id is None else {'operator_id': int(operator_id)}
         cursor.execute("""
             UPDATE daily_hours dh
             SET group_id = sub.group_id
@@ -4896,13 +4933,14 @@ class Database:
                 FROM daily_hours d
                 JOIN group_operator_memberships gom
                   ON gom.operator_id = d.operator_id
-                 AND gom.start_date <= d.day
-                 AND (gom.end_date IS NULL OR gom.end_date >= d.day)
-                WHERE d.group_id IS NULL
-                ORDER BY d.id, gom.start_date DESC
+                 AND """ + MEMBERSHIP_MONTH_OVERLAP_SQL.format(m='gom', day='d.day') + """
+                WHERE d.group_id IS NULL""" + scope.format('d') + """
+                ORDER BY d.id, """
+                + MEMBERSHIP_DAY_DISTANCE_SQL.format(m='gom', day='d.day')
+                + """, gom.start_date DESC
             ) sub
             WHERE dh.id = sub.id
-        """)
+        """, params)
         daily_fixed = cursor.rowcount
         cursor.execute("""
             UPDATE work_hours w
@@ -4910,16 +4948,25 @@ class Database:
             FROM (
                 SELECT DISTINCT ON (x.id) x.id, gom.group_id
                 FROM work_hours x
+                CROSS JOIN LATERAL (
+                    SELECT (to_date(x.month || '-01', 'YYYY-MM-DD')
+                            + interval '1 month - 1 day')::date AS day
+                ) me
                 JOIN group_operator_memberships gom
                   ON gom.operator_id = x.operator_id
-                 AND gom.start_date <= (to_date(x.month || '-01', 'YYYY-MM-DD') + interval '1 month - 1 day')::date
-                 AND (gom.end_date IS NULL OR gom.end_date >= (to_date(x.month || '-01', 'YYYY-MM-DD') + interval '1 month - 1 day')::date)
-                WHERE x.group_id IS NULL
-                ORDER BY x.id, gom.start_date DESC
+                 AND """ + MEMBERSHIP_MONTH_OVERLAP_SQL.format(m='gom', day='me.day') + """
+                WHERE x.group_id IS NULL""" + scope.format('x') + """
+                ORDER BY x.id, """
+                + MEMBERSHIP_DAY_DISTANCE_SQL.format(m='gom', day='me.day')
+                + """, gom.start_date DESC
             ) sub
             WHERE w.id = sub.id
-        """)
-        wh_fixed = cursor.rowcount
+        """, params)
+        return daily_fixed, cursor.rowcount
+
+    def _backfill_null_group_id_tx(self, cursor):
+        """Стартовый прогон _stamp_orphan_group_ids_tx по всем операторам."""
+        daily_fixed, wh_fixed = self._stamp_orphan_group_ids_tx(cursor)
         if daily_fixed or wh_fixed:
             logging.info("backfill NULL group_id: daily=%s work_hours=%s", daily_fixed, wh_fixed)
 
@@ -29268,7 +29315,11 @@ class Database:
         }
 
     def _get_operator_group_id_tx(self, cursor, operator_id, as_of):
-        """group_id активной (основной) группы оператора на дату as_of, или None."""
+        """group_id группы оператора на дату as_of, или None.
+
+        Покрывающее членство выигрывает всегда (расстояние 0); если такого нет —
+        берётся ближайшее членство того же месяца (см. MEMBERSHIP_MONTH_OVERLAP_SQL).
+        """
         if operator_id is None or as_of is None:
             return None
         cursor.execute(
@@ -29276,13 +29327,16 @@ class Database:
             SELECT gom.group_id
             FROM group_operator_memberships gom
             JOIN groups gr ON gr.id = gom.group_id
-            WHERE gom.operator_id = %s
-              AND gom.start_date <= %s
-              AND (gom.end_date IS NULL OR gom.end_date >= %s)
-            ORDER BY gom.start_date DESC
+            WHERE gom.operator_id = %(operator_id)s
+              AND """
+            + MEMBERSHIP_MONTH_OVERLAP_SQL.format(m='gom', day='%(day)s::date')
+            + """
+            ORDER BY """
+            + MEMBERSHIP_DAY_DISTANCE_SQL.format(m='gom', day='%(day)s::date')
+            + """, gom.start_date DESC
             LIMIT 1
             """,
-            (int(operator_id), as_of, as_of),
+            {'operator_id': int(operator_id), 'day': as_of},
         )
         row = cursor.fetchone()
         return int(row[0]) if row and row[0] is not None else None
@@ -29920,6 +29974,10 @@ class Database:
             self._set_operators_supervisor_tx(
                 cursor, [operator_id], self._group_active_supervisor_id_tx(cursor, group_id)
             )
+            # Оператора почти всегда заводят в группу позже, чем он в ней начал
+            # работать: дни до start_date остались бы без группы и не попали бы в
+            # «Учёт часов». Подбираем их сразу, а не до следующего рестарта.
+            self._stamp_orphan_group_ids_tx(cursor, operator_id)
 
     def remove_operator_from_group(self, group_id, operator_id, end_date=None):
         with self._get_cursor() as cursor:
