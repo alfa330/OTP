@@ -1347,7 +1347,7 @@ class ColumnBrowserTests(unittest.TestCase):
     def test_task_opens_over_the_window_without_closing_it(self):
         # Окно живёт ниже карточки задачи и её модалок: закрыл задачу — остался там,
         # где смотрел. Раньше окно закрывалось, и приходилось открывать его заново.
-        self.assertIn("const COLUMN_BROWSER_Z = 30;", self.src)
+        self.assertIn("const COLUMN_BROWSER_Z = ", self.src)
         self.assertIn("z={COLUMN_BROWSER_Z}", self.block)
         self.assertIn("onOpen={onOpenTask}", self.block)
         self.assertNotIn("const openTask = useCallback", self.block)
@@ -1377,6 +1377,25 @@ class ColumnBrowserTests(unittest.TestCase):
         self.assertLess(browser_z, overlay_z, 'окно перекрыло бы затемнение задачи')
         self.assertLess(browser_z, drawer_z, 'карточка задачи открылась бы под окном')
         self.assertLess(browser_z, modal_z, 'модалки задачи открылись бы под окном')
+
+    def test_window_stays_above_app_navigation(self):
+        """
+        Второй конец того же инварианта: опустив окно под карточку задачи, легко
+        уронить его под сайдбар — именно это и случилось. Сравниваем с реальными
+        значениями навигации, а не с числами в тексте теста.
+        """
+        browser_z = int(re.search(r"const COLUMN_BROWSER_Z = (\d+);", self.src).group(1))
+        app_src = _read(APP_JSX_PATH)
+        sidebar_z = int(re.search(r'className=\{`sidebar fixed[^`]*?\bz-(\d+)\b', app_src).group(1))
+        styles = _read(ROOT / "src" / "styles.css")
+
+        def css_z(selector):
+            block = styles[styles.index(selector):]
+            return int(re.search(r"z-index:\s*(\d+);", block).group(1))
+
+        self.assertGreater(browser_z, sidebar_z, 'окно уехало под сайдбар')
+        self.assertGreater(browser_z, css_z(".hamburger-btn {"), 'окно уехало под гамбургер')
+        self.assertGreater(browser_z, css_z(".sidebar-overlay {"), 'окно уехало под затемнение меню')
 
     def test_scroll_loads_the_next_page(self):
         self.assertIn("new IntersectionObserver(", self.block)

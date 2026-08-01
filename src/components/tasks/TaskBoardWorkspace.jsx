@@ -876,9 +876,10 @@ const BacklogView = ({ tasks, canPlan, onOpen, onPromote, onApplyPlan, onReorder
 
 const COLUMN_BROWSER_PAGE = 40;
 
-/* Окно статуса живёт НИЖЕ карточки задачи (.tv-overlay 40 / .tv-drawer 50) и её
-   модалок: открытая задача перекрывает окно, а закрытая возвращает к нему. */
-const COLUMN_BROWSER_Z = 30;
+/* Окно статуса: выше сайдбара приложения (z-50) и гамбургера (60), но ниже
+   карточки задачи и её модалок (110/111/120 — см. шкалу слоёв в TasksView).
+   Открытая задача перекрывает окно, закрытая возвращает к нему. */
+const COLUMN_BROWSER_Z = 90;
 
 const ColumnBrowser = ({
   column,
@@ -1561,6 +1562,7 @@ const TimelineView = ({ tasks, onOpen }) => {
       <FullscreenSheet
         open
         wide
+        z={COLUMN_BROWSER_Z}
         icon="fa-chart-gantt"
         title="Таймлайн задач"
         subtitle={`${rows.length} ${rows.length === 1 ? 'задача' : 'задач'} в окне · Esc чтобы выйти`}
