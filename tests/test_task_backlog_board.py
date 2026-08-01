@@ -240,7 +240,9 @@ class WorkspaceFrontendTests(unittest.TestCase):
 
     def test_manual_backlog_order_remains_separate(self):
         start = self.src.index("const backlogTasks = useMemo(")
-        block = self.src[start:self.src.index("// «Готово»", start)]
+        # Границу берём по следующему объявлению, а не по тексту комментария рядом:
+        # комментарий уже один раз протух и увёл тест за собой.
+        block = self.src[start:self.src.index("const tasksByColumn = useMemo(", start)]
         self.assertIn("a?.backlog_rank", block)
         self.assertIn("return aRank - bRank;", block)
 
@@ -1377,6 +1379,90 @@ class ColumnBrowserTests(unittest.TestCase):
         self.assertLess(browser_z, overlay_z, 'окно перекрыло бы затемнение задачи')
         self.assertLess(browser_z, drawer_z, 'карточка задачи открылась бы под окном')
         self.assertLess(browser_z, modal_z, 'модалки задачи открылись бы под окном')
+
+    def test_window_leaves_the_sidebar_visible(self):
+        """
+        Окно занимает область контента, а не весь экран: сайдбар остаётся видимым
+        и рабочим. Раньше окно либо уезжало под сайдбар, либо накрывало его целиком.
+        """
+        self.assertIn(
+            "const COLUMN_BROWSER_OFFSET_LEFT = 'var(--app-sidebar-offset, 0px)';",
+            self.src,
+        )
+        self.assertIn("offsetLeft={COLUMN_BROWSER_OFFSET_LEFT}", self.block)
+
+        sheet = _read(ROOT / "src" / "components" / "common" / "FullscreenSheet.jsx")
+        self.assertIn("offsetLeft = null,", sheet)
+        self.assertIn("{ left: offsetLeft, transition: 'left 0.3s ease' }", sheet)
+
+        styles = _read(ROOT / "src" / "styles.css")
+        # Переменная обязана жить на :root — портал в document.body не видит
+        # переменные, объявленные на .main-content.
+        self.assertRegex(styles, r":root\s*\{\s*--app-sidebar-offset:\s*256px;")
+        self.assertRegex(styles, r"body\.sidebar-collapsed\s*\{\s*--app-sidebar-offset:\s*80px;")
+        # На мобильном обнуляются оба селектора: body-класс перебил бы один :root.
+        self.assertRegex(styles, r":root,\s*body\.sidebar-collapsed\s*\{\s*--app-sidebar-offset:\s*0px;")
+        # Старое имя переменной сохранено: его читает панель в LmsView.
+        self.assertIn("--main-content-sidebar-offset: var(--app-sidebar-offset);", styles)
+        self.assertIn('style={{ left: "var(--main-content-sidebar-offset, 0px)" }}',
+                      _read(ROOT / "src" / "components" / "lms" / "LmsView.jsx"))
+
+        app_src = _read(APP_JSX_PATH)
+        self.assertIn("document.body.classList.toggle('sidebar-collapsed', sidebarCollapsed);", app_src)
+        # Именно layout-эффект: сайдбар по умолчанию свёрнут, обычный useEffect
+        # дал бы кадр с отступом развёрнутого — скачок контента при загрузке.
+        start = app_src.index("document.body.classList.toggle('sidebar-collapsed'")
+        self.assertIn("useLayoutEffect(() => {", app_src[start - 400:start])
+
+    def test_open_window_lifts_the_sidebar_above_itself(self):
+        """
+        Отступа мало: сайдбар шире, чем занимает. Кнопка сворачивания висит за его
+        правым краем (-right-4), а свёрнутый сайдбар разворачивается по наведению —
+        и то и другое попадало под окно, которое рисуется выше навигации. Пока окно
+        открыто, сайдбар поднимается над ним, но остаётся ниже карточки задачи.
+        """
+        sheet = _read(ROOT / "src" / "components" / "common" / "FullscreenSheet.jsx")
+        self.assertIn("document.body.classList.add('sheet-beside-sidebar');", sheet)
+        # Layout-эффект: сдвиг окна попадает в первый кадр, класс обязан успеть туда же,
+        # иначе кадр рисуется с сайдбаром под окном и кнопка сворачивания мигает.
+        start = sheet.index("document.body.classList.add('sheet-beside-sidebar')")
+        self.assertIn("useLayoutEffect(() => {", sheet[start - 400:start])
+        # Счётчик, а не флаг: закрытие одного окна не снимает класс, пока открыто другое.
+        self.assertIn("sheetsBesideSidebar = Math.max(0, sheetsBesideSidebar - 1);", sheet)
+        self.assertIn(
+            "if (sheetsBesideSidebar === 0) document.body.classList.remove('sheet-beside-sidebar');",
+            sheet,
+        )
+        # Класс вешает только окно со смещением: на весь экран окно и должно накрывать сайдбар.
+        self.assertIn("if (!open || !offsetLeft) return undefined;", sheet)
+
+        styles = _read(ROOT / "src" / "styles.css")
+        # Дополнение мобильного запроса, а не «769px»: при дробной ширине (зум, масштаб
+        # ОС) на 768.5px не сработал бы ни один из двух, и правка молча отключалась бы.
+        mobile_start = styles.rindex("@media (max-width:", 0, styles.index("--app-sidebar-offset: 0px;"))
+        mobile = re.match(r"@media \(max-width: (\d+)px\) \{", styles[mobile_start:])
+        lifted = re.search(
+            r"@media not all and \(max-width: (\d+)px\) \{\s*body\.sheet-beside-sidebar \.sidebar \{\s*z-index:\s*(\d+);",
+            styles,
+        )
+        self.assertIsNotNone(lifted, 'сайдбар не поднимается над открытым окном')
+        self.assertEqual(lifted.group(1), mobile.group(1), 'между мобильным и десктопным режимом осталась щель')
+        lifted_z = int(lifted.group(2))
+
+        app_src = _read(APP_JSX_PATH)
+        sidebar_z = int(re.search(r'className=\{`sidebar fixed[^`]*?\bz-(\d+)\b', app_src).group(1))
+        browser_z = int(re.search(r"const COLUMN_BROWSER_Z = (\d+);", self.src).group(1))
+        view = _read(TASKS_VIEW_PATH)
+        overlay_z = int(re.search(r"z-index:\s*(\d+);", view[view.index("  .tv-overlay {"):]).group(1))
+        # Поповер «Оценка и срок» портируется в body, поэтому подъём сайдбара обязан
+        # учитывать и его: иначе развёрнутый по наведению сайдбар накрывает пресеты.
+        popover_z = int(re.search(r'className="fixed z-\[(\d+)\]', self.src).group(1))
+
+        self.assertGreater(lifted_z, sidebar_z, 'подъём ничего не меняет')
+        self.assertGreater(lifted_z, browser_z, 'сайдбар остался под окном')
+        self.assertLess(lifted_z, overlay_z, 'сайдбар торчал бы поверх открытой задачи')
+        self.assertGreater(popover_z, lifted_z, 'поднятый сайдбар накрыл поповер планирования')
+        self.assertLess(popover_z, overlay_z, 'поповер перекрыл бы открытую задачу')
 
     def test_window_stays_above_app_navigation(self):
         """

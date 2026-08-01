@@ -1,5 +1,9 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useLayoutEffect } from 'react';
 import FaIcon from './FaIcon';
+
+/* Сколько окон сейчас стоит рядом с сайдбаром (offsetLeft). Считаем, а не держим
+   флаг: закрытие одного окна не должно снимать класс, пока открыто другое. */
+let sheetsBesideSidebar = 0;
 
 /**
  * Полноэкранное окно в стиле macOS/iOS: матовый фон, крупная шапка со скруглённой
@@ -17,6 +21,8 @@ import FaIcon from './FaIcon';
  *  - wide: снять ограничение ширины контента (для таблиц/таймлайнов на весь экран)
  *  - closeOnEscape: реагировать на Esc (выключают, когда поверх окна открыто своё
  *    окно — например карточка задачи: Esc должен закрывать её, а не оба слоя)
+ *  - offsetLeft: отступ слева, чтобы окно заняло только область контента и не
+ *    накрывало сайдбар приложения (например 'var(--app-sidebar-offset, 0px)')
  */
 const FullscreenSheet = ({
   open,
@@ -29,6 +35,7 @@ const FullscreenSheet = ({
   z = 140,
   wide = false,
   closeOnEscape = true,
+  offsetLeft = null,
 }) => {
   useEffect(() => {
     if (!open) return undefined;
@@ -44,10 +51,34 @@ const FullscreenSheet = ({
     };
   }, [open, onClose, closeOnEscape]);
 
+  /* Окно рисуется выше сайдбара, поэтому, встав рядом с ним, оно всё равно
+     накрывало бы то, что выходит за его ширину: кнопку сворачивания (она висит
+     на -right-4) и свёрнутый сайдбар, который разворачивается по наведению.
+     Пока такое окно открыто, класс поднимает сайдбар над ним — см. src/styles.css.
+     Именно layout-эффект: сдвиг окна попадает в первый же кадр (инлайновый стиль),
+     и с обычным useEffect этот кадр рисовался бы с сайдбаром ещё под окном —
+     кнопка сворачивания на миг пропадала бы. */
+  useLayoutEffect(() => {
+    if (!open || !offsetLeft) return undefined;
+    sheetsBesideSidebar += 1;
+    document.body.classList.add('sheet-beside-sidebar');
+    return () => {
+      sheetsBesideSidebar = Math.max(0, sheetsBesideSidebar - 1);
+      if (sheetsBesideSidebar === 0) document.body.classList.remove('sheet-beside-sidebar');
+    };
+  }, [open, offsetLeft]);
+
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 flex bg-slate-100/95 backdrop-blur-sm" style={{ zIndex: z }}>
+    <div
+      className="fixed inset-0 flex bg-slate-100/95 backdrop-blur-sm"
+      style={{
+        zIndex: z,
+        // Сдвиг вправо от сайдбара; анимация та же, что у отступа контента.
+        ...(offsetLeft ? { left: offsetLeft, transition: 'left 0.3s ease' } : null),
+      }}
+    >
       <div className="flex h-full w-full min-w-0 flex-col overflow-hidden">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white/90 px-4 py-3 backdrop-blur sm:px-6">
           <div className="flex min-w-0 items-center gap-3">

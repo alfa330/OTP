@@ -233,14 +233,36 @@
     .sidebar.mobile-open .sidebar-menu-scroll::-webkit-scrollbar-thumb:hover {
       background: rgba(147, 197, 253, 0.9);
     }
-    .main-content {
-      --main-content-sidebar-offset: 256px;
-      margin-left: 256px;
-      transition: margin-left 0.3s ease;
+    /* Ширина сайдбара живёт на :root, чтобы её видели и обычный контент, и
+       fixed-слои, отрендеренные порталом в document.body (окно статуса задач,
+       панели разделов). Класс на <body> синхронизирует App с состоянием
+       сворачивания — см. useLayoutEffect рядом с sidebarCollapsed. */
+    :root {
+      --app-sidebar-offset: 256px;
     }
-    .main-content.sidebar-collapsed {
-      --main-content-sidebar-offset: 80px;
-      margin-left: 80px;
+    body.sidebar-collapsed {
+      --app-sidebar-offset: 80px;
+    }
+    /* Окно, вставшее рядом с сайдбаром (offsetLeft у FullscreenSheet), рисуется
+       выше раздела — и накрыло бы то, что выходит за ширину сайдбара: кнопку
+       сворачивания на -right-4 и разворот свёрнутого сайдбара по наведению.
+       Пока такое окно открыто, поднимаем сайдбар над ним, оставаясь ниже
+       карточки задачи (110) — открытая задача по-прежнему перекрывает всё.
+       Только на десктопе: на мобильном сайдбар уезжает за экран, а поверх
+       контента его открывает гамбургер, который и так под окном.
+       Запрос — точное дополнение мобильного (max-width: 768px), а не «769px»:
+       при зуме и масштабе ОС ширина бывает дробной, и на 768.5px не сработал бы
+       ни один из двух — сайдбар остался бы под окном ровно с той же жалобой. */
+    @media not all and (max-width: 768px) {
+      body.sheet-beside-sidebar .sidebar {
+        z-index: 100;
+      }
+    }
+    .main-content {
+      /* Прежнее имя оставлено: его читает панель в LmsView. */
+      --main-content-sidebar-offset: var(--app-sidebar-offset);
+      margin-left: var(--app-sidebar-offset);
+      transition: margin-left 0.3s ease;
     }
 
     /* === Sidebar performance optimizations (no visual change) ===
@@ -370,8 +392,14 @@
       .sidebar .sidebar-logo-mini {
         display: none !important;
       }
+      /* На мобильном сайдбар выезжает поверх контента, поэтому отступа нет ни у
+         контента, ни у fixed-слоёв. Оба селектора обнуляем вместе: у
+         body.sidebar-collapsed специфичность выше :root, и одного :root не хватит. */
+      :root,
+      body.sidebar-collapsed {
+        --app-sidebar-offset: 0px;
+      }
       .main-content {
-        --main-content-sidebar-offset: 0px;
         margin-left: 0 !important;
       }
       .sidebar-collapse-btn {
