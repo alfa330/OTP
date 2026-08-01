@@ -907,10 +907,19 @@ styleTag.textContent = `
   .tv-empty-title { font-weight: 600; color: var(--ink-2); font-size: 14px; }
   .tv-empty-sub { font-size: 12.5px; }
 
+  /* ── Слои раздела ──
+     90  — окно статуса (просмотр колонки целиком)
+     110 — затемнение карточки задачи
+     111 — карточка задачи
+     120 — модалки задачи
+     130 — закреплённая задача
+     Всё это выше сайдбара приложения (z-50) и гамбургера (60): окно статуса не
+     должно уезжать под навигацию, а карточка задачи — под окно. */
+
   /* ── Drawer ── */
   .tv-overlay {
     position: fixed; inset: 0; background: rgba(0,0,0,.3);
-    backdrop-filter: blur(2px); z-index: 40;
+    backdrop-filter: blur(2px); z-index: 110;
     animation: tvFadeIn .2s ease;
   }
   @keyframes tvFadeIn { from { opacity: 0 } to { opacity: 1 } }
@@ -918,7 +927,7 @@ styleTag.textContent = `
   .tv-drawer {
     position: fixed; top: 0; right: 0; bottom: 0;
     width: min(560px, 100vw);
-    background: var(--surface); z-index: 50;
+    background: var(--surface); z-index: 111;
     display: flex; flex-direction: column;
     box-shadow: var(--shadow-lg);
     animation: tvSlideIn .22s cubic-bezier(.22,1,.36,1);
@@ -1584,7 +1593,7 @@ styleTag.textContent = `
   /* ── Modal ── */
   .tv-modal-overlay {
     position: fixed; inset: 0; background: rgba(0,0,0,.35);
-    backdrop-filter: blur(3px); z-index: 60;
+    backdrop-filter: blur(3px); z-index: 120;
     display: flex; align-items: center; justify-content: center;
     padding: 16px; animation: tvFadeIn .18s ease;
   }
@@ -1678,7 +1687,7 @@ styleTag.textContent = `
     --blue: #2563eb;
     --shadow-lg: 0 20px 60px rgba(0,0,0,.16), 0 8px 24px rgba(0,0,0,.1);
     position: fixed;
-    z-index: 75;
+    z-index: 130;
     width: min(360px, calc(100vw - 24px));
     background: var(--surface);
     border: 1px solid var(--border-strong);
