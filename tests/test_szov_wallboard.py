@@ -646,8 +646,7 @@ class SzovWallboardWiringTests(unittest.TestCase):
             "Звонков в очереди",
             "Максимальное ожидание",
             "AR на текущий момент",
-            "Всего входящих",
-            "Принято",
+            "Входящих / Принято",
             "Потеряно",
             "Среднее ожидание",
             "Максимальное за день",
@@ -673,7 +672,7 @@ class SzovWallboardWiringTests(unittest.TestCase):
         self.assertNotIn("StatusTile", self.view)
         self.assertIn("<StatusStrip now={now}", self.view)
         # Одна карточка, внутри — колонки, разделённые тонкой линией
-        self.assertIn("grid grid-cols-4 divide-x divide-slate-200/70", self.view)
+        self.assertIn("grid grid-cols-4 divide-x ${HAIRLINE}", self.view)
         # И ровно один экземпляр полосы на разметку (полноэкранный режим переиспользует ту же)
         self.assertEqual(self.view.count("<StatusStrip"), 1)
 
@@ -683,16 +682,87 @@ class SzovWallboardWiringTests(unittest.TestCase):
         self.assertIn("training: { label: 'Тренинг', dot: 'bg-emerald-500', value: 'text-emerald-600'", self.view)
         self.assertIn("tech: { label: 'Тех.причина', dot: 'bg-violet-500', value: 'text-violet-600'", self.view)
 
-    def test_section_order(self):
-        """Порядок блоков задан владельцем: итоги дня идут сразу после «Сейчас на линии»."""
-        titles = re.findall(r"\{SECTION_LABEL_CLASS\}>([^<]+)</div>", self.view)
-        self.assertEqual(titles, ["Сейчас на линии", "Звонки с начала дня", "Операторы"])
+    def test_metric_order(self):
+        """Порядок задан владельцем: очередь/ожидание/AR, затем итоги дня, затем операторы."""
+        labels = re.findall(r'label="([^"]+)"', self.view)
+        self.assertEqual(labels, [
+            "Звонков в очереди", "Максимальное ожидание", "AR на текущий момент",
+            "Входящих / Принято", "Потеряно",
+            "Среднее ожидание", "Максимальное за день",
+            "Свободны", "В разговоре", "Онлайн",
+        ])
 
-    def test_significant_numbers_outrank_the_status_breakdown(self):
-        """Иерархия: очередь/ожидание/AR — hero, люди на линии — lg, причины перерыва — тонкая полоса."""
-        hero = re.findall(r'size="hero"', self.view)
-        self.assertEqual(len(hero), 3, "hero — только очередь, максимальное ожидание и AR")
-        # Разбивка по причинам не должна использовать размеры плиток вообще
+    def test_incoming_and_served_share_one_cell_with_ar_colour(self):
+        """Владелец: объединить входящие и принятые через слеш, принятые красить тоном AR."""
+        pair = re.search(r"<PairCell(.*?)/>", self.view, flags=re.DOTALL)
+        self.assertIsNotNone(pair, "пары «входящих / принято» нет")
+        self.assertIn("first={formatInt(today.total)}", pair.group(0))
+        self.assertIn("second={formatInt(today.served)}", pair.group(0))
+        self.assertIn("secondTone={arTone(today.ar_ratio)}", pair.group(0))
+        # Слеш — разделитель внутри одной ячейки, а не отдельная плитка
+        body = re.search(r"const PairCell = .*?^\);$", self.view, flags=re.MULTILINE | re.DOTALL)
+        self.assertIn(">/<", body.group(0).replace(" ", ""))
+        self.assertIn("VALUE_TONE[secondTone]", body.group(0))
+
+    def test_no_row_captions(self):
+        """Владелец убрал подписи рядов — группу обозначает сама панель."""
+        self.assertNotIn("SECTION_LABEL_CLASS", self.view)
+        for caption in ("Сейчас на линии", "Звонки с начала дня"):
+            self.assertNotIn(f">{caption}<", self.view, caption)
+
+    def test_cells_sit_flush_inside_panels(self):
+        """Между карточками нет зазора: одна панель, ячейки делит волосяная линия."""
+        # Внутри рядов — divide-x, а не gap
+        self.assertIn("const Row = ({ cols, children, divided = false }) => (", self.view)
+        self.assertIn("divide-x", self.view)
+        row_block = re.search(r"const Row = .*?^\);$", self.view, flags=re.MULTILINE | re.DOTALL)
+        self.assertNotIn("gap-", row_block.group(0))
+        # Ячейка не носит собственную карточку — рамку держит панель
+        cell_block = re.search(r"const Cell = .*?^\);$", self.view, flags=re.MULTILINE | re.DOTALL)
+        self.assertNotIn("iosCard", cell_block.group(0))
+        self.assertIn("const Panel = ({ children }) => (", self.view)
+
+    def test_day_totals_split_into_two_rows_at_full_size(self):
+        """Владелец: итоги дня — нужная инфа, поэтому два ряда и крупные цифры."""
+        day_labels = ["Входящих / Принято", "Потеряно", "Среднее ожидание", "Максимальное за день"]
+        for label in day_labels:
+            cell = re.search(rf'label="{re.escape(label)}"(.*?)/>', self.view, flags=re.DOTALL)
+            self.assertIsNotNone(cell, label)
+            self.assertIn('size="hero"', cell.group(0), f"{label} должен быть крупным")
+        # Второй ряд отделён линией, а не отступом
+        self.assertIn('<Row cols="grid-cols-1 sm:grid-cols-2" divided>', self.view)
+
+    def test_operator_cells_have_transparent_icon_watermarks(self):
+        """Владелец: у операторов жирные полупрозрачные иконки на фоне, чтобы ряд отделялся."""
+        for label, icon in (("Свободны", "fa-user-check"),
+                            ("В разговоре", "fa-headset"),
+                            ("Онлайн", "fa-users")):
+            cell = re.search(rf'label="{re.escape(label)}"(.*?)/>', self.view, flags=re.DOTALL)
+            self.assertIsNotNone(cell, label)
+            self.assertIn(f'icon="{icon}"', cell.group(0), label)
+        watermark = re.search(r"const CellWatermark = .*?^\);$", self.view, flags=re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(watermark)
+        block = watermark.group(0)
+        self.assertIn("strokeWidth={2.5}", block, "иконка должна быть жирной")
+        self.assertIn("text-slate-900/[0.05]", block, "иконка должна быть полупрозрачной")
+        self.assertIn("absolute", block)
+        self.assertIn("pointer-events-none", block)
+        # Подложка не должна перекрывать цифры
+        cell_block = re.search(r"const Cell = .*?^\);$", self.view, flags=re.MULTILINE | re.DOTALL).group(0)
+        self.assertIn("overflow-hidden", cell_block)
+        self.assertEqual(cell_block.count("relative"), 4, "контент должен лежать поверх подложки")
+
+    def test_only_operator_row_carries_watermarks(self):
+        """Иконки — признак ряда операторов; на плитках звонков их быть не должно."""
+        self.assertEqual(self.view.count("<CellWatermark"), 1)
+        cells = re.findall(r"<Cell\s(.*?)/>", self.view, flags=re.DOTALL)
+        with_icon = [c for c in cells if "icon=" in c]
+        self.assertEqual(len(with_icon), 3, "подложка только у трёх ячеек операторов")
+        for cell in with_icon:
+            self.assertRegex(cell, r'label="(Свободны|В разговоре|Онлайн)"')
+
+    def test_status_breakdown_stays_small(self):
+        """Причины перерыва — вспомогательные, они не используют размеры плиток."""
         strip = re.search(r"const StatusStrip = .*?^\};$", self.view, flags=re.MULTILINE | re.DOTALL)
         self.assertIsNotNone(strip)
         self.assertNotIn("valueFontSize", strip.group(0))
