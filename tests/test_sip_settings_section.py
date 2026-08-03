@@ -52,10 +52,12 @@ def _database_namespace(method_names):
     ns = {"json": json, "re": re, "Optional": None, "execute_values": _fake_execute_values}
     for node in DATABASE_MODULE.body:
         if isinstance(node, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == "SIP_IDENTIFIER_RE" for t in node.targets
+            isinstance(t, ast.Name) and t.id.startswith("SIP_") for t in node.targets
         ):
             exec(_source_of(node, DATABASE_SOURCE), ns)
-        if isinstance(node, ast.FunctionDef) and node.name == "normalize_sip_identifier":
+        if isinstance(node, ast.FunctionDef) and node.name in (
+            "normalize_sip_identifier", "build_sip_password",
+        ):
             exec(_source_of(node, DATABASE_SOURCE), ns)
     for node in DATABASE_CLASS.body:
         if isinstance(node, ast.Assign) and any(
@@ -119,7 +121,7 @@ OPERATOR_STATE = {
     "autodial_number": "", "autodial_password": "", "autodial_domain": "",
     "updated_at": None, "updated_by_name": None,
     "department_sip_server": "", "department_base_password": "", "department_autodial_code": "",
-    "department_autodial_server": "",
+    "department_autodial_server": "", "department_autodial_base_password": "",
 }
 
 
@@ -151,6 +153,28 @@ class NormalizeSipIdentifierTests(unittest.TestCase):
         self.assertIn("Код автодозвона", str(ctx.exception))
 
 
+class BuildSipPasswordTests(unittest.TestCase):
+    """База пароля — шаблон: «Secret{номер}!» → «Secret1024!»."""
+
+    def setUp(self):
+        self.build = _database_namespace(set())["build_sip_password"]
+
+    def test_plain_base_is_still_a_prefix(self):
+        self.assertEqual("pwd1024", self.build("pwd", "1024"))
+
+    def test_placeholder_allows_a_suffix(self):
+        self.assertEqual("Secret1024!", self.build("Secret{номер}!", "1024"))
+        self.assertEqual("Secret3001!", self.build("Secret{SIP номер}!", " 3001 "))
+
+    def test_placeholder_can_stand_anywhere(self):
+        self.assertEqual("1024-pbx", self.build("{номер}-pbx", "1024"))
+        self.assertEqual("a1024b1024c", self.build("a{n}b{n}c", "1024"))
+
+    def test_empty_parts_give_empty_password(self):
+        self.assertEqual("", self.build("", "1024"))
+        self.assertEqual("", self.build("pwd", ""))
+
+
 class SaveUserSipSettingsTests(unittest.TestCase):
     def setUp(self):
         self.ns = _database_namespace({
@@ -163,7 +187,10 @@ class SaveUserSipSettingsTests(unittest.TestCase):
         self.owners = {}
         self.checked = []
         self.db.get_sip_operator = lambda user_id: dict(self.current)
-        self.db.get_sip_config = lambda: {"sip_server": "SIP.Local", "base_password": "pwd", "autodial_server": ""}
+        self.db.get_sip_config = lambda: {
+            "sip_server": "SIP.Local", "base_password": "pwd",
+            "autodial_server": "", "autodial_base_password": "",
+        }
 
         def _find(entries, exclude_user_ids=None):
             self.checked = list(entries)
@@ -286,7 +313,8 @@ class BulkUpdateSipOverridesTests(unittest.TestCase):
         ]
         self.db = _StubDb(self.ns, _FakeCursor(rows))
         self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
-        self.db.get_sip_config = lambda: {"sip_server": "sip.local", "autodial_server": ""}
+        self.db.get_sip_config = lambda: {
+            "sip_server": "sip.local", "autodial_server": "", "autodial_base_password": ""}
         self.db.get_sip_operators_by_ids = lambda ids: [{"id": i} for i in ids]
         self.owners = {}
         self.checked = []
@@ -339,7 +367,8 @@ class BulkUpdateSipOverridesTests(unittest.TestCase):
         rows = [(1, 'Иван', '', '', '', '', '', '1024', 'pbx.sales', '')]
         self.db = _StubDb(self.ns, _FakeCursor(rows))
         self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
-        self.db.get_sip_config = lambda: {"sip_server": "sip.local", "autodial_server": ""}
+        self.db.get_sip_config = lambda: {
+            "sip_server": "sip.local", "autodial_server": "", "autodial_base_password": ""}
         self.db.get_sip_operators_by_ids = lambda ids: []
         self.db.find_sip_number_owners = lambda entries, exclude_user_ids=None: (
             self.checked.extend(entries) or {})
@@ -354,7 +383,8 @@ class BulkUpdateSipOverridesTests(unittest.TestCase):
         ]
         self.db = _StubDb(self.ns, _FakeCursor(rows))
         self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
-        self.db.get_sip_config = lambda: {"sip_server": "sip.local", "autodial_server": ""}
+        self.db.get_sip_config = lambda: {
+            "sip_server": "sip.local", "autodial_server": "", "autodial_base_password": ""}
         self.db.find_sip_number_owners = lambda entries, exclude_user_ids=None: {}
         with self.assertRaises(ValueError) as ctx:
             self._bulk({"sip_domain": "pbx.new"}, ids=(1, 2))
@@ -455,6 +485,7 @@ class DepartmentSipConfigTests(unittest.TestCase):
         self.state = {
             "department_id": 12, "department_name": "СЗоВ", "department_code": "szov",
             "sip_server": "", "base_password": "", "autodial_code": "", "autodial_server": "",
+            "autodial_base_password": "",
             "configured": False, "updated_at": None, "updated_by_name": None,
             "operators_count": 7,
         }
@@ -465,8 +496,9 @@ class DepartmentSipConfigTests(unittest.TestCase):
 
     def test_listing_marks_departments_without_their_own_settings(self):
         db = _StubDb(self.ns, _FakeCursor([
-            (12, 'СЗоВ', 'szov', '', '', '', '', False, None, None, 7),
-            (367, 'Отдел продаж', 'op', 'pbx.sales', 'sales', '*77', 'dialer.sales', True, None, 'Админ', 3),
+            (12, 'СЗоВ', 'szov', '', '', '', '', '', False, None, None, 7),
+            (367, 'Отдел продаж', 'op', 'pbx.sales', 'sales', '*77', 'dialer.sales',
+             'Secret{номер}!', True, None, 'Админ', 3),
         ]))
         rows = self.ns["get_sip_department_configs"](db)
         self.assertEqual([False, True], [r["configured"] for r in rows])
@@ -489,16 +521,20 @@ class DepartmentSipConfigTests(unittest.TestCase):
         self.state.update({"sip_server": "pbx.sales", "configured": True})
         self.ns["update_sip_department_config"](
             self.db, 12,
-            {"sip_server": "", "base_password": "", "autodial_code": "", "autodial_server": ""},
+            {"sip_server": "", "base_password": "", "autodial_code": "", "autodial_server": "",
+             "autodial_base_password": ""},
             user_id=5)
         self.assertTrue(any("DELETE FROM sip_department_config" in s for s in self._sql()))
 
-    def test_autodial_server_is_stored_separately(self):
-        self.ns["update_sip_department_config"](
-            self.db, 12, {"sip_server": "pbx.sales", "autodial_server": "dialer.sales"}, user_id=5)
+    def test_autodial_server_and_base_are_stored_separately(self):
+        self.ns["update_sip_department_config"](self.db, 12, {
+            "sip_server": "pbx.sales", "autodial_server": "dialer.sales",
+            "autodial_base_password": "Secret{номер}!",
+        }, user_id=5)
         _, params = next((s, p) for s, p in self.db.cursor.calls if "INSERT INTO sip_department_config" in s)
         self.assertEqual("pbx.sales", params[1])
         self.assertEqual("dialer.sales", params[4])
+        self.assertEqual("Secret{номер}!", params[5])
 
     def test_only_the_autodial_server_is_enough_to_configure_a_department(self):
         self.ns["update_sip_department_config"](self.db, 12, {"autodial_server": "dialer.sales"}, user_id=5)
@@ -525,7 +561,7 @@ class UserSipAccountTests(unittest.TestCase):
         self.ns = _database_namespace({"get_user_sip_account"})
         self.db = _StubDb(self.ns)
         self.config = {"sip_server": "sip.local", "base_password": "pwd", "autodial_code": "*55",
-                       "autodial_server": ""}
+                       "autodial_server": "", "autodial_base_password": ""}
         self.row = dict(OPERATOR_STATE)
         self.db.get_sip_config = lambda: dict(self.config)
         self.db.get_sip_operator = lambda user_id: dict(self.row)
@@ -587,6 +623,27 @@ class UserSipAccountTests(unittest.TestCase):
         self.config["autodial_server"] = "dialer.local"
         self.row["autodial_number"] = "3001"
         self.assertEqual("dialer.local", self._account()["autodial"]["server"])
+
+    def test_autodial_has_its_own_password_base(self):
+        """У аккаунта автодозвона свой пароль: «Secret{номер}!»."""
+        self.row.update({
+            "autodial_number": "3001",
+            "department_autodial_base_password": "Secret{номер}!",
+        })
+        account = self._account()
+        self.assertEqual("Secret3001!", account["autodial"]["password"])
+        self.assertEqual("pwd1024", account["main"]["password"])   # основной по своей базе
+
+    def test_autodial_password_falls_back_to_the_main_base(self):
+        self.row["autodial_number"] = "3001"
+        self.assertEqual("pwd3001", self._account()["autodial"]["password"])
+
+    def test_personal_autodial_password_wins_over_the_base(self):
+        self.row.update({
+            "autodial_number": "3001", "autodial_password": "own",
+            "department_autodial_base_password": "Secret{номер}!",
+        })
+        self.assertEqual("own", self._account()["autodial"]["password"])
 
     def test_personal_values_win_over_the_department_ones(self):
         self.row.update({
@@ -787,11 +844,15 @@ class SipSectionFrontendTests(unittest.TestCase):
         view = _read(VIEW_PATH)
         # Значения по умолчанию — сначала отдела, потом общие.
         self.assertIn("const server = op?.department_sip_server || settings.sip_server || '';", view)
-        self.assertIn("base: op?.department_base_password || settings.base_password || ''", view)
+        self.assertIn("const base = op?.department_base_password || settings.base_password || '';", view)
         self.assertIn("code: op?.department_autodial_code || settings.autodial_code || ''", view)
-        # У автодозвона своя АТС; не задана — берётся домен основного номера.
+        # У автодозвона свои АТС и база пароля; не заданы — как у основного номера.
         self.assertIn(
             "autodialServer: op?.department_autodial_server || settings.autodial_server || server",
+            view,
+        )
+        self.assertIn(
+            "autodialBase: op?.department_autodial_base_password || settings.autodial_base_password || base",
             view,
         )
         self.assertIn("effectiveDomain(op.autodial_domain, common.autodialServer)", view)

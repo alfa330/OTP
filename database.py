@@ -156,6 +156,22 @@ def normalize_proxy_status_value(value):
 SIP_IDENTIFIER_RE = re.compile(r'^[A-Za-z0-9*#+._-]{1,64}$')
 
 
+# База пароля может быть шаблоном: «Secret{номер}!» → «Secret1024!».
+# Без плейсхолдера работает по-старому: база + номер.
+SIP_PASSWORD_PLACEHOLDER_RE = re.compile(r'\{[^{}]*\}')
+
+
+def build_sip_password(template, number) -> str:
+    """Пароль SIP-аккаунта из базы/шаблона и номера."""
+    template = str(template or '')
+    number = str(number or '').strip()
+    if not template or not number:
+        return ''
+    if SIP_PASSWORD_PLACEHOLDER_RE.search(template):
+        return SIP_PASSWORD_PLACEHOLDER_RE.sub(number, template)
+    return f'{template}{number}'
+
+
 def normalize_sip_identifier(value, field="SIP-номер"):
     """Нормализует SIP-номер/код: '' если пусто, иначе валидирует набор символов."""
     if value is None:
@@ -3738,6 +3754,11 @@ class Database:
                 ALTER TABLE sip_config
                 ADD COLUMN IF NOT EXISTS autodial_server VARCHAR(255) NOT NULL DEFAULT '';
             """)
+            # ...и своя база пароля: пароль автодозвона = база + его номер.
+            cursor.execute("""
+                ALTER TABLE sip_config
+                ADD COLUMN IF NOT EXISTS autodial_base_password VARCHAR(255) NOT NULL DEFAULT '';
+            """)
             # История ведётся и по общим настройкам, и по персональным аккаунтам:
             # target_user_id пуст у глобальных изменений.
             cursor.execute("""
@@ -3755,6 +3776,7 @@ class Database:
                     base_password VARCHAR(255) NOT NULL DEFAULT '',
                     autodial_code VARCHAR(64) NOT NULL DEFAULT '',
                     autodial_server VARCHAR(255) NOT NULL DEFAULT '',
+                    autodial_base_password VARCHAR(255) NOT NULL DEFAULT '',
                     updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
                     updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 );
@@ -3762,6 +3784,10 @@ class Database:
             cursor.execute("""
                 ALTER TABLE sip_department_config
                 ADD COLUMN IF NOT EXISTS autodial_server VARCHAR(255) NOT NULL DEFAULT '';
+            """)
+            cursor.execute("""
+                ALTER TABLE sip_department_config
+                ADD COLUMN IF NOT EXISTS autodial_base_password VARCHAR(255) NOT NULL DEFAULT '';
             """)
             cursor.execute("""
                 ALTER TABLE sip_config_history
@@ -21057,7 +21083,7 @@ class Database:
         with self._get_cursor() as cur:
             cur.execute("""
                 SELECT s.sip_server, s.base_password, s.autodial_code, s.autodial_server,
-                       s.updated_by, s.updated_at, u.name
+                       s.autodial_base_password, s.updated_by, s.updated_at, u.name
                 FROM sip_config s
                 LEFT JOIN users u ON u.id = s.updated_by
                 WHERE s.id = 1
@@ -21065,15 +21091,17 @@ class Database:
             r = cur.fetchone()
         if not r:
             return {"sip_server": "", "base_password": "", "autodial_code": "", "autodial_server": "",
+                    "autodial_base_password": "",
                     "updated_by": None, "updated_by_name": None, "updated_at": None}
         return {
             "sip_server": r[0] or "",
             "base_password": r[1] or "",
             "autodial_code": r[2] or "",
             "autodial_server": r[3] or "",
-            "updated_by": r[4],
-            "updated_by_name": r[6],
-            "updated_at": r[5].isoformat() if r[5] else None,
+            "autodial_base_password": r[4] or "",
+            "updated_by": r[5],
+            "updated_by_name": r[7],
+            "updated_at": r[6].isoformat() if r[6] else None,
         }
 
     @staticmethod
@@ -21100,20 +21128,25 @@ class Database:
         autodial_server = current["autodial_server"]
         if payload.get('autodial_server') is not None:
             autodial_server = str(payload['autodial_server']).strip()
+        autodial_base = current["autodial_base_password"]
+        if payload.get('autodial_base_password') is not None:
+            autodial_base = str(payload['autodial_base_password']).strip()
 
         snapshot = json.dumps({
             "sip_server": sip_server,
             "base_password": self._mask_sip_secret(base_password),
             "autodial_code": autodial_code,
             "autodial_server": autodial_server,
+            "autodial_base_password": self._mask_sip_secret(autodial_base),
         })
         with self._get_cursor() as cur:
             cur.execute("""
                 UPDATE sip_config
                 SET sip_server = %s, base_password = %s, autodial_code = %s, autodial_server = %s,
+                    autodial_base_password = %s,
                     updated_by = %s, updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 WHERE id = 1
-            """, (sip_server, base_password, autodial_code, autodial_server, user_id))
+            """, (sip_server, base_password, autodial_code, autodial_server, autodial_base, user_id))
             cur.execute("""
                 INSERT INTO sip_config_history (changed_by, settings)
                 VALUES (%s, %s::jsonb)
@@ -21166,6 +21199,7 @@ class Database:
                 SELECT d.id, d.name, d.code,
                        COALESCE(c.sip_server, ''), COALESCE(c.base_password, ''),
                        COALESCE(c.autodial_code, ''), COALESCE(c.autodial_server, ''),
+                       COALESCE(c.autodial_base_password, ''),
                        (c.department_id IS NOT NULL) AS configured,
                        c.updated_at, u.name,
                        COALESCE(ops.cnt, 0)
@@ -21191,10 +21225,11 @@ class Database:
             "base_password": r[4],
             "autodial_code": r[5],
             "autodial_server": r[6],
-            "configured": bool(r[7]),
-            "updated_at": r[8].isoformat() if r[8] else None,
-            "updated_by_name": r[9],
-            "operators_count": int(r[10] or 0),
+            "autodial_base_password": r[7],
+            "configured": bool(r[8]),
+            "updated_at": r[9].isoformat() if r[9] else None,
+            "updated_by_name": r[10],
+            "operators_count": int(r[11] or 0),
         } for r in rows]
 
     def update_sip_department_config(self, department_id: int, payload: dict, user_id=None) -> dict:
@@ -21219,12 +21254,14 @@ class Database:
         base_password = _field('base_password')
         autodial_code = normalize_sip_identifier(_field('autodial_code'), field="Код автодозвона")
         autodial_server = _field('autodial_server')
-        filled = (sip_server, base_password, autodial_code, autodial_server)
+        autodial_base = _field('autodial_base_password')
+        filled = (sip_server, base_password, autodial_code, autodial_server, autodial_base)
         unchanged = (
             sip_server == current['sip_server']
             and base_password == current['base_password']
             and autodial_code == current['autodial_code']
             and autodial_server == current['autodial_server']
+            and autodial_base == current['autodial_base_password']
         )
         if unchanged and current['configured'] == any(filled):
             return current
@@ -21234,16 +21271,18 @@ class Database:
                 cur.execute("""
                     INSERT INTO sip_department_config (
                         department_id, sip_server, base_password, autodial_code, autodial_server,
-                        updated_by, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
+                        autodial_base_password, updated_by, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
                     ON CONFLICT (department_id) DO UPDATE SET
                         sip_server = EXCLUDED.sip_server,
                         base_password = EXCLUDED.base_password,
                         autodial_code = EXCLUDED.autodial_code,
                         autodial_server = EXCLUDED.autodial_server,
+                        autodial_base_password = EXCLUDED.autodial_base_password,
                         updated_by = EXCLUDED.updated_by,
                         updated_at = EXCLUDED.updated_at
-                """, (department_id, sip_server, base_password, autodial_code, autodial_server, user_id))
+                """, (department_id, sip_server, base_password, autodial_code, autodial_server,
+                      autodial_base, user_id))
             else:
                 cur.execute("DELETE FROM sip_department_config WHERE department_id = %s", (department_id,))
             cur.execute("""
@@ -21254,6 +21293,7 @@ class Database:
                 "base_password": self._mask_sip_secret(base_password),
                 "autodial_code": autodial_code,
                 "autodial_server": autodial_server,
+                "autodial_base_password": self._mask_sip_secret(autodial_base),
             })))
         return next(
             row for row in self.get_sip_department_configs([department_id])
@@ -21291,7 +21331,8 @@ class Database:
             COALESCE(dc.sip_server, '') AS department_sip_server,
             COALESCE(dc.base_password, '') AS department_base_password,
             COALESCE(dc.autodial_code, '') AS department_autodial_code,
-            COALESCE(dc.autodial_server, '') AS department_autodial_server
+            COALESCE(dc.autodial_server, '') AS department_autodial_server,
+            COALESCE(dc.autodial_base_password, '') AS department_autodial_base_password
         FROM users u
         LEFT JOIN departments dep ON dep.id = u.department_id
         LEFT JOIN user_sip_settings s ON s.user_id = u.id
@@ -21331,6 +21372,7 @@ class Database:
             "department_base_password": row[17] or "",
             "department_autodial_code": row[18] or "",
             "department_autodial_server": row[19] or "",
+            "department_autodial_base_password": row[20] or "",
         }
 
     def get_sip_operators(self, department_ids=None, supervisor_id=None,
@@ -21717,25 +21759,29 @@ class Database:
         autodial_server = (
             row.get("department_autodial_server") or cfg.get("autodial_server") or "").strip() or server
         base = row.get("department_base_password") or cfg.get("base_password") or ""
+        # У автодозвона своя база: пароль = база автодозвона + номер автодозвона.
+        autodial_base = (
+            row.get("department_autodial_base_password")
+            or cfg.get("autodial_base_password") or base)
         autodial_code = row.get("department_autodial_code") or cfg.get("autodial_code") or ""
         sip_number = (row.get("sip_number") or "").strip()
         autodial_number = (row.get("autodial_number") or "").strip()
 
-        def _account(number, password, domain, fallback_server):
+        def _account(number, password, domain, fallback_server, fallback_base):
             if not number:
                 return None
             return {
                 "username": number,
-                "password": password or (f"{base}{number}" if base else ""),
+                "password": password or build_sip_password(fallback_base, number),
                 "server": (domain or fallback_server),
                 "transport": "UDP",
             }
 
         return {
             "config": cfg,
-            "main": _account(sip_number, row.get("sip_password"), row.get("sip_domain"), server),
+            "main": _account(sip_number, row.get("sip_password"), row.get("sip_domain"), server, base),
             "autodial": _account(autodial_number, row.get("autodial_password"),
-                                 row.get("autodial_domain"), autodial_server),
+                                 row.get("autodial_domain"), autodial_server, autodial_base),
             "autodial_code": autodial_code,
         }
 
