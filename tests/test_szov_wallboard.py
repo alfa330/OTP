@@ -732,6 +732,42 @@ class SzovWallboardWiringTests(unittest.TestCase):
         # Второй ряд отделён линией, а не отступом
         self.assertIn('<Row cols="grid-cols-1 sm:grid-cols-2" divided>', self.view)
 
+    def test_every_number_is_centred_in_its_card(self):
+        """Владелец: все цифры по центру своей карточки, а не по левому краю."""
+        self.assertIn("items-center", self.view)
+        cell_class = re.search(r"const CELL_CLASS = '([^']+)';", self.view)
+        self.assertIsNotNone(cell_class, "общий класс ячейки не найден")
+        self.assertIn("items-center", cell_class.group(1))
+        self.assertIn("text-center", cell_class.group(1))
+        # Обе разновидности ячеек используют его, иначе часть цифр останется слева
+        for component in ("const Cell = ", "const PairCell = "):
+            block = re.search(rf"{component}.*?^\);$", self.view, flags=re.MULTILINE | re.DOTALL)
+            self.assertIn("CELL_CLASS", block.group(0), component)
+
+    def test_operator_cells_are_large_and_tinted(self):
+        """Свободны — зеленоватый фон, в разговоре — желтоватый, цифры крупные."""
+        expected = {
+            "Свободны": "bg-emerald-50",
+            "В разговоре": "bg-amber-50",
+        }
+        for label, bg in expected.items():
+            cell = re.search(rf'label="{re.escape(label)}"(.*?)/>', self.view, flags=re.DOTALL)
+            self.assertIsNotNone(cell, label)
+            self.assertIn(f'bg="{bg}"', cell.group(0), label)
+            self.assertIn('size="hero"', cell.group(0), label)
+        # «Онлайн» владелец не подсвечивал — фон остаётся нейтральным
+        online = re.search(r'label="Онлайн"(.*?)/>', self.view, flags=re.DOTALL)
+        self.assertNotIn('bg="', online.group(0))
+        self.assertIn('size="hero"', online.group(0))
+
+    def test_free_operators_no_longer_duplicate_the_queue_alarm(self):
+        """Тревога «ждут, а взять некому» осталась только на очереди — цвет не спорит с фоном."""
+        free = re.search(r'label="Свободны"(.*?)/>', self.view, flags=re.DOTALL)
+        self.assertNotIn("tone=", free.group(0))
+        self.assertNotIn("freeTone", self.view)
+        queue = re.search(r'label="Звонков в очереди"(.*?)/>', self.view, flags=re.DOTALL)
+        self.assertIn("tone={queueTone}", queue.group(0))
+
     def test_operator_cells_have_transparent_icon_watermarks(self):
         """Владелец: у операторов жирные полупрозрачные иконки на фоне, чтобы ряд отделялся."""
         for label, icon in (("Свободны", "fa-user-check"),
@@ -747,10 +783,12 @@ class SzovWallboardWiringTests(unittest.TestCase):
         self.assertIn("text-slate-900/[0.05]", block, "иконка должна быть полупрозрачной")
         self.assertIn("absolute", block)
         self.assertIn("pointer-events-none", block)
-        # Подложка не должна перекрывать цифры
+        # Подложка обрезается по ячейке и лежит под контентом
+        cell_class = re.search(r"const CELL_CLASS = '([^']+)';", self.view).group(1)
+        self.assertIn("overflow-hidden", cell_class)
+        self.assertIn("relative", cell_class)
         cell_block = re.search(r"const Cell = .*?^\);$", self.view, flags=re.MULTILINE | re.DOTALL).group(0)
-        self.assertIn("overflow-hidden", cell_block)
-        self.assertEqual(cell_block.count("relative"), 4, "контент должен лежать поверх подложки")
+        self.assertEqual(cell_block.count("relative"), 3, "подпись, число и хинт должны быть поверх подложки")
 
     def test_only_operator_row_carries_watermarks(self):
         """Иконки — признак ряда операторов; на плитках звонков их быть не должно."""

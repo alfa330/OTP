@@ -124,8 +124,12 @@ const CellWatermark = ({ icon, scale = 1 }) => (
     />
 );
 
-const Cell = ({ label, value, hint, tone = 'neutral', size = 'lg', scale = 1, icon = null }) => (
-    <div className="relative flex min-w-0 flex-col gap-2 overflow-hidden px-5 py-5">
+// Содержимое ячейки всегда по центру: на табло так цифры выравниваются между собой
+// по вертикальной оси карточки и не «липнут» к разделителям.
+const CELL_CLASS = 'relative flex min-w-0 flex-col items-center gap-2 overflow-hidden px-5 py-5 text-center';
+
+const Cell = ({ label, value, hint, tone = 'neutral', size = 'lg', scale = 1, icon = null, bg = '' }) => (
+    <div className={`${CELL_CLASS} ${bg}`}>
         {icon ? <CellWatermark icon={icon} scale={scale} /> : null}
         <div className={`relative ${LABEL_CLASS}`}>{label}</div>
         <div
@@ -144,7 +148,7 @@ const Cell = ({ label, value, hint, tone = 'neutral', size = 'lg', scale = 1, ic
  * доля потерь в норму.
  */
 const PairCell = ({ label, first, second, secondTone = 'neutral', hint, size = 'hero', scale = 1 }) => (
-    <div className="flex min-w-0 flex-col gap-2 px-5 py-5">
+    <div className={CELL_CLASS}>
         <div className={LABEL_CLASS}>{label}</div>
         <div
             className="font-semibold tabular-nums leading-[1.02]"
@@ -262,10 +266,11 @@ const WallboardBody = ({ snapshot, scale }) => {
     // Красим ожидание «сейчас» только когда порог SL уже пробит — это настоящее отклонение.
     const waitNow = Number(now.queue_max_wait_seconds) || 0;
     const waitTone = waitNow > slThreshold ? 'bad' : 'neutral';
-    // Настоящая тревога — люди ждут, а взять звонок некому. Красим оба конца этой пары.
+    // Настоящая тревога — люди ждут, а взять звонок некому. Сигналим только на очереди:
+    // у «Свободны» теперь свой зелёный фон, и красное число на нём читалось бы как спор
+    // цветов, а дублировать одну тревогу в двух местах незачем.
     const nobodyFree = Number(now.operators_free) === 0;
     const queueTone = Number(now.queue) > 0 && nobodyFree ? 'bad' : 'neutral';
-    const freeTone = queueTone;
 
     return (
         <div className="space-y-3" style={{ fontFamily: APPLE_FONT }}>
@@ -334,9 +339,9 @@ const WallboardBody = ({ snapshot, scale }) => {
             {/* Операторы: сколько людей и сколько из них могут взять звонок, ниже — причины. */}
             <Panel>
                 <Row cols="grid-cols-1 sm:grid-cols-3">
-                    <Cell label="Свободны" value={formatInt(now.operators_free)} hint="Готовы принять звонок" tone={freeTone} icon="fa-user-check" scale={scale} />
-                    <Cell label="В разговоре" value={formatInt(now.operators_talking)} hint="Заняты звонком" icon="fa-headset" scale={scale} />
-                    <Cell label="Онлайн" value={formatInt(now.operators_online)} hint="Всего на линии" icon="fa-users" scale={scale} />
+                    <Cell label="Свободны" value={formatInt(now.operators_free)} hint="Готовы принять звонок" icon="fa-user-check" size="hero" bg="bg-emerald-50" scale={scale} />
+                    <Cell label="В разговоре" value={formatInt(now.operators_talking)} hint="Заняты звонком" icon="fa-headset" size="hero" bg="bg-amber-50" scale={scale} />
+                    <Cell label="Онлайн" value={formatInt(now.operators_online)} hint="Всего на линии" icon="fa-users" size="hero" scale={scale} />
                 </Row>
                 <StatusStrip now={now} scale={scale} />
             </Panel>
