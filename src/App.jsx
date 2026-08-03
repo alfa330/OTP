@@ -28,6 +28,7 @@ import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, IosBadge }
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId } from './utils/roles';
 import { departmentAllowsView, departmentHidesColleagueSchedules, departmentRestrictsViews, departmentUsesSimpleEmployeeAccounting, firstAllowedView } from './utils/departmentViews';
 import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan, calculateTezOpSalary, calculateTezLineSalary } from './utils/salaryFormula';
+import { calculateWeightedChatAverage, getChatScoreContribution } from './utils/chatScore';
 
 const CHUNK_RELOAD_STORAGE_KEY = 'otp_chunk_reload_attempted';
 const PINNED_TASK_STORAGE_KEY_PREFIX = 'otp_pinned_task';
@@ -4021,12 +4022,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         }
 
         // Чат-метрики дня: transfer_chat_count — целое, время ответа — секунды (float).
-        // Количество чатов приходит из отдельных импортов метрик чатов.
+        // Количество чатов и средняя оценка приходят только из импортов/синка Chat2Desk.
         function updateChatMetricField(field, value) {
             setCellModel(prev => {
             if (!prev) return prev;
+            if (field === 'avg_score') return prev;
             const cm = { ...(prev.chat_metrics || { chats_count: 0, avg_response_time_seconds: '', transfer_chat_count: 0, avg_score: '' }) };
-            if (field === 'avg_response_time_seconds' || field === 'avg_score') cm[field] = value === '' ? '' : Number(value);
+            if (field === 'avg_response_time_seconds') cm[field] = value === '' ? '' : Number(value);
             else cm[field] = value === '' ? '' : (parseInt(value, 10) || 0);
             return { ...prev, chat_metrics: cm };
             });
@@ -4226,16 +4228,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     comment: String(b?.comment || '').trim() || null
                 };
                 }).filter((b) => Boolean(b.type)) : [],
-                // Чат-метрики (для чат-модели). Количество чатов не берём из daily.calls:
-                // его ведут отдельные импорты метрик чатов (Whatsapp A + Name/Requests B).
-                // Пустые avg_score/время ответа -> null: на бэке preserve_missing сохраняет прежнее (импорт не затирается).
+                // Ручные чат-метрики (для чат-модели). Количество чатов и средняя оценка
+                // приходят только из отчётов/синка Chat2Desk и здесь не отправляются.
+                // Пустое время ответа -> null: на бэке preserve_missing сохраняет импорт.
                 ...(isChatModel ? {
                     chat_metrics: {
                         avg_response_time_seconds: (cellModel.chat_metrics?.avg_response_time_seconds === '' || cellModel.chat_metrics?.avg_response_time_seconds == null)
                             ? null : Number(cellModel.chat_metrics.avg_response_time_seconds),
                         transfer_chat_count: Number(cellModel.chat_metrics?.transfer_chat_count) || 0,
-                        avg_score: (cellModel.chat_metrics?.avg_score === '' || cellModel.chat_metrics?.avg_score == null)
-                            ? null : Number(cellModel.chat_metrics.avg_score),
                     }
                 } : {}),
                 month: cellModel.month
@@ -4534,6 +4534,27 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const value = Number(dayData[dailyKey]);
                 return sum + (Number.isFinite(value) ? value : 0);
             }, 0);
+        };
+
+        const getWeightedChatAverage = (op) => {
+            const aggregateValue = op?.aggregates?.chat_avg_score;
+            if (aggregateValue !== null && aggregateValue !== undefined && aggregateValue !== '') {
+                const aggregateNumber = Number(aggregateValue);
+                if (Number.isFinite(aggregateNumber) && aggregateNumber > 0) return aggregateNumber;
+            }
+
+            const daily = (op?.daily && typeof op.daily === 'object' && !Array.isArray(op.daily)) ? op.daily : {};
+            const chatByDay = (
+                op?.chat_metrics_by_day &&
+                typeof op.chat_metrics_by_day === 'object' &&
+                !Array.isArray(op.chat_metrics_by_day)
+            ) ? op.chat_metrics_by_day : {};
+            const dayKeys = new Set([...Object.keys(daily), ...Object.keys(chatByDay)]);
+            const scoreDays = [];
+            for (const dayKey of dayKeys) {
+                scoreDays.push(chatByDay[dayKey] || daily[dayKey]?.chat_metrics);
+            }
+            return calculateWeightedChatAverage(scoreDays);
         };
 
         const hasAnyHoursIndicators = (op) => {
@@ -7692,12 +7713,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 })()}
 
                                 {selectedTab === 'avg_score' && (() => {
-                                    // Итого = средняя оценка по дням, где она проставлена (не сумма)
-                                    const vals = daysArray
-                                        .map(dy => op.daily?.[String(dy)]?.chat_metrics?.avg_score)
-                                        .filter(v => v != null && v !== '' && Number(v) > 0)
-                                        .map(Number);
-                                    const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+                                    // Единая взвешенная оценка месяца: сумма баллов / количество оценок.
+                                    const avg = getWeightedChatAverage(op);
                                     return <div className={`${hoursSummaryColClass} w-36 text-sm`}>{avg == null ? '—' : avg.toFixed(2)}</div>;
                                 })()}
 
@@ -8098,14 +8115,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <FaIcon className="fas fa-star" aria-hidden="true" /> Средняя оценка (1–5)
                         </span>
                         <input
-                            className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
+                            className="w-full p-2 rounded-md border border-gray-200 bg-gray-100 text-gray-600 cursor-not-allowed"
                             type="number"
                             step="0.01"
                             min="0"
                             max="5"
                             value={cellModel.chat_metrics?.avg_score ?? ''}
-                            onChange={e => updateChatMetricField('avg_score', e.target.value)}
+                            readOnly
+                            disabled
+                            aria-readonly="true"
+                            title="Средняя оценка рассчитывается по данным Chat2Desk"
                         />
+                        <span className="mt-1 text-[11px] text-gray-400">Рассчитывается автоматически по данным Chat2Desk</span>
                         </label>
                         )}
 
@@ -46876,8 +46897,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         }
                                                         const cm = chatByDay[String(day)] || (d && d.chat_metrics) || null;
                                                         if (cm) {
-                                                            const sc = safeNum(cm.avg_score);
-                                                            if (sc > 0) { scoreSum += sc; scoreN += 1; }
+                                                            const scoreContribution = getChatScoreContribution(cm);
+                                                            scoreSum += scoreContribution.sum;
+                                                            scoreN += scoreContribution.count;
                                                             const rt = safeNum(cm.avg_response_time_seconds);
                                                             if (rt > 0) { respSum += rt; respN += 1; }
                                                             if (p.model === 'chat') interactions += safeNum(cm.chats_count);
