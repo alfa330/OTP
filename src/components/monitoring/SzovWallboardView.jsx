@@ -75,23 +75,26 @@ const VALUE_TONE = {
     bad: 'text-rose-600',
 };
 
-// Размеры цифр. Иерархия важнее абсолютных значений: hero читается через зал,
-// sm — это итоги дня, которые смотрят вблизи.
+// Размеры цифр задают иерархию значимости:
+//   hero — то, по чему принимают решение сию секунду (очередь, ожидание, AR);
+//   lg   — сколько людей на линии и сколько из них могут взять звонок;
+//   sm   — итоги дня, их смотрят вблизи и без спешки.
+// Разбивка по причинам перерыва сюда не входит: она живёт в тонкой полосе StatusStrip.
 const VALUE_SIZE = {
-    hero: [2.5, 4.6, 4.75],
-    md: [2, 3.2, 3.5],
+    hero: [2.75, 5, 5.25],
+    lg: [2, 3.2, 3.5],
     sm: [1.625, 2.2, 2.375],
 };
 
 const valueFontSize = (size, scale) => {
-    const [min, mid, max] = VALUE_SIZE[size] || VALUE_SIZE.md;
+    const [min, mid, max] = VALUE_SIZE[size] || VALUE_SIZE.lg;
     return `clamp(${(min * scale).toFixed(3)}rem, ${(mid * scale).toFixed(2)}vw, ${(max * scale).toFixed(3)}rem)`;
 };
 
 const LABEL_CLASS = 'text-[12px] font-semibold uppercase tracking-wide text-slate-500';
 const SECTION_LABEL_CLASS = 'mb-2.5 px-0.5 text-[13px] font-semibold uppercase tracking-wider text-slate-400';
 
-const Tile = ({ label, value, hint, tone = 'neutral', size = 'md', scale = 1 }) => (
+const Tile = ({ label, value, hint, tone = 'neutral', size = 'lg', scale = 1 }) => (
     <div className={`${iosCard} flex flex-col gap-1.5 p-4`}>
         <div className={LABEL_CLASS}>{label}</div>
         <div
@@ -110,23 +113,47 @@ const Tile = ({ label, value, hint, tone = 'neutral', size = 'md', scale = 1 }) 
  * чтобы он не сливался с тремя остальными.
  */
 const STATUS_STYLE = {
-    break: { label: 'Перерыв', card: 'bg-orange-50 ring-orange-200/80', value: 'text-orange-600', chip: 'bg-orange-100 text-orange-700' },
-    training: { label: 'Тренинг', card: 'bg-emerald-50 ring-emerald-200/80', value: 'text-emerald-600', chip: 'bg-emerald-100 text-emerald-700' },
-    tech: { label: 'Тех.причина', card: 'bg-violet-50 ring-violet-200/80', value: 'text-violet-600', chip: 'bg-violet-100 text-violet-700' },
-    recall: { label: 'Перезвон', card: 'bg-blue-50 ring-blue-200/80', value: 'text-blue-600', chip: 'bg-blue-100 text-blue-700' },
+    break: { label: 'Перерыв', dot: 'bg-orange-500', value: 'text-orange-600', chip: 'bg-orange-100 text-orange-700' },
+    training: { label: 'Тренинг', dot: 'bg-emerald-500', value: 'text-emerald-600', chip: 'bg-emerald-100 text-emerald-700' },
+    tech: { label: 'Тех.причина', dot: 'bg-violet-500', value: 'text-violet-600', chip: 'bg-violet-100 text-violet-700' },
+    recall: { label: 'Перезвон', dot: 'bg-blue-500', value: 'text-blue-600', chip: 'bg-blue-100 text-blue-700' },
 };
 
-const StatusTile = ({ statusKey, value, scale = 1 }) => {
-    const style = STATUS_STYLE[statusKey];
+const STATUS_ORDER = ['break', 'training', 'tech', 'recall'];
+
+/*
+ * Разбивка по причинам — вспомогательная информация, а не главные цифры табло,
+ * поэтому это одна тонкая полоса с разделителями, а не четыре крупные карточки.
+ * Точка держит цвет статуса всегда, само число красим только когда оно не ноль:
+ * ноль — это не сигнал, и подсвечивать его незачем.
+ */
+const StatusStrip = ({ now, scale = 1 }) => {
+    const valueOf = {
+        break: now.operators_on_break,
+        training: now.operators_on_training,
+        tech: now.operators_on_tech,
+        recall: now.operators_on_recall,
+    };
     return (
-        <div className={`rounded-2xl p-4 ring-1 shadow-[0_1px_2px_rgba(15,23,42,0.04)] ${style.card}`}>
-            <div className="text-[12px] font-semibold uppercase tracking-wide text-slate-600">{style.label}</div>
-            <div
-                className={`mt-1.5 font-semibold tabular-nums leading-[1.05] ${style.value}`}
-                style={{ fontSize: valueFontSize('md', scale) }}
-            >
-                {formatInt(value)}
-            </div>
+        <div className={`${iosCard} grid grid-cols-4 divide-x divide-slate-200/70`}>
+            {STATUS_ORDER.map((key) => {
+                const style = STATUS_STYLE[key];
+                const value = Number(valueOf[key]) || 0;
+                return (
+                    <div key={key} className="flex flex-col items-center gap-1 px-2 py-2.5">
+                        <span className="flex items-center gap-1.5 text-[12px] font-medium text-slate-500">
+                            <span className={`h-2 w-2 shrink-0 rounded-full ${style.dot}`} />
+                            <span className="truncate">{style.label}</span>
+                        </span>
+                        <span
+                            className={`font-semibold tabular-nums leading-none ${value > 0 ? style.value : 'text-slate-300'}`}
+                            style={{ fontSize: `clamp(${(1.125 * scale).toFixed(3)}rem, ${(1.4 * scale).toFixed(2)}vw, ${(1.5 * scale).toFixed(3)}rem)` }}
+                        >
+                            {formatInt(value)}
+                        </span>
+                    </div>
+                );
+            })}
         </div>
     );
 };
@@ -184,7 +211,10 @@ const WallboardBody = ({ snapshot, scale }) => {
     // Красим ожидание «сейчас» только когда порог SL уже пробит — это настоящее отклонение.
     const waitNow = Number(now.queue_max_wait_seconds) || 0;
     const waitTone = waitNow > slThreshold ? 'bad' : 'neutral';
-    const queueTone = Number(now.queue) > 0 && Number(now.operators_free) === 0 ? 'bad' : 'neutral';
+    // Настоящая тревога — люди ждут, а взять звонок некому. Красим оба конца этой пары.
+    const nobodyFree = Number(now.operators_free) === 0;
+    const queueTone = Number(now.queue) > 0 && nobodyFree ? 'bad' : 'neutral';
+    const freeTone = queueTone;
 
     return (
         <div className="space-y-6" style={{ fontFamily: APPLE_FONT }}>
@@ -221,15 +251,12 @@ const WallboardBody = ({ snapshot, scale }) => {
             <section>
                 <div className={SECTION_LABEL_CLASS}>Операторы</div>
                 <div className="grid grid-cols-3 gap-3">
-                    <Tile label="Онлайн" value={formatInt(now.operators_online)} hint="Всего на линии" scale={scale} />
-                    <Tile label="В разговоре" value={formatInt(now.operators_talking)} hint="Заняты звонком" scale={scale} />
-                    <Tile label="Свободны" value={formatInt(now.operators_free)} hint="Готовы принять" scale={scale} />
+                    <Tile label="Свободны" value={formatInt(now.operators_free)} hint="Готовы принять звонок" tone={freeTone} size="lg" scale={scale} />
+                    <Tile label="В разговоре" value={formatInt(now.operators_talking)} hint="Заняты звонком" size="lg" scale={scale} />
+                    <Tile label="Онлайн" value={formatInt(now.operators_online)} hint="Всего на линии" size="lg" scale={scale} />
                 </div>
-                <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
-                    <StatusTile statusKey="break" value={now.operators_on_break} scale={scale} />
-                    <StatusTile statusKey="training" value={now.operators_on_training} scale={scale} />
-                    <StatusTile statusKey="tech" value={now.operators_on_tech} scale={scale} />
-                    <StatusTile statusKey="recall" value={now.operators_on_recall} scale={scale} />
+                <div className="mt-2.5">
+                    <StatusStrip now={now} scale={scale} />
                 </div>
                 {Number(now.operators_other) > 0 ? (
                     <div className="mt-2 px-1 text-[12px] text-slate-400">

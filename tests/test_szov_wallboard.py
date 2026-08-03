@@ -661,19 +661,36 @@ class SzovWallboardWiringTests(unittest.TestCase):
         ):
             self.assertIn(label, self.view, label)
 
-    def test_each_status_has_its_own_counter_tile(self):
+    def test_each_status_has_its_own_counter(self):
         """Владелец просил отдельный счётчик на каждый статус, а не один общий «на перерыве»."""
-        for status_key in ("break", "training", "tech", "recall"):
-            self.assertIn(f'<StatusTile statusKey="{status_key}"', self.view, status_key)
+        self.assertIn("const STATUS_ORDER = ['break', 'training', 'tech', 'recall'];", self.view)
         for field in ("operators_on_break", "operators_on_training",
                       "operators_on_tech", "operators_on_recall"):
             self.assertIn(field, self.view, field)
 
+    def test_statuses_are_one_thin_strip_not_four_cards(self):
+        """Владелец: «не огромные карточки по каждому статусу, а один блок через тонкий разделитель»."""
+        self.assertNotIn("StatusTile", self.view)
+        self.assertIn("<StatusStrip now={now}", self.view)
+        # Одна карточка, внутри — колонки, разделённые тонкой линией
+        self.assertIn("grid grid-cols-4 divide-x divide-slate-200/70", self.view)
+        # И ровно один экземпляр полосы на разметку (полноэкранный режим переиспользует ту же)
+        self.assertEqual(self.view.count("<StatusStrip"), 1)
+
     def test_status_colours_match_the_owners_choice(self):
         """Перерыв оранжевый, тренинг зелёный, тех.причина фиолетовая."""
-        self.assertIn("break: { label: 'Перерыв', card: 'bg-orange-50", self.view)
-        self.assertIn("training: { label: 'Тренинг', card: 'bg-emerald-50", self.view)
-        self.assertIn("tech: { label: 'Тех.причина', card: 'bg-violet-50", self.view)
+        self.assertIn("break: { label: 'Перерыв', dot: 'bg-orange-500', value: 'text-orange-600'", self.view)
+        self.assertIn("training: { label: 'Тренинг', dot: 'bg-emerald-500', value: 'text-emerald-600'", self.view)
+        self.assertIn("tech: { label: 'Тех.причина', dot: 'bg-violet-500', value: 'text-violet-600'", self.view)
+
+    def test_significant_numbers_outrank_the_status_breakdown(self):
+        """Иерархия: очередь/ожидание/AR — hero, люди на линии — lg, причины перерыва — тонкая полоса."""
+        hero = re.findall(r'size="hero"', self.view)
+        self.assertEqual(len(hero), 3, "hero — только очередь, максимальное ожидание и AR")
+        # Разбивка по причинам не должна использовать размеры плиток вообще
+        strip = re.search(r"const StatusStrip = .*?^\};$", self.view, flags=re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(strip)
+        self.assertNotIn("valueFontSize", strip.group(0))
 
     def test_backend_exposes_every_status_counter(self):
         for field in ("'operators_on_break'", "'operators_on_training'",
